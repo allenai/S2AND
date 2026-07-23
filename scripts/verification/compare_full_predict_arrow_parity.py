@@ -391,7 +391,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     from s2and.data import ANDData
     from s2and.feature_port import (
         build_rust_featurizer_from_arrow_paths,
-        clear_rust_featurizer_cache,
+        evict_rust_featurizer,
     )
     from s2and.production_model import load_production_model
     from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
@@ -498,7 +498,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     block_dict = {block_name: selected_signature_ids}
-    clear_rust_featurizer_cache()
     start = time.perf_counter()
     incumbent_dists = clusterer.make_distance_matrices(
         block_dict,
@@ -509,7 +508,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     timings["incumbent_make_dists_seconds"] = time.perf_counter() - start
 
-    clear_rust_featurizer_cache()
+    evict_rust_featurizer(dataset)
     start = time.perf_counter()
     arrow_featurizer = build_rust_featurizer_from_arrow_paths(
         arrow_paths,

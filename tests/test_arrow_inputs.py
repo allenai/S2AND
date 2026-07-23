@@ -5,7 +5,7 @@ import json
 import operator
 import threading
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
 
 import pytest
@@ -334,6 +334,10 @@ def test_retained_validated_profile_reuses_in_memory_contract_without_io(
         operator.setitem(validated.paths, "signatures", "other.arrow")
     with pytest.raises(AttributeError):
         validated.generation_id = "other"  # type: ignore[misc]
+    without_name_counts = validated.without("name_counts_index")
+    assert "name_counts_index" not in without_name_counts
+    assert without_name_counts.name_counts_manifest is None
+    assert without_name_counts._name_counts_index is None  # noqa: SLF001
 
     def fail_io(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("retained validation performed filesystem I/O")
@@ -398,12 +402,13 @@ def test_retained_validated_profile_projects_unused_specter_paths(
 def test_validated_arrow_inputs_rejects_direct_construction_and_subclassing() -> None:
     with pytest.raises(TypeError, match="cannot be constructed directly"):
         ValidatedArrowInputs(
-            paths={"signatures": "unverified.arrow"},
-            generation_id="forged-generation",
+            paths={"signatures": "missing.arrow"},
+            generation_id="forged",
             normalization_version="canonical_v2",
         )
+
     with pytest.raises(TypeError, match="cannot be subclassed"):
-        type("ForgedValidatedArrowInputs", (ValidatedArrowInputs,), {})
+        type("_ForgedValidatedArrowInputs", (ValidatedArrowInputs,), {})
 
 
 def test_normalize_arrow_paths_resolves_relative_paths_at_boundary(
@@ -450,7 +455,7 @@ def test_legacy_name_counts_are_rejected_without_model_expectation(tmp_path: Pat
     name_counts_manifest_path.write_text(json.dumps(name_counts_manifest), encoding="utf-8")
     write_test_arrow_artifact_manifest(tmp_path, paths)
 
-    with pytest.raises(MissingArrowArtifactError, match="invalid normalization_version"):
+    with pytest.raises(MissingArrowArtifactError, match="unsupported normalization_version"):
         validate_arrow_prediction_artifacts(
             paths,
             require_specter=False,
@@ -594,7 +599,6 @@ def test_validation_rejects_name_counts_republished_after_generation_verificatio
 
     with arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE_LOCK:  # noqa: SLF001
         arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE.clear()  # noqa: SLF001
-        arrow_inputs_module._RUNTIME_ARROW_GENERATION_INFLIGHT.clear()  # noqa: SLF001
     monkeypatch.setattr(arrow_inputs_module, "_validate_arrow_bundle_manifest", validate_then_republish)
 
     with pytest.raises(MissingArrowArtifactError, match="opened name-count manifest does not match"):
@@ -614,19 +618,7 @@ def test_concurrent_runtime_validation_opens_generation_once(
     manifest_barrier = threading.Barrier(worker_count)
     open_started = threading.Event()
     release_open = threading.Event()
-    all_waiters = threading.Event()
-    waiter_lock = threading.Lock()
-    waiter_count = 0
     open_calls = 0
-
-    class RecordingFuture(Future[ValidatedArrowInputs]):
-        def result(self, timeout: float | None = None) -> ValidatedArrowInputs:
-            nonlocal waiter_count
-            with waiter_lock:
-                waiter_count += 1
-                if waiter_count == worker_count - 1:
-                    all_waiters.set()
-            return super().result(timeout)
 
     original_manifest_validation = arrow_inputs_module._validate_arrow_bundle_manifest  # noqa: SLF001
     original_open = arrow_inputs_module._open_validated_arrow_generation  # noqa: SLF001
@@ -646,8 +638,6 @@ def test_concurrent_runtime_validation_opens_generation_once(
 
     with arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE_LOCK:  # noqa: SLF001
         arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE.clear()  # noqa: SLF001
-        arrow_inputs_module._RUNTIME_ARROW_GENERATION_INFLIGHT.clear()  # noqa: SLF001
-    monkeypatch.setattr(arrow_inputs_module, "Future", RecordingFuture)
     monkeypatch.setattr(arrow_inputs_module, "_validate_arrow_bundle_manifest", synchronized_manifest_validation)
     monkeypatch.setattr(arrow_inputs_module, "_open_validated_arrow_generation", blocking_open)
 
@@ -663,17 +653,61 @@ def test_concurrent_runtime_validation_opens_generation_once(
                 for _index in range(worker_count)
             ]
             assert open_started.wait(timeout=5)
-            assert all_waiters.wait(timeout=5)
             release_open.set()
             validated = [future.result(timeout=5) for future in futures]
     finally:
         release_open.set()
         with arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE_LOCK:  # noqa: SLF001
             arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE.clear()  # noqa: SLF001
-            arrow_inputs_module._RUNTIME_ARROW_GENERATION_INFLIGHT.clear()  # noqa: SLF001
 
     assert open_calls == 1
     assert len({item.generation_id for item in validated}) == 1
+
+
+def test_concurrent_distinct_runtime_generations_open_in_parallel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    first_paths = _write_valid_prediction_bundle(first_root)
+    second_paths = _write_valid_prediction_bundle(second_root)
+    open_barrier = threading.Barrier(2)
+    opened_paths: list[str] = []
+    opened_paths_lock = threading.Lock()
+    original_open = arrow_inputs_module._open_validated_arrow_generation  # noqa: SLF001
+
+    def synchronized_open(paths: dict[str, str], *args: object, **kwargs: object):
+        with opened_paths_lock:
+            opened_paths.append(paths["signatures"])
+        open_barrier.wait(timeout=5)
+        return original_open(paths, *args, **kwargs)
+
+    with arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE_LOCK:  # noqa: SLF001
+        arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE.clear()  # noqa: SLF001
+    monkeypatch.setattr(arrow_inputs_module, "_open_validated_arrow_generation", synchronized_open)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    validate_arrow_prediction_artifacts,
+                    paths,
+                    require_specter=False,
+                    require_name_counts_index=False,
+                )
+                for paths in (first_paths, second_paths)
+            ]
+            validated = [future.result(timeout=10) for future in futures]
+    finally:
+        with arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE_LOCK:  # noqa: SLF001
+            arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE.clear()  # noqa: SLF001
+
+    assert len(opened_paths) == 2
+    assert {Path(path).parent for path in opened_paths} == {first_root, second_root}
+    assert len({item["signatures"] for item in validated}) == 2
 
 
 def test_complete_bundle_streams_each_generation_file_once(
@@ -692,11 +726,20 @@ def test_complete_bundle_streams_each_generation_file_once(
         "specter_batch_index",
     }
     paired_paths = {Path(paths[key]).resolve() for key in paired_keys}
+    index_paths = {
+        Path(paths[key]).resolve()
+        for key in (
+            "signatures_batch_index",
+            "papers_batch_index",
+            "paper_authors_batch_index",
+            "specter_batch_index",
+        )
+    }
     table_reads: list[Path] = []
     index_reads: list[Path] = []
     original_manifest_sha256 = arrow_inputs_module._sha256_file  # noqa: SLF001
     original_table_sha256 = feature_block_arrow_module._source_file_sha256_once  # noqa: SLF001
-    original_index_validator = feature_block_arrow_module._validate_verified_arrow_batch_lookup_index  # noqa: SLF001
+    original_path_open = Path.open
 
     def reject_duplicate_manifest_hash(path: Path) -> str:
         assert path.resolve() not in paired_paths, f"paired artifact was hashed separately: {path}"
@@ -706,18 +749,14 @@ def test_complete_bundle_streams_each_generation_file_once(
         table_reads.append(path.resolve())
         return original_table_sha256(path)
 
-    def record_index_read(*args: object, **kwargs: object) -> dict[str, int | str]:
-        index_reads.append(Path(args[1]).resolve())
-        assert kwargs["validate_source_fingerprint"] is False
-        return original_index_validator(*args, **kwargs)
+    def record_index_read(path: Path, *args: object, **kwargs: object):
+        if path.resolve() in index_paths:
+            index_reads.append(path.resolve())
+        return original_path_open(path, *args, **kwargs)
 
     monkeypatch.setattr(arrow_inputs_module, "_sha256_file", reject_duplicate_manifest_hash)
     monkeypatch.setattr(feature_block_arrow_module, "_source_file_sha256_once", record_table_read)
-    monkeypatch.setattr(
-        feature_block_arrow_module,
-        "_validate_verified_arrow_batch_lookup_index",
-        record_index_read,
-    )
+    monkeypatch.setattr(Path, "open", record_index_read)
 
     validate_arrow_prediction_artifacts(
         paths,

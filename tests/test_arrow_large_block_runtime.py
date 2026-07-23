@@ -137,11 +137,6 @@ def test_canonical_pubmed_large_block_arrow_subblocking_and_incremental_no_andda
     )
 
     monkeypatch.setattr(
-        model_module,
-        "_sync_rust_cluster_seeds",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ANDData seed synchronization ran")),
-    )
-    monkeypatch.setattr(
         subblocking_module,
         "cluster_with_specter",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python SPECTER subblocking ran")),
@@ -233,8 +228,8 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         assert signature_ids == ["6", "0", "5", "3", "9"]
         return {
             signature_id: SimpleNamespace(
-                author_info_first="j" if signature_id in {"0", "6"} else "john",
-                author_info_first_normalized_without_apostrophe=("j" if signature_id in {"0", "6"} else "john"),
+                author_info_first="j" if signature_id == "6" else "john",
+                author_info_first_normalized_without_apostrophe=("j" if signature_id == "6" else "john"),
             )
             for signature_id in signature_ids
         }
@@ -248,10 +243,10 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         del self
         events.append("bulk_predict")
         assert list(block_dict) == [
+            "large|subblock=multi_a|repair_part=0000",
             "large|subblock=multi_a|repair_part=0001",
             "large|subblock=multi_b",
             "small",
-            "large|subblock=multi_a|repair_part=0000",
         ]
         assert block_dict["large|subblock=multi_a|repair_part=0000"] == ["0", "1", "2"]
         assert kwargs["dataset"].cluster_seeds_require == {"0": "claimed", "1": "claimed"}
@@ -297,12 +292,6 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         "make_subblocks",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python subblocking must not run")),
     )
-    monkeypatch.setattr(
-        model_module,
-        "_sync_rust_cluster_seeds",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ANDData seed synchronization must not run")),
-    )
-
     clusterer = _clusterer()
     predicted, dists = clusterer.predict_from_arrow_paths(
         {"small": ["9"], "large": [str(index) for index in range(9)]},
@@ -343,6 +332,91 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     assert predict_telemetry["signature_count"] == 10
     assert predict_telemetry["featurizer_signature_count"] == 7
     assert predict_telemetry["block_count"] == 2
+
+
+def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep seeded initial-only groups on the cross-subblock attachment path."""
+
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    bulk_calls: list[dict[str, list[str]]] = []
+    incremental_calls: list[dict[str, Any]] = []
+
+    def fake_native_subblocking(
+        _paths: Mapping[str, Any],
+        signature_ids: list[str],
+        **_kwargs: Any,
+    ) -> tuple[dict[str, list[str]], dict[str, int]]:
+        assert signature_ids == ["0", "1", "2", "3", "4"]
+        return {
+            "initial": ["2", "3", "4"],
+            "multiple": ["0", "1"],
+        }, {"final_subblock_count": 2}
+
+    def fake_load_representatives(
+        _paths: Mapping[str, Any],
+        signature_ids: list[str],
+    ) -> dict[str, SimpleNamespace]:
+        assert signature_ids == ["2", "0"]
+        return {
+            signature_id: SimpleNamespace(
+                author_info_first="j" if signature_id == "2" else "john",
+                author_info_first_normalized_without_apostrophe=("j" if signature_id == "2" else "john"),
+            )
+            for signature_id in signature_ids
+        }
+
+    def fake_build_featurizer(_paths: Mapping[str, Any], **kwargs: Any) -> object:
+        assert kwargs["signature_ids"] == ["0", "1"]
+        return object()
+
+    def fake_predict_multiple(
+        self: Clusterer,
+        block_dict: dict[str, list[str]],
+        **_kwargs: Any,
+    ) -> dict[str, list[str]]:
+        del self
+        bulk_calls.append(dict(block_dict))
+        assert block_dict == {"large|subblock=multiple": ["0", "1"]}
+        return {"established": ["0", "1"]}
+
+    def fake_predict_incremental(
+        self: Clusterer,
+        block_signatures: list[str],
+        _paths: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        del self
+        incremental_calls.append({"block_signatures": list(block_signatures), **kwargs})
+        assert block_signatures == ["2", "3", "4"]
+        assert kwargs["cluster_seeds_require"] == {
+            "0": "established",
+            "1": "established",
+            "2": "initial_component",
+            "3": "initial_component",
+        }
+        return {"clusters": {"established": ["0", "1", "2", "3", "4"]}}
+
+    monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
+    monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_representatives)
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fake_build_featurizer)
+    monkeypatch.setattr(Clusterer, "_predict_subblocked_multiple_letter_groups", fake_predict_multiple)
+    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow_paths", fake_predict_incremental)
+
+    predicted, dists = _clusterer().predict_from_arrow_paths(
+        {"large": ["0", "1", "2", "3", "4"]},
+        arrow_paths,
+        batching_threshold=3,
+        cluster_seeds_require={"2": "initial_component", "3": "initial_component"},
+        name_tuples=set(),
+    )
+
+    assert dists is None
+    assert bulk_calls == [{"large|subblock=multiple": ["0", "1"]}]
+    assert len(incremental_calls) == 1
+    assert predicted == {"established": ["0", "1", "2", "3", "4"]}
 
 
 def test_large_arrow_block_rejects_native_subblock_over_threshold(

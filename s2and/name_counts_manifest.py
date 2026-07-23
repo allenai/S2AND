@@ -14,16 +14,16 @@ from typing import Any
 from s2and.consts import NORMALIZATION_VERSION
 
 NAME_COUNTS_INDEX_SCHEMA_VERSION = "name_counts_index_v2"
-NAME_COUNTS_PROVENANCE_SCHEMA_VERSION = "name_counts_provenance_v2"
+NAME_COUNTS_PROVENANCE_SCHEMA_VERSION = "name_counts_provenance_v3"
+NAME_COUNTS_MANIFEST_SHA256_FIELD = "manifest_sha256"
 NAME_COUNTS_INDEX_FILE_KEYS = ("first", "last", "first_last", "last_first_initial")
 _NAME_COUNTS_PROVENANCE_FIELDS = frozenset(
     {
         "cardinalities",
         "generated_at",
         "generation_id",
+        NAME_COUNTS_MANIFEST_SHA256_FIELD,
         "normalization_version",
-        "pickle_byte_count",
-        "pickle_sha256",
         "rejected_row_count",
         "schema_version",
         "selected_rows_sha256",
@@ -89,10 +89,14 @@ def validated_name_counts_provenance(value: Any, *, context: str) -> dict[str, A
         )
     for field in ("generation_id", "source_snapshot_id", "source_kind"):
         _require_nonempty_string(value.get(field), field=field, context=f"{context} provenance")
-    # pickle_sha256 remains the source-lineage identity until the next model
-    # feature-contract schema. Runtime lookup never opens or unpickles that file.
-    for field in ("pickle_sha256", "source_query_sha256", "selected_rows_sha256"):
+    for field in ("source_query_sha256", "selected_rows_sha256"):
         _require_lowercase_sha256(value.get(field), field=field, context=f"{context} provenance")
+    if NAME_COUNTS_MANIFEST_SHA256_FIELD in value:
+        _require_lowercase_sha256(
+            value[NAME_COUNTS_MANIFEST_SHA256_FIELD],
+            field=NAME_COUNTS_MANIFEST_SHA256_FIELD,
+            context=f"{context} provenance",
+        )
     _require_u64(
         value.get("source_row_count"),
         field="source_row_count",
@@ -137,19 +141,12 @@ class ValidatedNameCountsManifest:
         *,
         context: str,
     ) -> ValidatedNameCountsManifest:
-        """Read and verify one immutable name-count manifest generation."""
+        """Open one native-validated manifest generation."""
 
-        root = Path(index_dir).resolve()
-        manifest_path = root / "manifest.json"
-        if not manifest_path.is_file():
-            raise FileNotFoundError(f"{manifest_path} (missing manifest.json)")
-        manifest_bytes = manifest_path.read_bytes()
-        return cls._from_manifest_bytes(
-            root,
-            manifest_bytes,
-            context=context,
-            verify_file_digests=True,
-        )
+        from s2and.name_counts_index import NameCountsIndex
+
+        _index, manifest = NameCountsIndex._open_with_manifest(index_dir, context=context)
+        return manifest
 
     @classmethod
     def _from_manifest_bytes(
@@ -186,10 +183,12 @@ class ValidatedNameCountsManifest:
                 f"{context} has invalid normalization_version {normalization_version!r}; "
                 f"expected {NORMALIZATION_VERSION!r}: {manifest_path}"
             )
+        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
         provenance = validated_name_counts_provenance(
             manifest.get("source_provenance"),
             context=f"{context} source_provenance",
         )
+        provenance[NAME_COUNTS_MANIFEST_SHA256_FIELD] = manifest_sha256
         if provenance["normalization_version"] != normalization_version:
             raise ValueError(f"{context} source_provenance normalization_version mismatch: {manifest_path}")
 
@@ -257,7 +256,7 @@ class ValidatedNameCountsManifest:
         return cls(
             index_dir=root,
             manifest_path=manifest_path,
-            manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+            manifest_sha256=manifest_sha256,
             normalization_version=normalization_version,
             source_provenance=readonly_name_counts_provenance(provenance),
             files=MappingProxyType(files),

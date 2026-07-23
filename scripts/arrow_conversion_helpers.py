@@ -84,7 +84,6 @@ def write_bounded_name_counts_index(
         "source_query_sha256": hashlib.sha256(b"bounded-name-counts-v1").hexdigest(),
         "selected_rows_sha256": records_sha256,
         "source_row_count": len(signatures),
-        "pickle_sha256": records_sha256,
     }
     index_path, _metrics = write_name_counts_index(
         output_dir,

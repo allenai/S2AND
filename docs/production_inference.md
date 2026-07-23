@@ -258,10 +258,12 @@ Canonical-v2 uses one binary `NameCountsIndex` in Python and Rust. Classic
 verified alternate path, a shared open index handle, or explicit `None` when
 count features are intentionally absent. Arrow routes carry the same index
 under `arrow_paths["name_counts_index"]`. Runtime code does not open the
-historical source pickle. Python deduplicates each 2,048-signature batch before
+historical source pickle, and the generator no longer publishes one. Models
+bind to the native index's single `manifest_sha256`; warehouse lineage remains
+inside that manifest's `source_provenance`. Python deduplicates each
+2,048-signature batch before
 unique keys cross the native boundary, scatters the four result columns back
-onto signatures, and discards all temporary key maps with the batch. The
-v1 `pickle_sha256` field is source-lineage metadata, not a runtime dependency.
+onto signatures, and discards all temporary key maps with the batch.
 
 Python is the sole name-tuple artifact loader. It validates the data and
 adjacent metadata once for the packaged immutable artifact, retains frozen

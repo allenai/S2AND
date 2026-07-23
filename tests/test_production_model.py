@@ -120,7 +120,7 @@ def synthetic_pairwise_bundle(
 
 
 def _write_synthetic_linker(pairwise_bundle: Path, linker_dir: Path) -> Path:
-    booster, fixture = build_tiny_promoted_booster()
+    booster, _fixture = build_tiny_promoted_booster()
     gate_config = logistic_gate_config(
         feature_names=("chosen_probability",),
         weights=np.asarray([[0.0, 0.0, 0.0]], dtype=np.float64),
@@ -132,7 +132,6 @@ def _write_synthetic_linker(pairwise_bundle: Path, linker_dir: Path) -> Path:
     save_incremental_linking_artifact(
         booster,
         linker_dir,
-        prediction_fixture_matrix=fixture,
         gate_config=gate_config,
         target_spec=target_spec,
         pairwise_bundle_binding=pairwise_bundle_binding(pairwise_bundle),
@@ -301,7 +300,7 @@ def test_production_name_count_model_requires_exact_binding(
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _refresh_manifest_checksum(bundle_dir, "clusterer.json")
 
-    with pytest.raises(ValueError, match="requires name-count provenance fields"):
+    with pytest.raises(ValueError, match="requires name_counts_manifest_sha256"):
         _load_pairwise_staging_model(bundle_dir)
 
 
@@ -1058,10 +1057,10 @@ def test_finalization_rejects_linker_bound_to_different_pairwise_bundle(
     target_json = _write_synthetic_linker(bundle_dir, linker_dir)
     metadata_path = linker_dir / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["pairwise_bundle_binding"]["main_booster_sha256"] = "f" * 64
+    metadata["pairwise_bundle_binding_digest"] = "f" * 64
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="pairwise_bundle_binding does not match"):
+    with pytest.raises(ValueError, match="pairwise_bundle_binding_digest does not match"):
         finalize_production_bundle(
             pairwise_bundle_dir=bundle_dir,
             output_bundle_dir=output_bundle,
@@ -1119,6 +1118,33 @@ def test_complete_bundle_rejects_target_tampering_even_with_refreshed_manifest(
     _refresh_manifest_checksum(output_bundle, bundled_target.relative_to(output_bundle).as_posix())
 
     with pytest.raises(ValueError, match="target_spec_digest does not match enclosing bundle target JSON"):
+        load_production_model(output_bundle)
+
+
+def test_complete_bundle_rejects_pairwise_binding_tampering_even_with_refreshed_manifest(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    output_bundle = tmp_path / "production_model_v9.8"
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(bundle_dir, linker_dir)
+    finalize_production_bundle(
+        pairwise_bundle_dir=bundle_dir,
+        output_bundle_dir=output_bundle,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=target_json,
+        bundle_version="9.8",
+        pairwise_model_version="9.9",
+        incremental_linker_version="9.9",
+    )
+    metadata_path = output_bundle / "incremental_linker" / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["pairwise_bundle_binding_digest"] = "f" * 64
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _refresh_manifest_checksum(output_bundle, metadata_path.relative_to(output_bundle).as_posix())
+
+    with pytest.raises(ValueError, match="pairwise_bundle_binding_digest does not match enclosing bundle"):
         load_production_model(output_bundle)
 
 
@@ -1217,6 +1243,32 @@ def test_manifest_writer_rejects_directory_at_required_file_path(tmp_path: Path)
             bundle_version="9.9",
             pairwise_model_version="9.9",
         )
+    assert not (tmp_path / "manifest.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    (
+        ("bundle_version", ""),
+        ("bundle_version", "   "),
+        ("pairwise_model_version", ""),
+        ("pairwise_model_version", "   "),
+    ),
+)
+def test_manifest_writer_rejects_empty_model_versions_before_writing(
+    tmp_path: Path,
+    field_name: str,
+    invalid_value: str,
+) -> None:
+    versions = {
+        "bundle_version": "9.9",
+        "pairwise_model_version": "9.9",
+    }
+    versions[field_name] = invalid_value
+
+    with pytest.raises(ValueError, match=rf"{field_name} must be a nonempty string"):
+        production_bundle_module.write_production_manifest(tmp_path, **versions)
+
     assert not (tmp_path / "manifest.json").exists()
 
 

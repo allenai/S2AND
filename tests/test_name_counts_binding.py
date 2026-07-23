@@ -1,346 +1,86 @@
+"""Outcome tests for model-to-name-count manifest identity."""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
-import s2and.incremental_linking.policy as policy_module
-import s2and.model as model_module
-from s2and import feature_port
-from s2and.arrow_inputs import ValidatedArrowInputs, validate_arrow_prediction_artifacts
-from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
-from s2and.featurizer import FeaturizationInfo
+from s2and.arrow_inputs import ValidatedArrowInputs
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
-from s2and.model import Clusterer
-from s2and.name_counts_manifest import ValidatedNameCountsManifest
-from s2and.runtime import build_runtime_context
-from tests.helpers import (
-    build_arrow_training_dataset,
-    build_dummy_dataset,
-    tiny_name_counts_provenance,
-    tiny_name_counts_tuple,
-    write_minimal_arrow_prediction_bundle,
-    write_test_arrow_artifact_manifest,
+from s2and.incremental_linking.policy import (
+    require_arrow_name_counts_index_for_clusterer,
+    require_dataset_name_counts_binding_for_clusterer,
+    require_rust_featurizer_name_counts_binding_for_clusterer,
 )
+from s2and.name_count_binding import NameCountsBinding
+from s2and.name_counts_index import NameCountsIndex
+from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
 
 
-class _ConstantClassifier:
-    def predict_proba(self, features: Any, **_kwargs: Any) -> np.ndarray:
-        row_count = int(np.asarray(features).shape[0])
-        return np.tile(np.asarray([[0.5, 0.5]], dtype=np.float64), (row_count, 1))
-
-
-def _feature_contract(provenance: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "normalization_version": NORMALIZATION_VERSION,
-        "name_counts_generation_id": provenance["generation_id"],
-        "name_counts_pickle_sha256": provenance["pickle_sha256"],
-        "name_counts_source_snapshot_id": provenance["source_snapshot_id"],
-        "name_counts_selected_rows_sha256": provenance["selected_rows_sha256"],
-    }
-
-
-def _name_count_clusterer(provenance: dict[str, Any]) -> Clusterer:
-    clusterer = Clusterer(
-        FeaturizationInfo(["name_counts"], featurizer_version=FEATURIZER_VERSION),
-        _ConstantClassifier(),
-        n_jobs=1,
-    )
-    clusterer.feature_contract = _feature_contract(provenance)
-    return clusterer
-
-
-def _write_index_manifest(index_dir: Path, provenance: dict[str, Any]) -> None:
-    written_path, _metrics = write_name_counts_index(
-        index_dir.parent,
-        tiny_name_counts_tuple(),
-        provenance,
-        overwrite=True,
-    )
-    assert Path(written_path) == index_dir
-
-
-def _binding_tuple(provenance: dict[str, Any]) -> tuple[str, str, str, str]:
-    return (
-        provenance["generation_id"],
-        provenance["pickle_sha256"],
-        provenance["source_snapshot_id"],
-        provenance["selected_rows_sha256"],
-    )
-
-
-class _PrebuiltRustFeaturizer:
-    def __init__(self, provenance: dict[str, Any]) -> None:
-        self._binding = _binding_tuple(provenance)
-        self.binding_read_count = 0
-
-    @property
-    def name_counts_provenance_binding(self) -> tuple[str, str, str, str]:
-        self.binding_read_count += 1
-        return self._binding
-
-    def cluster_seeds_require(self) -> list[tuple[str, str]]:
-        return []
-
-    def signature_rule_metadata(self) -> list[tuple[str, str, None]]:
-        return []
-
-
-def test_name_count_model_without_complete_binding_is_rejected_at_every_runtime_boundary(
-    tmp_path: Path,
-) -> None:
-    provenance = tiny_name_counts_provenance()
-    clusterer = _name_count_clusterer(provenance)
-    clusterer.feature_contract = {"normalization_version": NORMALIZATION_VERSION}
-    dataset = build_dummy_dataset(
-        "name-count-binding-required",
-        mode="inference",
-        name_counts_index=True,
-    )
-    index_dir = tmp_path / "name_counts_index"
-    _write_index_manifest(index_dir, provenance)
-    validated_arrow_paths = ValidatedArrowInputs._from_verified(
-        paths={"name_counts_index": str(index_dir)},
-        generation_id="test-generation",
-        normalization_version=NORMALIZATION_VERSION,
-        name_counts_manifest=ValidatedNameCountsManifest.load(index_dir, context="test Arrow boundary"),
-    )
-    featurizer = _PrebuiltRustFeaturizer(provenance)
-
-    checks = (
-        lambda: policy_module.require_dataset_name_counts_binding_for_clusterer(
-            clusterer, dataset, context="dataset boundary"
-        ),
-        lambda: policy_module.require_arrow_name_counts_index_for_clusterer(
-            clusterer, validated_arrow_paths, context="Arrow boundary"
-        ),
-        lambda: policy_module.require_rust_featurizer_name_counts_binding_for_clusterer(
-            clusterer, featurizer, context="Rust boundary"
-        ),
-    )
-    for check in checks:
-        with pytest.raises(ValueError, match="requires name-count provenance fields"):
-            check()
-
-
-def test_python_prediction_accepts_exact_name_count_binding() -> None:
-    provenance = tiny_name_counts_provenance()
-    clusterer = _name_count_clusterer(provenance)
-    dataset = build_dummy_dataset(
-        "name-count-binding-python-match",
-        mode="inference",
-        name_counts_index=True,
-    )
-
-    clusters, dists = clusterer.predict_helper(
-        {"block": ["1"]},
-        dataset,
-        runtime_context=build_runtime_context("name_count_binding_test", backend="python"),
-    )
-
-    assert clusters == {"block_0": ["1"]}
-    assert dists is None
-
-
-def test_python_prediction_rejects_mismatched_name_count_binding_before_features(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clusterer = _name_count_clusterer(tiny_name_counts_provenance())
-    dataset = build_dummy_dataset(
-        "name-count-binding-python-mismatch",
-        mode="inference",
-        name_counts_index=True,
-    )
-    assert dataset.name_counts_provenance is not None
-    dataset.name_counts_provenance = {
-        **dataset.name_counts_provenance,
-        "generation_id": "different-name-count-generation",
-    }
-    monkeypatch.setattr(
-        model_module,
-        "many_pairs_featurize",
-        lambda *_args, **_kwargs: pytest.fail("feature work started before the binding check"),
-    )
-
-    with pytest.raises(ValueError, match="name-count binding mismatch.*ANDData.name_counts_provenance"):
-        clusterer.predict_helper(
-            {"block": ["1", "2"]},
-            dataset,
-            runtime_context=build_runtime_context("name_count_binding_test", backend="python"),
-        )
-
-
-@pytest.mark.parametrize("generation_id", ["test-tiny-name-counts", "different-name-count-generation"])
-def test_arrow_prediction_checks_exact_name_count_binding_before_featurizer_build(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    generation_id: str,
-) -> None:
-    model_provenance = tiny_name_counts_provenance()
-    index_provenance = {**model_provenance, "generation_id": generation_id}
-    clusterer = _name_count_clusterer(model_provenance)
-    index_dir = tmp_path / "name_counts_index"
-    _write_index_manifest(index_dir, index_provenance)
-    arrow_paths = {"name_counts_index": str(index_dir)}
-    build_calls: list[dict[str, Any]] = []
-
-    validated_arrow_paths = ValidatedArrowInputs._from_verified(
-        paths=arrow_paths,
-        generation_id="test-generation",
-        normalization_version=NORMALIZATION_VERSION,
-        name_counts_manifest=ValidatedNameCountsManifest.load(index_dir, context="test Arrow prediction"),
-    )
-    monkeypatch.setattr(
-        model_module,
-        "validate_arrow_prediction_artifacts",
-        lambda _paths, **_kwargs: validated_arrow_paths,
-    )
-
-    def fake_build(paths: dict[str, Any], **_kwargs: Any) -> object:
-        build_calls.append(paths)
-        return object()
-
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fake_build)
-    monkeypatch.setattr(
-        clusterer,
-        "predict_from_rust_featurizer",
-        lambda *_args, **_kwargs: ({"block_0": ["1"]}, None),
-    )
-
-    if generation_id == model_provenance["generation_id"]:
-        clusters, dists = clusterer.predict_from_arrow_paths({"block": ["1"]}, arrow_paths)
-        assert clusters == {"block_0": ["1"]}
-        assert dists is None
-        assert len(build_calls) == 1
-    else:
-        with pytest.raises(ValueError, match="name-count binding mismatch.*name_counts_index"):
-            clusterer.predict_from_arrow_paths({"block": ["1"]}, arrow_paths)
-        assert build_calls == []
-
-
-def test_validated_arrow_binding_reuses_retained_name_count_manifest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provenance = tiny_name_counts_provenance()
-    clusterer = _name_count_clusterer(provenance)
-    paths = write_minimal_arrow_prediction_bundle(tmp_path)
+def _runtime_state(tmp_path: Path):
     index_path, _metrics = write_name_counts_index(
         tmp_path,
         tiny_name_counts_tuple(),
-        provenance,
+        tiny_name_counts_provenance(),
         overwrite=True,
     )
-    paths["name_counts_index"] = index_path
-    write_test_arrow_artifact_manifest(tmp_path, paths)
-    validated = validate_arrow_prediction_artifacts(
-        paths,
-        require_specter=False,
-        require_name_counts_index=True,
-        expected_normalization_version=NORMALIZATION_VERSION,
+    index, manifest = NameCountsIndex._open_with_manifest(index_path, context="test")
+    contract = {"name_counts_manifest_sha256": manifest.manifest_sha256}
+    clusterer = SimpleNamespace(
+        featurizer_info=SimpleNamespace(features_to_use=("name_counts",)),
+        nameless_featurizer_info=None,
+        feature_contract=contract,
     )
-    assert validated.name_counts_manifest is not None
-
-    def fail_revalidation(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("retained name-count manifest was revalidated")
-
-    monkeypatch.setattr(ValidatedNameCountsManifest, "load", fail_revalidation)
-
-    policy_module.require_arrow_name_counts_index_for_clusterer(
-        clusterer,
-        validated,
-        context="retained manifest test",
+    dataset = SimpleNamespace(name_counts_provenance=index.source_provenance)
+    arrow_paths = ValidatedArrowInputs._from_verified(
+        paths={"name_counts_index": str(Path(index_path).resolve())},
+        generation_id="test-generation",
+        normalization_version=NORMALIZATION_VERSION,
+        name_counts_manifest=manifest,
+        name_counts_index=index,
     )
+    return clusterer, dataset, arrow_paths, index
 
 
-def test_prebuilt_rust_featurizer_prediction_checks_binding_once_and_skips_singletons(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provenance = tiny_name_counts_provenance()
-    clusterer = _name_count_clusterer(provenance)
-    featurizer = _PrebuiltRustFeaturizer(provenance)
-    make_calls: list[str] = []
+def test_feature_contract_contains_only_manifest_sha256(tmp_path: Path) -> None:
+    clusterer, _dataset, _arrow_paths, index = _runtime_state(tmp_path)
 
-    def fake_make_dists(
-        _self: Clusterer,
-        block_dict: dict[str, list[str]],
-        _rust_featurizer: object,
-        **kwargs: Any,
-    ) -> dict[str, np.ndarray]:
-        assert "_name_counts_binding_verified" not in kwargs
-        block_key = next(iter(block_dict))
-        make_calls.append(block_key)
-        return {block_key: np.asarray([], dtype=np.float64)}
+    binding = NameCountsBinding.from_provenance(index.source_provenance, context="test index")
 
-    monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", fake_make_dists)
-    monkeypatch.setattr(
-        Clusterer,
-        "_cluster_one_block_with_logging",
-        lambda _self, signatures, *_args, **_kwargs: [0] * len(signatures),
+    assert binding.feature_contract_fields() == {
+        "name_counts_manifest_sha256": index.manifest_sha256,
+    }
+    assert clusterer.feature_contract == binding.feature_contract_fields()
+
+
+def test_exact_manifest_identity_is_accepted_at_every_runtime_boundary(tmp_path: Path) -> None:
+    clusterer, dataset, arrow_paths, index = _runtime_state(tmp_path)
+
+    require_dataset_name_counts_binding_for_clusterer(clusterer, dataset, context="dataset")
+    require_arrow_name_counts_index_for_clusterer(clusterer, arrow_paths, context="Arrow")
+    require_rust_featurizer_name_counts_binding_for_clusterer(clusterer, index._native, context="Rust")
+
+
+def test_manifest_mismatch_is_rejected_at_every_runtime_boundary(tmp_path: Path) -> None:
+    clusterer, dataset, arrow_paths, index = _runtime_state(tmp_path)
+    clusterer.feature_contract = {"name_counts_manifest_sha256": "f" * 64}
+
+    checks = (
+        lambda: require_dataset_name_counts_binding_for_clusterer(clusterer, dataset, context="dataset"),
+        lambda: require_arrow_name_counts_index_for_clusterer(clusterer, arrow_paths, context="Arrow"),
+        lambda: require_rust_featurizer_name_counts_binding_for_clusterer(clusterer, index._native, context="Rust"),
     )
-
-    clusters, dists = clusterer.predict_from_rust_featurizer(
-        {"a": ["1"], "b": ["2"]},
-        featurizer,
-        cluster_seeds_require={},
-    )
-
-    assert clusters == {"a_0": ["1"], "b_0": ["2"]}
-    assert dists is None
-    assert make_calls == []
-    assert featurizer.binding_read_count == 1
+    for check in checks:
+        with pytest.raises(ValueError, match="name-count binding mismatch"):
+            check()
 
 
-def test_prebuilt_rust_featurizer_prediction_rejects_mismatch_before_metadata() -> None:
-    clusterer = _name_count_clusterer(tiny_name_counts_provenance())
-    featurizer_provenance = {**tiny_name_counts_provenance(), "generation_id": "different-name-count-generation"}
-    featurizer = _PrebuiltRustFeaturizer(featurizer_provenance)
+def test_missing_manifest_identity_is_rejected(tmp_path: Path) -> None:
+    clusterer, dataset, _arrow_paths, _index = _runtime_state(tmp_path)
+    clusterer.feature_contract = {"normalization_version": NORMALIZATION_VERSION}
 
-    with pytest.raises(ValueError, match="name-count binding mismatch.*RustFeaturizer"):
-        clusterer.predict_from_rust_featurizer({"block": ["1", "2"]}, featurizer)
-
-    assert featurizer.binding_read_count == 1
-
-
-def test_prebuilt_rust_featurizer_distance_boundary_accepts_exact_binding(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provenance = tiny_name_counts_provenance()
-    clusterer = _name_count_clusterer(provenance)
-    featurizer = _PrebuiltRustFeaturizer(provenance)
-    monkeypatch.setattr(model_module, "_build_signature_index_by_id", lambda _featurizer: {})
-
-    assert clusterer.make_distance_matrices_from_rust_featurizer({}, featurizer) == {}
-    assert featurizer.binding_read_count == 1
-
-
-def test_prebuilt_rust_featurizer_distance_boundary_rejects_mismatch_before_features(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clusterer = _name_count_clusterer(tiny_name_counts_provenance())
-    featurizer_provenance = {**tiny_name_counts_provenance(), "generation_id": "different-name-count-generation"}
-    featurizer = _PrebuiltRustFeaturizer(featurizer_provenance)
-    monkeypatch.setattr(
-        model_module,
-        "_build_signature_index_by_id",
-        lambda _featurizer: pytest.fail("feature work started before the binding check"),
-    )
-
-    with pytest.raises(ValueError, match="name-count binding mismatch.*RustFeaturizer"):
-        clusterer.make_distance_matrices_from_rust_featurizer({"block": ["1", "2"]}, featurizer)
-
-
-def test_arrow_built_rust_featurizer_retains_verified_name_count_binding(tmp_path: Path) -> None:
-    provenance = tiny_name_counts_provenance()
-    dataset = build_dummy_dataset(
-        "name-count-binding-real-rust-featurizer",
-        mode="inference",
-        name_counts_index=True,
-    )
-    dataset = build_arrow_training_dataset(dataset, tmp_path)
-
-    rust_featurizer = feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
-
-    assert rust_featurizer.name_counts_provenance_binding == _binding_tuple(provenance)
+    with pytest.raises(ValueError, match="name_counts_manifest_sha256"):
+        require_dataset_name_counts_binding_for_clusterer(clusterer, dataset, context="dataset")

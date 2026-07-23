@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -12,6 +13,7 @@ import pandas as pd
 import pytest
 
 from s2and import production_model as production_model_module
+from s2and.incremental_linking.artifact import ARTIFACT_SCHEMA_VERSION
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking_training.classic import load_bundle
@@ -332,7 +334,7 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
     pairwise_bundle_dir = tmp_path / "pairwise_stage" / "production_model_v9.8"
     bundle_dir = tmp_path / "final" / "production_model_v9.8"
     canonical_data_dir = tmp_path / "canonical_data"
-    write_name_counts_index(
+    name_counts_index_path, _metrics = write_name_counts_index(
         canonical_data_dir,
         tiny_name_counts_tuple(),
         tiny_name_counts_provenance(),
@@ -389,12 +391,10 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
     pairwise_config = json.loads((pairwise_bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
     for field in ("name_tuples_data_sha256", "orcid_prefix_counts_data_sha256"):
         assert len(pairwise_config["feature_contract"][field]) == 64
-    provenance = tiny_name_counts_provenance()
     expected_name_count_contract = {
-        "name_counts_generation_id": provenance["generation_id"],
-        "name_counts_pickle_sha256": provenance["pickle_sha256"],
-        "name_counts_source_snapshot_id": provenance["source_snapshot_id"],
-        "name_counts_selected_rows_sha256": provenance["selected_rows_sha256"],
+        "name_counts_manifest_sha256": hashlib.sha256(
+            (Path(name_counts_index_path) / "manifest.json").read_bytes()
+        ).hexdigest(),
     }
     for field, expected in expected_name_count_contract.items():
         assert pairwise_config["feature_contract"][field] == expected
@@ -448,7 +448,15 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
     assert clusterer.incremental_linker_artifact_dir is not None
     assert Path(clusterer.incremental_linker_artifact_dir) == bundle_dir / "incremental_linker"
     artifact_metadata = json.loads((bundle_dir / "incremental_linker" / "metadata.json").read_text(encoding="utf-8"))
-    assert artifact_metadata["gate_surface"] == "promoted_numpy_logistic_gate"
+    assert set(artifact_metadata) == {
+        "booster_sha256",
+        "gate_config",
+        "pairwise_bundle_binding_digest",
+        "retrieval_top_k",
+        "schema_version",
+        "target_spec_digest",
+    }
+    assert artifact_metadata["schema_version"] == ARTIFACT_SCHEMA_VERSION
     assert artifact_metadata["gate_config"]["model_type"] == "multiclass_logistic_numpy_v1"
     assert len(artifact_metadata["gate_config"]["feature_names"]) == 240
     assert len(artifact_metadata["gate_config"]["weights"]) == 240

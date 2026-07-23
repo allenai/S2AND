@@ -202,10 +202,63 @@ def _partial_supervision_for_upper_triangle(signatures: list[str]) -> tuple[dict
     return partial_supervision, np.asarray(values, dtype=np.float64)
 
 
+def test_block_feature_union_builds_once_and_preserves_requested_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_build(
+        block_signature_indices,
+        *,
+        start_offset,
+        max_pairs,
+        selected_indices,
+        num_threads,
+        nan_value,
+        featurizer,
+    ):
+        captured.update(
+            block_signature_indices=block_signature_indices,
+            start_offset=start_offset,
+            max_pairs=max_pairs,
+            selected_indices=selected_indices,
+            num_threads=num_threads,
+            nan_value=nan_value,
+            featurizer=featurizer,
+        )
+        return np.asarray(
+            [[float(index) for index in selected_indices], [100.0 + float(index) for index in selected_indices]],
+            dtype=np.float64,
+        )
+
+    monkeypatch.setattr(model_module, "build_block_upper_triangle_feature_matrix_indexed_rust", fake_build)
+    featurizer = object()
+
+    main, nameless = model_module._build_block_feature_matrices_indexed_rust(
+        [7, 8, 9],
+        featurizer=featurizer,
+        start_offset=3,
+        max_pairs=2,
+        main_indices=[4, 1, 4],
+        nameless_indices=[9, 1, 0],
+        num_threads=5,
+    )
+
+    assert captured["block_signature_indices"] == [7, 8, 9]
+    assert captured["start_offset"] == 3
+    assert captured["max_pairs"] == 2
+    assert captured["selected_indices"] == [4, 1, 9, 0]
+    assert captured["num_threads"] == 5
+    assert np.isnan(captured["nan_value"])
+    assert captured["featurizer"] is featurizer
+    np.testing.assert_array_equal(main, [[4.0, 1.0, 4.0], [104.0, 101.0, 104.0]])
+    assert nameless is not None
+    np.testing.assert_array_equal(nameless, [[9.0, 1.0, 0.0], [109.0, 101.0, 100.0]])
+    assert main.flags.c_contiguous
+    assert nameless.flags.c_contiguous
+
+
 @pytest.mark.parametrize("square_matrix", [False, True], ids=["fastcluster", "square"])
 def test_make_distance_matrices_rust_blockwise_output_formats(monkeypatch, square_matrix: bool):
     monkeypatch.setenv("S2AND_BACKEND", "rust")
-    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         model_module.Clusterer,
         "distance_matrix_helper",
@@ -263,7 +316,6 @@ def test_make_distance_matrices_rust_blockwise_output_formats(monkeypatch, squar
 
 def test_make_distance_matrices_rust_honors_ram_bounded_pair_chunk_size(monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *_args, **_kwargs: None)
 
     def fake_chunk_plan(_num_features: int, **kwargs: Any) -> SimpleNamespace:
         captured["plan_total_pairs"] = kwargs["total_pairs"]
@@ -323,7 +375,6 @@ def test_make_distance_matrices_rust_honors_ram_bounded_pair_chunk_size(monkeypa
 
 def test_make_distance_matrices_rust_fused_upper_triangle_api(monkeypatch):
     monkeypatch.setenv("S2AND_BACKEND", "rust")
-    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         model_module.Clusterer,
         "distance_matrix_helper",
@@ -390,12 +441,14 @@ def test_make_distance_matrices_rust_fused_upper_triangle_api(monkeypatch):
         _nameless_classifier,
         features,
         labels,
-        _nameless_features,
+        nameless_features,
         _batch_label,
         runtime_context=None,
         **_kwargs,
     ):
         del labels, runtime_context, _kwargs
+        assert nameless_features is not None
+        np.testing.assert_array_equal(nameless_features[:, 0], features[:, 0])
         return np.asarray(features[:, 0], dtype=np.float64), 0.0
 
     monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
@@ -405,6 +458,8 @@ def test_make_distance_matrices_rust_fused_upper_triangle_api(monkeypatch):
         cluster_model=None,
         use_default_constraints_as_supervision=True,
     )
+    clusterer.nameless_classifier = object()
+    clusterer.nameless_featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
     signatures = ["0", "1", "2", "3"]
     output = clusterer.make_distance_matrices(
         {"block": signatures},
@@ -523,13 +578,15 @@ def test_make_distance_matrices_from_rust_featurizer_skips_fastcluster_indices_w
         _nameless_classifier,
         features,
         labels,
-        _nameless_features,
+        nameless_features,
         _batch_label,
         runtime_context=None,
         **_kwargs,
     ):
-        del _classifier, _nameless_classifier, _nameless_features, _batch_label, runtime_context, _kwargs
+        del _classifier, _nameless_classifier, _batch_label, runtime_context, _kwargs
         assert np.isnan(labels).all()
+        assert nameless_features is not None
+        np.testing.assert_array_equal(nameless_features[:, 0], features[:, 0])
         return np.asarray(features[:, 0], dtype=np.float64), 0.0
 
     monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
@@ -538,6 +595,8 @@ def test_make_distance_matrices_from_rust_featurizer_skips_fastcluster_indices_w
         cluster_model=model_module.FastCluster(linkage="average"),
         use_default_constraints_as_supervision=False,
     )
+    clusterer.nameless_classifier = object()
+    clusterer.nameless_featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
     output = clusterer.make_distance_matrices_from_rust_featurizer(
         {"block": ["0", "1", "2", "3"]},
         _FakeFeaturizer(),
@@ -819,6 +878,56 @@ def test_predict_from_rust_featurizer_injects_seed_overrides_into_distance_build
         }
     ]
     assert captured_incremental_flags == [True]
+
+
+def test_predict_from_rust_featurizer_uses_native_seed_constraints_without_python_pair_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeFeaturizer:
+        def signature_ids(self):
+            return ["0", "1", "2", "3"]
+
+        def cluster_seeds_require(self):
+            return [("0", "c0"), ("1", "c0"), ("2", "c1"), ("3", "c1")]
+
+    def fake_make_dists(self, block_dict, _rust_featurizer, **kwargs):
+        captured["partial_supervision"] = dict(kwargs["partial_supervision"])
+        captured["incremental_dont_use_cluster_seeds"] = kwargs["incremental_dont_use_cluster_seeds"]
+        block_key, signatures = next(iter(block_dict.items()))
+        return {block_key: np.zeros((len(signatures), len(signatures)), dtype=np.float64)}
+
+    def fake_cluster_one_block(
+        self,
+        signatures,
+        pairwise_proba,
+        effective_cluster_model_params,
+        dataset,
+        all_disallow_signature_ids,
+        *,
+        block_key,
+    ):
+        del self, pairwise_proba, effective_cluster_model_params, all_disallow_signature_ids, block_key
+        captured["proxy_cluster_seeds_require"] = dict(dataset.cluster_seeds_require)
+        return [0 for _signature in signatures]
+
+    monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", fake_make_dists)
+    monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", fake_cluster_one_block)
+
+    _dummy_clusterer(cluster_model=None).predict_from_rust_featurizer(
+        {"block": ["0", "1", "2", "3"]},
+        _FakeFeaturizer(),
+    )
+
+    assert captured["partial_supervision"] == {}
+    assert captured["incremental_dont_use_cluster_seeds"] is False
+    assert captured["proxy_cluster_seeds_require"] == {
+        "0": "c0",
+        "1": "c0",
+        "2": "c1",
+        "3": "c1",
+    }
 
 
 def test_seed_override_partial_supervision_respects_existing_reverse_pair() -> None:
@@ -1160,7 +1269,7 @@ def test_predict_from_arrow_paths_routes_only_oversized_blocks_through_native_su
     assert clusterer._last_rust_arrow_subblocking_telemetry["oversized_block_count"] == 1
 
 
-def test_predict_from_arrow_paths_uses_explicit_current_cluster_seeds(
+def test_predict_from_arrow_paths_uses_request_featurizer_cluster_seeds_without_python_pair_expansion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1169,13 +1278,13 @@ def test_predict_from_arrow_paths_uses_explicit_current_cluster_seeds(
 
     class FakeRustFeaturizer:
         def cluster_seeds_require(self):
-            return [("s1", "stale"), ("s2", "stale")]
+            return [("s1", "current"), ("s2", "current")]
 
-    monkeypatch.setattr(
-        model_module,
-        "build_rust_featurizer_from_arrow_paths",
-        lambda *_args, **_kwargs: FakeRustFeaturizer(),
-    )
+    def fake_build_rust_featurizer(paths, **_kwargs):
+        captured["build_seed_map"] = model_module._read_cluster_seeds_arrow(Path(paths["cluster_seeds"]))
+        return FakeRustFeaturizer()
+
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fake_build_rust_featurizer)
 
     def fake_predict_from_rust_featurizer(self, block_dict, rust_featurizer, **kwargs):
         del self, rust_featurizer
@@ -1192,7 +1301,8 @@ def test_predict_from_arrow_paths_uses_explicit_current_cluster_seeds(
     )
 
     assert result == {"cluster": ["s1", "s2"]}
-    assert captured["cluster_seeds_require"] == {"s1": "current", "s2": "current"}
+    assert captured["build_seed_map"] == {"s1": "current", "s2": "current"}
+    assert captured["cluster_seeds_require"] is None
 
 
 def test_arrow_subblocking_presplits_altered_profiles_before_partition_and_uses_rewritten_seeds(
@@ -1275,7 +1385,7 @@ def test_arrow_subblocking_presplits_altered_profiles_before_partition_and_uses_
     assert captured["native_seed_map"] == expected_rewritten_seeds
     assert captured["build_seed_map"] == expected_rewritten_seeds
     assert captured["native_seed_path"] == captured["build_seed_path"]
-    assert captured["explicit_cluster_seeds_require"] == expected_rewritten_seeds
+    assert captured["explicit_cluster_seeds_require"] is None
     assert captured["proxy_cluster_seeds_require"] == expected_rewritten_seeds
     assert ["s1", "s2"] in captured["predicted_blocks"].values()
 

@@ -501,6 +501,10 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
         "evict_rust_featurizer",
         lambda _dataset: pytest.fail("a new Arrow-training dataset cannot have a cached featurizer"),
     )
+    monkeypatch.setattr(
+        "s2and.arrow_training.load_papers_from_arrow",
+        lambda *_args, **_kwargs: pytest.fail("construction must not load Python papers"),
+    )
 
     arrow_dataset = build_training_anddata_from_arrow(
         training_bundle["arrow_paths"],
@@ -521,6 +525,36 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     assert arrow_dataset.name_counts_provenance == arrow_dataset.arrow_paths.name_counts_manifest.source_provenance
     assert isinstance(arrow_dataset.name_tuples, frozenset)
     assert arrow_dataset._cluster_seeds_source == "arrow"
+    assert "papers" not in arrow_dataset.__dict__
+
+
+def test_arrow_training_materializes_exact_papers_once(
+    training_bundle: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    load_calls = 0
+    original_loader = load_papers_from_arrow
+
+    def recording_loader(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal load_calls
+        load_calls += 1
+        return original_loader(*args, **kwargs)
+
+    monkeypatch.setattr("s2and.arrow_training.load_papers_from_arrow", recording_loader)
+    arrow_dataset = build_training_anddata_from_arrow(
+        training_bundle["arrow_paths"],
+        "dummy_arrow_training_lazy_papers",
+        expected_normalization_version=NORMALIZATION_VERSION,
+        clusters=str(DUMMY_DIR / "clusters.json"),
+        random_seed=42,
+        n_jobs=1,
+    )
+
+    assert "papers" not in arrow_dataset.__dict__
+    assert load_calls == 0
+    assert arrow_dataset.papers == training_bundle["arrow_dataset"].papers
+    assert arrow_dataset.papers is arrow_dataset.__dict__["papers"]
+    assert load_calls == 1
 
 
 def test_arrow_training_constructor_retains_disabled_orcid_policy(
@@ -606,6 +640,10 @@ def test_featurize_end_to_end_with_fixed_pairs(
         "val_pairs": val_frame,
         "test_pairs": test_frame,
     }
+    monkeypatch.setattr(
+        "s2and.arrow_training.load_papers_from_arrow",
+        lambda *_args, **_kwargs: pytest.fail("pair resolution and Rust featurization must not load Python papers"),
+    )
 
     json_dataset = _json_training_anddata("dummy_json_fixed_pairs", training_bundle["specter"], **pair_kwargs)
     arrow_dataset = build_training_anddata_from_arrow(
@@ -626,7 +664,6 @@ def test_featurize_end_to_end_with_fixed_pairs(
         featurizer_version=FEATURIZER_VERSION,
     )
 
-    feature_port.clear_rust_featurizer_cache()
     results = {}
     for label, dataset in (("json", json_dataset), ("arrow", arrow_dataset)):
         monkeypatch.setenv("S2AND_BACKEND", "rust" if label == "arrow" else "python")
@@ -664,6 +701,7 @@ def test_featurize_end_to_end_with_fixed_pairs(
             split_name=split_name,
             pairs=split_pairs[split_index],
         )
+    assert "papers" not in arrow_dataset.__dict__
 
 
 def test_constructor_requires_batch_indexes_and_name_counts_index(training_bundle: dict[str, Any]) -> None:

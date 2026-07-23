@@ -77,7 +77,6 @@ def tiny_name_counts_provenance() -> dict[str, Any]:
         "source_query_sha256": "1" * 64,
         "selected_rows_sha256": "2" * 64,
         "source_row_count": 1,
-        "pickle_sha256": "0" * 64,
     }
 
 

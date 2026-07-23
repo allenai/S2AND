@@ -10,7 +10,6 @@ from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.feature_port import (
     _get_rust_featurizer,
-    clear_rust_featurizer_cache,
     get_constraints_matrix_indexed_rust,
 )
 from s2and.runtime import build_runtime_context
@@ -110,7 +109,6 @@ def test_cached_rust_featurizer_respects_suppress_orcid_per_call(tmp_path) -> No
     _require_rust()
     source_dataset = _feature_safe_dataset()
     dataset = build_arrow_training_dataset(source_dataset, tmp_path, name_counts="empty")
-    clear_rust_featurizer_cache()
     rust_featurizer = _get_rust_featurizer(dataset)
     signature_index = {str(sig_id): idx for idx, sig_id in enumerate(rust_featurizer.signature_ids())}
     indexed_pairs = [(signature_index["same_a"], signature_index["same_b"])]

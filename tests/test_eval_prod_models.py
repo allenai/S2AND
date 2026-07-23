@@ -220,37 +220,57 @@ def test_pair_splits_from_arrow_paths_samples_within_block_random_pairs(
     assert splits.test_pairs == []
 
 
-def test_feature_tuple_from_rust_featurizer_uses_selected_feature_groups() -> None:
+def test_feature_tuple_from_rust_featurizer_uses_one_union_call_and_projects_feature_groups() -> None:
+    calls: list[dict[str, Any]] = []
+
     class FakeRustFeaturizer:
         def signature_ids(self) -> list[str]:
-            return ["s1", "s2"]
+            return ["s1", "s2", "s3"]
 
         def featurize_pairs_matrix_indexed(
             self,
             indexed_pairs: list[tuple[int, int]],
             selected_indices: list[int],
-            _n_jobs: int,
-            _nan_value: float,
+            n_jobs: int,
+            nan_value: float,
         ) -> list[list[float]]:
-            assert indexed_pairs == [(0, 1)]
-            return [[float(index) for index in selected_indices]]
+            calls.append(
+                {
+                    "indexed_pairs": indexed_pairs,
+                    "selected_indices": selected_indices,
+                    "n_jobs": n_jobs,
+                    "nan_value": nan_value,
+                }
+            )
+            return [[float(row * 100 + index) for index in selected_indices] for row in range(len(indexed_pairs))]
 
-    main_info = SimpleNamespace(features_to_use=["main"], feature_group_to_index={"main": [2, 0]})
-    nameless_info = SimpleNamespace(features_to_use=["nameless"], feature_group_to_index={"nameless": [1]})
+    main_info = SimpleNamespace(
+        features_to_use=["main_b", "main_a"],
+        feature_group_to_index={"main_a": [3], "main_b": [4, 1]},
+    )
+    nameless_info = SimpleNamespace(features_to_use=["nameless"], feature_group_to_index={"nameless": [4, 2]})
 
     features, labels, nameless = eval_prod_models._feature_tuple_from_rust_featurizer(
         FakeRustFeaturizer(),
-        [("s1", "s2", 1)],
+        [("s3", "s1", 0.25), ("s1", "s2", 1)],
         featurizer_info=main_info,
         nameless_featurizer_info=nameless_info,
-        n_jobs=1,
-        nan_value=float("nan"),
+        n_jobs=3,
+        nan_value=-7.5,
     )
 
-    assert features.tolist() == [[0.0, 2.0]]
-    assert labels.tolist() == [1.0]
+    assert calls == [
+        {
+            "indexed_pairs": [(2, 0), (0, 1)],
+            "selected_indices": [1, 2, 3, 4],
+            "n_jobs": 3,
+            "nan_value": -7.5,
+        }
+    ]
+    assert features.tolist() == [[1.0, 3.0, 4.0], [101.0, 103.0, 104.0]]
+    assert labels.tolist() == [0.25, 1.0]
     assert nameless is not None
-    assert nameless.tolist() == [[1.0]]
+    assert nameless.tolist() == [[2.0, 4.0], [102.0, 104.0]]
 
 
 @pytest.mark.parametrize("name_counts_owner", ["main", "nameless"])

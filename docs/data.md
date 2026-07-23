@@ -46,8 +46,8 @@ rows as Arrow IPC files. It intentionally does not duplicate legacy `raw/`,
 
 Both Arrow/Rust inference and Python `ANDData` consume the shared
 `name_counts_index/`. Python callers pass `NAME_COUNTS_INDEX_PATH` or an open
-`NameCountsIndex` handle; the historical name-count pickle is source-lineage
-material only and is never a runtime loader.
+`NameCountsIndex` handle. The native manifest is the publication and model
+identity; its `source_provenance` retains warehouse audit lineage.
 
 The previous production model source bundle is checked into this repo under
 `s2and/data/production_model_v1.21/`. Canonical-v2 rejects it; it is retained

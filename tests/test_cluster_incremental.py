@@ -1,3 +1,4 @@
+import hashlib
 import os
 import threading
 import weakref
@@ -36,7 +37,6 @@ from s2and.incremental_linking.retrieval import (
 )
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
 from s2and.model import Clusterer, IncrementalDistStats
-from s2and.name_count_binding import NameCountsBinding
 from tests.helpers import (
     tiny_name_counts_index,
     tiny_name_counts_provenance,
@@ -188,51 +188,40 @@ def _patch_fake_raw_arrow_planner(
     )
 
 
-def test_raw_plan_window_subset_preserves_rows_pairs_and_zeroes_reused_telemetry() -> None:
+def test_raw_plan_contiguous_query_slice_rebases_rows_and_pairs() -> None:
     plan: dict[str, Any] = {
         "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
         "query_signature_ids": ["q0", "q1", "q2"],
         "query_views": ["full", "full", "full"],
         "query_authors": ["A", "B", "C"],
-        "row_count": 3,
-        "pair_count": 3,
-        "row_query_signature_indices": np.asarray([0, 1, 2], dtype=np.uint32),
-        "row_component_keys": ["c0", "c1", "c2"],
-        "retrieval_scores": np.asarray([0.9, 0.8, 0.7], dtype=np.float32),
-        "retrieval_ranks": np.asarray([1, 1, 1], dtype=np.uint16),
-        "pair_row_indices": np.asarray([0, 1, 2], dtype=np.uint32),
-        "left_signature_ids": ["q0", "q1", "q2"],
-        "right_signature_ids": ["s0", "s1", "s2"],
-        "component_members": {"c0": ["s0"], "c1": ["s1"], "c2": ["s2"]},
-        "telemetry": {"query_signature_count": 3, "timings": {"total_secs": 1.0}},
+        "row_count": 4,
+        "pair_count": 4,
+        "row_query_signature_indices": np.asarray([0, 0, 1, 2], dtype=np.uint32),
+        "row_component_keys": ["c0", "c1", "c2", "c3"],
+        "retrieval_scores": np.asarray([0.9, 0.8, 0.7, 0.6], dtype=np.float32),
+        "retrieval_ranks": np.asarray([1, 2, 1, 1], dtype=np.uint16),
+        "pair_row_indices": np.asarray([0, 1, 2, 3], dtype=np.uint32),
+        "left_signature_ids": ["q0", "q0", "q1", "q2"],
+        "right_signature_ids": ["s0", "s1", "s2", "s3"],
+        "component_members": {f"c{index}": [f"s{index}"] for index in range(4)},
+        "telemetry": {"query_signature_count": 3},
     }
     for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
         fill_value: Any = "" if dtype is object else 0
-        plan[raw_key] = np.asarray([fill_value] * 3, dtype=dtype)
+        plan[raw_key] = np.asarray([fill_value] * 4, dtype=dtype)
     bundle = RawArrowPlanBundle.from_mapping(plan)
-    production_module._validate_raw_plan_bundle_window_order(bundle)  # noqa: SLF001
 
-    first = production_module._subset_raw_plan_bundle_for_contiguous_queries(  # noqa: SLF001
-        bundle,
-        ["q1", "q2"],
-        include_plan_telemetry=True,
-    )
-    reused = production_module._subset_raw_plan_bundle_for_contiguous_queries(  # noqa: SLF001
-        bundle,
-        ["q1", "q2"],
-        include_plan_telemetry=False,
-    )
+    first = bundle.contiguous_query_slice(0, 1)
+    remainder = bundle.contiguous_query_slice(1, 3)
 
-    assert first.query_signature_ids == ("q1", "q2")
-    assert first.query_authors == ("B", "C")
-    assert first.row_query_offsets.tolist() == [0, 1]
-    assert first.pair_row_indices.tolist() == [0, 1]
-    assert first.left_signature_ids == ("q1", "q2")
-    assert first.right_signature_ids == ("s1", "s2")
-    assert first.row_component_keys == ("c1", "c2")
-    assert np.shares_memory(first.retrieval_scores, bundle.retrieval_scores)
     assert first.telemetry == bundle.telemetry
-    assert reused.telemetry == {"query_signature_count": 0, "timings": {"total_secs": 0.0}}
+    assert remainder.telemetry is None
+    assert remainder.query_signature_ids == ("q1", "q2")
+    assert remainder.row_query_offsets.tolist() == [0, 1]
+    assert remainder.pair_row_indices.tolist() == [0, 1]
+    assert remainder.left_signature_ids == ("q1", "q2")
+    assert remainder.right_signature_ids == ("s2", "s3")
+    assert np.shares_memory(remainder.retrieval_scores, bundle.retrieval_scores)
 
 
 def test_finish_incremental_uses_split_inverse_for_altered_incompatibility_check() -> None:
@@ -1101,10 +1090,8 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
 
     class FakeArtifact:
         artifact_dir = tmp_path
-        metadata = SimpleNamespace(
-            retrieval_top_k=25,
-            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
-        )
+        retrieval_top_k = 25
+        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
 
     @contextmanager
     def fake_temporary_arrow_paths_with_cluster_seeds(*_args: object, **_kwargs: object):
@@ -1169,11 +1156,9 @@ def test_predict_incremental_arrow_promoted_linker_uses_loaded_artifact_and_type
     import pyarrow as pa
 
     class FakeArtifact:
-        metadata = SimpleNamespace(
-            retrieval_top_k=25,
-            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
-        )
         artifact_dir = tmp_path
+        retrieval_top_k = 25
+        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
 
     captured: dict[str, Any] = {}
     cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
@@ -1239,7 +1224,7 @@ def test_predict_incremental_arrow_promoted_linker_uses_loaded_artifact_and_type
     monkeypatch.setattr(
         production_module,
         "compute_promoted_incremental_limits",
-        lambda **kwargs: _mock_promoted_limits(query_count=int(kwargs["query_count"]), query_batch_size=1),
+        lambda **_kwargs: _mock_promoted_limits(query_batch_size=1),
     )
     monkeypatch.setattr(
         production_module.runtime_module,
@@ -1301,10 +1286,8 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
 
     class FakeArtifact:
         artifact_dir = tmp_path
-        metadata = SimpleNamespace(
-            retrieval_top_k=25,
-            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
-        )
+        retrieval_top_k = 25
+        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
 
     class FakeClusterer:
         n_jobs = 1
@@ -1389,7 +1372,6 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
         production_module,
         "compute_promoted_incremental_limits",
         lambda **kwargs: _mock_promoted_limits(
-            query_count=int(kwargs["query_count"]),
             query_batch_size=min(int(kwargs["query_count"]), batching_threshold),
         ),
     )
@@ -1438,7 +1420,7 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
     assert telemetry["raw_arrow_batch_featurizer_count"] == len(captured["featurizer_name_counts_indexes"])
 
 
-def test_query_disallow_rescores_reuse_two_bounded_window_featurizers(
+def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1453,7 +1435,8 @@ def test_query_disallow_rescores_reuse_two_bounded_window_featurizers(
 
     class FakeArtifact:
         artifact_dir = tmp_path
-        metadata = SimpleNamespace(retrieval_top_k=25, feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS)
+        retrieval_top_k = 25
+        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
 
     class FakeClusterer:
         n_jobs = 1
@@ -1529,7 +1512,6 @@ def test_query_disallow_rescores_reuse_two_bounded_window_featurizers(
 
     def fake_limits(**kwargs: object):
         return _mock_promoted_limits(
-            query_count=int(kwargs["query_count"]),
             query_batch_size=1,
             predicted_peak_delta_bytes=8_500,
         )
@@ -1577,10 +1559,10 @@ def test_query_disallow_rescores_reuse_two_bounded_window_featurizers(
         batching_threshold=1,
     )
 
-    assert captured["planner_plans"][:2] == [("q0", "q1"), ("q2", "q3")]
-    assert captured["planner_plans"][2:] == [("q1",), ("q3",)]
+    assert captured["planner_plans"][:4] == [("q0",), ("q1",), ("q2",), ("q3",)]
+    assert captured["planner_plans"][4:] == [("q1",), ("q3",)]
     assert captured["rescored"] == ["q1", "q3"]
-    assert len(captured["featurizer_builds"]) == 2
+    assert len(captured["featurizer_builds"]) == 5
     assert captured["linked"] == {"q0": "c0", "q1": "c2", "q2": "c1", "q3": "c3"}
     assert captured["phase_a_released_before_finish"] == {
         "featurizers": True,
@@ -1588,19 +1570,17 @@ def test_query_disallow_rescores_reuse_two_bounded_window_featurizers(
         "rescore_callback": True,
         "rescore_context": True,
     }
-    assert result["incremental_linker_telemetry"]["raw_arrow_batch_featurizer_count"] == 2
+    assert result["incremental_linker_telemetry"]["raw_arrow_batch_featurizer_count"] == 5
 
 
-def test_promoted_linker_reuses_one_memory_safe_plan_and_featurizer_for_four_batches(
+def test_promoted_linker_reuses_one_plan_and_featurizer_for_four_scoring_batches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     class FakeArtifact:
         artifact_dir = tmp_path
-        metadata = SimpleNamespace(
-            retrieval_top_k=25,
-            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
-        )
+        retrieval_top_k = 25
+        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
 
     query_ids = [f"q{index:02d}" for index in range(20)]
     captured: dict[str, Any] = {"featurizer_windows": [], "scored_batches": []}
@@ -1622,7 +1602,6 @@ def test_promoted_linker_reuses_one_memory_safe_plan_and_featurizer_for_four_bat
         query_count = int(kwargs["query_count"])
         max_query_batch_size = int(cast(int, kwargs["max_query_batch_size"]))
         return _mock_promoted_limits(
-            query_count=query_count,
             query_batch_size=min(query_count, max_query_batch_size),
         )
 
@@ -1660,45 +1639,15 @@ def test_promoted_linker_reuses_one_memory_safe_plan_and_featurizer_for_four_bat
         batching_threshold=2,
     )
 
-    assert captured["planner_plans"] == [tuple(query_ids[:8]), tuple(query_ids[8:16]), tuple(query_ids[16:])]
-    assert captured["featurizer_windows"] == captured["planner_plans"]
+    expected_windows = [tuple(query_ids[:8]), tuple(query_ids[8:16]), tuple(query_ids[16:])]
+    assert captured["planner_plans"] == expected_windows
+    assert captured["featurizer_windows"] == expected_windows
     assert captured["scored_batches"] == [tuple(query_ids[start : start + 2]) for start in range(0, 20, 2)]
     telemetry = result["incremental_linker_telemetry"]
     assert telemetry["raw_arrow_batch_plan_count"] == 3
     assert telemetry["raw_arrow_batch_featurizer_count"] == 3
-    assert telemetry["raw_arrow_batch_featurizer_reused_batch_count"] == 7
-    assert telemetry["raw_arrow_batch_plan_window_size"] == 8
-
-
-def test_promoted_plan_window_exceeds_ram_limited_scoring_batch_when_raw_headroom_fits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        production_module.memory_budget,
-        "current_rss_bytes_best_effort",
-        lambda _total: (10_000_000, "rss:test"),
-    )
-    component_summary = production_module.memory_budget.summarize_promoted_component_sizes([1] * 25)
-
-    window, scoring_batch_size, limits = production_module._memory_safe_promoted_plan_window(  # noqa: SLF001
-        [f"q{index}" for index in range(8)],
-        max_scoring_batch_size=2,
-        orcid_fanout_by_query={},
-        component_sizes=component_summary,
-        retrieval_top_k=25,
-        memory_layout=production_module._PromotedIncrementalMemoryLayout(  # noqa: SLF001
-            final_matrix_feature_count=53,
-            pairwise_matrix_feature_count=35,
-            aggregate_feature_count=18,
-        ),
-        total_ram_bytes=48_600_000,
-        base_candidate_rows_per_query=25,
-        base_pairs_per_query=25,
-    )
-
-    assert limits.query_batch_size == 2
-    assert scoring_batch_size == 2
-    assert len(window) == 3
+    assert "raw_arrow_batch_plan_window_size" not in telemetry
+    assert "raw_arrow_batch_featurizer_reused_batch_count" not in telemetry
 
 
 def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
@@ -1707,13 +1656,15 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
 ) -> None:
     class FakeArtifact:
         artifact_dir = tmp_path
-        metadata = SimpleNamespace(
-            retrieval_top_k=25,
-            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
-        )
+        retrieval_top_k = 25
+        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
 
     query_ids = [f"q{index:02d}" for index in range(20)]
-    captured: dict[str, Any] = {"featurizer_batches": [], "scored_batches": []}
+    captured: dict[str, Any] = {
+        "featurizer_batches": [],
+        "limit_checks": [],
+        "scored_batches": [],
+    }
 
     class FakeClusterer:
         n_jobs = 1
@@ -1730,9 +1681,15 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
 
     def fake_limits(**kwargs: object):
         query_count = int(kwargs["query_count"])
+        captured["limit_checks"].append(
+            (
+                bool(kwargs.get("retrieval_payload_resident", False)),
+                len(captured.get("planner_plans", [])),
+                len(captured["featurizer_batches"]),
+            )
+        )
         safe_size = 2 if captured["featurizer_batches"] else 10
         return _mock_promoted_limits(
-            query_count=query_count,
             query_batch_size=min(query_count, safe_size),
         )
 
@@ -1774,10 +1731,16 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
     scored_signature_ids = [signature_id for batch in captured["scored_batches"] for signature_id in batch]
     assert scored_signature_ids == query_ids
     assert all(1 <= len(batch) <= 2 for batch in captured["scored_batches"])
+    assert captured["limit_checks"][:5] == [
+        (False, 0, 0),
+        (False, 0, 0),
+        (False, 0, 0),
+        (True, 1, 0),
+        (True, 1, 1),
+    ]
     assert captured["featurizer_batches"] == captured["planner_plans"]
-    replanned_signature_ids = [signature_id for window in captured["featurizer_batches"][1:] for signature_id in window]
-    assert replanned_signature_ids == query_ids
-    assert len(captured["featurizer_batches"][1:]) < len(captured["scored_batches"])
+    assert captured["featurizer_batches"][0] == tuple(query_ids[:10])
+    assert len(captured["featurizer_batches"]) < len(captured["scored_batches"])
     assert result["clusters"] == {"c_seed": ["seed", *query_ids]}
     assert result["incremental_linker_telemetry"]["raw_arrow_batch_memory_replan_count"] >= 1
 
@@ -1816,16 +1779,13 @@ def test_predict_from_arrow_paths_enforces_and_loads_name_counts_index(
             },
         )
 
-    clusterer.feature_contract.update(
-        NameCountsBinding.from_provenance(
-            tiny_name_counts_provenance(),
-            context="test clusterer",
-        ).feature_contract_fields()
-    )
     valid_root = tmp_path / "valid"
     name_counts_index, _metrics = write_name_counts_index(
         valid_root, tiny_name_counts_tuple(), tiny_name_counts_provenance()
     )
+    clusterer.feature_contract["name_counts_manifest_sha256"] = hashlib.sha256(
+        (Path(name_counts_index) / "manifest.json").read_bytes()
+    ).hexdigest()
     arrow_paths = _minimal_arrow_paths(valid_root)
     arrow_paths["name_counts_index"] = name_counts_index
     write_test_arrow_artifact_manifest(valid_root, arrow_paths)
@@ -1927,69 +1887,14 @@ def test_promoted_incremental_batch_telemetry_records_constant_and_unknown_confl
 
 def _mock_promoted_limits(
     *,
-    query_count: int = 1,
     query_batch_size: int = 1,
-    operational_estimate_source: str = "top_k_largest_components",
     predicted_peak_delta_bytes: int = 2_000,
     predicted_peak_rss_bytes: int = 3_000,
-    predicted_pairs_per_batch: int = 40,
-    predicted_candidate_rows_per_batch: int = 10,
-    pair_chunk_pairs: int = 100,
-    pair_chunk_count: int = 1,
 ) -> model_module.memory_budget.PromotedPhaseALimits:
     return model_module.memory_budget.PromotedPhaseALimits(
-        total_ram_bytes=100_000,
-        total_ram_source="test",
-        current_rss_bytes=1_000,
-        current_rss_source="rss:test",
-        available_bytes=90_000,
-        effective_available_fraction=0.9,
-        safety_margin_bytes=1_000,
-        stage_budget_fraction=0.5,
-        stage_budget_bytes=10_000,
-        query_count=int(query_count),
-        max_query_batch_size=max(1, int(query_count)),
         query_batch_size=int(query_batch_size),
-        component_count=4,
-        retrieval_top_k=25,
-        candidate_rows_per_query=2,
-        conservative_pairs_per_query=4,
-        hard_query_batch_size=int(query_batch_size),
-        observed_query_count=0,
-        observed_candidate_rows_per_query=0,
-        observed_pairs_per_query=0,
-        observed_safety_multiplier=2.0,
-        operational_candidate_rows_per_query=2,
-        operational_pairs_per_query=4,
-        operational_estimate_source=operational_estimate_source,
-        max_component_size=2,
-        predicted_candidate_rows_per_batch=int(predicted_candidate_rows_per_batch),
-        predicted_pairs_per_batch=int(predicted_pairs_per_batch),
-        hard_predicted_candidate_rows_per_batch=int(predicted_candidate_rows_per_batch),
-        hard_predicted_pairs_per_batch=int(predicted_pairs_per_batch),
-        retrieval_pair_bytes=16,
-        retrieval_row_bytes=512,
-        pair_label_bytes=8,
-        distance_row_bytes=96,
-        final_matrix_feature_count=53,
-        pairwise_matrix_feature_count=35,
-        aggregate_feature_count=18,
-        fixed_overhead_bytes=16 * (1 << 20),
-        predicted_retrieval_pair_arrays_bytes=0,
-        predicted_retrieval_row_bytes=0,
-        predicted_pair_label_bytes=0,
-        predicted_aggregate_bytes=0,
-        predicted_distance_row_bytes=0,
-        predicted_final_matrix_bytes=0,
-        predicted_fixed_overhead_bytes=16 * (1 << 20),
-        predicted_persistent_bytes=0,
-        predicted_pair_chunk_bytes=0,
         predicted_peak_delta_bytes=int(predicted_peak_delta_bytes),
         predicted_peak_rss_bytes=int(predicted_peak_rss_bytes),
-        pair_chunk_pairs=int(pair_chunk_pairs),
-        pair_chunk_count=int(pair_chunk_count),
-        pair_chunk_stage_budget_bytes=10_000,
-        single_query_predicted_persistent_bytes=100,
     )
 
 
@@ -2026,12 +1931,6 @@ def test_subblocked_single_letter_cleanup_skips_missing_dataset_rust_featurizer(
         return {"clusters": {"single": list(block_signatures)}}
 
     monkeypatch.setattr(Clusterer, "predict_incremental", fake_predict_incremental)
-    monkeypatch.setattr(
-        model_module,
-        "_sync_rust_cluster_seeds",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dataset featurizer sync should be skipped")),
-    )
-
     result = clusterer._predict_subblocked_single_letter_incremental_groups(
         {"block|single": ["s1", "s2"]},
         pred_clusters={},

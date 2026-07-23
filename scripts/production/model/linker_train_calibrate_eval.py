@@ -314,76 +314,6 @@ def _selected_rows_digest(rows: pd.DataFrame) -> str:
     return digest.hexdigest()
 
 
-def _version_from_production_model_path(path: Path) -> str | None:
-    name = path.name
-    prefix = "production_model_v"
-    suffix = ".pickle"
-    if name.startswith(prefix) and name.endswith(suffix):
-        return name[len(prefix) : -len(suffix)]
-    if name.startswith(prefix):
-        return name[len(prefix) :]
-    return None
-
-
-def _portable_repo_path(path: Path) -> str:
-    raw_path = Path(path)
-    resolved = raw_path.resolve() if raw_path.is_absolute() else (REPO_ROOT / raw_path).resolve()
-    try:
-        return resolved.relative_to(REPO_ROOT).as_posix()
-    except ValueError:
-        return resolved.name
-
-
-def _strip_local_paths(payload: Any) -> Any:
-    if isinstance(payload, Mapping):
-        return {
-            str(key): _strip_local_paths(value)
-            for key, value in payload.items()
-            if "path" not in str(key).lower() and "root" not in str(key).lower()
-        }
-    if isinstance(payload, list):
-        return [_strip_local_paths(value) for value in payload]
-    return payload
-
-
-def _linker_artifact_audit_metadata(
-    *,
-    args: argparse.Namespace,
-    target: Mapping[str, Any],
-    feature_bundle: OfficialBundle,
-    featureization_summaries: Sequence[Mapping[str, Any]],
-) -> dict[str, Any]:
-    pairwise_model_path = Path(args.pairwise_model_path)
-    pairwise_model = {
-        "path": _portable_repo_path(pairwise_model_path),
-        "filename": pairwise_model_path.name,
-        "version": _version_from_production_model_path(pairwise_model_path),
-    }
-    if pairwise_model_path.is_file():
-        pairwise_model["sha256"] = _sha256_file(pairwise_model_path)
-    elif pairwise_model_path.is_dir() and (pairwise_model_path / "manifest.json").exists():
-        pairwise_model["manifest_sha256"] = _sha256_file(pairwise_model_path / "manifest.json")
-    return {
-        "artifact_name": "production_incremental_linker",
-        "artifact_version": str(args.linker_artifact_version),
-        "target_variant": str(target.get("variant", "")),
-        "target_status": str(target.get("status", "")),
-        "target_metrics": dict(target.get("metrics", {})),
-        "pairwise_model": pairwise_model,
-        "training_source_bundle": _portable_repo_path(Path(args.source_bundle_root)),
-        "training_feature_mode": str(args.feature_mode),
-        "precomputed_feature_bundle": (
-            _portable_repo_path(Path(args.precomputed_feature_bundle_root))
-            if args.precomputed_feature_bundle_root is not None
-            else None
-        ),
-        "training_feature_bundle_name": str(feature_bundle.bundle_name),
-        "feature_nan_policy": _feature_nan_policy_summary(args),
-        "featureization": [_strip_local_paths(dict(summary)) for summary in featureization_summaries],
-        "target_spec": _portable_repo_path(Path(args.target_json)),
-    }
-
-
 def _bundle_with_promoted_target(bundle: OfficialBundle, target: Mapping[str, Any]) -> OfficialBundle:
     models = copy.deepcopy(bundle.models)
     classic = dict(models["classic"])
@@ -932,7 +862,6 @@ def _build_arrow_rust_dataset_context(
 
 def _release_arrow_rust_dataset_context(context: ArrowRustDatasetContext) -> None:
     context.component_members.clear()
-    feature_port.clear_rust_featurizer_cache()
     gc.collect()
 
 
@@ -2752,12 +2681,10 @@ def _prepare_prod_training_data(
 def _train_and_save_prod_artifact(
     *,
     feature_bundle: OfficialBundle,
-    classic_summary: Mapping[str, Any],
     output_dir: Path,
     save_artifact_to: Path,
     target_spec: Mapping[str, Any],
     artifact_pairwise_bundle_binding: Mapping[str, Any],
-    artifact_audit_metadata: Mapping[str, Any] | None,
     holdout_importance_weight: float,
 ) -> dict[str, Any]:
     spec = dict(feature_bundle.models["classic"])
@@ -2801,44 +2728,18 @@ def _train_and_save_prod_artifact(
     booster_training_splits = [str(split) for split in promoted_gate_config["calibration_splits"]]
     gate_calibration_splits = [str(promoted_gate_config["test_split"])]
 
-    audit_metadata = dict(artifact_audit_metadata or {})
-    audit_metadata["prod_training"] = {
-        "policy": "train_plus_calibration_weighted_test_calibrated_logistic_gate",
-        "holdout_importance_weight": float(holdout_importance_weight),
-        "retrieval_rank_limit": retrieval_top_k,
-        "booster_training_splits": booster_training_splits,
-        "gate_calibration_splits": gate_calibration_splits,
-        "rows": int(len(prod_training_data.rows)),
-        "positive_rows": int(train_labels.sum()),
-        "sample_weight_sum": round(float(prod_training_data.sample_weight.sum()), 6),
-        "sources": prod_training_data.source_summaries,
-        "train_holdout_filter_summary": prod_training_data.train_holdout_filter_summary,
-        "train_filter_summary": prod_training_data.train_filter_summary,
-        "params": dict(spec["best_params"]),
-        "logistic_gate": {
-            "calibration_metrics": dict(logistic_gate_result["calibration_metrics"]),
-            "split_metrics": dict(logistic_gate_result["split_metrics"]),
-            "training_summary": dict(logistic_gate_config.get("training_summary", {})),
-        },
-    }
     artifact_metadata = save_incremental_linking_artifact(
         model,
         Path(save_artifact_to),
-        feature_columns=feature_columns,
         retrieval_top_k=retrieval_top_k,
         gate_config=logistic_gate_config,
-        prediction_fixture_matrix=train_matrix[:5],
         target_spec=target_spec,
         pairwise_bundle_binding=artifact_pairwise_bundle_binding,
-        audit_metadata=audit_metadata,
     )
     summary = {
         "path": str(Path(save_artifact_to)),
-        "schema_version": artifact_metadata.schema_version,
-        "feature_schema_digest": artifact_metadata.feature_schema_digest,
-        "production_contract_digest": artifact_metadata.production_contract_digest,
-        "retrieval_stack_digest": artifact_metadata.retrieval_stack_digest,
-        "target_spec_digest": artifact_metadata.target_spec_digest,
+        "schema_version": artifact_metadata["schema_version"],
+        "target_spec_digest": artifact_metadata["target_spec_digest"],
         "training_summary": {
             "rows": int(len(prod_training_data.rows)),
             "queries": int(prod_training_data.rows["query_group_id"].astype(str).nunique()),
@@ -3088,16 +2989,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             save_artifact_to = output_dir / "production_incremental_linker"
         if save_artifact_to == production_bundle_dir or save_artifact_to.is_relative_to(production_bundle_dir):
             raise SystemExit("--save-artifact-to must be outside --save-production-bundle-to")
-    artifact_pairwise_binding: dict[str, Any] | None = None
-    artifact_audit_metadata = None
-    if save_artifact_to is not None:
-        artifact_pairwise_binding = dict(pairwise_model_binding)
-        artifact_audit_metadata = _linker_artifact_audit_metadata(
-            args=args,
-            target=target,
-            feature_bundle=feature_bundle,
-            featureization_summaries=featureization_summaries,
-        )
+    artifact_pairwise_binding = dict(pairwise_model_binding) if save_artifact_to is not None else None
     summary = run_classic(
         feature_bundle,
         run_output_dir,
@@ -3107,28 +2999,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     deltas = _metric_deltas(observed, target)
     if not args.allow_metric_drift:
         _assert_no_metric_drift(observed, target)
-    if artifact_audit_metadata is not None:
-        artifact_audit_metadata = {
-            **artifact_audit_metadata,
-            "classic_train_calibrate_eval": {
-                "summary_artifact": "not bundled; observed metrics are embedded in this metadata",
-                "observed_metrics": observed,
-                "metric_deltas": deltas,
-            },
-            "hyperopt": hyperopt_summary or {"enabled": False},
-        }
     prod_artifact_summary = None
     production_bundle_summary = None
     if save_artifact_to is not None:
         assert artifact_pairwise_binding is not None
         prod_artifact_summary = _train_and_save_prod_artifact(
             feature_bundle=feature_bundle,
-            classic_summary=summary,
             output_dir=output_dir,
             save_artifact_to=save_artifact_to,
             target_spec=target,
             artifact_pairwise_bundle_binding=artifact_pairwise_binding,
-            artifact_audit_metadata=artifact_audit_metadata,
             holdout_importance_weight=float(args.prod_holdout_importance_weight),
         )
     if production_bundle_dir is not None:

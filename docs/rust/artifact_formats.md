@@ -38,7 +38,7 @@ s2and/data/name_counts_index/
 
 `manifest.json` must have `schema_version: "name_counts_index_v2"`,
 `normalization_version: "canonical_v2"`, a complete
-`name_counts_provenance_v2` `source_provenance`, and a `files` object with
+`name_counts_provenance_v3` `source_provenance`, and a `files` object with
 `first`, `last`, `first_last`, and `last_first_initial` entries. Each entry
 requires a nonempty contained `path`, unsigned `byte_count`, and lowercase
 SHA-256. The declared size and digest must match the file, and the file's
@@ -48,13 +48,14 @@ is not the acceptance authority. Each path must equal
 share the same nonempty publication-generation directory. This directory name
 is a storage identifier and need not equal `source_provenance.generation_id`.
 
-`name_counts_provenance_v2` records the input cardinality once as
+`name_counts_provenance_v3` records the input cardinality once as
 `source_row_count`; the duplicate `selected_row_count` field from v1 is not
-accepted.
+accepted. It retains warehouse snapshot, query, selected-row, cardinality, and
+generation audit facts, but does not name a separately published pickle.
 
-Python's `ValidatedNameCountsManifest` and the native Rust opener independently
-enforce this same acceptance contract. Cross-runtime mutation tests cover every
-required provenance and file-integrity field.
+The native Rust opener is the runtime authority for manifest, file-digest, and
+record validation. Python retains facts from the exact native-accepted
+manifest snapshot for orchestration and model binding.
 
 Writers publish by writing every binary file into a temporary generation
 directory, renaming that directory into `generations/`, validating that every
@@ -116,7 +117,7 @@ planning. Do not hand-write the batch-index binary format.
 |---|---|
 | Embedded `name_count_*` columns in `signatures.arrow` | Removed as a preferred/supporting Arrow hot path. Use `name_counts_index/`. |
 | SQLite for name counts | Not better for the current exact static point-lookup workload. Revisit only for ad hoc queries, updates, or transaction requirements. |
-| Pickle | Not a runtime name-count format. The generator still publishes a source pickle because the v1 provenance/model contract names its SHA; remove it when that contract is versioned. |
+| Pickle | Removed. The native index is the sole published representation. |
 | JSON | Fine for fixtures and compatibility loaders; not the runtime target for large table-shaped inference data. |
 | Arrow read into Python dict/list before Rust | Defeats the columnar boundary and was measured slower than keeping the hot path in Rust. |
 | MessagePack as universal target | Better than JSON for nested legacy payloads, but it preserves the object shape the Rust path is trying to avoid. |

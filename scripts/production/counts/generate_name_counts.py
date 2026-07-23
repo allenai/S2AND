@@ -6,19 +6,11 @@ import argparse
 import datetime
 import hashlib
 import json
-import os
-import pickle
-import re
-import shutil
-import tempfile
 import uuid
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
-from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 from s2and.text import canonical_name_count_keys, canonicalize_name_parts
@@ -143,125 +135,6 @@ def build_name_count_dicts(
     }
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _fsync_file(path: Path) -> None:
-    with path.open("r+b") as source:
-        os.fsync(source.fileno())
-
-
-@contextmanager
-def _publish_lock(root: Path) -> Iterator[None]:
-    with exclusive_file_lock(root / ".publish.lock"):
-        yield
-
-
-def publish_name_counts(
-    mappings: NameCountMappings,
-    *,
-    output_dir: Path,
-    source_snapshot_id: str,
-    source_kind: str,
-    query_digest: str,
-    row_metrics: Mapping[str, int | str],
-    overwrite: bool,
-) -> dict[str, Any]:
-    """Publish one immutable generation and replace its manifest last."""
-
-    if len(query_digest) != 64:
-        raise ValueError("query_digest must be a SHA-256 hex digest")
-    selected_rows_sha256 = row_metrics.get("selected_rows_sha256")
-    if not isinstance(selected_rows_sha256, str) or len(selected_rows_sha256) != 64:
-        raise ValueError("row_metrics requires selected_rows_sha256")
-    safe_snapshot = re.sub(r"[^A-Za-z0-9._-]+", "-", source_snapshot_id).strip("-")
-    if not safe_snapshot:
-        raise ValueError("--source-snapshot-id must contain a filename-safe character")
-    root = output_dir / "name_counts"
-    generations = root / "generations"
-    generations.mkdir(parents=True, exist_ok=True)
-    generation_id = f"{safe_snapshot}-{uuid.uuid4().hex}"
-    staging = Path(tempfile.mkdtemp(prefix=f".{generation_id}.", dir=str(generations)))
-    final_generation = generations / generation_id
-    manifest_path = root / "manifest.json"
-    manifest_tmp = root / f".manifest.{generation_id}.json"
-    generation_renamed = False
-    manifest_committed = False
-    try:
-        pickle_path = staging / "name_counts.pickle"
-        with pickle_path.open("wb") as output:
-            pickle.dump(mappings, output, protocol=pickle.HIGHEST_PROTOCOL)
-            output.flush()
-            os.fsync(output.fileno())
-        cardinalities = dict(
-            zip(
-                ("first", "last", "first_last", "last_first_initial"),
-                (len(mapping) for mapping in mappings),
-                strict=True,
-            )
-        )
-        metadata = {
-            "schema_version": NAME_COUNTS_PROVENANCE_SCHEMA_VERSION,
-            "normalization_version": NORMALIZATION_VERSION,
-            "generation_id": generation_id,
-            "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-            "source_kind": source_kind,
-            "source_snapshot_id": source_snapshot_id,
-            "source_query_sha256": query_digest,
-            "pickle_sha256": _sha256(pickle_path),
-            "pickle_byte_count": pickle_path.stat().st_size,
-            "cardinalities": cardinalities,
-            **row_metrics,
-        }
-        metadata_path = staging / "name_counts.meta.json"
-        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        _fsync_file(metadata_path)
-        fsync_directory(staging)
-        provenance_sha256 = _sha256(metadata_path)
-        provenance_byte_count = metadata_path.stat().st_size
-        manifest = {
-            "schema_version": "name_counts_manifest_v1",
-            "normalization_version": NORMALIZATION_VERSION,
-            "generation_id": generation_id,
-            "source_snapshot_id": source_snapshot_id,
-            "files": {
-                "pickle": f"generations/{generation_id}/name_counts.pickle",
-                "provenance": f"generations/{generation_id}/name_counts.meta.json",
-            },
-            "pickle_sha256": metadata["pickle_sha256"],
-            "provenance_sha256": provenance_sha256,
-            "provenance_byte_count": provenance_byte_count,
-        }
-        manifest_tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        _fsync_file(manifest_tmp)
-        with _publish_lock(root):
-            if manifest_path.exists() and not overwrite:
-                raise FileExistsError(f"published manifest already exists: {manifest_path}; pass --overwrite")
-            staging.rename(final_generation)
-            generation_renamed = True
-            fsync_directory(generations)
-            manifest_tmp.replace(manifest_path)
-            manifest_committed = True
-            fsync_directory(root)
-        # Return the exact persisted provenance payload.  Callers embed this
-        # value in derived artifacts, so adding machine-local publication
-        # details here would make their lineage differ from the authoritative
-        # sidecar written above.
-        return metadata
-    finally:
-        manifest_tmp.unlink(missing_ok=True)
-        if staging.exists():
-            shutil.rmtree(staging)
-        if generation_renamed and not manifest_committed and final_generation.exists():
-            shutil.rmtree(final_generation)
-            fsync_directory(generations)
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     limit = _validated_limit(args.limit)
@@ -280,28 +153,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps({"plan": plan}, indent=2, sort_keys=True))
     if args.dry_run:
         return 0
+    manifest_path = args.output_dir / "name_counts_index" / "manifest.json"
+    if manifest_path.exists() and not args.overwrite:
+        raise FileExistsError(f"published manifest already exists: {manifest_path}; pass --overwrite")
     rows = _query_rows(limit) if args.run_full else _fixture_rows(args.fixture_input, limit)
     mappings, row_metrics = build_name_count_dicts(rows)
-    metadata = publish_name_counts(
-        mappings,
-        output_dir=args.output_dir,
-        source_snapshot_id=args.source_snapshot_id,
-        source_kind=source_kind,
-        query_digest=plan["query_sha256"],
-        row_metrics=row_metrics,
-        overwrite=bool(args.overwrite),
-    )
+    source_snapshot_id = args.source_snapshot_id.strip()
+    if not source_snapshot_id:
+        raise ValueError("--source-snapshot-id must be nonempty")
+    provenance = {
+        "schema_version": NAME_COUNTS_PROVENANCE_SCHEMA_VERSION,
+        "normalization_version": NORMALIZATION_VERSION,
+        "generation_id": f"{source_snapshot_id}-{uuid.uuid4().hex}",
+        "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
+        "source_kind": source_kind,
+        "source_snapshot_id": source_snapshot_id,
+        "source_query_sha256": plan["query_sha256"],
+        "cardinalities": dict(
+            zip(
+                ("first", "last", "first_last", "last_first_initial"),
+                (len(mapping) for mapping in mappings),
+                strict=True,
+            )
+        ),
+        **row_metrics,
+    }
     from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 
     index_path, index_metrics = write_name_counts_index(
         args.output_dir,
         mappings,
-        metadata,
+        provenance,
         overwrite=bool(args.overwrite),
     )
     print(
         json.dumps(
-            {"result": metadata, "name_counts_index": index_path, "name_counts_index_metrics": index_metrics},
+            {"result": provenance, "name_counts_index": index_path, "name_counts_index_metrics": index_metrics},
             indent=2,
             sort_keys=True,
         )

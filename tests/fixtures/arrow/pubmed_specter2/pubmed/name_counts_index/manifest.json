@@ -53,8 +53,7 @@
   "source_provenance": {
     "generation_id": "pubmed-specter2",
     "normalization_version": "canonical_v2",
-    "pickle_sha256": "d83c2f30a1e4a04cb760da18541eaae81f22fe3233203eb8ccbb03cd37be2e5d",
-    "schema_version": "name_counts_provenance_v2",
+    "schema_version": "name_counts_provenance_v3",
     "selected_rows_sha256": "d83c2f30a1e4a04cb760da18541eaae81f22fe3233203eb8ccbb03cd37be2e5d",
     "source_kind": "fixture:pubmed-specter2",
     "source_query_sha256": "4c41d07c32caa63b0996f7870d5495d72a61ac5ae20e5bf0ec61fa5187121bb5",

@@ -211,6 +211,12 @@ def write_production_manifest(
     """Write the bundle manifest for either pairwise-only or complete bundles."""
 
     bundle_dir = Path(bundle_dir)
+    for version_field, version in (
+        ("bundle_version", bundle_version),
+        ("pairwise_model_version", pairwise_model_version),
+    ):
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError(f"Production model bundle {version_field} must be a nonempty string")
     if incremental_linker_version is not None and (
         not isinstance(incremental_linker_version, str) or not incremental_linker_version.strip()
     ):
@@ -420,8 +426,8 @@ def finalize_production_bundle(
     pairwise_binding = pairwise_bundle_binding(pairwise_bundle_dir)
     pairwise_manifest = _read_json(pairwise_bundle_dir / "manifest.json")
     linker_metadata = _read_json(incremental_linker_artifact_dir / "metadata.json")
-    if linker_metadata.get("pairwise_bundle_binding") != pairwise_binding:
-        raise ValueError("Incremental linker pairwise_bundle_binding does not match pairwise bundle")
+    if linker_metadata.get("pairwise_bundle_binding_digest") != canonical_json_digest(pairwise_binding):
+        raise ValueError("Incremental linker pairwise_bundle_binding_digest does not match pairwise bundle")
     target_spec_digest = canonical_json_digest(_read_json(target_json))
     if linker_metadata.get("target_spec_digest") != target_spec_digest:
         raise ValueError("Incremental linker target_spec_digest does not match target JSON")

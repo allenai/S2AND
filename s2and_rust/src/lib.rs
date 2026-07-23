@@ -35,10 +35,7 @@ use constraints::{
 use features::*;
 pub(crate) use ingest_dataset::*;
 use language_detection::detect_language_compat;
-use name_counts::{
-    NameCountsData, NameCountsIndex, NameCountsProvenanceBinding, RawNameCountKind,
-    RawNameCountMaps,
-};
+use name_counts::{NameCountsData, NameCountsIndex, RawNameCountKind, RawNameCountMaps};
 use orcid::{normalize_orcid_compact_owned, normalize_orcid_owned};
 use pair_indexing::upper_triangle_pairs_for_range;
 use raw_arrow::paths::{

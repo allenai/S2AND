@@ -3,27 +3,19 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 
 import numpy as np
 
 from s2and import feature_port, memory_budget
-from s2and.arrow_inputs import (
-    ValidatedArrowInputs,
-    require_feature_contract_normalization_version,
-    validate_arrow_prediction_artifacts,
-)
+from s2and.arrow_inputs import ValidatedArrowInputs
 from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import IncrementalLinkingArtifact
-from s2and.incremental_linking.feature_block import (
-    read_incremental_query_signatures_arrow,
-)
 from s2and.incremental_linking.features import LinkerFeatureMatrix, assemble_linker_feature_matrix
 from s2and.incremental_linking.linker_pairwise import (
     PROMOTED_PAIRWISE_AGG_BASE_FEATURE_NAMES,
@@ -40,20 +32,12 @@ from s2and.incremental_linking.logistic_gate import (
     NumpyLogisticGate,
     build_runtime_logistic_gate_matrix,
 )
-from s2and.incremental_linking.policy import (
-    clusterer_uses_embedding_features,
-    clusterer_uses_name_count_features,
-    require_arrow_name_counts_index_for_clusterer,
-)
-from s2and.incremental_linking.policy import (
-    resolve_load_name_counts_policy as _resolve_load_name_counts_policy,
-)
+from s2and.incremental_linking.policy import require_arrow_name_counts_index_for_clusterer
 from s2and.incremental_linking.retrieval import (
     LinkerRetrievalBatch,
     RawArrowPlanBundle,
     _query_author_for_retrieval_row_signal,
     build_linker_retrieval_batch_from_raw_plan_bundle,
-    build_linker_retrieval_batch_rust,
 )
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features_with_telemetry
 from s2and.model_pairwise import predict_pairwise_class0
@@ -1362,7 +1346,7 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
         dataset=dataset,
         candidate_batch=candidate_batch,
         row_signals=row_signals,
-        feature_columns=artifact.metadata.feature_columns,
+        feature_columns=artifact.feature_columns,
         pairwise_stats=pairwise_stats,
         n_jobs=n_jobs,
         total_ram_bytes=total_ram_bytes,
@@ -1372,7 +1356,7 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
     )
     scorer_plan = memory_budget.compute_native_scorer_chunk_plan(
         row_count=candidate_batch.row_count,
-        feature_count=len(artifact.metadata.feature_columns),
+        feature_count=len(artifact.feature_columns),
         total_ram_bytes=total_ram_bytes,
     )
     compact_result = _predict_incremental_link_or_abstain_compact(
@@ -1410,120 +1394,6 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
             **{key: int(value) for key, value in compact_result.decision_telemetry.items()},
             **{f"row_feature_{key}": int(value) for key, value in row_feature_telemetry.items()},
         },
-    )
-
-
-def _predict_incremental_link_or_abstain_production_private(
-    clusterer: Any,
-    artifact: IncrementalLinkingArtifact,
-    *,
-    dataset: ANDData,
-    featurizer: Any,
-    retriever: Any,
-    queries: Sequence[Any],
-    query_signature_ids: Sequence[Any],
-    query_view: str | Sequence[str] = "initial_only",
-    top_k: int | None = None,
-    partial_supervision: Mapping[tuple[Any, Any], int | float] | None = None,
-    constraint_backend: Any | None = None,
-    extra_row_signals: Mapping[str, Any] | None = None,
-    extra_row_signal_builder: Callable[[LinkerRetrievalBatch, Mapping[int, str]], Mapping[str, Any]] | None = None,
-    seed_setup: SeedSetup | None = None,
-    runtime_context: Any | None = None,
-    n_jobs: int | None = None,
-    total_ram_bytes: int | None = None,
-    retrieval_top_k: int | None = None,
-    cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
-) -> LinkOrAbstainProductionResult:
-    """Run the private M3a production-shaped link-or-abstain slice.
-
-    The caller still owns production summary/query construction and the
-    constraint backend so this runtime package stays free of `scripts.*` and
-    `s2and.model` imports. This helper wires the pieces that are already runtime
-    surfaces: seed setup, Rust retrieval into `LinkerCandidateBatch`, existing
-    constraint-label resolution, fused pairwise scoring/aggregation, gate
-    application, no-candidate abstains, and split-cluster link preservation
-    for the incremental finish step.
-    """
-
-    if len(queries) != len(query_signature_ids):
-        raise ValueError(
-            f"queries and query_signature_ids must have equal length: {len(queries)} != {len(query_signature_ids)}"
-        )
-    resolved_runtime_context = runtime_context or build_runtime_context(
-        "incremental_link_or_abstain_private",
-        backend="rust",
-    )
-    partial_supervision_dict = {
-        (str(left), str(right)): value for (left, right), value in (partial_supervision or {}).items()
-    }
-    n_jobs_resolved = resolve_n_jobs(getattr(clusterer, "n_jobs", 1) if n_jobs is None else n_jobs)
-    if retrieval_top_k is not None and top_k is not None and int(retrieval_top_k) != int(top_k):
-        raise ValueError("top_k and retrieval_top_k must match when both are provided")
-    retrieval_top_k = int(
-        retrieval_top_k
-        if retrieval_top_k is not None
-        else artifact.metadata.retrieval_top_k
-        if top_k is None
-        else top_k
-    )
-
-    if seed_setup is None:
-        build_seed_setup = getattr(clusterer, "_build_incremental_seed_setup", None)
-        if not callable(build_seed_setup):
-            raise TypeError("clusterer must expose _build_incremental_seed_setup for the private M3a slice")
-        resolved_seed_setup = build_seed_setup(
-            dataset,
-            partial_supervision_dict,
-            resolved_runtime_context,
-        )
-    else:
-        resolved_seed_setup = seed_setup
-    cluster_seeds_require, _recluster_map, _cluster_seeds_require_inverse, _split_cluster_seeds_require_inverse = (
-        resolved_seed_setup
-    )
-    cluster_seeds_require = dict(cluster_seeds_require)
-
-    signature_id_to_index = signature_id_to_index_map(featurizer)
-    query_signature_id_strings = tuple(str(signature_id) for signature_id in query_signature_ids)
-    query_signature_indices = np.asarray(
-        [_signature_id_to_index(signature_id_to_index, signature_id) for signature_id in query_signature_id_strings],
-        dtype=np.uint32,
-    )
-    component_member_indices_by_key = _build_component_member_indices_by_key(
-        cluster_seeds_require,
-        signature_id_to_index,
-    )
-    if len(queries) == 0 or len(component_member_indices_by_key) == 0:
-        retrieval_batch = _empty_retrieval_batch()
-    else:
-        retrieval_batch = build_linker_retrieval_batch_rust(
-            retriever=retriever,
-            queries=queries,
-            query_signature_indices=query_signature_indices,
-            component_member_indices_by_key=component_member_indices_by_key,
-            top_k=retrieval_top_k,
-            query_view=query_view,
-            n_jobs=n_jobs_resolved,
-        )
-    return _predict_incremental_link_or_abstain_production_from_retrieval_private(
-        clusterer,
-        artifact,
-        dataset=dataset,
-        featurizer=featurizer,
-        retrieval_batch=retrieval_batch,
-        queries=queries,
-        query_signature_ids=query_signature_ids,
-        partial_supervision=partial_supervision_dict,
-        constraint_backend=constraint_backend,
-        extra_row_signals=extra_row_signals,
-        extra_row_signal_builder=extra_row_signal_builder,
-        seed_setup=resolved_seed_setup,
-        runtime_context=resolved_runtime_context,
-        n_jobs=n_jobs_resolved,
-        total_ram_bytes=total_ram_bytes,
-        retrieval_top_k=retrieval_top_k,
-        cluster_seed_disallow_excluded_components=cluster_seed_disallow_excluded_components,
     )
 
 
@@ -1598,7 +1468,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         (str(left), str(right)): value for (left, right), value in (partial_supervision or {}).items()
     }
     n_jobs_resolved = resolve_n_jobs(getattr(clusterer, "n_jobs", 1) if n_jobs is None else n_jobs)
-    retrieval_top_k_resolved = int(artifact.metadata.retrieval_top_k if retrieval_top_k is None else retrieval_top_k)
+    retrieval_top_k_resolved = int(artifact.retrieval_top_k if retrieval_top_k is None else retrieval_top_k)
     if seed_setup is None:
         build_seed_setup = getattr(clusterer, "_build_incremental_seed_setup", None)
         if not callable(build_seed_setup):
@@ -1821,54 +1691,6 @@ def _raw_candidate_plan_telemetry_fields(telemetry: Mapping[str, Any] | None) ->
     return fields
 
 
-_RAW_ARROW_PLANNER_BUILD_COUNT_TELEMETRY_KEYS: tuple[str, ...] = (
-    "signature_batches_read",
-    "signature_rows_scanned",
-    "paper_batches_read",
-    "paper_rows_scanned",
-    "paper_author_batches_read",
-    "paper_author_rows_scanned",
-    "specter_batches_read",
-    "specter_rows_scanned",
-)
-_RAW_ARROW_PLANNER_BUILD_TIMING_TELEMETRY_KEYS: tuple[str, ...] = (
-    "read_cluster_seeds_secs",
-    "read_signatures_secs",
-    "read_papers_secs",
-    "read_paper_authors_secs",
-    "read_specter_secs",
-    "read_name_counts_secs",
-    "metadata_reads_parallel_secs",
-    "text_context_secs",
-    "feature_secs",
-    "summary_secs",
-    "component_members_secs",
-)
-
-
-def _merge_raw_arrow_planner_build_telemetry(
-    raw_candidate_plan: MutableMapping[str, Any],
-    build_telemetry: Mapping[str, Any],
-) -> None:
-    """Merge reusable-planner construction telemetry into a single-use plan."""
-
-    telemetry = raw_candidate_plan.get("telemetry")
-    if not isinstance(telemetry, MutableMapping):
-        raise KeyError("raw candidate plan is missing telemetry")
-    timings = telemetry.get("timings")
-    if not isinstance(timings, MutableMapping):
-        raise KeyError("raw candidate plan telemetry is missing timings")
-    build_timings = build_telemetry.get("timings")
-    if not isinstance(build_timings, Mapping):
-        raise KeyError("planner build telemetry is missing timings")
-    for key in _RAW_ARROW_PLANNER_BUILD_COUNT_TELEMETRY_KEYS:
-        telemetry[key] = int(telemetry.get(key, 0) or 0) + int(build_telemetry.get(key, 0) or 0)
-    for key in _RAW_ARROW_PLANNER_BUILD_TIMING_TELEMETRY_KEYS:
-        timings[key] = float(timings.get(key, 0.0) or 0.0) + float(build_timings.get(key, 0.0) or 0.0)
-    telemetry["planner_seed_state_reused"] = 0
-    telemetry["planner_seed_state_built"] = 1
-
-
 def _seed_setup_from_component_members(
     component_members: Mapping[str, Sequence[str]],
 ) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
@@ -1900,111 +1722,6 @@ def _query_placeholders_from_authors(
     return tuple(SimpleNamespace(query_author=str(value or "")) for value in query_authors)
 
 
-def predict_incremental_link_or_abstain_from_raw_arrow_paths(
-    clusterer: Any,
-    artifact: IncrementalLinkingArtifact,
-    *,
-    arrow_paths: Mapping[str, Any],
-    top_k: int | None = None,
-    partial_supervision: Mapping[tuple[Any, Any], int | float] | None = None,
-    runtime_context: Any | None = None,
-    n_jobs: int | None = None,
-    total_ram_bytes: int | None = None,
-    max_exemplars: int = 4,
-    load_name_counts: bool | None = None,
-    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
-    orcid_enabled: bool | None = None,
-    partial_supervision_seed_signature_to_component: Mapping[str, Any] | None = None,
-) -> LinkOrAbstainProductionResult:
-    """Plan retrieval and score raw Arrow IPC inputs through Rust without `ANDData`."""
-
-    resolved_runtime_context = runtime_context or build_runtime_context(
-        "incremental_link_or_abstain_raw_arrow",
-        backend="rust",
-    )
-    n_jobs_resolved = resolve_n_jobs(getattr(clusterer, "n_jobs", 1) if n_jobs is None else n_jobs)
-    top_k_resolved = int(artifact.metadata.retrieval_top_k if top_k is None else top_k)
-    arrow_path_payload = validate_arrow_prediction_artifacts(
-        arrow_paths,
-        require_specter=clusterer_uses_embedding_features(clusterer),
-        require_name_counts_index=clusterer_uses_name_count_features(clusterer),
-        require_cluster_seeds=True,
-        required_request_sidecars=("query_signatures",),
-        context="Raw Arrow scoring",
-        producer_hint=(
-            "include raw Arrow tables, raw-planner batch indexes, and cluster_seeds.arrow before raw Arrow scoring"
-        ),
-    )
-    require_arrow_name_counts_index_for_clusterer(clusterer, arrow_path_payload, context="Raw Arrow scoring")
-    query_request_rows = read_incremental_query_signatures_arrow(Path(arrow_path_payload["query_signatures"]))
-    query_signature_id_strings = tuple(row.signature_id for row in query_request_rows)
-    resolved_orcid_enabled = (
-        not bool(getattr(clusterer, "suppress_orcid", False)) if orcid_enabled is None else bool(orcid_enabled)
-    )
-    stage_start = time.perf_counter()
-    rust_module = feature_port._require_rust_runtime()  # noqa: SLF001
-    raw_planner = rust_module.RawBlockQueryCandidatePlanner.from_query_signatures(
-        dict(arrow_path_payload),
-        top_k=top_k_resolved,
-        orcid_enabled=resolved_orcid_enabled,
-        num_threads=n_jobs_resolved,
-        max_exemplars=int(max_exemplars),
-        name_counts_index=arrow_path_payload._retained_native_name_counts_index(),  # noqa: SLF001
-    )
-    raw_candidate_plan_mapping = raw_planner.plan_query_signatures()
-    if not isinstance(raw_candidate_plan_mapping, MutableMapping):
-        raise RuntimeError(
-            "RawBlockQueryCandidatePlanner.plan_query_signatures violated its mutable-mapping result contract"
-        )
-    _merge_raw_arrow_planner_build_telemetry(raw_candidate_plan_mapping, raw_planner.build_telemetry())
-    raw_arrow_retrieval_seconds = time.perf_counter() - stage_start
-
-    scoring_arrow_paths = _strip_raw_query_signature_sidecar(arrow_path_payload)
-    raw_plan_bundle = RawArrowPlanBundle.from_native_mapping(raw_candidate_plan_mapping)
-    del raw_candidate_plan_mapping
-    _validate_raw_plan_query_signature_ids(raw_plan_bundle, query_signature_id_strings)
-    resolved_load_name_counts = _resolve_load_name_counts_policy(
-        clusterer,
-        load_name_counts,
-        context="raw Arrow scoring",
-    )
-    shared_name_counts_index = raw_planner.name_counts_index() if resolved_load_name_counts else None
-    if resolved_load_name_counts and shared_name_counts_index is None:
-        raise RuntimeError("Raw Arrow planner did not retain the requested name-count index")
-    featurizer_start = time.perf_counter()
-    rust_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
-        scoring_arrow_paths,
-        expected_normalization_version=require_feature_contract_normalization_version(
-            clusterer,
-            context="raw Arrow scoring",
-        ),
-        signature_ids=raw_plan_bundle.signature_order.signature_ids,
-        name_tuples=name_tuples,
-        load_name_counts=resolved_load_name_counts,
-        preprocess=True,
-        num_threads=n_jobs_resolved,
-        name_counts_index=shared_name_counts_index,
-    )
-    raw_arrow_featurizer_seconds = time.perf_counter() - featurizer_start
-
-    return _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-        clusterer,
-        artifact,
-        arrow_paths=scoring_arrow_paths,
-        query_signature_ids=query_signature_id_strings,
-        raw_plan_bundle=raw_plan_bundle,
-        rust_featurizer=rust_featurizer,
-        raw_arrow_featurizer_seconds=raw_arrow_featurizer_seconds,
-        raw_arrow_retrieval_seconds=raw_arrow_retrieval_seconds,
-        partial_supervision=partial_supervision,
-        runtime_context=resolved_runtime_context,
-        n_jobs=n_jobs_resolved,
-        total_ram_bytes=total_ram_bytes,
-        top_k=top_k_resolved,
-        partial_supervision_seed_signature_to_component=partial_supervision_seed_signature_to_component,
-    )
-
-
 def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     clusterer: Any,
     artifact: IncrementalLinkingArtifact,
@@ -2030,7 +1747,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         backend="rust",
     )
     n_jobs_resolved = resolve_n_jobs(getattr(clusterer, "n_jobs", 1) if n_jobs is None else n_jobs)
-    top_k_resolved = int(artifact.metadata.retrieval_top_k if top_k is None else top_k)
+    top_k_resolved = int(artifact.retrieval_top_k if top_k is None else top_k)
     arrow_path_payload = _strip_raw_query_signature_sidecar(arrow_paths)
     require_arrow_name_counts_index_for_clusterer(clusterer, arrow_path_payload, context="raw Arrow scoring")
     query_signature_id_strings = tuple(str(signature_id) for signature_id in query_signature_ids)

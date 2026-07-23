@@ -111,7 +111,7 @@ def require_rust_featurizer_name_counts_binding_for_clusterer(
     expected.require_matches(
         observed,
         context=context,
-        source="RustFeaturizer.name_counts_provenance_binding",
+        source="RustFeaturizer.name_counts_manifest_sha256",
     )
 
 

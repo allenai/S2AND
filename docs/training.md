@@ -162,9 +162,10 @@ does not synthesize missing hashes. Export and load both compare the recorded
 values with the canonical artifacts installed in the package.
 
 The promoted incremental-linker artifact uses the strict
-`incremental_linking_artifact_v4` contract. It records the canonical digest of
-the complete training target JSON. Final bundle assembly and production loading
-both reject a different target, including a target modified after manifest
+`incremental_linking_artifact_v5` contract. It stores the booster checksum,
+runtime gate, retrieval top-k, and canonical digests binding the exact pairwise
+bundle and complete training target JSON. Final bundle assembly and production
+loading reject either mismatch, including a target modified after manifest
 checksums are refreshed.
 
 After a bundle passes those gates, reload it explicitly:

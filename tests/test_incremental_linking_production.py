@@ -46,13 +46,11 @@ def test_batch_telemetry_aggregates_all_refreshed_limits() -> None:
             query_batch_size=4,
             predicted_peak_delta_bytes=100,
             predicted_peak_rss_bytes=1_000,
-            operational_estimate_source="default",
         ),
         SimpleNamespace(
             query_batch_size=2,
             predicted_peak_delta_bytes=250,
             predicted_peak_rss_bytes=1_250,
-            operational_estimate_source="observed",
         ),
     ]
 
@@ -66,8 +64,6 @@ def test_batch_telemetry_aggregates_all_refreshed_limits() -> None:
     assert telemetry["memory_final_query_batch_size"] == 2
     assert telemetry["memory_final_predicted_peak_delta_bytes"] == 250
     assert telemetry["memory_final_predicted_peak_rss_bytes"] == 1_250
-    assert telemetry["memory_final_operational_estimate_source"] == "__mixed__"
-    assert "memory_observed_calibration_applied" not in telemetry
 
 
 def _scored_query(

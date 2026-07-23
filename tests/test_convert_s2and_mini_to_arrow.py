@@ -12,8 +12,9 @@ import pytest
 import scripts.convert_to_arrow as convert_to_arrow
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block import write_arrow_ipc_table
+from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from scripts.convert_to_arrow import RuntimeDatasetSources
-from tests.helpers import tiny_name_counts_provenance
+from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
 
 
 def _fake_sources(tmp_path: Path, dataset: str) -> RuntimeDatasetSources:
@@ -907,24 +908,22 @@ def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tm
     signatures_path = tmp_path / "signatures.arrow"
     papers_path = tmp_path / "papers.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
-    name_counts_index = tmp_path / "name_counts_index"
-    name_counts_index.mkdir()
-    (name_counts_index / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "name_counts_index_v2",
-                "normalization_version": NORMALIZATION_VERSION,
-                "source_provenance": tiny_name_counts_provenance(),
-                "files": {"first": {"path": "generations/missing/first.bin"}},
-            }
-        ),
-        encoding="utf-8",
+    index_path, _metrics = write_name_counts_index(
+        tmp_path,
+        tiny_name_counts_tuple(),
+        tiny_name_counts_provenance(),
+        overwrite=True,
     )
+    name_counts_index = Path(index_path)
+    manifest_path = name_counts_index / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["first"]["path"] = "generations/missing/first.bin"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
     _write_papers_table(pa, papers_path, ["p1"])
     _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
 
-    with pytest.raises(ValueError, match=r"files\.first\.path target"):
+    with pytest.raises(ValueError, match=r"files\.first target"):
         convert_to_arrow.validate_arrow_dataset_manifest(
             {
                 "normalization_version": NORMALIZATION_VERSION,

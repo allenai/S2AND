@@ -212,15 +212,14 @@ def test_compute_promoted_phase_a_limits_uses_top_k_largest_components():
         current_rss_fn=lambda _total: (100_000_000, "rss:test"),
     )
 
-    assert int(limits.candidate_rows_per_query) == 3
-    assert int(limits.conservative_pairs_per_query) == 175
-    assert int(limits.max_component_size) == 100
+    assert set(vars(limits)) == {
+        "query_batch_size",
+        "predicted_peak_delta_bytes",
+        "predicted_peak_rss_bytes",
+    }
     assert int(limits.query_batch_size) == 20
-    assert int(limits.predicted_candidate_rows_per_batch) == 60
-    assert int(limits.predicted_pairs_per_batch) == 3500
-    assert float(limits.observed_safety_multiplier) == pytest.approx(2.0)
-    assert int(limits.predicted_scorer_full_input_bytes) == 60 * 53 * 4
-    assert int(limits.predicted_scorer_persistent_output_bytes) == 60 * 8
+    assert int(limits.predicted_peak_delta_bytes) > 0
+    assert int(limits.predicted_peak_rss_bytes) == 100_000_000 + int(limits.predicted_peak_delta_bytes)
 
 
 def test_promoted_component_size_summary_is_reused_without_reinspecting_mapping():
@@ -261,28 +260,6 @@ def test_promoted_component_size_summary_is_reused_without_reinspecting_mapping(
     assert summary.top_k_totals(25) == (25, sum(range(976, 1_001)))
 
 
-def test_promoted_window_uses_raw_payload_headroom_beyond_memory_limited_batch():
-    limits = _compute_promoted_phase_a_limits(
-        query_count=20,
-        component_sizes=[1] * 25,
-        retrieval_top_k=25,
-        total_ram_bytes=48_600_000,
-        max_query_batch_size=20,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
-    )
-
-    assert limits.query_batch_size == 2
-    assert (
-        memory_budget.compute_promoted_phase_a_window_query_limit(
-            limits,
-            max_window_query_count=8,
-        )
-        == 3
-    )
-
-
 def test_promoted_resident_retrieval_payload_is_not_reserved_twice():
     kwargs = {
         "query_count": 4,
@@ -297,11 +274,9 @@ def test_promoted_resident_retrieval_payload_is_not_reserved_twice():
     pending = _compute_promoted_phase_a_limits(**kwargs)
     resident = _compute_promoted_phase_a_limits(**kwargs, retrieval_payload_resident=True)
 
-    assert pending.predicted_retrieval_pair_arrays_bytes > 0
-    assert pending.predicted_retrieval_row_bytes > 0
-    assert resident.predicted_retrieval_pair_arrays_bytes == 0
-    assert resident.predicted_retrieval_row_bytes == 0
     assert resident.predicted_peak_delta_bytes < pending.predicted_peak_delta_bytes
+    assert resident.predicted_peak_rss_bytes == 10_000_000 + resident.predicted_peak_delta_bytes
+    assert pending.predicted_peak_rss_bytes == 10_000_000 + pending.predicted_peak_delta_bytes
 
 
 def test_native_scorer_chunk_plan_uses_full_call_when_scratch_fits() -> None:
@@ -356,9 +331,7 @@ def test_compute_promoted_phase_a_limits_allows_zero_queries_with_default_batch_
     )
 
     assert int(limits.query_batch_size) == 0
-    assert int(limits.max_query_batch_size) == 1
-    assert int(limits.predicted_candidate_rows_per_batch) == 0
-    assert int(limits.predicted_pairs_per_batch) == 0
+    assert int(limits.predicted_peak_delta_bytes) > 0
 
 
 def test_compute_promoted_phase_a_limits_shrinks_query_batch_under_tight_budget():
@@ -376,70 +349,21 @@ def test_compute_promoted_phase_a_limits_shrinks_query_batch_under_tight_budget(
 
     assert int(limits.query_batch_size) < 100
     assert int(limits.query_batch_size) >= 1
-    assert int(limits.predicted_peak_rss_bytes) > int(limits.current_rss_bytes)
-    assert int(limits.pair_chunk_pairs) >= 1
+    assert int(limits.predicted_peak_rss_bytes) > 10_000_000
 
 
-def test_compute_promoted_phase_a_limits_uses_observed_probe_for_operational_batch():
-    hard = _compute_promoted_phase_a_limits(
-        query_count=100,
-        component_sizes=[20_000, 16_000, 12_000, 8_000, 4_000],
-        retrieval_top_k=5,
-        total_ram_bytes=100_000_000,
-        stage_budget_fraction=0.50,
-        fixed_overhead_bytes=1_000_000,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
-    )
-    observed = _compute_promoted_phase_a_limits(
-        query_count=100,
-        component_sizes=[20_000, 16_000, 12_000, 8_000, 4_000],
-        retrieval_top_k=5,
-        total_ram_bytes=100_000_000,
-        stage_budget_fraction=0.50,
-        fixed_overhead_bytes=1_000_000,
-        observed_query_count=16,
-        observed_candidate_rows_per_query=5,
-        observed_pairs_per_query=5_000,
-        observed_safety_multiplier=2.0,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
-    )
-
-    assert str(hard.operational_estimate_source) == "top_k_largest_components"
-    assert str(observed.operational_estimate_source) == "observed_probe"
-    assert int(observed.hard_query_batch_size) == int(hard.query_batch_size)
-    assert int(observed.query_batch_size) > int(observed.hard_query_batch_size)
-    assert int(observed.operational_pairs_per_query) == 10_000
-    assert int(observed.hard_predicted_pairs_per_batch) > int(observed.predicted_pairs_per_batch)
-
-
-def test_compute_promoted_phase_a_limits_lets_observed_rows_exceed_top_k():
-    limits = _compute_promoted_phase_a_limits(
+def test_compute_promoted_phase_a_limits_uses_orcid_fanout_floor_above_top_k():
+    baseline = _compute_promoted_phase_a_limits(
         query_count=10,
         component_sizes=[1] * 100,
         retrieval_top_k=25,
         total_ram_bytes=1_000_000_000,
         stage_budget_fraction=0.50,
         fixed_overhead_bytes=1024,
-        observed_query_count=1,
-        observed_candidate_rows_per_query=80,
-        observed_pairs_per_query=80,
         detect_cgroup_fn=lambda: (None, "unavailable"),
         detect_total_fn=lambda: (None, "unavailable"),
         current_rss_fn=lambda _total: (100_000_000, "rss:test"),
     )
-
-    assert int(limits.candidate_rows_per_query) == 80
-    assert int(limits.conservative_pairs_per_query) == 80
-    assert int(limits.operational_candidate_rows_per_query) == 80
-    assert int(limits.operational_pairs_per_query) == 80
-    assert str(limits.operational_estimate_source) == "observed_probe"
-
-
-def test_compute_promoted_phase_a_limits_uses_orcid_fanout_floor_above_top_k():
     limits = _compute_promoted_phase_a_limits(
         query_count=10,
         component_sizes=[1] * 100,
@@ -454,15 +378,24 @@ def test_compute_promoted_phase_a_limits_uses_orcid_fanout_floor_above_top_k():
         current_rss_fn=lambda _total: (100_000_000, "rss:test"),
     )
 
-    assert int(limits.candidate_rows_per_query) == 80
-    assert int(limits.conservative_pairs_per_query) == 80
-    assert int(limits.operational_candidate_rows_per_query) == 80
-    assert int(limits.operational_pairs_per_query) == 80
-    assert str(limits.operational_estimate_source) == "orcid_fanout"
-    assert int(limits.predicted_candidate_rows_per_batch) == 800
+    assert int(limits.query_batch_size) == 10
+    assert limits.predicted_peak_delta_bytes > baseline.predicted_peak_delta_bytes
 
 
 def test_compute_promoted_phase_a_limits_uses_orcid_total_floor_for_mixed_batch():
+    per_query_limits = _compute_promoted_phase_a_limits(
+        query_count=10,
+        component_sizes=[1] * 100,
+        retrieval_top_k=25,
+        total_ram_bytes=1_000_000_000,
+        stage_budget_fraction=0.50,
+        fixed_overhead_bytes=1024,
+        candidate_rows_per_query_floor=80,
+        pairs_per_query_floor=80,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+    )
     limits = _compute_promoted_phase_a_limits(
         query_count=10,
         component_sizes=[1] * 100,
@@ -479,15 +412,8 @@ def test_compute_promoted_phase_a_limits_uses_orcid_total_floor_for_mixed_batch(
         current_rss_fn=lambda _total: (100_000_000, "rss:test"),
     )
 
-    assert int(limits.candidate_rows_per_query) == 80
-    assert int(limits.conservative_pairs_per_query) == 80
-    assert int(limits.operational_candidate_rows_per_query) == 31
-    assert int(limits.operational_pairs_per_query) == 31
-    assert str(limits.operational_estimate_source) == "orcid_fanout"
     assert int(limits.query_batch_size) == 10
-    assert int(limits.predicted_candidate_rows_per_batch) == 305
-    assert int(limits.predicted_pairs_per_batch) == 305
-    assert int(limits.hard_predicted_candidate_rows_per_batch) == 800
+    assert limits.predicted_peak_delta_bytes < per_query_limits.predicted_peak_delta_bytes
 
 
 def test_compute_promoted_phase_a_limits_fails_when_single_query_exceeds_budget():
@@ -520,9 +446,7 @@ def test_compute_promoted_phase_a_limits_zero_queries_no_threshold_returns_empty
         current_rss_fn=lambda _total: (100_000_000, "rss:test"),
     )
 
-    assert int(limits.query_count) == 0
     assert int(limits.query_batch_size) == 0
-    assert int(limits.hard_query_batch_size) == 0
 
 
 def test_compute_promoted_phase_a_limits_zero_queries_ignores_single_query_budget():
@@ -538,9 +462,8 @@ def test_compute_promoted_phase_a_limits_zero_queries_ignores_single_query_budge
         current_rss_fn=lambda _total: (10_000_000, "rss:test"),
     )
 
-    assert int(limits.query_count) == 0
     assert int(limits.query_batch_size) == 0
-    assert int(limits.single_query_predicted_persistent_bytes) > int(limits.stage_budget_bytes)
+    assert int(limits.predicted_peak_delta_bytes) >= 20_000_000
 
 
 @pytest.mark.parametrize("query_count", [0, 5])

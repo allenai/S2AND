@@ -6,14 +6,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from s2and.name_counts_manifest import validated_name_counts_provenance
-
-_FEATURE_CONTRACT_FIELDS = (
-    "name_counts_generation_id",
-    "name_counts_pickle_sha256",
-    "name_counts_source_snapshot_id",
-    "name_counts_selected_rows_sha256",
+from s2and.name_counts_manifest import (
+    NAME_COUNTS_MANIFEST_SHA256_FIELD,
+    validated_name_counts_provenance,
 )
+
+_FEATURE_CONTRACT_FIELD = "name_counts_manifest_sha256"
 
 
 def _nonempty_string(value: Any, *, field: str, context: str) -> str:
@@ -31,12 +29,9 @@ def _sha256(value: Any, *, field: str, context: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class NameCountsBinding:
-    """The four provenance values persisted in a trained feature contract."""
+    """The native index manifest identity persisted in a model contract."""
 
-    generation_id: str
-    pickle_sha256: str
-    source_snapshot_id: str
-    selected_rows_sha256: str
+    manifest_sha256: str
 
     @classmethod
     def from_feature_contract(
@@ -49,30 +44,12 @@ class NameCountsBinding:
 
         if not isinstance(feature_contract, Mapping):
             raise ValueError(f"{context} requires a feature_contract mapping with name-count provenance")
-        missing_fields = [field for field in _FEATURE_CONTRACT_FIELDS if field not in feature_contract]
-        if len(missing_fields) == len(_FEATURE_CONTRACT_FIELDS):
-            raise ValueError(f"{context} requires name-count provenance fields {list(_FEATURE_CONTRACT_FIELDS)!r}")
-        if missing_fields:
-            raise ValueError(f"{context} has partial name-count provenance; missing={missing_fields!r}")
+        if _FEATURE_CONTRACT_FIELD not in feature_contract:
+            raise ValueError(f"{context} requires {_FEATURE_CONTRACT_FIELD}")
         return cls(
-            generation_id=_nonempty_string(
-                feature_contract["name_counts_generation_id"],
-                field="name_counts_generation_id",
-                context=context,
-            ),
-            pickle_sha256=_sha256(
-                feature_contract["name_counts_pickle_sha256"],
-                field="name_counts_pickle_sha256",
-                context=context,
-            ),
-            source_snapshot_id=_nonempty_string(
-                feature_contract["name_counts_source_snapshot_id"],
-                field="name_counts_source_snapshot_id",
-                context=context,
-            ),
-            selected_rows_sha256=_sha256(
-                feature_contract["name_counts_selected_rows_sha256"],
-                field="name_counts_selected_rows_sha256",
+            manifest_sha256=_sha256(
+                feature_contract[_FEATURE_CONTRACT_FIELD],
+                field=_FEATURE_CONTRACT_FIELD,
                 context=context,
             ),
         )
@@ -83,44 +60,24 @@ class NameCountsBinding:
 
         provenance = validated_name_counts_provenance(provenance, context=context)
         return cls(
-            generation_id=provenance["generation_id"],
-            pickle_sha256=provenance["pickle_sha256"],
-            source_snapshot_id=provenance["source_snapshot_id"],
-            selected_rows_sha256=provenance["selected_rows_sha256"],
+            manifest_sha256=_sha256(
+                provenance.get(NAME_COUNTS_MANIFEST_SHA256_FIELD),
+                field=NAME_COUNTS_MANIFEST_SHA256_FIELD,
+                context=context,
+            ),
         )
 
     @classmethod
     def from_rust_featurizer(cls, rust_featurizer: Any, *, context: str) -> NameCountsBinding:
         """Read the runtime-only binding retained by an Arrow-built Rust featurizer."""
 
-        binding = getattr(rust_featurizer, "name_counts_provenance_binding", None)
-        if binding is None:
-            raise ValueError(
-                f"{context} requires a Rust featurizer with verified name-count provenance; "
-                "rebuild it from a provenance-bearing name_counts_index"
-            )
-        if not isinstance(binding, tuple) or len(binding) != 4:
-            raise ValueError(f"{context} Rust featurizer returned an invalid name-count provenance binding")
-        generation_id, pickle_sha256, source_snapshot_id, selected_rows_sha256 = binding
+        manifest_sha256 = getattr(rust_featurizer, "name_counts_manifest_sha256", None)
+        if manifest_sha256 is None:
+            raise ValueError(f"{context} requires a Rust featurizer with a verified name-count manifest")
         return cls(
-            generation_id=_nonempty_string(
-                generation_id,
-                field="generation_id",
-                context=context,
-            ),
-            pickle_sha256=_sha256(
-                pickle_sha256,
-                field="pickle_sha256",
-                context=context,
-            ),
-            source_snapshot_id=_nonempty_string(
-                source_snapshot_id,
-                field="source_snapshot_id",
-                context=context,
-            ),
-            selected_rows_sha256=_sha256(
-                selected_rows_sha256,
-                field="selected_rows_sha256",
+            manifest_sha256=_sha256(
+                manifest_sha256,
+                field=NAME_COUNTS_MANIFEST_SHA256_FIELD,
                 context=context,
             ),
         )
@@ -128,12 +85,7 @@ class NameCountsBinding:
     def feature_contract_fields(self) -> dict[str, str]:
         """Return the exact fields persisted in a trained model contract."""
 
-        return {
-            "name_counts_generation_id": self.generation_id,
-            "name_counts_pickle_sha256": self.pickle_sha256,
-            "name_counts_source_snapshot_id": self.source_snapshot_id,
-            "name_counts_selected_rows_sha256": self.selected_rows_sha256,
-        }
+        return {_FEATURE_CONTRACT_FIELD: self.manifest_sha256}
 
     def require_matches(self, observed: NameCountsBinding, *, context: str, source: str) -> None:
         """Reject a model/artifact generation mismatch before feature computation."""

@@ -13,7 +13,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, Self, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, cast
 
 import lightgbm as lgb
 import numpy as np
@@ -39,7 +39,6 @@ from s2and.eval import b3_precision_recall_fscore
 from s2and.feature_port import (
     _get_rust_featurizer,
     build_rust_featurizer_from_arrow_paths,
-    update_rust_cluster_seeds,
 )
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from s2and.incremental_linking.feature_block import (
@@ -104,7 +103,6 @@ IncrementalPhaseBMode = Literal["exact"]
 IncrementalBroadcastMode = Literal["always", "never", "top1_consensus"]
 IncrementalSeedScoreMode = Literal["mean", "min", "mean_min_hybrid"]
 IncrementalDistStats = tuple[float, int, float]
-_MISSING = object()
 _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES = 128
 _ALTERED_PRESPLIT_CACHE_INIT_LOCK = threading.Lock()
 _PATH_CACHE_KEY: TypeAlias = tuple[str, int | None, int | None, Any]
@@ -779,6 +777,36 @@ def _selected_feature_indices(featurizer_info: FeaturizationInfo) -> list[int]:
     return featurizer_info.selected_feature_indices()
 
 
+def _build_block_feature_matrices_indexed_rust(
+    block_signature_indices: list[int],
+    *,
+    featurizer: Any,
+    start_offset: int,
+    max_pairs: int,
+    main_indices: list[int],
+    nameless_indices: list[int] | None,
+    num_threads: int,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    union_indices = list(dict.fromkeys(main_indices + (nameless_indices or [])))
+    union_features = build_block_upper_triangle_feature_matrix_indexed_rust(
+        block_signature_indices,
+        start_offset=start_offset,
+        max_pairs=max_pairs,
+        selected_indices=union_indices,
+        num_threads=num_threads,
+        nan_value=np.nan,
+        featurizer=featurizer,
+    )
+    position_by_index = {index: position for position, index in enumerate(union_indices)}
+
+    def project(indices: list[int]) -> np.ndarray:
+        if indices == union_indices:
+            return union_features
+        return np.take(union_features, [position_by_index[index] for index in indices], axis=1)
+
+    return project(main_indices), None if nameless_indices is None else project(nameless_indices)
+
+
 def _condensed_pair_index(block_size: int, left: int, right: int) -> int:
     if left >= right:
         raise ValueError(f"Expected left < right; got left={left} right={right}")
@@ -1294,190 +1322,6 @@ def _use_rust_constraints(
     return dataset_stage_uses_rust(runtime_context, dataset)
 
 
-def _cluster_seeds_version(dataset: ANDData) -> int:
-    return int(getattr(dataset, "_cluster_seeds_version", 0))
-
-
-def _bump_cluster_seeds_version(dataset: ANDData) -> int:
-    dataset._cluster_seeds_source = "python"
-    next_version = _cluster_seeds_version(dataset) + 1
-    dataset._cluster_seeds_version = next_version
-    return next_version
-
-
-class _VersionedClusterSeedDict(dict[Any, Any]):
-    def __init__(self, *args: Any, on_mutation: Callable[[], None] | None = None, **kwargs: Any) -> None:
-        self._on_mutation = on_mutation
-        super().__init__(*args, **kwargs)
-
-    def set_on_mutation(self, on_mutation: Callable[[], None] | None) -> None:
-        self._on_mutation = on_mutation
-
-    def _mark_mutated(self) -> None:
-        callback = self._on_mutation
-        if callback is not None:
-            callback()
-
-    def __setitem__(self, key: Any, value: Any) -> None:
-        super().__setitem__(key, value)
-        self._mark_mutated()
-
-    def __delitem__(self, key: Any) -> None:
-        super().__delitem__(key)
-        self._mark_mutated()
-
-    def clear(self) -> None:
-        if self:
-            super().clear()
-            self._mark_mutated()
-
-    def pop(self, key: Any, default: Any = _MISSING) -> Any:
-        if key in self:
-            value = super().pop(key)
-            self._mark_mutated()
-            return value
-        if default is not _MISSING:
-            return default
-        raise KeyError(key)
-
-    def popitem(self) -> tuple[Any, Any]:
-        value = super().popitem()
-        self._mark_mutated()
-        return value
-
-    def setdefault(self, key: Any, default: Any = None) -> Any:
-        if key in self:
-            return self[key]
-        super().__setitem__(key, default)
-        self._mark_mutated()
-        return default
-
-    def update(self, *args: Any, **kwargs: Any) -> None:
-        if args or kwargs:
-            super().update(*args, **kwargs)
-            self._mark_mutated()
-
-    def __ior__(self, value: Any) -> Self:
-        super().__ior__(value)
-        self._mark_mutated()
-        return self
-
-
-class _VersionedClusterSeedSet(set[tuple[Any, Any]]):
-    def __init__(self, *args: Any, on_mutation: Callable[[], None] | None = None) -> None:
-        self._on_mutation = on_mutation
-        super().__init__(*args)
-
-    def set_on_mutation(self, on_mutation: Callable[[], None] | None) -> None:
-        self._on_mutation = on_mutation
-
-    def _mark_mutated(self) -> None:
-        callback = self._on_mutation
-        if callback is not None:
-            callback()
-
-    def add(self, element: tuple[Any, Any]) -> None:
-        super().add(element)
-        self._mark_mutated()
-
-    def remove(self, element: tuple[Any, Any]) -> None:
-        super().remove(element)
-        self._mark_mutated()
-
-    def discard(self, element: object) -> None:
-        if element in self:
-            super().discard(element)
-            self._mark_mutated()
-
-    def pop(self) -> tuple[Any, Any]:
-        value = super().pop()
-        self._mark_mutated()
-        return value
-
-    def clear(self) -> None:
-        if self:
-            super().clear()
-            self._mark_mutated()
-
-    def update(self, *others: Any) -> None:
-        if others:
-            super().update(*others)
-            self._mark_mutated()
-
-    def difference_update(self, *others: Any) -> None:
-        if others:
-            super().difference_update(*others)
-            self._mark_mutated()
-
-    def intersection_update(self, *others: Any) -> None:
-        if others:
-            super().intersection_update(*others)
-            self._mark_mutated()
-
-    def symmetric_difference_update(self, other: Any) -> None:
-        super().symmetric_difference_update(other)
-        self._mark_mutated()
-
-    def __ior__(self, value: Any) -> Self:
-        super().__ior__(value)
-        self._mark_mutated()
-        return self
-
-    def __iand__(self, value: Any) -> Self:
-        super().__iand__(value)
-        self._mark_mutated()
-        return self
-
-    def __isub__(self, value: Any) -> Self:
-        super().__isub__(value)
-        self._mark_mutated()
-        return self
-
-    def __ixor__(self, value: Any) -> Self:
-        super().__ixor__(value)
-        self._mark_mutated()
-        return self
-
-
-def _ensure_cluster_seed_version_tracking(dataset: ANDData) -> None:
-    def _mark_mutated() -> None:
-        _bump_cluster_seeds_version(dataset)
-
-    require = getattr(dataset, "cluster_seeds_require", {})
-    if require is None:
-        require = {}
-    tracking_initialized = bool(getattr(dataset, "_cluster_seed_tracking_initialized", False))
-    require_is_versioned = isinstance(require, _VersionedClusterSeedDict)
-    disallow = getattr(dataset, "cluster_seeds_disallow", set())
-    if disallow is None:
-        disallow = set()
-    disallow_is_versioned = isinstance(disallow, _VersionedClusterSeedSet)
-    if (
-        not tracking_initialized
-        and getattr(dataset, "_cluster_seeds_source", "python") == "arrow"
-        and (
-            bool(require)
-            or bool(disallow)
-            or id(require) != getattr(dataset, "_cluster_seeds_initial_require_id", id(require))
-            or id(disallow) != getattr(dataset, "_cluster_seeds_initial_disallow_id", id(disallow))
-        )
-    ):
-        dataset._cluster_seeds_source = "python"
-    if tracking_initialized and (not require_is_versioned or not disallow_is_versioned):
-        dataset._cluster_seeds_source = "python"
-
-    if require_is_versioned:
-        require.set_on_mutation(_mark_mutated)
-    else:
-        dataset.cluster_seeds_require = _VersionedClusterSeedDict(require, on_mutation=_mark_mutated)
-
-    if disallow_is_versioned:
-        disallow.set_on_mutation(_mark_mutated)
-    else:
-        dataset.cluster_seeds_disallow = _VersionedClusterSeedSet(disallow, on_mutation=_mark_mutated)
-    dataset._cluster_seed_tracking_initialized = True
-
-
 @dataclass(frozen=True)
 class _ConstraintPolicy:
     """Resolved hard-constraint behavior for one constraint evaluation boundary."""
@@ -1485,78 +1329,6 @@ class _ConstraintPolicy:
     dont_merge_cluster_seeds: bool = True
     incremental_dont_use_cluster_seeds: bool = False
     suppress_orcid: bool = False
-
-
-def _sync_rust_cluster_seeds(
-    dataset: ANDData,
-    runtime_context: RuntimeContext | None = None,
-) -> None:
-    if runtime_context is None:
-        runtime_context = dataset.runtime_context
-    if _use_rust_constraints(runtime_context, dataset):
-        # Best-effort instrumentation for subblocking lifecycle overhead.
-        # Stored on the dataset to avoid changing return payloads on hot paths.
-        dataset._rust_cluster_seeds_sync_calls = int(getattr(dataset, "_rust_cluster_seeds_sync_calls", 0)) + 1
-
-        _ensure_cluster_seed_version_tracking(dataset)
-        if getattr(dataset, "_cluster_seeds_source", "python") == "arrow":
-            dataset._rust_cluster_seeds_sync_skipped_arrow_authority = (
-                int(getattr(dataset, "_rust_cluster_seeds_sync_skipped_arrow_authority", 0)) + 1
-            )
-            return
-        seed_version = _cluster_seeds_version(dataset)
-        require = getattr(dataset, "cluster_seeds_require", {})
-        disallow = getattr(dataset, "cluster_seeds_disallow", set())
-        require_id = int(id(require))
-        disallow_id = int(id(disallow))
-        require_len = int(len(require))
-        disallow_len = int(len(disallow))
-
-        last_synced = getattr(dataset, "_rust_cluster_seeds_synced_version", None)
-        last_require_id = getattr(dataset, "_rust_cluster_seeds_require_id", None)
-        last_disallow_id = getattr(dataset, "_rust_cluster_seeds_disallow_id", None)
-        last_require_len = getattr(dataset, "_rust_cluster_seeds_require_len", None)
-        last_disallow_len = getattr(dataset, "_rust_cluster_seeds_disallow_len", None)
-        if (
-            last_synced == seed_version
-            and last_require_id == require_id
-            and last_require_len == require_len
-            and last_disallow_id == disallow_id
-            and last_disallow_len == disallow_len
-        ):
-            dataset._rust_cluster_seeds_sync_skipped_unchanged = (
-                int(getattr(dataset, "_rust_cluster_seeds_sync_skipped_unchanged", 0)) + 1
-            )
-            return
-
-        dataset._rust_cluster_seeds_sync_attempted = int(getattr(dataset, "_rust_cluster_seeds_sync_attempted", 0)) + 1
-
-        def _sync() -> None:
-            sync_start = time.perf_counter()
-            update_rust_cluster_seeds(dataset, runtime_context=runtime_context, bump_version=False)
-            sync_seconds = float(time.perf_counter() - sync_start)
-            dataset._rust_cluster_seeds_sync_succeeded = (
-                int(getattr(dataset, "_rust_cluster_seeds_sync_succeeded", 0)) + 1
-            )
-            dataset._rust_cluster_seeds_sync_seconds_total = (
-                float(getattr(dataset, "_rust_cluster_seeds_sync_seconds_total", 0.0)) + sync_seconds
-            )
-            dataset._rust_cluster_seeds_sync_seconds_max = max(
-                float(getattr(dataset, "_rust_cluster_seeds_sync_seconds_max", 0.0)),
-                sync_seconds,
-            )
-            dataset._rust_cluster_seeds_synced_version = seed_version
-            dataset._rust_cluster_seeds_require_id = require_id
-            dataset._rust_cluster_seeds_require_len = require_len
-            dataset._rust_cluster_seeds_disallow_id = disallow_id
-            dataset._rust_cluster_seeds_disallow_len = disallow_len
-
-        try:
-            _sync()
-        except (RuntimeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Rust cluster seed sync failed in strict rust backend (run_id={runtime_context.run_id} error={exc})"
-            ) from exc
 
 
 def _initialize_incremental_constraint_backend(
@@ -2418,28 +2190,21 @@ class Clusterer:
                     runtime_context=runtime_context,
                 )
                 selected_indices = _selected_feature_indices(self.featurizer_info)
-                batch_features = build_block_upper_triangle_feature_matrix_indexed_rust(
+                nameless_selected_indices = (
+                    _selected_feature_indices(self.nameless_featurizer_info)
+                    if self.nameless_classifier is not None and self.nameless_featurizer_info is not None
+                    else None
+                )
+                batch_features, batch_nameless_features = _build_block_feature_matrices_indexed_rust(
                     chunk.block_signature_indices,
+                    featurizer=rust_featurizer,
                     start_offset=int(chunk.start_offset),
                     max_pairs=int(len(chunk.labels)),
-                    selected_indices=selected_indices,
+                    main_indices=selected_indices,
+                    nameless_indices=nameless_selected_indices,
                     num_threads=self.n_jobs,
-                    nan_value=np.nan,
-                    featurizer=rust_featurizer,
                 )
                 batch_labels = np.asarray(chunk.labels, dtype=np.float64)
-                batch_nameless_features: np.ndarray | None = None
-                if self.nameless_classifier is not None and self.nameless_featurizer_info is not None:
-                    nameless_selected_indices = _selected_feature_indices(self.nameless_featurizer_info)
-                    batch_nameless_features = build_block_upper_triangle_feature_matrix_indexed_rust(
-                        chunk.block_signature_indices,
-                        start_offset=int(chunk.start_offset),
-                        max_pairs=int(len(chunk.labels)),
-                        selected_indices=nameless_selected_indices,
-                        num_threads=self.n_jobs,
-                        nan_value=np.nan,
-                        featurizer=rust_featurizer,
-                    )
             except Exception as exc:
                 if stage_uses_rust(runtime_context):
                     raise RuntimeError(
@@ -2695,7 +2460,6 @@ class Clusterer:
                     arrow_paths,
                     context="Clusterer.make_distance_matrices Arrow featurizer",
                 )
-        _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
         _ensure_lightgbm_fitted(self.classifier)
         _ensure_lightgbm_fitted(self.nameless_classifier)
         if partial_supervision is None:
@@ -3009,29 +2773,16 @@ class Clusterer:
                 label_build_seconds += time.perf_counter() - stage_start
 
                 stage_start = time.perf_counter()
-                batch_features = build_block_upper_triangle_feature_matrix_indexed_rust(
+                batch_features, batch_nameless_features = _build_block_feature_matrices_indexed_rust(
                     block_signature_indices,
+                    featurizer=rust_featurizer,
                     start_offset=offset,
                     max_pairs=chunk_pair_count,
-                    selected_indices=selected_indices,
+                    main_indices=selected_indices,
+                    nameless_indices=nameless_selected_indices,
                     num_threads=self.n_jobs,
-                    nan_value=np.nan,
-                    featurizer=rust_featurizer,
                 )
                 feature_matrix_seconds += time.perf_counter() - stage_start
-                batch_nameless_features: np.ndarray | None = None
-                if nameless_selected_indices is not None:
-                    stage_start = time.perf_counter()
-                    batch_nameless_features = build_block_upper_triangle_feature_matrix_indexed_rust(
-                        block_signature_indices,
-                        start_offset=offset,
-                        max_pairs=chunk_pair_count,
-                        selected_indices=nameless_selected_indices,
-                        num_threads=self.n_jobs,
-                        nan_value=np.nan,
-                        featurizer=rust_featurizer,
-                    )
-                    nameless_feature_matrix_seconds += time.perf_counter() - stage_start
                 batch_predictions, batch_seconds = _predict_and_combine(
                     self.classifier,
                     self.nameless_classifier,
@@ -3629,13 +3380,6 @@ class Clusterer:
                 block_dict_subblocked,
                 cast(ANDData, partition_dataset),
             )
-            seeded_initial_only_block_keys = [
-                block_key
-                for block_key, block_signatures in block_dict_single_letter.items()
-                if any(signature_id in atomic_cluster_seeds_require for signature_id in block_signatures)
-            ]
-            for block_key in seeded_initial_only_block_keys:
-                block_dict_multiple_letter[block_key] = block_dict_single_letter.pop(block_key)
             featurizer_signature_ids = list(
                 dict.fromkeys(
                     str(signature_id)
@@ -3689,7 +3433,7 @@ class Clusterer:
                 total_ram_bytes=total_ram_bytes,
                 rust_featurizer=rust_featurizer,
                 cluster_seeds_disallow=cluster_seed_disallows,
-                explicit_cluster_seeds_require=prediction_cluster_seeds_require,
+                explicit_cluster_seeds_require=None,
             )
             # The sequential attachment path constructs a request-local planner
             # for each initial-only group. Release the bulk native state first so
@@ -3718,7 +3462,7 @@ class Clusterer:
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
-                cluster_seeds_require=prediction_cluster_seeds_require,
+                cluster_seeds_require=None,
                 cluster_seeds_disallow=cluster_seed_disallows,
             )
         predict_seconds = time.perf_counter() - predict_start
@@ -4254,7 +3998,6 @@ class Clusterer:
             for cluster_id, signatures in pred_clusters_intermediate.items():
                 for signature in signatures:
                     dataset.cluster_seeds_require[signature] = cluster_id
-            _bump_cluster_seeds_version(dataset)
 
             predict_times: dict[str, float] = {}
             for block_key in sorted(block_dict_single_letter.keys()):
@@ -4289,7 +4032,6 @@ class Clusterer:
                 for cluster_id, signatures in pred_clusters_intermediate.items():
                     for signature in signatures:
                         dataset.cluster_seeds_require[signature] = cluster_id
-                _bump_cluster_seeds_version(dataset)
 
             logger.info(f"Finished subblocked predict incremental. Here's how long each subblock took: {predict_times}")
         finally:
@@ -4298,8 +4040,6 @@ class Clusterer:
                 dataset.altered_cluster_signatures = altered_cluster_signatures_original
             elif hasattr(dataset, "altered_cluster_signatures"):
                 delattr(dataset, "altered_cluster_signatures")
-            _bump_cluster_seeds_version(dataset)
-            _ensure_cluster_seed_version_tracking(dataset)
         return pred_clusters_intermediate
 
     def _predict_subblocked(

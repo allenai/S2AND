@@ -286,17 +286,9 @@ def build_training_anddata_from_arrow(
         training_arrow_paths["signatures"],
         use_orcid_id=use_orcid_id,
     )
-    needed_paper_ids = {str(signature.paper_id) for signature in signatures.values()}
-    papers = load_papers_from_arrow(
-        training_arrow_paths["papers"],
-        training_arrow_paths["paper_authors"],
-        needed_paper_ids=needed_paper_ids,
-    )
-    del needed_paper_ids
 
     dataset = ANDData._from_validated_arrow_training(
         signatures=signatures,
-        papers=papers,
         name=name,
         arrow_paths=training_arrow_paths,
         clusters=clusters,
@@ -315,7 +307,7 @@ def build_training_anddata_from_arrow(
         "Telemetry stage: stage=arrow_training_ingest seconds=%.3f signatures=%d papers=%d specter=%s",
         time.perf_counter() - ingest_start,
         len(signatures),
-        len(papers),
+        len(dataset._arrow_paper_source[2]) if dataset._arrow_paper_source is not None else 0,
         "yes" if training_arrow_paths.get("specter") else "no",
     )
     return dataset

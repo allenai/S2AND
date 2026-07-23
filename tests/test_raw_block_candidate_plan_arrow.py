@@ -14,7 +14,6 @@ import pytest
 import s2and.incremental_linking.retrieval as retrieval_module
 from s2and.arrow_inputs import validate_arrow_publication_artifacts
 from s2and.incremental_linking.feature_block import (
-    feature_block_signature_order_from_raw_candidate_plan,
     write_arrow_batch_lookup_index,
     write_incremental_query_signatures_arrow,
     write_name_counts_index,
@@ -26,10 +25,7 @@ from s2and.incremental_linking.retrieval import (
     RawArrowPlanBundle,
     build_linker_retrieval_batch_from_raw_plan_bundle,
 )
-from s2and.incremental_linking.runtime import (
-    _merge_raw_arrow_planner_build_telemetry,
-    _seed_setup_from_component_members,
-)
+from s2and.incremental_linking.runtime import _seed_setup_from_component_members
 from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import (
     build_cluster_summary,
@@ -371,9 +367,7 @@ def _raw_candidate_plan_arrow(
         num_threads=num_threads,
         max_exemplars=max_exemplars,
     )
-    plan = planner.plan_query_signatures()
-    _merge_raw_arrow_planner_build_telemetry(plan, planner.build_telemetry())
-    return plan
+    return planner.plan_query_signatures()
 
 
 def _raw_candidate_planner_from_query_signatures(
@@ -1070,10 +1064,10 @@ def test_raw_arrow_candidate_plan_batch_indexes_bound_rows(tmp_path: Path) -> No
     assert telemetry["paper_count"] == 3
     assert telemetry["paper_author_paper_count"] == 3
     assert telemetry["specter_count"] == 3
-    assert telemetry["signature_rows_scanned"] == 3
-    assert telemetry["paper_rows_scanned"] == 3
-    assert telemetry["paper_author_rows_scanned"] == 3
-    assert telemetry["specter_rows_scanned"] == 3
+    assert telemetry["signature_rows_scanned"] == 1
+    assert telemetry["paper_rows_scanned"] == 1
+    assert telemetry["paper_author_rows_scanned"] == 1
+    assert telemetry["specter_rows_scanned"] == 1
     timings = telemetry["timings"]
     assert isinstance(timings["drop_secs"], float)
     assert timings["drop_secs"] >= 0.0
@@ -1138,7 +1132,7 @@ def test_raw_arrow_candidate_plan_extra_hash_selected_batch_is_exact_filtered(tm
 
     assert plan["right_signature_ids"] == ["s1", "s2"]
     assert plan["telemetry"]["signature_count"] == 3
-    assert plan["telemetry"]["signature_rows_scanned"] == 4
+    assert plan["telemetry"]["signature_rows_scanned"] == 2
 
 
 def test_raw_arrow_candidate_plan_rejects_out_of_range_batch_index(tmp_path: Path) -> None:
@@ -2314,7 +2308,7 @@ def test_rust_featurizer_from_arrow_paths_applies_cluster_seed_disallows(tmp_pat
             }
         ),
     )
-    signature_order = feature_block_signature_order_from_raw_candidate_plan(raw_plan)
+    signature_order = RawArrowPlanBundle.from_mapping(raw_plan).signature_order
 
     direct = s2and_rust.RustFeaturizer.from_arrow_paths(
         paths,

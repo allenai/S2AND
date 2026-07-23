@@ -38,10 +38,20 @@ def _write_minimal_name_counts_index(root: Path, *, normalization_version: str |
     return index_dir
 
 
-@pytest.mark.parametrize("value", [None, "legacy_compat"])
-def test_noncanonical_manifest_fails_artifact_validation(tmp_path: Path, value: str | None) -> None:
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (None, "missing field `normalization_version`"),
+        ("legacy_compat", "unsupported normalization_version"),
+    ],
+)
+def test_noncanonical_manifest_fails_artifact_validation(
+    tmp_path: Path,
+    value: str | None,
+    message: str,
+) -> None:
     index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=value)
-    with pytest.raises(MissingArrowArtifactError, match="invalid normalization_version"):
+    with pytest.raises(MissingArrowArtifactError, match=message):
         require_name_counts_index_artifact(index_dir, context="test", producer_hint="test")
 
 

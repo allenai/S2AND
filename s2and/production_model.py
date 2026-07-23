@@ -718,10 +718,10 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
             featurizer_info,
             nameless_featurizer_info,
         )
-        if dict(incremental_linker_artifact.metadata.pairwise_bundle_binding) != expected_binding:
-            raise ValueError("Incremental linker pairwise_bundle_binding does not match enclosing bundle")
+        if incremental_linker_artifact.pairwise_bundle_binding_digest != canonical_json_digest(expected_binding):
+            raise ValueError("Incremental linker pairwise_bundle_binding_digest does not match enclosing bundle")
         target_path = bundle_dir / COMPLETE_MANIFEST_FILES["incremental_linker_training_target"]
-        if canonical_json_digest(_read_json(target_path)) != incremental_linker_artifact.metadata.target_spec_digest:
+        if canonical_json_digest(_read_json(target_path)) != incremental_linker_artifact.target_spec_digest:
             raise ValueError("Incremental linker target_spec_digest does not match enclosing bundle target JSON")
         clusterer.incremental_linker_artifact_dir = incremental_linker_dir
         clusterer.incremental_linker_artifact = incremental_linker_artifact

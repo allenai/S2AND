@@ -869,15 +869,23 @@ def _feature_tuple_from_rust_featurizer(
         str(signature_id): index for index, signature_id in enumerate(rust_featurizer.signature_ids())
     }
     indexed_pairs = [(index_by_signature_id[str(left)], index_by_signature_id[str(right)]) for left, right, _ in pairs]
-    features = np.asarray(
-        rust_featurizer.featurize_pairs_matrix_indexed(indexed_pairs, selected_indices, int(n_jobs), nan_value),
+    union_indices = sorted(set(selected_indices) | set(nameless_indices))
+    union_features = np.asarray(
+        rust_featurizer.featurize_pairs_matrix_indexed(indexed_pairs, union_indices, int(n_jobs), nan_value),
         dtype=np.float64,
+    )
+    position_by_index = {feature_index: position for position, feature_index in enumerate(union_indices)}
+    features = (
+        union_features
+        if selected_indices == union_indices
+        else np.take(union_features, [position_by_index[index] for index in selected_indices], axis=1)
     )
     nameless_features = None
     if nameless_featurizer_info is not None:
-        nameless_features = np.asarray(
-            rust_featurizer.featurize_pairs_matrix_indexed(indexed_pairs, nameless_indices, int(n_jobs), nan_value),
-            dtype=np.float64,
+        nameless_features = (
+            union_features
+            if nameless_indices == union_indices
+            else np.take(union_features, [position_by_index[index] for index in nameless_indices], axis=1)
         )
     return features, labels, nameless_features
 

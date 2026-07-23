@@ -375,7 +375,7 @@ def test_reuse_rejects_changed_labels_before_copying_fresh_bundle_metadata(
         "metrics": {},
     }
     pairwise_binding = {"main_booster_sha256": "1" * 64}
-    validated_paths = promoted_train.ValidatedArrowInputs._from_verified(  # noqa: SLF001
+    validated_paths = promoted_train.ValidatedArrowInputs._from_verified(
         paths={},
         generation_id="2" * 64,
         normalization_version="canonical_v2",
@@ -463,7 +463,7 @@ def test_materialization_identity_hashes_shared_inputs_once_per_run(
         expected_metrics={},
     )
     rows = pd.DataFrame({"dataset": ["toy"], "label": [0]})
-    validated_paths = promoted_train.ValidatedArrowInputs._from_verified(  # noqa: SLF001
+    validated_paths = promoted_train.ValidatedArrowInputs._from_verified(
         paths={},
         generation_id="1" * 64,
         normalization_version="canonical_v2",

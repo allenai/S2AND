@@ -788,10 +788,9 @@ mod name_counts_empty_surname_tests {
             "schema_version": "name_counts_index_v2",
             "normalization_version": "canonical_v2",
             "source_provenance": {
-                "schema_version": "name_counts_provenance_v2",
+                "schema_version": "name_counts_provenance_v3",
                 "normalization_version": "canonical_v2",
                 "generation_id": "empty-test-generation",
-                "pickle_sha256": "0".repeat(64),
                 "source_snapshot_id": "empty-test-snapshot",
                 "source_kind": "test-fixture",
                 "source_query_sha256": "1".repeat(64),

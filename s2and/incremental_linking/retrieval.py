@@ -181,6 +181,41 @@ class RawArrowPlanBundle:
     retrieval_ranks: np.ndarray
     row_signals: Mapping[str, np.ndarray]
 
+    def contiguous_query_slice(self, start: int, stop: int) -> RawArrowPlanBundle:
+        """Return the row and pair views for a contiguous query slice."""
+
+        query_signature_ids = self.query_signature_ids[start:stop]
+        row_start = int(np.searchsorted(self.row_query_offsets, start, side="left"))
+        row_stop = int(np.searchsorted(self.row_query_offsets, stop, side="left"))
+        pair_start = int(np.searchsorted(self.pair_row_indices, row_start, side="left"))
+        pair_stop = int(np.searchsorted(self.pair_row_indices, row_stop, side="left"))
+        row_query_offsets = (self.row_query_offsets[row_start:row_stop] - start).astype(np.uint32, copy=False)
+        pair_row_indices = (self.pair_row_indices[pair_start:pair_stop] - row_start).astype(np.uint32, copy=False)
+        row_query_offsets.setflags(write=False)
+        pair_row_indices.setflags(write=False)
+        return RawArrowPlanBundle(
+            signature_order=FeatureBlockSignatureOrder(
+                signature_ids=self.signature_order.signature_ids,
+                query_signature_ids=query_signature_ids,
+            ),
+            query_signature_ids=query_signature_ids,
+            query_views=self.query_views[start:stop],
+            query_authors=self.query_authors[start:stop],
+            seed_signature_ids=self.seed_signature_ids,
+            component_members=self.component_members,
+            telemetry=self.telemetry if start == 0 else None,
+            row_count=row_stop - row_start,
+            pair_count=pair_stop - pair_start,
+            row_query_offsets=row_query_offsets,
+            left_signature_ids=self.left_signature_ids[pair_start:pair_stop],
+            right_signature_ids=self.right_signature_ids[pair_start:pair_stop],
+            pair_row_indices=pair_row_indices,
+            row_component_keys=self.row_component_keys[row_start:row_stop],
+            retrieval_scores=self.retrieval_scores[row_start:row_stop],
+            retrieval_ranks=self.retrieval_ranks[row_start:row_stop],
+            row_signals=MappingProxyType({key: values[row_start:row_stop] for key, values in self.row_signals.items()}),
+        )
+
     @classmethod
     def _from_normalized_values(
         cls,

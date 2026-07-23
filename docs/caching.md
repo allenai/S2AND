@@ -9,29 +9,26 @@ may manage their own output reuse, such as the epsilon-sweep distance files.
 
 `train_pairwise.py --feature-cache-dir PATH` opts into snapshot reuse for
 repeated pairwise training experiments; there is no implicit default location.
-The training command owns dataset construction and immediately featurizes it,
-so mutable `ANDData` objects are never accepted as a reusable cache boundary.
-The cache stores the *output* of featurization, not per-pair state:
+The training command constructs `ANDData` normally, then passes the cache an
+explicit source key. The cache stores the *output* of featurization, not
+per-pair state:
 
 - One uncompressed NPZ file per train/val/test split at
-  `<cache_dir>/<split>_<key-prefix>.npz`, holding the exact `X`, `y`,
+  `<cache_dir>/<split>_<full-key>.npz`, holding the exact `X`, `y`,
   and (when configured) `nameless_X` matrices.
-- The key is a SHA-256 over: a snapshot schema version, the content hashes of
-  the feature-input files (signatures, papers, SPECTER), the verified name-counts
-  binding when name-count features are selected, the name-tuples digest, the
-  normalization version, both featurizer configurations (version + feature
-  groups), `nan_value`,
-  and the hash of the exact resolved pair lists.
+- `train_pairwise.py` supplies exact signatures, papers, and SPECTER file
+  hashes, the opened name-count manifest hash, the canonical name-tuples
+  digest, and the normalization version. The cache adds its schema version,
+  both featurizer configurations, `nan_value`, and the hash of each exact
+  ordered pair list.
 - There is no invalidation logic: any input change produces a different key
   and a fresh snapshot. Old snapshots are dead files; delete the directory
   whenever you like.
-- Identity is fail-closed: source hashes are captured privately while the
-  cache-enabled training dataset is parsed, consumed once, and never exposed
-  for reuse. Missing file identity or required name-count provenance raises.
-- Snapshots are write-once (published under a short file lock; never
-  overwritten) and strictly validated on load (`allow_pickle=False`, exact
-  members, dtypes, shapes). A corrupt snapshot raises with its path — delete
-  the file and rerun.
+- Snapshots are written to a temporary file and atomically replaced. Concurrent
+  cold callers may duplicate computation, but readers only see complete files.
+  Loads are strictly validated (`allow_pickle=False`, exact members, dtypes,
+  and shapes). A corrupt snapshot raises with its path — delete the file and
+  rerun.
 - Loading a snapshot reproduces the originally written matrices bit-for-bit.
 
 The snapshot boundary currently supports classic file-backed `ANDData`
@@ -52,13 +49,14 @@ cost can be re-evaluated on full retrains).
 ## In-memory reuse (not caches on disk)
 
 - **Rust featurizer in-process reuse**: an already-built Rust featurizer is
-  reused for the same Arrow-attached dataset object within one process, keyed
-  by validated generation ID, path set, and seed versions. Process restarts
-  rebuild it. `evict_rust_featurizer(dataset)` / `clear_rust_featurizer_cache()`
-  manage it explicitly; `warm_rust_featurizer(dataset)` prebuilds it for
-  lower cold-start latency in long-lived Arrow services.
-- **Name-counts index open dedup**: one shared immutable `NameCountsIndex`
-  handle per `(path, manifest sha256)` within a process.
+  owned and reused by the same Arrow-attached dataset object within one
+  process. Changes to native build inputs rebuild it; changes to the exact
+  current seed contents update it in place. Process restarts rebuild it.
+  `evict_rust_featurizer(dataset)` releases one dataset's native state;
+  `warm_rust_featurizer(dataset)` prebuilds it for lower cold-start latency in
+  long-lived Arrow services.
+- **Name-counts index open dedup**: a four-entry `lru_cache` shares immutable
+  `NameCountsIndex` handles by resolved path and exact manifest bytes.
 - Assorted per-request/per-call memoization inside incremental linking; all
   ephemeral, none persisted.
 

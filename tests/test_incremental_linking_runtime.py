@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pytest
@@ -38,9 +38,6 @@ from s2and.incremental_linking.runtime import (
     _predict_incremental_link_or_abstain_compact,
 )
 from s2and.incremental_linking.runtime import (
-    _predict_incremental_link_or_abstain_production_private as _prod_private_impl,
-)
-from s2and.incremental_linking.runtime import (
     _predict_incremental_link_or_abstain_retrieved_candidates as _retrieved_candidates_impl,
 )
 from s2and.incremental_linking.runtime import (
@@ -71,10 +68,6 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(*args: Any, **kwar
     return _retrieved_candidates_impl(*args, **kwargs)
 
 
-def _predict_incremental_link_or_abstain_production_private(*args: Any, **kwargs: Any) -> Any:
-    return _prod_private_impl(*args, **kwargs)
-
-
 class StaticPairwiseStats:
     def __init__(self, row_count: int) -> None:
         self.aggregate_feature_columns = promoted_pairwise_aggregate_columns()
@@ -89,11 +82,8 @@ class StaticArtifact:
         self.probabilities = np.asarray(probabilities, dtype=np.float64)
         self.last_num_threads: int | None = None
         self.gate_model = load_logistic_gate_config(gate_config)
-        self.metadata = SimpleNamespace(
-            feature_columns=promoted_linker_feature_columns(),
-            gate_config=gate_config,
-            retrieval_top_k=25,
-        )
+        self.feature_columns = promoted_linker_feature_columns()
+        self.retrieval_top_k = 25
 
     def predict_probabilities(
         self,
@@ -453,51 +443,6 @@ class FakeProductionClusterer:
         )
 
 
-def test_private_production_forwards_four_element_seed_setup_to_retrieval_slice(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    split_inverse = {"c1_0": ["s1"]}
-    captured: dict[str, Any] = {}
-
-    class FourElementSeedSetupClusterer(FakeProductionClusterer):
-        def _build_incremental_seed_setup(
-            self,
-            _dataset: object,
-            _partial_supervision: dict[tuple[str, str], int | float],
-            _runtime_context: object,
-            total_ram_bytes: int | None = None,
-        ):
-            del total_ram_bytes
-            return {"s1": "c1_0"}, {"c1_0": "c1"}, {"c1": ["s1"]}, split_inverse
-
-    def fake_from_retrieval_private(*_args: Any, **kwargs: Any) -> Any:
-        captured["seed_setup"] = kwargs["seed_setup"]
-        return SimpleNamespace(ok=True)
-
-    monkeypatch.setattr(
-        runtime_module,
-        "_predict_incremental_link_or_abstain_production_from_retrieval_private",
-        fake_from_retrieval_private,
-    )
-
-    result = cast(
-        Any,
-        runtime_module._predict_incremental_link_or_abstain_production_private(  # noqa: SLF001
-            FourElementSeedSetupClusterer({"s1": "c1"}),
-            _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0)),
-            dataset=cast(Any, SimpleNamespace()),
-            featurizer=FakeRuntimeFeaturizer(["s1"]),
-            retriever=object(),
-            queries=[],
-            query_signature_ids=[],
-        ),
-    )
-
-    assert result.ok is True
-    assert len(captured["seed_setup"]) == 4
-    assert captured["seed_setup"][3] is split_inverse
-
-
 def _row_features(retrieval_scores: np.ndarray) -> dict[str, np.ndarray]:
     row_count = len(retrieval_scores)
     row_features = {column: np.zeros(row_count, dtype=np.float32) for column in PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS}
@@ -522,25 +467,6 @@ def _promoted_gate_config(score: float = 0.0, margin: float = 0.0) -> dict[str, 
         missing_values=np.asarray([0.0], dtype=np.float64),
         calibration_mode="test",
     )
-
-
-def test_raw_arrow_runtime_rejects_none_path_before_rust_planner(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail_require_rust_runtime():
-        raise AssertionError("invalid Arrow paths should be rejected before raw Arrow planning")
-
-    monkeypatch.setattr(runtime_module.feature_port, "_require_rust_runtime", fail_require_rust_runtime)
-    clusterer = SimpleNamespace(
-        n_jobs=1,
-        featurizer_info=FeaturizationInfo(features_to_use=[]),
-        nameless_featurizer_info=None,
-    )
-
-    with pytest.raises(ValueError, match="signatures.*None"):
-        runtime_module.predict_incremental_link_or_abstain_from_raw_arrow_paths(
-            clusterer,
-            _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0)),
-            arrow_paths={"signatures": None, "papers": "papers.arrow", "paper_authors": "paper_authors.arrow"},
-        )
 
 
 def test_raw_arrow_runtime_rejects_mismatched_query_view_length_before_featurizer(
@@ -1173,12 +1099,11 @@ def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
 
 @requires_rust_lightgbm
 def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path: Path) -> None:
-    booster, fixture = build_tiny_promoted_booster()
+    booster, _fixture = build_tiny_promoted_booster()
     artifact_dir = tmp_path / "artifact"
     save_incremental_linking_artifact(
         booster,
         artifact_dir,
-        prediction_fixture_matrix=fixture,
         gate_config=_promoted_gate_config(0.0),
         target_spec={},
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
@@ -1215,12 +1140,11 @@ def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path:
 
 @requires_rust_lightgbm
 def test_compact_link_or_abstain_abstains_when_artifact_score_threshold_too_high(tmp_path: Path) -> None:
-    booster, fixture = build_tiny_promoted_booster()
+    booster, _fixture = build_tiny_promoted_booster()
     artifact_dir = tmp_path / "artifact"
     save_incremental_linking_artifact(
         booster,
         artifact_dir,
-        prediction_fixture_matrix=fixture,
         gate_config=_promoted_gate_config(1.1),
         target_spec={},
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
@@ -1706,51 +1630,6 @@ def test_query_disallow_partner_ids_collects_query_pairs_from_both_channels() ->
     assert partners == {"q1": {"q2"}, "q2": {"q1", "q3"}, "q3": {"q2"}}
 
 
-def test_private_production_slice_enforces_cross_batch_query_disallow_exclusion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    featurizer = FakeRuntimeFeaturizer(["q1", "s1", "q2"])
-    clusterer = FakeProductionClusterer({"s1": "7"})
-    artifact = _static_artifact(np.asarray([0.9, 0.8], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-
-    def fake_retrieval(**_kwargs: Any) -> LinkerRetrievalBatch:
-        return _production_retrieval_batch(
-            row_query_signature_indices=np.asarray([0, 2], dtype=np.uint32),
-            row_component_keys=("7", "7"),
-        )
-
-    monkeypatch.setattr(runtime_module, "build_linker_retrieval_batch_rust", fake_retrieval)
-    monkeypatch.setattr(
-        runtime_module,
-        "compute_candidate_batch_pairwise_model_and_aggregate_stats",
-        lambda _dataset, candidate_batch, **_kwargs: _fake_pairwise_result(candidate_batch),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.9, 0.8], dtype=np.float32)),
-    )
-
-    # A mutually-disallowed partner of q1 linked to component "7" in an earlier
-    # batch, so "7" is excluded for q1 as if never retrieved; q2 is unaffected.
-    result = _predict_incremental_link_or_abstain_production_private(
-        clusterer,
-        artifact,
-        dataset=dataset,
-        featurizer=featurizer,
-        retriever=object(),
-        queries=[object(), object()],
-        query_signature_ids=["q1", "q2"],
-        cluster_seed_disallow_excluded_components={"q1": {"7"}},
-    )
-
-    assert result.linked_signature_clusters == {"q2": "7"}
-    assert [decision.action for decision in result.compact_result.decisions] == ["abstain", "link"]
-    assert result.telemetry["cluster_seed_disallow_excluded_row_count"] == 1
-    assert result.telemetry["cluster_seed_disallow_excluded_query_count"] == 1
-
-
 def test_private_retrieved_candidate_slice_scores_matrix_and_records_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1840,107 +1719,6 @@ def test_private_retrieved_candidate_slice_rejects_partial_supervision() -> None
         )
 
 
-def test_private_production_slice_preserves_split_ids_for_incremental_finish(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    featurizer = FakeRuntimeFeaturizer(["q1", "s1", "q2"])
-    clusterer = FakeProductionClusterer({"s1": "7_0"}, recluster_map={"7_0": "7"})
-    artifact = _static_artifact(np.asarray([0.9], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-
-    def fake_retrieval(**kwargs: Any) -> LinkerRetrievalBatch:
-        assert kwargs["component_member_indices_by_key"] == {"7_0": np.asarray([1], dtype=np.uint32)}
-        np.testing.assert_array_equal(kwargs["query_signature_indices"], np.asarray([0, 2], dtype=np.uint32))
-        return _production_retrieval_batch(
-            row_query_signature_indices=np.asarray([0], dtype=np.uint32),
-            row_component_keys=("7_0",),
-            left_signature_indices=np.asarray([0], dtype=np.uint32),
-            right_signature_indices=np.asarray([1], dtype=np.uint32),
-            pair_row_indices=np.asarray([0], dtype=np.uint32),
-        )
-
-    monkeypatch.setattr(runtime_module, "build_linker_retrieval_batch_rust", fake_retrieval)
-    monkeypatch.setattr(
-        runtime_module,
-        "compute_candidate_batch_pairwise_model_and_aggregate_stats",
-        lambda _dataset, candidate_batch, **_kwargs: _fake_pairwise_result(candidate_batch),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.9], dtype=np.float32)),
-    )
-
-    result = _predict_incremental_link_or_abstain_production_private(
-        clusterer,
-        artifact,
-        dataset=dataset,
-        featurizer=featurizer,
-        retriever=object(),
-        queries=[object(), object()],
-        query_signature_ids=["q1", "q2"],
-    )
-
-    assert result.linked_signature_clusters == {"q1": "7_0"}
-    assert [decision.action for decision in result.compact_result.decisions] == ["link", "abstain"]
-    assert result.telemetry["no_candidate_query_count"] == 1
-    assert result.telemetry["link_count"] == 1
-    assert result.telemetry["abstain_count"] == 1
-
-
-def test_private_production_slice_supplies_query_author_to_logistic_gate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    featurizer = FakeRuntimeFeaturizer(["q1", "s1"])
-    clusterer = FakeProductionClusterer({"s1": "c1"})
-    scale = 10.0
-    artifact = _static_artifact(
-        np.asarray([0.9], dtype=np.float64),
-        gate_config=logistic_gate_config(
-            feature_names=("top_meta_query_author_len",),
-            weights=np.asarray([[-scale, 0.0, scale]], dtype=np.float64),
-            bias=np.asarray([scale * 5.0, -10.0, -scale * 5.0], dtype=np.float64),
-            missing_values=np.asarray([0.0], dtype=np.float64),
-            calibration_mode="test",
-        ),
-    )
-
-    monkeypatch.setattr(
-        runtime_module,
-        "build_linker_retrieval_batch_rust",
-        lambda **_kwargs: _production_retrieval_batch(
-            row_query_signature_indices=np.asarray([0], dtype=np.uint32),
-            row_component_keys=("c1",),
-            left_signature_indices=np.asarray([0], dtype=np.uint32),
-            right_signature_indices=np.asarray([1], dtype=np.uint32),
-            pair_row_indices=np.asarray([0], dtype=np.uint32),
-        ),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "compute_candidate_batch_pairwise_model_and_aggregate_stats",
-        lambda _dataset, candidate_batch, **_kwargs: _fake_pairwise_result(candidate_batch),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.9], dtype=np.float32)),
-    )
-
-    result = _predict_incremental_link_or_abstain_production_private(
-        clusterer,
-        artifact,
-        dataset=dataset,
-        featurizer=featurizer,
-        retriever=object(),
-        queries=[SimpleNamespace(query_author="Ada Lovelace")],
-        query_signature_ids=["q1"],
-    )
-
-    assert result.compact_result.decisions[0].action == "link"
-
-
 def test_production_query_author_row_signals_reuses_retrieval_signal() -> None:
     retrieval_batch = _production_retrieval_batch(
         row_query_signature_indices=np.asarray([0, 0], dtype=np.uint32),
@@ -1968,184 +1746,6 @@ def test_query_author_for_gate_fallback_includes_full_signature_name() -> None:
     )
 
     assert runtime_module._query_author_for_gate(query) == "Ada Byron Lovelace PhD"
-
-
-def test_private_production_slice_preserves_partial_supervision_constraint_labels(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    featurizer = FakeRuntimeFeaturizer(["q1", "s1", "s2"])
-    clusterer = FakeProductionClusterer({"s1": "c1", "s2": "c2"})
-    artifact = _static_artifact(np.asarray([0.9, 0.1], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-    captured_pair_labels: list[np.ndarray] = []
-
-    monkeypatch.setattr(
-        runtime_module,
-        "build_linker_retrieval_batch_rust",
-        lambda **_kwargs: _production_retrieval_batch(
-            row_query_signature_indices=np.asarray([0, 0], dtype=np.uint32),
-            row_component_keys=("c1", "c2"),
-            left_signature_indices=np.asarray([0, 0], dtype=np.uint32),
-            right_signature_indices=np.asarray([1, 2], dtype=np.uint32),
-            pair_row_indices=np.asarray([0, 1], dtype=np.uint32),
-        ),
-    )
-
-    def fake_pairwise(
-        _dataset: object,
-        candidate_batch: LinkerCandidateBatch,
-        **kwargs: Any,
-    ) -> CandidateBatchPairwiseModelResult:
-        captured_pair_labels.append(np.asarray(kwargs["pair_labels"], dtype=np.float64))
-        return _fake_pairwise_result(candidate_batch)
-
-    monkeypatch.setattr(runtime_module, "compute_candidate_batch_pairwise_model_and_aggregate_stats", fake_pairwise)
-    monkeypatch.setattr(
-        runtime_module,
-        "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.9, 0.1], dtype=np.float32)),
-    )
-
-    _predict_incremental_link_or_abstain_production_private(
-        clusterer,
-        artifact,
-        dataset=dataset,
-        featurizer=featurizer,
-        retriever=object(),
-        queries=[object()],
-        query_signature_ids=["q1"],
-        partial_supervision={
-            ("q1", "s1"): 0,
-            ("s2", "q1"): 10_000,
-        },
-    )
-
-    np.testing.assert_allclose(
-        captured_pair_labels[0],
-        np.asarray([-float(LARGE_INTEGER), 10_000.0 - float(LARGE_INTEGER)]),
-    )
-
-
-def test_private_production_slice_rejects_conflicting_partial_require_components(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    featurizer = FakeRuntimeFeaturizer(["q1", "s1", "s2"])
-    clusterer = FakeProductionClusterer({"s1": "c1", "s2": "c2"})
-    artifact = _static_artifact(np.asarray([0.9, 0.8], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-    monkeypatch.setattr(
-        runtime_module,
-        "build_linker_retrieval_batch_rust",
-        lambda **_kwargs: _production_retrieval_batch(
-            row_query_signature_indices=np.asarray([0, 0], dtype=np.uint32),
-            row_component_keys=("c1", "c2"),
-            left_signature_indices=np.asarray([0, 0], dtype=np.uint32),
-            right_signature_indices=np.asarray([1, 2], dtype=np.uint32),
-            pair_row_indices=np.asarray([0, 1], dtype=np.uint32),
-        ),
-    )
-
-    with pytest.raises(ValueError, match="partial_supervision_require_conflicting_seed_components"):
-        _predict_incremental_link_or_abstain_production_private(
-            clusterer,
-            artifact,
-            dataset=dataset,
-            featurizer=featurizer,
-            retriever=object(),
-            queries=[object()],
-            query_signature_ids=["q1"],
-            partial_supervision={
-                ("q1", "s1"): 0,
-                ("q1", "s2"): 0,
-            },
-        )
-
-
-def test_private_production_slice_keeps_seed_disallow_constraints(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    disallow_label = float(LARGE_DISTANCE - LARGE_INTEGER)
-    featurizer = FakeRuntimeFeaturizer(["q1", "s1", "s2"], default_label=disallow_label)
-    clusterer = FakeProductionClusterer(
-        {"q1": "c1", "s1": "c1", "s2": "c2"},
-        default_label=disallow_label,
-    )
-    artifact = _static_artifact(np.asarray([0.9, 0.1], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-    captured_pair_labels: list[np.ndarray] = []
-
-    monkeypatch.setattr(
-        runtime_module,
-        "build_linker_retrieval_batch_rust",
-        lambda **_kwargs: _production_retrieval_batch(
-            row_query_signature_indices=np.asarray([0, 0], dtype=np.uint32),
-            row_component_keys=("c1", "c2"),
-            left_signature_indices=np.asarray([0, 0], dtype=np.uint32),
-            right_signature_indices=np.asarray([1, 2], dtype=np.uint32),
-            pair_row_indices=np.asarray([0, 1], dtype=np.uint32),
-        ),
-    )
-
-    def fake_pairwise(
-        _dataset: object,
-        candidate_batch: LinkerCandidateBatch,
-        **kwargs: Any,
-    ) -> CandidateBatchPairwiseModelResult:
-        captured_pair_labels.append(np.asarray(kwargs["pair_labels"], dtype=np.float64))
-        return _fake_pairwise_result(candidate_batch)
-
-    monkeypatch.setattr(runtime_module, "compute_candidate_batch_pairwise_model_and_aggregate_stats", fake_pairwise)
-    monkeypatch.setattr(
-        runtime_module,
-        "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.9, 0.1], dtype=np.float32)),
-    )
-
-    result = _predict_incremental_link_or_abstain_production_private(
-        clusterer,
-        artifact,
-        dataset=dataset,
-        featurizer=featurizer,
-        retriever=object(),
-        queries=[object()],
-        query_signature_ids=["q1"],
-    )
-
-    assert result.telemetry["constraint_api_mode"] == "rust_index_arrays"
-    assert "constraint_disallow_ignored_pair_count" not in result.telemetry
-    assert "constraint_seed_bypass_pair_count" not in result.telemetry
-    assert captured_pair_labels[0][0] == pytest.approx(disallow_label)
-    assert captured_pair_labels[0][1] == pytest.approx(disallow_label)
-    assert result.linked_signature_clusters == {}
-
-
-def test_private_production_slice_rejects_require_outside_retrieval_window(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    featurizer = FakeRuntimeFeaturizer(["q1", "s1"])
-    clusterer = FakeProductionClusterer({"s1": "c1"})
-    artifact = _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-    monkeypatch.setattr(
-        runtime_module,
-        "build_linker_retrieval_batch_rust",
-        lambda **_kwargs: _production_retrieval_batch(
-            row_query_signature_indices=np.asarray([], dtype=np.uint32),
-            row_component_keys=(),
-        ),
-    )
-
-    with pytest.raises(ValueError, match="partial_supervision_require_outside_retrieval_window"):
-        _predict_incremental_link_or_abstain_production_private(
-            clusterer,
-            artifact,
-            dataset=dataset,
-            featurizer=featurizer,
-            retriever=object(),
-            queries=[object()],
-            query_signature_ids=["q1"],
-            partial_supervision={("q1", "s1"): 0},
-        )
 
 
 def test_from_retrieval_validates_partial_supervision_against_full_seed_map() -> None:
@@ -2178,7 +1778,7 @@ def test_from_retrieval_records_artifact_retrieval_top_k_when_not_passed(
     featurizer = FakeRuntimeFeaturizer(["q1", "s1"])
     clusterer = FakeProductionClusterer({"s1": "c1"})
     artifact = _static_artifact(np.asarray([0.9], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-    artifact.metadata.retrieval_top_k = 37
+    artifact.retrieval_top_k = 37
     retrieval_batch = _production_retrieval_batch(
         row_query_signature_indices=np.asarray([0], dtype=np.uint32),
         row_component_keys=("c1",),
@@ -2209,73 +1809,3 @@ def test_from_retrieval_records_artifact_retrieval_top_k_when_not_passed(
     )
 
     assert result.telemetry["retrieval_top_k"] == 37
-
-
-def test_private_production_slice_records_disallow_outside_retrieval_window(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    featurizer = FakeRuntimeFeaturizer(["q1", "s1"])
-    clusterer = FakeProductionClusterer({"s1": "c1"})
-    artifact = _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-    monkeypatch.setattr(
-        runtime_module,
-        "build_linker_retrieval_batch_rust",
-        lambda **_kwargs: _production_retrieval_batch(
-            row_query_signature_indices=np.asarray([], dtype=np.uint32),
-            row_component_keys=(),
-        ),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "compute_candidate_batch_pairwise_model_and_aggregate_stats",
-        lambda _dataset, candidate_batch, **_kwargs: _fake_pairwise_result(candidate_batch),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([], dtype=np.float32)),
-    )
-
-    result = _predict_incremental_link_or_abstain_production_private(
-        clusterer,
-        artifact,
-        dataset=dataset,
-        featurizer=featurizer,
-        retriever=object(),
-        queries=[object()],
-        query_signature_ids=["q1"],
-        partial_supervision={("q1", "s1"): 10_000},
-    )
-
-    assert result.compact_result.decisions[0].action == "abstain"
-    assert result.telemetry["partial_supervision_disallow_outside_retrieval_window"] == 1
-
-
-def test_private_production_slice_rejects_require_between_residual_queries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    featurizer = FakeRuntimeFeaturizer(["q1", "q2", "s1"])
-    clusterer = FakeProductionClusterer({"s1": "c1"})
-    artifact = _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-    monkeypatch.setattr(
-        runtime_module,
-        "build_linker_retrieval_batch_rust",
-        lambda **_kwargs: _production_retrieval_batch(
-            row_query_signature_indices=np.asarray([], dtype=np.uint32),
-            row_component_keys=(),
-        ),
-    )
-
-    with pytest.raises(ValueError, match="partial_supervision_require_between_residual_queries"):
-        _predict_incremental_link_or_abstain_production_private(
-            clusterer,
-            artifact,
-            dataset=dataset,
-            featurizer=featurizer,
-            retriever=object(),
-            queries=[object(), object()],
-            query_signature_ids=["q1", "q2"],
-            partial_supervision={("q1", "q2"): 0},
-        )

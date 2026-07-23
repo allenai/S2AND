@@ -190,7 +190,7 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
     from s2and.arrow_inputs import validate_arrow_prediction_artifacts
     from s2and.consts import NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION
     from s2and.data import ANDData
-    from s2and.feature_port import build_rust_featurizer_from_arrow_paths, clear_rust_featurizer_cache
+    from s2and.feature_port import build_rust_featurizer_from_arrow_paths
     from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
     from s2and.runtime import RuntimeContext
 
@@ -242,7 +242,6 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
         context="existing Arrow/ANDData feature parity",
     )
 
-    clear_rust_featurizer_cache()
     started = time.perf_counter()
     anddata_features, _labels, _nameless_features = many_pairs_featurize(
         [(left, right, 0) for left, right in pairs],

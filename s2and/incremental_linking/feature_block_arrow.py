@@ -18,8 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
-import numpy as np
-
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.arrow_inputs import (
     RAW_PLANNER_ARROW_BATCH_INDEX_KEYS,
@@ -30,20 +28,11 @@ from s2and.arrow_inputs import (
 from s2and.arrow_schema import validate_arrow_schema
 from s2and.incremental_linking.feature_block_contract import (
     FeatureBlock,
-    FeatureBlockPaper,
-    FeatureBlockPaperAuthor,
-    FeatureBlockSignature,
-    _feature_block_specter_from_mapping,
-    _optional_bool,
-    _optional_int,
-    _optional_str,
-    _strict_string_tuple,
-    feature_block_signature_order_from_raw_candidate_plan,
-    filter_cluster_seed_disallows_for_signature_subset,
     normalize_cluster_seed_disallow_pairs,
 )
 from s2and.name_counts_manifest import (
     NAME_COUNTS_INDEX_SCHEMA_VERSION,
+    NAME_COUNTS_MANIFEST_SHA256_FIELD,
     ValidatedNameCountsManifest,
     validated_name_counts_provenance,
 )
@@ -536,12 +525,6 @@ def _decode_arrow_batch_lookup_index_header(index_path: Path, header: bytes) -> 
     }
 
 
-def _read_arrow_batch_lookup_index_header(index_path: Path) -> dict[str, int | str]:
-    with index_path.open("rb") as infile:
-        header = infile.read(_ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size)
-    return _decode_arrow_batch_lookup_index_header(index_path, header)
-
-
 def _batch_lookup_index_source_mismatch(
     header: Mapping[str, int | str],
     *,
@@ -559,72 +542,6 @@ def _batch_lookup_index_source_mismatch(
         f"({indexed_size}, {indexed_fingerprint}) current size/fingerprint="
         f"({int(source_size)}, {int(source_fingerprint)})"
     )
-
-
-def _validate_arrow_batch_lookup_index_header_contract(
-    header: Mapping[str, int | str],
-    *,
-    arrow_path: Path,
-    index_path: Path,
-    key_column: str,
-    source_size: int,
-    source_fingerprint: int | None,
-    expected_row_count: int | None,
-) -> int:
-    """Validate header facts shared by standalone and generation-bound checks."""
-
-    key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
-    if int(header["key_column_hash"]) != key_column_hash:
-        raise ValueError(
-            f"Arrow batch lookup index '{index_path!s}' was built for a different key column: "
-            f"indexed hash={int(header['key_column_hash'])} expected hash={key_column_hash} "
-            f"key_column={key_column!r}"
-        )
-    source_mismatch = _batch_lookup_index_source_mismatch(
-        header,
-        source_size=source_size,
-        source_fingerprint=source_fingerprint,
-    )
-    if source_mismatch is not None:
-        raise ValueError(f"Arrow batch lookup index '{index_path!s}' is stale for '{arrow_path!s}': {source_mismatch}")
-    if expected_row_count is not None and int(header["record_count"]) != int(expected_row_count):
-        raise ValueError(
-            f"Arrow batch lookup index row count mismatch for {arrow_path!s}: "
-            f"index has {int(header['record_count'])} records, expected {int(expected_row_count)}. "
-            "Rebuild it with overwrite=True."
-        )
-    return int(header["record_count"])
-
-
-def _validate_arrow_batch_lookup_index_records(
-    records: Iterable[tuple[int, int, int]],
-    *,
-    index_path: Path,
-    record_count: int,
-    record_batch_count: int,
-) -> None:
-    """Validate ordering and record-batch bounds for one exact index body."""
-
-    previous_hash: int | None = None
-    observed_count = 0
-    for record_index, (key_hash, batch_index, _reserved) in enumerate(records):
-        if previous_hash is not None and key_hash < previous_hash:
-            raise ValueError(
-                f"Arrow batch lookup index '{index_path!s}' key hashes are not nondecreasing "
-                f"at record {record_index}: {key_hash} follows {previous_hash}"
-            )
-        if batch_index >= record_batch_count:
-            raise ValueError(
-                f"Arrow batch lookup index '{index_path!s}' batch index {batch_index} is out of bounds "
-                f"at record {record_index} for {record_batch_count} Arrow record batches"
-            )
-        previous_hash = int(key_hash)
-        observed_count += 1
-    if observed_count != record_count:
-        raise ValueError(
-            f"Arrow batch lookup index '{index_path!s}' record count changed while validating: "
-            f"expected {record_count}, observed {observed_count}"
-        )
 
 
 def _arrow_batch_lookup_record_hash(index_mmap: mmap.mmap, record_index: int) -> int:
@@ -792,176 +709,140 @@ def validate_arrow_batch_lookup_index(
 ) -> dict[str, int | str]:
     """Validate an index and its record-batch references without reading Arrow rows."""
 
-    arrow_path_obj = Path(arrow_path)
-    index_path_obj = Path(index_path)
-    header = _read_arrow_batch_lookup_index_header(index_path_obj)
-    source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="validating batch lookup index")
-    import pyarrow as pa
-
-    with pa.memory_map(str(arrow_path_obj), "r") as source:
-        record_batch_count = int(pa.ipc.open_file(source).num_record_batches)
-    return _validate_arrow_batch_lookup_index_material(
-        arrow_path=arrow_path_obj,
-        index_path=index_path_obj,
+    return _validate_arrow_batch_lookup_index(
+        arrow_path=Path(arrow_path),
+        index_path=Path(index_path),
         key_column=key_column,
         expected_row_count=expected_row_count,
-        header=header,
-        source_snapshot=source_snapshot,
-        record_batch_count=record_batch_count,
     )
 
 
-def _validate_arrow_batch_lookup_index_material(
+def _validate_arrow_batch_lookup_index(
     *,
     arrow_path: Path,
     index_path: Path,
     key_column: str,
-    expected_row_count: int | None,
-    header: Mapping[str, int | str],
-    source_snapshot: _ArrowSourceSnapshot,
-    record_batch_count: int,
-) -> dict[str, int | str]:
-    """Validate exact index material using already-established source facts."""
-
-    record_count = _validate_arrow_batch_lookup_index_header_contract(
-        header,
-        arrow_path=arrow_path,
-        index_path=index_path,
-        key_column=key_column,
-        source_size=source_snapshot.size,
-        source_fingerprint=source_snapshot.fingerprint,
-        expected_row_count=expected_row_count,
-    )
-    expected_length = (
-        _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size + record_count * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
-    )
-    observed_length = index_path.stat().st_size
-    if observed_length != expected_length:
-        raise ValueError(
-            f"Arrow batch lookup index '{index_path!s}' length {observed_length} does not match "
-            f"expected length {expected_length} (record_count={record_count})"
-        )
-
-    if not _source_snapshot_matches_stat(source_snapshot, arrow_path.stat()):
-        _raise_arrow_source_changed(arrow_path, context="validating batch lookup index")
-
-    with index_path.open("rb") as infile:
-        with mmap.mmap(infile.fileno(), 0, access=mmap.ACCESS_READ) as index_mmap:
-            records = (
-                _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.unpack_from(
-                    index_mmap,
-                    _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size
-                    + record_index * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size,
-                )
-                for record_index in range(record_count)
-            )
-            _validate_arrow_batch_lookup_index_records(
-                records,
-                index_path=index_path,
-                record_count=record_count,
-                record_batch_count=record_batch_count,
-            )
-    if not _source_snapshot_matches_stat(source_snapshot, arrow_path.stat()):
-        _raise_arrow_source_changed(arrow_path, context="validating batch lookup index")
-    return {
-        "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
-        "magic": str(header["magic"]),
-        "record_count": record_count,
-        "source_size": int(header["source_size"]),
-        "key_column_hash": int(header["key_column_hash"]),
-        "source_fingerprint": int(header["source_fingerprint"]),
-    }
-
-
-def _validate_verified_arrow_batch_lookup_index(
-    arrow_path: str | Path,
-    index_path: str | Path,
-    *,
-    key_column: str,
-    expected_arrow_byte_count: int,
-    expected_arrow_sha256: str,
-    expected_index_byte_count: int,
-    expected_index_sha256: str,
     expected_row_count: int | None = None,
+    expected_arrow_byte_count: int | None = None,
+    expected_arrow_sha256: str | None = None,
+    expected_index_byte_count: int | None = None,
+    expected_index_sha256: str | None = None,
     validate_source_fingerprint: bool = True,
 ) -> dict[str, int | str]:
-    """Validate one manifest-bound table/index pair with one full pass per file."""
+    """Stream and validate one Arrow table/index pair."""
 
-    arrow_path_obj = Path(arrow_path)
-    index_path_obj = Path(index_path)
-    source_digests = (
-        _stable_source_file_digests(
-            arrow_path_obj,
-            context="validating generation-bound batch lookup index",
-        )
-        if validate_source_fingerprint
-        else _stable_source_file_sha256(
-            arrow_path_obj,
-            context="validating generation-bound batch lookup index",
-        )
+    context = (
+        "validating generation-bound batch lookup index"
+        if expected_arrow_sha256 is not None
+        else "validating batch lookup index"
     )
-    if source_digests.size != expected_arrow_byte_count:
-        raise ValueError(f"Arrow artifact generation source byte_count mismatch: {arrow_path_obj}")
-    if source_digests.sha256 != expected_arrow_sha256:
-        raise ValueError(f"Arrow artifact generation source checksum mismatch: {arrow_path_obj}")
-
-    index_stat_before = index_path_obj.stat()
-    if int(index_stat_before.st_size) != expected_index_byte_count:
-        raise ValueError(f"Arrow artifact generation index byte_count mismatch: {index_path_obj}")
+    source_sha256: str | None = None
+    if expected_arrow_sha256 is None:
+        source_snapshot = _stable_source_file_snapshot(arrow_path, context=context)
+        source_size = source_snapshot.size
+        source_mtime_ns = source_snapshot.mtime_ns
+        source_fingerprint: int | None = source_snapshot.fingerprint
+    else:
+        source_digests = (
+            _stable_source_file_digests(arrow_path, context=context)
+            if validate_source_fingerprint
+            else _stable_source_file_sha256(arrow_path, context=context)
+        )
+        source_size = source_digests.size
+        source_mtime_ns = source_digests.mtime_ns
+        source_sha256 = source_digests.sha256
+        source_fingerprint = source_digests.fingerprint
+    if expected_arrow_byte_count is not None and source_size != expected_arrow_byte_count:
+        raise ValueError(f"Arrow artifact generation source byte_count mismatch: {arrow_path}")
+    if expected_arrow_sha256 is not None and source_sha256 != expected_arrow_sha256:
+        raise ValueError(f"Arrow artifact generation source checksum mismatch: {arrow_path}")
 
     import pyarrow as pa
 
-    with pa.memory_map(str(arrow_path_obj), "r") as source:
+    with pa.memory_map(str(arrow_path), "r") as source:
         record_batch_count = int(pa.ipc.open_file(source).num_record_batches)
-    if not _source_digests_match_stat(source_digests, arrow_path_obj.stat()):
-        _raise_arrow_source_changed(arrow_path_obj, context="validating generation-bound batch lookup index")
+    source_stat = arrow_path.stat()
+    if source_size != int(source_stat.st_size) or source_mtime_ns != int(source_stat.st_mtime_ns):
+        _raise_arrow_source_changed(arrow_path, context=context)
 
-    index_digest = hashlib.sha256()
-    with index_path_obj.open("rb") as infile:
+    index_stat_before = index_path.stat()
+    if expected_index_byte_count is not None and int(index_stat_before.st_size) != expected_index_byte_count:
+        raise ValueError(f"Arrow artifact generation index byte_count mismatch: {index_path}")
+
+    index_digest = hashlib.sha256() if expected_index_sha256 is not None else None
+    with index_path.open("rb") as infile:
         header_bytes = infile.read(_ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size)
-        index_digest.update(header_bytes)
-        header = _decode_arrow_batch_lookup_index_header(index_path_obj, header_bytes)
-        record_count = _validate_arrow_batch_lookup_index_header_contract(
+        if index_digest is not None:
+            index_digest.update(header_bytes)
+        header = _decode_arrow_batch_lookup_index_header(index_path, header_bytes)
+        key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
+        if int(header["key_column_hash"]) != key_column_hash:
+            raise ValueError(
+                f"Arrow batch lookup index '{index_path!s}' was built for a different key column: "
+                f"indexed hash={int(header['key_column_hash'])} expected hash={key_column_hash} "
+                f"key_column={key_column!r}"
+            )
+        source_mismatch = _batch_lookup_index_source_mismatch(
             header,
-            arrow_path=arrow_path_obj,
-            index_path=index_path_obj,
-            key_column=key_column,
-            source_size=source_digests.size,
-            source_fingerprint=source_digests.fingerprint,
-            expected_row_count=expected_row_count,
+            source_size=source_size,
+            source_fingerprint=source_fingerprint,
         )
+        if source_mismatch is not None:
+            raise ValueError(
+                f"Arrow batch lookup index '{index_path!s}' is stale for '{arrow_path!s}': {source_mismatch}"
+            )
+        record_count = int(header["record_count"])
+        if expected_row_count is not None and record_count != int(expected_row_count):
+            raise ValueError(
+                f"Arrow batch lookup index row count mismatch for {arrow_path!s}: "
+                f"index has {record_count} records, expected {int(expected_row_count)}. "
+                "Rebuild it with overwrite=True."
+            )
         expected_length = (
             _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size + record_count * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
         )
         if int(index_stat_before.st_size) != expected_length:
             raise ValueError(
-                f"Arrow batch lookup index '{index_path_obj!s}' length {index_stat_before.st_size} does not match "
+                f"Arrow batch lookup index '{index_path!s}' length {index_stat_before.st_size} does not match "
                 f"expected length {expected_length} (record_count={record_count})"
             )
 
-        def streamed_records() -> Iterator[tuple[int, int, int]]:
-            while chunk := infile.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES):
+        previous_hash: int | None = None
+        observed_count = 0
+        while chunk := infile.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES):
+            if index_digest is not None:
                 index_digest.update(chunk)
-                if len(chunk) % _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size != 0:
-                    raise ValueError(f"Arrow batch lookup index is truncated: {index_path_obj!s}")
-                yield from _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.iter_unpack(chunk)
+            if len(chunk) % _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size != 0:
+                raise ValueError(f"Arrow batch lookup index is truncated: {index_path!s}")
+            for key_hash, batch_index, _reserved in _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.iter_unpack(chunk):
+                if previous_hash is not None and key_hash < previous_hash:
+                    raise ValueError(
+                        f"Arrow batch lookup index '{index_path!s}' key hashes are not nondecreasing "
+                        f"at record {observed_count}: {key_hash} follows {previous_hash}"
+                    )
+                if batch_index >= record_batch_count:
+                    raise ValueError(
+                        f"Arrow batch lookup index '{index_path!s}' batch index {batch_index} is out of bounds "
+                        f"at record {observed_count} for {record_batch_count} Arrow record batches"
+                    )
+                previous_hash = int(key_hash)
+                observed_count += 1
+        if observed_count != record_count:
+            raise ValueError(
+                f"Arrow batch lookup index '{index_path!s}' record count changed while validating: "
+                f"expected {record_count}, observed {observed_count}"
+            )
 
-        _validate_arrow_batch_lookup_index_records(
-            streamed_records(),
-            index_path=index_path_obj,
-            record_count=record_count,
-            record_batch_count=record_batch_count,
-        )
-
-    index_stat_after = index_path_obj.stat()
+    index_stat_after = index_path.stat()
     if int(index_stat_before.st_size) != int(index_stat_after.st_size) or int(index_stat_before.st_mtime_ns) != int(
         index_stat_after.st_mtime_ns
     ):
-        raise ValueError(f"Arrow batch lookup index changed while validating: {index_path_obj!s}")
-    if index_digest.hexdigest() != expected_index_sha256:
-        raise ValueError(f"Arrow artifact generation index checksum mismatch: {index_path_obj}")
-    if not _source_digests_match_stat(source_digests, arrow_path_obj.stat()):
-        _raise_arrow_source_changed(arrow_path_obj, context="validating generation-bound batch lookup index")
+        raise ValueError(f"Arrow batch lookup index changed while validating: {index_path!s}")
+    if index_digest is not None and index_digest.hexdigest() != expected_index_sha256:
+        raise ValueError(f"Arrow artifact generation index checksum mismatch: {index_path}")
+    source_stat = arrow_path.stat()
+    if source_size != int(source_stat.st_size) or source_mtime_ns != int(source_stat.st_mtime_ns):
+        _raise_arrow_source_changed(arrow_path, context=context)
     return {
         "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
         "magic": str(header["magic"]),
@@ -1125,26 +1006,7 @@ def write_arrow_batch_lookup_index(
     output_path = Path(index_path)
     if output_path.exists() and not overwrite:
         arrow_path_obj = Path(arrow_path)
-        index_header = _read_arrow_batch_lookup_index_header(output_path)
-        source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="validating reusable batch lookup index")
-        key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
-        source_mismatch = _batch_lookup_index_source_mismatch(
-            index_header,
-            source_size=source_snapshot.size,
-            source_fingerprint=source_snapshot.fingerprint,
-        )
-        if int(index_header["key_column_hash"]) != key_column_hash or source_mismatch is not None:
-            raise ValueError(
-                f"Arrow batch lookup index is stale for {arrow_path_obj!s}: {output_path!s}. "
-                "Rebuild it with overwrite=True."
-            )
-        layout_stat = arrow_path_obj.stat()
         layout = arrow_ipc_physical_layout(arrow_path)
-        if not _source_snapshot_matches_stat(source_snapshot, layout_stat) or not _source_snapshot_matches_stat(
-            source_snapshot,
-            arrow_path_obj.stat(),
-        ):
-            _raise_arrow_source_changed(arrow_path_obj, context="validating reusable batch lookup index")
         _raise_if_record_batch_limit_exceeded(
             arrow_path=arrow_path,
             table_name=table_name,
@@ -1152,29 +1014,20 @@ def write_arrow_batch_lookup_index(
             batch_rows=layout["actual_max_batch_rows"],
             max_record_batch_rows=max_record_batch_rows,
         )
-        if int(index_header["record_count"]) != int(layout["row_count"]):
-            raise ValueError(
-                f"Arrow batch lookup index row count mismatch for {arrow_path_obj!s}: "
-                f"index has {int(index_header['record_count'])} records, "
-                f"Arrow file has {int(layout['row_count'])} rows. Rebuild it with overwrite=True."
-            )
-        _validate_arrow_batch_lookup_index_material(
+        index_metrics = _validate_arrow_batch_lookup_index(
             arrow_path=arrow_path_obj,
             index_path=output_path,
             key_column=key_column,
             expected_row_count=int(layout["row_count"]),
-            header=index_header,
-            source_snapshot=source_snapshot,
-            record_batch_count=int(layout["record_batch_count"]),
         )
         return str(output_path), {
             "reused": True,
             "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
             **layout,
-            "magic": str(index_header["magic"]),
-            "record_count": int(index_header["record_count"]),
-            "key_column_hash": int(index_header["key_column_hash"]),
-            "source_fingerprint": int(index_header["source_fingerprint"]),
+            "magic": index_metrics["magic"],
+            "record_count": index_metrics["record_count"],
+            "key_column_hash": index_metrics["key_column_hash"],
+            "source_fingerprint": index_metrics["source_fingerprint"],
             "source_fingerprint_kind": "fnv1a64_full_file",
             "max_record_batch_rows": int(max_record_batch_rows or 0),
         }
@@ -1789,7 +1642,10 @@ def _name_counts_index_reuse_snapshot(
         return manifest_sha256, False
     return manifest_sha256, (
         manifest.payload.get("fingerprint") == expected_fingerprint
-        and manifest.source_provenance == expected_source_provenance
+        and {
+            key: value for key, value in manifest.source_provenance.items() if key != NAME_COUNTS_MANIFEST_SHA256_FIELD
+        }
+        == expected_source_provenance
     )
 
 
@@ -1817,6 +1673,7 @@ def write_name_counts_index(
         source_provenance,
         context="write_name_counts_index",
     )
+    source_provenance.pop(NAME_COUNTS_MANIFEST_SHA256_FIELD, None)
     first_dict, last_dict, first_last_dict, last_first_initial_dict = mappings
     fingerprint: int | None = None
     reuse_manifest_sha256: str | None = None
@@ -1960,215 +1817,3 @@ def write_name_counts_index(
     metrics["row_count"] = total_records
     metrics["byte_count"] = total_bytes
     return str(index_dir), metrics
-
-
-def _arrow_rows_by_unique_key(
-    rows: Iterable[Mapping[str, Any]],
-    *,
-    table_name: str,
-    key_column: str,
-) -> dict[str, Mapping[str, Any]]:
-    rows_by_key: dict[str, Mapping[str, Any]] = {}
-    for row in rows:
-        key_value = row.get(key_column)
-        if key_value is None:
-            raise ValueError(f"{table_name} Arrow cannot contain null {key_column} values")
-        key = str(key_value)
-        if not key:
-            raise ValueError(f"{table_name} Arrow cannot contain empty {key_column} values")
-        if key in rows_by_key:
-            raise ValueError(f"{table_name} Arrow contains duplicate {key_column}: {key!r}")
-        rows_by_key[key] = row
-    return rows_by_key
-
-
-def feature_block_from_arrow_paths(
-    paths: Mapping[str, Any],
-    *,
-    raw_candidate_plan: Mapping[str, Any],
-    include_specter: bool = False,
-) -> FeatureBlock:
-    """Build a mini signal-only `FeatureBlock` from Arrow IPC inputs."""
-
-    pa = __import__("pyarrow")
-    pc = __import__("pyarrow.compute").compute
-    from s2and.incremental_linking.retrieval import validate_raw_candidate_plan_schema
-
-    validate_raw_candidate_plan_schema(raw_candidate_plan)
-    signature_order = feature_block_signature_order_from_raw_candidate_plan(raw_candidate_plan)
-    selected_signature_ids = tuple(signature_order.signature_ids)
-    selected_signature_id_set = set(selected_signature_ids)
-
-    signatures_table = _read_arrow_ipc_table(pa, paths["signatures"])
-    validate_arrow_schema(signatures_table.schema, table_name="signatures")
-    signatures_table = _filter_arrow_table_by_values(pa, pc, signatures_table, "signature_id", selected_signature_ids)
-    signatures_by_id = _arrow_rows_by_unique_key(
-        signatures_table.to_pylist(),
-        table_name="signatures",
-        key_column="signature_id",
-    )
-    missing_signatures = [
-        signature_id for signature_id in selected_signature_ids if signature_id not in signatures_by_id
-    ]
-    if missing_signatures:
-        raise ValueError(f"Arrow signatures are missing raw-plan signature ids: {missing_signatures[:10]}")
-    signature_rows = tuple(
-        _feature_block_signature_from_arrow_row(signature_id, signatures_by_id[signature_id])
-        for signature_id in selected_signature_ids
-    )
-
-    paper_ids = tuple(dict.fromkeys(row.paper_id for row in signature_rows))
-    papers_table = _read_arrow_ipc_table(pa, paths["papers"])
-    validate_arrow_schema(papers_table.schema, table_name="papers")
-    papers_table = _filter_arrow_table_by_values(pa, pc, papers_table, "paper_id", paper_ids)
-    papers_by_id = _arrow_rows_by_unique_key(
-        papers_table.to_pylist(),
-        table_name="papers",
-        key_column="paper_id",
-    )
-    missing_paper_ids = [paper_id for paper_id in paper_ids if paper_id not in papers_by_id]
-    if missing_paper_ids:
-        raise ValueError(f"Arrow papers are missing signature paper_ids: {missing_paper_ids[:10]}")
-    paper_rows = tuple(_feature_block_paper_from_arrow_row(paper_id, papers_by_id[paper_id]) for paper_id in paper_ids)
-
-    paper_author_rows: tuple[FeatureBlockPaperAuthor, ...] = ()
-    paper_authors_path = paths.get("paper_authors")
-    if paper_authors_path is not None:
-        paper_authors_table = _read_arrow_ipc_table(pa, paper_authors_path)
-        validate_arrow_schema(paper_authors_table.schema, table_name="paper_authors")
-        paper_authors_table = _filter_arrow_table_by_values(pa, pc, paper_authors_table, "paper_id", paper_ids)
-        paper_author_row_list: list[FeatureBlockPaperAuthor] = []
-        seen_paper_author_positions: set[tuple[str, int]] = set()
-        for row in paper_authors_table.to_pylist():
-            paper_id_value = row.get("paper_id")
-            if paper_id_value is None:
-                raise ValueError("paper_authors Arrow cannot contain null paper_id values")
-            paper_id = str(paper_id_value)
-            if not paper_id:
-                raise ValueError("paper_authors Arrow cannot contain empty paper_id values")
-            if row.get("position") is None:
-                raise ValueError("paper_authors Arrow cannot contain null position values")
-            position = int(row["position"])
-            author_name_value = row.get("author_name")
-            if author_name_value is None:
-                raise ValueError("paper_authors Arrow cannot contain null author_name values")
-            author_name = str(author_name_value)
-            key = (paper_id, position)
-            if key in seen_paper_author_positions:
-                raise ValueError(f"paper_authors Arrow contains duplicate (paper_id, position): {key!r}")
-            seen_paper_author_positions.add(key)
-            paper_author_row_list.append(
-                FeatureBlockPaperAuthor(
-                    paper_id=paper_id,
-                    position=position,
-                    author_name=author_name,
-                )
-            )
-        paper_author_rows = tuple(paper_author_row_list)
-
-    component_members = raw_candidate_plan.get("component_members")
-    if not isinstance(component_members, Mapping):
-        raise ValueError("raw candidate plan must include component_members")
-    require_pairs = tuple(
-        (str(signature_id), str(component_key))
-        for component_key, members in component_members.items()
-        for signature_id in members
-        if str(signature_id) in selected_signature_id_set
-    )
-    disallow_pairs: tuple[tuple[str, str], ...] = ()
-    disallow_path = paths.get("cluster_seed_disallows")
-    if disallow_path is not None:
-        disallow_rows = read_cluster_seed_disallows_arrow(Path(disallow_path))
-        disallow_pairs = filter_cluster_seed_disallows_for_signature_subset(
-            disallow_rows,
-            selected_signature_id_set,
-        )
-
-    specter_paper_ids: tuple[str, ...] = ()
-    specter_embeddings: np.ndarray | None = None
-    specter_path = paths.get("specter")
-    if include_specter and specter_path is not None:
-        specter_table = _read_arrow_ipc_table(pa, specter_path)
-        validate_arrow_schema(specter_table.schema, table_name="specter")
-        specter_table = _filter_arrow_table_by_values(pa, pc, specter_table, "paper_id", paper_ids)
-        specter_by_id = _arrow_rows_by_unique_key(
-            specter_table.to_pylist(),
-            table_name="specter",
-            key_column="paper_id",
-        )
-        specter_payload: dict[str, Any] = {}
-        for paper_id in paper_ids:
-            row = specter_by_id.get(paper_id)
-            if row is None:
-                continue
-            embedding = row.get("embedding")
-            if embedding is None:
-                raise ValueError("specter Arrow cannot contain null embedding values")
-            specter_payload[paper_id] = embedding
-        specter_paper_ids, specter_embeddings = _feature_block_specter_from_mapping(paper_ids, specter_payload)
-    return FeatureBlock(
-        signatures=signature_rows,
-        papers=paper_rows,
-        paper_authors=paper_author_rows,
-        cluster_seeds_require=require_pairs,
-        cluster_seeds_disallow=disallow_pairs,
-        query_signature_ids=signature_order.query_signature_ids,
-        specter_paper_ids=specter_paper_ids,
-        specter_embeddings=specter_embeddings,
-    )
-
-
-def _read_arrow_ipc_table(pa: Any, path: Any) -> Any:
-    with pa.memory_map(str(path), "r") as source:
-        return pa.ipc.open_file(source).read_all()
-
-
-def _filter_arrow_table_by_values(pa: Any, pc: Any, table: Any, column: str, values: Sequence[str]) -> Any:
-    value_list = [str(value) for value in values]
-    if not value_list:
-        return table.slice(0, 0)
-    value_set = pa.array(value_list, type=table[column].type)
-    cast_values = value_set.to_pylist()
-    if any(value is None for value in cast_values) or len(set(cast_values)) != len(value_list):
-        raise ValueError(f"{column} filter values are not one-to-one after casting to Arrow type {table[column].type}")
-    mask = pc.is_in(table[column], value_set=value_set)
-    return table.filter(mask)
-
-
-def _feature_block_signature_from_arrow_row(signature_id: str, row: Mapping[str, Any]) -> FeatureBlockSignature:
-    return FeatureBlockSignature(
-        signature_id=str(row.get("signature_id", signature_id)),
-        paper_id=str(row["paper_id"]),
-        author_first=_optional_str(row.get("author_first")),
-        author_middle=_optional_str(row.get("author_middle")),
-        author_last=_optional_str(row.get("author_last")),
-        author_suffix=_optional_str(row.get("author_suffix")),
-        author_affiliations=_strict_string_tuple(
-            row.get("author_affiliations"),
-            field_name="signatures.author_affiliations",
-        ),
-        author_orcid=_optional_str(row.get("author_orcid")),
-        author_position=_optional_int(row.get("author_position"), field_name="signatures.author_position"),
-        author_block=_optional_str(row.get("author_block")),
-        author_email=_optional_str(row.get("author_email")),
-        source_author_ids=_strict_string_tuple(
-            row.get("source_author_ids"),
-            field_name="signatures.source_author_ids",
-            skip_none=True,
-        ),
-    )
-
-
-def _feature_block_paper_from_arrow_row(paper_id: str, row: Mapping[str, Any]) -> FeatureBlockPaper:
-    is_reliable = _optional_bool(row.get("is_reliable"), field_name="papers.is_reliable")
-    return FeatureBlockPaper(
-        paper_id=str(row.get("paper_id", paper_id)),
-        title=_optional_str(row.get("title")),
-        abstract=_optional_str(row.get("abstract")),
-        venue=_optional_str(row.get("venue")),
-        journal_name=_optional_str(row.get("journal_name")),
-        year=_optional_int(row.get("year"), field_name="papers.year"),
-        predicted_language=_optional_str(row.get("predicted_language")),
-        is_reliable=is_reliable,
-        language_reliability=row.get("language_reliability"),
-    )

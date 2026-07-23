@@ -11,7 +11,7 @@ pub(crate) struct RustFeaturizer {
     cluster_seeds_require: HashMap<String, ClusterId>,
     cluster_seed_require_value: f64,
     cluster_seed_disallow_value: f64,
-    name_counts_provenance_binding: Option<NameCountsProvenanceBinding>,
+    name_counts_manifest_sha256: Option<String>,
     cluster_seeds_disallow_index: OnceLock<HashMap<String, HashSet<String>>>,
 }
 
@@ -1286,21 +1286,14 @@ impl RustFeaturizer {
             cluster_seeds_require,
             cluster_seed_require_value,
             cluster_seed_disallow_value,
-            name_counts_provenance_binding: raw_name_counts.provenance_binding().cloned(),
+            name_counts_manifest_sha256: raw_name_counts.manifest_sha256().map(str::to_owned),
             cluster_seeds_disallow_index: OnceLock::new(),
         })
     }
 
     #[getter]
-    fn name_counts_provenance_binding(&self) -> Option<(String, String, String, String)> {
-        self.name_counts_provenance_binding.as_ref().map(|binding| {
-            (
-                binding.generation_id.clone(),
-                binding.pickle_sha256.clone(),
-                binding.source_snapshot_id.clone(),
-                binding.selected_rows_sha256.clone(),
-            )
-        })
+    fn name_counts_manifest_sha256(&self) -> Option<&str> {
+        self.name_counts_manifest_sha256.as_deref()
     }
 
     fn update_cluster_seeds(

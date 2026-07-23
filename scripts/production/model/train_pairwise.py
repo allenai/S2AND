@@ -9,11 +9,13 @@ complete model into a separate, previously nonexistent directory.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
-from s2and.feature_cache import build_and_cached_featurize  # noqa: E402
+from s2and.feature_cache import cached_featurize  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
     DEFAULT_NAMELESS_FEATURE_GROUPS,
@@ -50,6 +52,66 @@ DEFAULT_VAL_TEST_SIZE = 10_000
 DEFAULT_N_ITER = 50
 DEFAULT_N_JOBS = 25
 DEFAULT_CHUNK_SIZE = 100
+
+
+def _sha256_file(path: str | os.PathLike[str]) -> str:
+    with open(path, "rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def _feature_source_hashes(
+    *,
+    signatures_path: str | os.PathLike[str],
+    papers_path: str | os.PathLike[str],
+    specter_path: str | os.PathLike[str],
+) -> dict[str, str]:
+    return {
+        "signatures_sha256": _sha256_file(signatures_path),
+        "papers_sha256": _sha256_file(papers_path),
+        "specter_embeddings_sha256": _sha256_file(specter_path),
+    }
+
+
+def _feature_snapshot_source_key(
+    dataset: ANDData,
+    *,
+    source_hashes: Mapping[str, str],
+    name_tuples_data_sha256: str,
+) -> dict[str, object]:
+    name_counts_provenance = dataset.name_counts_provenance
+    if name_counts_provenance is None:
+        raise RuntimeError(f"Production training dataset {dataset.name!r} has no name-count manifest")
+    return {
+        **source_hashes,
+        "name_tuples_data_sha256": name_tuples_data_sha256,
+        "name_counts_manifest_sha256": name_counts_provenance["manifest_sha256"],
+        "normalization_version": dataset.normalization_version,
+    }
+
+
+def _build_cacheable_anddata(
+    anddata_kwargs: dict[str, Any],
+    *,
+    name_tuples_data_sha256: str,
+) -> tuple[ANDData, dict[str, object]]:
+    """Load a dataset only if its cache-keyed source files remain unchanged."""
+
+    source_paths = {
+        "signatures_path": anddata_kwargs["signatures"],
+        "papers_path": anddata_kwargs["papers"],
+        "specter_path": anddata_kwargs["specter_embeddings"],
+    }
+    before = _feature_source_hashes(**source_paths)
+    dataset = ANDData(**anddata_kwargs)
+    after = _feature_source_hashes(**source_paths)
+    if before != after:
+        changed = ", ".join(key.removesuffix("_sha256") for key in before if before[key] != after[key])
+        raise RuntimeError(f"Production training source files changed while loading ANDData: {changed}")
+    return dataset, _feature_snapshot_source_key(
+        dataset,
+        source_hashes=before,
+        name_tuples_data_sha256=name_tuples_data_sha256,
+    )
 
 
 def _search_space() -> dict[str, Any]:
@@ -216,8 +278,18 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             "preprocess": True,
         }
 
+        source_key = None
         if args.feature_cache_dir is None:
             anddata = ANDData(**anddata_kwargs)
+        else:
+            anddata, source_key = _build_cacheable_anddata(
+                anddata_kwargs,
+                name_tuples_data_sha256=canonical_name_tuples.data_sha256,
+            )
+        if anddata.name_tuples != canonical_name_tuples.pairs:
+            raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
+
+        if source_key is None:
             train, val, test = featurize(
                 anddata,
                 featurizer_info,
@@ -227,9 +299,10 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 nan_value=nan_value,
             )
         else:
-            anddata, (train, val, test) = build_and_cached_featurize(
-                anddata_kwargs,
+            train, val, test = cached_featurize(
+                anddata,
                 featurizer_info,
+                source_key=source_key,
                 cache_dir=args.feature_cache_dir,
                 n_jobs=int(args.n_jobs),
                 chunk_size=int(args.chunk_size),
@@ -237,8 +310,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 nan_value=nan_value,
             )
 
-        if anddata.name_tuples != canonical_name_tuples.pairs:
-            raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
         if train is None or val is None or test is None:
             raise RuntimeError(f"Expected train/val/test features for {dataset_name}")
         X_train, y_train, nameless_X_train = train

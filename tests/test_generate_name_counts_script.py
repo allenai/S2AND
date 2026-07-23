@@ -2,23 +2,42 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import shutil
-import sys
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
 from s2and.consts import NORMALIZATION_VERSION
-from s2and.name_counts_manifest import ValidatedNameCountsManifest
+from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 from scripts.production.counts import generate_name_counts
 
 
-def test_import_is_side_effect_free_without_internal_pys2(tmp_path: Path) -> None:
-    assert not (tmp_path / "name_counts").exists()
-    assert callable(generate_name_counts.main)
+def _fixture(path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            [
+                {"first_name": "Abd-al", "last_name": "Sattar", "count": 4},
+                {"first_name": "Abd al", "last_name": "Sattar", "count": 3},
+                {"first_name": "", "last_name": "", "count": 2},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _run_fixture(tmp_path: Path, *extra: str) -> int:
+    return generate_name_counts.main(
+        [
+            "--fixture-input",
+            str(_fixture(tmp_path / "rows.json")),
+            "--source-snapshot-id",
+            "fixture-2026-07-09",
+            "--output-dir",
+            str(tmp_path),
+            *extra,
+        ]
+    )
 
 
 def test_dry_run_does_not_query_or_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -27,6 +46,7 @@ def test_dry_run_does_not_query_or_write(monkeypatch: pytest.MonkeyPatch, tmp_pa
         "_query_rows",
         lambda _limit: pytest.fail("dry-run must not query"),
     )
+
     assert (
         generate_name_counts.main(
             [
@@ -40,362 +60,52 @@ def test_dry_run_does_not_query_or_write(monkeypatch: pytest.MonkeyPatch, tmp_pa
         )
         == 0
     )
-    assert not (tmp_path / "name_counts").exists()
+    assert not (tmp_path / "name_counts_index").exists()
 
 
-def test_fixture_generation_publishes_data_before_manifest(tmp_path: Path) -> None:
-    rows = [
-        {"first_name": "Abd-al", "last_name": "Sattar", "count": 4},
-        {"first_name": "Abd al", "last_name": "Sattar", "count": 3},
-        {"first_name": "", "last_name": "", "count": 2},
-    ]
-    fixture_path = tmp_path / "rows.json"
-    fixture_path.write_text(json.dumps(rows), encoding="utf-8")
+def test_fixture_publishes_only_native_index_with_audit_provenance(tmp_path: Path) -> None:
+    assert _run_fixture(tmp_path) == 0
 
-    assert (
-        generate_name_counts.main(
-            [
-                "--fixture-input",
-                str(fixture_path),
-                "--source-snapshot-id",
-                "fixture-2026-07-09",
-                "--output-dir",
-                str(tmp_path),
-            ]
-        )
-        == 0
-    )
-
-    root = tmp_path / "name_counts"
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    pickle_path = root / manifest["files"]["pickle"]
-    provenance_path = root / manifest["files"]["provenance"]
-    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    assert pickle_path.is_file()
-    assert provenance_path.is_file()
+    manifest = json.loads((tmp_path / "name_counts_index" / "manifest.json").read_text(encoding="utf-8"))
+    provenance = manifest["source_provenance"]
     assert manifest["normalization_version"] == NORMALIZATION_VERSION
-    assert provenance["generation_id"] == manifest["generation_id"]
-    assert hashlib.sha256(pickle_path.read_bytes()).hexdigest() == manifest["pickle_sha256"]
-    assert hashlib.sha256(provenance_path.read_bytes()).hexdigest() == manifest["provenance_sha256"]
-    assert provenance_path.stat().st_size == manifest["provenance_byte_count"]
+    assert provenance["schema_version"] == NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
+    assert provenance["source_snapshot_id"] == "fixture-2026-07-09"
     assert provenance["source_row_count"] == 3
-    assert "selected_row_count" not in provenance
-    assert len(provenance["selected_rows_sha256"]) == 64
     assert provenance["rejected_row_count"] == 1
-    assert "manifest_path" not in provenance
+    assert len(provenance["selected_rows_sha256"]) == 64
+    assert set(manifest["files"]) == {"first", "last", "first_last", "last_first_initial"}
+    assert not (tmp_path / "name_counts").exists()
+    assert not list(tmp_path.rglob("*.pickle"))
 
-    index_manifest = json.loads((tmp_path / "name_counts_index" / "manifest.json").read_text(encoding="utf-8"))
-    assert index_manifest["source_provenance"] == provenance
 
-    from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
-
-    mappings, _row_metrics = generate_name_counts.build_name_count_dicts(
-        generate_name_counts._fixture_rows(fixture_path, None)
-    )
-    _index_path, reuse_metrics = write_name_counts_index(tmp_path, mappings, provenance)
-    assert reuse_metrics == {"reused": True}
+def test_existing_publication_requires_explicit_overwrite(tmp_path: Path) -> None:
+    _run_fixture(tmp_path)
 
     with pytest.raises(FileExistsError, match="--overwrite"):
-        generate_name_counts.main(
-            [
-                "--fixture-input",
-                str(fixture_path),
-                "--source-snapshot-id",
-                "fixture-second",
-                "--output-dir",
-                str(tmp_path),
-            ]
-        )
+        _run_fixture(tmp_path)
+
+    assert _run_fixture(tmp_path, "--overwrite") == 0
 
 
-def test_fixture_limit_is_bounded_and_reported(tmp_path: Path) -> None:
-    fixture_path = tmp_path / "rows.json"
-    fixture_path.write_text(
-        json.dumps(
-            [
-                {"first_name": "A", "last_name": "One", "count": 2},
-                {"first_name": "B", "last_name": "Two", "count": 2},
-            ]
-        ),
-        encoding="utf-8",
-    )
-    generate_name_counts.main(
+def test_fixture_limit_is_applied_before_aggregation(tmp_path: Path) -> None:
+    assert _run_fixture(tmp_path, "--limit", "1") == 0
+
+    manifest = json.loads((tmp_path / "name_counts_index" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_provenance"]["source_row_count"] == 1
+
+
+def test_build_name_count_dicts_preserves_canonical_counts() -> None:
+    mappings, metrics = generate_name_counts.build_name_count_dicts(
         [
-            "--fixture-input",
-            str(fixture_path),
-            "--source-snapshot-id",
-            "fixture-limit",
-            "--limit",
-            "1",
-            "--output-dir",
-            str(tmp_path),
+            ("Abd-al", "Sattar", 4),
+            ("abd-al", "sattar", 3),
         ]
     )
-    manifest = json.loads((tmp_path / "name_counts" / "manifest.json").read_text(encoding="utf-8"))
-    provenance = json.loads((tmp_path / "name_counts" / manifest["files"]["provenance"]).read_text(encoding="utf-8"))
-    assert provenance["source_row_count"] == 1
 
-
-def test_fixture_names_may_contain_the_legacy_delimiter(tmp_path: Path) -> None:
-    fixture_path = tmp_path / "rows.json"
-    fixture_path.write_text(
-        json.dumps([{"first_name": "Ana|||Maria", "last_name": "Lopez", "count": 2}]),
-        encoding="utf-8",
-    )
-
-    mappings, row_metrics = generate_name_counts.build_name_count_dicts(
-        generate_name_counts._fixture_rows(fixture_path, None)
-    )
-
-    first_counts, last_counts, first_last_counts, last_first_initial_counts = mappings
-    assert first_counts == {"ana": 2}
-    assert last_counts == {"lopez": 2}
-    assert first_last_counts == {"ana lopez": 2}
-    assert last_first_initial_counts == {"lopez a": 2}
-    assert row_metrics["source_row_count"] == 1
-    assert row_metrics["rejected_row_count"] == 0
-
-    _, differently_partitioned_metrics = generate_name_counts.build_name_count_dicts([("Ana", "Maria|||Lopez", 2)])
-    assert row_metrics["selected_rows_sha256"] != differently_partitioned_metrics["selected_rows_sha256"]
-
-
-def test_warehouse_rows_keep_first_and_last_in_distinct_columns(monkeypatch: pytest.MonkeyPatch) -> None:
-    queries: list[str] = []
-    fake_pys2 = ModuleType("pys2")
-
-    def evaluate(query: str) -> dict[str, list[str] | list[int]]:
-        queries.append(query)
-        return {
-            "first_name": ["Ana|||Maria"],
-            "last_name": ["Lopez"],
-            "count": [2],
-        }
-
-    monkeypatch.setattr(fake_pys2, "_evaluate_redshift_query", evaluate, raising=False)
-    monkeypatch.setitem(sys.modules, "pys2", fake_pys2)
-
-    assert list(generate_name_counts._query_rows(None)) == [("Ana|||Maria", "Lopez", 2)]
-    assert "|||" not in queries[0]
-    assert "order by first_name, last_name" in queries[0]
-
-
-@pytest.mark.parametrize("field", ["first_name", "last_name"])
-def test_fixture_rejects_non_string_name_fields(tmp_path: Path, field: str) -> None:
-    row: dict[str, object] = {"first_name": "Ana", "last_name": "Lopez", "count": 2}
-    row[field] = None
-    fixture_path = tmp_path / "rows.json"
-    fixture_path.write_text(json.dumps([row]), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="names must be strings"):
-        list(generate_name_counts._fixture_rows(fixture_path, None))
-
-
-def test_failed_manifest_replace_removes_only_the_uncommitted_generation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
-    metrics = {
-        "source_row_count": 1,
-        "selected_rows_sha256": "b" * 64,
-        "rejected_row_count": 0,
-    }
-    generate_name_counts.publish_name_counts(
-        mappings,
-        output_dir=tmp_path,
-        source_snapshot_id="first",
-        source_kind="fixture",
-        query_digest="a" * 64,
-        row_metrics=metrics,
-        overwrite=False,
-    )
-    root = tmp_path / "name_counts"
-    original_manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    original_replace = Path.replace
-
-    def fail_manifest_replace(path: Path, target: Path) -> Path:
-        if Path(target) == root / "manifest.json" and path.name.startswith(".manifest."):
-            raise OSError("injected manifest replace failure")
-        return original_replace(path, target)
-
-    monkeypatch.setattr(Path, "replace", fail_manifest_replace)
-    with pytest.raises(OSError, match="injected manifest replace failure"):
-        generate_name_counts.publish_name_counts(
-            mappings,
-            output_dir=tmp_path,
-            source_snapshot_id="second",
-            source_kind="fixture",
-            query_digest="a" * 64,
-            row_metrics=metrics,
-            overwrite=True,
-        )
-
-    assert json.loads((root / "manifest.json").read_text(encoding="utf-8")) == original_manifest
-    generations = [path for path in (root / "generations").iterdir() if path.is_dir()]
-    assert [path.name for path in generations] == [original_manifest["generation_id"]]
-
-
-def test_committed_generation_is_retained_after_a_superseding_manifest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
-    metrics = {
-        "source_row_count": 1,
-        "selected_rows_sha256": "b" * 64,
-        "rejected_row_count": 0,
-    }
-    root = tmp_path / "name_counts"
-    manifest_path = tmp_path / "name_counts" / "manifest.json"
-    original_replace = Path.replace
-    committed_generation_id: str | None = None
-    superseding_generation_id = "superseding"
-
-    def replace_then_supersede(path: Path, target: str | Path) -> Path:
-        nonlocal committed_generation_id
-        result = original_replace(path, target)
-        if Path(target) != manifest_path or not path.name.startswith(".manifest."):
-            return result
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        committed_generation_id = manifest["generation_id"]
-        shutil.copytree(
-            root / "generations" / committed_generation_id,
-            root / "generations" / superseding_generation_id,
-        )
-        manifest["generation_id"] = superseding_generation_id
-        for key, relative_path in manifest["files"].items():
-            manifest["files"][key] = f"generations/{superseding_generation_id}/{Path(relative_path).name}"
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        return result
-
-    monkeypatch.setattr(Path, "replace", replace_then_supersede)
-    generate_name_counts.publish_name_counts(
-        mappings,
-        output_dir=tmp_path,
-        source_snapshot_id="fixture",
-        source_kind="fixture",
-        query_digest="a" * 64,
-        row_metrics=metrics,
-        overwrite=False,
-    )
-
-    assert committed_generation_id is not None
-    assert (root / "generations" / committed_generation_id).is_dir()
-    assert (root / "generations" / superseding_generation_id).is_dir()
-
-
-def test_failed_publication_cleans_uncommitted_generation_without_reading_manifest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "name_counts"
-    root.mkdir()
-    manifest_path = root / "manifest.json"
-    manifest_path.write_text("{", encoding="utf-8")
-    original_replace = Path.replace
-
-    def fail_manifest_replace(path: Path, target: Path) -> Path:
-        if Path(target) == manifest_path and path.name.startswith(".manifest."):
-            raise OSError("injected primary replace failure")
-        return original_replace(path, target)
-
-    monkeypatch.setattr(Path, "replace", fail_manifest_replace)
-    with pytest.raises(OSError, match="injected primary replace failure") as exc_info:
-        generate_name_counts.publish_name_counts(
-            ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1}),
-            output_dir=tmp_path,
-            source_snapshot_id="fixture",
-            source_kind="fixture",
-            query_digest="a" * 64,
-            row_metrics={
-                "source_row_count": 1,
-                "selected_rows_sha256": "b" * 64,
-                "rejected_row_count": 0,
-            },
-            overwrite=True,
-        )
-
-    assert not getattr(exc_info.value, "__notes__", [])
-    assert list((root / "generations").iterdir()) == []
-
-
-def test_crash_between_counts_and_index_publication_fails_closed_and_repairs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A torn publish (counts=new, index=stale) is detected at binding time and repaired by rerun."""
-
-    import s2and.incremental_linking.feature_block_arrow as feature_block_arrow
-    from s2and.name_count_binding import NameCountsBinding
-
-    fixture_path = tmp_path / "rows.json"
-    fixture_path.write_text(
-        json.dumps([{"first_name": "Ada", "last_name": "Lovelace", "count": 4}]),
-        encoding="utf-8",
-    )
-    root = tmp_path / "name_counts"
-    index_dir = tmp_path / "name_counts_index"
-
-    def index_binding() -> NameCountsBinding:
-        manifest = ValidatedNameCountsManifest.load(index_dir, context="torn-publish test")
-        return NameCountsBinding.from_provenance(
-            manifest.source_provenance,
-            context="torn-publish test source_provenance",
-        )
-
-    def run(snapshot_id: str, *, overwrite: bool) -> None:
-        args = [
-            "--fixture-input",
-            str(fixture_path),
-            "--source-snapshot-id",
-            snapshot_id,
-            "--output-dir",
-            str(tmp_path),
-        ]
-        if overwrite:
-            args.append("--overwrite")
-        assert generate_name_counts.main(args) == 0
-
-    run("fixture-gen-a", overwrite=False)
-    manifest_a = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    index_binding_a = index_binding()
-    assert index_binding_a.generation_id == manifest_a["generation_id"]
-
-    real_write_index = feature_block_arrow.write_name_counts_index
-
-    def crash_before_index(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("injected crash between counts and index publication")
-
-    monkeypatch.setattr(feature_block_arrow, "write_name_counts_index", crash_before_index)
-    with pytest.raises(RuntimeError, match="injected crash between counts and index publication"):
-        generate_name_counts.main(
-            [
-                "--fixture-input",
-                str(fixture_path),
-                "--source-snapshot-id",
-                "fixture-gen-b",
-                "--output-dir",
-                str(tmp_path),
-                "--overwrite",
-            ]
-        )
-
-    manifest_b = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest_b["generation_id"] != manifest_a["generation_id"]
-    stale_index_binding = index_binding()
-    assert stale_index_binding == index_binding_a
-
-    provenance_b = json.loads((root / manifest_b["files"]["provenance"]).read_text(encoding="utf-8"))
-    expected_binding = NameCountsBinding.from_provenance(provenance_b, context="torn-publish test")
-    with pytest.raises(ValueError, match="name-count binding mismatch"):
-        expected_binding.require_matches(
-            stale_index_binding,
-            context="torn-publish test",
-            source=str(index_dir),
-        )
-
-    monkeypatch.setattr(feature_block_arrow, "write_name_counts_index", real_write_index)
-    run("fixture-gen-b", overwrite=True)
-    manifest_repaired = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    repaired_binding = index_binding()
-    assert repaired_binding.generation_id == manifest_repaired["generation_id"]
+    first, last, first_last, last_first_initial = mappings
+    assert first["abd al"] == 7
+    assert last["sattar"] == 7
+    assert first_last["abd al sattar"] == 7
+    assert last_first_initial["sattar a"] == 7
+    assert metrics["source_row_count"] == 2

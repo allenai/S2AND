@@ -128,7 +128,6 @@ def _write_synthetic_bundle(root: Path) -> Path:
 
     feature_count = len(promoted_linker_feature_columns())
     linker = _fit_binary_classifier(feature_count, seed=103)
-    fixture = np.zeros((2, feature_count), dtype=np.float32)
     gate_config = logistic_gate_config(
         feature_names=("chosen_probability",),
         weights=np.asarray([[0.0, 0.0, 0.0]], dtype=np.float64),
@@ -140,7 +139,6 @@ def _write_synthetic_bundle(root: Path) -> Path:
     save_incremental_linking_artifact(
         linker,
         linker_dir,
-        prediction_fixture_matrix=fixture,
         gate_config=gate_config,
         target_spec={},
         pairwise_bundle_binding=pairwise_bundle_binding(pairwise_bundle_dir),

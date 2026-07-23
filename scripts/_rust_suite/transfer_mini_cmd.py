@@ -557,12 +557,9 @@ def _single_run(
             dt["n_test_pairs"] = int(len(y_test))
             rust_build_count: int | None = None
             if backend == "rust":
-                try:
-                    from s2and import feature_port as _feature_port
+                from s2and import feature_port as _feature_port
 
-                    rust_build_count = int(_feature_port._rust_featurizer_build_count(anddata))
-                except Exception:
-                    rust_build_count = None
+                rust_build_count = int(_feature_port._rust_featurizer_build_count(anddata))
             dt["rust_featurizer_build_count"] = rust_build_count
 
             datasets[dataset_name] = {
@@ -587,8 +584,10 @@ def _single_run(
             try:
                 from s2and import feature_port as _feature_port
 
-                evicted = int(_feature_port.clear_rust_featurizer_cache())
-                print(f"  [{run_label}] Cleared Rust featurizer cache entries: {evicted}")
+                evicted = sum(
+                    int(_feature_port.evict_rust_featurizer(payload["anddata"])) for payload in datasets.values()
+                )
+                print(f"  [{run_label}] Evicted Rust featurizers: {evicted}")
                 stage_timings["rust_cleanup_evicted_entries"] = evicted
             except Exception as exc:
                 print(f"  [{run_label}] Rust featurizer cleanup skipped: {exc!r}")

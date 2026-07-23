@@ -42,8 +42,6 @@ from s2and.incremental_linking.feature_block_contract import (
     FeatureBlockPaperAuthor,
     FeatureBlockSignature,
     FeatureBlockSignatureOrder,
-    feature_block_for_signature_order,
-    feature_block_signature_order_from_raw_candidate_plan,
     normalize_cluster_seed_disallow_pairs,
 )
 
@@ -65,8 +63,6 @@ __all__ = [
     "arrow_ipc_physical_layout",
     "cluster_seed_disallows_from_arrow_paths",
     "cluster_seed_disallows_path_from_arrow_paths",
-    "feature_block_for_signature_order",
-    "feature_block_signature_order_from_raw_candidate_plan",
     "normalize_cluster_seed_disallow_pairs",
     "raw_planner_arrow_physical_layout",
     "read_altered_cluster_signatures_arrow",

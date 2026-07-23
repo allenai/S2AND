@@ -86,63 +86,11 @@ class RustBatchChunkPlan:
 
 @dataclass(frozen=True)
 class PromotedPhaseALimits:
-    total_ram_bytes: int
-    total_ram_source: str
-    current_rss_bytes: int
-    current_rss_source: str
-    available_bytes: int
-    effective_available_fraction: float
-    safety_margin_bytes: int
-    stage_budget_fraction: float
-    stage_budget_bytes: int
-    query_count: int
-    max_query_batch_size: int
+    """The three Phase-A values consumed outside the memory calculation."""
+
     query_batch_size: int
-    component_count: int
-    retrieval_top_k: int
-    candidate_rows_per_query: int
-    conservative_pairs_per_query: int
-    hard_query_batch_size: int
-    observed_query_count: int
-    observed_candidate_rows_per_query: int
-    observed_pairs_per_query: int
-    observed_safety_multiplier: float
-    operational_candidate_rows_per_query: int
-    operational_pairs_per_query: int
-    operational_estimate_source: str
-    max_component_size: int
-    predicted_candidate_rows_per_batch: int
-    predicted_pairs_per_batch: int
-    hard_predicted_candidate_rows_per_batch: int
-    hard_predicted_pairs_per_batch: int
-    retrieval_pair_bytes: int
-    retrieval_row_bytes: int
-    pair_label_bytes: int
-    distance_row_bytes: int
-    final_matrix_feature_count: int
-    pairwise_matrix_feature_count: int
-    aggregate_feature_count: int
-    fixed_overhead_bytes: int
-    predicted_retrieval_pair_arrays_bytes: int
-    predicted_retrieval_row_bytes: int
-    predicted_pair_label_bytes: int
-    predicted_aggregate_bytes: int
-    predicted_distance_row_bytes: int
-    predicted_final_matrix_bytes: int
-    predicted_fixed_overhead_bytes: int
-    predicted_persistent_bytes: int
-    predicted_pair_chunk_bytes: int
     predicted_peak_delta_bytes: int
     predicted_peak_rss_bytes: int
-    pair_chunk_pairs: int
-    pair_chunk_count: int
-    pair_chunk_stage_budget_bytes: int
-    single_query_predicted_persistent_bytes: int
-    predicted_scorer_full_input_bytes: int = 0
-    predicted_scorer_persistent_output_bytes: int = 0
-    predicted_scorer_chunk_rows: int = 0
-    predicted_scorer_chunk_input_bytes: int = 0
-    predicted_scorer_chunk_output_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -827,30 +775,6 @@ def summarize_promoted_component_sizes(
     )
 
 
-def compute_promoted_phase_a_window_query_limit(
-    limits: PromotedPhaseALimits,
-    *,
-    max_window_query_count: int,
-) -> int:
-    """Size a reuse window as one scoring batch plus resident raw payload.
-
-    The active scoring batch already reserves its complete Phase A peak in
-    ``limits``. Additional window queries retain only raw-plan and featurizer
-    payload, represented by the calibrated retrieval pair and row widths.
-    """
-
-    max_window = max(1, int(max_window_query_count))
-    scoring_batch_size = max(1, min(max_window, int(limits.query_batch_size or 1)))
-    raw_payload_bytes_per_query = int(limits.conservative_pairs_per_query) * int(limits.retrieval_pair_bytes) + int(
-        limits.candidate_rows_per_query
-    ) * int(limits.retrieval_row_bytes)
-    if raw_payload_bytes_per_query <= 0:
-        return max_window
-    headroom_bytes = max(0, int(limits.stage_budget_bytes) - int(limits.predicted_peak_delta_bytes))
-    additional_queries = headroom_bytes // raw_payload_bytes_per_query
-    return min(max_window, scoring_batch_size + int(additional_queries))
-
-
 def compute_promoted_phase_a_limits(
     *,
     query_count: int,
@@ -868,14 +792,10 @@ def compute_promoted_phase_a_limits(
     pair_label_bytes: int = PROMOTED_PHASE_A_PAIR_LABEL_BYTES,
     distance_row_bytes: int = PROMOTED_PHASE_A_DISTANCE_ROW_BYTES,
     fixed_overhead_bytes: int = PROMOTED_PHASE_A_FIXED_OVERHEAD_BYTES,
-    observed_query_count: int = 0,
-    observed_candidate_rows_per_query: int | None = None,
-    observed_pairs_per_query: int | None = None,
     candidate_rows_per_query_floor: int | None = None,
     pairs_per_query_floor: int | None = None,
     candidate_rows_total_floor: int | None = None,
     pairs_total_floor: int | None = None,
-    observed_safety_multiplier: float = 2.0,
     retrieval_payload_resident: bool = False,
     detect_cgroup_fn: Callable[[], tuple[int | None, str]] | None = None,
     detect_total_fn: Callable[[], tuple[int | None, str]] | None = None,
@@ -912,13 +832,6 @@ def compute_promoted_phase_a_limits(
     )
     component_count = component_summary.component_count
     top_k_candidate_rows_per_query, top_k_pairs_per_query = component_summary.top_k_totals(parsed_top_k)
-    max_component_size = component_summary.max_component_size
-    parsed_observed_query_count = max(0, int(observed_query_count))
-    multiplier = float(observed_safety_multiplier)
-    if not math.isfinite(multiplier) or multiplier < 1.0:
-        raise ValueError(f"observed_safety_multiplier must be finite and >= 1.0, got {observed_safety_multiplier}")
-    observed_rows = 0 if observed_candidate_rows_per_query is None else max(0, int(observed_candidate_rows_per_query))
-    observed_pairs = 0 if observed_pairs_per_query is None else max(0, int(observed_pairs_per_query))
     row_floor = 0 if candidate_rows_per_query_floor is None else max(0, int(candidate_rows_per_query_floor))
     pair_floor = 0 if pairs_per_query_floor is None else max(0, int(pairs_per_query_floor))
     row_total_floor = 0 if candidate_rows_total_floor is None else max(0, int(candidate_rows_total_floor))
@@ -935,51 +848,25 @@ def compute_promoted_phase_a_limits(
     )
     candidate_rows_per_query = min(
         component_count,
-        max(
-            top_k_candidate_rows_per_query,
-            row_floor,
-            observed_rows if parsed_observed_query_count > 0 and observed_candidate_rows_per_query is not None else 0,
-        ),
+        max(top_k_candidate_rows_per_query, row_floor),
     )
-    conservative_pairs_per_query = max(
-        top_k_pairs_per_query,
-        pair_floor,
-        observed_pairs if parsed_observed_query_count > 0 and observed_pairs_per_query is not None else 0,
+    conservative_pairs_per_query = max(top_k_pairs_per_query, pair_floor)
+    operational_candidate_rows_per_query = (
+        max(top_k_candidate_rows_per_query, row_total_per_query_floor)
+        if row_total_per_query_floor > 0
+        else candidate_rows_per_query
     )
-    if parsed_observed_query_count > 0 and observed_candidate_rows_per_query is not None:
-        observed_operational_rows = int(math.ceil(float(observed_rows) * multiplier))
-        row_floor_for_operational = row_floor if row_total_per_query_floor == 0 else row_total_per_query_floor
-        operational_candidate_rows_per_query = min(
-            candidate_rows_per_query,
-            max(row_floor_for_operational, observed_operational_rows),
-        )
-    elif row_total_per_query_floor > 0:
-        operational_candidate_rows_per_query = max(top_k_candidate_rows_per_query, row_total_per_query_floor)
-    else:
-        operational_candidate_rows_per_query = candidate_rows_per_query
-    if parsed_observed_query_count > 0 and observed_pairs_per_query is not None:
-        observed_operational_pairs = int(math.ceil(float(observed_pairs) * multiplier))
-        pair_floor_for_operational = pair_floor if pair_total_per_query_floor == 0 else pair_total_per_query_floor
-        operational_pairs_per_query = min(
-            conservative_pairs_per_query,
-            max(pair_floor_for_operational, observed_operational_pairs),
-        )
-        operational_estimate_source = "observed_probe"
-    elif (
+    operational_pairs_per_query = (
+        max(top_k_pairs_per_query, pair_total_per_query_floor)
+        if pair_total_per_query_floor > 0
+        else conservative_pairs_per_query
+    )
+    orcid_floor_exceeds_top_k = (
         row_floor > top_k_candidate_rows_per_query
         or pair_floor > top_k_pairs_per_query
         or row_total_floor > parsed_query_count * top_k_candidate_rows_per_query
         or pair_total_floor > parsed_query_count * top_k_pairs_per_query
-    ):
-        operational_pairs_per_query = (
-            max(top_k_pairs_per_query, pair_total_per_query_floor)
-            if pair_total_per_query_floor > 0
-            else conservative_pairs_per_query
-        )
-        operational_estimate_source = "orcid_fanout"
-    else:
-        operational_pairs_per_query = conservative_pairs_per_query
-        operational_estimate_source = "top_k_largest_components"
+    )
 
     snapshot = memory_snapshot_for_stage(
         total_ram_bytes=total_ram_bytes,
@@ -1028,10 +915,8 @@ def compute_promoted_phase_a_limits(
         )
     if parsed_query_count == 0:
         query_batch_size = 0
-        hard_query_batch_size = 0
     elif operational_persistent_bytes_per_query <= 0:
         query_batch_size = max_batch
-        hard_query_batch_size = max_batch
     else:
         query_batch_size, _ = compute_chunk_size(
             item_bytes=operational_persistent_bytes_per_query,
@@ -1039,49 +924,25 @@ def compute_promoted_phase_a_limits(
             fixed_overhead_bytes=int(fixed_overhead_bytes) + scorer_scratch_bytes_per_row,
             hard_limit_items=max_batch,
         )
-        hard_query_batch_size, _ = compute_chunk_size(
-            item_bytes=max(1, hard_persistent_bytes_per_query),
-            budget_bytes=stage_budget_bytes,
-            fixed_overhead_bytes=int(fixed_overhead_bytes) + scorer_scratch_bytes_per_row,
-            hard_limit_items=max_batch,
-        )
 
     predicted_candidate_rows_per_batch = int(query_batch_size) * operational_candidate_rows_per_query
     predicted_pairs_per_batch = int(query_batch_size) * operational_pairs_per_query
-    hard_predicted_candidate_rows_per_batch = int(query_batch_size) * candidate_rows_per_query
-    hard_predicted_pairs_per_batch = int(query_batch_size) * conservative_pairs_per_query
     if int(query_batch_size) == parsed_query_count:
-        if row_total_floor > 0 and str(operational_estimate_source) == "orcid_fanout":
+        if row_total_floor > 0 and orcid_floor_exceeds_top_k:
             predicted_candidate_rows_per_batch = row_total_floor
         else:
             predicted_candidate_rows_per_batch = max(predicted_candidate_rows_per_batch, row_total_floor)
-        if pair_total_floor > 0 and str(operational_estimate_source) == "orcid_fanout":
+        if pair_total_floor > 0 and orcid_floor_exceeds_top_k:
             predicted_pairs_per_batch = pair_total_floor
         else:
             predicted_pairs_per_batch = max(predicted_pairs_per_batch, pair_total_floor)
-        hard_predicted_candidate_rows_per_batch = max(hard_predicted_candidate_rows_per_batch, row_total_floor)
-        hard_predicted_pairs_per_batch = max(hard_predicted_pairs_per_batch, pair_total_floor)
-    predicted_retrieval_pair_arrays_bytes = predicted_pairs_per_batch * pending_retrieval_pair_bytes
-    predicted_retrieval_row_bytes = predicted_candidate_rows_per_batch * pending_retrieval_row_bytes
-    predicted_pair_label_bytes = predicted_pairs_per_batch * int(pair_label_bytes)
-    predicted_aggregate_bytes = predicted_candidate_rows_per_batch * parsed_aggregate_feature_count * 3 * 8
-    predicted_distance_row_bytes = predicted_candidate_rows_per_batch * int(distance_row_bytes)
-    predicted_final_matrix_bytes = predicted_candidate_rows_per_batch * parsed_final_matrix_feature_count * 4
-    predicted_fixed_overhead_bytes = int(fixed_overhead_bytes)
     predicted_persistent_bytes = (
-        predicted_retrieval_pair_arrays_bytes
-        + predicted_retrieval_row_bytes
-        + predicted_pair_label_bytes
-        + predicted_aggregate_bytes
-        + predicted_distance_row_bytes
-        + predicted_final_matrix_bytes
-        + predicted_fixed_overhead_bytes
-        + predicted_candidate_rows_per_batch * scorer_output_bytes_per_row
+        predicted_pairs_per_batch * (pending_retrieval_pair_bytes + int(pair_label_bytes))
+        + predicted_candidate_rows_per_batch * (pending_retrieval_row_bytes + row_state_bytes_per_row)
+        + int(fixed_overhead_bytes)
     )
-    predicted_scorer_full_input_bytes = predicted_candidate_rows_per_batch * scorer_input_bytes_per_row
-    predicted_scorer_persistent_output_bytes = predicted_candidate_rows_per_batch * scorer_output_bytes_per_row
     scorer_scratch_budget_bytes = max(1, stage_budget_bytes - predicted_persistent_bytes)
-    predicted_scorer_chunk_rows = (
+    scorer_chunk_rows = (
         min(
             predicted_candidate_rows_per_batch,
             max(1, scorer_scratch_budget_bytes // max(1, scorer_scratch_bytes_per_row)),
@@ -1089,8 +950,6 @@ def compute_promoted_phase_a_limits(
         if predicted_candidate_rows_per_batch > 0
         else 0
     )
-    predicted_scorer_chunk_input_bytes = predicted_scorer_chunk_rows * scorer_input_bytes_per_row
-    predicted_scorer_chunk_output_bytes = predicted_scorer_chunk_rows * scorer_output_bytes_per_row
 
     # Match s2and.incremental_linking.linker_pairwise.compute_linker_pair_chunk_plan
     # without importing the incremental-linking package from this core utility.
@@ -1109,79 +968,18 @@ def compute_promoted_phase_a_limits(
         current_rss_fn=lambda _total: (snapshot.current_rss_bytes, snapshot.current_rss_source),
         index_remap_bytes_per_pair=BORROWED_SIGNATURE_INDEX_REMAP_BYTES_PER_PAIR,
     )
-    predicted_pair_chunk_bytes = int(pair_plan.predicted_chunk_bytes)
-    predicted_scorer_transient_bytes = predicted_scorer_chunk_input_bytes + (
-        predicted_scorer_chunk_output_bytes if predicted_scorer_chunk_rows < predicted_candidate_rows_per_batch else 0
+    scorer_transient_bytes = scorer_chunk_rows * scorer_input_bytes_per_row + (
+        scorer_chunk_rows * scorer_output_bytes_per_row if scorer_chunk_rows < predicted_candidate_rows_per_batch else 0
     )
     predicted_peak_delta_bytes = predicted_persistent_bytes + max(
-        predicted_pair_chunk_bytes,
-        predicted_scorer_transient_bytes,
+        int(pair_plan.predicted_chunk_bytes),
+        scorer_transient_bytes,
     )
     predicted_peak_rss_bytes = snapshot.current_rss_bytes + predicted_peak_delta_bytes
-    pair_chunk_pairs = int(pair_plan.chunk_pairs)
-    pair_chunk_count = (
-        int((predicted_pairs_per_batch + pair_chunk_pairs - 1) // pair_chunk_pairs)
-        if predicted_pairs_per_batch > 0
-        else 0
-    )
     return PromotedPhaseALimits(
-        total_ram_bytes=snapshot.total_ram_bytes,
-        total_ram_source=snapshot.total_ram_source,
-        current_rss_bytes=snapshot.current_rss_bytes,
-        current_rss_source=snapshot.current_rss_source,
-        available_bytes=snapshot.available_bytes,
-        effective_available_fraction=snapshot.effective_available_fraction,
-        safety_margin_bytes=snapshot.safety_margin_bytes,
-        stage_budget_fraction=float(stage_budget_fraction),
-        stage_budget_bytes=stage_budget_bytes,
-        query_count=parsed_query_count,
-        max_query_batch_size=max_batch,
         query_batch_size=int(query_batch_size),
-        component_count=component_count,
-        retrieval_top_k=parsed_top_k,
-        candidate_rows_per_query=candidate_rows_per_query,
-        conservative_pairs_per_query=conservative_pairs_per_query,
-        hard_query_batch_size=int(hard_query_batch_size),
-        observed_query_count=parsed_observed_query_count,
-        observed_candidate_rows_per_query=observed_rows,
-        observed_pairs_per_query=observed_pairs,
-        observed_safety_multiplier=multiplier,
-        operational_candidate_rows_per_query=operational_candidate_rows_per_query,
-        operational_pairs_per_query=operational_pairs_per_query,
-        operational_estimate_source=operational_estimate_source,
-        max_component_size=max_component_size,
-        predicted_candidate_rows_per_batch=predicted_candidate_rows_per_batch,
-        predicted_pairs_per_batch=predicted_pairs_per_batch,
-        hard_predicted_candidate_rows_per_batch=hard_predicted_candidate_rows_per_batch,
-        hard_predicted_pairs_per_batch=hard_predicted_pairs_per_batch,
-        retrieval_pair_bytes=int(retrieval_pair_bytes),
-        retrieval_row_bytes=int(retrieval_row_bytes),
-        pair_label_bytes=int(pair_label_bytes),
-        distance_row_bytes=int(distance_row_bytes),
-        final_matrix_feature_count=parsed_final_matrix_feature_count,
-        pairwise_matrix_feature_count=parsed_pairwise_matrix_feature_count,
-        aggregate_feature_count=parsed_aggregate_feature_count,
-        fixed_overhead_bytes=int(fixed_overhead_bytes),
-        predicted_retrieval_pair_arrays_bytes=predicted_retrieval_pair_arrays_bytes,
-        predicted_retrieval_row_bytes=predicted_retrieval_row_bytes,
-        predicted_pair_label_bytes=predicted_pair_label_bytes,
-        predicted_aggregate_bytes=predicted_aggregate_bytes,
-        predicted_distance_row_bytes=predicted_distance_row_bytes,
-        predicted_final_matrix_bytes=predicted_final_matrix_bytes,
-        predicted_fixed_overhead_bytes=predicted_fixed_overhead_bytes,
-        predicted_persistent_bytes=predicted_persistent_bytes,
-        predicted_pair_chunk_bytes=predicted_pair_chunk_bytes,
         predicted_peak_delta_bytes=predicted_peak_delta_bytes,
         predicted_peak_rss_bytes=predicted_peak_rss_bytes,
-        pair_chunk_pairs=pair_chunk_pairs,
-        pair_chunk_count=pair_chunk_count,
-        pair_chunk_stage_budget_bytes=int(pair_plan.stage_budget_bytes),
-        single_query_predicted_persistent_bytes=single_query_predicted_persistent_bytes,
-        predicted_scorer_full_input_bytes=predicted_scorer_full_input_bytes,
-        predicted_scorer_persistent_output_bytes=predicted_scorer_persistent_output_bytes,
-        predicted_scorer_chunk_rows=predicted_scorer_chunk_rows,
-        predicted_scorer_chunk_input_bytes=predicted_scorer_chunk_input_bytes,
-        predicted_scorer_chunk_output_bytes=predicted_scorer_chunk_output_bytes,
     )
 
 

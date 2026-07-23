@@ -9,7 +9,6 @@ import tempfile
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from types import MappingProxyType
@@ -75,7 +74,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
         name_counts_manifest: ValidatedNameCountsManifest | None = None,
         name_counts_index: Any | None = None,
     ) -> ValidatedArrowInputs:
-        """Create an instance after a trusted internal validation or projection."""
+        """Create an instance from facts established by internal validation."""
 
         instance = object.__new__(cls)
         object.__setattr__(instance, "paths", MappingProxyType(dict(paths)))
@@ -145,34 +144,8 @@ class ValidatedArrowInputs(Mapping[str, str]):
     def _retained_native_name_counts_index(self) -> Any | None:
         """Return the exact native snapshot bound to retained manifest facts."""
 
-        manifest = self.name_counts_manifest
         index = self._name_counts_index
-        if manifest is None and index is None:
-            return None
-        if manifest is None or index is None:
-            raise RuntimeError("validated Arrow inputs lost retained name-count snapshot state")
-        if index.path != self.paths.get("name_counts_index"):
-            raise RuntimeError("retained name-count handle path does not match validated Arrow inputs")
-        if index.manifest_sha256 != manifest.manifest_sha256:
-            raise RuntimeError("retained name-count handle manifest does not match validated Arrow inputs")
-        if index.normalization_version != manifest.normalization_version:
-            raise RuntimeError("retained name-count handle normalization does not match validated Arrow inputs")
-        if index.source_provenance != manifest.source_provenance:
-            raise RuntimeError("retained name-count handle provenance does not match validated Arrow inputs")
-        native = index._native  # noqa: SLF001 - paired internal snapshot contract
-        expected_binding = (
-            manifest.source_provenance["generation_id"],
-            manifest.source_provenance["pickle_sha256"],
-            manifest.source_provenance["source_snapshot_id"],
-            manifest.source_provenance["selected_rows_sha256"],
-        )
-        if getattr(native, "manifest_sha256", None) != manifest.manifest_sha256:
-            raise RuntimeError("retained native name-count handle manifest does not match validated Arrow inputs")
-        if getattr(native, "normalization_version", None) != manifest.normalization_version:
-            raise RuntimeError("retained native name-count handle normalization does not match validated Arrow inputs")
-        if getattr(native, "name_counts_provenance_binding", None) != expected_binding:
-            raise RuntimeError("retained native name-count handle provenance does not match validated Arrow inputs")
-        return native
+        return None if index is None else index._native  # noqa: SLF001 - retained internal snapshot
 
 
 RAW_PLANNER_ARROW_BATCH_INDEX_CONTRACTS = (
@@ -233,10 +206,9 @@ _SPECTER_PATH_KEYS = frozenset(
 )
 _UNSUPPORTED_SPECTER_PATH_KEYS = frozenset({"specter2", "specter2_batch_index"})
 _RUNTIME_ARROW_GENERATION_CACHE_SIZE = 4
-_RUNTIME_ARROW_GENERATION_CACHE: OrderedDict[tuple[str, tuple[tuple[str, str], ...]], ValidatedArrowInputs] = (
-    OrderedDict()
-)
-_RUNTIME_ARROW_GENERATION_INFLIGHT: dict[tuple[str, tuple[tuple[str, str], ...]], Future[ValidatedArrowInputs]] = {}
+_RuntimeArrowGenerationCacheKey = tuple[str, tuple[tuple[str, str], ...]]
+_RUNTIME_ARROW_GENERATION_CACHE: OrderedDict[_RuntimeArrowGenerationCacheKey, ValidatedArrowInputs] = OrderedDict()
+_RUNTIME_ARROW_GENERATION_KEY_LOCKS: dict[_RuntimeArrowGenerationCacheKey, threading.Lock] = {}
 _RUNTIME_ARROW_GENERATION_CACHE_LOCK = threading.Lock()
 
 
@@ -763,16 +735,16 @@ def _validate_batch_indexes(
 
     # Local import avoids a module cycle: feature_block_arrow consumes the
     # canonical path helpers defined in this module.
-    from s2and.incremental_linking.feature_block_arrow import _validate_verified_arrow_batch_lookup_index
+    from s2and.incremental_linking.feature_block_arrow import _validate_arrow_batch_lookup_index
 
     for contract in RAW_PLANNER_ARROW_BATCH_INDEX_CONTRACTS:
         if contract.table_key not in paths:
             continue
         arrow_file = generation_files[contract.table_key]
         index_file = generation_files[contract.index_key]
-        _validate_verified_arrow_batch_lookup_index(
-            paths[contract.table_key],
-            paths[contract.index_key],
+        _validate_arrow_batch_lookup_index(
+            arrow_path=Path(paths[contract.table_key]),
+            index_path=Path(paths[contract.index_key]),
             key_column=contract.key_column,
             expected_arrow_byte_count=arrow_file.byte_count,
             expected_arrow_sha256=arrow_file.sha256,
@@ -785,7 +757,7 @@ def _validate_batch_indexes(
 def _runtime_arrow_generation_cache_key(
     paths: Mapping[str, str],
     generation_id: str,
-) -> tuple[str, tuple[tuple[str, str], ...]]:
+) -> _RuntimeArrowGenerationCacheKey:
     """Return the identity of one immutable runtime bundle projection."""
 
     return generation_id, tuple(sorted((str(key), str(value)) for key, value in paths.items()))
@@ -874,7 +846,7 @@ def _open_validated_arrow_generation(
     )
 
 
-def _open_runtime_arrow_generation_singleflight(
+def _open_runtime_arrow_generation(
     paths: Mapping[str, str],
     verified: _VerifiedArrowArtifactGeneration,
     *,
@@ -882,33 +854,23 @@ def _open_runtime_arrow_generation_singleflight(
     context: str,
     producer_hint: str,
 ) -> ValidatedArrowInputs:
-    """Open one runtime generation once while concurrent callers share the result."""
+    """Open and cache one runtime generation."""
 
     cache_key = _runtime_arrow_generation_cache_key(paths, verified.generation_id)
-    while True:
+    with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
+        cached = _RUNTIME_ARROW_GENERATION_CACHE.get(cache_key)
+        if cached is not None:
+            _RUNTIME_ARROW_GENERATION_CACHE.move_to_end(cache_key)
+            return cached
+        key_lock = _RUNTIME_ARROW_GENERATION_KEY_LOCKS.setdefault(cache_key, threading.Lock())
+
+    with key_lock:
         with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
             cached = _RUNTIME_ARROW_GENERATION_CACHE.get(cache_key)
             if cached is not None:
                 _RUNTIME_ARROW_GENERATION_CACHE.move_to_end(cache_key)
                 return cached
-            in_flight = _RUNTIME_ARROW_GENERATION_INFLIGHT.get(cache_key)
-            if in_flight is None:
-                in_flight = Future()
-                _RUNTIME_ARROW_GENERATION_INFLIGHT[cache_key] = in_flight
-                owns_open = True
-            else:
-                owns_open = False
 
-        if owns_open:
-            break
-        try:
-            return in_flight.result()
-        except CancelledError:
-            with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
-                if _RUNTIME_ARROW_GENERATION_INFLIGHT.get(cache_key) is in_flight:
-                    del _RUNTIME_ARROW_GENERATION_INFLIGHT[cache_key]
-
-    try:
         opened = _open_validated_arrow_generation(
             paths,
             verified,
@@ -917,29 +879,11 @@ def _open_runtime_arrow_generation_singleflight(
             context=context,
             producer_hint=producer_hint,
         )
-    except BaseException as error:
         with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
-            if _RUNTIME_ARROW_GENERATION_INFLIGHT.get(cache_key) is in_flight:
-                del _RUNTIME_ARROW_GENERATION_INFLIGHT[cache_key]
-        if isinstance(error, Exception):
-            in_flight.set_exception(error)
-        else:
-            in_flight.cancel()
-        raise
-
-    with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
-        cached = _RUNTIME_ARROW_GENERATION_CACHE.get(cache_key)
-        result = opened if cached is None else cached
-        if cached is None:
             _RUNTIME_ARROW_GENERATION_CACHE[cache_key] = opened
             while len(_RUNTIME_ARROW_GENERATION_CACHE) > _RUNTIME_ARROW_GENERATION_CACHE_SIZE:
                 _RUNTIME_ARROW_GENERATION_CACHE.popitem(last=False)
-        else:
-            _RUNTIME_ARROW_GENERATION_CACHE.move_to_end(cache_key)
-        if _RUNTIME_ARROW_GENERATION_INFLIGHT.get(cache_key) is in_flight:
-            del _RUNTIME_ARROW_GENERATION_INFLIGHT[cache_key]
-    in_flight.set_result(result)
-    return result
+            return opened
 
 
 def require_arrow_artifacts(
@@ -1118,7 +1062,7 @@ def _validate_complete_arrow_artifacts(
     else:
         if retained_name_counts is not None:
             raise ValueError("retained_name_counts is only supported for strict publication validation")
-        validated_generation = _open_runtime_arrow_generation_singleflight(
+        validated_generation = _open_runtime_arrow_generation(
             generation_paths,
             verified,
             required_keys=sorted_required,

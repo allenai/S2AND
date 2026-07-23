@@ -9,7 +9,6 @@ import pytest
 
 from s2and.arrow_inputs import MissingArrowArtifactError, require_name_counts_index_artifact
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
-from s2and.name_count_binding import NameCountsBinding
 from s2and.name_counts_index import NameCountsIndex
 from s2and.name_counts_manifest import ValidatedNameCountsManifest
 from tests.helpers import import_s2and_rust, tiny_name_counts_provenance, tiny_name_counts_tuple
@@ -20,7 +19,6 @@ _REQUIRED_PROVENANCE_FIELDS = (
     "schema_version",
     "normalization_version",
     "generation_id",
-    "pickle_sha256",
     "source_snapshot_id",
     "source_kind",
     "source_query_sha256",
@@ -67,29 +65,22 @@ def _remove_manifest_field(index_dir: Path, field: str) -> None:
     _write_manifest(index_dir, manifest)
 
 
-def test_valid_manifest_has_identical_python_and_rust_binding(tmp_path: Path) -> None:
+def test_valid_manifest_has_identical_python_and_rust_identity(tmp_path: Path) -> None:
     if not HAS_RUST:
         pytest.skip(f"Rust extension unavailable: {RUST_MODULE!r}")
     index_dir = _write_index(tmp_path)
 
     python_manifest = ValidatedNameCountsManifest.load(index_dir, context="test valid manifest")
-    python_binding = NameCountsBinding.from_provenance(
-        python_manifest.source_provenance,
-        context="test valid binding",
-    )
     rust_index = RUST_MODULE.NameCountsIndex.open(str(index_dir))
+    manifest_sha256 = hashlib.sha256((index_dir / "manifest.json").read_bytes()).hexdigest()
 
     assert python_manifest.normalization_version == rust_index.normalization_version
     assert "selected_row_count" not in python_manifest.source_provenance
-    assert rust_index.manifest_sha256 == hashlib.sha256((index_dir / "manifest.json").read_bytes()).hexdigest()
+    assert python_manifest.manifest_sha256 == manifest_sha256
+    assert python_manifest.source_provenance["manifest_sha256"] == manifest_sha256
+    assert rust_index.name_counts_manifest_sha256 == manifest_sha256
     assert not hasattr(rust_index, "lookup_many")
     assert callable(rust_index._lookup_many_unique)
-    assert rust_index.name_counts_provenance_binding == (
-        python_binding.generation_id,
-        python_binding.pickle_sha256,
-        python_binding.source_snapshot_id,
-        python_binding.selected_rows_sha256,
-    )
 
 
 def test_required_manifest_fields_are_rejected_by_python_and_rust(tmp_path: Path) -> None:

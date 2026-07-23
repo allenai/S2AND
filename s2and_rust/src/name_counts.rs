@@ -16,7 +16,7 @@ use crate::{
 };
 
 const NAME_COUNTS_INDEX_SCHEMA_VERSION: &str = "name_counts_index_v2";
-const NAME_COUNTS_PROVENANCE_SCHEMA_VERSION: &str = "name_counts_provenance_v2";
+const NAME_COUNTS_PROVENANCE_SCHEMA_VERSION: &str = "name_counts_provenance_v3";
 const NAME_COUNTS_NORMALIZATION_VERSION: &str = "canonical_v2";
 
 #[derive(Clone)]
@@ -63,7 +63,6 @@ pub(crate) struct RawNameCountIndex {
     first_last: RawNameCountIndexFile,
     last_first_initial: RawNameCountIndexFile,
     normalization_version: String,
-    provenance_binding: NameCountsProvenanceBinding,
     identity: NameCountsIndexIdentity,
 }
 
@@ -72,14 +71,6 @@ pub(crate) struct RawNameCountIndex {
 #[pyclass(frozen)]
 pub(crate) struct NameCountsIndex {
     index: Arc<RawNameCountIndex>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NameCountsProvenanceBinding {
-    pub(crate) generation_id: String,
-    pub(crate) pickle_sha256: String,
-    pub(crate) source_snapshot_id: String,
-    pub(crate) selected_rows_sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,7 +93,6 @@ struct NameCountsProvenance {
     schema_version: String,
     normalization_version: String,
     generation_id: String,
-    pickle_sha256: String,
     source_snapshot_id: String,
     source_kind: String,
     source_query_sha256: String,
@@ -111,8 +101,6 @@ struct NameCountsProvenance {
     _source_row_count: u64,
     #[serde(default, rename = "generated_at")]
     _generated_at: Option<serde_json::Value>,
-    #[serde(default, rename = "pickle_byte_count")]
-    _pickle_byte_count: Option<serde_json::Value>,
     #[serde(default, rename = "cardinalities")]
     _cardinalities: Option<serde_json::Value>,
     #[serde(default, rename = "rejected_row_count")]
@@ -140,7 +128,6 @@ struct RawNameCountIndexPaths {
     first_last: RawNameCountIndexFileSpec,
     last_first_initial: RawNameCountIndexFileSpec,
     normalization_version: String,
-    provenance_binding: NameCountsProvenanceBinding,
     identity: NameCountsIndexIdentity,
 }
 
@@ -203,7 +190,6 @@ impl RawNameCountIndex {
             first_last: first_last?,
             last_first_initial: last_first_initial?,
             normalization_version: paths.normalization_version.clone(),
-            provenance_binding: paths.provenance_binding.clone(),
             identity: paths.identity.clone(),
         })
     }
@@ -325,20 +311,8 @@ impl NameCountsIndex {
 
     /// Return the digest of the exact manifest snapshot this handle opened.
     #[getter]
-    fn manifest_sha256(&self) -> &str {
+    fn name_counts_manifest_sha256(&self) -> &str {
         &self.index.identity.manifest_sha256
-    }
-
-    /// Return the exact four-field model-binding tuple used by RustFeaturizer.
-    #[getter]
-    fn name_counts_provenance_binding(&self) -> (String, String, String, String) {
-        let binding = &self.index.provenance_binding;
-        (
-            binding.generation_id.clone(),
-            binding.pickle_sha256.clone(),
-            binding.source_snapshot_id.clone(),
-            binding.selected_rows_sha256.clone(),
-        )
     }
 
     /// Resolve four already-deduplicated aligned optional-key columns.
@@ -750,8 +724,10 @@ impl RawNameCountMaps {
         self.index.as_ref().and_then(|index| index.get(kind, name))
     }
 
-    pub(crate) fn provenance_binding(&self) -> Option<&NameCountsProvenanceBinding> {
-        self.index.as_ref().map(|index| &index.provenance_binding)
+    pub(crate) fn manifest_sha256(&self) -> Option<&str> {
+        self.index
+            .as_ref()
+            .map(|index| index.identity.manifest_sha256.as_str())
     }
 }
 
@@ -772,7 +748,7 @@ fn is_lowercase_sha256(value: &str) -> bool {
 }
 
 impl NameCountsProvenance {
-    fn into_binding(self, manifest_path: &Path) -> PyResult<NameCountsProvenanceBinding> {
+    fn validate(self, manifest_path: &Path) -> PyResult<()> {
         if self.schema_version != NAME_COUNTS_PROVENANCE_SCHEMA_VERSION {
             return Err(manifest_value_error(
                 manifest_path,
@@ -804,7 +780,6 @@ impl NameCountsProvenance {
             }
         }
         for (field, value) in [
-            ("pickle_sha256", self.pickle_sha256.as_str()),
             ("source_query_sha256", self.source_query_sha256.as_str()),
             ("selected_rows_sha256", self.selected_rows_sha256.as_str()),
         ] {
@@ -815,12 +790,7 @@ impl NameCountsProvenance {
                 ));
             }
         }
-        Ok(NameCountsProvenanceBinding {
-            generation_id: self.generation_id,
-            pickle_sha256: self.pickle_sha256,
-            source_snapshot_id: self.source_snapshot_id,
-            selected_rows_sha256: self.selected_rows_sha256,
-        })
+        Ok(())
     }
 }
 
@@ -1003,7 +973,7 @@ impl NameCountsManifest {
                 ),
             ));
         }
-        let provenance_binding = self.source_provenance.into_binding(&manifest_path)?;
+        self.source_provenance.validate(&manifest_path)?;
         let canonical_index_dir = fs::canonicalize(index_dir).map_err(|err| {
             pyo3::exceptions::PyIOError::new_err(format!(
                 "failed to resolve name-count index directory {}: {}",
@@ -1040,7 +1010,6 @@ impl NameCountsManifest {
             first_last,
             last_first_initial,
             normalization_version: self.normalization_version,
-            provenance_binding,
             identity: NameCountsIndexIdentity {
                 canonical_root: canonical_index_dir,
                 manifest_sha256,
@@ -1139,10 +1108,9 @@ mod name_counts_tests {
 
     fn complete_source_provenance() -> serde_json::Value {
         serde_json::json!({
-            "schema_version": "name_counts_provenance_v2",
+            "schema_version": "name_counts_provenance_v3",
             "normalization_version": "canonical_v2",
             "generation_id": "generation-a",
-            "pickle_sha256": "0".repeat(64),
             "source_snapshot_id": "snapshot-a",
             "source_kind": "test-fixture",
             "source_query_sha256": "2".repeat(64),
@@ -1321,30 +1289,25 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn source_provenance_binding_is_exact_and_validated() {
+    fn source_provenance_is_validated() {
         let provenance: NameCountsProvenance =
             serde_json::from_value(complete_source_provenance()).expect("valid provenance shape");
-        let binding = provenance
-            .into_binding(std::path::Path::new("manifest.json"))
+        provenance
+            .validate(std::path::Path::new("manifest.json"))
             .expect("valid provenance");
-
-        assert_eq!(binding.generation_id, "generation-a");
-        assert_eq!(binding.pickle_sha256, "0".repeat(64));
-        assert_eq!(binding.source_snapshot_id, "snapshot-a");
-        assert_eq!(binding.selected_rows_sha256, "1".repeat(64));
     }
 
     #[test]
-    fn source_provenance_binding_rejects_non_sha_digest() {
+    fn source_provenance_rejects_non_sha_digest() {
         let mut provenance = complete_source_provenance();
-        provenance["pickle_sha256"] = serde_json::Value::String("G".repeat(64));
+        provenance["selected_rows_sha256"] = serde_json::Value::String("G".repeat(64));
         let provenance: NameCountsProvenance =
             serde_json::from_value(provenance).expect("valid provenance shape");
         let error = provenance
-            .into_binding(std::path::Path::new("manifest.json"))
+            .validate(std::path::Path::new("manifest.json"))
             .expect_err("invalid digest must fail");
 
-        assert!(py_err_message(error).contains("lowercase SHA-256 pickle_sha256"));
+        assert!(py_err_message(error).contains("lowercase SHA-256 selected_rows_sha256"));
     }
 
     #[test]
@@ -1682,17 +1645,15 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn open_retains_manifest_normalization_and_provenance_binding() {
+    fn open_retains_manifest_normalization_and_sha256() {
         let dir = write_lookup_artifact();
+        let expected_manifest_sha256 =
+            sha256_file(&dir.join("manifest.json")).expect("hash manifest");
         let index = RawNameCountIndex::open(dir.to_str().expect("utf-8 temp path"))
             .expect("open lookup index");
 
         assert_eq!(index.normalization_version, "canonical_v2");
-        let binding = &index.provenance_binding;
-        assert_eq!(binding.generation_id, "generation-a");
-        assert_eq!(binding.pickle_sha256, "0".repeat(64));
-        assert_eq!(binding.source_snapshot_id, "snapshot-a");
-        assert_eq!(binding.selected_rows_sha256, "1".repeat(64));
+        assert_eq!(index.identity.manifest_sha256, expected_manifest_sha256);
         drop(index);
         std::fs::remove_dir_all(&dir).expect("remove lookup artifact");
     }

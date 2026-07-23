@@ -1,5 +1,3 @@
-import hashlib
-import io
 import json
 import logging
 import math
@@ -9,7 +7,7 @@ import platform
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping
-from functools import partial
+from functools import cached_property, partial
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, TypedDict, cast
 
@@ -82,29 +80,6 @@ _PAIR_SAMPLING_MODES: frozenset[str] = frozenset(
         "global_balanced_classes",
     }
 )
-
-
-class _HashingRawReader(io.RawIOBase):
-    """Hash bytes as a buffered parser consumes them."""
-
-    def __init__(self, raw: io.BufferedReader, digest: Any):
-        self._raw = raw
-        self._digest = digest
-
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, buffer: Any) -> int | None:
-        count = self._raw.readinto(buffer)
-        if count:
-            self._digest.update(memoryview(buffer)[:count])
-        return count
-
-    def close(self) -> None:
-        try:
-            self._raw.close()
-        finally:
-            super().close()
 
 
 def _normalize_specter_keys(embeddings: Iterable[tuple[Any, Any]]) -> dict[str, Any]:
@@ -484,7 +459,6 @@ class ANDData:
     def _from_validated_arrow_training(
         cls,
         signatures: dict[str, Signature],
-        papers: dict[str, Paper],
         name: str,
         *,
         arrow_paths: ValidatedArrowInputs,
@@ -494,7 +468,6 @@ class ANDData:
 
         Args:
             signatures: Final lightweight Python signature metadata.
-            papers: Final lightweight Python paper metadata.
             name: Human-readable dataset name used in logs and metrics.
             arrow_paths: Fully verified immutable Arrow artifact paths.
             **kwargs: Remaining train-mode ``ANDData`` construction arguments.
@@ -506,7 +479,7 @@ class ANDData:
 
         return cls(
             signatures=signatures,
-            papers=papers,
+            papers={},
             name=name,
             mode="train",
             specter_embeddings=None,
@@ -553,7 +526,6 @@ class ANDData:
         use_orcid_id: bool = True,
         compute_block_fn: Callable[[str], str] = compute_block,
         _validated_arrow_inputs: ValidatedArrowInputs | None = None,
-        _capture_feature_source_hashes: bool = False,
     ):
         init_start = time.perf_counter()
         arrow_name_counts_provenance: Mapping[str, Any] | None = None
@@ -575,14 +547,11 @@ class ANDData:
         self.signatures_path = self.original_signatures_path
         self.papers_path = self.original_papers_path
         self._s2and_python_pair_ngrams_ready: bool = False
-        self._rust_cluster_seeds_require_id: int | None = None
-        self._rust_cluster_seeds_require_len: int | None = None
-        self._rust_cluster_seeds_disallow_id: int | None = None
-        self._rust_cluster_seeds_disallow_len: int | None = None
         self.clusters_path = clusters if isinstance(clusters, str) else None
         self.cluster_seeds_path = cluster_seeds if isinstance(cluster_seeds, str) else None
         self.specter_embeddings_path = specter_embeddings if isinstance(specter_embeddings, str) else None
         self.arrow_paths = _validated_arrow_inputs
+        self._arrow_paper_source: tuple[str, str, set[str]] | None = None
         self.arrow_artifact_generation = (
             _validated_arrow_inputs.generation_id if _validated_arrow_inputs is not None else None
         )
@@ -605,10 +574,6 @@ class ANDData:
             if train_blocks is not None and clusters is None:
                 raise ValueError("Train blocks still needs clusters")
 
-        # Private, opt-in provenance for the one-shot training snapshot path.
-        # Ordinary ANDData callers retain the original zero-hash-overhead loaders.
-        self._feature_source_sha256: dict[str, str] | None = {} if _capture_feature_source_hashes else None
-
         # Load signatures first so we can restrict papers/specter to relevant subset
         signatures_stage_start = time.perf_counter()
         logger.info("loading signatures")
@@ -617,7 +582,7 @@ class ANDData:
             # Preserve those objects; native training owns preprocessing.
             self.signatures = cast(dict[str, Signature], signatures)
         else:
-            raw_signatures = self._load_json_feature_source(signatures, "signatures")
+            raw_signatures = self.maybe_load_json(signatures)
             self.signatures = {}
             # convert dictionary to namedtuples for memory reduction
             for signature_id, signature in raw_signatures.items():
@@ -665,11 +630,16 @@ class ANDData:
         papers_stage_start = time.perf_counter()
         logger.info("loading papers (subset referenced by signatures)")
         if self.arrow_paths is not None:
-            self.papers = cast(dict[str, Paper], papers)
-            source_paper_count = len(self.papers)
+            needed_paper_ids = {str(signature.paper_id) for signature in self.signatures.values()}
+            self._arrow_paper_source = (
+                self.arrow_paths["papers"],
+                self.arrow_paths["paper_authors"],
+                needed_paper_ids,
+            )
+            retained_paper_count = source_paper_count = len(needed_paper_ids)
         else:
             needed_paper_ids = {str(signature.paper_id) for signature in self.signatures.values()}
-            raw_papers = self._load_json_feature_source(papers, "papers")
+            raw_papers = self.maybe_load_json(papers)
             filtered_papers = {pid: p for pid, p in raw_papers.items() if str(pid) in needed_paper_ids}
             self.papers = {}
             # convert dictionary to namedtuples for memory reduction
@@ -698,12 +668,13 @@ class ANDData:
                     year=paper["year"],
                     paper_id=paper["paper_id"],
                 )
+            retained_paper_count = len(self.papers)
             source_paper_count = len(raw_papers)
-        logger.info(f"loaded papers subset: {len(self.papers)}/{source_paper_count} relevant")
+        logger.info(f"loaded papers subset: {retained_paper_count}/{source_paper_count} relevant")
         logger.debug(
             "Telemetry stage: stage=anddata_ingest_papers seconds=%.3f retained_papers=%d source_papers=%d",
             time.perf_counter() - papers_stage_start,
-            len(self.papers),
+            retained_paper_count,
             source_paper_count,
         )
 
@@ -712,9 +683,7 @@ class ANDData:
         logger.info("loading clusters")
         self.clusters: dict | None = self.maybe_load_json(clusters)
         logger.info("loaded clusters, loading specter")
-        self.specter_embeddings = self.maybe_load_specter(
-            self._load_pickle_feature_source(specter_embeddings, "specter_embeddings")
-        )
+        self.specter_embeddings = self.maybe_load_specter(specter_embeddings)
         # prevents errors during testing where we have no specter embeddings
         if self.specter_embeddings is None:
             self.specter_embeddings = {}
@@ -744,20 +713,9 @@ class ANDData:
                     cluster_num += 1
             self.max_seed_cluster_id = cluster_num
         logger.info("loaded cluster seeds")
-        # Versioned seed state for Rust sync dedupe.
         self._cluster_seeds_source = "arrow" if self.arrow_paths is not None else "python"
         self._cluster_seeds_initial_require_id = id(self.cluster_seeds_require)
         self._cluster_seeds_initial_disallow_id = id(self.cluster_seeds_disallow)
-        self._cluster_seed_tracking_initialized = False
-        self._cluster_seeds_version = 1
-        self._rust_cluster_seeds_synced_version = 0
-        self._rust_cluster_seeds_sync_calls = 0
-        self._rust_cluster_seeds_sync_attempted = 0
-        self._rust_cluster_seeds_sync_succeeded = 0
-        self._rust_cluster_seeds_sync_skipped_unchanged = 0
-        self._rust_cluster_seeds_sync_skipped_arrow_authority = 0
-        self._rust_cluster_seeds_sync_seconds_total = 0.0
-        self._rust_cluster_seeds_sync_seconds_max = 0.0
         # check that all altered_cluster_signatures are in cluster_seeds_require
         if self.altered_cluster_signatures is not None:
             for signature_id in self.altered_cluster_signatures:
@@ -848,7 +806,7 @@ class ANDData:
         logger.debug(
             "Telemetry stage: stage=anddata_preprocess_papers seconds=%.3f papers=%d",
             time.perf_counter() - preprocess_papers_stage_start,
-            len(self.papers),
+            retained_paper_count,
         )
 
         preprocess_signatures_stage_start = time.perf_counter()
@@ -866,6 +824,20 @@ class ANDData:
         logger.debug(
             "Telemetry stage: stage=anddata_total_init seconds=%.3f",
             time.perf_counter() - init_start,
+        )
+
+    @cached_property
+    def papers(self) -> dict[str, Paper]:
+        """Materialize Python paper objects when an Arrow-backed caller needs them."""
+
+        from s2and.arrow_training import load_papers_from_arrow
+
+        assert self._arrow_paper_source is not None
+        papers_path, paper_authors_path, needed_paper_ids = self._arrow_paper_source
+        return load_papers_from_arrow(
+            papers_path,
+            paper_authors_path,
+            needed_paper_ids=needed_paper_ids,
         )
 
     @property
@@ -1206,45 +1178,6 @@ class ANDData:
             return output
         else:
             return path_or_json
-
-    def _load_json_feature_source(self, path_or_json: str | list | dict | None, source_name: str) -> Any:
-        """Load JSON normally, or stream-hash it for one-shot snapshot use."""
-        if self._feature_source_sha256 is None or not isinstance(path_or_json, str):
-            return self.maybe_load_json(path_or_json)
-
-        digest = hashlib.sha256()
-        with open(path_or_json, "rb") as raw:
-            with io.TextIOWrapper(
-                io.BufferedReader(_HashingRawReader(raw, digest)),
-                encoding="utf-8",
-            ) as handle:
-                output = json.load(handle)
-        self._feature_source_sha256[source_name] = digest.hexdigest()
-        return output
-
-    def _load_pickle_feature_source(self, path_or_object: str | dict | tuple | None, source_name: str) -> Any:
-        """Load pickle normally, or stream-hash it for one-shot snapshot use."""
-        if self._feature_source_sha256 is None or not isinstance(path_or_object, str):
-            return path_or_object
-
-        digest = hashlib.sha256()
-        with open(path_or_object, "rb") as raw:
-            with io.BufferedReader(_HashingRawReader(raw, digest)) as handle:
-                output = pickle.load(handle)
-                while handle.read(1 << 20):
-                    pass
-        self._feature_source_sha256[source_name] = digest.hexdigest()
-        return output
-
-    def _consume_feature_source_sha256(self) -> dict[str, str]:
-        """Consume private file provenance for one immediate cache operation."""
-        source_hashes = self._feature_source_sha256
-        if source_hashes is None:
-            raise ValueError(
-                "Feature snapshot caching requires a freshly constructed ANDData with private source capture enabled"
-            )
-        self._feature_source_sha256 = None
-        return dict(source_hashes)
 
     @staticmethod
     def maybe_load_list(path_or_list: str | list | set | None) -> list | set | None:

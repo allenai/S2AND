@@ -3482,17 +3482,19 @@ class Clusterer:
         for signature_id, component_id in cluster_seeds_require.items():
             original_seed_components[str(component_id)].append(str(signature_id))
 
-        def synthetic_seeds_for_clusters(clusters: Mapping[str, Sequence[str]]) -> dict[str, str]:
-            synthetic_seed_map = {
+        synthetic_seed_map: dict[str, str] = {}
+
+        def refresh_synthetic_seeds_for_clusters(clusters: Mapping[str, Sequence[str]]) -> None:
+            next_seed_map = {
                 str(signature_id): str(cluster_id)
                 for cluster_id, signatures in clusters.items()
                 for signature_id in signatures
             }
             for component_id, component_signatures in original_seed_components.items():
                 predicted_component_cluster_ids = {
-                    synthetic_seed_map[signature_id]
+                    next_seed_map[signature_id]
                     for signature_id in component_signatures
-                    if signature_id in synthetic_seed_map
+                    if signature_id in next_seed_map
                 }
                 if len(predicted_component_cluster_ids) > 1:
                     raise RuntimeError(
@@ -3503,10 +3505,11 @@ class Clusterer:
                     next(iter(predicted_component_cluster_ids)) if predicted_component_cluster_ids else component_id
                 )
                 for signature_id in component_signatures:
-                    synthetic_seed_map[signature_id] = target_cluster_id
-            return synthetic_seed_map
+                    next_seed_map[signature_id] = target_cluster_id
+            synthetic_seed_map.clear()
+            synthetic_seed_map.update(next_seed_map)
 
-        synthetic_seed_map = synthetic_seeds_for_clusters(pred_clusters_intermediate)
+        refresh_synthetic_seeds_for_clusters(pred_clusters_intermediate)
         for block_key in sorted(block_dict_single_letter):
             group_signature_ids = [str(signature_id) for signature_id in block_dict_single_letter[block_key]]
             incremental_result = self.predict_incremental_from_arrow_paths(
@@ -3538,7 +3541,7 @@ class Clusterer:
                 cluster_key = str(cluster_id)
                 normalized_signatures = [str(signature_id) for signature_id in signatures]
                 pred_clusters_intermediate[cluster_key] = normalized_signatures
-            synthetic_seed_map = synthetic_seeds_for_clusters(pred_clusters_intermediate)
+            refresh_synthetic_seeds_for_clusters(pred_clusters_intermediate)
         return pred_clusters_intermediate
 
     def _predict_from_validated_arrow_paths(

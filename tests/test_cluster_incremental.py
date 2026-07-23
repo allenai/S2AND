@@ -2080,6 +2080,7 @@ def test_arrow_subblocked_single_letter_groups_reuse_and_extend_one_seed_map() -
         total_ram_bytes=None,
         name_tuples=frozenset(),
         cluster_seeds_disallow=set(),
+        cluster_seeds_require={},
     )
 
     assert result == {

@@ -470,6 +470,7 @@ def test_feature_block_to_arrow_tables_matches_raw_schema() -> None:
         "author_block",
         "author_email",
         "source_author_ids",
+        "author_ror_display_names",
     ]
     assert tables["signatures"].schema.field("author_suffix").type == pa.string()
     assert tables["papers"].schema.field("abstract").type == pa.string()

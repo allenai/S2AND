@@ -1,3 +1,5 @@
+import copy
+import pickle
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -56,6 +58,16 @@ def test_cacheable_value_preserves_list_order_but_sorts_sets():
     assert model_module._cacheable_value({"year_diff", "name_counts"}) == model_module._cacheable_value(
         {"name_counts", "year_diff"}
     )
+
+
+def test_altered_presplit_cache_does_not_make_clusterer_unserializable() -> None:
+    clusterer = object.__new__(Clusterer)
+    model_module._put_altered_presplit_cache_entry(clusterer, ("state",), [["s1", "s2"]])
+
+    assert not hasattr(clusterer, "_s2and_altered_presplit_cache_lock")
+    for restored in (copy.deepcopy(clusterer), pickle.loads(pickle.dumps(clusterer))):
+        assert model_module._get_altered_presplit_cache_entry(restored, ("state",)) == (("s1", "s2"),)
+        assert not hasattr(restored, "_s2and_altered_presplit_cache_lock")
 
 
 def _expected_upper_triangle_pairs_for_range(

@@ -1269,6 +1269,37 @@ def test_predict_from_arrow_paths_routes_only_oversized_blocks_through_native_su
     assert clusterer._last_rust_arrow_subblocking_telemetry["oversized_block_count"] == 1
 
 
+def test_arrow_subblocking_avoids_generated_key_collisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_native_subblocking(_paths, signature_ids, **_kwargs):
+        assert list(signature_ids) == ["s1", "s2"]
+        return {"x": ["s1"], "y": ["s2"]}, {}
+
+    monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
+
+    result = _dummy_clusterer(cluster_model=None)._build_arrow_subblocked_block_dict(
+        {
+            "a": ["s1", "s2"],
+            "a|subblock=x": ["other"],
+        },
+        {},
+        batching_threshold=1,
+        cluster_seeds_require={},
+    )
+
+    assert result == {
+        "a|subblock=x|collision=0001": ["s1"],
+        "a|subblock=y": ["s2"],
+        "a|subblock=x": ["other"],
+    }
+    assert {signature_id for signatures in result.values() for signature_id in signatures} == {
+        "s1",
+        "s2",
+        "other",
+    }
+
+
 def test_predict_from_arrow_paths_uses_request_featurizer_cluster_seeds_without_python_pair_expansion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

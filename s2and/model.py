@@ -269,11 +269,7 @@ def _altered_presplit_cache_state(
         if not isinstance(cache, OrderedDict):
             cache = OrderedDict()
             clusterer._s2and_altered_presplit_cache = cache
-        lock = getattr(clusterer, "_s2and_altered_presplit_cache_lock", None)
-        if lock is None:
-            lock = threading.RLock()
-            clusterer._s2and_altered_presplit_cache_lock = lock
-    return cache, lock
+    return cache, _ALTERED_PRESPLIT_CACHE_INIT_LOCK
 
 
 def _get_altered_presplit_cache_entry(
@@ -3183,9 +3179,14 @@ class Clusterer:
                     repaired_parts.append(current_part)
 
                 for part_index, repaired_part in enumerate(repaired_parts):
-                    repaired_key = f"{block_key}|subblock={subblock_key}"
+                    repaired_key_base = f"{block_key}|subblock={subblock_key}"
                     if len(repaired_parts) > 1:
-                        repaired_key += f"|repair_part={part_index:04d}"
+                        repaired_key_base += f"|repair_part={part_index:04d}"
+                    repaired_key = repaired_key_base
+                    collision_index = 1
+                    while repaired_key in normalized_blocks or repaired_key in subblocked:
+                        repaired_key = f"{repaired_key_base}|collision={collision_index:04d}"
+                        collision_index += 1
                     subblocked[repaired_key] = repaired_part
                     repaired_subblock_count += 1
 

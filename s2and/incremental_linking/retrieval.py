@@ -14,11 +14,9 @@ from s2and.incremental_linking.feature_block import FeatureBlockSignatureOrder
 from s2and.incremental_linking.gate_buckets import (
     QueryView,
     first_name_bucket_array,
-    normalize_query_views,
     validate_query_view,
 )
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
-from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 
 RAW_CANDIDATE_PLAN_SCHEMA_VERSION = "raw_arrow_candidate_plan_v2"
 RAW_CANDIDATE_PLAN_BATCH_ROW_KEYS: tuple[str, ...] = (
@@ -86,69 +84,6 @@ RAW_CANDIDATE_PLAN_PAIR_KEYS: tuple[str, ...] = (
     *RAW_CANDIDATE_PLAN_PAIR_INDEX_KEYS,
     *RAW_CANDIDATE_PLAN_PAIR_ID_KEYS,
 )
-RUST_PAIR_PLAN_PAIR_KEYS: tuple[str, ...] = (
-    "left_signature_indices",
-    "right_signature_indices",
-    "pair_row_indices",
-)
-RUST_PAIR_PLAN_ROW_SIGNAL_KEYS: tuple[str, ...] = (
-    "row_query_signature_indices",
-    "row_component_keys",
-    "retrieval_scores",
-    "retrieval_ranks",
-    "row_query_first_tokens",
-    "row_component_sizes",
-    "row_named_signature_counts",
-    "row_dominant_first_names",
-    "row_candidate_year_min",
-    "row_candidate_year_max",
-    "row_candidate_year_range_missing",
-    "row_query_years",
-    "row_query_year_missing",
-    "row_query_has_affiliations",
-    "row_query_has_coauthors",
-    "row_orcid_match",
-    "middle_initial_compatibility",
-    "affiliation_overlap",
-    "coauthor_overlap",
-    "venue_overlap",
-    "year_compatibility",
-    "title_overlap",
-    "specter_centroid_similarity",
-    "specter_exemplar_similarity",
-)
-REQUIRED_RUST_PAIR_PLAN_KEYS: tuple[str, ...] = (
-    "row_count",
-    *RUST_PAIR_PLAN_PAIR_KEYS,
-    *RUST_PAIR_PLAN_ROW_SIGNAL_KEYS,
-)
-
-
-def _query_author_for_retrieval_row_signal(query: Any) -> str:
-    """Resolve a display author string for a retrieval query.
-
-    Mirrors the gate-side helper in s2and.incremental_linking.runtime so that the
-    Rust retrieval path can populate `query_author` row signals directly, matching
-    the raw-Arrow retrieval path's row-signal contract.
-    """
-    value = getattr(query, "query_author", None)
-    if value is not None and str(value).strip():
-        return str(value)
-
-    def first_present(*names: str) -> Any:
-        for name in names:
-            attr_value = getattr(query, name, None)
-            if attr_value is not None and str(attr_value).strip():
-                return attr_value
-        return None
-
-    parts = [
-        first_present("first", "author_info_first"),
-        first_present("middle", "author_info_middle"),
-        first_present("last", "author_info_last"),
-        first_present("suffix", "author_info_suffix"),
-    ]
-    return " ".join(str(part).strip() for part in parts if part is not None and str(part).strip())
 
 
 @dataclass(frozen=True)
@@ -220,7 +155,6 @@ class RawArrowPlanBundle:
     def _from_normalized_values(
         cls,
         *,
-        copy_arrays: bool,
         query_signature_ids: Sequence[Any],
         query_views: Sequence[QueryView],
         query_authors: Sequence[Any],
@@ -241,37 +175,33 @@ class RawArrowPlanBundle:
         owned_query_signature_ids = tuple(str(value) for value in query_signature_ids)
         owned_query_views = tuple(query_views)
         owned_query_authors = tuple(str(value or "") for value in query_authors)
-        owned_row_query_offsets = _readonly_array(row_query_offsets, dtype=np.uint32, copy=copy_arrays)
+        owned_row_query_offsets = _readonly_array(row_query_offsets, dtype=np.uint32)
         owned_left_signature_ids = tuple(str(value) for value in left_signature_ids)
         owned_right_signature_ids = tuple(str(value) for value in right_signature_ids)
-        owned_pair_row_indices = _readonly_array(pair_row_indices, dtype=np.uint32, copy=copy_arrays)
+        owned_pair_row_indices = _readonly_array(pair_row_indices, dtype=np.uint32)
         owned_row_component_keys = tuple(str(value) for value in row_component_keys)
-        owned_retrieval_scores = _readonly_array(retrieval_scores, dtype=np.float32, copy=copy_arrays)
-        owned_retrieval_ranks = _readonly_array(retrieval_ranks, dtype=np.uint16, copy=copy_arrays)
+        owned_retrieval_scores = _readonly_array(retrieval_scores, dtype=np.float32)
+        owned_retrieval_ranks = _readonly_array(retrieval_ranks, dtype=np.uint16)
         owned_normalized_row_signals = {
-            signal_key: _readonly_array(values, copy=copy_arrays)
-            for signal_key, values in normalized_row_signals.items()
+            signal_key: _readonly_array(values) for signal_key, values in normalized_row_signals.items()
         }
         row_query_views = _readonly_array(
             [owned_query_views[int(offset)] for offset in owned_row_query_offsets],
             dtype=object,
-            copy=False,
         )
         row_query_authors = _readonly_array(
             [owned_query_authors[int(offset)] for offset in owned_row_query_offsets],
             dtype=object,
-            copy=False,
         )
         row_signals = {
             "retrieval_score": owned_retrieval_scores,
             "retrieval_rank": owned_retrieval_ranks,
-            "candidate_component_key": _readonly_array(owned_row_component_keys, dtype=object, copy=False),
+            "candidate_component_key": _readonly_array(owned_row_component_keys, dtype=object),
             "query_view": row_query_views,
             "query_author": row_query_authors,
             "first_name_bucket": _readonly_array(
                 first_name_bucket_array(owned_normalized_row_signals["query_first_token"], row_query_views),
                 dtype=object,
-                copy=False,
             ),
             **owned_normalized_row_signals,
         }
@@ -323,12 +253,6 @@ class RawArrowPlanBundle:
         )
 
     @classmethod
-    def from_mapping(cls, plan: Mapping[str, Any]) -> RawArrowPlanBundle:
-        """Validate once and own every value consumed by the linker bridge."""
-
-        return cls._from_mapping(plan, copy_arrays=True)
-
-    @classmethod
     def from_native_mapping(cls, plan: Mapping[str, Any]) -> RawArrowPlanBundle:
         """Validate and adopt arrays freshly returned by the native planner.
 
@@ -336,12 +260,6 @@ class RawArrowPlanBundle:
         Adopting those arrays avoids a second full payload copy; the adopted
         arrays are made read-only before the caller can observe the bundle.
         """
-
-        return cls._from_mapping(plan, copy_arrays=False)
-
-    @classmethod
-    def _from_mapping(cls, plan: Mapping[str, Any], *, copy_arrays: bool) -> RawArrowPlanBundle:
-        """Validate a raw plan using the requested array-ownership policy."""
 
         schema_version = _required_raw_plan_value(plan, "schema_version")
         if schema_version != RAW_CANDIDATE_PLAN_SCHEMA_VERSION:
@@ -431,7 +349,6 @@ class RawArrowPlanBundle:
             for raw_key, signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS
         }
         return cls._from_normalized_values(
-            copy_arrays=copy_arrays,
             query_signature_ids=query_signature_ids,
             query_views=query_views,
             query_authors=query_authors,
@@ -447,57 +364,6 @@ class RawArrowPlanBundle:
             retrieval_ranks=retrieval_ranks,
             normalized_row_signals=normalized_row_signals,
         )
-
-
-def _rust_retriever_object(retriever: Any) -> Any:
-    return getattr(retriever, "retriever", retriever)
-
-
-def _as_uint32_mapping(component_member_indices_by_key: Mapping[str, Sequence[int] | np.ndarray]) -> dict[str, Any]:
-    return {
-        str(component_key): as_uint32_1d(f"component_member_indices_by_key[{component_key!r}]", member_indices)
-        for component_key, member_indices in component_member_indices_by_key.items()
-    }
-
-
-def _validate_rust_pair_plan_schema(plan: Mapping[str, Any]) -> None:
-    missing = sorted(key for key in REQUIRED_RUST_PAIR_PLAN_KEYS if key not in plan)
-    if missing:
-        raise RuntimeError(
-            "RustHybridCentroidRetriever.top_k_hybrid_centroid_pair_plan violated its result contract: "
-            f"missing keys={missing}"
-        )
-    row_count = int(plan["row_count"])
-    if row_count < 0:
-        raise RuntimeError(
-            "RustHybridCentroidRetriever.top_k_hybrid_centroid_pair_plan violated its result contract: "
-            f"row_count must be non-negative, got {row_count}"
-        )
-    pair_count = _rust_plan_sequence_len(plan, "pair_row_indices")
-    for key in ("left_signature_indices", "right_signature_indices"):
-        length = _rust_plan_sequence_len(plan, key)
-        if length != pair_count:
-            raise RuntimeError(
-                "RustHybridCentroidRetriever.top_k_hybrid_centroid_pair_plan violated its pair-array contract: "
-                f"{key} length={length} pair_row_indices length={pair_count}"
-            )
-    for key in RUST_PAIR_PLAN_ROW_SIGNAL_KEYS:
-        length = _rust_plan_sequence_len(plan, key)
-        if length != row_count:
-            raise RuntimeError(
-                "RustHybridCentroidRetriever.top_k_hybrid_centroid_pair_plan violated its row-array contract: "
-                f"{key} length={length} row_count={row_count}"
-            )
-
-
-def _rust_plan_sequence_len(plan: Mapping[str, Any], key: str) -> int:
-    try:
-        return len(plan[key])
-    except TypeError as exc:
-        raise RuntimeError(
-            "RustHybridCentroidRetriever.top_k_hybrid_centroid_pair_plan violated its result contract: "
-            f"key {key!r} is not a sized sequence"
-        ) from exc
 
 
 def _required_raw_plan_value(plan: Mapping[str, Any], key: str) -> Any:
@@ -523,13 +389,10 @@ def _uint8_flag_array(key: str, raw_values: Any, expected_length: int | None = N
     return values.astype(np.uint8, copy=False)
 
 
-def _readonly_array(values: Any, *, dtype: Any | None = None, copy: bool) -> np.ndarray:
-    """Return normalized read-only storage, copying only untrusted inputs."""
+def _readonly_array(values: Any, *, dtype: Any | None = None) -> np.ndarray:
+    """Return normalized read-only storage from a native planner value."""
 
-    owned = np.array(values, dtype=dtype, copy=True, order="C") if copy else np.asarray(values, dtype=dtype, order="C")
-    if copy and owned.dtype.hasobject:
-        for index, item in np.ndenumerate(owned):
-            owned[index] = _owned_plan_value(item)
+    owned = np.asarray(values, dtype=dtype, order="C")
     owned.setflags(write=False)
     return owned
 
@@ -544,7 +407,9 @@ def _owned_plan_value(value: Any) -> Any:
                 owned[index] = _owned_plan_value(item)
             owned.setflags(write=False)
             return owned
-        return _readonly_array(value, dtype=value.dtype, copy=True)
+        owned = np.array(value, dtype=value.dtype, copy=True, order="C")
+        owned.setflags(write=False)
+        return owned
     if isinstance(value, Mapping):
         return MappingProxyType({key: _owned_plan_value(item) for key, item in value.items()})
     if isinstance(value, bytearray):
@@ -610,12 +475,6 @@ def _raw_plan_sequence_length(plan: Mapping[str, Any], key: str) -> int:
         return len(_required_raw_plan_value(plan, key))
     except TypeError as exc:
         raise ValueError(f"raw candidate plan key {key!r} must be a sized 1D sequence") from exc
-
-
-def validate_raw_candidate_plan_schema(plan: Mapping[str, Any]) -> None:
-    """Validate the raw Arrow candidate-plan payload before slicing or remapping it."""
-
-    RawArrowPlanBundle.from_mapping(plan)
 
 
 def _signature_indices_from_ids(
@@ -693,160 +552,3 @@ def build_linker_retrieval_batch_from_raw_plan_bundle(
         retrieval_ranks=bundle.retrieval_ranks,
     )
     return LinkerRetrievalBatch(candidate_batch=candidate_batch, row_signals=dict(bundle.row_signals))
-
-
-def build_linker_retrieval_batch_rust(
-    *,
-    retriever: Any,
-    queries: Sequence[Any],
-    query_signature_indices: Sequence[int] | np.ndarray,
-    query_signature_ids: Sequence[str] | None = None,
-    component_member_indices_by_key: Mapping[str, Sequence[int] | np.ndarray],
-    top_k: int,
-    query_view: str | Sequence[str],
-    n_jobs: int | None = None,
-    retrieval_subblock_index: Mapping[str, Any] | None = None,
-    query_candidate_component_keys_by_signature_id: Mapping[str, Sequence[str]] | None = None,
-    full_first_global_backfill_count: int = 5,
-    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
-) -> LinkerRetrievalBatch:
-    """Retrieve candidates in Rust and return the shared numeric candidate-batch contract."""
-
-    normalized_query_views = normalize_query_views(query_view, len(queries))
-    query_signature_indices_array = as_uint32_1d("query_signature_indices", query_signature_indices)
-    if not isinstance(normalized_query_views, str):
-        query_index_values = [int(value) for value in query_signature_indices_array]
-        if len(set(query_index_values)) != len(query_index_values):
-            raise ValueError("query_signature_indices must be unique when per-query query_view values are provided")
-    rust_retriever = _rust_retriever_object(retriever)
-    if retrieval_subblock_index is not None or query_candidate_component_keys_by_signature_id is not None:
-        if query_signature_ids is None:
-            raise ValueError(
-                "query_signature_ids are required when retrieval_subblock_index or query candidate keys are provided"
-            )
-        if len(query_signature_ids) != len(queries):
-            raise ValueError(
-                f"queries and query_signature_ids must have equal length: {len(queries)} != {len(query_signature_ids)}"
-            )
-        resolved_name_tuples = None
-        if retrieval_subblock_index is not None:
-            resolved_name_tuples = load_packaged_name_tuple_artifact().pairs if name_tuples is None else name_tuples
-        plan = rust_retriever.top_k_hybrid_centroid_pair_plan(
-            list(queries),
-            query_signature_indices_array,
-            _as_uint32_mapping(component_member_indices_by_key),
-            int(top_k),
-            None if n_jobs is None else int(n_jobs),
-            [str(value) for value in query_signature_ids],
-            None if retrieval_subblock_index is None else dict(retrieval_subblock_index),
-            (
-                None
-                if query_candidate_component_keys_by_signature_id is None
-                else {
-                    str(query_signature_id): [str(component_key) for component_key in component_keys]
-                    for query_signature_id, component_keys in query_candidate_component_keys_by_signature_id.items()
-                }
-            ),
-            int(full_first_global_backfill_count),
-            resolved_name_tuples,
-        )
-    else:
-        plan = rust_retriever.top_k_hybrid_centroid_pair_plan(
-            list(queries),
-            query_signature_indices_array,
-            _as_uint32_mapping(component_member_indices_by_key),
-            int(top_k),
-            None if n_jobs is None else int(n_jobs),
-        )
-    _validate_rust_pair_plan_schema(plan)
-    row_count = int(plan["row_count"])
-    candidate_batch = LinkerCandidateBatch(
-        row_count=row_count,
-        left_signature_indices=as_uint32_1d("left_signature_indices", plan["left_signature_indices"]),
-        right_signature_indices=as_uint32_1d("right_signature_indices", plan["right_signature_indices"]),
-        pair_row_indices=as_uint32_1d("pair_row_indices", plan["pair_row_indices"]),
-        row_query_signature_indices=as_uint32_1d(
-            "row_query_signature_indices",
-            plan["row_query_signature_indices"],
-        ),
-        row_component_keys=tuple(str(value) for value in plan["row_component_keys"]),
-        retrieval_scores=np.asarray(plan["retrieval_scores"], dtype=np.float32),
-        retrieval_ranks=as_retrieval_rank_uint16_1d("retrieval_ranks", plan["retrieval_ranks"]),
-    )
-    if isinstance(normalized_query_views, str):
-        query_views: Any = np.full(row_count, normalized_query_views, dtype=object)
-    else:
-        row_query_signature_indices = candidate_batch.row_query_signature_indices
-        if row_query_signature_indices is None:
-            raise RuntimeError("Rust retrieval plan did not provide row_query_signature_indices")
-        query_view_by_query_index = {
-            int(query_index): str(current_query_view)
-            for query_index, current_query_view in zip(
-                query_signature_indices_array,
-                normalized_query_views,
-                strict=True,
-            )
-        }
-        query_views = np.asarray(
-            [query_view_by_query_index[int(query_index)] for query_index in row_query_signature_indices],
-            dtype=object,
-        )
-    query_first_tokens = np.asarray(plan["row_query_first_tokens"], dtype=object)
-    # Mirror the raw-Arrow path: broadcast per-query author strings onto each row so
-    # downstream gate features (top_meta_query_author_len) read query_author directly
-    # from row_signals instead of relying on a separate runtime patch-in.
-    row_query_signature_indices_arr = candidate_batch.row_query_signature_indices
-    if row_query_signature_indices_arr is None:
-        raise RuntimeError("Rust retrieval plan did not provide row_query_signature_indices")
-    per_query_authors = np.asarray(
-        [_query_author_for_retrieval_row_signal(query) for query in queries],
-        dtype=object,
-    )
-    query_index_to_offset = {
-        int(query_index): offset for offset, query_index in enumerate(query_signature_indices_array)
-    }
-    query_authors_per_row = np.asarray(
-        [per_query_authors[query_index_to_offset[int(query_index)]] for query_index in row_query_signature_indices_arr],
-        dtype=object,
-    )
-    row_signals: dict[str, Any] = {
-        "retrieval_score": candidate_batch.retrieval_scores,
-        "retrieval_rank": candidate_batch.retrieval_ranks,
-        "candidate_component_key": np.asarray(candidate_batch.row_component_keys, dtype=object),
-        "query_view": query_views,
-        "query_author": query_authors_per_row,
-        "cluster_size": np.asarray(plan["row_component_sizes"], dtype=np.float32),
-        "named_signature_count": np.asarray(plan["row_named_signature_counts"], dtype=np.float32),
-        "dominant_first_name": np.asarray(plan["row_dominant_first_names"], dtype=object),
-        "candidate_year_min": np.asarray(plan["row_candidate_year_min"], dtype=np.int32),
-        "candidate_year_max": np.asarray(plan["row_candidate_year_max"], dtype=np.int32),
-        "candidate_year_range_missing": _uint8_flag_array(
-            "row_candidate_year_range_missing",
-            plan["row_candidate_year_range_missing"],
-            row_count,
-        ),
-        "query_first_token": query_first_tokens,
-        "first_name_bucket": first_name_bucket_array(query_first_tokens, query_views),
-        "query_year": np.asarray(plan["row_query_years"], dtype=np.int32),
-        "query_year_missing": _uint8_flag_array("row_query_year_missing", plan["row_query_year_missing"], row_count),
-        "query_has_affiliations": _uint8_flag_array(
-            "row_query_has_affiliations",
-            plan["row_query_has_affiliations"],
-            row_count,
-        ),
-        "query_has_coauthors": _uint8_flag_array(
-            "row_query_has_coauthors",
-            plan["row_query_has_coauthors"],
-            row_count,
-        ),
-        "orcid_match": _uint8_flag_array("row_orcid_match", plan["row_orcid_match"], row_count),
-        "middle_initial_compatibility": np.asarray(plan["middle_initial_compatibility"], dtype=np.float32),
-        "affiliation_overlap": np.asarray(plan["affiliation_overlap"], dtype=np.float32),
-        "coauthor_overlap": np.asarray(plan["coauthor_overlap"], dtype=np.float32),
-        "venue_overlap": np.asarray(plan["venue_overlap"], dtype=np.float32),
-        "year_compatibility": np.asarray(plan["year_compatibility"], dtype=np.float32),
-        "title_overlap": np.asarray(plan["title_overlap"], dtype=np.float32),
-        "specter_centroid_similarity": np.asarray(plan["specter_centroid_similarity"], dtype=np.float32),
-        "specter_exemplar_similarity": np.asarray(plan["specter_exemplar_similarity"], dtype=np.float32),
-    }
-    return LinkerRetrievalBatch(candidate_batch=candidate_batch, row_signals=row_signals)

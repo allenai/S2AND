@@ -912,7 +912,6 @@ def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tm
         tmp_path,
         tiny_name_counts_tuple(),
         tiny_name_counts_provenance(),
-        overwrite=True,
     )
     name_counts_index = Path(index_path)
     manifest_path = name_counts_index / "manifest.json"

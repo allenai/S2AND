@@ -1690,16 +1690,19 @@ def _sorted_subblock_merge_candidates(
     return sorted(candidates, key=lambda x: (x[1], x[0][0], x[0][1]), reverse=True)
 
 
-def _normalize_unique_subblocking_signature_ids(signature_ids: Iterable[Any]) -> list[str]:
-    """Normalize subblocking IDs and reject duplicate identities."""
+def _require_unique_subblocking_signature_ids(signature_ids: Iterable[Any]) -> list[Any]:
+    """Preserve subblocking IDs while rejecting duplicate canonical identities."""
 
-    normalized_signature_ids = [str(signature_id) for signature_id in signature_ids]
+    original_signature_ids = list(signature_ids)
     seen_signature_ids: set[str] = set()
-    for signature_id in normalized_signature_ids:
-        if signature_id in seen_signature_ids:
-            raise ValueError(f"Subblocking signature_ids must be unique after string coercion: {signature_id!r}")
-        seen_signature_ids.add(signature_id)
-    return normalized_signature_ids
+    for signature_id in original_signature_ids:
+        normalized_signature_id = str(signature_id)
+        if normalized_signature_id in seen_signature_ids:
+            raise ValueError(
+                f"Subblocking signature_ids must be unique after string coercion: {normalized_signature_id!r}"
+            )
+        seen_signature_ids.add(normalized_signature_id)
+    return original_signature_ids
 
 
 def _make_subblocks_with_telemetry_arrow_rust(
@@ -1720,7 +1723,7 @@ def _make_subblocks_with_telemetry_arrow_rust(
     rust_make_subblocks = load_s2and_rust_extension().make_subblocks_with_telemetry_arrow_native_graph
     subblocks, telemetry = rust_make_subblocks(
         dict(arrow_paths),
-        _normalize_unique_subblocking_signature_ids(signature_ids),
+        [str(signature_id) for signature_id in _require_unique_subblocking_signature_ids(signature_ids)],
         int(maximum_size),
         rust_prefix_counts,
         graph_subblocking_config,
@@ -1766,7 +1769,7 @@ def make_subblocks_with_telemetry(
     """
     logger.info("Beginning subblocking...")
     first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
-    signature_ids = np.asarray(_normalize_unique_subblocking_signature_ids(signature_ids))
+    signature_ids = np.asarray(_require_unique_subblocking_signature_ids(signature_ids), dtype=object)
     first_middle_names = [signature_name_parts_for_subblocking(anddata.signatures[i]) for i in signature_ids]
     first_names = np.array([name_parts[0] for name_parts in first_middle_names])
     middle_names = np.array([name_parts[1] for name_parts in first_middle_names])

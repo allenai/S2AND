@@ -24,8 +24,9 @@ per-pair state:
 - There is no invalidation logic: any input change produces a different key
   and a fresh snapshot. Old snapshots are dead files; delete the directory
   whenever you like.
-- Snapshots are written to a temporary file and atomically replaced. Concurrent
-  cold callers may duplicate computation, but readers only see complete files.
+- Snapshots are written to a temporary file and published once under a short
+  per-key lock. Concurrent cold callers may duplicate computation, but a losing
+  publisher loads the winner and readers only see complete files.
   Loads are strictly validated (`allow_pickle=False`, exact members, dtypes,
   and shapes). A corrupt snapshot raises with its path — delete the file and
   rerun.

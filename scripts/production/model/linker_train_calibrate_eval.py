@@ -4,12 +4,11 @@ This is the official replay entrypoint for the promoted LightGBM
 linker/reranker target. It intentionally pins the promoted target JSON instead
 of trusting bundle manifests whose classic model specs predate the promotion.
 
-The default `arrow-rust` mode starts from the self-contained Arrow+labels
-bundle, rebuilds the promoted feature tables through Rust/Arrow query,
-summary, row-signal, pairwise, and row-formula paths, then runs the
-train/calibrate/eval stack. The active candidate-member contract is
-block-local for retrieval, pairwise distance summaries, and appended `pw_*`
-aggregates.
+The flow starts from the self-contained Arrow+labels bundle, rebuilds the
+promoted feature tables through Rust/Arrow query, summary, row-signal,
+pairwise, and row-formula paths, then runs the train/calibrate/eval stack. The
+active candidate-member contract is block-local for retrieval, pairwise
+distance summaries, and appended `pw_*` aggregates.
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ from __future__ import annotations
 import argparse
 import copy
 import gc
-import hashlib
 import json
 import math
 import os
@@ -27,13 +25,12 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 import pyarrow.ipc as pa_ipc
-import pyarrow.parquet as pq
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
@@ -48,8 +45,6 @@ from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact  # noqa: E402
 from s2and.incremental_linking.contracts import (  # noqa: E402
     DEFAULT_RETRIEVAL_TOP_K,
-    canonical_json_digest,
-    promoted_linker_feature_schema_digest,
 )
 from s2and.incremental_linking.feature_block import (  # noqa: E402
     read_cluster_seed_disallows_arrow,
@@ -103,9 +98,6 @@ REQUIRED_TABLE_KEYS = (
     "s2and_eval_path",
     "hwang_eval_path",
 )
-PRECOMPUTED_PROMOTED_BUNDLE_SCHEMA_VERSION = "precomputed_promoted_feature_bundle_v2"
-MATERIALIZATION_IDENTITY_SCHEMA_VERSION = "promoted_arrow_materialization_identity_v1"
-MATERIALIZATION_SIDECAR_SUFFIX = ".materialization.json"
 
 
 @dataclass
@@ -133,7 +125,6 @@ class ArrowRustPendingShard:
     rows: pd.DataFrame
     row_positions: np.ndarray
     partial_path: Path
-    reuse_metadata: dict[str, Any]
 
 
 @dataclass
@@ -148,7 +139,6 @@ class ArrowRustTablePlan:
     dataset_summaries: list[dict[str, Any]]
     label_filtering_summary: dict[str, Any]
     structural_cleaning_summary: dict[str, Any]
-    reuse_metadata: dict[str, Any]
     started: float
 
 
@@ -212,106 +202,6 @@ def _target_expected_metrics(target: Mapping[str, Any]) -> dict[str, float]:
         )
         if key in metrics
     }
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _materialization_sidecar_path(parquet_path: Path) -> Path:
-    """Return the identity sidecar path for one reusable Parquet artifact."""
-
-    return Path(f"{parquet_path}{MATERIALIZATION_SIDECAR_SUFFIX}")
-
-
-def _materialization_reuse_metadata(
-    materialization_identity: Mapping[str, Any],
-    *,
-    artifact: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Build the exact identity record attached to one reusable artifact."""
-
-    identity = _validated_materialization_identity(materialization_identity)
-    return {
-        "schema_version": MATERIALIZATION_IDENTITY_SCHEMA_VERSION,
-        "materialization_digest": canonical_json_digest(identity),
-        "materialization_identity": identity,
-        "artifact": dict(artifact),
-    }
-
-
-def _write_materialization_sidecar(parquet_path: Path, metadata: Mapping[str, Any]) -> None:
-    """Write one reusable-artifact identity after its Parquet is complete."""
-
-    _write_json(_materialization_sidecar_path(parquet_path), dict(metadata))
-
-
-def _read_materialization_sidecar(parquet_path: Path, *, context: str) -> dict[str, Any]:
-    """Read one self-consistent materialization sidecar."""
-
-    sidecar_path = _materialization_sidecar_path(parquet_path)
-    if not sidecar_path.is_file():
-        raise ValueError(f"{context}: reusable parquet is missing materialization identity: {sidecar_path}")
-    try:
-        raw_metadata = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"{context}: invalid materialization identity sidecar {sidecar_path}: {exc}") from exc
-    if not isinstance(raw_metadata, Mapping):
-        raise ValueError(f"{context}: materialization identity sidecar must contain an object: {sidecar_path}")
-    actual = dict(raw_metadata)
-    if set(actual) != {"schema_version", "materialization_digest", "materialization_identity", "artifact"}:
-        raise ValueError(f"{context}: materialization identity sidecar fields are invalid: {sidecar_path}")
-    if not isinstance(actual.get("artifact"), Mapping):
-        raise ValueError(f"{context}: materialization identity sidecar artifact must be an object: {sidecar_path}")
-    stored_identity = actual.get("materialization_identity")
-    if not isinstance(stored_identity, Mapping):
-        raise ValueError(f"{context}: materialization identity sidecar is missing its input identity: {sidecar_path}")
-    stored_digest = actual.get("materialization_digest")
-    if stored_digest != canonical_json_digest(dict(stored_identity)):
-        raise ValueError(f"{context}: materialization identity sidecar digest is invalid: {sidecar_path}")
-    if actual.get("schema_version") != MATERIALIZATION_IDENTITY_SCHEMA_VERSION:
-        raise ValueError(f"{context}: materialization identity sidecar schema is unsupported: {sidecar_path}")
-    _validated_materialization_identity(stored_identity)
-    return actual
-
-
-def _validate_materialization_sidecar(
-    parquet_path: Path,
-    expected_metadata: Mapping[str, Any],
-    *,
-    context: str,
-) -> None:
-    """Fail closed unless an existing artifact binds to the exact current inputs."""
-
-    actual = _read_materialization_sidecar(parquet_path, context=context)
-    stored_digest = actual["materialization_digest"]
-    expected = dict(expected_metadata)
-    if actual != expected:
-        raise ValueError(
-            f"{context}: reusable parquet materialization identity mismatch; "
-            f"existing={stored_digest!r} expected={expected.get('materialization_digest')!r} ({parquet_path})"
-        )
-
-
-def _row_positions_digest(row_positions: np.ndarray) -> str:
-    """Return a platform-independent digest for one ordered partial-row selection."""
-
-    positions = np.asarray(row_positions, dtype="<i8")
-    return hashlib.sha256(positions.tobytes(order="C")).hexdigest()
-
-
-def _selected_rows_digest(rows: pd.DataFrame) -> str:
-    """Return a stable digest for the ordered rows actually materialized."""
-
-    schema = [(str(column), str(dtype)) for column, dtype in rows.dtypes.items()]
-    digest = hashlib.sha256(json.dumps(schema, separators=(",", ":")).encode("utf-8"))
-    row_hashes = pd.util.hash_pandas_object(rows, index=False, categorize=True).to_numpy(dtype="<u8", copy=False)
-    digest.update(row_hashes.tobytes(order="C"))
-    return digest.hexdigest()
 
 
 def _bundle_with_promoted_target(bundle: OfficialBundle, target: Mapping[str, Any]) -> OfficialBundle:
@@ -1187,460 +1077,6 @@ def _constraint_label_is_disallow(label: float) -> bool:
     return float(label) + float(LARGE_INTEGER) >= float(LARGE_DISTANCE)
 
 
-def _parquet_row_count_and_columns(path: Path) -> tuple[int, set[str]]:
-    parquet_file = pq.ParquetFile(path)
-    return int(parquet_file.metadata.num_rows), set(parquet_file.schema_arrow.names)
-
-
-def _validate_reusable_parquet(
-    path: Path,
-    *,
-    expected_rows: int,
-    required_columns: Iterable[str],
-    context: str,
-) -> int:
-    row_count, columns = _parquet_row_count_and_columns(path)
-    if row_count != int(expected_rows):
-        raise ValueError(f"{context}: reusable parquet row count mismatch: {row_count} != {expected_rows} ({path})")
-    missing_columns = sorted(set(required_columns) - columns)
-    if missing_columns:
-        raise ValueError(f"{context}: reusable parquet is missing columns: {missing_columns[:10]} ({path})")
-    return row_count
-
-
-def _relative_bundle_asset_path(bundle: OfficialBundle, path: Path) -> str:
-    """Return a portable bundle-relative path for a resolved asset path."""
-
-    try:
-        return path.resolve().relative_to(bundle.root.resolve()).as_posix()
-    except ValueError as exc:
-        raise ValueError(f"Precomputed feature path escapes bundle root: {path}") from exc
-
-
-def _resolve_portable_bundle_relative_path(bundle_root: Path, raw_path: Any, *, context: str) -> Path:
-    """Resolve a canonical POSIX bundle path without host-dependent semantics."""
-
-    if not isinstance(raw_path, str) or not raw_path:
-        raise ValueError(f"{context} must be a nonempty bundle-relative POSIX path")
-    windows_path = PureWindowsPath(raw_path)
-    if (
-        "\\" in raw_path
-        or PurePosixPath(raw_path).is_absolute()
-        or windows_path.is_absolute()
-        or bool(windows_path.drive)
-    ):
-        raise ValueError(f"{context} must be a bundle-relative POSIX path")
-    relative_path = PurePosixPath(raw_path)
-    if any(part in {"", ".", ".."} for part in relative_path.parts) or relative_path.as_posix() != raw_path:
-        raise ValueError(f"{context} must not contain empty, current-directory, or parent-directory segments")
-    return bundle_root.joinpath(*relative_path.parts)
-
-
-def _require_identity_sha256(value: Any, *, field: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"materialization identity {field} must be a lowercase SHA-256")
-    return value
-
-
-def _validated_materialization_identity(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the complete portable input identity stored beside feature tables."""
-
-    identity = dict(value)
-    expected_keys = {
-        "schema_version",
-        "source_bundle",
-        "pairwise_bundle_binding",
-        "target_spec_digest",
-        "feature_schema_digest",
-        "feature_columns",
-        "feature_policies",
-        "selection",
-        "datasets",
-    }
-    if set(identity) != expected_keys or identity.get("schema_version") != MATERIALIZATION_IDENTITY_SCHEMA_VERSION:
-        raise ValueError("materialization identity fields or schema_version are invalid")
-    source = identity.get("source_bundle")
-    if not isinstance(source, Mapping) or set(source) != {"bundle_json_sha256", "labels_path", "labels_sha256"}:
-        raise ValueError("materialization identity source_bundle fields are invalid")
-    _require_identity_sha256(source.get("bundle_json_sha256"), field="source_bundle.bundle_json_sha256")
-    _require_identity_sha256(source.get("labels_sha256"), field="source_bundle.labels_sha256")
-    _resolve_portable_bundle_relative_path(
-        Path("."),
-        source.get("labels_path"),
-        context="materialization identity source_bundle.labels_path",
-    )
-    pairwise_binding = identity.get("pairwise_bundle_binding")
-    if not isinstance(pairwise_binding, Mapping) or not pairwise_binding:
-        raise ValueError("materialization identity pairwise_bundle_binding must be a nonempty object")
-    _require_identity_sha256(identity.get("target_spec_digest"), field="target_spec_digest")
-    _require_identity_sha256(identity.get("feature_schema_digest"), field="feature_schema_digest")
-    feature_columns = identity.get("feature_columns")
-    if not isinstance(feature_columns, list) or any(not isinstance(column, str) for column in feature_columns):
-        raise ValueError("materialization identity feature_columns must be a list of strings")
-    policies = identity.get("feature_policies")
-    if not isinstance(policies, Mapping) or set(policies) != {
-        "pairwise_model_nan_value",
-        "pairwise_aggregate_nan_value",
-        "row_nan_policy",
-        "max_exemplars",
-    }:
-        raise ValueError("materialization identity feature_policies fields are invalid")
-    if isinstance(policies.get("max_exemplars"), bool) or not isinstance(policies.get("max_exemplars"), int):
-        raise ValueError("materialization identity max_exemplars must be an integer")
-    selection = identity.get("selection")
-    if not isinstance(selection, Mapping) or set(selection) != {
-        "table_key",
-        "datasets",
-        "limit_rows",
-        "selected_row_count",
-        "selected_rows_digest",
-        "input_datasets",
-    }:
-        raise ValueError("materialization identity selection fields are invalid")
-    if not isinstance(selection.get("table_key"), str) or not selection.get("table_key"):
-        raise ValueError("materialization identity selection.table_key must be nonempty")
-    selected_row_count = selection.get("selected_row_count")
-    if isinstance(selected_row_count, bool) or not isinstance(selected_row_count, int):
-        raise ValueError("materialization identity selection.selected_row_count must be an integer")
-    _require_identity_sha256(selection.get("selected_rows_digest"), field="selection.selected_rows_digest")
-    input_datasets = selection.get("input_datasets")
-    if not isinstance(input_datasets, list) or any(not isinstance(name, str) for name in input_datasets):
-        raise ValueError("materialization identity selection.input_datasets must be a list of strings")
-    dataset_identities = identity.get("datasets")
-    if not isinstance(dataset_identities, Mapping) or sorted(dataset_identities) != input_datasets:
-        raise ValueError("materialization identity datasets must match selection.input_datasets")
-    for dataset_name, raw_dataset_identity in dataset_identities.items():
-        if not isinstance(raw_dataset_identity, Mapping) or set(raw_dataset_identity) != {
-            "arrow",
-            "candidate_members_path",
-            "candidate_members_sha256",
-        }:
-            raise ValueError(f"materialization identity dataset {dataset_name!r} fields are invalid")
-        arrow = raw_dataset_identity.get("arrow")
-        if not isinstance(arrow, Mapping) or set(arrow) != {
-            "generation_id",
-            "normalization_version",
-            "name_counts_manifest_sha256",
-        }:
-            raise ValueError(f"materialization identity dataset {dataset_name!r} Arrow fields are invalid")
-        _require_identity_sha256(arrow.get("generation_id"), field=f"datasets.{dataset_name}.arrow.generation_id")
-        _require_identity_sha256(
-            arrow.get("name_counts_manifest_sha256"),
-            field=f"datasets.{dataset_name}.arrow.name_counts_manifest_sha256",
-        )
-        if not isinstance(arrow.get("normalization_version"), str) or not arrow.get("normalization_version"):
-            raise ValueError(f"materialization identity dataset {dataset_name!r} normalization_version is invalid")
-        _resolve_portable_bundle_relative_path(
-            Path("."),
-            raw_dataset_identity.get("candidate_members_path"),
-            context=f"materialization identity dataset {dataset_name!r} candidate_members_path",
-        )
-        _require_identity_sha256(
-            raw_dataset_identity.get("candidate_members_sha256"),
-            field=f"datasets.{dataset_name}.candidate_members_sha256",
-        )
-    return identity
-
-
-def _target_spec_digest(target: Mapping[str, Any]) -> str:
-    """Return the stable digest for a promoted training target spec."""
-
-    return canonical_json_digest(dict(target))
-
-
-def _nan_identity_value(value: float) -> float | str:
-    """Return a canonical JSON value for one floating-point missingness policy."""
-
-    return "nan" if math.isnan(float(value)) else float(value)
-
-
-def _validated_arrow_materialization_identity(paths: ValidatedArrowInputs) -> dict[str, Any]:
-    """Return portable identities for one fully validated Arrow generation."""
-
-    name_counts_manifest = paths.name_counts_manifest
-    if name_counts_manifest is None:
-        raise ValueError("Arrow materialization identity requires a validated name_counts_index manifest")
-    return {
-        "generation_id": str(paths.generation_id),
-        "normalization_version": str(paths.normalization_version),
-        "name_counts_manifest_sha256": str(name_counts_manifest.manifest_sha256),
-    }
-
-
-def _table_materialization_identity(
-    *,
-    source_bundle: OfficialBundle,
-    table_key: str,
-    labels_path: Path,
-    selected_rows: pd.DataFrame,
-    input_dataset_names: Sequence[str],
-    arrow_paths_cache: Mapping[str, ValidatedArrowInputs],
-    target: Mapping[str, Any],
-    pairwise_model_binding: Mapping[str, Any],
-    datasets: set[str] | None,
-    limit_rows: int | None,
-    max_exemplars: int,
-    pairwise_model_nan_value: float,
-    pairwise_aggregate_nan_value: float,
-    row_nan_policy: str,
-    sha256_cache: dict[Path, str] | None = None,
-) -> dict[str, Any]:
-    """Bind one table's reusable outputs to every material feature input."""
-
-    digest_cache = {} if sha256_cache is None else sha256_cache
-
-    def file_sha256(path: Path) -> str:
-        resolved = path.resolve()
-        if resolved not in digest_cache:
-            digest_cache[resolved] = _sha256_file(resolved)
-        return digest_cache[resolved]
-
-    dataset_identities: dict[str, Any] = {}
-    member_datasets = dict(source_bundle.assets["candidate_members"]["datasets"])
-    for dataset_name in sorted(set(str(value) for value in input_dataset_names)):
-        if dataset_name not in arrow_paths_cache:
-            raise KeyError(f"Missing validated Arrow identity for dataset {dataset_name!r}")
-        if dataset_name not in member_datasets:
-            raise KeyError(f"Candidate member metadata is missing dataset {dataset_name!r}")
-        member_path = _resolve_path(source_bundle, str(member_datasets[dataset_name]))
-        dataset_identities[dataset_name] = {
-            "arrow": _validated_arrow_materialization_identity(arrow_paths_cache[dataset_name]),
-            "candidate_members_path": _relative_bundle_asset_path(source_bundle, member_path),
-            "candidate_members_sha256": file_sha256(member_path),
-        }
-
-    target_features = tuple(str(feature) for feature in target["features"])
-    return {
-        "schema_version": MATERIALIZATION_IDENTITY_SCHEMA_VERSION,
-        "source_bundle": {
-            "bundle_json_sha256": file_sha256(source_bundle.root / "bundle.json"),
-            "labels_path": _relative_bundle_asset_path(source_bundle, labels_path),
-            "labels_sha256": file_sha256(labels_path),
-        },
-        "pairwise_bundle_binding": dict(pairwise_model_binding),
-        "target_spec_digest": _target_spec_digest(target),
-        "feature_schema_digest": promoted_linker_feature_schema_digest(target_features),
-        "feature_columns": list(target_features),
-        "feature_policies": {
-            "pairwise_model_nan_value": _nan_identity_value(pairwise_model_nan_value),
-            "pairwise_aggregate_nan_value": _nan_identity_value(pairwise_aggregate_nan_value),
-            "row_nan_policy": str(row_nan_policy),
-            "max_exemplars": int(max_exemplars),
-        },
-        "selection": {
-            "table_key": str(table_key),
-            "datasets": None if datasets is None else sorted(str(value) for value in datasets),
-            "limit_rows": None if limit_rows is None else int(limit_rows),
-            "selected_row_count": int(len(selected_rows)),
-            "selected_rows_digest": _selected_rows_digest(selected_rows),
-            "input_datasets": sorted(dataset_identities),
-        },
-        "datasets": dataset_identities,
-    }
-
-
-def _precomputed_table_metadata(
-    bundle: OfficialBundle,
-    target: Mapping[str, Any],
-    *,
-    pairwise_model_binding: Mapping[str, Any],
-) -> dict[str, dict[str, Any]]:
-    """Return validated table metadata for a portable precomputed feature bundle."""
-
-    target_features = tuple(str(feature) for feature in target["features"])
-    expected_target_digest = _target_spec_digest(target)
-    expected_schema_digest = promoted_linker_feature_schema_digest(target_features)
-    spec = dict(bundle.models["classic"])
-    table_metadata: dict[str, dict[str, Any]] = {}
-    for table_key in _classic_table_keys(spec):
-        path = _asset_file(bundle, "corrected_feature_rows", table_key)
-        row_count, columns = _parquet_row_count_and_columns(path)
-        missing_features = sorted(set(str(feature) for feature in target_features) - columns)
-        if missing_features:
-            raise ValueError(f"{table_key}: precomputed table is missing target features: {missing_features[:10]}")
-        sidecar = _read_materialization_sidecar(path, context=f"{table_key} precomputed promoted feature table")
-        identity = cast(Mapping[str, Any], sidecar["materialization_identity"])
-        if identity.get("pairwise_bundle_binding") != dict(pairwise_model_binding):
-            raise ValueError(f"{table_key}: precomputed table pairwise bundle binding does not match")
-        if identity.get("target_spec_digest") != expected_target_digest:
-            raise ValueError(f"{table_key}: precomputed table target identity does not match target_json")
-        if identity.get("feature_schema_digest") != expected_schema_digest:
-            raise ValueError(f"{table_key}: precomputed table feature schema identity does not match target_json")
-        if sidecar.get("artifact") != {
-            "kind": "complete_table",
-            "table_key": table_key,
-            "rows": int(row_count),
-        }:
-            raise ValueError(f"{table_key}: precomputed table materialization artifact identity does not match")
-        table_metadata[table_key] = {
-            "path": _relative_bundle_asset_path(bundle, path),
-            "rows": int(row_count),
-            "feature_count": int(len(target_features)),
-            "materialization_digest": str(sidecar["materialization_digest"]),
-        }
-    return table_metadata
-
-
-def _precomputed_promoted_bundle_metadata(
-    *,
-    bundle: OfficialBundle,
-    target: Mapping[str, Any],
-    source_mode: str,
-    pairwise_model_binding: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Build portable metadata for a validated precomputed promoted feature bundle."""
-
-    target_features = tuple(str(feature) for feature in target["features"])
-    return {
-        "schema_version": PRECOMPUTED_PROMOTED_BUNDLE_SCHEMA_VERSION,
-        "source_mode": str(source_mode),
-        "target_spec_digest": _target_spec_digest(target),
-        "feature_schema_digest": promoted_linker_feature_schema_digest(target_features),
-        "feature_count": int(target["feature_count"]),
-        "feature_columns": list(target_features),
-        "pairwise_bundle_binding": dict(pairwise_model_binding),
-        "tables": _precomputed_table_metadata(
-            bundle,
-            target,
-            pairwise_model_binding=pairwise_model_binding,
-        ),
-    }
-
-
-def _stamp_precomputed_promoted_bundle_metadata(
-    *,
-    output_bundle_root: Path,
-    target: Mapping[str, Any],
-    source_mode: str,
-    pairwise_model_binding: Mapping[str, Any],
-) -> None:
-    """Persist portable precomputed-feature metadata into `bundle.json`."""
-
-    bundle = load_bundle(output_bundle_root)
-    payload = json.loads((output_bundle_root / "bundle.json").read_text(encoding="utf-8"))
-    payload["precomputed_promoted_feature_bundle"] = _precomputed_promoted_bundle_metadata(
-        bundle=bundle,
-        target=target,
-        source_mode=source_mode,
-        pairwise_model_binding=pairwise_model_binding,
-    )
-    (output_bundle_root / "bundle.json").write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _load_precomputed_promoted_feature_bundle(
-    *,
-    bundle_root: Path,
-    target: Mapping[str, Any],
-    pairwise_model_binding: Mapping[str, Any],
-) -> tuple[OfficialBundle, list[dict[str, Any]]]:
-    """Load and validate a portable precomputed promoted feature bundle."""
-
-    root = bundle_root.resolve()
-    payload = json.loads((root / "bundle.json").read_text(encoding="utf-8"))
-    metadata = payload.get("precomputed_promoted_feature_bundle")
-    if not isinstance(metadata, Mapping):
-        raise ValueError(
-            "precomputed-promoted bundles must include precomputed_promoted_feature_bundle metadata; "
-            "rerun Arrow materialization without --reuse-existing-features to create an identity-bound bundle"
-        )
-    if metadata.get("schema_version") != PRECOMPUTED_PROMOTED_BUNDLE_SCHEMA_VERSION:
-        raise ValueError(f"Unsupported precomputed promoted bundle schema_version: {metadata.get('schema_version')!r}")
-    target_features = tuple(str(feature) for feature in target["features"])
-    if tuple(str(feature) for feature in metadata.get("feature_columns", ())) != target_features:
-        raise ValueError("Precomputed promoted bundle feature columns do not match target_json")
-    if int(metadata.get("feature_count", -1)) != int(target["feature_count"]):
-        raise ValueError("Precomputed promoted bundle feature_count does not match target_json")
-    expected_target_digest = _target_spec_digest(target)
-    if metadata.get("target_spec_digest") != expected_target_digest:
-        raise ValueError("Precomputed promoted bundle target_spec_digest does not match target_json")
-    expected_schema_digest = promoted_linker_feature_schema_digest(target_features)
-    if metadata.get("feature_schema_digest") != expected_schema_digest:
-        raise ValueError("Precomputed promoted bundle feature_schema_digest does not match target_json")
-    if metadata.get("pairwise_bundle_binding") != dict(pairwise_model_binding):
-        raise ValueError("Precomputed promoted bundle pairwise_bundle_binding does not match pairwise model")
-
-    raw_files = dict(payload.get("assets", {}).get("corrected_feature_rows", {}).get("files", {}))
-    invalid_feature_paths: list[str] = []
-    for raw_path in raw_files.values():
-        try:
-            _resolve_portable_bundle_relative_path(
-                root,
-                raw_path,
-                context="precomputed promoted bundle feature path",
-            )
-        except ValueError:
-            invalid_feature_paths.append(str(raw_path))
-    if invalid_feature_paths:
-        raise ValueError(
-            "Precomputed promoted bundle contains non-portable or non-relative feature paths: "
-            f"{sorted(invalid_feature_paths)[:5]}"
-        )
-
-    bundle = _bundle_with_promoted_target(load_bundle(root), target)
-    if tuple(str(feature) for feature in bundle.models["classic"]["feature_columns"]) != target_features:
-        raise ValueError("Precomputed promoted bundle classic feature_columns do not match target_json")
-    table_metadata = metadata.get("tables", {})
-    if not isinstance(table_metadata, Mapping):
-        raise ValueError("Precomputed promoted bundle metadata must include table row counts")
-    featureization_summaries: list[dict[str, Any]] = []
-    for table_key in _classic_table_keys(bundle.models["classic"]):
-        if table_key not in table_metadata:
-            raise ValueError(f"Precomputed promoted bundle metadata is missing table {table_key!r}")
-        table_payload = dict(cast(Mapping[str, Any], table_metadata[table_key]))
-        table_path = _asset_file(bundle, "corrected_feature_rows", table_key)
-        raw_metadata_path = table_payload.get("path", "")
-        resolved_metadata_path = _resolve_portable_bundle_relative_path(
-            bundle.root,
-            raw_metadata_path,
-            context=f"{table_key} precomputed table metadata path",
-        )
-        if resolved_metadata_path.resolve() != table_path.resolve():
-            raise ValueError(f"{table_key}: precomputed table metadata path does not match bundle asset path")
-        expected_rows = int(table_payload["rows"])
-        row_count = _validate_reusable_parquet(
-            table_path,
-            expected_rows=expected_rows,
-            required_columns=target_features,
-            context=f"{table_key} precomputed promoted feature table",
-        )
-        sidecar = _read_materialization_sidecar(
-            table_path,
-            context=f"{table_key} precomputed promoted feature table",
-        )
-        identity = cast(Mapping[str, Any], sidecar["materialization_identity"])
-        if identity.get("pairwise_bundle_binding") != dict(pairwise_model_binding):
-            raise ValueError(f"{table_key}: precomputed table pairwise bundle binding does not match")
-        if identity.get("target_spec_digest") != expected_target_digest:
-            raise ValueError(f"{table_key}: precomputed table target identity does not match target_json")
-        if identity.get("feature_schema_digest") != expected_schema_digest:
-            raise ValueError(f"{table_key}: precomputed table feature schema identity does not match target_json")
-        if table_payload.get("materialization_digest") != sidecar.get("materialization_digest"):
-            raise ValueError(f"{table_key}: precomputed table materialization digest does not match bundle metadata")
-        if sidecar.get("artifact") != {
-            "kind": "complete_table",
-            "table_key": table_key,
-            "rows": int(row_count),
-        }:
-            raise ValueError(f"{table_key}: precomputed table materialization artifact identity does not match")
-        featureization_summaries.append(
-            {
-                "table_key": table_key,
-                "output_path": str(table_path.relative_to(bundle.root)),
-                "rows": int(row_count),
-                "mode": "precomputed-promoted",
-                "reused": True,
-            }
-        )
-    return bundle, featureization_summaries
-
-
 def _validate_materialized_target_features(
     frame: pd.DataFrame,
     target_features: Sequence[str],
@@ -1662,19 +1098,6 @@ def _validate_materialized_target_features(
         raise ValueError(f"{context}: materialized features contain infinite values: {infinite_features}")
 
 
-def _required_materialized_output_columns(labels: pd.DataFrame, target_features: Sequence[str]) -> list[str]:
-    """Return output columns, treating label columns as reusable feature columns."""
-
-    columns = [str(column) for column in labels.columns]
-    seen = set(columns)
-    for feature in target_features:
-        feature = str(feature)
-        if feature not in seen:
-            columns.append(feature)
-            seen.add(feature)
-    return columns
-
-
 def _target_feature_frame_to_append(
     rows: pd.DataFrame,
     dataset_features: Mapping[str, np.ndarray],
@@ -1691,13 +1114,11 @@ def _target_feature_frame_to_append(
 def _copy_bundle_support_files(
     source_bundle: OfficialBundle,
     output_bundle_root: Path,
-    *,
-    reuse_existing_features: bool = False,
 ) -> dict[str, Any]:
-    if output_bundle_root.exists() and not reuse_existing_features:
-        shutil.rmtree(output_bundle_root)
-    output_bundle_root.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source_bundle.root / "splits", output_bundle_root / "splits", dirs_exist_ok=True)
+    if output_bundle_root.exists():
+        raise ValueError(f"Fresh feature bundle output already exists: {output_bundle_root}")
+    output_bundle_root.mkdir(parents=True)
+    shutil.copytree(source_bundle.root / "splits", output_bundle_root / "splits")
     shutil.copy2(source_bundle.root / "bundle.json", output_bundle_root / "bundle.json")
     payload = json.loads((output_bundle_root / "bundle.json").read_text(encoding="utf-8"))
     payload["bundle_name"] = f"{payload['bundle_name']}_promoted_rust_recomputed_pw"
@@ -1940,7 +1361,7 @@ def _materialize_arrow_rust_dataset_rows(
         orcid_enabled=False,
         num_threads=max(1, int(n_jobs)),
         max_exemplars=int(max_exemplars),
-        name_counts_index=context.arrow_paths._retained_native_name_counts_index(),  # noqa: SLF001
+        name_counts_index=context.arrow_paths.native_name_counts_index,
     )
     raw_plan_seconds = float(time.perf_counter() - plan_started)
     signature_ids = tuple(str(signature_id) for signature_id in raw_plan["signature_ids"])
@@ -2078,7 +1499,6 @@ def _write_arrow_rust_partial(
         partial_path=shard.partial_path,
         dataset_features=dataset_features,
         target_features=target_features,
-        reuse_metadata=shard.reuse_metadata,
     )
 
 
@@ -2089,15 +1509,12 @@ def _write_arrow_rust_partial_frame(
     partial_path: Path,
     dataset_features: Mapping[str, np.ndarray],
     target_features: Sequence[str],
-    reuse_metadata: Mapping[str, Any] | None = None,
 ) -> None:
     feature_frame = _target_feature_frame_to_append(rows, dataset_features, target_features)
     partial_output = pd.concat([rows.reset_index(drop=True), feature_frame], axis=1)
     partial_output.insert(0, "_row_position", row_positions)
     partial_path.parent.mkdir(parents=True, exist_ok=True)
     partial_output.to_parquet(partial_path, index=False)
-    if reuse_metadata is not None:
-        _write_materialization_sidecar(partial_path, reuse_metadata)
     del feature_frame, partial_output
 
 
@@ -2115,7 +1532,6 @@ def _finalize_arrow_rust_table_plan(
     _validate_materialized_target_features(output, target_features, context=plan.table_key)
     plan.output_path.parent.mkdir(parents=True, exist_ok=True)
     output.to_parquet(plan.output_path, index=False)
-    _write_materialization_sidecar(plan.output_path, plan.reuse_metadata)
     del parts, output
     gc.collect()
     return {
@@ -2137,8 +1553,6 @@ def _finalize_arrow_rust_bundle_metadata(
     output_bundle_root: Path,
     target: Mapping[str, Any],
     selected_keys: Sequence[str],
-    stamp_precomputed_metadata: bool,
-    pairwise_model_binding: Mapping[str, Any],
 ) -> OfficialBundle:
     payload = json.loads((output_bundle_root / "bundle.json").read_text(encoding="utf-8"))
     feature_count = int(target["feature_count"])
@@ -2187,13 +1601,6 @@ def _finalize_arrow_rust_bundle_metadata(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    if stamp_precomputed_metadata:
-        _stamp_precomputed_promoted_bundle_metadata(
-            output_bundle_root=output_bundle_root,
-            target=target,
-            source_mode="arrow-rust",
-            pairwise_model_binding=pairwise_model_binding,
-        )
     return _bundle_with_promoted_target(load_bundle(output_bundle_root), target)
 
 
@@ -2203,27 +1610,18 @@ def _materialize_arrow_rust_feature_bundle(
     output_bundle_root: Path,
     target: Mapping[str, Any],
     clusterer: Any,
-    pairwise_model_binding: Mapping[str, Any],
     n_jobs: int,
     total_ram_bytes: int,
     table_keys: Sequence[str] | None,
     datasets: set[str] | None,
     limit_rows: int | None,
     max_exemplars: int,
-    reuse_existing_features: bool,
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
     row_nan_policy: str,
     name_counts_index_root: Path | None = None,
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
-    if reuse_existing_features:
-        output_bundle_root.mkdir(parents=True, exist_ok=True)
-    else:
-        _copy_bundle_support_files(
-            source_bundle,
-            output_bundle_root,
-            reuse_existing_features=False,
-        )
+    _copy_bundle_support_files(source_bundle, output_bundle_root)
     table_key_set = set(table_keys) if table_keys is not None else None
     selected_keys = [
         table_key
@@ -2238,7 +1636,6 @@ def _materialize_arrow_rust_feature_bundle(
     pending_by_dataset: dict[str, list[ArrowRustPendingShard]] = {}
     component_membership_cache: dict[str, pd.DataFrame] = {}
     arrow_paths_cache: dict[str, ValidatedArrowInputs] = {}
-    sha256_cache: dict[Path, str] = {}
 
     def append_empty_selection_summary(
         *,
@@ -2314,7 +1711,6 @@ def _materialize_arrow_rust_feature_bundle(
             name_counts_index_root=name_counts_index_root,
             arrow_paths_cache=arrow_paths_cache,
         )
-        required_output_columns = _required_materialized_output_columns(labels, target_features)
         if labels.empty:
             append_empty_selection_summary(
                 table_key=table_key,
@@ -2324,64 +1720,9 @@ def _materialize_arrow_rust_feature_bundle(
                 structural_cleaning_summary=structural_cleaning_summary,
             )
             continue
-        materialization_identity = _table_materialization_identity(
-            source_bundle=source_bundle,
-            table_key=table_key,
-            labels_path=labels_path,
-            selected_rows=labels,
-            input_dataset_names=input_dataset_names,
-            arrow_paths_cache=arrow_paths_cache,
-            target=target,
-            pairwise_model_binding=pairwise_model_binding,
-            datasets=datasets,
-            limit_rows=limit_rows,
-            max_exemplars=max_exemplars,
-            pairwise_model_nan_value=pairwise_model_nan_value,
-            pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
-            row_nan_policy=row_nan_policy,
-            sha256_cache=sha256_cache,
-        )
-        table_reuse_metadata = _materialization_reuse_metadata(
-            materialization_identity,
-            artifact={
-                "kind": "complete_table",
-                "table_key": table_key,
-                "rows": int(len(labels)),
-            },
-        )
-        if reuse_existing_features and output_path.exists():
-            _validate_materialization_sidecar(
-                output_path,
-                table_reuse_metadata,
-                context=f"{table_key} existing output",
-            )
-            row_count = _validate_reusable_parquet(
-                output_path,
-                expected_rows=len(labels),
-                required_columns=required_output_columns,
-                context=f"{table_key} existing output",
-            )
-            summary = {
-                "table_key": table_key,
-                "labels_path": str(labels_path.relative_to(source_bundle.root)),
-                "output_path": str(output_path),
-                "rows": int(row_count),
-                "datasets": [],
-                "seconds": 0.0,
-                "mode": "arrow-rust",
-                "reused": True,
-                "label_filtering": label_filtering_summary,
-                "structural_cleaning": structural_cleaning_summary,
-            }
-            summaries.append(summary)
-            materialized_keys.append(table_key)
-            print(json.dumps({"event": "arrow_rust_table_featureization_done", **summary}), flush=True)
-            continue
 
         partial_dir = output_path.parent / "_partial" / output_path.stem
-        if partial_dir.exists() and not reuse_existing_features:
-            shutil.rmtree(partial_dir)
-        partial_dir.mkdir(parents=True, exist_ok=True)
+        partial_dir.mkdir(parents=True)
         plan = ArrowRustTablePlan(
             table_key=table_key,
             labels_path=labels_path,
@@ -2391,7 +1732,6 @@ def _materialize_arrow_rust_feature_bundle(
             dataset_summaries=[],
             label_filtering_summary=label_filtering_summary,
             structural_cleaning_summary=structural_cleaning_summary,
-            reuse_metadata=table_reuse_metadata,
             started=time.perf_counter(),
         )
         table_plans[table_key] = plan
@@ -2401,51 +1741,6 @@ def _materialize_arrow_rust_feature_bundle(
             dataset_name = str(dataset_name)
             row_positions = dataset_rows.index.to_numpy(dtype=np.int64)
             partial_path = partial_dir / f"{_safe_dataset_filename(dataset_name)}.parquet"
-            partial_reuse_metadata = _materialization_reuse_metadata(
-                materialization_identity,
-                artifact={
-                    "kind": "dataset_partial",
-                    "table_key": table_key,
-                    "dataset": dataset_name,
-                    "rows": int(len(dataset_rows)),
-                    "row_positions_sha256": _row_positions_digest(row_positions),
-                },
-            )
-            if reuse_existing_features and partial_path.exists():
-                _validate_materialization_sidecar(
-                    partial_path,
-                    partial_reuse_metadata,
-                    context=f"{table_key} {dataset_name} partial",
-                )
-                row_count = _validate_reusable_parquet(
-                    partial_path,
-                    expected_rows=len(dataset_rows),
-                    required_columns=["_row_position", *required_output_columns],
-                    context=f"{table_key} {dataset_name} partial",
-                )
-                plan.dataset_summaries.append(
-                    {
-                        "dataset": dataset_name,
-                        "rows": int(row_count),
-                        "seconds": 0.0,
-                        "mode": "arrow-rust",
-                        "reused": True,
-                    }
-                )
-                plan.partial_paths.append(partial_path)
-                print(
-                    json.dumps(
-                        {
-                            "event": "arrow_rust_dataset_featureization_reused",
-                            "table_key": table_key,
-                            "dataset": dataset_name,
-                            "rows": int(row_count),
-                            "partial_path": str(partial_path),
-                        }
-                    ),
-                    flush=True,
-                )
-                continue
             pending_by_dataset.setdefault(dataset_name, []).append(
                 ArrowRustPendingShard(
                     table_key=table_key,
@@ -2453,16 +1748,8 @@ def _materialize_arrow_rust_feature_bundle(
                     rows=dataset_rows.reset_index(drop=True),
                     row_positions=row_positions,
                     partial_path=partial_path,
-                    reuse_metadata=partial_reuse_metadata,
                 )
             )
-
-    if reuse_existing_features:
-        _copy_bundle_support_files(
-            source_bundle,
-            output_bundle_root,
-            reuse_existing_features=True,
-        )
 
     for dataset_name, shards in pending_by_dataset.items():
         print(
@@ -2552,8 +1839,6 @@ def _materialize_arrow_rust_feature_bundle(
             output_bundle_root=output_bundle_root,
             target=target,
             selected_keys=materialized_keys,
-            stamp_precomputed_metadata=table_keys is None and datasets is None and limit_rows is None,
-            pairwise_model_binding=pairwise_model_binding,
         ),
         summaries,
     )
@@ -2895,76 +2180,45 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     pairwise_model_nan_value = _nan_value_from_policy(str(args.pairwise_model_nan_policy))
     pairwise_aggregate_nan_value = _nan_value_from_policy(str(args.pairwise_aggregate_nan_policy))
     feature_nan_policy = _feature_nan_policy_summary(args)
-    pairwise_model_binding: dict[str, Any]
-    if args.feature_mode == "arrow-rust":
-        if args.limit_rows is None and not args.run_full:
-            raise SystemExit(f"unbounded {args.feature_mode} feature materialization requires --run-full")
-        if not args.materialize_only and (args.limit_rows is not None or args.tables or args.datasets):
-            raise SystemExit(
-                f"limited/table-filtered {args.feature_mode} materialization is smoke-only; pass --materialize-only"
-            )
-        source_bundle = load_bundle(args.source_bundle_root)
-        clusterer = load_clusterer(args.pairwise_model_path, n_jobs=int(args.n_jobs))
-        _assert_pairwise_model_supports_arrow_materialization(clusterer, args.pairwise_model_path)
-        pairwise_model_binding = dict(pairwise_bundle_binding(Path(args.pairwise_model_path)))
-        feature_bundle_root = output_dir / f"{str(args.feature_mode).replace('-', '_')}_feature_bundle"
-        feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
-            source_bundle=source_bundle,
-            output_bundle_root=feature_bundle_root,
-            target=target,
-            clusterer=clusterer,
-            pairwise_model_binding=pairwise_model_binding,
-            n_jobs=int(args.n_jobs),
-            total_ram_bytes=int(args.total_ram_bytes),
-            table_keys=_parse_tables(args.tables),
-            datasets=_parse_datasets(args.datasets),
-            limit_rows=args.limit_rows,
-            max_exemplars=int(args.max_exemplars),
-            reuse_existing_features=bool(args.reuse_existing_features),
-            pairwise_model_nan_value=pairwise_model_nan_value,
-            pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
-            row_nan_policy=str(args.row_nan_policy),
-            name_counts_index_root=(
-                Path(args.arrow_name_counts_index_root) if args.arrow_name_counts_index_root is not None else None
-            ),
-        )
-        if args.materialize_only:
-            result = {
-                "mode": args.feature_mode,
-                "source_bundle_root": str(source_bundle.root),
-                "feature_bundle_root": str(feature_bundle.root),
-                "pairwise_model_path": str(args.pairwise_model_path),
-                "feature_count": int(target["feature_count"]),
-                "component_scope": "block-local",
-                "feature_nan_policy": feature_nan_policy,
-                "featureization": featureization_summaries,
-            }
-            _write_json(output_dir / "run_summary.json", result)
-            return result
-    elif args.feature_mode == "precomputed-promoted":
-        if args.precomputed_feature_bundle_root is None:
-            raise SystemExit("--feature-mode precomputed-promoted requires --precomputed-feature-bundle-root")
-        if not args.run_full:
-            raise SystemExit("precomputed-promoted train/calibrate/eval requires --run-full")
-        if args.materialize_only:
-            raise SystemExit("precomputed-promoted does not materialize features")
-        if args.limit_rows is not None or args.tables or args.datasets:
-            raise SystemExit("precomputed-promoted requires a complete validated feature bundle")
-        # The precomputed table still belongs to one exact pairwise model.
-        # Loading through the staging-only door rejects complete/legacy bundles
-        # before training or artifact publication starts.
-        load_clusterer(args.pairwise_model_path, n_jobs=int(args.n_jobs))
-        pairwise_model_binding = dict(pairwise_bundle_binding(Path(args.pairwise_model_path)))
-        feature_bundle, featureization_summaries = _load_precomputed_promoted_feature_bundle(
-            bundle_root=args.precomputed_feature_bundle_root,
-            target=target,
-            pairwise_model_binding=pairwise_model_binding,
-        )
-    else:
-        raise ValueError(f"Unknown feature mode: {args.feature_mode}")
-
+    if args.limit_rows is None and not args.run_full:
+        raise SystemExit("unbounded Arrow/Rust feature materialization requires --run-full")
+    if not args.materialize_only and (args.limit_rows is not None or args.tables or args.datasets):
+        raise SystemExit("limited/table-filtered materialization is smoke-only; pass --materialize-only")
+    source_bundle = load_bundle(args.source_bundle_root)
+    clusterer = load_clusterer(args.pairwise_model_path, n_jobs=int(args.n_jobs))
+    _assert_pairwise_model_supports_arrow_materialization(clusterer, args.pairwise_model_path)
+    feature_bundle_root = output_dir / "arrow_rust_feature_bundle"
+    feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
+        source_bundle=source_bundle,
+        output_bundle_root=feature_bundle_root,
+        target=target,
+        clusterer=clusterer,
+        n_jobs=int(args.n_jobs),
+        total_ram_bytes=int(args.total_ram_bytes),
+        table_keys=_parse_tables(args.tables),
+        datasets=_parse_datasets(args.datasets),
+        limit_rows=args.limit_rows,
+        max_exemplars=int(args.max_exemplars),
+        pairwise_model_nan_value=pairwise_model_nan_value,
+        pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
+        row_nan_policy=str(args.row_nan_policy),
+        name_counts_index_root=(
+            Path(args.arrow_name_counts_index_root) if args.arrow_name_counts_index_root is not None else None
+        ),
+    )
     if args.materialize_only:
-        raise SystemExit("materialize-only is only valid with a materializing feature mode")
+        result = {
+            "mode": "arrow-rust",
+            "source_bundle_root": str(source_bundle.root),
+            "feature_bundle_root": str(feature_bundle.root),
+            "pairwise_model_path": str(args.pairwise_model_path),
+            "feature_count": int(target["feature_count"]),
+            "component_scope": "block-local",
+            "feature_nan_policy": feature_nan_policy,
+            "featureization": featureization_summaries,
+        }
+        _write_json(output_dir / "run_summary.json", result)
+        return result
 
     run_output_dir = output_dir / "classic"
     started = time.perf_counter()
@@ -2989,7 +2243,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             save_artifact_to = output_dir / "production_incremental_linker"
         if save_artifact_to == production_bundle_dir or save_artifact_to.is_relative_to(production_bundle_dir):
             raise SystemExit("--save-artifact-to must be outside --save-production-bundle-to")
-    artifact_pairwise_binding = dict(pairwise_model_binding) if save_artifact_to is not None else None
+    artifact_pairwise_binding = (
+        dict(pairwise_bundle_binding(Path(args.pairwise_model_path))) if save_artifact_to is not None else None
+    )
     summary = run_classic(
         feature_bundle,
         run_output_dir,
@@ -3023,7 +2279,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             incremental_linker_version=str(args.linker_artifact_version).removeprefix("v"),
         )
     result = {
-        "mode": args.feature_mode,
+        "mode": "arrow-rust",
         "feature_bundle_root": str(feature_bundle.root),
         "target_json": str(args.target_json),
         "feature_count": int(target["feature_count"]),
@@ -3051,8 +2307,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "files": list(production_bundle_summary.files),
             "manifest_path": str(production_bundle_summary.manifest_path),
         }
-    if args.feature_mode == "arrow-rust":
-        result["component_scope"] = "block-local"
+    result["component_scope"] = "block-local"
     if not args.allow_metric_drift:
         result["metric_drift_check"] = "passed"
     _write_json(output_dir / "run_summary.json", result)
@@ -3117,27 +2372,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--hyperopt-seed", type=int, default=13)
     parser.add_argument(
-        "--feature-mode",
-        choices=("arrow-rust", "precomputed-promoted"),
-        default="arrow-rust",
-        help="Feature source for the official train/calibrate/eval run.",
-    )
-    parser.add_argument(
         "--arrow-name-counts-index-root",
         type=Path,
         default=DEFAULT_NAME_COUNTS_INDEX_ROOT,
         help=(
-            "Optional override for the Arrow name_counts_index root used with --feature-mode arrow-rust. "
-            "By default, each Arrow dataset manifest is the authority."
-        ),
-    )
-    parser.add_argument(
-        "--precomputed-feature-bundle-root",
-        type=Path,
-        default=None,
-        help=(
-            "Explicit portable precomputed promoted feature bundle root. Required only with "
-            "--feature-mode precomputed-promoted."
+            "Optional override for the Arrow name_counts_index root. By default, each Arrow dataset "
+            "manifest is the authority."
         ),
     )
     parser.add_argument(
@@ -3167,17 +2407,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-jobs", type=int, default=20)
     parser.add_argument("--total-ram-bytes", type=int, default=DEFAULT_TOTAL_RAM_BYTES)
     parser.add_argument("--max-exemplars", type=int, default=4)
-    parser.add_argument(
-        "--tables", nargs="*", help="Optional table keys to materialize in feature rematerialization modes."
-    )
+    parser.add_argument("--tables", nargs="*", help="Optional table keys to materialize.")
     parser.add_argument("--datasets", nargs="*", help="Optional dataset slugs to keep when materializing smoke checks.")
     parser.add_argument("--limit-rows", type=int, default=None, help="Optional per-table row limit for smoke checks.")
     parser.add_argument("--materialize-only", action="store_true", help="Stop after Rust feature materialization.")
-    parser.add_argument(
-        "--reuse-existing-features",
-        action="store_true",
-        help="Reuse already materialized output tables and dataset partials in the output directory.",
-    )
     parser.add_argument("--run-full", action="store_true", help="Explicitly allow an unbounded official run.")
     parser.add_argument(
         "--allow-metric-drift",

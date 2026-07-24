@@ -394,7 +394,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         evict_rust_featurizer,
     )
     from s2and.production_model import load_production_model
-    from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
+    from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
     timings: dict[str, float] = {}
     meta = _load_json(args.fixture_dir / "meta.json")
@@ -465,7 +465,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     timings["anddata_subset_seconds"] = time.perf_counter() - start
 
     start = time.perf_counter()
-    arrow_paths = write_feature_block_arrow_from_anddata(
+    arrow_paths = write_raw_planner_arrow_from_anddata(
         dataset,
         args.output_dir,
         signature_ids=selected_signature_ids,

@@ -3,9 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import operator
-import threading
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
 
 import pytest
@@ -399,16 +396,18 @@ def test_retained_validated_profile_projects_unused_specter_paths(
     assert "specter" in validated
 
 
-def test_validated_arrow_inputs_rejects_direct_construction_and_subclassing() -> None:
-    with pytest.raises(TypeError, match="cannot be constructed directly"):
-        ValidatedArrowInputs(
-            paths={"signatures": "missing.arrow"},
-            generation_id="forged",
-            normalization_version="canonical_v2",
-        )
+def test_validated_arrow_inputs_is_a_normal_immutable_value_object() -> None:
+    source_paths = {"signatures": "signatures.arrow"}
+    inputs = ValidatedArrowInputs(
+        paths=source_paths,
+        generation_id="generation",
+        normalization_version="canonical_v2",
+    )
 
-    with pytest.raises(TypeError, match="cannot be subclassed"):
-        type("_ForgedValidatedArrowInputs", (ValidatedArrowInputs,), {})
+    source_paths["signatures"] = "changed.arrow"
+    assert inputs["signatures"] == "signatures.arrow"
+    with pytest.raises(TypeError):
+        inputs.paths["signatures"] = "changed.arrow"  # type: ignore[index]
 
 
 def test_normalize_arrow_paths_resolves_relative_paths_at_boundary(
@@ -566,148 +565,6 @@ def test_repeated_raw_validation_reuses_immutable_generation(tmp_path: Path) -> 
             require_name_counts_index=False,
         )
     assert validated.generation_id
-
-
-@pytest.mark.parametrize(
-    "validator",
-    (validate_arrow_prediction_artifacts, validate_arrow_publication_artifacts),
-    ids=("runtime", "publication"),
-)
-def test_validation_rejects_name_counts_republished_after_generation_verification(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    validator: Callable[..., ValidatedArrowInputs],
-) -> None:
-    paths = _write_valid_prediction_bundle(tmp_path, include_name_counts=True)
-    original_manifest_validation = arrow_inputs_module._validate_arrow_bundle_manifest  # noqa: SLF001
-    republished = False
-
-    def validate_then_republish(*args: object, **kwargs: object):
-        nonlocal republished
-        verified = original_manifest_validation(*args, **kwargs)
-        if not republished:
-            republished = True
-            mappings = tuple(dict(mapping) for mapping in tiny_name_counts_tuple())
-            mappings[0]["abdul"] += 1
-            write_name_counts_index(
-                tmp_path,
-                mappings,
-                tiny_name_counts_provenance(),
-                overwrite=True,
-            )
-        return verified
-
-    with arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE_LOCK:  # noqa: SLF001
-        arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE.clear()  # noqa: SLF001
-    monkeypatch.setattr(arrow_inputs_module, "_validate_arrow_bundle_manifest", validate_then_republish)
-
-    with pytest.raises(MissingArrowArtifactError, match="opened name-count manifest does not match"):
-        validator(
-            paths,
-            require_specter=False,
-            require_name_counts_index=True,
-        )
-
-
-def test_concurrent_runtime_validation_opens_generation_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    paths = _write_valid_prediction_bundle(tmp_path)
-    worker_count = 4
-    manifest_barrier = threading.Barrier(worker_count)
-    open_started = threading.Event()
-    release_open = threading.Event()
-    open_calls = 0
-
-    original_manifest_validation = arrow_inputs_module._validate_arrow_bundle_manifest  # noqa: SLF001
-    original_open = arrow_inputs_module._open_validated_arrow_generation  # noqa: SLF001
-
-    def synchronized_manifest_validation(*args: object, **kwargs: object):
-        verified = original_manifest_validation(*args, **kwargs)
-        manifest_barrier.wait(timeout=5)
-        return verified
-
-    def blocking_open(*args: object, **kwargs: object):
-        nonlocal open_calls
-        open_calls += 1
-        open_started.set()
-        if not release_open.wait(timeout=5):
-            raise TimeoutError("test did not release generation open")
-        return original_open(*args, **kwargs)
-
-    with arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE_LOCK:  # noqa: SLF001
-        arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE.clear()  # noqa: SLF001
-    monkeypatch.setattr(arrow_inputs_module, "_validate_arrow_bundle_manifest", synchronized_manifest_validation)
-    monkeypatch.setattr(arrow_inputs_module, "_open_validated_arrow_generation", blocking_open)
-
-    try:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [
-                executor.submit(
-                    validate_arrow_prediction_artifacts,
-                    paths,
-                    require_specter=False,
-                    require_name_counts_index=False,
-                )
-                for _index in range(worker_count)
-            ]
-            assert open_started.wait(timeout=5)
-            release_open.set()
-            validated = [future.result(timeout=5) for future in futures]
-    finally:
-        release_open.set()
-        with arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE_LOCK:  # noqa: SLF001
-            arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE.clear()  # noqa: SLF001
-
-    assert open_calls == 1
-    assert len({item.generation_id for item in validated}) == 1
-
-
-def test_concurrent_distinct_runtime_generations_open_in_parallel(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    first_root = tmp_path / "first"
-    second_root = tmp_path / "second"
-    first_root.mkdir()
-    second_root.mkdir()
-    first_paths = _write_valid_prediction_bundle(first_root)
-    second_paths = _write_valid_prediction_bundle(second_root)
-    open_barrier = threading.Barrier(2)
-    opened_paths: list[str] = []
-    opened_paths_lock = threading.Lock()
-    original_open = arrow_inputs_module._open_validated_arrow_generation  # noqa: SLF001
-
-    def synchronized_open(paths: dict[str, str], *args: object, **kwargs: object):
-        with opened_paths_lock:
-            opened_paths.append(paths["signatures"])
-        open_barrier.wait(timeout=5)
-        return original_open(paths, *args, **kwargs)
-
-    with arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE_LOCK:  # noqa: SLF001
-        arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE.clear()  # noqa: SLF001
-    monkeypatch.setattr(arrow_inputs_module, "_open_validated_arrow_generation", synchronized_open)
-
-    try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [
-                executor.submit(
-                    validate_arrow_prediction_artifacts,
-                    paths,
-                    require_specter=False,
-                    require_name_counts_index=False,
-                )
-                for paths in (first_paths, second_paths)
-            ]
-            validated = [future.result(timeout=10) for future in futures]
-    finally:
-        with arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE_LOCK:  # noqa: SLF001
-            arrow_inputs_module._RUNTIME_ARROW_GENERATION_CACHE.clear()  # noqa: SLF001
-
-    assert len(opened_paths) == 2
-    assert {Path(path).parent for path in opened_paths} == {first_root, second_root}
-    assert len({item["signatures"] for item in validated}) == 2
 
 
 def test_complete_bundle_streams_each_generation_file_once(

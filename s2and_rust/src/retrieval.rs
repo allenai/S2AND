@@ -92,10 +92,11 @@ pub(crate) const RETRIEVAL_YEAR_SCORE_RANGE_PENALTY: f64 = 0.15;
 const RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP: i64 = 35;
 pub(crate) const RETRIEVAL_MEGA_AUTHOR_THRESHOLD: usize = 50;
 
-pub(crate) fn filter_excluded_candidate_indices(
-    indices: Vec<usize>,
+fn candidate_indices_excluding(
+    summary_count: usize,
     excluded_candidate_indices: Option<&HashSet<usize>>,
 ) -> Vec<usize> {
+    let indices = (0..summary_count).collect::<Vec<_>>();
     let Some(excluded) = excluded_candidate_indices else {
         return indices;
     };
@@ -106,18 +107,6 @@ pub(crate) fn filter_excluded_candidate_indices(
         .into_iter()
         .filter(|index| !excluded.contains(index))
         .collect()
-}
-
-pub(crate) fn default_candidate_indices(
-    summary_count: usize,
-    base_candidate_indices: Option<&[usize]>,
-    excluded_candidate_indices: Option<&HashSet<usize>>,
-) -> Vec<usize> {
-    let values = base_candidate_indices.map_or_else(
-        || (0..summary_count).collect::<Vec<_>>(),
-        |base_values| base_values.to_vec(),
-    );
-    filter_excluded_candidate_indices(values, excluded_candidate_indices)
 }
 
 #[derive(Clone, Copy)]
@@ -143,13 +132,6 @@ pub(crate) struct RustHybridCentroidRetriever {
     pub(crate) coauthor_cluster_df: HashMap<u64, usize>,
     pub(crate) non_mega_coauthor_cluster_df: HashMap<u64, usize>,
     pub(crate) affiliation_cluster_df: HashMap<u64, usize>,
-}
-
-pub(crate) struct RustNameCompatibleSubblockSelector {
-    pub(crate) signature_to_subblock: HashMap<String, String>,
-    pub(crate) subblock_to_components: HashMap<String, Vec<String>>,
-    pub(crate) subblock_tokens_by_subblock: HashMap<String, Vec<String>>,
-    pub(crate) name_tuples: HashMap<String, HashSet<String>>,
 }
 
 #[derive(Default)]
@@ -444,60 +426,15 @@ impl RustHybridCentroidRetriever {
     fn candidate_indices_for_pair_plan_query(
         &self,
         query_data: &RetrievalQueryData,
-        base_candidate_indices: Option<&[usize]>,
         excluded_candidate_indices: Option<&HashSet<usize>>,
-        query_signature_id: Option<&str>,
-        selector: Option<&RustNameCompatibleSubblockSelector>,
-        global_backfill_count: usize,
-        allow_global_orcid_override: bool,
     ) -> RetrievalCandidateSelection {
-        if allow_global_orcid_override {
-            let global_candidates =
-                (0..self.summaries.len()).filter(|idx| match excluded_candidate_indices {
-                    Some(excluded) => !excluded.contains(idx),
-                    None => true,
-                });
-            if let Some(selection) =
-                self.orcid_candidate_selection_for_query(query_data, global_candidates)
-            {
-                return selection;
-            }
+        let candidate_indices =
+            candidate_indices_excluding(self.summaries.len(), excluded_candidate_indices);
+        if let Some(selection) =
+            self.orcid_candidate_selection_for_query(query_data, candidate_indices.iter().copied())
+        {
+            return selection;
         }
-        let selected = if query_data.has_full_first {
-            match (query_signature_id, selector) {
-                (Some(signature_id), Some(selector)) => selector
-                    .select_candidate_indices_for_summaries(
-                        signature_id,
-                        &query_data.first,
-                        &self.summaries,
-                        base_candidate_indices,
-                        global_backfill_count,
-                    ),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        let candidate_indices = match selected {
-            Some(indices) => {
-                let filtered =
-                    filter_excluded_candidate_indices(indices, excluded_candidate_indices);
-                if filtered.is_empty() {
-                    default_candidate_indices(
-                        self.summaries.len(),
-                        base_candidate_indices,
-                        excluded_candidate_indices,
-                    )
-                } else {
-                    filtered
-                }
-            }
-            None => default_candidate_indices(
-                self.summaries.len(),
-                base_candidate_indices,
-                excluded_candidate_indices,
-            ),
-        };
         self.hard_filtered_candidate_indices_for_query(query_data, candidate_indices)
     }
 
@@ -506,24 +443,12 @@ impl RustHybridCentroidRetriever {
         current_query: &RetrievalQueryData,
         row_query_first_token: &str,
         query_signature_index: u32,
-        base_candidate_indices: Option<&[usize]>,
         excluded_candidate_indices: Option<&HashSet<usize>>,
-        query_signature_id: Option<&str>,
         component_member_indices: &HashMap<String, Vec<u32>>,
         top_k: usize,
-        selector: Option<&RustNameCompatibleSubblockSelector>,
-        global_backfill_count: usize,
-        allow_global_orcid_override: bool,
     ) -> Result<RetrievalPairPlanQueryResult, RetrievalError> {
-        let selection = self.candidate_indices_for_pair_plan_query(
-            current_query,
-            base_candidate_indices,
-            excluded_candidate_indices,
-            query_signature_id,
-            selector,
-            global_backfill_count,
-            allow_global_orcid_override,
-        );
+        let selection =
+            self.candidate_indices_for_pair_plan_query(current_query, excluded_candidate_indices);
         if selection.indices.is_empty() {
             return Ok(RetrievalPairPlanQueryResult::default());
         }
@@ -628,27 +553,6 @@ impl RustHybridCentroidRetriever {
                 .push(member_indices.clone());
         }
         Ok(result)
-    }
-
-    fn extract_candidate_indices_by_query_signature_id(
-        &self,
-        obj: &Bound<'_, PyAny>,
-    ) -> PyResult<HashMap<String, Vec<usize>>> {
-        let candidate_keys_by_query = extract_string_vec_map(obj)?;
-        let mut out = HashMap::with_capacity(candidate_keys_by_query.len());
-        for (query_signature_id, component_keys) in candidate_keys_by_query {
-            let mut indices = Vec::with_capacity(component_keys.len());
-            for component_key in component_keys {
-                let Some(candidate_index) = self.component_index_by_key.get(&component_key) else {
-                    return Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                        "Unknown component_key for RustHybridCentroidRetriever query window: {component_key}"
-                    )));
-                };
-                indices.push(*candidate_index);
-            }
-            out.insert(query_signature_id, indices);
-        }
-        Ok(out)
     }
 
     fn score_top_k_candidate_indices_default(
@@ -1284,95 +1188,6 @@ pub(crate) fn update_cluster_df_from_counter(
     Ok(())
 }
 
-impl RustNameCompatibleSubblockSelector {
-    fn from_py(
-        retrieval_subblock_index: &Bound<'_, PyAny>,
-        name_tuples: &Bound<'_, PyAny>,
-    ) -> PyResult<Self> {
-        let signature_to_subblock = extract_string_string_map(
-            &retrieval_subblock_index.get_item("signature_to_subblock")?,
-        )?;
-        let subblock_to_components =
-            extract_string_vec_map(&retrieval_subblock_index.get_item("subblock_to_components")?)?;
-        let subblock_tokens_by_subblock =
-            match retrieval_subblock_index.get_item("subblock_tokens_by_subblock") {
-                Ok(tokens_obj) => extract_string_vec_map(&tokens_obj)?,
-                Err(_) => subblock_to_components
-                    .keys()
-                    .map(|subblock| (subblock.clone(), subblock_tokens_from_key(subblock)))
-                    .collect(),
-            };
-        let name_tuples = extract_name_tuples_map(name_tuples)?;
-        Ok(Self {
-            signature_to_subblock,
-            subblock_to_components,
-            subblock_tokens_by_subblock,
-            name_tuples,
-        })
-    }
-
-    fn allowed_component_keys(
-        &self,
-        query_signature_id: &str,
-        query_first: &str,
-    ) -> Option<HashSet<String>> {
-        let query_subblock = self.signature_to_subblock.get(query_signature_id)?;
-        let mut allowed_components: HashSet<String> = HashSet::new();
-        if let Some(components) = self.subblock_to_components.get(query_subblock) {
-            allowed_components.extend(components.iter().cloned());
-        }
-        for (subblock, tokens) in self.subblock_tokens_by_subblock.iter() {
-            if tokens
-                .iter()
-                .any(|token| first_names_name_compatible(query_first, token, &self.name_tuples))
-            {
-                if let Some(components) = self.subblock_to_components.get(subblock) {
-                    allowed_components.extend(components.iter().cloned());
-                }
-            }
-        }
-        Some(allowed_components)
-    }
-
-    fn select_candidate_indices_for_summaries(
-        &self,
-        query_signature_id: &str,
-        query_first: &str,
-        summaries: &[RetrievalSummaryData],
-        base_candidate_indices: Option<&[usize]>,
-        global_backfill_count: usize,
-    ) -> Option<Vec<usize>> {
-        let allowed_components = self.allowed_component_keys(query_signature_id, query_first)?;
-        let ordered_indices: Vec<usize> = base_candidate_indices
-            .map_or_else(|| (0..summaries.len()).collect(), |values| values.to_vec());
-        let mut selected: Vec<usize> = ordered_indices
-            .iter()
-            .copied()
-            .filter(|index| allowed_components.contains(&summaries[*index].component_key))
-            .collect();
-        if selected.is_empty() {
-            return None;
-        }
-        if global_backfill_count > 0 {
-            let mut selected_set: HashSet<String> = selected
-                .iter()
-                .map(|index| summaries[*index].component_key.clone())
-                .collect();
-            let mut remaining = global_backfill_count;
-            for index in ordered_indices {
-                if remaining == 0 {
-                    break;
-                }
-                if selected_set.insert(summaries[index].component_key.clone()) {
-                    selected.push(index);
-                    remaining -= 1;
-                }
-            }
-        }
-        Some(selected)
-    }
-}
-
 #[pymethods]
 impl RustHybridCentroidRetriever {
     #[new]
@@ -1408,279 +1223,6 @@ impl RustHybridCentroidRetriever {
             non_mega_coauthor_cluster_df,
             affiliation_cluster_df,
         })
-    }
-
-    #[pyo3(signature = (
-        queries,
-        query_signature_indices,
-        component_member_indices_by_key,
-        top_k,
-        num_threads = None,
-        query_signature_ids = None,
-        retrieval_subblock_index = None,
-        query_candidate_component_keys_by_signature_id = None,
-        full_first_global_backfill_count = 0,
-        name_tuples = None
-    ))]
-    fn top_k_hybrid_centroid_pair_plan<'py>(
-        &self,
-        py: Python<'py>,
-        queries: &Bound<'py, PyAny>,
-        query_signature_indices: PyReadonlyArray1<'py, u32>,
-        component_member_indices_by_key: &Bound<'py, PyAny>,
-        top_k: usize,
-        num_threads: Option<usize>,
-        query_signature_ids: Option<&Bound<'py, PyAny>>,
-        retrieval_subblock_index: Option<&Bound<'py, PyAny>>,
-        query_candidate_component_keys_by_signature_id: Option<&Bound<'py, PyAny>>,
-        full_first_global_backfill_count: usize,
-        name_tuples: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Py<PyDict>> {
-        validate_retrieval_rank_top_k(top_k)?;
-        let mut query_data = Vec::new();
-        for item in PyIterator::from_object(queries)? {
-            query_data.push(extract_retrieval_query(&item?)?);
-        }
-        let query_indices_slice = query_signature_indices.as_slice()?;
-        if query_data.len() != query_indices_slice.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "queries and query_signature_indices must have equal length: {} != {}",
-                query_data.len(),
-                query_indices_slice.len()
-            )));
-        }
-        let query_indices = query_indices_slice.to_vec();
-        let query_signature_ids = query_signature_ids
-            .map(|values| {
-                PyIterator::from_object(values)?
-                    .map(|item| item.and_then(|value| value.extract::<String>()))
-                    .collect::<PyResult<Vec<_>>>()
-            })
-            .transpose()?;
-        if let Some(values) = query_signature_ids.as_ref() {
-            if values.len() != query_data.len() {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "queries and query_signature_ids must have equal length: {} != {}",
-                    query_data.len(),
-                    values.len()
-                )));
-            }
-        }
-        if retrieval_subblock_index.is_some() && query_signature_ids.is_none() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "query_signature_ids are required when retrieval_subblock_index is provided",
-            ));
-        }
-        if query_candidate_component_keys_by_signature_id.is_some() && query_signature_ids.is_none()
-        {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "query_signature_ids are required when query candidate component keys are provided",
-            ));
-        }
-        let selector = match retrieval_subblock_index {
-            Some(index) => {
-                let pairs = name_tuples.ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(
-                        "name_tuples are required when retrieval_subblock_index is provided",
-                    )
-                })?;
-                Some(RustNameCompatibleSubblockSelector::from_py(index, pairs)?)
-            }
-            None => None,
-        };
-        let query_candidate_indices_by_signature_id =
-            query_candidate_component_keys_by_signature_id
-                .map(|mapping| self.extract_candidate_indices_by_query_signature_id(mapping))
-                .transpose()?;
-        let component_member_indices =
-            extract_component_member_indices(component_member_indices_by_key)?;
-
-        let mut row_query_signature_indices = Vec::<u32>::new();
-        let mut row_component_keys = Vec::<String>::new();
-        let mut row_retrieval_scores = Vec::<f32>::new();
-        let mut row_retrieval_ranks = Vec::<u16>::new();
-        let mut row_component_sizes = Vec::<u32>::new();
-        let mut row_named_signature_counts = Vec::<u32>::new();
-        let mut row_dominant_first_names = Vec::<String>::new();
-        let mut row_candidate_year_min = Vec::<i32>::new();
-        let mut row_candidate_year_max = Vec::<i32>::new();
-        let mut row_candidate_year_range_missing = Vec::<u8>::new();
-        let mut row_query_first_tokens = Vec::<String>::new();
-        let mut row_query_years = Vec::<i32>::new();
-        let mut row_query_year_missing = Vec::<u8>::new();
-        let mut row_query_has_affiliations = Vec::<u8>::new();
-        let mut row_query_has_coauthors = Vec::<u8>::new();
-        let mut row_orcid_match = Vec::<u8>::new();
-        let mut row_middle_initial_compatibility = Vec::<f32>::new();
-        let mut row_affiliation_overlap = Vec::<f32>::new();
-        let mut row_coauthor_overlap = Vec::<f32>::new();
-        let mut row_venue_overlap = Vec::<f32>::new();
-        let mut row_year_compatibility = Vec::<f32>::new();
-        let mut row_title_overlap = Vec::<f32>::new();
-        let mut row_specter_centroid_similarity = Vec::<f32>::new();
-        let mut row_specter_exemplar_similarity = Vec::<f32>::new();
-        let mut left_signature_indices = Vec::<u32>::new();
-        let mut right_signature_indices = Vec::<u32>::new();
-        let mut pair_row_indices = Vec::<u32>::new();
-
-        let query_results: Vec<Result<RetrievalPairPlanQueryResult, RetrievalError>> = py
-            .allow_threads(|| {
-                let compute = || {
-                    query_data
-                        .par_iter()
-                        .enumerate()
-                        .map(|(query_offset, current_query)| {
-                            let query_signature_id = query_signature_ids
-                                .as_ref()
-                                .map(|values| values[query_offset].as_str());
-                            let base_candidate_indices =
-                                query_signature_id.and_then(|signature_id| {
-                                    query_candidate_indices_by_signature_id.as_ref().and_then(
-                                        |mapping| mapping.get(signature_id).map(Vec::as_slice),
-                                    )
-                                });
-                            self.build_pair_plan_query_result(
-                                current_query,
-                                current_query.first.as_str(),
-                                query_indices[query_offset],
-                                base_candidate_indices,
-                                None,
-                                query_signature_id,
-                                &component_member_indices,
-                                top_k,
-                                selector.as_ref(),
-                                full_first_global_backfill_count,
-                                true,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                };
-                install_with_optional_rayon_pool(num_threads, compute)
-            });
-
-        for query_result in query_results {
-            let mut query_result = query_result.map_err(retrieval_error_to_py)?;
-            let base_row_index = u32::try_from(row_component_keys.len()).map_err(|_| {
-                pyo3::exceptions::PyOverflowError::new_err(
-                    "retrieved candidate row count exceeds u32",
-                )
-            })?;
-            for (local_row_index, member_indices) in query_result
-                .right_signature_indices_by_row
-                .iter()
-                .enumerate()
-            {
-                let row_index = checked_retrieved_row_index(base_row_index, local_row_index)?;
-                let query_signature_index =
-                    query_result.row_query_signature_indices[local_row_index];
-                for member_index in member_indices.iter() {
-                    left_signature_indices.push(query_signature_index);
-                    right_signature_indices.push(*member_index);
-                    pair_row_indices.push(row_index);
-                }
-            }
-            row_query_signature_indices.append(&mut query_result.row_query_signature_indices);
-            row_component_keys.append(&mut query_result.row_component_keys);
-            row_retrieval_scores.append(&mut query_result.row_retrieval_scores);
-            row_retrieval_ranks.append(&mut query_result.row_retrieval_ranks);
-            row_component_sizes.append(&mut query_result.row_component_sizes);
-            row_named_signature_counts.append(&mut query_result.row_named_signature_counts);
-            row_dominant_first_names.append(&mut query_result.row_dominant_first_names);
-            row_candidate_year_min.append(&mut query_result.row_candidate_year_min);
-            row_candidate_year_max.append(&mut query_result.row_candidate_year_max);
-            row_candidate_year_range_missing
-                .append(&mut query_result.row_candidate_year_range_missing);
-            row_query_first_tokens.append(&mut query_result.row_query_first_tokens);
-            row_query_years.append(&mut query_result.row_query_years);
-            row_query_year_missing.append(&mut query_result.row_query_year_missing);
-            row_query_has_affiliations.append(&mut query_result.row_query_has_affiliations);
-            row_query_has_coauthors.append(&mut query_result.row_query_has_coauthors);
-            row_orcid_match.append(&mut query_result.row_orcid_match);
-            row_middle_initial_compatibility
-                .append(&mut query_result.row_middle_initial_compatibility);
-            row_affiliation_overlap.append(&mut query_result.row_affiliation_overlap);
-            row_coauthor_overlap.append(&mut query_result.row_coauthor_overlap);
-            row_venue_overlap.append(&mut query_result.row_venue_overlap);
-            row_year_compatibility.append(&mut query_result.row_year_compatibility);
-            row_title_overlap.append(&mut query_result.row_title_overlap);
-            row_specter_centroid_similarity
-                .append(&mut query_result.row_specter_centroid_similarity);
-            row_specter_exemplar_similarity
-                .append(&mut query_result.row_specter_exemplar_similarity);
-        }
-
-        let payload = PyDict::new(py);
-        payload.set_item("row_count", row_component_keys.len())?;
-        payload.set_item(
-            "left_signature_indices",
-            left_signature_indices.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "right_signature_indices",
-            right_signature_indices.to_pyarray(py),
-        )?;
-        payload.set_item("pair_row_indices", pair_row_indices.to_pyarray(py))?;
-        payload.set_item(
-            "row_query_signature_indices",
-            row_query_signature_indices.to_pyarray(py),
-        )?;
-        payload.set_item("row_component_keys", row_component_keys)?;
-        payload.set_item("retrieval_scores", row_retrieval_scores.to_pyarray(py))?;
-        payload.set_item("retrieval_ranks", row_retrieval_ranks.to_pyarray(py))?;
-        payload.set_item("row_component_sizes", row_component_sizes.to_pyarray(py))?;
-        payload.set_item(
-            "row_named_signature_counts",
-            row_named_signature_counts.to_pyarray(py),
-        )?;
-        payload.set_item("row_dominant_first_names", row_dominant_first_names)?;
-        payload.set_item(
-            "row_candidate_year_min",
-            row_candidate_year_min.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_candidate_year_max",
-            row_candidate_year_max.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_candidate_year_range_missing",
-            row_candidate_year_range_missing.to_pyarray(py),
-        )?;
-        payload.set_item("row_query_first_tokens", row_query_first_tokens)?;
-        payload.set_item("row_query_years", row_query_years.to_pyarray(py))?;
-        payload.set_item(
-            "row_query_year_missing",
-            row_query_year_missing.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_query_has_affiliations",
-            row_query_has_affiliations.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_query_has_coauthors",
-            row_query_has_coauthors.to_pyarray(py),
-        )?;
-        payload.set_item("row_orcid_match", row_orcid_match.to_pyarray(py))?;
-        payload.set_item(
-            "middle_initial_compatibility",
-            row_middle_initial_compatibility.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "affiliation_overlap",
-            row_affiliation_overlap.to_pyarray(py),
-        )?;
-        payload.set_item("coauthor_overlap", row_coauthor_overlap.to_pyarray(py))?;
-        payload.set_item("venue_overlap", row_venue_overlap.to_pyarray(py))?;
-        payload.set_item("year_compatibility", row_year_compatibility.to_pyarray(py))?;
-        payload.set_item("title_overlap", row_title_overlap.to_pyarray(py))?;
-        payload.set_item(
-            "specter_centroid_similarity",
-            row_specter_centroid_similarity.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "specter_exemplar_similarity",
-            row_specter_exemplar_similarity.to_pyarray(py),
-        )?;
-        Ok(payload.unbind())
     }
 
     #[pyo3(signature = (query, component_keys, top_k, num_threads = None, override_summary = None))]

@@ -209,7 +209,7 @@ def test_raw_plan_contiguous_query_slice_rebases_rows_and_pairs() -> None:
     for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
         fill_value: Any = "" if dtype is object else 0
         plan[raw_key] = np.asarray([fill_value] * 4, dtype=dtype)
-    bundle = RawArrowPlanBundle.from_mapping(plan)
+    bundle = RawArrowPlanBundle.from_native_mapping(plan)
 
     first = bundle.contiguous_query_slice(0, 1)
     remainder = bundle.contiguous_query_slice(1, 3)
@@ -1046,6 +1046,103 @@ def test_direct_arrow_incremental_requires_loaded_artifact() -> None:
         model_module._required_incremental_linker_artifact(SimpleNamespace(incremental_linker_artifact=attached))
         is attached
     )
+
+
+def test_partial_supervision_plan_disallows_keep_only_explicit_query_to_active_seed_pairs() -> None:
+    partial_supervision = {
+        ("seed-1", "query-1"): LARGE_DISTANCE,
+        ("query-1", "seed-1"): LARGE_DISTANCE,
+        ("query-2", "seed-2"): float(LARGE_DISTANCE),
+        ("query-1", "query-2"): LARGE_DISTANCE,
+        ("seed-1", "seed-2"): LARGE_DISTANCE,
+        ("query-1", "unknown"): LARGE_DISTANCE,
+        ("unknown", "seed-1"): LARGE_DISTANCE,
+        ("query-1", "seed-2"): LARGE_DISTANCE - 1,
+    }
+
+    result = production_module._partial_supervision_plan_disallows(  # noqa: SLF001
+        partial_supervision,
+        query_signature_ids=["query-1", "query-2"],
+        seed_signature_ids=["seed-1", "seed-2"],
+    )
+
+    assert result == {
+        ("query-1", "seed-1"),
+        ("query-2", "seed-2"),
+    }
+
+
+def test_promoted_linker_adds_partial_query_seed_disallows_to_planner_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class SidecarCaptured(Exception):
+        pass
+
+    class FakeArtifact:
+        artifact_dir = tmp_path
+        retrieval_top_k = 25
+        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
+
+    captured: dict[str, Any] = {}
+
+    class FakeClusterer:
+        n_jobs = 1
+        suppress_orcid = True
+        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
+        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        _last_incremental_seed_setup_telemetry: dict[str, Any] = {}
+
+        def _build_incremental_seed_setup(self, *_args: object, **kwargs: object):
+            captured["request_disallows"] = set(kwargs["cluster_seed_disallows"])
+            self._last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
+            seeds = {"seed-1": "component-1", "seed-2": "component-2"}
+            inverse = {"component-1": ["seed-1"], "component-2": ["seed-2"]}
+            return seeds, {}, inverse, inverse
+
+    @contextmanager
+    def capture_sidecar(
+        _paths: object,
+        seeds: Mapping[str, str],
+        *,
+        prefix: str,
+        cluster_seeds_disallow: set[tuple[str, str]],
+    ):
+        captured["seeds"] = dict(seeds)
+        captured["prefix"] = prefix
+        captured["planner_disallows"] = set(cluster_seeds_disallow)
+        raise SidecarCaptured
+        yield
+
+    monkeypatch.setattr(
+        production_module,
+        "temporary_arrow_paths_with_cluster_seeds",
+        capture_sidecar,
+    )
+    dataset = _direct_arrow_dataset(cluster_seeds_disallow={("query", "seed-1")})
+    partial_supervision = {("seed-2", "query"): LARGE_DISTANCE}
+
+    with pytest.raises(SidecarCaptured):
+        production_module.predict_incremental_promoted_linker_from_arrow_paths(
+            FakeClusterer(),
+            ["seed-1", "seed-2", "query"],
+            dataset,
+            arrow_paths=_validated_promoted_arrow_paths(_minimal_arrow_paths(tmp_path)),
+            artifact=FakeArtifact(),
+            prevent_new_incompatibilities=False,
+            partial_supervision=partial_supervision,
+            runtime_context=cast(Any, SimpleNamespace(run_id="test")),
+            total_ram_bytes=None,
+            batching_threshold=None,
+        )
+
+    assert captured["request_disallows"] == {("query", "seed-1")}
+    assert captured["planner_disallows"] == {
+        ("query", "seed-1"),
+        ("query", "seed-2"),
+    }
+    assert dataset.cluster_seeds_disallow == {("query", "seed-1")}
+    assert partial_supervision == {("seed-2", "query"): LARGE_DISTANCE}
 
 
 @pytest.mark.parametrize(

@@ -13,7 +13,6 @@ from s2and.incremental_linking.query_adapter import (
     query_view_for_features,
     raw_paper_evidence_features,
 )
-from s2and.incremental_linking_training.query_support import counter_query_overlap, title_overlap
 from tests.helpers import build_dummy_dataset, build_query_features
 
 
@@ -65,8 +64,6 @@ def test_title_and_venue_terms_keep_single_character_tokens() -> None:
     assert query.venue_terms == frozenset({"series", "a"})
     assert summary.title_counts["a"] == 1
     assert summary.venue_counts["a"] == 1
-    assert title_overlap(query, summary) == pytest.approx(2.0 / 3.0)
-    assert counter_query_overlap(query.venue_terms, summary.venue_counts, summary.size) == pytest.approx(0.5)
 
 
 def test_title_terms_preserve_identifying_digits() -> None:

@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
+from s2and._atomic_io import exclusive_file_lock
 from s2and.consts import DEFAULT_CHUNK_SIZE
 from s2and.data import ANDData
 from s2and.featurizer import (
@@ -127,8 +128,8 @@ def _load_snapshot(
     )
 
 
-def _publish_snapshot(path: Path, arrays: dict[str, np.ndarray]) -> None:
-    """Atomically replace ``path`` with a fully serialized snapshot."""
+def _publish_snapshot(path: Path, arrays: dict[str, np.ndarray]) -> bool:
+    """Atomically publish ``path`` once without replacing an existing snapshot."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path: Path | None = None
@@ -137,8 +138,12 @@ def _publish_snapshot(path: Path, arrays: dict[str, np.ndarray]) -> None:
             tmp_path = Path(handle.name)
             # NumPy's stub cannot express this dynamically named array mapping.
             np.savez(handle, **arrays)  # ty: ignore[invalid-argument-type]
-        os.replace(tmp_path, path)
-        tmp_path = None
+        with exclusive_file_lock(path.with_suffix(f"{path.suffix}.lock")):
+            if path.exists():
+                return False
+            os.replace(tmp_path, path)
+            tmp_path = None
+            return True
     finally:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
@@ -217,9 +222,19 @@ def cached_featurize(
             expected_width=expected_width,
             expected_nameless_width=expected_nameless_width,
         )
-        _publish_snapshot(path, arrays)
-        logger.info("Feature snapshot published split=%s path=%s bytes=%d", split_name, path, path.stat().st_size)
-        results.append(validated)
+        if _publish_snapshot(path, arrays):
+            logger.info("Feature snapshot published split=%s path=%s bytes=%d", split_name, path, path.stat().st_size)
+            results.append(validated)
+        else:
+            logger.info("Feature snapshot filled by concurrent caller split=%s path=%s", split_name, path)
+            results.append(
+                _load_snapshot(
+                    path,
+                    expected_rows=expected_rows,
+                    expected_width=expected_width,
+                    expected_nameless_width=expected_nameless_width,
+                )
+            )
 
     train_result, val_result, test_result = results
     return train_result, val_result, test_result

@@ -25,7 +25,6 @@ def _runtime_state(tmp_path: Path):
         tmp_path,
         tiny_name_counts_tuple(),
         tiny_name_counts_provenance(),
-        overwrite=True,
     )
     index, manifest = NameCountsIndex._open_with_manifest(index_path, context="test")
     contract = {"name_counts_manifest_sha256": manifest.manifest_sha256}
@@ -35,12 +34,12 @@ def _runtime_state(tmp_path: Path):
         feature_contract=contract,
     )
     dataset = SimpleNamespace(name_counts_provenance=index.source_provenance)
-    arrow_paths = ValidatedArrowInputs._from_verified(
+    arrow_paths = ValidatedArrowInputs(
         paths={"name_counts_index": str(Path(index_path).resolve())},
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,
         name_counts_manifest=manifest,
-        name_counts_index=index,
+        _name_counts_index=index,
     )
     return clusterer, dataset, arrow_paths, index
 

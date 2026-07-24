@@ -1,39 +1,10 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyIterator};
-use pyo3::Bound;
 use std::collections::{HashMap, HashSet};
 
 use crate::constraints::count_initials;
 use crate::name_counts::NameCountsData;
 use crate::text_compat::is_python_whitespace_compat;
 use crate::{py_len, CounterData};
-
-pub(crate) fn extract_string_string_map(
-    obj: &Bound<'_, PyAny>,
-) -> PyResult<HashMap<String, String>> {
-    let dict = obj.downcast::<PyDict>()?;
-    let mut out = HashMap::with_capacity(dict.len());
-    for (key, value) in dict.iter() {
-        out.insert(key.extract()?, value.extract()?);
-    }
-    Ok(out)
-}
-
-pub(crate) fn extract_string_vec_map(
-    obj: &Bound<'_, PyAny>,
-) -> PyResult<HashMap<String, Vec<String>>> {
-    let dict = obj.downcast::<PyDict>()?;
-    let mut out = HashMap::with_capacity(dict.len());
-    for (key, value) in dict.iter() {
-        let key_text: String = key.extract()?;
-        let mut values = Vec::new();
-        for item in PyIterator::from_object(&value)? {
-            values.push(item?.extract()?);
-        }
-        out.insert(key_text, values);
-    }
-    Ok(out)
-}
 
 pub(crate) fn filter_text_for_char_ngrams(
     text: &str,

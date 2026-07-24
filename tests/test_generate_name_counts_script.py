@@ -79,13 +79,11 @@ def test_fixture_publishes_only_native_index_with_audit_provenance(tmp_path: Pat
     assert not list(tmp_path.rglob("*.pickle"))
 
 
-def test_existing_publication_requires_explicit_overwrite(tmp_path: Path) -> None:
+def test_existing_publication_is_rejected(tmp_path: Path) -> None:
     _run_fixture(tmp_path)
 
-    with pytest.raises(FileExistsError, match="--overwrite"):
+    with pytest.raises(FileExistsError, match="target already exists"):
         _run_fixture(tmp_path)
-
-    assert _run_fixture(tmp_path, "--overwrite") == 0
 
 
 def test_fixture_limit_is_applied_before_aggregation(tmp_path: Path) -> None:

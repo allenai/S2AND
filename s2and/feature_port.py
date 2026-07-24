@@ -335,7 +335,7 @@ def build_rust_featurizer_from_arrow_paths(
     name_counts_index: Any | None = None,
     use_orcid_id: bool = True,
 ) -> Any:
-    """Build a Rust featurizer directly from Arrow IPC FeatureBlock paths.
+    """Build a Rust featurizer directly from raw-planner Arrow IPC paths.
 
     ``name_counts_index`` is an already validated native snapshot. When it is
     omitted, the handle retained by Arrow validation is reused automatically.
@@ -363,7 +363,7 @@ def build_rust_featurizer_from_arrow_paths(
             raise ValueError("name_counts_index requires load_name_counts=True")
         normalized_paths.pop("name_counts_index", None)
     elif name_counts_index is None:
-        name_counts_index = paths._retained_native_name_counts_index()  # noqa: SLF001
+        name_counts_index = paths.native_name_counts_index
     if load_name_counts and name_counts_index is not None:
         manifest = paths.name_counts_manifest
         if manifest is None:

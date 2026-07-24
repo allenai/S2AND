@@ -8,7 +8,6 @@ import weakref
 from pathlib import Path
 from typing import cast
 
-import numpy as np
 import pytest
 
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
@@ -23,7 +22,6 @@ def _write_index(root: Path, *, generation_id: str = "generation-a") -> Path:
         root,
         tiny_name_counts_tuple(),
         provenance,
-        overwrite=True,
     )
     return Path(path)
 
@@ -36,36 +34,6 @@ def test_open_reuses_one_exact_manifest_generation(tmp_path: Path) -> None:
 
     assert first is second
     assert first.manifest_sha256 == first.source_provenance["manifest_sha256"]
-
-
-def test_manifest_replacement_opens_new_generation_and_old_handle_remains_readable(tmp_path: Path) -> None:
-    path = _write_index(tmp_path, generation_id="generation-a")
-    first = NameCountsIndex.open(path)
-    old_value = first.lookup_many(["alexander"], [None], [None], [None])[0]
-
-    _write_index(tmp_path, generation_id="generation-b")
-    second = NameCountsIndex.open(path)
-
-    assert second is not first
-    assert second.manifest_sha256 != first.manifest_sha256
-    np.testing.assert_array_equal(
-        first.lookup_many(["alexander"], [None], [None], [None])[0],
-        old_value,
-    )
-
-
-def test_superseded_generation_is_released_after_callers_drop_it(tmp_path: Path) -> None:
-    path = _write_index(tmp_path, generation_id="generation-a")
-    first = NameCountsIndex.open(path)
-    first_ref = weakref.ref(first)
-
-    _write_index(tmp_path, generation_id="generation-b")
-    second = NameCountsIndex.open(path)
-    del first
-    gc.collect()
-
-    assert first_ref() is None
-    assert NameCountsIndex.open(path) is second
 
 
 def test_open_cache_retains_only_four_paths(tmp_path: Path) -> None:

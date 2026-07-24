@@ -1402,14 +1402,9 @@ impl RawBlockQueryCandidatePlanner {
                                 current_query,
                                 query_first_tokens[query_offset].as_str(),
                                 query_index,
-                                None,
                                 excluded_candidate_indices,
-                                Some(query_signature_ids[query_offset].as_str()),
                                 &component_member_indices,
                                 self.top_k,
-                                None,
-                                0,
-                                true,
                             )
                         })
                         .collect::<Vec<_>>()

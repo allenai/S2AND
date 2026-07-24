@@ -1,7 +1,7 @@
 use memmap2::Mmap;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -62,6 +62,8 @@ pub(crate) struct RawNameCountIndex {
     last: RawNameCountIndexFile,
     first_last: RawNameCountIndexFile,
     last_first_initial: RawNameCountIndexFile,
+    source_provenance_json: String,
+    manifest_files: Vec<(String, String, u64, String)>,
     normalization_version: String,
     identity: NameCountsIndexIdentity,
 }
@@ -87,7 +89,7 @@ struct NameCountsManifest {
     files: NameCountsManifestFiles,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct NameCountsProvenance {
     schema_version: String,
@@ -97,14 +99,13 @@ struct NameCountsProvenance {
     source_kind: String,
     source_query_sha256: String,
     selected_rows_sha256: String,
-    #[serde(rename = "source_row_count")]
-    _source_row_count: u64,
-    #[serde(default, rename = "generated_at")]
-    _generated_at: Option<serde_json::Value>,
-    #[serde(default, rename = "cardinalities")]
-    _cardinalities: Option<serde_json::Value>,
-    #[serde(default, rename = "rejected_row_count")]
-    _rejected_row_count: Option<serde_json::Value>,
+    source_row_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generated_at: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cardinalities: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejected_row_count: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -127,6 +128,7 @@ struct RawNameCountIndexPaths {
     last: RawNameCountIndexFileSpec,
     first_last: RawNameCountIndexFileSpec,
     last_first_initial: RawNameCountIndexFileSpec,
+    source_provenance_json: String,
     normalization_version: String,
     identity: NameCountsIndexIdentity,
 }
@@ -134,6 +136,7 @@ struct RawNameCountIndexPaths {
 #[derive(Debug)]
 struct RawNameCountIndexFileSpec {
     path: PathBuf,
+    byte_count: u64,
     expected_sha256: String,
 }
 
@@ -146,6 +149,22 @@ impl RawNameCountIndex {
     /// Open and exhaustively validate every record at public artifact boundaries.
     pub(crate) fn open_fully_validated(path: &str) -> PyResult<Self> {
         let paths = resolve_name_counts_index_paths(path)?;
+        let manifest_files = [
+            ("first", &paths.first),
+            ("last", &paths.last),
+            ("first_last", &paths.first_last),
+            ("last_first_initial", &paths.last_first_initial),
+        ]
+        .into_iter()
+        .map(|(kind, spec)| {
+            (
+                kind.to_string(),
+                spec.path.to_string_lossy().into_owned(),
+                spec.byte_count,
+                spec.expected_sha256.clone(),
+            )
+        })
+        .collect();
         let ((first, last), (first_last, last_first_initial)) = rayon::join(
             || {
                 rayon::join(
@@ -189,8 +208,10 @@ impl RawNameCountIndex {
             last: last?,
             first_last: first_last?,
             last_first_initial: last_first_initial?,
-            normalization_version: paths.normalization_version.clone(),
-            identity: paths.identity.clone(),
+            source_provenance_json: paths.source_provenance_json,
+            manifest_files,
+            normalization_version: paths.normalization_version,
+            identity: paths.identity,
         })
     }
 
@@ -313,6 +334,19 @@ impl NameCountsIndex {
     #[getter]
     fn name_counts_manifest_sha256(&self) -> &str {
         &self.index.identity.manifest_sha256
+    }
+
+    /// Return the native-validated manifest payload and resolved file facts.
+    fn _validated_manifest_facts(&self) -> (String, String, Vec<(String, String, u64, String)>) {
+        (
+            self.index
+                .identity
+                .canonical_root
+                .to_string_lossy()
+                .into_owned(),
+            self.index.source_provenance_json.clone(),
+            self.index.manifest_files.clone(),
+        )
     }
 
     /// Resolve four already-deduplicated aligned optional-key columns.
@@ -748,7 +782,7 @@ fn is_lowercase_sha256(value: &str) -> bool {
 }
 
 impl NameCountsProvenance {
-    fn validate(self, manifest_path: &Path) -> PyResult<()> {
+    fn validate(&self, manifest_path: &Path) -> PyResult<()> {
         if self.schema_version != NAME_COUNTS_PROVENANCE_SCHEMA_VERSION {
             return Err(manifest_value_error(
                 manifest_path,
@@ -944,6 +978,7 @@ fn validated_name_counts_index_manifest_path(
     }
     Ok(RawNameCountIndexFileSpec {
         path: canonical_resolved,
+        byte_count: entry.byte_count,
         expected_sha256: entry.sha256,
     })
 }
@@ -974,6 +1009,8 @@ impl NameCountsManifest {
             ));
         }
         self.source_provenance.validate(&manifest_path)?;
+        let source_provenance_json = serde_json::to_string(&self.source_provenance)
+            .expect("validated provenance is serializable");
         let canonical_index_dir = fs::canonicalize(index_dir).map_err(|err| {
             pyo3::exceptions::PyIOError::new_err(format!(
                 "failed to resolve name-count index directory {}: {}",
@@ -1009,6 +1046,7 @@ impl NameCountsManifest {
             last,
             first_last,
             last_first_initial,
+            source_provenance_json,
             normalization_version: self.normalization_version,
             identity: NameCountsIndexIdentity {
                 canonical_root: canonical_index_dir,
@@ -1076,10 +1114,11 @@ fn name_counts_index_hashes(kind: RawNameCountKind, name_bytes: &[u8]) -> (u64, 
 #[cfg(test)]
 mod name_counts_tests {
     use super::{
-        lookup_name_count_column, name_counts_index_hashes, resolve_name_counts_index_paths,
-        sha256_file, validate_lookup_column_lengths, NameCountsIndex, NameCountsProvenance,
-        RawNameCountIndex, RawNameCountIndexFile, RawNameCountKind, RawNameCountMaps,
-        NAME_COUNTS_INDEX_HEADER_LEN, NAME_COUNTS_INDEX_RECORD_LEN,
+        is_lowercase_sha256, lookup_name_count_column, name_counts_index_hashes,
+        resolve_name_counts_index_paths, sha256_file, validate_lookup_column_lengths,
+        NameCountsIndex, NameCountsProvenance, RawNameCountIndex, RawNameCountIndexFile,
+        RawNameCountKind, RawNameCountMaps, NAME_COUNTS_INDEX_HEADER_LEN,
+        NAME_COUNTS_INDEX_RECORD_LEN,
     };
     use std::io::{Seek, SeekFrom, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1598,7 +1637,7 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn native_handle_requires_matching_root_but_keeps_opened_manifest_snapshot() {
+    fn native_handle_requires_matching_root() {
         let first = write_lookup_artifact();
         let second = write_lookup_artifact();
         let handle = NameCountsIndex::from_shared(Arc::new(
@@ -1613,21 +1652,6 @@ mod name_counts_tests {
             .validate_path_root(second.to_str().expect("utf-8 temp path"))
             .expect_err("different root must fail");
         assert!(py_err_message(root_mismatch).contains("does not match paths['name_counts_index']"));
-
-        let manifest_path = first.join("manifest.json");
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
-                .expect("parse manifest");
-        manifest["source_provenance"]["generation_id"] =
-            serde_json::Value::String("generation-b".to_string());
-        std::fs::write(
-            &manifest_path,
-            serde_json::to_vec(&manifest).expect("serialize replacement manifest"),
-        )
-        .expect("publish replacement manifest");
-        handle
-            .validate_path_root(first.to_str().expect("utf-8 temp path"))
-            .expect("opened snapshot remains authoritative after same-root publication");
 
         drop(handle);
         std::fs::remove_dir_all(&first).expect("remove first lookup artifact");
@@ -1654,6 +1678,18 @@ mod name_counts_tests {
 
         assert_eq!(index.normalization_version, "canonical_v2");
         assert_eq!(index.identity.manifest_sha256, expected_manifest_sha256);
+        assert!(index
+            .source_provenance_json
+            .contains(r#""schema_version":"name_counts_provenance_v3""#));
+        assert_eq!(index.manifest_files.len(), 4);
+        assert!(index
+            .manifest_files
+            .iter()
+            .all(|(_kind, path, byte_count, sha256)| {
+                std::path::Path::new(path).is_file()
+                    && *byte_count > 0
+                    && is_lowercase_sha256(sha256)
+            }));
         drop(index);
         std::fs::remove_dir_all(&dir).expect("remove lookup artifact");
     }

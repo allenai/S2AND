@@ -1,6 +1,6 @@
-"""Public FeatureBlock Arrow module.
+"""Public raw-planner Arrow module.
 
-Implementation is split across feature_block_contract and feature_block_arrow.
+Implementation is split across compact contracts and Arrow IO helpers.
 """
 
 from __future__ import annotations
@@ -29,18 +29,14 @@ from s2and.incremental_linking.feature_block_arrow import (
     write_arrow_ipc_table,
     write_cluster_seed_disallows_arrow,
     write_cluster_seeds_arrow,
-    write_feature_block_arrow_tables,
     write_incremental_query_signatures_arrow,
     write_name_counts_index,
     write_raw_arrow_batch_lookup_indexes,
+    write_raw_planner_arrow_tables,
 )
 from s2and.incremental_linking.feature_block_contract import (
     FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
     FEATURE_BLOCK_SCHEMA_VERSION,
-    FeatureBlock,
-    FeatureBlockPaper,
-    FeatureBlockPaperAuthor,
-    FeatureBlockSignature,
     FeatureBlockSignatureOrder,
     normalize_cluster_seed_disallow_pairs,
 )
@@ -54,10 +50,6 @@ __all__ = [
     "RAW_PLANNER_ARROW_BATCH_INDEX_KEYS",
     "RAW_PLANNER_ARROW_KEY_COLUMNS",
     "RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS",
-    "FeatureBlock",
-    "FeatureBlockPaper",
-    "FeatureBlockPaperAuthor",
-    "FeatureBlockSignature",
     "FeatureBlockSignatureOrder",
     "IncrementalQuerySignatureRequest",
     "arrow_ipc_physical_layout",
@@ -77,8 +69,8 @@ __all__ = [
     "write_arrow_ipc_table",
     "write_cluster_seed_disallows_arrow",
     "write_cluster_seeds_arrow",
-    "write_feature_block_arrow_tables",
     "write_incremental_query_signatures_arrow",
     "write_name_counts_index",
+    "write_raw_planner_arrow_tables",
     "write_raw_arrow_batch_lookup_indexes",
 ]

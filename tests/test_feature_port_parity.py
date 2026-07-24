@@ -17,6 +17,7 @@ from s2and.feature_port import (
     get_constraints_matrix_indexed_rust,
 )
 from s2and.featurizer import _single_pair_featurize
+from s2and.text import detect_language
 from tests.helpers import build_arrow_training_dataset, equalish, import_s2and_rust, tiny_name_counts_index
 
 HAS_RUST, _rust_import_payload = import_s2and_rust()
@@ -489,6 +490,60 @@ def test_language_reliability_min_is_pair_order_invariant_in_python_and_rust(tmp
         rust_reverse[reliability_index],
     ]
     assert all(equalish(float(value), 0.25) for value in observed), observed
+
+
+@pytest.mark.parametrize(
+    "control",
+    ["\u001c", "\u0080"],
+    ids=["c0-file-separator", "c1-padding-character"],
+)
+def test_raw_arrow_language_detection_matches_python_for_rejected_controls(tmp_path, control):
+    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
+    dataset = _load_dataset_from_dir(data_dir, "dummy_rejected_language_control_parity")
+    signature_id_1 = "0"
+    signature_id_2 = "2"
+    paper_id_1 = str(dataset.signatures[signature_id_1].paper_id)
+    paper_id_2 = str(dataset.signatures[signature_id_2].paper_id)
+    plain_title = "This is a detailed English research title about neural systems and scientific evaluation."
+    control_title = (
+        f"This is a detailed English research title {control} about neural systems and scientific evaluation."
+    )
+    plain_detection = detect_language(plain_title)
+    control_detection = detect_language(control_title)
+
+    assert plain_detection.predicted_language == "en"
+    assert plain_detection.language_reliability > 0.0
+    assert control_detection.predicted_language == "un"
+    assert control_detection.language_reliability == 0.0
+
+    dataset.papers[paper_id_1] = dataset.papers[paper_id_1]._replace(
+        title=plain_title,
+        predicted_language=plain_detection.predicted_language,
+        is_reliable=plain_detection.is_reliable,
+        language_reliability=plain_detection.language_reliability,
+    )
+    dataset.papers[paper_id_2] = dataset.papers[paper_id_2]._replace(
+        title=control_title,
+        predicted_language=control_detection.predicted_language,
+        is_reliable=control_detection.is_reliable,
+        language_reliability=control_detection.language_reliability,
+    )
+    python_features, _ = _single_pair_featurize((signature_id_1, signature_id_2), dataset=dataset)
+
+    for paper_id in (paper_id_1, paper_id_2):
+        dataset.papers[paper_id] = dataset.papers[paper_id]._replace(
+            predicted_language=None,
+            is_reliable=None,
+            language_reliability=None,
+        )
+    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path)
+    rust_features = _featurize_pair_indexed_rust(arrow_dataset, signature_id_1, signature_id_2)
+    feature_names = featurizer_mod.FeaturizationInfo().get_feature_names()
+
+    for feature_name in ("same_language", "language_reliability_min"):
+        feature_index = feature_names.index(feature_name)
+        assert equalish(python_features[feature_index], rust_features[feature_index])
+        assert equalish(python_features[feature_index], 0.0)
 
 
 def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):

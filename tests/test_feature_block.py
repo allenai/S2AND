@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,7 +10,6 @@ import numpy as np
 import pytest
 
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
-import s2and.name_counts_manifest as name_counts_manifest_module
 import s2and.runtime as runtime_module
 from s2and.arrow_inputs import (
     ValidatedArrowInputs,
@@ -23,12 +21,9 @@ from s2and.feature_port import build_rust_featurizer_from_arrow_paths
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
-    FeatureBlock,
-    FeatureBlockPaper,
-    FeatureBlockPaperAuthor,
-    FeatureBlockSignature,
     IncrementalQuerySignatureRequest,
     arrow_ipc_physical_layout,
+    normalize_cluster_seed_disallow_pairs,
     raw_planner_arrow_physical_layout,
     read_altered_cluster_signatures_arrow,
     read_cluster_seed_disallows_arrow,
@@ -38,10 +33,10 @@ from s2and.incremental_linking.feature_block import (
     write_altered_cluster_signatures_arrow,
     write_arrow_batch_lookup_index,
     write_arrow_ipc_table,
-    write_feature_block_arrow_tables,
     write_incremental_query_signatures_arrow,
     write_name_counts_index,
     write_raw_arrow_batch_lookup_indexes,
+    write_raw_planner_arrow_tables,
 )
 from s2and.incremental_linking.features import LinkerFeatureMatrix
 from s2and.incremental_linking.retrieval import (
@@ -57,7 +52,10 @@ from s2and.incremental_linking.runtime import (
     _predict_incremental_link_or_abstain_from_preplanned_raw_arrow,
 )
 from s2and.model import Clusterer
-from scripts.arrow_conversion_helpers import feature_block_from_anddata, write_feature_block_arrow_from_anddata
+from scripts.arrow_conversion_helpers import (
+    raw_planner_arrow_tables_from_anddata,
+    write_raw_planner_arrow_from_anddata,
+)
 from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple, write_test_arrow_artifact_manifest
 
 
@@ -77,114 +75,6 @@ def _raw_test_clusterer(
 
 def _raw_test_artifact(*, retrieval_top_k: int = 25) -> Any:
     return SimpleNamespace(retrieval_top_k=retrieval_top_k)
-
-
-def test_feature_block_paper_is_reliable_parses_false_string() -> None:
-    paper = FeatureBlockPaper(
-        paper_id="p1",
-        title="",
-        abstract="",
-        venue="",
-        journal_name="",
-        year=None,
-        predicted_language="en",
-        is_reliable=cast(Any, "false"),
-        language_reliability=0.0,
-    )
-
-    assert paper.is_reliable is False
-
-
-def test_feature_block_paper_validates_language_reliability() -> None:
-    invalid_cases = [
-        (True, np.nan, "must be finite"),
-        (True, -0.01, r"must be in \[0.0, 1.0\]"),
-        (False, 0.25, "must be 0.0 when"),
-        (None, 0.75, "predicted_language requires FeatureBlockPaper.is_reliable"),
-        (True, None, "predicted_language requires FeatureBlockPaper.language_reliability"),
-    ]
-    for is_reliable, language_reliability, match in invalid_cases:
-        with pytest.raises(ValueError, match=match):
-            FeatureBlockPaper(
-                paper_id="p1",
-                title="A title",
-                abstract=None,
-                venue=None,
-                journal_name=None,
-                year=2024,
-                predicted_language="en",
-                is_reliable=is_reliable,
-                language_reliability=language_reliability,
-            )
-
-    reliable = FeatureBlockPaper(
-        paper_id="p1",
-        title="A title",
-        abstract=None,
-        venue=None,
-        journal_name=None,
-        year=2024,
-        predicted_language="en",
-        is_reliable=True,
-        language_reliability=1.0,
-    )
-    unreliable = FeatureBlockPaper(
-        paper_id="p2",
-        title="Un titre",
-        abstract=None,
-        venue=None,
-        journal_name=None,
-        year=2024,
-        predicted_language="fr",
-        is_reliable=False,
-        language_reliability=0.0,
-    )
-
-    assert reliable.language_reliability == 1.0
-    assert unreliable.language_reliability == 0.0
-
-
-@pytest.mark.parametrize(
-    ("predicted_language", "is_reliable", "language_reliability", "match"),
-    [
-        (None, True, 0.75, "require FeatureBlockPaper.predicted_language"),
-        (None, True, None, "require FeatureBlockPaper.predicted_language"),
-        (None, None, 0.75, "require FeatureBlockPaper.predicted_language"),
-        ("", True, 0.75, "predicted_language must be non-empty"),
-        (" \t", True, 0.75, "predicted_language must be non-empty"),
-    ],
-)
-def test_feature_block_paper_rejects_partial_or_blank_language_metadata(
-    predicted_language: str | None,
-    is_reliable: bool | None,
-    language_reliability: float | None,
-    match: str,
-) -> None:
-    with pytest.raises(ValueError, match=match):
-        FeatureBlockPaper(
-            paper_id="p1",
-            title=None,
-            abstract=None,
-            venue=None,
-            journal_name=None,
-            year=None,
-            predicted_language=predicted_language,
-            is_reliable=is_reliable,
-            language_reliability=language_reliability,
-        )
-
-
-def test_feature_block_paper_accepts_all_null_language_metadata() -> None:
-    paper = FeatureBlockPaper(
-        paper_id="p1",
-        title=None,
-        abstract=None,
-        venue=None,
-        journal_name=None,
-        year=None,
-    )
-
-    assert (paper.predicted_language, paper.is_reliable, paper.language_reliability) == (None, None, None)
 
 
 def _signature_payload(
@@ -323,133 +213,39 @@ def _raw_plan() -> dict[str, Any]:
 
 
 def _validated_empty_arrow_inputs() -> ValidatedArrowInputs:
-    return ValidatedArrowInputs._from_verified(
+    return ValidatedArrowInputs(
         paths={},
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,
     )
 
 
-def _feature_block_for_plan(
-    *,
-    cluster_seeds_disallow: tuple[tuple[str, str], ...] = (("q", "s2"),),
-    specter_embeddings: np.ndarray | None = None,
-    specter_paper_ids: tuple[str, ...] = (),
-) -> FeatureBlock:
-    return FeatureBlock(
-        signatures=(
-            FeatureBlockSignature(
-                signature_id="q",
-                paper_id="p_q",
-                author_first="Ada",
-                author_middle="",
-                author_last="Lovelace",
-                author_suffix="",
-                author_affiliations=("Analytical Engine Lab",),
-                author_orcid="0000-0000-0000-0001",
-                author_position=0,
-                author_block="a lovelace",
-                author_email="",
-                source_author_ids=("source-q",),
-            ),
-            FeatureBlockSignature(
-                signature_id="s1",
-                paper_id="p1",
-                author_first="Ada",
-                author_middle="",
-                author_last="Lovelace",
-                author_suffix="",
-                author_affiliations=("Analytical Engine Lab",),
-                author_orcid=None,
-                author_position=0,
-                author_block="a lovelace",
-                author_email="",
-                source_author_ids=("source-s1",),
-            ),
-            FeatureBlockSignature(
-                signature_id="s2",
-                paper_id="p2",
-                author_first="Grace",
-                author_middle="",
-                author_last="Hopper",
-                author_suffix="",
-                author_affiliations=("Analytical Engine Lab",),
-                author_orcid=None,
-                author_position=0,
-                author_block="g hopper",
-                author_email="",
-                source_author_ids=("source-s2",),
-            ),
-            FeatureBlockSignature(
-                signature_id="s3",
-                paper_id="p3",
-                author_first="Grace",
-                author_middle="",
-                author_last="Hopper",
-                author_suffix="",
-                author_affiliations=("Analytical Engine Lab",),
-                author_orcid=None,
-                author_position=1,
-                author_block="g hopper",
-                author_email="",
-                source_author_ids=("source-s3",),
-            ),
-        ),
-        papers=(
-            FeatureBlockPaper(
-                paper_id="p_q",
-                title="Notes",
-                abstract="",
-                venue="Royal Society",
-                journal_name="",
-                year=1843,
-            ),
-            FeatureBlockPaper(
-                paper_id="p1",
-                title="Notes",
-                abstract="",
-                venue="Royal Society",
-                journal_name="",
-                year=1843,
-            ),
-            FeatureBlockPaper(
-                paper_id="p2",
-                title="Compiler",
-                abstract="",
-                venue="Royal Society",
-                journal_name="",
-                year=1952,
-            ),
-            FeatureBlockPaper(
-                paper_id="p3",
-                title="Compiler",
-                abstract="",
-                venue="Royal Society",
-                journal_name="",
-                year=1952,
-            ),
-        ),
-        paper_authors=(
-            FeatureBlockPaperAuthor(paper_id="p_q", position=0, author_name="Ada Lovelace"),
-            FeatureBlockPaperAuthor(paper_id="p_q", position=1, author_name="Charles Babbage"),
-            FeatureBlockPaperAuthor(paper_id="p1", position=0, author_name="Ada Lovelace"),
-            FeatureBlockPaperAuthor(paper_id="p1", position=1, author_name="Charles Babbage"),
-            FeatureBlockPaperAuthor(paper_id="p2", position=0, author_name="Grace Hopper"),
-            FeatureBlockPaperAuthor(paper_id="p2", position=1, author_name="Jane Doe"),
-            FeatureBlockPaperAuthor(paper_id="p3", position=0, author_name="Jane Doe"),
-            FeatureBlockPaperAuthor(paper_id="p3", position=1, author_name="Grace Hopper"),
-        ),
-        cluster_seeds_require=(("s1", "c_ada"), ("s2", "c_other"), ("s3", "c_other")),
-        cluster_seeds_disallow=cluster_seeds_disallow,
-        query_signature_ids=("q",),
-        specter_paper_ids=specter_paper_ids,
-        specter_embeddings=specter_embeddings,
+def _write_raw_planner_arrow_paths(tmp_path: Path) -> dict[str, str]:
+    dataset = _tiny_anddata()
+    dataset.signatures["s3"] = dataset.signatures["s2"]._replace(
+        paper_id="p3",
+        author_info_position=1,
+        sourced_author_ids=("source-s3",),
     )
-
-
-def _write_feature_block_arrow_paths(tmp_path: Path) -> dict[str, str]:
-    feature_block = _feature_block_for_plan()
-    return write_feature_block_arrow_tables(feature_block, tmp_path, include_empty_cluster_seeds=True)
+    dataset.papers["p2"] = dataset.papers["p2"]._replace(
+        authors=[
+            Author(author_name="Grace Hopper", position=0),
+            Author(author_name="Jane Doe", position=1),
+        ]
+    )
+    dataset.papers["p3"] = dataset.papers["p2"]._replace(
+        paper_id="p3",
+        authors=[
+            Author(author_name="Jane Doe", position=0),
+            Author(author_name="Grace Hopper", position=1),
+        ],
+    )
+    dataset.cluster_seeds_require = {"s1": "c_ada", "s2": "c_other", "s3": "c_other"}
+    tables = raw_planner_arrow_tables_from_anddata(
+        dataset,
+        include_specter=False,
+    )
+    return write_raw_planner_arrow_tables(tables, tmp_path, include_empty_cluster_seeds=True)
 
 
 def _with_fake_batch_indexes(arrow_paths: dict[str, str], tmp_path: Path) -> dict[str, str]:
@@ -501,83 +297,115 @@ def _strict_signature_arrow_table(**overrides: Any) -> Any:
     return pa.table(data)
 
 
-def test_feature_block_from_anddata_builds_requested_mini_contract() -> None:
+def test_raw_planner_arrow_tables_from_anddata_builds_requested_mini_contract() -> None:
     dataset = _tiny_anddata()
     dataset.cluster_seeds_disallow = set()
-    feature_block = feature_block_from_anddata(
+    tables = raw_planner_arrow_tables_from_anddata(
         dataset,
         signature_ids=["q", "s1"],
-        query_signature_ids=["q"],
     )
 
-    assert feature_block.signature_ids == ("q", "s1")
-    assert feature_block.query_signature_ids == ("q",)
-    assert feature_block.signature_id_to_index == {"q": 0, "s1": 1}
-    assert feature_block.cluster_seeds_require == (("s1", "c_ada"),)
-    assert feature_block.cluster_seeds_disallow == ()
-    assert feature_block.seed_component_members == {"c_ada": ("s1",)}
-    assert [paper.paper_id for paper in feature_block.papers] == ["p_q", "p1"]
-    assert [(row.paper_id, row.position, row.author_name) for row in feature_block.paper_authors] == [
-        ("p_q", 0, "ada lovelace"),
-        ("p_q", 1, "charles babbage"),
-        ("p1", 0, "ada lovelace"),
-        ("p1", 1, "charles babbage"),
+    assert tables["signatures"]["signature_id"].to_pylist() == ["q", "s1"]
+    assert tables["cluster_seeds"].to_pydict() == {
+        "signature_id": ["s1"],
+        "cluster_id": ["c_ada"],
+    }
+    assert tables["cluster_seed_disallows"].num_rows == 0
+    assert tables["papers"]["paper_id"].to_pylist() == ["p_q", "p1"]
+    assert tables["paper_authors"].to_pylist() == [
+        {"paper_id": "p_q", "position": 0, "author_name": "ada lovelace"},
+        {"paper_id": "p_q", "position": 1, "author_name": "charles babbage"},
+        {"paper_id": "p1", "position": 0, "author_name": "ada lovelace"},
+        {"paper_id": "p1", "position": 1, "author_name": "charles babbage"},
     ]
-    assert feature_block.signatures[0].author_orcid == "0000-0000-0000-0001"
-    assert feature_block.specter_paper_ids == ("p_q", "p1")
-    assert feature_block.specter_embeddings is not None
-    np.testing.assert_allclose(feature_block.specter_embeddings, [[1.0, 0.0], [1.0, 0.1]])
+    assert tables["signatures"]["author_orcid"].to_pylist()[0] == "0000-0000-0000-0001"
+    assert tables["specter"]["paper_id"].to_pylist() == ["p_q", "p1"]
+    np.testing.assert_allclose(tables["specter"]["embedding"].to_pylist(), [[1.0, 0.0], [1.0, 0.1]])
 
 
-def test_feature_block_from_anddata_preserves_blank_paper_author_rows() -> None:
+def test_raw_planner_arrow_tables_from_anddata_preserves_blank_paper_author_rows() -> None:
     dataset = _tiny_anddata()
     dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
         authors=[Author(author_name="", position=0), Author(author_name="   ", position=1)]
     )
 
-    feature_block = feature_block_from_anddata(dataset, signature_ids=["q"], query_signature_ids=["q"])
+    tables = raw_planner_arrow_tables_from_anddata(dataset, signature_ids=["q"])
 
-    assert [(row.position, row.author_name) for row in feature_block.paper_authors] == [(0, ""), (1, "   ")]
-    assert feature_block.to_arrow_tables()["paper_authors"].to_pylist() == [
+    assert tables["paper_authors"].to_pylist() == [
         {"paper_id": "p_q", "position": 0, "author_name": ""},
         {"paper_id": "p_q", "position": 1, "author_name": "   "},
     ]
 
 
-def test_feature_block_from_anddata_does_not_infer_reliability_from_boolean() -> None:
+def test_raw_planner_arrow_tables_parse_false_language_reliability() -> None:
     dataset = _tiny_anddata()
     dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
         predicted_language="en",
-        is_reliable=True,
-        language_reliability=None,
+        is_reliable=cast(Any, "false"),
+        language_reliability=0.0,
     )
 
-    with pytest.raises(ValueError, match="predicted_language requires FeatureBlockPaper.language_reliability"):
-        feature_block_from_anddata(
+    tables = raw_planner_arrow_tables_from_anddata(
+        dataset,
+        signature_ids=["q"],
+    )
+
+    assert tables["papers"]["is_reliable"].to_pylist() == [False]
+
+
+@pytest.mark.parametrize(
+    ("predicted_language", "is_reliable", "language_reliability", "match"),
+    [
+        ("en", True, np.nan, "must be finite"),
+        ("en", True, -0.01, r"must be in \[0.0, 1.0\]"),
+        ("en", False, 0.25, "must be 0.0 when"),
+        ("en", None, 0.75, "predicted_language requires papers.is_reliable"),
+        ("en", True, None, "predicted_language requires papers.language_reliability"),
+        (None, True, 0.75, "require papers.predicted_language"),
+        ("", True, 0.75, "require papers.predicted_language"),
+        (" \t", True, 0.75, "predicted_language must be non-empty"),
+    ],
+)
+def test_raw_planner_arrow_tables_validate_language_metadata(
+    predicted_language: str | None,
+    is_reliable: bool | None,
+    language_reliability: float | None,
+    match: str,
+) -> None:
+    dataset = _tiny_anddata()
+    dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
+        predicted_language=predicted_language,
+        is_reliable=is_reliable,
+        language_reliability=language_reliability,
+    )
+
+    with pytest.raises(ValueError, match=match):
+        raw_planner_arrow_tables_from_anddata(
             dataset,
             signature_ids=["q"],
-            query_signature_ids=["q"],
         )
 
 
-def test_feature_block_from_anddata_rejects_signature_missing_paper() -> None:
+def test_raw_planner_arrow_tables_from_anddata_rejects_signature_missing_paper() -> None:
     dataset = _tiny_anddata()
     del dataset.papers["p1"]
 
     with pytest.raises(ValueError, match="missing signature paper_id"):
-        feature_block_from_anddata(
+        raw_planner_arrow_tables_from_anddata(
             dataset,
             signature_ids=["q", "s1"],
-            query_signature_ids=["q"],
         )
 
 
-def test_feature_block_to_arrow_tables_matches_raw_schema() -> None:
+def test_raw_planner_arrow_tables_match_schema() -> None:
     pa = pytest.importorskip("pyarrow")
 
     dataset = _tiny_anddata()
     dataset.cluster_seeds_disallow = set()
-    tables = feature_block_from_anddata(dataset, signature_ids=["q", "s1"], query_signature_ids=["q"]).to_arrow_tables()
+    tables = raw_planner_arrow_tables_from_anddata(
+        dataset,
+        signature_ids=["q", "s1"],
+    )
 
     assert set(tables) == {
         "signatures",
@@ -610,35 +438,14 @@ def test_feature_block_to_arrow_tables_matches_raw_schema() -> None:
     assert tables["cluster_seed_disallows"].to_pydict() == {"signature_id_1": [], "signature_id_2": []}
 
 
-def test_feature_block_to_arrow_tables_keeps_all_null_optional_columns_typed() -> None:
+def test_raw_planner_arrow_tables_keep_all_null_optional_columns_typed() -> None:
     pa = pytest.importorskip("pyarrow")
 
-    tables = FeatureBlock(
-        signatures=(
-            FeatureBlockSignature(
-                signature_id="q",
-                paper_id="p_q",
-                author_first="Ada",
-                author_middle=None,
-                author_last="Lovelace",
-                author_suffix=None,
-                author_affiliations=(),
-                author_orcid=None,
-                author_position=0,
-            ),
-        ),
-        papers=(
-            FeatureBlockPaper(
-                paper_id="p_q",
-                title="",
-                abstract=None,
-                venue=None,
-                journal_name=None,
-                year=1843,
-            ),
-        ),
-        paper_authors=(FeatureBlockPaperAuthor(paper_id="p_q", position=0, author_name="Ada Lovelace"),),
-    ).to_arrow_tables()
+    tables = raw_planner_arrow_tables_from_anddata(
+        _tiny_anddata(),
+        signature_ids=["q"],
+        include_specter=False,
+    )
 
     assert tables["signatures"].schema.field("author_suffix").type == pa.string()
     assert tables["signatures"].schema.field("author_email").type == pa.string()
@@ -649,16 +456,15 @@ def test_feature_block_to_arrow_tables_keeps_all_null_optional_columns_typed() -
     assert tables["cluster_seed_disallows"].schema.field("signature_id_1").type == pa.string()
 
 
-def test_write_feature_block_arrow_from_anddata_skips_empty_seed_table(tmp_path: Path) -> None:
+def test_write_raw_planner_arrow_from_anddata_skips_empty_seed_table(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
 
     dataset = _tiny_anddata()
     dataset.cluster_seeds_disallow = set()
-    paths = write_feature_block_arrow_from_anddata(
+    paths = write_raw_planner_arrow_from_anddata(
         dataset,
         tmp_path,
         signature_ids=["q"],
-        query_signature_ids=["q"],
         include_specter=False,
     )
 
@@ -920,26 +726,6 @@ def test_read_cluster_seeds_arrow_rejects_duplicate_signature_rows(tmp_path: Pat
         read_cluster_seeds_arrow(path)
 
 
-@pytest.mark.parametrize(
-    ("paper_ids", "match"),
-    [
-        (("",), "cannot contain empty"),
-        (("p1", "p1"), "must contain unique"),
-        (cast(Any, (1, "1")), "must contain unique"),
-    ],
-)
-def test_feature_block_rejects_invalid_specter_paper_ids(
-    paper_ids: tuple[str, ...],
-    match: str,
-) -> None:
-    with pytest.raises(ValueError, match=match):
-        FeatureBlock(
-            signatures=(),
-            specter_paper_ids=paper_ids,
-            specter_embeddings=np.ones((len(paper_ids), 1), dtype=np.float32),
-        )
-
-
 def test_write_arrow_ipc_table_writes_bounded_record_batches(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
 
@@ -1106,65 +892,15 @@ def test_write_name_counts_index(tmp_path: Path) -> None:
 
     index_path, index_metrics = write_name_counts_index(tmp_path, mappings, provenance)
 
-    assert index_metrics["reused"] is False
+    assert "reused" not in index_metrics
     assert index_metrics["row_count"] == 4
     assert index_metrics["first_count"] == 1
     manifest = json.loads((Path(index_path) / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "name_counts_index_v2"
     assert manifest["exact_string_verification"] is True
     assert manifest["files"]["first"]["path"].startswith("generations/")
-    assert write_name_counts_index(tmp_path, mappings, provenance)[1] == {"reused": True}
-
-
-def test_write_name_counts_index_rebuilds_fingerprintless_manifest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    first_mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
-    first_provenance = tiny_name_counts_provenance()
-    index_path, _metrics = write_name_counts_index(tmp_path, first_mappings, first_provenance)
-    manifest_path = Path(index_path) / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    original_fingerprint = manifest.pop("fingerprint")
-    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
-
-    second_mappings = ({"grace": 11}, {"hopper": 13}, {"grace hopper": 17}, {"hopper g": 19})
-    second_provenance = {**tiny_name_counts_provenance(), "generation_id": "test-grace-hopper"}
-
-    _index_path, metrics = write_name_counts_index(tmp_path, second_mappings, second_provenance, overwrite=False)
-
-    rebuilt_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert metrics["reused"] is False
-    assert rebuilt_manifest["fingerprint"] != original_fingerprint
-
-
-def test_write_name_counts_index_failed_overwrite_keeps_previous_manifest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    first_mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
-    first_provenance = tiny_name_counts_provenance()
-    index_path, _metrics = write_name_counts_index(tmp_path, first_mappings, first_provenance)
-    manifest_path = Path(index_path) / "manifest.json"
-    original_manifest = manifest_path.read_text(encoding="utf-8")
-    original_first_path = Path(index_path) / json.loads(original_manifest)["files"]["first"]["path"]
-
-    real_write_file = feature_block_arrow_module._write_name_count_index_file  # noqa: SLF001
-
-    def fail_after_first_file(path: Path, kind: str, mapping: Any, **kwargs: Any) -> dict[str, int]:
-        if kind == "last":
-            raise RuntimeError("simulated index write failure")
-        return real_write_file(path, kind, mapping, **kwargs)
-
-    monkeypatch.setattr(feature_block_arrow_module, "_write_name_count_index_file", fail_after_first_file)
-    second_mappings = ({"alan": 11}, {"turing": 13}, {"alan turing": 17}, {"turing a": 19})
-    second_provenance = {**tiny_name_counts_provenance(), "generation_id": "test-alan-turing"}
-
-    with pytest.raises(RuntimeError, match="simulated index write failure"):
-        write_name_counts_index(tmp_path, second_mappings, second_provenance, overwrite=True)
-
-    assert manifest_path.read_text(encoding="utf-8") == original_manifest
-    assert original_first_path.exists()
+    with pytest.raises(FileExistsError, match="target already exists"):
+        write_name_counts_index(tmp_path, mappings, provenance)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows prevents unlinking open sort-run files")
@@ -1197,96 +933,41 @@ def test_name_count_index_merge_failure_closes_sort_runs_before_cleanup(
     assert list(tmp_path.glob(f".{output_path.name}.run.*")) == []
 
 
-def test_write_name_counts_index_published_marker_failure_keeps_previous_manifest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    first_mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
-    first_provenance = tiny_name_counts_provenance()
-    index_path, _metrics = write_name_counts_index(tmp_path, first_mappings, first_provenance)
-    manifest_path = Path(index_path) / "manifest.json"
-    original_manifest = manifest_path.read_text(encoding="utf-8")
-    original_first_path = Path(index_path) / json.loads(original_manifest)["files"]["first"]["path"]
-
-    real_open = Path.open
-
-    def fail_published_write(path: Path, *args: Any, **kwargs: Any) -> Any:
-        if path.name == ".published":
-            raise RuntimeError("simulated published marker failure")
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "open", fail_published_write)
-    second_mappings = ({"alan": 11}, {"turing": 13}, {"alan turing": 17}, {"turing a": 19})
-    second_provenance = {**tiny_name_counts_provenance(), "generation_id": "test-alan-turing"}
-
-    with pytest.raises(RuntimeError, match="simulated published marker failure"):
-        write_name_counts_index(tmp_path, second_mappings, second_provenance, overwrite=True)
-
-    assert manifest_path.read_text(encoding="utf-8") == original_manifest
-    assert original_first_path.exists()
-
-
-def test_feature_block_from_anddata_filters_one_sided_disallow_pair() -> None:
-    feature_block = feature_block_from_anddata(
+def test_raw_planner_arrow_tables_from_anddata_filters_one_sided_disallow_pair() -> None:
+    tables = raw_planner_arrow_tables_from_anddata(
         _tiny_anddata(),
         signature_ids=["q", "s1"],
-        query_signature_ids=["q"],
     )
 
-    assert feature_block.cluster_seeds_disallow == ()
+    assert tables["cluster_seed_disallows"].num_rows == 0
 
 
-def test_feature_block_contract_rejects_out_of_block_disallow_pair() -> None:
-    with pytest.raises(ValueError, match="missing from FeatureBlock"):
-        FeatureBlock(
-            signatures=(
-                FeatureBlockSignature(
-                    signature_id="q",
-                    paper_id="p_q",
-                    author_first="Ada",
-                    author_middle=None,
-                    author_last="Lovelace",
-                    author_suffix=None,
-                    author_affiliations=(),
-                    author_orcid=None,
-                    author_position=0,
-                ),
-            ),
-            papers=(
-                FeatureBlockPaper(
-                    paper_id="p_q",
-                    title="Notes",
-                    abstract=None,
-                    venue=None,
-                    journal_name=None,
-                    year=1843,
-                ),
-            ),
-            paper_authors=(FeatureBlockPaperAuthor(paper_id="p_q", position=0, author_name="Ada Lovelace"),),
-            cluster_seeds_disallow=(("q", "outside"),),
+def test_disallow_contract_rejects_out_of_set_pair() -> None:
+    with pytest.raises(ValueError, match="missing from signature set"):
+        normalize_cluster_seed_disallow_pairs(
+            [("q", "outside")],
+            valid_signature_ids=["q"],
         )
 
 
-def test_feature_block_signature_rejects_scalar_sequence_fields() -> None:
-    with pytest.raises(ValueError, match="FeatureBlockSignature.author_affiliations"):
-        FeatureBlockSignature(
-            signature_id="q",
-            paper_id="p_q",
-            author_first="Ada",
-            author_middle=None,
-            author_last="Lovelace",
-            author_suffix=None,
-            author_affiliations=cast(Any, "Lab"),
-            author_orcid=None,
-            author_position=0,
+def test_raw_planner_arrow_tables_reject_scalar_sequence_fields() -> None:
+    dataset = _tiny_anddata()
+    dataset.signatures["q"] = dataset.signatures["q"]._replace(
+        author_info_affiliations=cast(Any, "Lab"),
+    )
+
+    with pytest.raises(ValueError, match="signatures.author_info_affiliations"):
+        raw_planner_arrow_tables_from_anddata(
+            dataset,
+            signature_ids=["q"],
         )
 
 
 def test_raw_candidate_plan_bridge_accepts_feature_block_signature_order() -> None:
-    order = RawArrowPlanBundle.from_mapping(_raw_plan()).signature_order
+    order = RawArrowPlanBundle.from_native_mapping(_raw_plan()).signature_order
 
     retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
-        RawArrowPlanBundle.from_mapping(_raw_plan()),
+        RawArrowPlanBundle.from_native_mapping(_raw_plan()),
         feature_block_signature_order=order,
     )
 
@@ -1301,59 +982,32 @@ def test_raw_candidate_plan_bridge_accepts_feature_block_signature_order() -> No
 def test_raw_candidate_plan_bridge_reports_missing_signature_id() -> None:
     with pytest.raises(KeyError, match="right_signature_ids contains signature_id not present"):
         build_linker_retrieval_batch_from_raw_plan_bundle(
-            RawArrowPlanBundle.from_mapping(_raw_plan()),
+            RawArrowPlanBundle.from_native_mapping(_raw_plan()),
             signature_id_to_index={"q": 0, "s1": 1, "s2": 2},
         )
 
 
-def test_feature_block_rejects_duplicate_paper_author_positions() -> None:
+def test_raw_planner_arrow_tables_reject_duplicate_paper_author_positions() -> None:
+    dataset = _tiny_anddata()
+    dataset.papers["p1"] = dataset.papers["p1"]._replace(
+        authors=[
+            Author(author_name="Alice Smith", position=0),
+            Author(author_name="A. Smith", position=0),
+        ]
+    )
+
     with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
-        FeatureBlock(
-            signatures=(
-                FeatureBlockSignature(
-                    signature_id="s1",
-                    paper_id="p1",
-                    author_first="Alice",
-                    author_middle=None,
-                    author_last="Smith",
-                    author_suffix=None,
-                    author_affiliations=(),
-                    author_orcid=None,
-                    author_position=0,
-                ),
-            ),
-            papers=(
-                FeatureBlockPaper(
-                    paper_id="p1",
-                    title="One",
-                    abstract="",
-                    venue="",
-                    journal_name="",
-                    year=2020,
-                ),
-            ),
-            paper_authors=(
-                FeatureBlockPaperAuthor(paper_id="p1", position=0, author_name="Alice Smith"),
-                FeatureBlockPaperAuthor(paper_id="p1", position=0, author_name="A. Smith"),
-            ),
+        raw_planner_arrow_tables_from_anddata(
+            dataset,
+            signature_ids=["s1"],
         )
 
 
-@pytest.mark.parametrize("author_name", ["", "   "])
-def test_feature_block_accepts_blank_paper_author_name(author_name: str) -> None:
-    row = FeatureBlockPaperAuthor(paper_id="p1", position=0, author_name=author_name)
-
-    assert row.author_name == author_name
-    assert FeatureBlock(signatures=(), paper_authors=(row,)).to_arrow_tables()["paper_authors"].to_pylist() == [
-        {"paper_id": "p1", "position": 0, "author_name": author_name}
-    ]
-
-
-def test_arrow_validation_and_planner_share_one_native_name_count_snapshot_across_publication(
+def test_arrow_validation_and_planner_share_one_native_name_count_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    base_arrow_paths = _write_feature_block_arrow_paths(tmp_path)
+    base_arrow_paths = _write_raw_planner_arrow_paths(tmp_path)
     mappings = tiny_name_counts_tuple()
     name_counts_index_path, _metrics = write_name_counts_index(
         tmp_path,
@@ -1382,10 +1036,6 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot_acros
         lambda: SimpleNamespace(NameCountsIndex=CountingNativeNameCountsIndex),
     )
 
-    def unexpected_python_material_hash(*_args: Any, **_kwargs: Any) -> str:
-        pytest.fail("Arrow validation must use native name-count material validation")
-
-    monkeypatch.setattr(name_counts_manifest_module, "_sha256_file", unexpected_python_material_hash)
     validated = validate_arrow_prediction_artifacts(
         arrow_paths,
         require_specter=False,
@@ -1396,20 +1046,8 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot_acros
     )
     retained_manifest = validated.name_counts_manifest
     assert retained_manifest is not None
-    manifest_a_sha256 = retained_manifest.manifest_sha256
-    retained_native = validated._retained_native_name_counts_index()  # noqa: SLF001
+    retained_native = validated.native_name_counts_index
     assert retained_native is not None
-
-    replacement_mappings = tiny_name_counts_tuple()
-    replacement_mappings[0]["ada"] = 999
-    write_name_counts_index(
-        tmp_path,
-        replacement_mappings,
-        {**tiny_name_counts_provenance(), "generation_id": "generation-b"},
-        overwrite=True,
-    )
-    manifest_b_sha256 = hashlib.sha256((Path(name_counts_index_path) / "manifest.json").read_bytes()).hexdigest()
-    assert manifest_b_sha256 != manifest_a_sha256
 
     labeled_plan = real_extension.raw_arrow_labeled_candidate_plan(
         dict(validated),
@@ -1440,7 +1078,7 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot_acros
     assert int(plan["row_count"]) > 0
     assert native_open_calls == 1
     assert planner.build_telemetry()["reused_name_counts_index"] is True
-    assert planner.name_counts_index().name_counts_manifest_sha256 == manifest_a_sha256
+    assert planner.name_counts_index().name_counts_manifest_sha256 == retained_manifest.manifest_sha256
     featurizer = build_rust_featurizer_from_arrow_paths(
         validated.without("query_signatures"),
         expected_normalization_version=NORMALIZATION_VERSION,
@@ -1469,7 +1107,7 @@ def test_raw_arrow_rejects_candidate_plan_without_component_members() -> None:
             _raw_test_artifact(),
             arrow_paths=_validated_empty_arrow_inputs(),
             query_signature_ids=["q"],
-            raw_plan_bundle=RawArrowPlanBundle.from_mapping(raw_plan),
+            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(raw_plan),
             rust_featurizer=FakeFeaturizer(),
             runtime_context=SimpleNamespace(operation="raw-arrow-test", run_id="raw-arrow-test"),
         )
@@ -1489,7 +1127,7 @@ def test_raw_arrow_partial_supervision_require_unknown_seed_rejected() -> None:
             _raw_test_artifact(),
             arrow_paths=_validated_empty_arrow_inputs(),
             query_signature_ids=["q"],
-            raw_plan_bundle=RawArrowPlanBundle.from_mapping(raw_plan),
+            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(raw_plan),
             rust_featurizer=FakeFeaturizer(),
             partial_supervision={("q", "s1"): 0},
         )
@@ -1512,7 +1150,7 @@ def test_raw_arrow_scoring_requires_featurizer_with_provided_raw_plan(
             _raw_test_artifact(),
             arrow_paths=_validated_empty_arrow_inputs(),
             query_signature_ids=["q"],
-            raw_plan_bundle=RawArrowPlanBundle.from_mapping(_raw_plan()),
+            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
             rust_featurizer=None,
         )
 
@@ -1569,7 +1207,7 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan(
         _raw_test_artifact(),
         arrow_paths=_validated_empty_arrow_inputs(),
         query_signature_ids=["q"],
-        raw_plan_bundle=RawArrowPlanBundle.from_mapping(_raw_plan()),
+        raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
         rust_featurizer=FakeFeaturizer(),
         top_k=2,
         n_jobs=1,
@@ -1635,7 +1273,7 @@ def test_preplanned_raw_arrow_scoring_uses_provided_rust_featurizer(
         _raw_test_artifact(),
         arrow_paths=_validated_empty_arrow_inputs(),
         query_signature_ids=["q"],
-        raw_plan_bundle=RawArrowPlanBundle.from_mapping(_raw_plan()),
+        raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
         rust_featurizer=fake_featurizer,
         top_k=2,
         n_jobs=1,
@@ -1660,7 +1298,7 @@ def test_preplanned_raw_arrow_scoring_rejects_mismatched_raw_plan_query_ids() ->
             _raw_test_artifact(),
             arrow_paths=_validated_empty_arrow_inputs(),
             query_signature_ids=["s1"],
-            raw_plan_bundle=RawArrowPlanBundle.from_mapping(_raw_plan()),
+            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
             rust_featurizer=FakeFeaturizer(),
             top_k=2,
             n_jobs=1,
@@ -1672,9 +1310,9 @@ def test_from_retrieval_skips_pair_id_build_when_partial_supervision_empty(
 ) -> None:
     import s2and.incremental_linking.runtime as runtime_module
 
-    order = RawArrowPlanBundle.from_mapping(_raw_plan()).signature_order
+    order = RawArrowPlanBundle.from_native_mapping(_raw_plan()).signature_order
     retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
-        RawArrowPlanBundle.from_mapping(_raw_plan()),
+        RawArrowPlanBundle.from_native_mapping(_raw_plan()),
         feature_block_signature_order=order,
     )
 
@@ -1758,6 +1396,6 @@ def test_raw_candidate_plan_bridge_rejects_missing_schema_version() -> None:
 
     with pytest.raises(KeyError, match="schema_version"):
         build_linker_retrieval_batch_from_raw_plan_bundle(
-            RawArrowPlanBundle.from_mapping(raw_plan),
-            feature_block_signature_order=RawArrowPlanBundle.from_mapping(_raw_plan()).signature_order,
+            RawArrowPlanBundle.from_native_mapping(raw_plan),
+            feature_block_signature_order=RawArrowPlanBundle.from_native_mapping(_raw_plan()).signature_order,
         )

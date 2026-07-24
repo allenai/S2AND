@@ -45,7 +45,7 @@ from s2and.incremental_linking.feature_block_arrow import (  # noqa: E402
     write_name_counts_index,
     write_raw_arrow_batch_lookup_indexes,
 )
-from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata  # noqa: E402
+from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata  # noqa: E402
 from tests.helpers import (  # noqa: E402
     import_s2and_rust,
     tiny_name_counts_index,
@@ -400,7 +400,7 @@ def training_bundle(tmp_path_factory: pytest.TempPathFactory) -> Any:
         json_dataset = _json_training_anddata("dummy_json_training", specter)
 
         bundle_dir = tmp_path_factory.mktemp("arrow_training_bundle")
-        arrow_paths = write_feature_block_arrow_from_anddata(json_dataset, bundle_dir, include_specter=True)
+        arrow_paths = write_raw_planner_arrow_from_anddata(json_dataset, bundle_dir, include_specter=True)
         arrow_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(arrow_paths, bundle_dir)
         name_counts_index_path, _name_counts_metrics = write_name_counts_index(
             bundle_dir, tiny_name_counts_tuple(), tiny_name_counts_provenance()

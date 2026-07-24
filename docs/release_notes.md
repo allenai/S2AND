@@ -20,6 +20,12 @@
   dependency. Production Rust featurization and ingest enter through validated
   Arrow IPC artifacts; classic JSON/`ANDData` remains a Python training,
   fixture, and reference surface for the canonical S2 partition.
+- Breaking: script-side `ANDData` conversion now constructs typed PyArrow
+  tables directly. The intermediate `FeatureBlock`, `FeatureBlockSignature`,
+  `FeatureBlockPaper`, and `FeatureBlockPaperAuthor` object graph is removed.
+  Producers use `write_raw_planner_arrow_from_anddata()` or
+  `raw_planner_arrow_tables_from_anddata()`; table mappings are written with
+  `write_raw_planner_arrow_tables()`.
 - Breaking: `ANDData` blocking is S2-only. `author_info.block` is the sole
   grouping authority; the `block_type` constructor argument,
   `Signature.author_info_given_block`, `get_original_blocks()`, and
@@ -71,9 +77,9 @@
   reject partial/malformed values and agree across pair order. Raw candidate
   planning likewise has only two valid constructors: declared queries and
   explicit automatic queries; the empty-sidecar/boolean-bypass state is gone.
-- Name-count source and binary-index publication remain two sequential,
-  individually atomic generation publishes. A crash between them can leave a
-  detected binding mismatch; rerunning with `--overwrite` repairs it. Warehouse
+- Name-count indexes are assembled completely in a temporary sibling and
+  published with one rename into an absent `name_counts_index` target. Existing
+  targets are immutable; regeneration uses a new output directory. Warehouse
   access requires an explicit full-run flag and local fixtures are bounded.
   ORCID counts now use one direct JSON file plus an adjacent metadata sidecar,
   with no pointer manifest, cross-process lock, fsync protocol, retry loop, or
@@ -118,7 +124,7 @@
 - Adds canonical Arrow runtime contracts and tooling: `s2and.arrow_inputs`, `s2and/arrow_schema_contract.json`, `scripts/convert_to_arrow.py`, `scripts/arrow_conversion_helpers.py`, local Arrow release validation, and bounded parity/quality verification scripts. The documented public data release is now `s2and-release-arrow`; the legacy JSON/pickle release remains for paper-era inputs.
 - Tightens production validation. Missing or malformed Arrow artifacts now raise structured `MissingArrowArtifactError` failures, Rust production routes fail fast instead of silently falling back to `ANDData`, unsupported name-alias path keys are rejected, and direct Arrow prediction refuses models that require reference features.
 - Reworks promoted incremental linking around Arrow/Rust. The promoted path reads base Arrow artifacts, query signatures, cluster seeds, cluster seed disallows, and altered-profile sidecars; Rust performs raw candidate planning and promoted row-signal construction; `batching_threshold` controls promoted Rust query batch size.
-- Switches promoted linker replay/training to `--feature-mode arrow-rust` by default against the canonical `s2and_and_big_blocks_linker_dataset_20260525` Arrow+labels bundle. `precomputed-promoted` remains an explicit reuse mode.
+- Switches promoted linker replay/training to one fresh Arrow/Rust flow against the canonical `s2and_and_big_blocks_linker_dataset_20260525` Arrow+labels bundle. Cached/precomputed feature modes are no longer supported.
 - Uses the manifest-backed binary `name_counts_index/` sidecar as the sole supported name-count artifact. Embedded Arrow name-count columns and the standalone `name_counts.arrow` artifact are no longer supported.
 - Updates model, eval, tutorial, and profiling flows for Arrow-first operation. `eval_prod_models.py` can auto-use Arrow when complete artifacts exist, the production tutorial defaults to Arrow input, the documented model path is the native `production_model_v1.21/` bundle, and `rust_suite.py promoted-incremental-arrow-profile` replaces the legacy big-block incremental profiler.
 - Adds graph subblocking as the default fallback for oversized name groups and introduces strict Arrow-native Rust graph subblocking with batch-indexed reads, expanded telemetry, ORCID repair behavior, and scoped dash-name compatibility.

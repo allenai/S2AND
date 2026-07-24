@@ -2,30 +2,22 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_counts_manifest import (
-    NAME_COUNTS_MANIFEST_SHA256_FIELD,
     ValidatedNameCountsManifest,
-    readonly_name_counts_provenance,
-    validated_name_counts_provenance,
 )
 
 _OPEN_CACHE_MAX_PATHS = 4
 _OPEN_CACHE_LOCK = threading.Lock()
-_OPEN_CACHE: OrderedDict[
-    str,
-    tuple[bytes, tuple[NameCountsIndex, ValidatedNameCountsManifest]],
-] = OrderedDict()
+_OPEN_CACHE: OrderedDict[str, tuple[NameCountsIndex, ValidatedNameCountsManifest]] = OrderedDict()
 
 
 def _lookup_many_deduplicated(
@@ -105,73 +97,44 @@ class NameCountsIndex:
         self,
         *,
         native: Any,
-        path: str,
-        manifest_sha256: str,
-        normalization_version: str,
-        source_provenance: Mapping[str, Any],
+        manifest: ValidatedNameCountsManifest,
     ) -> None:
-        if normalization_version != NORMALIZATION_VERSION:
-            raise ValueError(
-                f"NameCountsIndex normalization_version={normalization_version!r}; expected {NORMALIZATION_VERSION!r}"
-            )
-        provenance = validated_name_counts_provenance(
-            source_provenance,
-            context="NameCountsIndex source_provenance",
-        )
-        if provenance.get(NAME_COUNTS_MANIFEST_SHA256_FIELD) != manifest_sha256:
-            raise ValueError("NameCountsIndex provenance is not bound to its manifest")
         self._native = native
-        self.path = path
-        self.manifest_sha256 = manifest_sha256
-        self.normalization_version = normalization_version
-        self.source_provenance = readonly_name_counts_provenance(provenance)
+        self.path = str(manifest.index_dir)
+        self.manifest_sha256 = manifest.manifest_sha256
+        self.normalization_version = manifest.normalization_version
+        self.source_provenance = manifest.source_provenance
 
     @classmethod
-    def _open_manifest_snapshot(
+    def _open_resolved(
         cls,
         resolved_path: str,
-        manifest_bytes: bytes,
     ) -> tuple[NameCountsIndex, ValidatedNameCountsManifest]:
-        """Open one exact native generation and retain its manifest facts."""
+        """Open one immutable path and retain facts from the native authority."""
 
         with _OPEN_CACHE_LOCK:
             cached = _OPEN_CACHE.get(resolved_path)
-            if cached is not None and cached[0] == manifest_bytes:
+            if cached is not None:
                 _OPEN_CACHE.move_to_end(resolved_path)
-                return cached[1]
+                return cached
 
         from s2and.runtime import load_s2and_rust_extension
 
-        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
         native = load_s2and_rust_extension().NameCountsIndex.open(resolved_path)
-        native_manifest_sha256 = native.name_counts_manifest_sha256
-        if native_manifest_sha256 != manifest_sha256:
-            raise RuntimeError(
-                "name-count manifest changed during open; retry the operation: "
-                f"expected={manifest_sha256} observed={native_manifest_sha256}"
-            )
-        manifest = ValidatedNameCountsManifest._from_manifest_bytes(
-            resolved_path,
-            manifest_bytes,
-            context="native-validated name-count index",
-            verify_file_digests=False,
-        )
+        manifest = ValidatedNameCountsManifest._from_native(native, index_dir=resolved_path)
         opened = (
             cls(
                 native=native,
-                path=resolved_path,
-                manifest_sha256=manifest_sha256,
-                normalization_version=manifest.normalization_version,
-                source_provenance=manifest.source_provenance,
+                manifest=manifest,
             ),
             manifest,
         )
         with _OPEN_CACHE_LOCK:
             cached = _OPEN_CACHE.get(resolved_path)
-            if cached is not None and cached[0] == manifest_bytes:
+            if cached is not None:
                 _OPEN_CACHE.move_to_end(resolved_path)
-                return cached[1]
-            _OPEN_CACHE[resolved_path] = (manifest_bytes, opened)
+                return cached
+            _OPEN_CACHE[resolved_path] = opened
             _OPEN_CACHE.move_to_end(resolved_path)
             if len(_OPEN_CACHE) > _OPEN_CACHE_MAX_PATHS:
                 _OPEN_CACHE.popitem(last=False)
@@ -179,7 +142,7 @@ class NameCountsIndex:
 
     @classmethod
     def open(cls, path: str | os.PathLike[str]) -> NameCountsIndex:
-        """Verify and share one complete manifest generation at ``path``."""
+        """Verify and share one immutable name-count index at ``path``."""
 
         opened, _manifest = cls._open_generation(path)
         return opened
@@ -191,7 +154,7 @@ class NameCountsIndex:
         *,
         context: str,
     ) -> tuple[NameCountsIndex, ValidatedNameCountsManifest]:
-        """Open native material and retain facts from the exact same manifest bytes."""
+        """Open native material and retain facts returned by the same handle."""
 
         del context
         opened, manifest = cls._open_generation(path)
@@ -202,13 +165,10 @@ class NameCountsIndex:
         cls,
         path: str | os.PathLike[str],
     ) -> tuple[NameCountsIndex, ValidatedNameCountsManifest]:
-        """Open the exact manifest snapshot currently published at ``path``."""
+        """Open the immutable index published at ``path``."""
 
         resolved_path = str(Path(os.fspath(path)).resolve())
-        manifest_path = Path(resolved_path) / "manifest.json"
-        if not manifest_path.is_file():
-            raise FileNotFoundError(f"{manifest_path} (missing manifest.json)")
-        return cls._open_manifest_snapshot(resolved_path, manifest_path.read_bytes())
+        return cls._open_resolved(resolved_path)
 
     def lookup_many(
         self,

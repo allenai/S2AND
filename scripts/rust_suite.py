@@ -17,7 +17,6 @@ if str(_SCRIPTS_DIR) not in sys.path:
 _MODULE_IMPORTS = {
     "compare": "_rust_suite.compare_cmd",
     "transfer_mini": "_rust_suite.transfer_mini_cmd",
-    "prod_inference": "_rust_suite.prod_inference_cmd",
     "largest_block": "_rust_suite.largest_block_cmd",
     "promoted_incremental_arrow_profile": "_rust_suite.promoted_incremental_arrow_profile_cmd",
     "featurizer_reuse": "_rust_suite.featurizer_reuse_cmd",
@@ -71,11 +70,6 @@ _COMMANDS = {
     "transfer-mini": {
         "module": "transfer_mini",
         "help": "Mini transfer benchmark workflow.",
-        "main_kind": "noargv",
-    },
-    "prod-inference": {
-        "module": "prod_inference",
-        "help": "Production-model inference profiling workflow.",
         "main_kind": "noargv",
     },
     "largest-block": {

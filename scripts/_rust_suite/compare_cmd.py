@@ -292,12 +292,12 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
             )
             from s2and.feature_port import build_rust_featurizer_from_arrow_paths
             from s2and.incremental_linking.feature_block_arrow import write_raw_arrow_batch_lookup_indexes
-            from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
+            from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
             execution_route = RUST_EXECUTION_ROUTE
             with tempfile.TemporaryDirectory(prefix=f"s2and_compare_{args.dataset}_arrow_") as arrow_tmpdir:
                 arrow_prepare_start = time.perf_counter()
-                arrow_paths = write_feature_block_arrow_from_anddata(
+                arrow_paths = write_raw_planner_arrow_from_anddata(
                     dataset,
                     arrow_tmpdir,
                     signature_ids=signature_ids,

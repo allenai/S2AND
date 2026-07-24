@@ -9,7 +9,7 @@ import tempfile
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from types import MappingProxyType
 from typing import Any
@@ -46,43 +46,30 @@ class _VerifiedArrowArtifactGeneration:
     files: Mapping[str, _ArrowArtifactGenerationFile]
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(slots=True)
+class _RuntimeArrowGenerationEntry:
+    """One bounded cache entry and its single-flight open lock."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    value: ValidatedArrowInputs | None = None
+
+
+@dataclass(frozen=True)
 class ValidatedArrowInputs(Mapping[str, str]):
-    """Immutable, integrity-checked Arrow paths for one artifact generation."""
+    """Immutable Arrow paths and retained state for one validated generation."""
 
     paths: Mapping[str, str]
     generation_id: str
     normalization_version: str
-    name_counts_manifest: ValidatedNameCountsManifest | None
-    _name_counts_index: Any | None
+    name_counts_manifest: ValidatedNameCountsManifest | None = None
+    _name_counts_index: Any | None = field(default=None, repr=False, compare=False)
 
-    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-        raise TypeError(
-            "ValidatedArrowInputs cannot be constructed directly; use an Arrow artifact validation function"
-        )
+    def __post_init__(self) -> None:
+        """Normalize the small immutable value object."""
 
-    def __init_subclass__(cls, **_kwargs: Any) -> None:
-        raise TypeError("ValidatedArrowInputs cannot be subclassed")
-
-    @classmethod
-    def _from_verified(
-        cls,
-        *,
-        paths: Mapping[str, str],
-        generation_id: str,
-        normalization_version: str,
-        name_counts_manifest: ValidatedNameCountsManifest | None = None,
-        name_counts_index: Any | None = None,
-    ) -> ValidatedArrowInputs:
-        """Create an instance from facts established by internal validation."""
-
-        instance = object.__new__(cls)
-        object.__setattr__(instance, "paths", MappingProxyType(dict(paths)))
-        object.__setattr__(instance, "generation_id", str(generation_id))
-        object.__setattr__(instance, "normalization_version", str(normalization_version))
-        object.__setattr__(instance, "name_counts_manifest", name_counts_manifest)
-        object.__setattr__(instance, "_name_counts_index", name_counts_index)
-        return instance
+        object.__setattr__(self, "paths", MappingProxyType(dict(self.paths)))
+        object.__setattr__(self, "generation_id", str(self.generation_id))
+        object.__setattr__(self, "normalization_version", str(self.normalization_version))
 
     def __getitem__(self, key: str) -> str:
         return self.paths[key]
@@ -97,12 +84,12 @@ class ValidatedArrowInputs(Mapping[str, str]):
         """Return this verified generation without request-local path entries."""
 
         removed = set(keys)
-        return self._from_verified(
+        return ValidatedArrowInputs(
             paths={key: value for key, value in self.paths.items() if key not in removed},
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
             name_counts_manifest=(None if "name_counts_index" in removed else self.name_counts_manifest),
-            name_counts_index=(None if "name_counts_index" in removed else self._name_counts_index),
+            _name_counts_index=(None if "name_counts_index" in removed else self._name_counts_index),
         )
 
     def with_request_sidecars(
@@ -133,15 +120,16 @@ class ValidatedArrowInputs(Mapping[str, str]):
             )
         paths = dict(self.paths)
         paths.update(normalized)
-        return self._from_verified(
+        return ValidatedArrowInputs(
             paths=paths,
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
             name_counts_manifest=self.name_counts_manifest,
-            name_counts_index=self._name_counts_index,
+            _name_counts_index=self._name_counts_index,
         )
 
-    def _retained_native_name_counts_index(self) -> Any | None:
+    @property
+    def native_name_counts_index(self) -> Any | None:
         """Return the exact native snapshot bound to retained manifest facts."""
 
         index = self._name_counts_index
@@ -207,8 +195,10 @@ _SPECTER_PATH_KEYS = frozenset(
 _UNSUPPORTED_SPECTER_PATH_KEYS = frozenset({"specter2", "specter2_batch_index"})
 _RUNTIME_ARROW_GENERATION_CACHE_SIZE = 4
 _RuntimeArrowGenerationCacheKey = tuple[str, tuple[tuple[str, str], ...]]
-_RUNTIME_ARROW_GENERATION_CACHE: OrderedDict[_RuntimeArrowGenerationCacheKey, ValidatedArrowInputs] = OrderedDict()
-_RUNTIME_ARROW_GENERATION_KEY_LOCKS: dict[_RuntimeArrowGenerationCacheKey, threading.Lock] = {}
+_RUNTIME_ARROW_GENERATION_CACHE: OrderedDict[
+    _RuntimeArrowGenerationCacheKey,
+    _RuntimeArrowGenerationEntry,
+] = OrderedDict()
 _RUNTIME_ARROW_GENERATION_CACHE_LOCK = threading.Lock()
 
 
@@ -758,9 +748,7 @@ def _runtime_arrow_generation_cache_key(
     paths: Mapping[str, str],
     generation_id: str,
 ) -> _RuntimeArrowGenerationCacheKey:
-    """Return the identity of one immutable runtime bundle projection."""
-
-    return generation_id, tuple(sorted((str(key), str(value)) for key, value in paths.items()))
+    return generation_id, tuple(sorted(paths.items()))
 
 
 def _open_validated_arrow_generation(
@@ -837,12 +825,12 @@ def _open_validated_arrow_generation(
         verified.files,
         validate_source_fingerprint=strict_integrity,
     )
-    return ValidatedArrowInputs._from_verified(
+    return ValidatedArrowInputs(
         paths=paths,
         generation_id=verified.generation_id,
         normalization_version=normalization_version,
         name_counts_manifest=name_counts_manifest,
-        name_counts_index=name_counts_index,
+        _name_counts_index=name_counts_index,
     )
 
 
@@ -854,36 +842,32 @@ def _open_runtime_arrow_generation(
     context: str,
     producer_hint: str,
 ) -> ValidatedArrowInputs:
-    """Open and cache one runtime generation."""
+    """Open one generation once while it remains in the bounded cache."""
 
     cache_key = _runtime_arrow_generation_cache_key(paths, verified.generation_id)
     with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
-        cached = _RUNTIME_ARROW_GENERATION_CACHE.get(cache_key)
-        if cached is not None:
-            _RUNTIME_ARROW_GENERATION_CACHE.move_to_end(cache_key)
-            return cached
-        key_lock = _RUNTIME_ARROW_GENERATION_KEY_LOCKS.setdefault(cache_key, threading.Lock())
-
-    with key_lock:
-        with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
-            cached = _RUNTIME_ARROW_GENERATION_CACHE.get(cache_key)
-            if cached is not None:
-                _RUNTIME_ARROW_GENERATION_CACHE.move_to_end(cache_key)
-                return cached
-
-        opened = _open_validated_arrow_generation(
-            paths,
-            verified,
-            strict_integrity=False,
-            required_keys=required_keys,
-            context=context,
-            producer_hint=producer_hint,
-        )
-        with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
-            _RUNTIME_ARROW_GENERATION_CACHE[cache_key] = opened
+        entry = _RUNTIME_ARROW_GENERATION_CACHE.get(cache_key)
+        if entry is None:
+            entry = _RuntimeArrowGenerationEntry()
+            _RUNTIME_ARROW_GENERATION_CACHE[cache_key] = entry
             while len(_RUNTIME_ARROW_GENERATION_CACHE) > _RUNTIME_ARROW_GENERATION_CACHE_SIZE:
                 _RUNTIME_ARROW_GENERATION_CACHE.popitem(last=False)
-            return opened
+        else:
+            _RUNTIME_ARROW_GENERATION_CACHE.move_to_end(cache_key)
+            if entry.value is not None:
+                return entry.value
+
+    with entry.lock:
+        if entry.value is None:
+            entry.value = _open_validated_arrow_generation(
+                paths,
+                verified,
+                strict_integrity=False,
+                required_keys=required_keys,
+                context=context,
+                producer_hint=producer_hint,
+            )
+        return entry.value
 
 
 def require_arrow_artifacts(

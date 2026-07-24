@@ -544,57 +544,6 @@ pub(crate) fn extract_name_tuples_argument(
     extract_name_tuples_map(obj)
 }
 
-pub(crate) fn extract_u32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
-    if let Ok(arr) = obj.downcast::<PyArray1<u32>>() {
-        let readonly = arr.readonly();
-        return Ok(readonly.as_slice()?.to_vec());
-    }
-    if let Ok(arr) = obj.downcast::<PyArray1<u64>>() {
-        let readonly = arr.readonly();
-        return readonly
-            .as_slice()?
-            .iter()
-            .map(|value| {
-                u32::try_from(*value).map_err(|_| {
-                    pyo3::exceptions::PyOverflowError::new_err(format!(
-                        "component member signature index exceeds u32: {value}"
-                    ))
-                })
-            })
-            .collect();
-    }
-    let values: Vec<u64> = obj.extract()?;
-    values
-        .into_iter()
-        .map(|value| {
-            u32::try_from(value).map_err(|_| {
-                pyo3::exceptions::PyOverflowError::new_err(format!(
-                    "component member signature index exceeds u32: {value}"
-                ))
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn extract_component_member_indices(
-    obj: &Bound<'_, PyAny>,
-) -> PyResult<HashMap<String, Vec<u32>>> {
-    let mut out = HashMap::new();
-    let items = obj.call_method0("items")?;
-    for item in PyIterator::from_object(&items)? {
-        let tuple = item?.downcast_into::<PyTuple>()?;
-        if tuple.len() != 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "component_member_indices_by_key.items() yielded a non-pair",
-            ));
-        }
-        let component_key: String = tuple.get_item(0)?.extract()?;
-        let members = extract_u32_vec(&tuple.get_item(1)?)?;
-        out.insert(component_key, members);
-    }
-    Ok(out)
-}
-
 pub(crate) fn extract_specter_vec_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<f32>>> {
     if obj.is_none() {
         return Ok(Vec::new());

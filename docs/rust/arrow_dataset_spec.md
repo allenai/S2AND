@@ -1,4 +1,4 @@
-# Arrow Dataset Specification
+﻿# Arrow Dataset Specification
 
 Status date: 2026-07-10
 
@@ -100,7 +100,7 @@ Notes:
   Hand-authored artifacts can omit it when the request has no seed disallows;
   converters may emit an empty table instead. An explicit path must exist when
   present.
-- When using `scripts.arrow_conversion_helpers.write_feature_block_arrow_from_anddata(...)` to publish physical
+- When using `scripts.arrow_conversion_helpers.write_raw_planner_arrow_from_anddata(...)` to publish physical
   seeded/incremental seed sidecars, pass `include_empty_cluster_seeds=True` so
   empty seed/disallow tables are still emitted.
 - `altered_cluster_signatures.arrow` is required for incremental datasets whose
@@ -211,8 +211,8 @@ serving location.
 Every script that produces S2AND runtime Arrow artifacts should use the shared
 writers instead of open-coding the table or sidecar formats:
 
-- `scripts.arrow_conversion_helpers.write_feature_block_arrow_from_anddata(...)` or
-  `write_feature_block_arrow_tables(...)` for semantic Arrow IPC tables.
+- `scripts.arrow_conversion_helpers.write_raw_planner_arrow_from_anddata(...)` or
+  `write_raw_planner_arrow_tables(...)` for semantic Arrow IPC tables.
 - `write_raw_arrow_batch_lookup_indexes(...)` after the final table write for
   raw-planner sidecars.
 - `raw_planner_arrow_physical_layout(...)` for manifest/report layout metrics.
@@ -260,10 +260,10 @@ the same feature view that S2AND would expose after normal preprocessing:
 as having no ORCID evidence; all non-ORCID features and constraints remain
 available. Name-count artifacts always use the canonical initial-character key.
 
-Use the script-only `FeatureBlock` conversion writer as the reference
-implementation for Arrow physical layout and for benchmark/replay bundles whose
+Use the script-only direct Arrow conversion writer as the reference
+implementation for physical layout and for benchmark/replay bundles whose
 inputs are derived from `ANDData`:
-`scripts.arrow_conversion_helpers.write_feature_block_arrow_from_anddata`.
+`scripts.arrow_conversion_helpers.write_raw_planner_arrow_from_anddata`.
 That writer returns table paths and does not write `manifest.json`. All in-repo
 producers pass those paths through
 `s2and.arrow_inputs.build_arrow_artifact_manifest(...)` and
@@ -289,7 +289,7 @@ Important parity details:
   normalization, ngram, unidecode, name splitting, and language-detection work
   needed for production scoring.
 - Keep `abstract` as an abstract-presence signal, not raw abstract text. The
-  current `FeatureBlock` encoding writes `"Has Abstract"` when the preprocessed
+  current direct Arrow conversion writes `"Has Abstract"` when the preprocessed
   paper has an abstract and `""` otherwise.
 - Include all paper-author rows needed for coauthor features.
 - Do not include embedded name-count columns in `signatures.arrow`; use the
@@ -550,8 +550,8 @@ Required fields for every semantic Arrow manifest:
 The manifest `schema` value is the on-disk Arrow manifest schema. In Python it
 is exposed as
 `s2and.incremental_linking.feature_block.FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION`.
-Do not use the in-memory `FeatureBlock` schema constant for manifest
-validation.
+Do not use the signature-order `FEATURE_BLOCK_SCHEMA_VERSION` constant for
+manifest validation.
 
 The canonical manifest builder supplies `normalization_version`, `paths`, and
 `artifact_generation`. Dataset producers supply fields such as `schema`,
@@ -769,5 +769,5 @@ training pair samples, train/val/test split construction artifacts, reference
 features, upstream normalization artifacts, or pair-sampling policy state unless a
 separate training/eval contract explicitly asks for them.
 
-The direct Rust inference path should consume only the narrow feature-block
+The direct Rust inference path should consume only the narrow raw-planner
 inputs it needs for scoring and clustering.

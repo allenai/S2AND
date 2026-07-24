@@ -26,22 +26,6 @@ use crate::{
     extract_affiliation_stopwords, extract_required_string_set, fnv64_update, py_len, FNV_OFFSET,
 };
 
-pub(crate) fn subblock_tokens_from_key(subblock_key: &str) -> Vec<String> {
-    let mut values = HashSet::new();
-    for raw_token in subblock_key.split(',') {
-        let token = raw_token
-            .trim()
-            .split_once('|')
-            .map_or(raw_token.trim(), |(token, _rest)| token.trim());
-        if py_len(&token) > 1 {
-            values.insert(token.to_string());
-        }
-    }
-    let mut out: Vec<String> = values.into_iter().collect();
-    out.sort_unstable();
-    out
-}
-
 #[derive(Clone)]
 pub(crate) struct SubblockingSignatureRow {
     pub(crate) signature_id: String,

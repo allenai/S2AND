@@ -18,8 +18,10 @@ from s2and.arrow_inputs import (
     ValidatedArrowInputs,
     require_feature_contract_normalization_version,
 )
+from s2and.consts import LARGE_DISTANCE
 from s2and.incremental_linking.feature_block import (
     cluster_seed_disallows_from_arrow_paths,
+    normalize_cluster_seed_disallow_pairs,
     temporary_arrow_paths_with_cluster_seeds,
 )
 from s2and.incremental_linking.policy import (
@@ -511,6 +513,27 @@ def _plan_time_cluster_seed_disallows(
     }
 
 
+def _partial_supervision_plan_disallows(
+    partial_supervision: Mapping[tuple[str, str], int | float],
+    *,
+    query_signature_ids: Sequence[str],
+    seed_signature_ids: Iterable[str],
+) -> set[tuple[str, str]]:
+    """Return explicit query-to-active-seed disallows for candidate planning."""
+
+    query_ids = {str(signature_id) for signature_id in query_signature_ids}
+    seed_ids = {str(signature_id) for signature_id in seed_signature_ids}
+    pairs = []
+    for (left, right), value in partial_supervision.items():
+        if value != LARGE_DISTANCE:
+            continue
+        left_id = str(left)
+        right_id = str(right)
+        if (left_id in query_ids and right_id in seed_ids) or (right_id in query_ids and left_id in seed_ids):
+            pairs.append((left_id, right_id))
+    return set(normalize_cluster_seed_disallow_pairs(pairs))
+
+
 def _query_disallow_partner_ids(
     unassigned_signature_ids: Sequence[str],
     request_disallows: set[tuple[str, str]],
@@ -974,6 +997,13 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         partial_supervision,
     )
     planner_disallows = _plan_time_cluster_seed_disallows(request_disallows, unassigned_signature_ids)
+    planner_disallows.update(
+        _partial_supervision_plan_disallows(
+            partial_supervision,
+            query_signature_ids=unassigned_signature_ids,
+            seed_signature_ids=cluster_seeds_require,
+        )
+    )
     initial_query_disallow_decisions: dict[str, _ScoredQueryDecision] = {}
     seed_arrow_start = time.perf_counter()
     seed_arrow_reused_source = _seed_arrow_source_is_reusable(
@@ -1026,7 +1056,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 orcid_enabled=bool(orcid_enabled),
                 num_threads=clusterer.n_jobs,
                 max_exemplars=4,
-                name_counts_index=arrow_path_payload._retained_native_name_counts_index(),  # noqa: SLF001
+                name_counts_index=arrow_path_payload.native_name_counts_index,
             )
             if use_name_counts:
                 shared_name_counts_index = raw_request_planner.name_counts_index()

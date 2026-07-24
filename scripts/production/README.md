@@ -63,18 +63,11 @@ production_model_vX.Y/
   manifest.json
 ```
 
-Arrow feature rematerialization writes `.materialization.json` beside every
-complete feature table and dataset partial. `--reuse-existing-features` accepts
-an existing artifact only when that sidecar exactly matches the current source
-labels and candidate members, pairwise bundle, target/schema, policies,
-selection, Arrow generations, and effective name-count manifest. Validation
-happens before source bundle metadata is refreshed. A mismatch is intentionally
-fatal; rerun without the reuse flag to produce a clean feature bundle.
-
-Portable `precomputed-promoted` inputs use
-`precomputed_promoted_feature_bundle_v2`, POSIX-relative table paths, and the
-same table identity digests. They are rejected when used with a different
-pairwise bundle.
+Linker training has one feature path: it materializes a fresh Arrow/Rust
+feature bundle under the requested output directory, then trains from that
+bundle. The feature-bundle destination must not already exist. Use
+`--materialize-only` with `--limit-rows`, `--tables`, or `--datasets` for a
+bounded smoke run before approving an unbounded `--run-full` job.
 
 After this step, users load the model with:
 
@@ -107,13 +100,14 @@ deeper per-dataset Arrow schema/table validation.
 The `counts/` scripts document production count artifacts:
 
 - `counts/generate_name_counts.py` writes a provenance-bound immutable
-  `name_counts` generation and publishes its pointer manifest last. It requires
-  an explicit source snapshot, verifies selected-row content, and supports
-  bounded fixture runs before any authorized warehouse run. The writer emits
-  `name_counts_index/` directly from the resident generated mappings. Python
+  `name_counts_index/` into a previously absent target. It requires an explicit
+  source snapshot, verifies selected-row content, and supports bounded fixture
+  runs before any authorized warehouse run. The writer builds the complete
+  directory in a temporary sibling and publishes it with one rename. Python
   and Rust runtime paths share that verified mmap index; neither unpickles nor
   retains the full dictionaries. Models compare the exact generation/source
-  binding before feature work.
+  binding before feature work. Regeneration uses a new output directory; there
+  is no in-place overwrite mode.
 - `counts/generate_orcid_name_prefix_counts.py` writes canonical unordered
   ORCID prefix pairs directly to `first_k_letter_counts_from_orcid.json` with
   an adjacent `.meta.json` sidecar. The runtime verifies the normalization and

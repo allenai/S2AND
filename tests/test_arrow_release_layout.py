@@ -106,7 +106,6 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
         release_root,
         tiny_name_counts_tuple(),
         tiny_name_counts_provenance(),
-        overwrite=True,
     )
 
     for file_path in (release_root / "LICENSE.txt",):

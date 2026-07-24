@@ -88,6 +88,21 @@ def test_make_subblocks_rejects_duplicate_ids_after_string_coercion() -> None:
         )
 
 
+def test_make_subblocks_preserves_integer_signature_ids() -> None:
+    dataset = SimpleNamespace(signatures={1: _signature("1", first="anna")}, random_seed=0)
+
+    subblocks, _telemetry = subblocking.make_subblocks_with_telemetry(
+        [1],
+        dataset,
+        maximum_size=2,
+        first_k_letter_counts_sorted={},
+    )
+
+    output_signature_ids = [signature_id for subblock in subblocks.values() for signature_id in subblock]
+    assert output_signature_ids == [1]
+    assert type(output_signature_ids[0]) is int
+
+
 def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(tmp_path) -> None:
     _require_rust_arrow_subblocking()
     signatures_path = tmp_path / "signatures.arrow"

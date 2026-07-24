@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import struct
-from collections import Counter
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,8 +27,6 @@ from s2and.incremental_linking.retrieval import (
 from s2and.incremental_linking.runtime import _seed_setup_from_component_members
 from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import (
-    build_cluster_summary,
-    build_query_features,
     tiny_name_counts_provenance,
     write_test_arrow_artifact_manifest,
 )
@@ -98,7 +95,7 @@ def test_raw_arrow_plan_bundle_rejects_pair_left_id_that_disagrees_with_row_quer
     )
 
     with pytest.raises(ValueError, match="left_signature_ids must match"):
-        RawArrowPlanBundle.from_mapping(raw_plan)
+        RawArrowPlanBundle.from_native_mapping(raw_plan)
 
 
 def test_raw_arrow_plan_bundle_rejects_duplicate_query_signature_ids() -> None:
@@ -109,7 +106,7 @@ def test_raw_arrow_plan_bundle_rejects_duplicate_query_signature_ids() -> None:
     )
 
     with pytest.raises(ValueError, match="query_signature_ids must be unique"):
-        RawArrowPlanBundle.from_mapping(raw_plan)
+        RawArrowPlanBundle.from_native_mapping(raw_plan)
 
 
 def test_raw_candidate_plan_seed_setup_rejects_duplicate_seed_signature() -> None:
@@ -124,14 +121,14 @@ def test_raw_candidate_plan_schema_requires_component_members() -> None:
     raw_plan.pop("component_members")
 
     with pytest.raises(KeyError, match="component_members"):
-        RawArrowPlanBundle.from_mapping(raw_plan)
+        RawArrowPlanBundle.from_native_mapping(raw_plan)
 
 
 def test_raw_candidate_plan_schema_rejects_non_mapping_component_members() -> None:
     raw_plan = _minimal_raw_candidate_plan(component_members=[])
 
     with pytest.raises(ValueError, match="component_members must be a mapping"):
-        RawArrowPlanBundle.from_mapping(raw_plan)
+        RawArrowPlanBundle.from_native_mapping(raw_plan)
 
 
 def _fnv64_bytes(value: bytes) -> int:
@@ -328,26 +325,6 @@ def _base_arrow_paths(
     return indexed_paths
 
 
-def _assert_retrieval_plan_equal(raw_plan: dict[str, Any], direct_plan: dict[str, Any]) -> None:
-    assert raw_plan["row_component_keys"] == direct_plan["row_component_keys"]
-    assert int(raw_plan["row_count"]) == int(direct_plan["row_count"])
-    np.testing.assert_array_equal(raw_plan["retrieval_ranks"], direct_plan["retrieval_ranks"])
-    np.testing.assert_allclose(raw_plan["retrieval_scores"], direct_plan["retrieval_scores"], rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(
-        raw_plan["middle_initial_compatibility"],
-        direct_plan["middle_initial_compatibility"],
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(raw_plan["coauthor_overlap"], direct_plan["coauthor_overlap"], rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(
-        raw_plan["specter_centroid_similarity"],
-        direct_plan["specter_centroid_similarity"],
-        rtol=1e-6,
-        atol=1e-6,
-    )
-
-
 def _raw_candidate_plan_arrow(
     paths: dict[str, str],
     query_signature_ids: list[str],
@@ -418,111 +395,6 @@ def test_raw_arrow_candidate_planner_rejects_out_of_range_seed_year(tmp_path: Pa
             orcid_enabled=False,
             num_threads=1,
         )
-
-
-def test_rust_retriever_named_signature_count_keeps_integer_precision() -> None:
-    query = build_query_features(first="alice", has_full_first=True)
-    summary = build_cluster_summary(
-        component_key="c_large",
-        size=16_777_218,
-        first_name_counts=Counter({"alice": 16_777_217, "bob": 1}),
-    )
-    retriever = s2and_rust.RustHybridCentroidRetriever([summary], include_exemplars=False)
-
-    plan = retriever.top_k_hybrid_centroid_pair_plan(
-        [query],
-        np.asarray([0], dtype=np.uint32),
-        {"c_large": [1]},
-        1,
-        num_threads=1,
-    )
-
-    assert int(plan["row_named_signature_counts"][0]) == 16_777_218
-
-
-def test_rust_retriever_reports_missing_component_members_as_key_error() -> None:
-    query = build_query_features(first="alice", has_full_first=True)
-    summary = build_cluster_summary(
-        component_key="c_missing",
-        size=1,
-        first_name_counts=Counter({"alice": 1}),
-    )
-    retriever = s2and_rust.RustHybridCentroidRetriever([summary], include_exemplars=False)
-
-    with pytest.raises(KeyError, match="Missing component members"):
-        retriever.top_k_hybrid_centroid_pair_plan(
-            [query],
-            np.asarray([0], dtype=np.uint32),
-            {},
-            1,
-            num_threads=1,
-        )
-
-
-def test_raw_arrow_candidate_plan_matches_existing_rust_retriever(tmp_path: Path) -> None:
-    paths = _base_arrow_paths(tmp_path)
-
-    raw_plan = _raw_candidate_plan_arrow(
-        paths,
-        ["q1"],
-        top_k=2,
-        query_view="full",
-        orcid_enabled=False,
-        num_threads=1,
-    )
-
-    query = build_query_features(
-        first="alice",
-        coauthor_blocks=frozenset({"a smith"}),
-        affiliation_terms=frozenset({"ai"}),
-        venue_terms=frozenset({"neurips"}),
-        title_terms=frozenset({"graph", "models"}),
-        year=2020,
-        has_coauthors=True,
-        has_affiliations=True,
-        has_full_first=True,
-    )
-    summaries = [
-        build_cluster_summary(
-            component_key="c_match",
-            size=1,
-            first_name_counts=Counter({"alice": 1}),
-            coauthor_counts=Counter({"a smith": 1}),
-            affiliation_counts=Counter({"ai": 1}),
-            venue_counts=Counter({"neurips": 1}),
-            title_counts=Counter({"graph": 1, "models": 1}),
-            year_min=2020,
-            year_max=2020,
-            year_mean=2020.0,
-        ),
-        build_cluster_summary(
-            component_key="c_other",
-            size=1,
-            first_name_counts=Counter({"bob": 1}),
-            coauthor_counts=Counter({"c doe": 1}),
-            affiliation_counts=Counter(),
-            venue_counts=Counter({"icml": 1}),
-            title_counts=Counter({"different": 1, "topic": 1}),
-            year_min=2010,
-            year_max=2010,
-            year_mean=2010.0,
-        ),
-    ]
-    retriever = s2and_rust.RustHybridCentroidRetriever(summaries, include_exemplars=False)
-    direct_plan = retriever.top_k_hybrid_centroid_pair_plan(
-        [query],
-        np.asarray([0], dtype=np.uint32),
-        {"c_match": np.asarray([1], dtype=np.uint32), "c_other": np.asarray([2], dtype=np.uint32)},
-        2,
-        1,
-    )
-
-    _assert_retrieval_plan_equal(raw_plan, direct_plan)
-    assert raw_plan["left_signature_ids"] == ["q1", "q1"]
-    assert raw_plan["right_signature_ids"] == ["s1", "s2"]
-    assert raw_plan["left_signature_ids"][0] is raw_plan["left_signature_ids"][1]
-    assert raw_plan["query_views"] == ["full"]
-    assert raw_plan["telemetry"]["signature_count"] == 3
 
 
 def test_raw_arrow_candidate_planner_matches_one_shot_plan(tmp_path: Path) -> None:
@@ -1716,82 +1588,6 @@ def test_raw_arrow_candidate_plan_matches_multi_query_auto_views_and_specter(tmp
         num_threads=1,
     )
 
-    queries = [
-        build_query_features(
-            first="alice",
-            middle_initials=frozenset({"b"}),
-            coauthor_blocks=frozenset({"a smith"}),
-            affiliation_terms=frozenset({"ai"}),
-            venue_terms=frozenset({"neurips"}),
-            title_terms=frozenset({"graph", "models"}),
-            year=2020,
-            specter=np.asarray([1.0, 0.0], dtype=np.float32),
-            has_coauthors=True,
-            has_affiliations=True,
-            has_full_first=True,
-            has_middle=True,
-        ),
-        build_query_features(
-            first="a",
-            coauthor_blocks=frozenset({"b stone"}),
-            affiliation_terms=frozenset({"robotics"}),
-            venue_terms=frozenset({"rss"}),
-            title_terms=frozenset({"robot", "planning"}),
-            year=2022,
-            specter=np.asarray([0.0, 1.0], dtype=np.float32),
-            has_coauthors=True,
-            has_affiliations=True,
-            has_full_first=False,
-        ),
-    ]
-    summaries = [
-        build_cluster_summary(
-            component_key="c_full",
-            first_name_counts=Counter({"alice": 1}),
-            middle_initial_counts=Counter({"b": 1}),
-            coauthor_counts=Counter({"a smith": 1}),
-            affiliation_counts=Counter({"ai": 1}),
-            venue_counts=Counter({"neurips": 1}),
-            title_counts=Counter({"graph": 1, "models": 1}),
-            year_min=2020,
-            year_max=2020,
-            year_mean=2020.0,
-            specter_centroid=np.asarray([1.0, 0.0], dtype=np.float32),
-            exemplar_vectors=[np.asarray([1.0, 0.0], dtype=np.float32)],
-        ),
-        build_cluster_summary(
-            component_key="c_initial",
-            coauthor_counts=Counter({"b stone": 1}),
-            affiliation_counts=Counter({"robotics": 1}),
-            venue_counts=Counter({"rss": 1}),
-            title_counts=Counter({"robot": 1, "planning": 1}),
-            year_min=2022,
-            year_max=2022,
-            year_mean=2022.0,
-            specter_centroid=np.asarray([0.0, 1.0], dtype=np.float32),
-            exemplar_vectors=[np.asarray([0.0, 1.0], dtype=np.float32)],
-        ),
-        build_cluster_summary(
-            component_key="c_other",
-            first_name_counts=Counter({"carol": 1}),
-            specter_centroid=np.asarray([0.2, 0.2], dtype=np.float32),
-            exemplar_vectors=[np.asarray([0.2, 0.2], dtype=np.float32)],
-        ),
-    ]
-    retriever = s2and_rust.RustHybridCentroidRetriever(summaries, include_exemplars=True)
-    direct_plan = retriever.top_k_hybrid_centroid_pair_plan(
-        queries,
-        np.asarray([0, 1], dtype=np.uint32),
-        {
-            "c_full": np.asarray([2], dtype=np.uint32),
-            "c_initial": np.asarray([3], dtype=np.uint32),
-            "c_other": np.asarray([4], dtype=np.uint32),
-        },
-        2,
-        1,
-    )
-
-    _assert_retrieval_plan_equal(raw_plan, direct_plan)
     assert raw_plan["query_views"] == ["full", "initial_only"]
     assert raw_plan["left_signature_ids"] == ["q_full", "q_full", "q_initial", "q_initial"]
     assert raw_plan["right_signature_ids"] == ["s_full", "s_other", "s_initial", "s_other"]
@@ -1918,7 +1714,7 @@ def test_raw_arrow_candidate_plan_bridge_maps_signature_ids_to_linker_indices(tm
         num_threads=1,
     )
     retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
-        RawArrowPlanBundle.from_mapping(raw_plan),
+        RawArrowPlanBundle.from_native_mapping(raw_plan),
         signature_id_to_index={"q1": 7, "s1": 11, "s2": 13},
     )
 
@@ -1947,7 +1743,40 @@ def test_raw_arrow_plan_bundle_derives_signature_order_from_rust_plan(tmp_path: 
         orcid_enabled=False,
         num_threads=1,
     )
-    bundle = RawArrowPlanBundle.from_mapping(raw_plan)
+    assert tuple(raw_plan) == (
+        "schema_version",
+        "row_count",
+        "pair_count",
+        "query_signature_ids",
+        "query_views",
+        "query_authors",
+        "seed_signature_ids",
+        "component_members",
+        "left_signature_ids",
+        "right_signature_ids",
+        "pair_row_indices",
+        "row_query_signature_indices",
+        "row_component_keys",
+        "retrieval_scores",
+        "retrieval_ranks",
+        *(raw_key for raw_key, _signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS),
+        "telemetry",
+    )
+    expected_base_dtypes = {
+        "pair_row_indices": np.uint32,
+        "row_query_signature_indices": np.uint32,
+        "retrieval_scores": np.float32,
+        "retrieval_ranks": np.uint16,
+    }
+    for key, dtype in expected_base_dtypes.items():
+        assert raw_plan[key].dtype == dtype
+    for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
+        if dtype is object:
+            assert isinstance(raw_plan[raw_key], list)
+        else:
+            expected_dtype = np.uint32 if raw_key in {"row_component_sizes", "row_named_signature_counts"} else dtype
+            assert raw_plan[raw_key].dtype == expected_dtype
+    bundle = RawArrowPlanBundle.from_native_mapping(raw_plan)
 
     assert bundle.row_count == raw_plan["row_count"]
     assert bundle.pair_count == raw_plan["pair_count"]
@@ -1955,7 +1784,7 @@ def test_raw_arrow_plan_bundle_derives_signature_order_from_rust_plan(tmp_path: 
     assert bundle.signature_order.query_signature_ids == ("q1",)
 
 
-def test_raw_arrow_plan_bundle_owns_normalized_bridge_values(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_raw_arrow_plan_bundle_freezes_native_plan_values(monkeypatch: pytest.MonkeyPatch) -> None:
     raw_plan = _minimal_raw_candidate_plan(
         row_count=1,
         pair_count=1,
@@ -1968,29 +1797,27 @@ def test_raw_arrow_plan_bundle_owns_normalized_bridge_values(monkeypatch: pytest
         component_members={"c0": ["s0"]},
         telemetry={"seed_signature_count": 1, "timings": {"total_secs": 0.5}},
     )
-    bundle = RawArrowPlanBundle.from_mapping(raw_plan)
+    bundle = RawArrowPlanBundle.from_native_mapping(raw_plan)
 
-    owned_arrays = (
+    bundle_arrays = (
         bundle.row_query_offsets,
         bundle.pair_row_indices,
         bundle.retrieval_scores,
         bundle.retrieval_ranks,
         *bundle.row_signals.values(),
     )
-    assert all(array.flags.owndata and not array.flags.writeable for array in owned_arrays)
+    assert all(not array.flags.writeable for array in bundle_arrays)
+    with pytest.raises(ValueError, match="read-only"):
+        raw_plan["retrieval_scores"][0] = 9.0
+    with pytest.raises(ValueError, match="read-only"):
+        raw_plan["row_query_first_tokens"][0] = "Z"
 
     raw_plan["query_signature_ids"][0] = "changed-query"
     raw_plan["query_views"][0] = "initial_only"
     raw_plan["query_authors"][0] = "Changed Author"
-    raw_plan["row_query_signature_indices"][0] = 99
     raw_plan["row_component_keys"][0] = "changed-component"
-    raw_plan["retrieval_scores"][0] = 9.0
-    raw_plan["retrieval_ranks"][0] = 9
-    raw_plan["pair_row_indices"][0] = 99
     raw_plan["left_signature_ids"][0] = "changed-query"
     raw_plan["right_signature_ids"][0] = "changed-signature"
-    raw_plan["row_query_first_tokens"][0] = "Z"
-    raw_plan["row_component_sizes"][0] = 99.0
     raw_plan["component_members"]["c0"][0] = "changed-signature"
     raw_plan["telemetry"]["seed_signature_count"] = 99
     raw_plan["telemetry"]["timings"]["total_secs"] = 99.0
@@ -2308,7 +2135,7 @@ def test_rust_featurizer_from_arrow_paths_applies_cluster_seed_disallows(tmp_pat
             }
         ),
     )
-    signature_order = RawArrowPlanBundle.from_mapping(raw_plan).signature_order
+    signature_order = RawArrowPlanBundle.from_native_mapping(raw_plan).signature_order
 
     direct = s2and_rust.RustFeaturizer.from_arrow_paths(
         paths,

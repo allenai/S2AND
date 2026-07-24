@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,6 @@ def _write_index(root: Path) -> Path:
         root,
         tiny_name_counts_tuple(),
         tiny_name_counts_provenance(),
-        overwrite=True,
     )
     return Path(path)
 
@@ -51,12 +51,9 @@ def _write_manifest(index_dir: Path, manifest: dict[str, Any]) -> None:
     )
 
 
-def _assert_authorities_reject(index_dir: Path, expected_field: str) -> None:
+def _assert_native_validation_rejects(index_dir: Path, expected_field: str) -> None:
     with pytest.raises((OSError, RuntimeError, ValueError), match=expected_field):
-        ValidatedNameCountsManifest.load(index_dir, context="test Python parser")
-    if HAS_RUST:
-        with pytest.raises((OSError, RuntimeError, ValueError), match=expected_field):
-            RUST_MODULE.NameCountsIndex.open(str(index_dir))
+        ValidatedNameCountsManifest.load(index_dir, context="test native validation surface")
 
 
 def _remove_manifest_field(index_dir: Path, field: str) -> None:
@@ -79,22 +76,43 @@ def test_valid_manifest_has_identical_python_and_rust_identity(tmp_path: Path) -
     assert python_manifest.manifest_sha256 == manifest_sha256
     assert python_manifest.source_provenance["manifest_sha256"] == manifest_sha256
     assert rust_index.name_counts_manifest_sha256 == manifest_sha256
+    for file_key, file_entry in _read_manifest(index_dir)["files"].items():
+        retained_file = python_manifest.files[file_key]
+        assert os.path.samefile(retained_file.path, index_dir / file_entry["path"])
+        assert retained_file.byte_count == file_entry["byte_count"]
+        assert retained_file.sha256 == file_entry["sha256"]
     assert not hasattr(rust_index, "lookup_many")
     assert callable(rust_index._lookup_many_unique)
 
 
-def test_required_manifest_fields_are_rejected_by_python_and_rust(tmp_path: Path) -> None:
+def test_native_facts_preserve_optional_provenance(tmp_path: Path) -> None:
+    provenance = {
+        **tiny_name_counts_provenance(),
+        "generated_at": "2026-07-23T00:00:00Z",
+        "cardinalities": {"first": 3},
+        "rejected_row_count": 2,
+    }
+    index_dir, _metrics = write_name_counts_index(tmp_path, tiny_name_counts_tuple(), provenance)
+
+    retained = ValidatedNameCountsManifest.load(index_dir, context="test optional provenance")
+
+    assert retained.source_provenance["generated_at"] == provenance["generated_at"]
+    assert retained.source_provenance["cardinalities"] == provenance["cardinalities"]
+    assert retained.source_provenance["rejected_row_count"] == 2
+
+
+def test_required_manifest_fields_are_rejected(tmp_path: Path) -> None:
     for field in _REQUIRED_MANIFEST_FIELDS:
         index_dir = _write_index(tmp_path / field)
         _remove_manifest_field(index_dir, field)
-        _assert_authorities_reject(index_dir, field)
+        _assert_native_validation_rejects(index_dir, field)
 
 
 @pytest.mark.parametrize(
     ("location", "schema_version"),
     (("manifest", "name_counts_index_v1"), ("provenance", "name_counts_provenance_v1")),
 )
-def test_previous_schema_versions_are_rejected_by_python_and_rust(
+def test_previous_schema_versions_are_rejected(
     tmp_path: Path,
     location: str,
     schema_version: str,
@@ -105,43 +123,43 @@ def test_previous_schema_versions_are_rejected_by_python_and_rust(
     target["schema_version"] = schema_version
     _write_manifest(index_dir, manifest)
 
-    _assert_authorities_reject(index_dir, "schema_version")
+    _assert_native_validation_rejects(index_dir, "schema_version")
 
 
-def test_required_provenance_fields_are_rejected_by_python_and_rust(tmp_path: Path) -> None:
+def test_required_provenance_fields_are_rejected(tmp_path: Path) -> None:
     for field in _REQUIRED_PROVENANCE_FIELDS:
         index_dir = _write_index(tmp_path / field)
         manifest = _read_manifest(index_dir)
         manifest["source_provenance"].pop(field)
         _write_manifest(index_dir, manifest)
-        _assert_authorities_reject(index_dir, field)
+        _assert_native_validation_rejects(index_dir, field)
 
 
-def test_removed_selected_row_count_is_rejected_by_python_and_rust(tmp_path: Path) -> None:
+def test_removed_selected_row_count_is_rejected(tmp_path: Path) -> None:
     index_dir = _write_index(tmp_path)
     manifest = _read_manifest(index_dir)
     manifest["source_provenance"]["selected_row_count"] = manifest["source_provenance"]["source_row_count"]
     _write_manifest(index_dir, manifest)
 
-    _assert_authorities_reject(index_dir, "selected_row_count")
+    _assert_native_validation_rejects(index_dir, "selected_row_count")
 
 
-def test_required_file_entries_are_rejected_by_python_and_rust(tmp_path: Path) -> None:
+def test_required_file_entries_are_rejected(tmp_path: Path) -> None:
     for file_key in _REQUIRED_FILE_KEYS:
         index_dir = _write_index(tmp_path / file_key)
         manifest = _read_manifest(index_dir)
         manifest["files"].pop(file_key)
         _write_manifest(index_dir, manifest)
-        _assert_authorities_reject(index_dir, file_key)
+        _assert_native_validation_rejects(index_dir, file_key)
 
 
-def test_required_file_entry_fields_are_rejected_by_python_and_rust(tmp_path: Path) -> None:
+def test_required_file_entry_fields_are_rejected(tmp_path: Path) -> None:
     for field in _REQUIRED_FILE_ENTRY_FIELDS:
         index_dir = _write_index(tmp_path / field)
         manifest = _read_manifest(index_dir)
         manifest["files"]["first"].pop(field)
         _write_manifest(index_dir, manifest)
-        _assert_authorities_reject(index_dir, field)
+        _assert_native_validation_rejects(index_dir, field)
 
 
 def test_material_contract_is_identical_at_python_and_rust_boundaries(tmp_path: Path) -> None:
@@ -169,7 +187,7 @@ def test_material_contract_is_identical_at_python_and_rust_boundaries(tmp_path: 
         else:  # pragma: no cover - mutation invariant
             raise AssertionError(f"unknown mutation {mutation}")
         _write_manifest(index_dir, manifest)
-        _assert_authorities_reject(index_dir, expected_field)
+        _assert_native_validation_rejects(index_dir, expected_field)
 
 
 def test_arrow_boundary_translates_representative_manifest_failure(tmp_path: Path) -> None:

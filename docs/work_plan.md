@@ -47,8 +47,7 @@ expensive or internal-data operation. Then:
 9. Train the pairwise model from the exact immutable dataset, count, tuple,
    and ORCID identities.
 10. Train the promoted linker against that pairwise bundle and target digest.
-    Reuse promoted features only when every materialization sidecar verifies
-    against the current inputs.
+    Materialize a fresh Arrow/Rust feature bundle into a new output directory.
 11. Finalize and reload the complete bundle, then verify every cross-artifact
     identity before evaluation. A canonical parity rewrap of the published
     v1.21 boosters must load with effective clustering `eps=0.65`; a newly

@@ -1,4 +1,4 @@
-"""FeatureBlock Arrow IPC, sidecar, and artifact IO helpers."""
+"""Raw-planner Arrow IPC, sidecar, and artifact IO helpers."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
-from s2and._atomic_io import exclusive_file_lock, fsync_directory
+from s2and._atomic_io import fsync_directory
 from s2and.arrow_inputs import (
     RAW_PLANNER_ARROW_BATCH_INDEX_KEYS,
     RAW_PLANNER_ARROW_KEY_COLUMNS,
@@ -26,14 +26,10 @@ from s2and.arrow_inputs import (
     normalize_arrow_paths,
 )
 from s2and.arrow_schema import validate_arrow_schema
-from s2and.incremental_linking.feature_block_contract import (
-    FeatureBlock,
-    normalize_cluster_seed_disallow_pairs,
-)
+from s2and.incremental_linking.feature_block_contract import normalize_cluster_seed_disallow_pairs
 from s2and.name_counts_manifest import (
     NAME_COUNTS_INDEX_SCHEMA_VERSION,
     NAME_COUNTS_MANIFEST_SHA256_FIELD,
-    ValidatedNameCountsManifest,
     validated_name_counts_provenance,
 )
 from s2and.text import canonicalize_name_text
@@ -1180,18 +1176,17 @@ def raw_planner_arrow_physical_layout(
     }
 
 
-def write_feature_block_arrow_tables(
-    feature_block: FeatureBlock,
+def write_raw_planner_arrow_tables(
+    tables: Mapping[str, Any],
     output_dir: str | Path,
     *,
     include_empty_cluster_seeds: bool = False,
     max_record_batch_rows: Mapping[str, int] | int | None = RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     overwrite: bool = True,
 ) -> dict[str, str]:
-    """Write `FeatureBlock` Arrow IPC tables and return paths keyed by table name."""
+    """Write raw-planner Arrow IPC tables and return paths keyed by table name."""
 
     output_path = Path(output_dir)
-    tables = feature_block.to_arrow_tables()
     paths: dict[str, str] = {}
     for name, table in tables.items():
         if (
@@ -1241,23 +1236,6 @@ def _finish_name_counts_arrow_fingerprint(
         digest = _fnv64_update(digest, sum_accumulator.to_bytes(8, "little", signed=False))
         digest = _fnv64_update(digest, square_accumulator.to_bytes(8, "little", signed=False))
     return digest
-
-
-def _name_counts_arrow_fingerprint(mappings: Mapping[str, Mapping[Any, Any]]) -> int:
-    accumulators: dict[str, tuple[int, int, int, int]] = {}
-    for kind, mapping in mappings.items():
-        xor_accumulator = 0
-        sum_accumulator = 0
-        square_accumulator = 0
-        kind_seed = _fnv64_text(_fnv64_bytes(b"s2and-name-count-entry-v1\x00"), kind)
-        for raw_name, raw_count in mapping.items():
-            name, count = _validated_name_count_entry(kind, raw_name, raw_count)
-            entry_digest = _name_count_fingerprint_digest(kind_seed, name, count)
-            xor_accumulator ^= entry_digest
-            sum_accumulator = (sum_accumulator + entry_digest) & 0xFFFFFFFFFFFFFFFF
-            square_accumulator = (square_accumulator + (entry_digest * entry_digest)) & 0xFFFFFFFFFFFFFFFF
-        accumulators[kind] = (len(mapping), xor_accumulator, sum_accumulator, square_accumulator)
-    return _finish_name_counts_arrow_fingerprint(accumulators)
 
 
 def _validated_name_count_entry(kind: str, raw_name: Any, raw_count: Any) -> tuple[str, float]:
@@ -1593,81 +1571,18 @@ def _write_name_count_index_file(
     }
 
 
-def _name_count_index_disk_requirement(mapping: Mapping[Any, Any]) -> int:
-    """Return a conservative peak disk requirement before any temporary write."""
-
-    record_count = len(mapping)
-    # UTF-8 uses at most four bytes per Unicode code point. This avoids
-    # retaining encoded key copies during the preflight.
-    maximum_name_bytes = sum(4 * len(str(raw_name)) for raw_name in mapping)
-    sort_run_bytes = record_count * _NAME_COUNTS_SORT_RUN_RECORD_STRUCT.size + maximum_name_bytes
-    assembly_bytes = record_count * _NAME_COUNTS_INDEX_RECORD_STRUCT.size + maximum_name_bytes
-    final_bytes = _NAME_COUNTS_INDEX_HEADER_STRUCT.size + assembly_bytes
-    return sort_run_bytes + assembly_bytes + final_bytes + (4 * _NAME_COUNTS_WRITE_BUFFER_BYTES)
-
-
-def _name_counts_manifest_sha256(index_dir: Path) -> str | None:
-    """Return the small root-manifest identity without reading material files."""
-
-    try:
-        manifest_bytes = (index_dir / "manifest.json").read_bytes()
-    except OSError:
-        return None
-    return hashlib.sha256(manifest_bytes).hexdigest()
-
-
-def _name_counts_index_reuse_snapshot(
-    index_dir: Path,
-    *,
-    expected_fingerprint: int,
-    expected_source_provenance: Mapping[str, Any],
-) -> tuple[str | None, bool]:
-    """Fully validate one exact reuse candidate outside the publication lock."""
-
-    try:
-        manifest_bytes = (index_dir / "manifest.json").read_bytes()
-    except OSError:
-        return None, False
-    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-    try:
-        manifest = ValidatedNameCountsManifest._from_manifest_bytes(
-            index_dir,
-            manifest_bytes,
-            context="reusing name-count index",
-            verify_file_digests=True,
-        )
-    except (OSError, RuntimeError, TypeError, ValueError):
-        return manifest_sha256, False
-    if "fingerprint" not in manifest.payload:
-        return manifest_sha256, False
-    return manifest_sha256, (
-        manifest.payload.get("fingerprint") == expected_fingerprint
-        and {
-            key: value for key, value in manifest.source_provenance.items() if key != NAME_COUNTS_MANIFEST_SHA256_FIELD
-        }
-        == expected_source_provenance
-    )
-
-
-@contextmanager
-def _exclusive_name_counts_publish_lock(index_dir: Path) -> Iterator[None]:
-    """Serialize the short manifest publication boundary across processes."""
-
-    with exclusive_file_lock(index_dir / ".publish.lock"):
-        yield
-
-
 def write_name_counts_index(
     output_dir: str | Path,
     mappings: tuple[Mapping[Any, Any], Mapping[Any, Any], Mapping[Any, Any], Mapping[Any, Any]],
     source_provenance: Mapping[str, Any],
-    *,
-    overwrite: bool = False,
-) -> tuple[str, dict[str, int | bool]]:
-    """Write the global name-count lookup as exact-verified sorted binary indexes."""
+) -> tuple[str, dict[str, int]]:
+    """Publish one new global name-count index into an absent target."""
 
-    index_dir = Path(output_dir) / "name_counts_index"
-    manifest_path = index_dir / "manifest.json"
+    output_path = Path(output_dir)
+    index_dir = output_path / "name_counts_index"
+    if index_dir.exists():
+        raise FileExistsError(f"name-count index target already exists: {index_dir}")
+    output_path.mkdir(parents=True, exist_ok=True)
 
     source_provenance = validated_name_counts_provenance(
         source_provenance,
@@ -1675,65 +1590,27 @@ def write_name_counts_index(
     )
     source_provenance.pop(NAME_COUNTS_MANIFEST_SHA256_FIELD, None)
     first_dict, last_dict, first_last_dict, last_first_initial_dict = mappings
-    fingerprint: int | None = None
-    reuse_manifest_sha256: str | None = None
-    reuse_matches = False
-    if not overwrite and manifest_path.is_file():
-        fingerprint = _name_counts_arrow_fingerprint(
-            {
-                "first": first_dict,
-                "last": last_dict,
-                "first_last": first_last_dict,
-                "last_first_initial": last_first_initial_dict,
-            }
-        )
-        reuse_manifest_sha256, reuse_matches = _name_counts_index_reuse_snapshot(
-            index_dir,
-            expected_fingerprint=fingerprint,
-            expected_source_provenance=source_provenance,
-        )
-        if reuse_matches:
-            with _exclusive_name_counts_publish_lock(index_dir):
-                if _name_counts_manifest_sha256(index_dir) == reuse_manifest_sha256:
-                    return str(index_dir), {"reused": True}
-
     named_mappings = (
         ("first", first_dict),
         ("last", last_dict),
         ("first_last", first_last_dict),
         ("last_first_initial", last_first_initial_dict),
     )
-    index_dir.mkdir(parents=True, exist_ok=True)
-    required_free_bytes = sum(_name_count_index_disk_requirement(mapping) for _kind, mapping in named_mappings)
-    free_bytes_at_preflight = shutil.disk_usage(index_dir).free
-    if free_bytes_at_preflight < required_free_bytes:
-        raise OSError(
-            "insufficient free disk for name-count index generation: "
-            f"required={required_free_bytes} free={free_bytes_at_preflight} path={index_dir}"
-        )
-    metrics: dict[str, int | bool] = {
-        "reused": False,
-        "required_free_bytes": required_free_bytes,
-        "free_bytes_at_preflight": free_bytes_at_preflight,
-    }
+    metrics: dict[str, int] = {}
     total_records = 0
     total_bytes = 0
     fingerprint_accumulators: dict[str, tuple[int, int, int, int]] = {}
     manifest_files: dict[str, dict[str, int | str]] = {}
-    generations_dir = index_dir / "generations"
-    generations_dir.mkdir(parents=True, exist_ok=True)
     generation_name = f"gen-{uuid.uuid4().hex}"
-    tmp_generation_dir = Path(tempfile.mkdtemp(prefix=f".{generation_name}.", dir=str(generations_dir)))
-    generation_dir = generations_dir / generation_name
-    tmp_manifest_path = index_dir / f".manifest.{generation_name}.json"
-    generation_renamed = False
-    manifest_committed = False
+    temporary_index_dir = Path(tempfile.mkdtemp(prefix=".name_counts_index.", dir=str(output_path)))
+    generation_dir = temporary_index_dir / "generations" / generation_name
+    generation_dir.mkdir(parents=True)
     try:
         for kind, mapping in named_mappings:
             filename = f"{kind}.bin"
-            tmp_file = tmp_generation_dir / filename
+            index_file = generation_dir / filename
             file_metrics = _write_name_count_index_file(
-                tmp_file,
+                index_file,
                 kind,
                 mapping,
             )
@@ -1753,67 +1630,42 @@ def write_name_counts_index(
                 "path": f"generations/{generation_name}/{filename}",
                 "record_count": record_count,
                 "byte_count": byte_count,
-                "sha256": _sha256_file(tmp_file),
+                "sha256": _sha256_file(index_file),
             }
             metrics[f"{kind}_sort_run_count"] = file_metrics["sort_run_count"]
             metrics[f"{kind}_peak_buffered_records"] = file_metrics["peak_buffered_records"]
             metrics[f"{kind}_temporary_bytes"] = file_metrics["temporary_byte_count"]
 
-        built_fingerprint = _finish_name_counts_arrow_fingerprint(fingerprint_accumulators)
-        if fingerprint is not None and built_fingerprint != fingerprint:
-            raise ValueError("name-count mappings changed while building the index generation")
-        fingerprint = built_fingerprint
         manifest = {
             "schema_version": NAME_COUNTS_INDEX_SCHEMA_VERSION,
             "normalization_version": source_provenance["normalization_version"],
             "source_provenance": source_provenance,
             "magic": _NAME_COUNTS_INDEX_MAGIC.decode("ascii"),
-            "fingerprint": fingerprint,
+            "fingerprint": _finish_name_counts_arrow_fingerprint(fingerprint_accumulators),
             "record_layout": "hash1:u64,hash2:u64,name_offset:u64,name_len:u32,reserved:u32,count:f64",
             "sort_order": "hash1,hash2,utf8_name_bytes",
             "hash": "fnv1a64(name_bytes), fnv1a64(domain + kind + NUL + name_bytes)",
             "exact_string_verification": True,
             "files": manifest_files,
         }
-        tmp_manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        with tmp_manifest_path.open("r+b") as manifest_input:
+        manifest_path = temporary_index_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with manifest_path.open("r+b") as manifest_input:
             os.fsync(manifest_input.fileno())
-        marker_path = tmp_generation_dir / ".published"
+        marker_path = generation_dir / ".published"
         with marker_path.open("wb") as marker_output:
             marker_output.flush()
             os.fsync(marker_output.fileno())
-        fsync_directory(tmp_generation_dir)
-
-        if not overwrite and _name_counts_manifest_sha256(index_dir) != reuse_manifest_sha256:
-            # Another writer published while this process was sorting. Perform
-            # its one heavy validation outside the short publication lock, then
-            # bind that result to the exact root-manifest digest under the lock.
-            reuse_manifest_sha256, reuse_matches = _name_counts_index_reuse_snapshot(
-                index_dir,
-                expected_fingerprint=fingerprint,
-                expected_source_provenance=source_provenance,
-            )
-        with _exclusive_name_counts_publish_lock(index_dir):
-            if not overwrite and reuse_matches and _name_counts_manifest_sha256(index_dir) == reuse_manifest_sha256:
-                return str(index_dir), {"reused": True}
-            tmp_generation_dir.rename(generation_dir)
-            generation_renamed = True
-            fsync_directory(generations_dir)
-            for entry in manifest_files.values():
-                path = index_dir / str(entry["path"])
-                if not path.exists():
-                    raise FileNotFoundError(f"name-count index generation is incomplete: {path}")
-            tmp_manifest_path.replace(manifest_path)
-            manifest_committed = True
-            fsync_directory(index_dir)
+        fsync_directory(generation_dir)
+        fsync_directory(generation_dir.parent)
+        fsync_directory(temporary_index_dir)
+        if index_dir.exists():
+            raise FileExistsError(f"name-count index target already exists: {index_dir}")
+        temporary_index_dir.rename(index_dir)
+        fsync_directory(output_path)
     finally:
-        if tmp_manifest_path.exists():
-            tmp_manifest_path.unlink()
-        if tmp_generation_dir.exists():
-            shutil.rmtree(tmp_generation_dir)
-        if generation_renamed and not manifest_committed and generation_dir.exists():
-            shutil.rmtree(generation_dir)
-            fsync_directory(generations_dir)
+        if temporary_index_dir.exists():
+            shutil.rmtree(temporary_index_dir)
     metrics["row_count"] = total_records
     metrics["byte_count"] = total_bytes
     return str(index_dir), metrics

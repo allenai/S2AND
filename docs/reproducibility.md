@@ -45,16 +45,11 @@ The v1.21 bundle includes the previous promoted incremental linker under
 `production_model_v1.21/reproducibility/incremental_linker_training_target.json`;
 replay scripts should not depend on machine-local analysis artifacts.
 
-For repeated promoted-linker replay, materialized feature bundles can be reused
-only through the explicit `precomputed-promoted` mode. The bundle must be
-portable and validated against the replay target JSON and exact pairwise bundle
-binding. Each reusable table and intermediate dataset partial carries an
-adjacent `.materialization.json` identity that binds the source labels,
-candidate members, validated Arrow and name-count generations, target/schema,
-selection, exemplar cap, and missing-value policies. A missing or changed input
-identity is an error under `--reuse-existing-features`; rerun without that flag
-to rematerialize. Feature-table metadata uses canonical `/`-separated
-bundle-relative paths, so replay never depends on historical scratch paths or
-the host path separator.
+Promoted-linker replay always materializes a fresh Arrow/Rust feature bundle
+from the source bundle, target JSON, and pairwise model. The destination must be
+new, so a replay cannot silently consume stale feature tables. Run a bounded
+`--materialize-only` smoke first, then record the full command, source artifact
+identities, runtime, peak RSS, and resulting bundle hashes in the release run
+report.
 
 See [production_inference.md](production_inference.md) for the current inference contract.

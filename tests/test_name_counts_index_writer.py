@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-import s2and.name_counts_manifest as name_counts_manifest_module
 from s2and.incremental_linking import feature_block_arrow
 from tests.helpers import tiny_name_counts_provenance
 
@@ -134,41 +131,6 @@ def test_writer_rejects_nonfinite_and_nonpositive_counts(tmp_path: Path, count: 
         )
 
 
-def test_disk_preflight_fails_before_creating_index_temporaries(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    mapping = {"ada": 2.0, "bea": 3.0}
-    monkeypatch.setattr(
-        feature_block_arrow.shutil,
-        "disk_usage",
-        lambda _path: SimpleNamespace(free=0),
-    )
-
-    with pytest.raises(OSError, match="insufficient free disk"):
-        feature_block_arrow.write_name_counts_index(
-            tmp_path,
-            (mapping, {}, {}, {}),
-            tiny_name_counts_provenance(),
-        )
-
-    index_dir = tmp_path / "name_counts_index"
-    assert index_dir.is_dir()
-    assert list(index_dir.iterdir()) == []
-
-
-def test_name_count_fingerprint_is_order_independent_and_content_sensitive() -> None:
-    forward = {"first": {"ada": 2, "grace": 3}}
-    reverse = {"first": {"grace": 3, "ada": 2}}
-    changed = {"first": {"grace": 4, "ada": 2}}
-    assert feature_block_arrow._name_counts_arrow_fingerprint(forward) == (
-        feature_block_arrow._name_counts_arrow_fingerprint(reverse)
-    )
-    assert feature_block_arrow._name_counts_arrow_fingerprint(forward) != (
-        feature_block_arrow._name_counts_arrow_fingerprint(changed)
-    )
-
-
 def test_fresh_writer_validates_each_name_count_entry_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -191,47 +153,6 @@ def test_fresh_writer_validates_each_name_count_entry_once(
     )
 
     assert validation_calls == sum(len(mapping) for mapping in mappings)
-
-
-def test_writer_never_hashes_name_count_material_under_publish_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provenance = tiny_name_counts_provenance()
-    feature_block_arrow.write_name_counts_index(tmp_path, ({"ada": 2.0}, {}, {}, {}), provenance)
-    real_sha256_file = feature_block_arrow._sha256_file
-    real_manifest_sha256_file = name_counts_manifest_module._sha256_file
-    lock_active = False
-
-    def checked_sha256_file(path: Path) -> str:
-        assert not lock_active, f"material hash ran under publication lock: {path}"
-        return real_sha256_file(path)
-
-    def checked_manifest_sha256_file(path: Path) -> str:
-        assert not lock_active, f"manifest material hash ran under publication lock: {path}"
-        return real_manifest_sha256_file(path)
-
-    @contextmanager
-    def observed_publish_lock(_index_dir: Path):
-        nonlocal lock_active
-        assert not lock_active
-        lock_active = True
-        try:
-            yield
-        finally:
-            lock_active = False
-
-    monkeypatch.setattr(feature_block_arrow, "_sha256_file", checked_sha256_file)
-    monkeypatch.setattr(name_counts_manifest_module, "_sha256_file", checked_manifest_sha256_file)
-    monkeypatch.setattr(feature_block_arrow, "_exclusive_name_counts_publish_lock", observed_publish_lock)
-
-    _path, metrics = feature_block_arrow.write_name_counts_index(
-        tmp_path,
-        ({"ada": 3.0}, {}, {}, {}),
-        {**provenance, "generation_id": "generation-b"},
-    )
-
-    assert metrics["reused"] is False
 
 
 @pytest.mark.parametrize(

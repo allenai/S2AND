@@ -25,7 +25,6 @@ def _write_minimal_name_counts_index(root: Path, *, normalization_version: str |
         root,
         tiny_name_counts_tuple(),
         tiny_name_counts_provenance(),
-        overwrite=True,
     )
     index_dir = Path(index_path)
     manifest_path = index_dir / "manifest.json"
@@ -99,7 +98,6 @@ def test_name_counts_index_writer_stamps_package_version(tmp_path: Path) -> None
         tmp_path,
         tiny_name_counts_tuple(),
         tiny_name_counts_provenance(),
-        overwrite=True,
     )
     manifest = json.loads((Path(index_dir) / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["normalization_version"] == NORMALIZATION_VERSION

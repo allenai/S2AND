@@ -19,12 +19,6 @@ REQUIRED_TRAINING_ARGS = (
     "--target-json",
     "target.json",
 )
-TEST_PAIRWISE_BINDING = {
-    "normalization_version": "canonical_v2",
-    "ordered_feature_contract_digest": "1" * 64,
-    "main_booster_sha256": "2" * 64,
-    "nameless_booster_sha256": "3" * 64,
-}
 
 
 def test_incremental_linking_runtime_imports_stay_runtime_safe() -> None:
@@ -56,6 +50,19 @@ def test_negative_limit_rows_is_rejected() -> None:
 
     with pytest.raises(SystemExit, match="--limit-rows must be > 0"):
         promoted_train.run(args)
+
+
+@pytest.mark.parametrize(
+    "removed_args",
+    (
+        ("--feature-mode", "precomputed-promoted"),
+        ("--precomputed-feature-bundle-root", "features"),
+        ("--reuse-existing-features",),
+    ),
+)
+def test_removed_cached_feature_interfaces_are_rejected(removed_args: tuple[str, ...]) -> None:
+    with pytest.raises(SystemExit):
+        promoted_train.build_parser().parse_args([*REQUIRED_TRAINING_ARGS, *removed_args])
 
 
 def test_existing_production_bundle_output_is_rejected_before_work(
@@ -229,7 +236,7 @@ def test_arrow_rust_materialization_passes_concrete_paths_to_native_planner(
             row_nan_policy="zero",
         )
 
-    assert captured["name_counts_index"] is arrow_paths._retained_native_name_counts_index()  # noqa: SLF001
+    assert captured["name_counts_index"] is arrow_paths.native_name_counts_index
     assert captured["reused_name_counts_index"] is True
 
 
@@ -267,164 +274,12 @@ def test_finalized_arrow_materialization_bundle_creates_corrected_feature_asset_
         output_bundle_root=output_root,
         target={"feature_count": 1, "features": ["f0"], "params": {"n_estimators": 10}, "metrics": {}},
         selected_keys=["train_path"],
-        stamp_precomputed_metadata=False,
-        pairwise_model_binding=TEST_PAIRWISE_BINDING,
     )
 
     assert bundle.assets["corrected_feature_rows"]["root"] == "features_corrected"
     feature_path = "features_corrected/train.parquet"
     assert bundle.assets["corrected_feature_rows"]["files"] == {"train_path": feature_path}
     assert bundle.models["classic"]["train_path"] == feature_path
-
-
-def _test_materialization_identity(target: dict[str, Any], *, table_key: str) -> dict[str, Any]:
-    return {
-        "schema_version": promoted_train.MATERIALIZATION_IDENTITY_SCHEMA_VERSION,
-        "source_bundle": {
-            "bundle_json_sha256": "4" * 64,
-            "labels_path": f"labels/{table_key}.parquet",
-            "labels_sha256": "5" * 64,
-        },
-        "pairwise_bundle_binding": dict(TEST_PAIRWISE_BINDING),
-        "target_spec_digest": promoted_train._target_spec_digest(target),  # noqa: SLF001
-        "feature_schema_digest": promoted_train.promoted_linker_feature_schema_digest(target["features"]),
-        "feature_columns": list(target["features"]),
-        "feature_policies": {
-            "pairwise_model_nan_value": "nan",
-            "pairwise_aggregate_nan_value": 0.0,
-            "row_nan_policy": "finite",
-            "max_exemplars": 4,
-        },
-        "selection": {
-            "table_key": table_key,
-            "datasets": None,
-            "limit_rows": None,
-            "selected_row_count": 1,
-            "selected_rows_digest": "9" * 64,
-            "input_datasets": ["toy"],
-        },
-        "datasets": {
-            "toy": {
-                "arrow": {
-                    "generation_id": "6" * 64,
-                    "normalization_version": "canonical_v2",
-                    "name_counts_manifest_sha256": "7" * 64,
-                },
-                "candidate_members_path": "components/toy.parquet",
-                "candidate_members_sha256": "8" * 64,
-            }
-        },
-    }
-
-
-def _write_precomputed_promoted_bundle(root: Path, target: dict[str, Any]) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    table_files = {
-        "train_path": "features_corrected/train.parquet",
-        "classic_gate_source_path": "features_corrected/calibration_source.parquet",
-        "s2and_eval_path": "features_corrected/s2and_eval.parquet",
-        "hwang_eval_path": "features_corrected/hwang_eval.parquet",
-    }
-    for table_key, relative_path in table_files.items():
-        path = root / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(
-            [
-                {
-                    "query_group_id": f"{table_key}:q1",
-                    "retrieval_rank": 1,
-                    "label": 1,
-                    "f0": 0.5,
-                }
-            ]
-        ).to_parquet(path, index=False)
-        reuse_metadata = promoted_train._materialization_reuse_metadata(  # noqa: SLF001
-            _test_materialization_identity(target, table_key=table_key),
-            artifact={"kind": "complete_table", "table_key": table_key, "rows": 1},
-        )
-        promoted_train._write_materialization_sidecar(path, reuse_metadata)  # noqa: SLF001
-    payload = {
-        "bundle_name": "precomputed_test",
-        "assets": {
-            "corrected_feature_rows": {
-                "root": "features_corrected",
-                "files": dict(table_files),
-            }
-        },
-        "models": {
-            "classic": {
-                **dict(table_files),
-                "feature_columns": list(target["features"]),
-                "best_params": dict(target["params"]),
-            }
-        },
-        "expected_metrics": {},
-    }
-    (root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    bundle = promoted_train.load_bundle(root)
-    payload["precomputed_promoted_feature_bundle"] = promoted_train._precomputed_promoted_bundle_metadata(  # noqa: SLF001
-        bundle=bundle,
-        target=target,
-        source_mode="test",
-        pairwise_model_binding=TEST_PAIRWISE_BINDING,
-    )
-    (root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return root
-
-
-def test_precomputed_promoted_bundle_validation_requires_portable_matching_tables(tmp_path: Path) -> None:
-    target = {"features": ["f0"], "feature_count": 1, "params": {"n_estimators": 10}, "metrics": {}}
-    bundle_root = _write_precomputed_promoted_bundle(tmp_path / "bundle", target)
-
-    bundle, summaries = promoted_train._load_precomputed_promoted_feature_bundle(  # noqa: SLF001
-        bundle_root=bundle_root,
-        target=target,
-        pairwise_model_binding=TEST_PAIRWISE_BINDING,
-    )
-
-    assert bundle.root == bundle_root.resolve()
-    assert bundle.models["classic"]["feature_columns"] == ["f0"]
-    assert [summary["table_key"] for summary in summaries] == [
-        "train_path",
-        "classic_gate_source_path",
-        "s2and_eval_path",
-        "hwang_eval_path",
-    ]
-    assert all(summary["mode"] == "precomputed-promoted" for summary in summaries)
-    metadata = json.loads((bundle_root / "bundle.json").read_text(encoding="utf-8"))[
-        "precomputed_promoted_feature_bundle"
-    ]
-    assert metadata["tables"]["train_path"]["path"] == "features_corrected/train.parquet"
-    assert "\\" not in metadata["tables"]["train_path"]["path"]
-
-
-def test_precomputed_promoted_bundle_rejects_changed_pairwise_model_binding(tmp_path: Path) -> None:
-    target = {"features": ["f0"], "feature_count": 1, "params": {"n_estimators": 10}, "metrics": {}}
-    bundle_root = _write_precomputed_promoted_bundle(tmp_path / "bundle", target)
-
-    with pytest.raises(ValueError, match="pairwise_bundle_binding does not match"):
-        promoted_train._load_precomputed_promoted_feature_bundle(  # noqa: SLF001
-            bundle_root=bundle_root,
-            target=target,
-            pairwise_model_binding={**TEST_PAIRWISE_BINDING, "main_booster_sha256": "9" * 64},
-        )
-
-
-def test_precomputed_promoted_bundle_rejects_absolute_feature_paths(tmp_path: Path) -> None:
-    target = {"features": ["f0"], "feature_count": 1, "params": {"n_estimators": 10}, "metrics": {}}
-    bundle_root = _write_precomputed_promoted_bundle(tmp_path / "bundle", target)
-    payload = json.loads((bundle_root / "bundle.json").read_text(encoding="utf-8"))
-    payload["assets"]["corrected_feature_rows"]["files"]["train_path"] = str(
-        (bundle_root / "features_corrected/train.parquet").resolve()
-    )
-    (bundle_root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="non-portable or non-relative feature paths"):
-        promoted_train._load_precomputed_promoted_feature_bundle(  # noqa: SLF001
-            bundle_root=bundle_root,
-            target=target,
-            pairwise_model_binding=TEST_PAIRWISE_BINDING,
-        )
 
 
 def test_hyperopt_loss_uses_weighted_average_error() -> None:
@@ -523,10 +378,16 @@ def test_metric_gate_runs_before_artifact_promotion(
         raise AssertionError("artifact promotion ran before metric gate")
 
     monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
+    monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
     monkeypatch.setattr(
         promoted_train,
-        "_load_precomputed_promoted_feature_bundle",
-        lambda **_kwargs: (bundle, [{"mode": "precomputed-promoted"}]),
+        "_materialize_arrow_rust_feature_bundle",
+        lambda **_kwargs: (bundle, [{"mode": "arrow-rust"}]),
+    )
+    monkeypatch.setattr(
+        promoted_train,
+        "_assert_pairwise_model_supports_arrow_materialization",
+        lambda *_args: None,
     )
     monkeypatch.setattr(promoted_train, "run_classic", lambda *_args, **_kwargs: summary)
     monkeypatch.setattr(promoted_train, "_train_and_save_prod_artifact", fail_if_promoted)  # noqa: SLF001
@@ -535,10 +396,6 @@ def test_metric_gate_runs_before_artifact_promotion(
     args = promoted_train.build_parser().parse_args(
         [
             *REQUIRED_TRAINING_ARGS,
-            "--feature-mode",
-            "precomputed-promoted",
-            "--precomputed-feature-bundle-root",
-            str(tmp_path / "features"),
             "--run-full",
             "--save-artifact-to",
             str(tmp_path / "artifact"),
@@ -857,8 +714,6 @@ def test_run_uses_hyperopt_params_and_saves_only_final_prod_artifact(
     args = promoted_train.build_parser().parse_args(
         [
             *REQUIRED_TRAINING_ARGS,
-            "--feature-mode",
-            "arrow-rust",
             "--run-full",
             "--hyperopt-evals",
             "2",

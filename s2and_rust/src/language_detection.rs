@@ -16,18 +16,29 @@ pub(crate) fn python_alpha_count(text: &str) -> usize {
     text.chars().filter(|ch| is_python_alpha(*ch)).count()
 }
 
+fn is_pycld2_rejected_control(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0000}'..='\u{0008}'
+            | '\u{000B}'
+            | '\u{000E}'..='\u{001F}'
+            | '\u{007F}'..='\u{009F}'
+    )
+}
+
 pub(crate) struct LanguageDetectionAudit {
     pub(crate) predicted_language: String,
     pub(crate) language_reliability: f64,
 }
 
 pub(crate) fn detect_language_compat(text: &str) -> LanguageDetectionAudit {
-    // The word gate intentionally uses Rust whitespace, not Python-compat
-    // whitespace: Python counts C0 separators (U+001C..=U+001F) as split
-    // points, but any input containing them makes pycld2 raise, which
-    // `s2and.text.detect_language` catches and maps to the same "un"/0.0
-    // this short-circuit returns. Widening the splitter here would DIVERGE
-    // from Python, because Rust cld2 accepts those inputs and detects.
+    // pycld2 rejects these C0/C1 controls while Rust cld2 accepts them.
+    // Python catches that binding error and returns "un"/0.0, so reject the
+    // same inputs before applying Rust's word and alphabetic gates.
+    if text.chars().any(is_pycld2_rejected_control) {
+        return unknown_language_detection();
+    }
+
     if text.split_whitespace().count() <= 1 || python_alpha_count(text) == 0 {
         return unknown_language_detection();
     }
@@ -60,7 +71,9 @@ fn unknown_language_detection() -> LanguageDetectionAudit {
 
 #[cfg(test)]
 mod alpha_gate_tests {
-    use super::{detect_language_compat, is_python_alpha, python_alpha_count};
+    use super::{
+        detect_language_compat, is_pycld2_rejected_control, is_python_alpha, python_alpha_count,
+    };
 
     #[test]
     fn letter_categories_are_python_alpha() {
@@ -83,6 +96,41 @@ mod alpha_gate_tests {
     #[test]
     fn text_of_only_combining_marks_counts_zero_alpha() {
         assert_eq!(python_alpha_count("\u{093F}\u{0941} \u{093F}"), 0);
+    }
+
+    #[test]
+    fn pycld2_rejected_control_set_is_exact() {
+        let observed = (0..=0x009F)
+            .filter_map(char::from_u32)
+            .filter(|ch| is_pycld2_rejected_control(*ch))
+            .collect::<Vec<_>>();
+        let expected = (0..=0x0008)
+            .chain([0x000B])
+            .chain(0x000E..=0x001F)
+            .chain(0x007F..=0x009F)
+            .filter_map(char::from_u32)
+            .collect::<Vec<_>>();
+
+        assert_eq!(observed, expected);
+        assert_eq!(observed.len(), 61);
+    }
+
+    #[test]
+    fn pycld2_accepted_ascii_whitespace_is_not_rejected() {
+        for ch in ['\t', '\n', '\u{000C}', '\r'] {
+            assert!(!is_pycld2_rejected_control(ch), "{ch:?}");
+        }
+    }
+
+    #[test]
+    fn pycld2_rejected_controls_return_unknown() {
+        for ch in ['\u{0000}', '\u{001C}', '\u{007F}', '\u{0080}', '\u{009F}'] {
+            let result = detect_language_compat(&format!(
+                "This is a detailed English research title {ch} about neural systems and scientific evaluation."
+            ));
+            assert_eq!(result.predicted_language, "un", "{ch:?}");
+            assert_eq!(result.language_reliability, 0.0, "{ch:?}");
+        }
     }
 
     #[test]

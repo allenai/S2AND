@@ -1,6 +1,6 @@
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, ToPyArray};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyIterator, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyIterator, PyModule};
 use pyo3::Bound;
 use rayon::prelude::*;
 use std::cmp::Ordering;
@@ -819,14 +819,6 @@ mod tests {
         assert_eq!(cache.len(), 2);
         assert_eq!(first_member_ids, vec!["m1".to_string()]);
         assert_eq!(second_member_ids, vec!["m2".to_string()]);
-    }
-
-    #[test]
-    fn subblock_token_fallback_matches_python_case_preserving_parse() {
-        assert_eq!(
-            subblock_tokens_from_key("Ali|3,bob|2,a|1"),
-            vec!["Ali".to_string(), "bob".to_string()]
-        );
     }
 }
 

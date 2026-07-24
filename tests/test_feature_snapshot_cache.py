@@ -121,6 +121,32 @@ def test_cold_warm_and_uncached_outputs_are_identical(
     _assert_same_splits(cold, warm)
 
 
+def test_losing_publisher_loads_winning_snapshot(
+    dataset: ANDData,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_publish = feature_cache._publish_snapshot
+
+    def publish_winner(path: Path, arrays: dict[str, np.ndarray]) -> bool:
+        winner = {name: np.full(array.shape, 9.0, dtype=np.float64) for name, array in arrays.items()}
+        assert original_publish(path, winner) is True
+        return False
+
+    monkeypatch.setattr(feature_cache, "_publish_snapshot", publish_winner)
+    results = feature_cache.cached_featurize(
+        dataset,
+        FeaturizationInfo(features_to_use=["year_diff"]),
+        source_key=_source_key(),
+        cache_dir=tmp_path,
+    )
+
+    for features, labels, nameless in results:
+        assert np.all(features == 9.0)
+        assert np.all(labels == 9.0)
+        assert nameless is None
+
+
 def test_source_key_change_creates_new_snapshots(
     dataset: ANDData,
     tmp_path: Path,
@@ -241,7 +267,10 @@ def test_snapshot_member_dtype_and_shape_validation(
         )
 
 
-def test_publication_uses_atomic_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_publication_is_write_once_while_existing_snapshot_is_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     path = tmp_path / "snapshot.npz"
     original_replace = os.replace
     replacements: list[tuple[Path, Path]] = []
@@ -251,13 +280,17 @@ def test_publication_uses_atomic_replace(tmp_path: Path, monkeypatch: pytest.Mon
         original_replace(source, destination)
 
     monkeypatch.setattr(feature_cache.os, "replace", record_replace)
-    feature_cache._publish_snapshot(path, {"X": np.zeros((1, 1)), "y": np.zeros(1)})
-    feature_cache._publish_snapshot(path, {"X": np.ones((1, 1)), "y": np.ones(1)})
+    first_published = feature_cache._publish_snapshot(path, {"X": np.zeros((1, 1)), "y": np.zeros(1)})
+    with np.load(path, allow_pickle=False) as open_reader:
+        second_published = feature_cache._publish_snapshot(path, {"X": np.ones((1, 1)), "y": np.ones(1)})
+        np.testing.assert_array_equal(open_reader["X"], np.zeros((1, 1)))
 
-    assert len(replacements) == 2
+    assert first_published is True
+    assert second_published is False
+    assert len(replacements) == 1
     assert all(source.parent == path.parent and destination == path for source, destination in replacements)
     with np.load(path, allow_pickle=False) as loaded:
-        np.testing.assert_array_equal(loaded["X"], np.ones((1, 1)))
+        np.testing.assert_array_equal(loaded["X"], np.zeros((1, 1)))
     assert list(tmp_path.glob("*.tmp")) == []
 
 

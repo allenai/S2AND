@@ -18,6 +18,7 @@ from s2and.incremental_linking.feature_block_arrow import write_name_counts_inde
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking_training.classic import load_bundle
 from s2and.production_model import _load_pairwise_staging_model, load_production_model
+from scripts.production.model import linker_train_calibrate_eval as promoted_train
 from tests.helpers import import_s2and_rust, tiny_name_counts_provenance, tiny_name_counts_tuple
 
 _HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust()
@@ -139,10 +140,7 @@ def _candidate_rows(
 def _write_tiny_promoted_feature_bundle(
     feature_root: Path,
     target_path: Path,
-    pairwise_bundle_dir: Path,
 ) -> None:
-    from scripts.production.model import linker_train_calibrate_eval as promoted_train
-
     feature_root.mkdir(parents=True, exist_ok=True)
     (feature_root / "features_corrected").mkdir(parents=True, exist_ok=True)
     (feature_root / "splits").mkdir(parents=True, exist_ok=True)
@@ -264,67 +262,9 @@ def _write_tiny_promoted_feature_bundle(
         encoding="utf-8",
     )
 
-    pairwise_binding = production_model_module.pairwise_bundle_binding(pairwise_bundle_dir)
-    for table_key, rel_path in paths.items():
-        input_datasets = sorted(set(frames[table_key]["dataset"].astype(str)))
-        identity = {
-            "schema_version": promoted_train.MATERIALIZATION_IDENTITY_SCHEMA_VERSION,
-            "source_bundle": {
-                "bundle_json_sha256": "4" * 64,
-                "labels_path": f"labels/{table_key}.parquet",
-                "labels_sha256": "5" * 64,
-            },
-            "pairwise_bundle_binding": dict(pairwise_binding),
-            "target_spec_digest": promoted_train._target_spec_digest(target),
-            "feature_schema_digest": promoted_train.promoted_linker_feature_schema_digest(feature_columns),
-            "feature_columns": feature_columns,
-            "feature_policies": {
-                "pairwise_model_nan_value": "nan",
-                "pairwise_aggregate_nan_value": 0.0,
-                "row_nan_policy": "finite",
-                "max_exemplars": 4,
-            },
-            "selection": {
-                "table_key": table_key,
-                "datasets": None,
-                "limit_rows": None,
-                "selected_row_count": len(frames[table_key]),
-                "selected_rows_digest": "9" * 64,
-                "input_datasets": input_datasets,
-            },
-            "datasets": {
-                dataset_name: {
-                    "arrow": {
-                        "generation_id": "6" * 64,
-                        "normalization_version": "canonical_v2",
-                        "name_counts_manifest_sha256": "7" * 64,
-                    },
-                    "candidate_members_path": f"components/{dataset_name}.parquet",
-                    "candidate_members_sha256": "8" * 64,
-                }
-                for dataset_name in input_datasets
-            },
-        }
-        reuse_metadata = promoted_train._materialization_reuse_metadata(
-            identity,
-            artifact={"kind": "complete_table", "table_key": table_key, "rows": len(frames[table_key])},
-        )
-        promoted_train._write_materialization_sidecar(feature_root / rel_path, reuse_metadata)
-
-    bundle_payload["precomputed_promoted_feature_bundle"] = promoted_train._precomputed_promoted_bundle_metadata(
-        bundle=load_bundle(feature_root),
-        target=target,
-        source_mode="tiny-flow-pytest",
-        pairwise_model_binding=pairwise_binding,
-    )
-    (feature_root / "bundle.json").write_text(
-        json.dumps(bundle_payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
 
 @requires_rust_lightgbm
-def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tiny_qian_production_model_two_step_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         production_model_module,
         "canonical_artifact_hashes",
@@ -338,7 +278,6 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
         canonical_data_dir,
         tiny_name_counts_tuple(),
         tiny_name_counts_provenance(),
-        overwrite=True,
     )
     path_config = tmp_path / "path_config.json"
     path_config.write_text(
@@ -404,14 +343,23 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
 
     feature_root = tmp_path / "tiny_linker_feature_bundle"
     target_path = tmp_path / "incremental_linker_training_target.json"
-    _write_tiny_promoted_feature_bundle(feature_root, target_path, pairwise_bundle_dir)
+    _write_tiny_promoted_feature_bundle(feature_root, target_path)
+    monkeypatch.setenv("S2AND_PATH_CONFIG", str(path_config))
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+    monkeypatch.setattr(
+        promoted_train,
+        "_assert_pairwise_model_supports_arrow_materialization",
+        lambda *_args: None,
+    )
 
-    _run_cli(
+    def use_tiny_materialized_features(**kwargs: Any) -> tuple[Any, list[dict[str, Any]]]:
+        assert kwargs["source_bundle"].root == feature_root.resolve()
+        return load_bundle(feature_root), [{"mode": "arrow-rust", "test_fixture": True}]
+
+    monkeypatch.setattr(promoted_train, "_materialize_arrow_rust_feature_bundle", use_tiny_materialized_features)
+    args = promoted_train.build_parser().parse_args(
         [
-            "scripts/production/model/train_linker_and_finalize.py",
-            "--feature-mode",
-            "precomputed-promoted",
-            "--precomputed-feature-bundle-root",
+            "--source-bundle-root",
             str(feature_root),
             "--target-json",
             str(target_path),
@@ -428,10 +376,9 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
             "--prod-holdout-importance-weight",
             "2.0",
             "--run-full",
-        ],
-        repo_root=repo_root,
-        env_overrides=cli_env,
+        ]
     )
+    promoted_train.run(args)
 
     final_manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     assert final_manifest["incremental_linker_version"] == "9.8"

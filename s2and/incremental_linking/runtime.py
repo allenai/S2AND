@@ -36,7 +36,6 @@ from s2and.incremental_linking.policy import require_arrow_name_counts_index_for
 from s2and.incremental_linking.retrieval import (
     LinkerRetrievalBatch,
     RawArrowPlanBundle,
-    _query_author_for_retrieval_row_signal,
     build_linker_retrieval_batch_from_raw_plan_bundle,
 )
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features_with_telemetry
@@ -965,7 +964,27 @@ def _merge_row_signal_sources(*sources: Mapping[str, Any] | None) -> dict[str, A
     return row_signals
 
 
-_query_author_for_gate = _query_author_for_retrieval_row_signal
+def _query_author_for_gate(query: Any) -> str:
+    """Resolve the display author string consumed by gate row features."""
+
+    value = getattr(query, "query_author", None)
+    if value is not None and str(value).strip():
+        return str(value)
+
+    def first_present(*names: str) -> Any:
+        for name in names:
+            attr_value = getattr(query, name, None)
+            if attr_value is not None and str(attr_value).strip():
+                return attr_value
+        return None
+
+    parts = [
+        first_present("first", "author_info_first"),
+        first_present("middle", "author_info_middle"),
+        first_present("last", "author_info_last"),
+        first_present("suffix", "author_info_suffix"),
+    ]
+    return " ".join(str(part).strip() for part in parts if part is not None and str(part).strip())
 
 
 def _production_query_author_row_signals(

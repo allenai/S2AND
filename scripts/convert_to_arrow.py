@@ -801,7 +801,7 @@ def convert_service_json_to_arrow(
         write_arrow_ipc_table,
         write_raw_arrow_batch_lookup_indexes,
     )
-    from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
+    from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
     output_dir = output_root / dataset_name
     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
@@ -851,7 +851,7 @@ def convert_service_json_to_arrow(
     anddata_seconds = time.perf_counter() - start
 
     start = time.perf_counter()
-    paths = write_feature_block_arrow_from_anddata(
+    paths = write_raw_planner_arrow_from_anddata(
         dataset,
         output_dir,
         signature_ids=list(dataset.signatures),
@@ -964,7 +964,7 @@ def convert_runtime_dataset_to_arrow(
         raw_planner_arrow_physical_layout,
         write_raw_arrow_batch_lookup_indexes,
     )
-    from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
+    from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
     dataset_name = sources.dataset
     if selected_embedding not in {"specter", "specter2"}:
@@ -1007,7 +1007,7 @@ def convert_runtime_dataset_to_arrow(
     anddata_seconds = time.perf_counter() - start
 
     start = time.perf_counter()
-    paths = write_feature_block_arrow_from_anddata(
+    paths = write_raw_planner_arrow_from_anddata(
         dataset,
         output_dir,
         signature_ids=list(dataset.signatures),

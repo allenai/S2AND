@@ -1,8 +1,7 @@
-"""Authoritative validation for manifest-backed name-count indexes."""
+"""Immutable Python views over native-validated name-count manifests."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from collections.abc import Mapping
@@ -16,7 +15,6 @@ from s2and.consts import NORMALIZATION_VERSION
 NAME_COUNTS_INDEX_SCHEMA_VERSION = "name_counts_index_v2"
 NAME_COUNTS_PROVENANCE_SCHEMA_VERSION = "name_counts_provenance_v3"
 NAME_COUNTS_MANIFEST_SHA256_FIELD = "manifest_sha256"
-NAME_COUNTS_INDEX_FILE_KEYS = ("first", "last", "first_last", "last_first_initial")
 _NAME_COUNTS_PROVENANCE_FIELDS = frozenset(
     {
         "cardinalities",
@@ -75,7 +73,7 @@ def readonly_name_counts_provenance(value: Mapping[str, Any]) -> Mapping[str, An
 
 
 def validated_name_counts_provenance(value: Any, *, context: str) -> dict[str, Any]:
-    """Return one validated v2 source-provenance payload."""
+    """Return one validated v3 source-provenance payload."""
 
     if not isinstance(value, Mapping) or value.get("schema_version") != NAME_COUNTS_PROVENANCE_SCHEMA_VERSION:
         raise ValueError(f"{context} requires schema_version={NAME_COUNTS_PROVENANCE_SCHEMA_VERSION!r} provenance")
@@ -105,14 +103,6 @@ def validated_name_counts_provenance(value: Any, *, context: str) -> dict[str, A
     return dict(value)
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 @dataclass(frozen=True, slots=True)
 class ValidatedNameCountsFile:
     """One verified material file declared by a name-count manifest."""
@@ -132,7 +122,6 @@ class ValidatedNameCountsManifest:
     normalization_version: str
     source_provenance: Mapping[str, Any]
     files: Mapping[str, ValidatedNameCountsFile]
-    payload: Mapping[str, Any]
 
     @classmethod
     def load(
@@ -149,116 +138,34 @@ class ValidatedNameCountsManifest:
         return manifest
 
     @classmethod
-    def _from_manifest_bytes(
+    def _from_native(
         cls,
-        index_dir: str | os.PathLike[str],
-        manifest_bytes: bytes,
+        native: Any,
         *,
-        context: str,
-        verify_file_digests: bool,
+        index_dir: str | os.PathLike[str],
     ) -> ValidatedNameCountsManifest:
-        """Validate one exact manifest snapshot.
+        """Freeze facts already validated and resolved by the native opener."""
 
-        ``verify_file_digests=False`` is reserved for exact-snapshot facts bound
-        to a native handle with the same manifest digest. Native open remains
-        the sole material-digest and record-semantics authority on runtime paths.
-        """
-
-        root = Path(index_dir).resolve()
+        _native_root, source_provenance_json, raw_files = native._validated_manifest_facts()
+        root = Path(index_dir)
         manifest_path = root / "manifest.json"
-        try:
-            manifest = json.loads(manifest_bytes)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError(f"{context} has invalid manifest {manifest_path}: {exc}") from exc
-        if not isinstance(manifest, Mapping):
-            raise ValueError(f"{context} manifest must contain a JSON object: {manifest_path}")
-        if manifest.get("schema_version") != NAME_COUNTS_INDEX_SCHEMA_VERSION:
-            raise ValueError(
-                f"{context} has unsupported schema_version {manifest.get('schema_version')!r}; "
-                f"expected {NAME_COUNTS_INDEX_SCHEMA_VERSION!r}: {manifest_path}"
-            )
-        normalization_version = manifest.get("normalization_version")
-        if normalization_version != NORMALIZATION_VERSION:
-            raise ValueError(
-                f"{context} has invalid normalization_version {normalization_version!r}; "
-                f"expected {NORMALIZATION_VERSION!r}: {manifest_path}"
-            )
-        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-        provenance = validated_name_counts_provenance(
-            manifest.get("source_provenance"),
-            context=f"{context} source_provenance",
-        )
+        manifest_sha256 = native.name_counts_manifest_sha256
+        provenance = json.loads(source_provenance_json)
         provenance[NAME_COUNTS_MANIFEST_SHA256_FIELD] = manifest_sha256
-        if provenance["normalization_version"] != normalization_version:
-            raise ValueError(f"{context} source_provenance normalization_version mismatch: {manifest_path}")
-
-        raw_files = manifest.get("files")
-        if not isinstance(raw_files, Mapping):
-            raise ValueError(f"{context} manifest requires files mapping: {manifest_path}")
-        files: dict[str, ValidatedNameCountsFile] = {}
-        generation_name: str | None = None
-        for file_key in NAME_COUNTS_INDEX_FILE_KEYS:
-            entry = raw_files.get(file_key)
-            if not isinstance(entry, Mapping):
-                raise ValueError(f"{context} manifest requires files.{file_key}: {manifest_path}")
-            path_value = _require_nonempty_string(
-                entry.get("path"),
-                field=f"files.{file_key}.path",
-                context=f"{context} manifest",
-            )
-            parts = path_value.split("/")
-            if (
-                len(parts) != 3
-                or parts[0] != "generations"
-                or parts[1] in {"", ".", ".."}
-                or "\\" in path_value
-                or parts[2] != f"{file_key}.bin"
-            ):
-                raise ValueError(
-                    f"{context} manifest files.{file_key}.path must equal generations/<generation-id>/{file_key}.bin"
-                )
-            if generation_name is None:
-                generation_name = parts[1]
-            elif parts[1] != generation_name:
-                raise ValueError(f"{context} manifest files must share one generation directory")
-            resolved_path = (root / path_value).resolve()
-            try:
-                resolved_path.relative_to(root)
-            except ValueError as exc:
-                raise ValueError(
-                    f"{context} manifest files.{file_key}.path escapes the name_counts_index directory: {resolved_path}"
-                ) from exc
-            if not resolved_path.is_file():
-                raise ValueError(f"{context} manifest files.{file_key}.path target is not a file: {resolved_path}")
-            marker_path = resolved_path.parent / ".published"
-            if not marker_path.is_file():
-                raise ValueError(f"{context} manifest files.{file_key} requires published marker: {marker_path}")
-            byte_count = _require_u64(
-                entry.get("byte_count"),
-                field=f"files.{file_key}.byte_count",
-                context=f"{context} manifest",
-            )
-            expected_sha256 = _require_lowercase_sha256(
-                entry.get("sha256"),
-                field=f"files.{file_key}.sha256",
-                context=f"{context} manifest",
-            )
-            if resolved_path.stat().st_size != byte_count:
-                raise ValueError(f"{context} manifest files.{file_key}.byte_count mismatch: {resolved_path}")
-            if verify_file_digests and _sha256_file(resolved_path) != expected_sha256:
-                raise ValueError(f"{context} manifest files.{file_key} SHA-256 mismatch: {resolved_path}")
-            files[file_key] = ValidatedNameCountsFile(
-                path=resolved_path,
+        files = {
+            file_key: ValidatedNameCountsFile(
+                path=Path(path),
                 byte_count=byte_count,
-                sha256=expected_sha256,
+                sha256=sha256,
             )
+            for file_key, path, byte_count, sha256 in raw_files
+        }
 
         return cls(
             index_dir=root,
             manifest_path=manifest_path,
             manifest_sha256=manifest_sha256,
-            normalization_version=normalization_version,
+            normalization_version=native.normalization_version,
             source_provenance=readonly_name_counts_provenance(provenance),
             files=MappingProxyType(files),
-            payload=_readonly_value(manifest),
         )

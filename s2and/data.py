@@ -27,11 +27,8 @@ from s2and.consts import (
     NUMPY_NAN,
 )
 from s2and.mp import UniversalPool
-from s2and.name_counts_index import (
-    NameCountsIndex,
-    readonly_name_counts_provenance,
-    validated_name_counts_provenance,
-)
+from s2and.name_counts_index import NameCountsIndex
+from s2and.name_counts_manifest import readonly_name_counts_provenance, validated_name_counts_provenance
 from s2and.name_tuple_artifact import load_name_tuple_artifact, load_packaged_name_tuple_artifact
 from s2and.runtime import (
     RuntimeContext,

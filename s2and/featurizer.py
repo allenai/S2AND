@@ -1,5 +1,4 @@
 import functools
-import gc
 import logging
 import platform
 import threading
@@ -64,9 +63,6 @@ DEFAULT_NAMELESS_FEATURE_GROUPS: tuple[str, ...] = tuple(
 )
 
 _FEATURIZATION_WORKER_STATE = threading.local()
-_RUST_BATCH_CALIBRATION_LOCK = threading.Lock()
-_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES: int | None = None
-_RUST_BATCH_CALIBRATION_ATTEMPTED = False
 
 
 def _initialize_featurization_worker(dataset: ANDData) -> None:
@@ -164,197 +160,6 @@ def _ensure_python_pair_signature_ngrams(
         runtime_context.backend,
         runtime_context.run_id,
     )
-
-
-def _rust_batch_probe_row_counts(total_pairs: int, *, probe_count: int, min_total_pairs: int) -> list[int]:
-    bounded_total_pairs = max(0, int(total_pairs))
-    if probe_count <= 0:
-        return []
-    if bounded_total_pairs < max(int(min_total_pairs), int(probe_count)):
-        return []
-
-    canonical = [10_000, 50_000, 100_000]
-    canonical_fits = [value for value in canonical if value <= bounded_total_pairs]
-    if len(canonical_fits) >= probe_count:
-        return canonical_fits[:probe_count]
-
-    quantile_rows: list[int] = []
-    for probe_index in range(probe_count):
-        quantile = float(probe_index + 1) / float(probe_count)
-        row_count = int(round(float(bounded_total_pairs) * quantile))
-        row_count = max(1, min(bounded_total_pairs, row_count))
-        quantile_rows.append(row_count)
-
-    deduped = sorted(set(quantile_rows))
-    if len(deduped) < probe_count:
-        return []
-    return deduped[-probe_count:]
-
-
-def _prefault_scratch_array_pages_inplace(array: np.ndarray) -> None:
-    """Fault virtual pages into RSS by writing zeros into a scratch buffer.
-
-    This intentionally mutates the provided array and must only be used with
-    scratch buffers that are immediately overwritten.
-    """
-    if array.size <= 0:
-        return
-    byte_view = array.view(np.uint8).ravel()
-    byte_view[0] = 0
-    byte_view[-1] = 0
-    byte_view[::4096] = 0
-
-
-def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
-    *,
-    rust_featurizer: Any,
-    pieces_of_work: list[tuple[tuple[str, str], int]],
-    signature_id_to_index: dict[Any, int],
-    rust_selected_indices: list[int] | None,
-    selected_feature_count: int,
-    nameless_feature_count: int,
-    row_overhead_bytes: int,
-    persistent_row_overhead_bytes: int,
-    configured_fixed_overhead_bytes: int,
-    num_threads: int,
-    total_ram_for_stage: int | None,
-    run_id: str,
-) -> int | None:
-    global _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES
-    global _RUST_BATCH_CALIBRATION_ATTEMPTED
-
-    probe_count = 3
-    min_total_pairs = 30_000
-
-    with _RUST_BATCH_CALIBRATION_LOCK:
-        if _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES is not None:
-            return int(_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES)
-        if _RUST_BATCH_CALIBRATION_ATTEMPTED:
-            return None
-
-    probe_rows = _rust_batch_probe_row_counts(
-        len(pieces_of_work),
-        probe_count=probe_count,
-        min_total_pairs=min_total_pairs,
-    )
-    if len(probe_rows) < probe_count:
-        return None
-    if total_ram_for_stage is None:
-        return None
-
-    # Reserve the process-wide attempt only after this job is eligible. The
-    # second locked check prevents concurrent eligible jobs from calibrating.
-    with _RUST_BATCH_CALIBRATION_LOCK:
-        if _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES is not None:
-            return int(_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES)
-        if _RUST_BATCH_CALIBRATION_ATTEMPTED:
-            return None
-        _RUST_BATCH_CALIBRATION_ATTEMPTED = True
-
-    fixed_samples: list[int] = []
-    chunk_feature_count = max(1, int(selected_feature_count) + int(nameless_feature_count))
-    row_overhead_bounded = max(0, int(row_overhead_bytes))
-    persistent_row_overhead_bounded = max(0, int(persistent_row_overhead_bytes))
-
-    try:
-        for row_count in probe_rows:
-            probe_work = pieces_of_work[: int(row_count)]
-            if len(probe_work) < int(row_count):
-                continue
-            probe_pairs = [pair for pair, _ in probe_work]
-            rss_before_bytes, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_stage)
-            rss_peak_bytes = rss_before_bytes
-
-            probe_features = np.empty((int(row_count), int(selected_feature_count)), dtype=np.float64)
-            probe_nameless_features: np.ndarray | None = None
-            if int(nameless_feature_count) > 0:
-                probe_nameless_features = np.empty((int(row_count), int(nameless_feature_count)), dtype=np.float64)
-            probe_labels = np.empty(int(row_count), dtype=np.float64)
-            _prefault_scratch_array_pages_inplace(probe_features)
-            if probe_nameless_features is not None:
-                _prefault_scratch_array_pages_inplace(probe_nameless_features)
-            _prefault_scratch_array_pages_inplace(probe_labels)
-
-            rss_now_bytes, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_stage)
-            rss_peak_bytes = max(rss_peak_bytes, int(rss_now_bytes))
-
-            probe_pairs_indexed = [
-                (
-                    _signature_id_to_index_or_raise(signature_id_to_index, pair[0]),
-                    _signature_id_to_index_or_raise(signature_id_to_index, pair[1]),
-                )
-                for pair in probe_pairs
-            ]
-            probe_chunk = np.asarray(
-                rust_featurizer.featurize_pairs_matrix_indexed(
-                    probe_pairs_indexed,
-                    rust_selected_indices,
-                    int(num_threads),
-                    np.nan,
-                ),
-                dtype=np.float64,
-            )
-
-            rss_after_call_bytes, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_stage)
-            rss_peak_bytes = max(rss_peak_bytes, int(rss_after_call_bytes))
-            observed_peak_delta_bytes = int(rss_peak_bytes) - int(rss_before_bytes)
-
-            modeled_features_bytes = int(row_count) * int(selected_feature_count + nameless_feature_count) * 8
-            modeled_labels_bytes = int(row_count) * 8
-            modeled_chunk_bytes = int(row_count) * int(chunk_feature_count * 8 + row_overhead_bounded)
-            modeled_persistent_bytes = int(row_count) * int(persistent_row_overhead_bounded)
-            estimated_fixed_bytes = int(
-                observed_peak_delta_bytes
-                - modeled_features_bytes
-                - modeled_labels_bytes
-                - modeled_chunk_bytes
-                - modeled_persistent_bytes
-            )
-            fixed_samples.append(estimated_fixed_bytes)
-
-            del probe_features
-            del probe_nameless_features
-            del probe_labels
-            del probe_chunk
-            gc.collect()
-    except Exception as exc:
-        with _RUST_BATCH_CALIBRATION_LOCK:
-            _RUST_BATCH_CALIBRATION_ATTEMPTED = True
-        logger.warning(
-            "Rust batch startup calibration failed; using configured fixed overhead (run_id=%s error=%s)",
-            run_id,
-            exc,
-        )
-        return None
-
-    if not fixed_samples:
-        return None
-
-    observed_fixed_bytes_estimate = max(0, int(max(fixed_samples)))
-    observed_fixed_bytes_estimate = min(observed_fixed_bytes_estimate, 512 * (1 << 20))
-    configured_fixed_bytes = max(0, int(configured_fixed_overhead_bytes))
-    if observed_fixed_bytes_estimate <= int(float(configured_fixed_bytes) * 1.2):
-        with _RUST_BATCH_CALIBRATION_LOCK:
-            _RUST_BATCH_CALIBRATION_ATTEMPTED = True
-        return None
-
-    calibrated_fixed_bytes = max(configured_fixed_bytes, observed_fixed_bytes_estimate)
-
-    with _RUST_BATCH_CALIBRATION_LOCK:
-        _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES = int(calibrated_fixed_bytes)
-        _RUST_BATCH_CALIBRATION_ATTEMPTED = True
-
-    logger.info(
-        "Telemetry: rust_batch_startup_calibration probes=%d probe_rows=%s "
-        "fixed_overhead_bytes_calibrated=%d row_overhead_bytes=%d persistent_row_overhead_bytes=%d run_id=%s",
-        len(probe_rows),
-        ",".join(str(v) for v in probe_rows),
-        int(calibrated_fixed_bytes),
-        int(row_overhead_bounded),
-        int(persistent_row_overhead_bounded),
-        run_id,
-    )
-    return int(calibrated_fixed_bytes)
 
 
 def _log_featurization_backend_decision(
@@ -1169,30 +974,6 @@ def _execute_rust_batch_featurization_phase(
     logger.info("Rust indexed pair API enabled (signature_count=%d)", len(signature_id_to_index))
     rust_feature_count = NUM_FEATURES if rust_selected_indices is None else len(rust_selected_indices)
     rust_prediction_params = memory_budget.resolve_rust_batch_prediction_params()
-    configured_fixed_overhead_bytes = int(rust_prediction_params["fixed_overhead_bytes"])
-    calibrated_fixed_overhead_bytes: int | None = None
-    if rust_batch_total_ram_for_stage is not None:
-        calibrated_fixed_overhead_bytes = _maybe_calibrate_rust_batch_fixed_overhead_bytes(
-            rust_featurizer=rust_featurizer,
-            pieces_of_work=pieces_of_work,
-            signature_id_to_index=signature_id_to_index,
-            rust_selected_indices=rust_selected_indices,
-            selected_feature_count=len(indices_to_use),
-            nameless_feature_count=len(nameless_indices_to_use),
-            row_overhead_bytes=int(rust_prediction_params["row_overhead_bytes"]),
-            persistent_row_overhead_bytes=int(rust_prediction_params["persistent_row_overhead_bytes"]),
-            configured_fixed_overhead_bytes=configured_fixed_overhead_bytes,
-            num_threads=max(1, int(n_jobs)),
-            total_ram_for_stage=rust_batch_total_ram_for_stage,
-            run_id=runtime_context.run_id,
-        )
-    fixed_overhead_bytes_for_plan = configured_fixed_overhead_bytes
-    if calibrated_fixed_overhead_bytes is not None:
-        fixed_overhead_bytes_for_plan = max(
-            configured_fixed_overhead_bytes,
-            int(calibrated_fixed_overhead_bytes),
-        )
-
     rust_batch_plan = memory_budget.compute_rust_batch_chunk_plan(
         num_features=rust_feature_count,
         total_pairs=len(pieces_of_work),
@@ -1205,7 +986,7 @@ def _execute_rust_batch_featurization_phase(
         base_chunk_pairs=int(rust_prediction_params["base_chunk_pairs"]),
         row_overhead_bytes=int(rust_prediction_params["row_overhead_bytes"]),
         persistent_row_overhead_bytes=int(rust_prediction_params["persistent_row_overhead_bytes"]),
-        fixed_overhead_bytes=int(fixed_overhead_bytes_for_plan),
+        fixed_overhead_bytes=int(rust_prediction_params["fixed_overhead_bytes"]),
     )
     target_chunk_size = int(rust_batch_plan.chunk_pairs)
     total_ram_for_stage = int(rust_batch_plan.total_ram_bytes)

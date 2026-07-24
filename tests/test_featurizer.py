@@ -381,67 +381,6 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatc
     assert state["rss_called"] is True
 
 
-def test_ineligible_rust_calibration_does_not_consume_process_attempt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(featurizer_module, "_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES", None)
-    monkeypatch.setattr(featurizer_module, "_RUST_BATCH_CALIBRATION_ATTEMPTED", False)
-    monkeypatch.setattr(
-        featurizer_module,
-        "_rust_batch_probe_row_counts",
-        lambda total_pairs, **_kwargs: [] if total_pairs < 3 else [1, 2, 3],
-    )
-    monkeypatch.setattr(memory_budget, "current_rss_bytes_best_effort", lambda _total_ram: (0, "test"))
-
-    class FakeRustFeaturizer:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def featurize_pairs_matrix_indexed(
-            self,
-            pairs: list[tuple[int, int]],
-            selected_indices: list[int] | None,
-            num_threads: int,
-            nan_value: float,
-        ) -> np.ndarray:
-            del num_threads, nan_value
-            self.calls += 1
-            width = NUM_FEATURES if selected_indices is None else len(selected_indices)
-            return np.zeros((len(pairs), width), dtype=np.float64)
-
-    rust_featurizer = FakeRustFeaturizer()
-    kwargs = {
-        "rust_featurizer": rust_featurizer,
-        "signature_id_to_index": {"a": 0, "b": 1},
-        "rust_selected_indices": [0],
-        "selected_feature_count": 1,
-        "nameless_feature_count": 0,
-        "row_overhead_bytes": 0,
-        "persistent_row_overhead_bytes": 0,
-        "configured_fixed_overhead_bytes": 0,
-        "num_threads": 1,
-        "total_ram_for_stage": 1024,
-        "run_id": "test-calibration",
-    }
-
-    result = featurizer_module._maybe_calibrate_rust_batch_fixed_overhead_bytes(
-        pieces_of_work=[(("a", "b"), 0)],
-        **kwargs,
-    )
-
-    assert result is None
-    assert featurizer_module._RUST_BATCH_CALIBRATION_ATTEMPTED is False
-
-    result = featurizer_module._maybe_calibrate_rust_batch_fixed_overhead_bytes(
-        pieces_of_work=[(("a", "b"), index) for index in range(3)],
-        **kwargs,
-    )
-
-    assert result is None
-    assert rust_featurizer.calls == 3
-    assert featurizer_module._RUST_BATCH_CALIBRATION_ATTEMPTED is True
-
-
 def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -145,7 +145,6 @@ def tiny_name_counts_index_path() -> str:
                 _TINY_NAME_COUNTS_ROOT,
                 tiny_name_counts_tuple(),
                 tiny_name_counts_provenance(),
-                overwrite=True,
             )
     return _TINY_NAME_COUNTS_PATH
 
@@ -197,7 +196,7 @@ def build_arrow_training_dataset(
         write_name_counts_index,
         write_raw_arrow_batch_lookup_indexes,
     )
-    from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
+    from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
     if name_counts == "tiny":
         loader = tiny_name_counts_tuple
@@ -207,7 +206,7 @@ def build_arrow_training_dataset(
         raise ValueError(f"name_counts must be 'tiny' or 'empty', got {name_counts!r}")
 
     include_specter = bool(getattr(dataset, "specter_embeddings", None))
-    arrow_paths = write_feature_block_arrow_from_anddata(
+    arrow_paths = write_raw_planner_arrow_from_anddata(
         dataset,
         bundle_dir,
         include_specter=include_specter,
@@ -217,7 +216,6 @@ def build_arrow_training_dataset(
         bundle_dir,
         loader(),
         tiny_name_counts_provenance(),
-        overwrite=True,
     )
     arrow_paths["name_counts_index"] = name_counts_index_path
     write_test_arrow_artifact_manifest(bundle_dir, arrow_paths)

@@ -56,7 +56,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, help="Maximum source rows")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--overwrite", action="store_true", help="replace the published manifest pointer")
     return parser
 
 
@@ -153,9 +152,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps({"plan": plan}, indent=2, sort_keys=True))
     if args.dry_run:
         return 0
-    manifest_path = args.output_dir / "name_counts_index" / "manifest.json"
-    if manifest_path.exists() and not args.overwrite:
-        raise FileExistsError(f"published manifest already exists: {manifest_path}; pass --overwrite")
     rows = _query_rows(limit) if args.run_full else _fixture_rows(args.fixture_input, limit)
     mappings, row_metrics = build_name_count_dicts(rows)
     source_snapshot_id = args.source_snapshot_id.strip()
@@ -184,7 +180,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.output_dir,
         mappings,
         provenance,
-        overwrite=bool(args.overwrite),
     )
     print(
         json.dumps(

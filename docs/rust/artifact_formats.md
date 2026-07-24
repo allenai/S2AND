@@ -54,14 +54,16 @@ accepted. It retains warehouse snapshot, query, selected-row, cardinality, and
 generation audit facts, but does not name a separately published pickle.
 
 The native Rust opener is the runtime authority for manifest, file-digest, and
-record validation. Python retains facts from the exact native-accepted
-manifest snapshot for orchestration and model binding.
+record validation. Python freezes the provenance and resolved file facts
+returned by that native handle for orchestration and model binding; it does
+not run a second manifest-schema validator.
 
-Writers publish by writing every binary file into a temporary generation
-directory, renaming that directory into `generations/`, validating that every
-manifest path exists, and replacing `manifest.json` last. Readers therefore see
-either the old complete manifest or the new complete manifest. A failed
-overwrite must leave the previous manifest and generation readable.
+Writers require the final `name_counts_index/` target to be absent. They build
+the complete layout above in a temporary sibling directory, fsync it, and
+rename that directory once to `name_counts_index/`. Failed builds leave the
+target absent. Published indexes are immutable: publish changed counts at a new
+parent/path and update the enclosing release manifest instead of replacing an
+existing index.
 
 Each `.bin` file starts with magic `S2NCI001` and stores sorted records with
 layout:
@@ -106,8 +108,8 @@ the selected canonical name-count index into an immutable artifact-generation
 manifest before calling a production validator.
 
 New scripts that create S2AND runtime Arrow files should use
-`scripts.arrow_conversion_helpers.write_feature_block_arrow_from_anddata(...)`
-or `write_feature_block_arrow_tables(...)`, then call
+`scripts.arrow_conversion_helpers.write_raw_planner_arrow_from_anddata(...)`
+or `write_raw_planner_arrow_tables(...)`, then call
 `write_raw_arrow_batch_lookup_indexes(...)` when the artifact may be used by raw
 planning. Do not hand-write the batch-index binary format.
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import re
@@ -155,12 +154,9 @@ def test_python_package_data_is_explicit() -> None:
 
     assert config["tool"]["setuptools"]["include-package-data"] is False
     package_data = config["tool"]["setuptools"]["package-data"]["s2and"]
-    canonical_orcid_artifacts = {
-        "data/first_k_letter_counts_from_orcid.json",
-        "data/first_k_letter_counts_from_orcid.manifest.json",
-    }
     assert "arrow_schema_contract.json" in package_data
-    assert canonical_orcid_artifacts <= set(package_data)
+    assert all((REPO_ROOT / "s2and" / path).is_file() for path in package_data)
+    assert all("first_k_letter_counts_from_orcid" not in pattern for pattern in package_data)
     assert all("production_model" not in pattern for pattern in package_data)
     assert set(package_data).isdisjoint(
         {
@@ -169,10 +165,6 @@ def test_python_package_data_is_explicit() -> None:
             "data/s2and_unnormalized_filtered_name_tuples.txt",
         }
     )
-    excluded_package_data = config["tool"]["setuptools"].get("exclude-package-data", {}).get("s2and", [])
-    assert canonical_orcid_artifacts.isdisjoint(excluded_package_data)
-
-
 def _write_distribution_fixture(
     root: Path,
     *,
@@ -184,19 +176,10 @@ def _write_distribution_fixture(
 ) -> tuple[Path, Path]:
     data_dir = root / "s2and" / "data"
     data_dir.mkdir(parents=True)
-    orcid_data_payload = b"{}\n"
-    (data_dir / "first_k_letter_counts_from_orcid.json").write_bytes(orcid_data_payload)
-    (data_dir / "first_k_letter_counts_from_orcid.manifest.json").write_text(
-        json.dumps(
-            {
-                "data_sha256": hashlib.sha256(orcid_data_payload).hexdigest(),
-                "normalization_version": "canonical_v2",
-                "pair_key_semantics": "unordered_lexicographic",
-                "schema_version": "orcid_prefix_counts_v2",
-            },
-            sort_keys=True,
-        )
-        + "\n",
+    (root / "s2and" / "arrow_schema_contract.json").write_text("{}\n", encoding="utf-8")
+    (data_dir / "path_config.json").write_text("{}\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[tool.setuptools.package-data]\ns2and = ["arrow_schema_contract.json", "data/path_config.json"]\n',
         encoding="utf-8",
     )
     if declare_model:
@@ -275,13 +258,11 @@ def test_distribution_verifier_rejects_undeclared_model_assets(
 @pytest.mark.parametrize(
     ("omit_wheel_path", "omit_sdist_path"),
     (
-        ("s2and/data/first_k_letter_counts_from_orcid.json", None),
-        ("s2and/data/first_k_letter_counts_from_orcid.manifest.json", None),
-        (None, "s2and/data/first_k_letter_counts_from_orcid.json"),
-        (None, "s2and/data/first_k_letter_counts_from_orcid.manifest.json"),
+        ("s2and/arrow_schema_contract.json", None),
+        (None, "s2and/data/path_config.json"),
     ),
 )
-def test_distribution_verifier_requires_canonical_orcid_artifact_pair(
+def test_distribution_verifier_requires_declared_package_data(
     tmp_path: Path,
     omit_wheel_path: str | None,
     omit_sdist_path: str | None,
@@ -301,16 +282,16 @@ def test_distribution_verifier_requires_canonical_orcid_artifact_pair(
 @pytest.mark.parametrize(
     "missing_source_path",
     (
-        "s2and/data/first_k_letter_counts_from_orcid.json",
-        "s2and/data/first_k_letter_counts_from_orcid.manifest.json",
+        "s2and/arrow_schema_contract.json",
+        "s2and/data/path_config.json",
     ),
 )
-def test_distribution_verifier_rejects_missing_canonical_orcid_source(
+def test_distribution_verifier_rejects_missing_declared_package_data_source(
     tmp_path: Path,
     missing_source_path: str,
 ) -> None:
     dist_dir, source_root = _write_distribution_fixture(tmp_path, extra_wheel=False, extra_sdist=False)
     (source_root / missing_source_path).unlink()
 
-    with pytest.raises(FileNotFoundError, match="missing required canonical runtime artifacts"):
+    with pytest.raises(FileNotFoundError, match="package-data patterns match no source files"):
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)

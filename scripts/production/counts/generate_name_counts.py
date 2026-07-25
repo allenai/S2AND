@@ -14,7 +14,8 @@ from pathlib import Path
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 from s2and.text import canonical_name_count_keys, canonicalize_name_parts
-from scripts.production.counts._run_support import (
+
+from ._run_support import (
     load_guardrails,
     require_positive,
     validate_fixture_path,

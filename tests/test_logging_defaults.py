@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from s2and import memory_budget
 from scripts import rust_suite
@@ -21,7 +22,7 @@ def test_rust_suite_main_removes_file_handler_after_run(monkeypatch, tmp_path) -
 
 def test_rust_suite_main_configures_memory_telemetry_path(monkeypatch, tmp_path) -> None:
     telemetry_path = tmp_path / "memory.jsonl"
-    previous_path = memory_budget.memory_telemetry_jsonl_path()
+    monkeypatch.setenv(memory_budget.MEMORY_TELEMETRY_JSONL_ENV, "original.jsonl")
     seen: dict[str, object] = {}
 
     def fake_dispatch(*_args, **_kwargs) -> int:
@@ -32,4 +33,4 @@ def test_rust_suite_main_configures_memory_telemetry_path(monkeypatch, tmp_path)
 
     assert rust_suite.main(["--memory-telemetry-jsonl", str(telemetry_path), "compare"]) == 0
     assert seen["path"] == telemetry_path
-    assert memory_budget.memory_telemetry_jsonl_path() == previous_path
+    assert memory_budget.memory_telemetry_jsonl_path() == Path("original.jsonl")

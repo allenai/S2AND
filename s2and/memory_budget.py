@@ -14,7 +14,6 @@ logger = logging.getLogger("s2and")
 
 MEMORY_TELEMETRY_JSONL_ENV = "S2AND_MEMORY_TELEMETRY_JSONL"
 _MEMORY_TELEMETRY_LOCK = threading.Lock()
-_MEMORY_TELEMETRY_JSONL_PATH: Path | None = None
 
 AUTODETECT_RAM_SAFETY_FACTOR = 0.8
 DEFAULT_SAFETY_MARGIN_FRACTION = 0.10
@@ -176,18 +175,9 @@ def _json_safe_value(value: Any) -> Any:
     return str(value)
 
 
-def configure_memory_telemetry_jsonl(path: str | Path | None) -> None:
-    """Configure the optional JSONL sink for structured memory telemetry."""
-
-    global _MEMORY_TELEMETRY_JSONL_PATH
-    _MEMORY_TELEMETRY_JSONL_PATH = None if path is None else Path(path)
-
-
 def memory_telemetry_jsonl_path() -> Path | None:
-    """Return the configured structured memory telemetry sink, if any."""
+    """Return the environment-configured structured memory telemetry sink."""
 
-    if _MEMORY_TELEMETRY_JSONL_PATH is not None:
-        return _MEMORY_TELEMETRY_JSONL_PATH
     env_path = os.environ.get(MEMORY_TELEMETRY_JSONL_ENV)
     if env_path is None or not env_path.strip():
         return None

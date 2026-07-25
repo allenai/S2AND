@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,20 @@ ORCID_1 = "0000-0000-0000-0001"
 ORCID_2 = "0000-0000-0000-0002"
 NAME_TUPLES_PATH = Path(PROJECT_ROOT_PATH) / "s2and" / "data" / "s2and_name_tuples_canonical.txt"
 NAME_TUPLES_SHA256 = hashlib.sha256(NAME_TUPLES_PATH.read_bytes()).hexdigest()
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_module_entrypoint_help() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "scripts.production.counts.generate_orcid_name_prefix_counts", "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--expected-name-tuples-sha256" in completed.stdout
 
 
 def _tuple_args() -> list[str]:
@@ -49,6 +65,26 @@ def _fixture_args(tmp_path: Path, rows: object, *, output_name: str = "publicati
         "fixture-snapshot",
         *_tuple_args(),
     ]
+
+
+def test_module_entrypoint_publishes_fixture(tmp_path: Path) -> None:
+    args = _fixture_args(
+        tmp_path,
+        [
+            {"orcid": ORCID_1, "first_name": "Alice", "middle": None},
+            {"orcid": ORCID_1, "first_name": "Amy", "middle": None},
+        ],
+    )
+    completed = subprocess.run(
+        [sys.executable, "-m", "scripts.production.counts.generate_orcid_name_prefix_counts", *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "publication" / ORCID_PREFIX_MANIFEST_FILENAME).is_file()
 
 
 def _write_guardrails(path: Path, **changes: int) -> Path:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import logging
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -44,17 +45,6 @@ def _configure_file_logging(log_file: str | None) -> logging.FileHandler | None:
     handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
     logger.addHandler(handler)
     return handler
-
-
-def _configure_memory_telemetry_jsonl(path: str | None) -> None:
-    from s2and import memory_budget
-
-    if not path:
-        memory_budget.configure_memory_telemetry_jsonl(None)
-        return
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    memory_budget.configure_memory_telemetry_jsonl(output_path)
 
 
 def _load_internal_module(module_key: str) -> ModuleType:
@@ -155,11 +145,14 @@ def main(argv: list[str] | None = None) -> int:
     if forwarded_args and forwarded_args[0] == "--":
         forwarded_args = forwarded_args[1:]
 
-    from s2and import memory_budget
+    from s2and.memory_budget import MEMORY_TELEMETRY_JSONL_ENV
 
-    previous_memory_telemetry_path = memory_budget.memory_telemetry_jsonl_path()
+    previous_memory_telemetry_path = os.environ.get(MEMORY_TELEMETRY_JSONL_ENV)
     file_handler = _configure_file_logging(parsed.log_file)
-    _configure_memory_telemetry_jsonl(parsed.memory_telemetry_jsonl)
+    if parsed.memory_telemetry_jsonl:
+        telemetry_path = Path(parsed.memory_telemetry_jsonl)
+        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+        os.environ[MEMORY_TELEMETRY_JSONL_ENV] = str(telemetry_path)
     try:
         return _dispatch(parsed.command, forwarded_args)
     finally:
@@ -167,7 +160,10 @@ def main(argv: list[str] | None = None) -> int:
             logger = logging.getLogger("s2and")
             logger.removeHandler(file_handler)
             file_handler.close()
-        memory_budget.configure_memory_telemetry_jsonl(previous_memory_telemetry_path)
+        if previous_memory_telemetry_path is None:
+            os.environ.pop(MEMORY_TELEMETRY_JSONL_ENV, None)
+        else:
+            os.environ[MEMORY_TELEMETRY_JSONL_ENV] = previous_memory_telemetry_path
 
 
 if __name__ == "__main__":

@@ -41,14 +41,10 @@ def test_resolve_total_ram_arg_overrides_autodetect():
     assert source == "arg"
 
 
-def test_emit_memory_telemetry_writes_jsonl(tmp_path):
+def test_emit_memory_telemetry_writes_jsonl(monkeypatch, tmp_path):
     output_path = tmp_path / "memory_telemetry.jsonl"
-    previous_path = memory_budget.memory_telemetry_jsonl_path()
-    try:
-        memory_budget.configure_memory_telemetry_jsonl(output_path)
-        memory_budget.emit_memory_telemetry({"stage": "test_stage", "value": 7})
-    finally:
-        memory_budget.configure_memory_telemetry_jsonl(previous_path)
+    monkeypatch.setenv(memory_budget.MEMORY_TELEMETRY_JSONL_ENV, str(output_path))
+    memory_budget.emit_memory_telemetry({"stage": "test_stage", "value": 7})
 
     record = json.loads(output_path.read_text(encoding="utf-8"))
     assert record["schema_version"] == 1
@@ -57,21 +53,12 @@ def test_emit_memory_telemetry_writes_jsonl(tmp_path):
     assert record["value"] == 7
 
 
-def test_emit_memory_telemetry_uses_env_fallback(monkeypatch, tmp_path):
+def test_emit_memory_telemetry_ignores_blank_env(monkeypatch, tmp_path):
     output_path = tmp_path / "memory_telemetry_env.jsonl"
-    previous_path = memory_budget.memory_telemetry_jsonl_path()
-    try:
-        memory_budget.configure_memory_telemetry_jsonl(None)
-        monkeypatch.setenv(memory_budget.MEMORY_TELEMETRY_JSONL_ENV, str(output_path))
-
-        memory_budget.emit_memory_telemetry({"stage": "env_stage", "value": 11})
-    finally:
-        memory_budget.configure_memory_telemetry_jsonl(previous_path)
-
-    record = json.loads(output_path.read_text(encoding="utf-8"))
-    assert record["event"] == "memory_telemetry"
-    assert record["stage"] == "env_stage"
-    assert record["value"] == 11
+    monkeypatch.setenv(memory_budget.MEMORY_TELEMETRY_JSONL_ENV, " ")
+    assert memory_budget.memory_telemetry_jsonl_path() is None
+    memory_budget.emit_memory_telemetry({"stage": "env_stage", "value": 11})
+    assert not output_path.exists()
 
 
 @pytest.mark.parametrize(("safety_factor", "expected", "suffix"), [(0.8, 8000, "80pct"), (0.75, 7500, "75pct")])

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,21 @@ import pytest
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 from scripts.production.counts import generate_name_counts
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_module_entrypoint_help() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "scripts.production.counts.generate_name_counts", "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--fixture-input" in completed.stdout
 
 
 def _write_rows(path: Path, rows: object) -> Path:
@@ -26,6 +43,20 @@ def _fixture_args(tmp_path: Path, rows: object) -> list[str]:
         "--output-dir",
         str(tmp_path),
     ]
+
+
+def test_module_entrypoint_publishes_fixture(tmp_path: Path) -> None:
+    args = _fixture_args(tmp_path, [{"first_name": "Alice", "last_name": "Smith", "count": 2}])
+    completed = subprocess.run(
+        [sys.executable, "-m", "scripts.production.counts.generate_name_counts", *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "name_counts_index" / "manifest.json").is_file()
 
 
 def _write_guardrails(path: Path, **changes: int) -> Path:

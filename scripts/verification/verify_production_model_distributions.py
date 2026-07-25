@@ -5,31 +5,36 @@ from __future__ import annotations
 import argparse
 import json
 import tarfile
+import tomllib
 import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path, PurePosixPath
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
-REQUIRED_CANONICAL_RUNTIME_PATHS = frozenset(
-    {
-        "s2and/data/first_k_letter_counts_from_orcid.json",
-        "s2and/data/first_k_letter_counts_from_orcid.manifest.json",
-    }
-)
+
+
+def _declared_package_data_paths(source_root: Path) -> set[str]:
+    config_path = source_root / "pyproject.toml"
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    patterns = config["tool"]["setuptools"]["package-data"]["s2and"]
+    package_root = source_root / "s2and"
+    expected: set[str] = set()
+    missing: list[str] = []
+    for pattern in patterns:
+        matches = sorted(path for path in package_root.glob(str(pattern)) if path.is_file())
+        if not matches:
+            missing.append(str(pattern))
+        expected.update(path.relative_to(source_root).as_posix() for path in matches)
+    if missing:
+        raise FileNotFoundError(f"Declared package-data patterns match no source files: {missing}")
+    return expected
 
 
 def _load_expected_paths(source_root: Path) -> set[str]:
-    missing_runtime_sources = sorted(
-        path for path in REQUIRED_CANONICAL_RUNTIME_PATHS if not (source_root / path).is_file()
-    )
-    if missing_runtime_sources:
-        raise FileNotFoundError(
-            f"Source tree is missing required canonical runtime artifacts: {missing_runtime_sources}"
-        )
-
+    expected = _declared_package_data_paths(source_root)
     declaration_path = source_root / "s2and" / "data" / "default_production_model.json"
     if not declaration_path.is_file():
-        return set(REQUIRED_CANONICAL_RUNTIME_PATHS)
+        return expected
     declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
     bundle_dir_name = str(declaration["bundle_dir"])
     bundle_version = str(declaration["bundle_version"])
@@ -38,8 +43,7 @@ def _load_expected_paths(source_root: Path) -> set[str]:
     default_dir = declaration_path.parent / bundle_dir_name
     if not default_dir.is_dir():
         raise FileNotFoundError(f"Declared default production bundle is missing: {default_dir}")
-    expected = {
-        *REQUIRED_CANONICAL_RUNTIME_PATHS,
+    expected |= {
         "s2and/data/default_production_model.json",
         *(path.relative_to(source_root).as_posix() for path in sorted(default_dir.rglob("*")) if path.is_file()),
     }
@@ -142,7 +146,7 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, default=Path("."))
     args = parser.parse_args()
     verify_production_model_distributions(dist_dir=args.dist_dir, source_root=args.source_root)
-    print("Verified canonical runtime artifacts and hydrated declared production models in the wheel and sdist.")
+    print("Verified declared package data and selected model inventory in the wheel and sdist.")
 
 
 if __name__ == "__main__":

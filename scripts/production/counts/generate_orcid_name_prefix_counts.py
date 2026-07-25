@@ -31,7 +31,8 @@ from s2and.orcid_prefix_counts import (
     validate_orcid_prefix_counts,
 )
 from s2and.text import canonicalize_name_parts, normalize_orcid, same_prefix_tokens
-from scripts.production.counts._run_support import (
+
+from ._run_support import (
     load_guardrails,
     require_positive,
     validate_fixture_path,

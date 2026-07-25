@@ -900,7 +900,7 @@ def convert_service_json_to_arrow(
         name_counts_index_path = require_name_counts_index_artifact(
             Path(index_root) / "name_counts_index",
             context="service JSON conversion",
-            producer_hint="run scripts/production/counts/generate_name_counts.py first",
+            producer_hint="run python -m scripts.production.counts.generate_name_counts first",
         )
         name_counts_index_metrics = {"validated": True}
         write_name_counts_index_seconds = time.perf_counter() - start
@@ -1051,7 +1051,7 @@ def convert_runtime_dataset_to_arrow(
         name_counts_index_path = require_name_counts_index_artifact(
             Path(index_root) / "name_counts_index",
             context="runtime dataset conversion",
-            producer_hint="run scripts/production/counts/generate_name_counts.py first",
+            producer_hint="run python -m scripts.production.counts.generate_name_counts first",
         )
         name_counts_index_metrics = {"validated": True}
         write_name_counts_index_seconds = time.perf_counter() - start
@@ -1281,7 +1281,7 @@ def validate_arrow_dataset_manifest(
         require_name_counts_index_artifact(
             paths["name_counts_index"],
             context="convert_to_arrow dataset validation",
-            producer_hint="run scripts/production/counts/generate_name_counts.py or rebuild the release bundle",
+            producer_hint="run python -m scripts.production.counts.generate_name_counts or rebuild the release bundle",
         )
         metrics["name_counts_index_present"] = True
 
@@ -1464,7 +1464,7 @@ def _run_validate_name_counts_index(args: argparse.Namespace) -> None:
     index_path = require_name_counts_index_artifact(
         args.output_root / "name_counts_index",
         context="name-count index validation",
-        producer_hint="run scripts/production/counts/generate_name_counts.py first",
+        producer_hint="run python -m scripts.production.counts.generate_name_counts first",
     )
     print(json.dumps({"name_counts_index": index_path, "metrics": {"validated": True}}, indent=2, sort_keys=True))
 

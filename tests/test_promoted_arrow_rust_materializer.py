@@ -16,7 +16,6 @@ from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking_training.classic import OfficialBundle
 from scripts.production.model import train_linker_and_finalize as promoted_train
 from scripts.production.model.train_linker_and_finalize import (
-    _apply_row_nan_policy,
     _arrow_paths_for_dataset,
     _arrow_row_seed_bypass_mask,
     _clean_arrow_rust_structural_rows,
@@ -197,133 +196,6 @@ def test_load_target_rejects_duplicate_features(tmp_path) -> None:
         _load_target(target_path)
 
 
-def test_semantic_row_nan_policy_marks_undefined_non_pairwise_features() -> None:
-    batch = LinkerCandidateBatch(
-        row_count=4,
-        left_signature_indices=np.asarray([], dtype=np.uint32),
-        right_signature_indices=np.asarray([], dtype=np.uint32),
-        pair_row_indices=np.asarray([], dtype=np.uint32),
-        row_query_signature_indices=np.asarray([0, 0, 1, 2], dtype=np.uint32),
-    )
-    row_signals = {
-        "pair_count": np.asarray([2.0, 2.0, 0.0, 2.0], dtype=np.float32),
-        "query_year_missing": np.asarray([1.0, 0.0, 1.0, 1.0], dtype=np.float32),
-        "candidate_year_range_missing": np.asarray([1.0, 0.0, 1.0, 0.0], dtype=np.float32),
-        "query_has_affiliations": np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
-        "candidate_has_affiliations": np.zeros(4, dtype=np.float32),
-        "query_has_coauthors": np.zeros(4, dtype=np.float32),
-        "candidate_has_coauthors": np.zeros(4, dtype=np.float32),
-        "query_has_title_terms": np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
-        "candidate_has_title_terms": np.zeros(4, dtype=np.float32),
-        "query_has_venue_terms": np.zeros(4, dtype=np.float32),
-        "candidate_has_venue_terms": np.zeros(4, dtype=np.float32),
-        "query_has_specter": np.zeros(4, dtype=np.float32),
-        "candidate_has_specter_exemplars": np.zeros(4, dtype=np.float32),
-        "query_has_name_counts": np.asarray([1.0, 0.0, 1.0, 1.0], dtype=np.float32),
-        "candidate_has_name_counts": np.asarray([1.0, 1.0, 0.0, 1.0], dtype=np.float32),
-        "query_first_token": np.asarray(["alex", "bo", "", "c"], dtype=object),
-        "dominant_first_name": np.asarray(["alex", "", "casey", "c"], dtype=object),
-    }
-    features = {
-        column: np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
-        for column in (
-            "min_distance",
-            "specter_exemplar_similarity",
-            "coauthor_overlap",
-            "affiliation_overlap",
-            "year_compatibility",
-            "candidate_year_span",
-            "year_gap_to_candidate_range",
-            "year_gap_signed_to_candidate_range",
-            "same_dominant_first_as_best_top5",
-            "same_family_as_heuristic_choice",
-            "query_first_prefix_match_any_length",
-            "affiliation_contradiction_severity",
-            "anchor_evidence_count",
-            "strong_positive_anchor_score",
-            "weak_residual_anchor_score",
-            "sparse_relative_winner_score",
-            "last_name_count_min_rarity",
-            "last_first_name_count_min_rarity",
-            "top5_mean_distance",
-        )
-    }
-
-    adjusted, summary = _apply_row_nan_policy(
-        features,
-        row_signals,
-        batch,
-        row_nan_policy="semantic",
-    )
-
-    distance_nan = np.asarray([False, False, True, False])
-    np.testing.assert_array_equal(np.isnan(adjusted["min_distance"]), distance_nan)
-    np.testing.assert_array_equal(np.isnan(adjusted["top5_mean_distance"]), distance_nan)
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["specter_exemplar_similarity"]),
-        np.asarray([True, True, True, True]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["coauthor_overlap"]),
-        np.asarray([True, True, True, True]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["affiliation_overlap"]),
-        np.asarray([True, True, True, True]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["year_compatibility"]),
-        np.asarray([True, False, True, True]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["candidate_year_span"]),
-        np.asarray([True, False, True, False]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["year_gap_to_candidate_range"]),
-        np.asarray([True, False, True, True]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["year_gap_signed_to_candidate_range"]),
-        np.asarray([True, False, True, True]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["affiliation_contradiction_severity"]),
-        np.asarray([True, False, True, True]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["same_dominant_first_as_best_top5"]),
-        np.asarray([False, True, True, False]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["same_family_as_heuristic_choice"]),
-        np.asarray([False, True, True, False]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["query_first_prefix_match_any_length"]),
-        np.asarray([False, True, True, False]),
-    )
-    composite_nan = np.asarray([False, False, True, False])
-    np.testing.assert_array_equal(np.isnan(adjusted["anchor_evidence_count"]), composite_nan)
-    np.testing.assert_array_equal(np.isnan(adjusted["strong_positive_anchor_score"]), composite_nan)
-    np.testing.assert_array_equal(np.isnan(adjusted["weak_residual_anchor_score"]), composite_nan)
-    np.testing.assert_array_equal(np.isnan(adjusted["sparse_relative_winner_score"]), composite_nan)
-    assert adjusted["anchor_evidence_count"][0] == pytest.approx(0.1)
-    assert adjusted["anchor_evidence_count"][1] == pytest.approx(0.2)
-    assert adjusted["anchor_evidence_count"][3] == pytest.approx(0.4)
-    assert adjusted["affiliation_contradiction_severity"][1] == pytest.approx(0.2)
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["last_name_count_min_rarity"]),
-        np.asarray([False, True, True, False]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["last_first_name_count_min_rarity"]),
-        np.asarray([False, True, True, False]),
-    )
-    assert summary["row_nan_policy"] == "semantic"
-    assert summary["semantic_nan_total"] > 0
-
-
 def test_arrow_rust_partial_writer_reuses_label_columns_as_features(tmp_path) -> None:
     rows = pd.DataFrame(
         {
@@ -439,7 +311,6 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
         max_exemplars=4,
         pairwise_model_nan_value=np.nan,
         pairwise_aggregate_nan_value=0.0,
-        row_nan_policy="finite",
     )
 
     output_path = output_root / "features_corrected" / "train.parquet"
@@ -474,56 +345,6 @@ def test_fresh_materialization_rejects_an_existing_output_directory(tmp_path: Pa
         promoted_train._copy_bundle_support_files(source_bundle, output_root)  # noqa: SLF001
 
     assert marker.read_text(encoding="utf-8") == "existing output"
-
-
-def test_semantic_row_nan_policy_uses_feature_direct_sources() -> None:
-    batch = LinkerCandidateBatch(
-        row_count=2,
-        left_signature_indices=np.asarray([], dtype=np.uint32),
-        right_signature_indices=np.asarray([], dtype=np.uint32),
-        pair_row_indices=np.asarray([], dtype=np.uint32),
-        row_query_signature_indices=np.asarray([0, 0], dtype=np.uint32),
-    )
-    row_signals = {
-        "pair_count": np.zeros(2, dtype=np.float32),
-        "query_year_missing": np.ones(2, dtype=np.float32),
-        "candidate_year_range_missing": np.ones(2, dtype=np.float32),
-        "query_has_affiliations": np.zeros(2, dtype=np.float32),
-        "candidate_has_affiliations": np.zeros(2, dtype=np.float32),
-        "query_has_coauthors": np.zeros(2, dtype=np.float32),
-        "candidate_has_coauthors": np.zeros(2, dtype=np.float32),
-        "query_has_title_terms": np.zeros(2, dtype=np.float32),
-        "candidate_has_title_terms": np.zeros(2, dtype=np.float32),
-        "query_has_venue_terms": np.zeros(2, dtype=np.float32),
-        "candidate_has_venue_terms": np.zeros(2, dtype=np.float32),
-        "query_has_specter": np.zeros(2, dtype=np.float32),
-        "candidate_has_specter_exemplars": np.zeros(2, dtype=np.float32),
-        "query_has_name_counts": np.ones(2, dtype=np.float32),
-        "candidate_has_name_counts": np.ones(2, dtype=np.float32),
-        "query_first_token": np.asarray(["alex", "alex"], dtype=object),
-        "dominant_first_name": np.asarray(["alex", "alex"], dtype=object),
-    }
-    features = {
-        column: np.asarray([0.1, 0.2], dtype=np.float32)
-        for column in (
-            "anchor_evidence_count",
-            "strong_positive_anchor_score",
-            "weak_residual_anchor_score",
-            "sparse_relative_winner_score",
-        )
-    }
-
-    adjusted, _summary = _apply_row_nan_policy(
-        features,
-        row_signals,
-        batch,
-        row_nan_policy="semantic",
-    )
-
-    assert not np.isnan(adjusted["anchor_evidence_count"]).any()
-    assert not np.isnan(adjusted["weak_residual_anchor_score"]).any()
-    assert not np.isnan(adjusted["sparse_relative_winner_score"]).any()
-    assert np.isnan(adjusted["strong_positive_anchor_score"]).all()
 
 
 def test_block_local_member_ids_drop_foreign_members() -> None:

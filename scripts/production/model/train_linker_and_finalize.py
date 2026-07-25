@@ -38,7 +38,6 @@ for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
         sys.path.insert(0, str(extra_path))
 
 from s2and import feature_port  # noqa: E402
-from s2and import text as s2and_text  # noqa: E402
 from s2and.arrow_inputs import ValidatedArrowInputs, validate_arrow_prediction_artifacts  # noqa: E402
 from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, NORMALIZATION_VERSION  # noqa: E402
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d  # noqa: E402
@@ -1089,158 +1088,6 @@ def _validate_row_signals(row_signals: Mapping[str, Any]) -> None:
         raise ValueError(f"Arrow feature materialization left unfilled row signals: {missing}")
 
 
-def _bool_row_signal(row_signals: Mapping[str, Any], name: str, row_count: int) -> np.ndarray:
-    if name not in row_signals:
-        raise KeyError(f"Missing row signal required for semantic NaN policy: {name}")
-    values = np.asarray(row_signals[name], dtype=np.float32)
-    if values.shape != (row_count,):
-        raise ValueError(f"Row signal {name!r} must have shape ({row_count},), got {values.shape}")
-    return values > 0.0
-
-
-def _normalized_alpha_present_signal(
-    row_signals: Mapping[str, Any],
-    name: str,
-    row_count: int,
-    *,
-    min_length: int = 1,
-) -> np.ndarray:
-    if name not in row_signals:
-        raise KeyError(f"Missing row signal required for semantic NaN policy: {name}")
-    values = np.asarray(row_signals[name], dtype=object)
-    if values.shape != (row_count,):
-        raise ValueError(f"Row signal {name!r} must have shape ({row_count},), got {values.shape}")
-    present = np.zeros(row_count, dtype=bool)
-    for index, value in enumerate(values):
-        if value is None or (isinstance(value, float) and math.isnan(value)):
-            continue
-        normalized = s2and_text.normalize_text(str(value), special_case_apostrophes=True)
-        present[index] = len(normalized) >= min_length
-    return present
-
-
-def _singleton_query_group_mask(candidate_batch: LinkerCandidateBatch) -> np.ndarray:
-    row_count = int(candidate_batch.row_count)
-    if candidate_batch.row_query_signature_indices is None:
-        return np.zeros(row_count, dtype=bool)
-    query_indices = np.asarray(candidate_batch.row_query_signature_indices, dtype=np.uint32)
-    if query_indices.shape != (row_count,):
-        raise ValueError(f"row_query_signature_indices must have shape ({row_count},), got {query_indices.shape}")
-    _unique, inverse, counts = np.unique(query_indices, return_inverse=True, return_counts=True)
-    return counts[inverse] <= 1
-
-
-def _semantic_row_nan_masks(
-    row_signals: Mapping[str, Any],
-    candidate_batch: LinkerCandidateBatch,
-) -> dict[str, np.ndarray]:
-    row_count = int(candidate_batch.row_count)
-    pair_count = np.asarray(row_signals["pair_count"], dtype=np.float32)
-    if pair_count.shape != (row_count,):
-        raise ValueError(f"pair_count must have shape ({row_count},), got {pair_count.shape}")
-
-    distance_missing = pair_count <= 0.0
-    competitor_missing = _singleton_query_group_mask(candidate_batch)
-    query_year_missing = np.asarray(row_signals["query_year_missing"], dtype=np.float32) > 0.0
-    candidate_year_range_missing = np.asarray(row_signals["candidate_year_range_missing"], dtype=np.float32) > 0.0
-    query_has_affiliations = _bool_row_signal(row_signals, "query_has_affiliations", row_count)
-    query_has_coauthors = _bool_row_signal(row_signals, "query_has_coauthors", row_count)
-    query_has_specter = _bool_row_signal(row_signals, "query_has_specter", row_count)
-    query_has_name_counts = _bool_row_signal(row_signals, "query_has_name_counts", row_count)
-    candidate_has_affiliations = _bool_row_signal(row_signals, "candidate_has_affiliations", row_count)
-    candidate_has_coauthors = _bool_row_signal(row_signals, "candidate_has_coauthors", row_count)
-    candidate_has_specter_exemplars = _bool_row_signal(row_signals, "candidate_has_specter_exemplars", row_count)
-    candidate_has_name_counts = _bool_row_signal(row_signals, "candidate_has_name_counts", row_count)
-    candidate_dominant_first_available = _normalized_alpha_present_signal(
-        row_signals,
-        "dominant_first_name",
-        row_count,
-    )
-    query_name_count_missing = ~query_has_name_counts
-    candidate_name_count_missing = ~candidate_has_name_counts
-    name_count_missing = query_name_count_missing | candidate_name_count_missing
-    query_first_any_available = _normalized_alpha_present_signal(
-        row_signals,
-        "query_first_token",
-        row_count,
-        min_length=1,
-    )
-    first_name_comparison_missing = ~query_first_any_available | ~candidate_dominant_first_available
-
-    distance_available = ~distance_missing
-    competitor_available = ~competitor_missing
-    year_comparison_missing = query_year_missing | candidate_year_range_missing
-    affiliation_comparison_missing = ~(query_has_affiliations & candidate_has_affiliations)
-    coauthor_comparison_missing = ~(query_has_coauthors & candidate_has_coauthors)
-    specter_comparison_missing = ~(query_has_specter & candidate_has_specter_exemplars)
-    anchor_support_missing = ~(distance_available | competitor_available)
-    strong_support_missing = distance_missing
-    residual_support_missing = ~(distance_available | competitor_available)
-    return {
-        "min_distance": distance_missing,
-        "retrieval_reciprocal_rank": np.zeros(row_count, dtype=bool),
-        "specter_exemplar_similarity": specter_comparison_missing,
-        "coauthor_overlap": coauthor_comparison_missing,
-        "affiliation_overlap": affiliation_comparison_missing,
-        "year_compatibility": year_comparison_missing,
-        "candidate_year_span": candidate_year_range_missing,
-        "year_gap_to_candidate_range": year_comparison_missing,
-        "year_gap_signed_to_candidate_range": year_comparison_missing,
-        "affiliation_contradiction_severity": ~query_has_affiliations,
-        "same_dominant_first_as_best_top5": first_name_comparison_missing,
-        "same_family_as_heuristic_choice": first_name_comparison_missing | distance_missing,
-        "query_first_prefix_match_any_length": first_name_comparison_missing,
-        "anchor_evidence_count": anchor_support_missing,
-        "strong_positive_anchor_score": strong_support_missing,
-        "weak_residual_anchor_score": residual_support_missing,
-        "sparse_relative_winner_score": residual_support_missing,
-        "last_name_count_min_rarity": name_count_missing,
-        "last_first_name_count_min_rarity": name_count_missing,
-        "top5_mean_distance": distance_missing,
-        "cluster_size_log": np.zeros(row_count, dtype=bool),
-        "candidate_dominant_first_name_length": ~candidate_dominant_first_available,
-        "paper_author_list_max_jaccard": np.zeros(row_count, dtype=bool),
-        "paper_author_list_max_containment": np.zeros(row_count, dtype=bool),
-        "paper_author_list_max_overlap_count": np.zeros(row_count, dtype=bool),
-        "local_author_window10_jaccard_max": np.zeros(row_count, dtype=bool),
-        "local_author_window10_overlap_count_max": np.zeros(row_count, dtype=bool),
-        "best_author_count_log_absdiff": np.zeros(row_count, dtype=bool),
-        "candidate_cluster_max_paper_author_count": np.zeros(row_count, dtype=bool),
-    }
-
-
-def _apply_row_nan_policy(
-    features: Mapping[str, np.ndarray],
-    row_signals: Mapping[str, Any],
-    candidate_batch: LinkerCandidateBatch,
-    *,
-    row_nan_policy: str,
-) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    if row_nan_policy == "finite":
-        return {str(column): np.asarray(values, dtype=np.float32) for column, values in features.items()}, {
-            "row_nan_policy": "finite",
-            "semantic_nan_counts": {},
-            "semantic_nan_total": 0,
-        }
-    if row_nan_policy != "semantic":
-        raise ValueError(f"Unsupported row_nan_policy: {row_nan_policy}")
-
-    adjusted = {str(column): np.asarray(values, dtype=np.float32).copy() for column, values in features.items()}
-    masks = _semantic_row_nan_masks(row_signals, candidate_batch)
-    nan_counts: dict[str, int] = {}
-    for column, mask in masks.items():
-        if column not in adjusted:
-            continue
-        adjusted[column][mask] = np.nan
-        nan_counts[column] = int(np.isnan(adjusted[column]).sum())
-    return adjusted, {
-        "row_nan_policy": "semantic",
-        "semantic_nan_counts": nan_counts,
-        "semantic_nan_total": int(sum(nan_counts.values())),
-        "semantic_nan_feature_count": int(sum(count > 0 for count in nan_counts.values())),
-    }
-
-
 def _pairwise_feature_values(pairwise_stats: Any) -> dict[str, np.ndarray]:
     pairwise_columns = tuple(pairwise_stats.aggregate_feature_columns)
     if pairwise_columns != PROMOTED_PAIRWISE_COLUMNS:
@@ -1280,7 +1127,6 @@ def _materialize_arrow_rust_dataset_rows(
     max_exemplars: int,
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
-    row_nan_policy: str,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     started = time.perf_counter()
     dataset_name = context.dataset_name
@@ -1373,13 +1219,10 @@ def _materialize_arrow_rust_dataset_rows(
     _validate_row_signals(row_signals)
 
     non_pairwise_started = time.perf_counter()
-    non_pairwise_features = build_promoted_non_pairwise_row_features(batch, row_signals)
-    non_pairwise_features, row_nan_summary = _apply_row_nan_policy(
-        non_pairwise_features,
-        row_signals,
-        batch,
-        row_nan_policy=str(row_nan_policy),
-    )
+    non_pairwise_features = {
+        str(column): np.asarray(values, dtype=np.float32)
+        for column, values in build_promoted_non_pairwise_row_features(batch, row_signals).items()
+    }
     non_pairwise_seconds = float(time.perf_counter() - non_pairwise_started)
     feature_values = _assemble_promoted_feature_values(
         target_features=target_features,
@@ -1411,7 +1254,7 @@ def _materialize_arrow_rust_dataset_rows(
         "pairwise_aggregate_nan_value": (
             "nan" if math.isnan(float(pairwise_aggregate_nan_value)) else float(pairwise_aggregate_nan_value)
         ),
-        **row_nan_summary,
+        "row_nan_policy": PRODUCTION_ROW_NAN_POLICY,
         **constraint_summary,
         "raw_arrow_labeled_plan_seconds": round(raw_plan_seconds, 3),
         "raw_arrow_featurizer_seconds": round(featurizer_seconds, 3),
@@ -1564,7 +1407,6 @@ def _materialize_arrow_rust_feature_bundle(
     max_exemplars: int,
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
-    row_nan_policy: str,
     name_counts_index_root: Path | None = None,
     prevalidated_arrow_paths: Mapping[str, ValidatedArrowInputs] | None = None,
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
@@ -1744,7 +1586,6 @@ def _materialize_arrow_rust_feature_bundle(
                     max_exemplars=max_exemplars,
                     pairwise_model_nan_value=float(pairwise_model_nan_value),
                     pairwise_aggregate_nan_value=float(pairwise_aggregate_nan_value),
-                    row_nan_policy=str(row_nan_policy),
                 )
                 _write_arrow_rust_partial(
                     shard=shard,
@@ -2264,7 +2105,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         max_exemplars=PRODUCTION_MAX_EXEMPLARS,
         pairwise_model_nan_value=pairwise_model_nan_value,
         pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
-        row_nan_policy=PRODUCTION_ROW_NAN_POLICY,
         name_counts_index_root=name_counts_index_root,
         prevalidated_arrow_paths=prevalidated_arrow_paths,
     )

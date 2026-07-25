@@ -640,7 +640,6 @@ def test_arrow_rust_materialization_rejects_invalid_retrieval_rank(
             max_exemplars=1,
             pairwise_model_nan_value=0.0,
             pairwise_aggregate_nan_value=0.0,
-            row_nan_policy="zero",
         )
 
 
@@ -709,7 +708,6 @@ def test_arrow_rust_materialization_passes_concrete_paths_to_native_planner(
             max_exemplars=1,
             pairwise_model_nan_value=0.0,
             pairwise_aggregate_nan_value=0.0,
-            row_nan_policy="zero",
         )
 
     assert captured["name_counts_index"] is arrow_paths.native_name_counts_index

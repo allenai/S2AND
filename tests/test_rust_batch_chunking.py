@@ -32,7 +32,6 @@ def _mock_chunk_plan(chunk_pairs: int, total_pairs: int) -> memory_budget.RustBa
         persistent_row_overhead_bytes=0,
         fixed_overhead_bytes=0,
         bytes_per_pair_row=int(bytes_per_pair_row),
-        derived_chunk_pairs=int(chunk_pairs),
         chunk_pairs=int(chunk_pairs),
         total_rows=int(total_pairs),
         full_feature_count=featurizer_mod.NUM_FEATURES,
@@ -43,8 +42,6 @@ def _mock_chunk_plan(chunk_pairs: int, total_pairs: int) -> memory_budget.RustBa
         predicted_labels_bytes=predicted_labels_bytes,
         predicted_persistent_row_overhead_bytes=0,
         predicted_fixed_overhead_bytes=0,
-        predicted_selected_features_bytes=int(predicted_features_matrix_bytes),
-        predicted_nameless_features_bytes=0,
         predicted_stage_peak_delta_bytes=predicted_stage_peak_delta_bytes,
         predicted_stage_peak_rss_bytes=256 * 1024 * 1024 + predicted_stage_peak_delta_bytes,
     )

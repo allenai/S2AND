@@ -64,7 +64,6 @@ class RustBatchChunkPlan:
     persistent_row_overhead_bytes: int
     fixed_overhead_bytes: int
     bytes_per_pair_row: int
-    derived_chunk_pairs: int
     chunk_pairs: int
     total_rows: int
     full_feature_count: int
@@ -75,8 +74,6 @@ class RustBatchChunkPlan:
     predicted_labels_bytes: int
     predicted_persistent_row_overhead_bytes: int
     predicted_fixed_overhead_bytes: int
-    predicted_selected_features_bytes: int
-    predicted_nameless_features_bytes: int
     predicted_stage_peak_delta_bytes: int
     predicted_stage_peak_rss_bytes: int
     index_remap_bytes_per_pair: int = 0
@@ -687,7 +684,7 @@ def compute_rust_batch_chunk_plan(
     bounded_total_rows = bounded_total_pairs
     if total_rows is not None:
         bounded_total_rows = max(1, total_rows)
-    chunk_pairs, derived_chunk_pairs = compute_chunk_size(
+    chunk_pairs, _ = compute_chunk_size(
         item_bytes=bytes_per_pair_row,
         budget_bytes=stage_budget_bytes,
         fixed_overhead_bytes=fixed_overhead_bytes,
@@ -727,7 +724,6 @@ def compute_rust_batch_chunk_plan(
         persistent_row_overhead_bytes=max(0, persistent_row_overhead_bytes),
         fixed_overhead_bytes=predicted_fixed_overhead_bytes,
         bytes_per_pair_row=bytes_per_pair_row,
-        derived_chunk_pairs=derived_chunk_pairs,
         chunk_pairs=chunk_pairs,
         total_rows=bounded_total_rows,
         full_feature_count=full_feature_count,
@@ -738,8 +734,6 @@ def compute_rust_batch_chunk_plan(
         predicted_labels_bytes=predicted_labels_bytes,
         predicted_persistent_row_overhead_bytes=predicted_persistent_row_overhead_bytes,
         predicted_fixed_overhead_bytes=predicted_fixed_overhead_bytes,
-        predicted_selected_features_bytes=predicted_selected_features_bytes,
-        predicted_nameless_features_bytes=predicted_nameless_features_bytes,
         predicted_stage_peak_delta_bytes=predicted_stage_peak_delta_bytes,
         predicted_stage_peak_rss_bytes=predicted_stage_peak_rss_bytes,
         index_remap_bytes_per_pair=parsed_index_remap_bytes_per_pair,

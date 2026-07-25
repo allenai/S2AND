@@ -181,7 +181,11 @@ def test_compute_rust_batch_chunk_plan_respects_named_max_chunk_pairs():
         current_rss_fn=lambda _total: (10_000_000, "rss:test"),
     )
 
-    assert int(plan.derived_chunk_pairs) > 10_000
+    derived_chunk_pairs = max(
+        1,
+        max(1, int(plan.stage_budget_bytes) - int(plan.fixed_overhead_bytes)) // max(1, int(plan.bytes_per_pair_row)),
+    )
+    assert derived_chunk_pairs > 10_000
     assert int(plan.max_chunk_pairs) == 10_000
     assert int(plan.chunk_pairs) == 10_000
 

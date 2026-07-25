@@ -120,6 +120,9 @@ print(pairwise_metrics)
 ```
 
 This writes useful diagnostic plots such as ROC, PR, and SHAP outputs under `figs/`.
+SHAP diagnostics support directly fitted tree and LightGBM classifiers. For
+calibrated, voting, stacking, or non-tree classifiers, pass `skip_shap=True` to
+`pairwise_eval`.
 
 ## Fit the clusterer
 

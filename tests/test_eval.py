@@ -148,47 +148,25 @@ def test_facet_eval_includes_zero_homonymity_and_synonymity_buckets() -> None:
 
 class TestShapIntegration(unittest.TestCase):
     def setUp(self):
-        # backup originals
-        self._orig_tree = shap_utils.shap.TreeExplainer
-        self._orig_summary = shap_utils.shap.summary_plot
-        self._orig_plots = getattr(shap_utils.shap, "plots", None)
-        self._orig_expl = getattr(shap_utils.shap, "Explanation", None)
-
-        # ensure plots namespace exists for fallback stub
-        if not hasattr(shap_utils.shap, "plots"):
-
-            class _Plots: ...
-
-            shap_utils.shap.plots = _Plots()
-
-    def tearDown(self):
-        # restore
-        shap_utils.shap.TreeExplainer = self._orig_tree
-        shap_utils.shap.summary_plot = self._orig_summary
-        if self._orig_plots is None:
-            delattr(shap_utils.shap, "plots")
-        else:
-            shap_utils.shap.plots = self._orig_plots
-        if self._orig_expl is None:
-            if hasattr(shap_utils.shap, "Explanation"):
-                delattr(shap_utils.shap, "Explanation")
-        else:
-            shap_utils.shap.Explanation = self._orig_expl
-
-    # -------------------- pairwise_eval tests --------------------
-
-    def test_pairwise_eval_writes_shap_single(self):
-        # Dummy TreeExplainer that returns 2D array SHAP values
         class DummyExplainer:
             def __init__(self, model):
-                pass
+                del model
 
             def shap_values(self, X):
                 return np.zeros((X.shape[0], X.shape[1]))
 
-        shap_utils.shap.TreeExplainer = DummyExplainer
-        shap_utils.shap.summary_plot = lambda *a, **k: None
+        self._orig_shap_module = shap_utils._SHAP_MODULE
+        shap_utils._SHAP_MODULE = SimpleNamespace(
+            TreeExplainer=DummyExplainer,
+            summary_plot=lambda *args, **kwargs: None,
+        )
 
+    def tearDown(self):
+        shap_utils._SHAP_MODULE = self._orig_shap_module
+
+    # -------------------- pairwise_eval tests --------------------
+
+    def test_pairwise_eval_writes_shap_single(self):
         class DummyClf:
             def predict_proba(self, X):
                 p = np.zeros((X.shape[0], 2))
@@ -215,16 +193,6 @@ class TestShapIntegration(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(td, base + "_shap.png")))
 
     def test_pairwise_eval_writes_shap_nameless(self):
-        class DummyExplainer:
-            def __init__(self, model):
-                pass
-
-            def shap_values(self, X):
-                return np.zeros((X.shape[0], X.shape[1]))
-
-        shap_utils.shap.TreeExplainer = DummyExplainer
-        shap_utils.shap.summary_plot = lambda *a, **k: None
-
         class DummyClf:
             def predict_proba(self, X):
                 p = np.zeros((X.shape[0], 2))
@@ -282,16 +250,6 @@ class TestShapIntegration(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(td, base + "_shap.png")))
 
     def test_pairwise_eval_wrapper_unwraps_classifier(self):
-        class DummyExplainer:
-            def __init__(self, model):
-                pass
-
-            def shap_values(self, X):
-                return np.zeros((X.shape[0], X.shape[1]))
-
-        shap_utils.shap.TreeExplainer = DummyExplainer
-        shap_utils.shap.summary_plot = lambda *a, **k: None
-
         class Inner:
             def predict_proba(self, X):
                 p = np.zeros((X.shape[0], 2))
@@ -358,82 +316,13 @@ class TestShapIntegration(unittest.TestCase):
                     skip_shap=True,
                 )
 
-    # -------------------- shap_utils.compute_shap_summary_plots tests --------------------
+    def test_safe_summary_plot_falls_back_to_beeswarm(self):
+        fake_shap = cast(Any, shap_utils._SHAP_MODULE)
+        beeswarm_calls = []
 
-    def test_compute_shap_summary_plots_voting_mean(self):
-        # TreeExplainer stub
-        class DummyExplainer:
-            def __init__(self, model):
-                pass
-
-            def shap_values(self, X):
-                return np.zeros((X.shape[0], X.shape[1]))
-
-        shap_utils.shap.TreeExplainer = DummyExplainer
-        shap_utils.shap.summary_plot = lambda *a, **k: None
-
-        # Voting-like classifier (estimators attribute)
-        class DummyEstimator:
-            pass
-
-        class DummyVoting:
-            def __init__(self):
-                self.estimators = [DummyEstimator(), DummyEstimator()]
-
-        X = np.ones((3, 4))
-        names = [f"f{i}" for i in range(4)]
-        with tempfile.TemporaryDirectory() as td:
-            outs = shap_utils.compute_shap_summary_plots(
-                classifier=DummyVoting(),
-                X=X,
-                shap_feature_names=names,
-                shap_plot_type="dot",
-                base_name="vote",
-                figs_path=td,
-            )
-            self.assertEqual(len(outs), 1)
-            self.assertTrue(outs[0].endswith("vote_shap_0.png"))
-            self.assertTrue(os.path.exists(outs[0]))
-
-    def test_compute_shap_summary_plots_calibrated(self):
-        # TreeExplainer stub
-        class DummyExplainer:
-            def __init__(self, model):
-                pass
-
-            def shap_values(self, X):
-                return np.zeros((X.shape[0], X.shape[1]))
-
-        shap_utils.shap.TreeExplainer = DummyExplainer
-        shap_utils.shap.summary_plot = lambda *a, **k: None
-
-        # Calibrated-like: expose fitted base estimator through calibrated_classifiers_
-        class Fold:
-            def __init__(self):
-                self.base_estimator = object()
-
-        class DummyCalibrated:
-            def __init__(self):
-                self.calibrated_classifiers_ = [Fold()]
-
-        X = np.ones((2, 3))
-        names = ["a", "b", "c"]
-        with tempfile.TemporaryDirectory() as td:
-            outs = shap_utils.compute_shap_summary_plots(
-                classifier=DummyCalibrated(),
-                X=X,
-                shap_feature_names=names,
-                shap_plot_type="dot",
-                base_name="calib",
-                figs_path=td,
-            )
-            self.assertEqual(len(outs), 1)
-            self.assertTrue(outs[0].endswith("calib_shap.png"))
-            self.assertTrue(os.path.exists(outs[0]))
-
-    def test_safe_summary_plot_fallback_to_beeswarm(self):
-        # Force summary_plot to raise; provide beeswarm + Explanation stubs
-        shap_utils.shap.summary_plot = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        def fail_summary_plot(*args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("summary plot failed")
 
         class Explanation:
             def __init__(self, values=None, data=None, feature_names=None):
@@ -441,38 +330,125 @@ class TestShapIntegration(unittest.TestCase):
                 self.data = data
                 self.feature_names = feature_names
 
-        shap_utils.shap.Explanation = Explanation
-
         class Plots:
             @staticmethod
-            def beeswarm(*a, **k):
-                return None
+            def beeswarm(explanation, **kwargs):
+                beeswarm_calls.append((explanation, kwargs))
 
-        shap_utils.shap.plots = Plots
-
-        # TreeExplainer stub
-        class DummyExplainer:
-            def __init__(self, model):
-                pass
-
-            def shap_values(self, X):
-                return np.zeros((X.shape[0], X.shape[1]))
-
-        shap_utils.shap.TreeExplainer = DummyExplainer
+        fake_shap.summary_plot = fail_summary_plot
+        fake_shap.Explanation = Explanation
+        fake_shap.plots = Plots
 
         X = np.ones((3, 3))
-        names = ["x", "y", "z"]
         with tempfile.TemporaryDirectory() as td:
-            outs = shap_utils.compute_shap_summary_plots(
+            outputs = shap_utils.compute_shap_summary_plots(
                 classifier=object(),
                 X=X,
-                shap_feature_names=names,
+                shap_feature_names=["x", "y", "z"],
                 shap_plot_type="dot",
                 base_name="fallback",
                 figs_path=td,
             )
-            self.assertEqual(len(outs), 1)
-            self.assertTrue(os.path.exists(outs[0]))
+            assert os.path.exists(outputs[0])
+
+        assert len(beeswarm_calls) == 1
+        assert outputs[0].endswith("fallback_shap.png")
+
+
+def _small_binary_classification() -> tuple[np.ndarray, np.ndarray]:
+    """Return a deterministic tiny binary classification fixture."""
+
+    from sklearn.datasets import make_classification
+
+    return make_classification(
+        n_samples=30,
+        n_features=4,
+        n_informative=3,
+        n_redundant=0,
+        random_state=7,
+    )
+
+
+def test_shap_values_for_lightgbm_are_2d():
+    from lightgbm import LGBMClassifier
+
+    X, y = _small_binary_classification()
+    classifier = LGBMClassifier(n_estimators=4, random_state=7, verbosity=-1).fit(X, y)
+
+    values = shap_utils._shap_values_for_tree_model(classifier, X[:3], class_index=1)
+
+    assert values.shape == (3, 4)
+
+
+def test_shap_values_for_native_lightgbm_are_2d():
+    from lightgbm import LGBMClassifier
+
+    from s2and.production_model import NativeLightGBMBinaryClassifier
+
+    X, y = _small_binary_classification()
+    classifier = LGBMClassifier(n_estimators=4, random_state=7, verbosity=-1).fit(X, y)
+    with tempfile.TemporaryDirectory() as td:
+        model_path = os.path.join(td, "model.txt")
+        classifier.booster_.save_model(model_path)
+        native_classifier = NativeLightGBMBinaryClassifier(model_path)
+
+        values = shap_utils._shap_values_for_tree_model(native_classifier, X[:3], class_index=1)
+
+    assert values.shape == (3, 4)
+
+
+def test_shap_values_select_random_forest_class_index():
+    from sklearn.ensemble import RandomForestClassifier
+
+    X, y = _small_binary_classification()
+    classifier = RandomForestClassifier(n_estimators=4, random_state=7).fit(X, y)
+    raw_values = shap_utils._get_shap_module().TreeExplainer(classifier).shap_values(X[:3])
+    assert raw_values.shape == (3, 4, 2)
+
+    values = shap_utils._shap_values_for_tree_model(classifier, X[:3], class_index=1)
+
+    np.testing.assert_allclose(values, raw_values[:, :, 1])
+
+
+def test_shap_values_reject_invalid_shape_and_class_index(monkeypatch):
+    class FakeExplainer:
+        output = np.zeros((2, 3, 4, 5))
+
+        def __init__(self, model):
+            del model
+
+        def shap_values(self, X):
+            del X
+            return self.output
+
+    monkeypatch.setattr(shap_utils, "_SHAP_MODULE", SimpleNamespace(TreeExplainer=FakeExplainer))
+    with pytest.raises(ValueError, match="unsupported shape"):
+        shap_utils._shap_values_for_tree_model(object(), np.ones((2, 3)))
+
+    FakeExplainer.output = np.zeros((2, 3, 2))
+    with pytest.raises(ValueError, match="class_index 2 is out of range"):
+        shap_utils._shap_values_for_tree_model(object(), np.ones((2, 3)), class_index=2)
+
+
+def test_shap_values_reject_calibrated_voting_and_stacking_classifiers():
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.ensemble import StackingClassifier, VotingClassifier
+    from sklearn.tree import DecisionTreeClassifier
+
+    X, y = _small_binary_classification()
+    estimators = [
+        ("shallow", DecisionTreeClassifier(max_depth=2, random_state=7)),
+        ("deep", DecisionTreeClassifier(max_depth=3, random_state=8)),
+    ]
+    unsupported = [
+        CalibratedClassifierCV(DecisionTreeClassifier(max_depth=2, random_state=7), cv=2).fit(X, y),
+        VotingClassifier(estimators).fit(X, y),
+        StackingClassifier(estimators, cv=2).fit(X, y),
+    ]
+
+    for classifier in unsupported:
+        with pytest.raises(TypeError, match=rf"{type(classifier).__name__} is unsupported.*skip_shap=True"):
+            shap_utils._shap_values_for_tree_model(classifier, X[:3])
 
 
 def _build_claims_eval_test_inputs(dists):
@@ -561,28 +537,35 @@ def test_claims_eval_writes_distance_dump_when_available():
         assert output["total"] == 1
 
 
-def test_shap_values_restore_lightgbm_booster_params(monkeypatch):
-    class DummyBooster:
-        def __init__(self):
-            self.params = {"keep": "value"}
+def test_native_lightgbm_shap_routes_booster_and_restores_params(monkeypatch):
+    import lightgbm as lgb
 
-    class DummyClassifier:
-        def __init__(self):
-            self.booster_ = DummyBooster()
+    from s2and.production_model import NativeLightGBMBinaryClassifier
 
-    classifier = DummyClassifier()
+    X, y = _small_binary_classification()
+    classifier = lgb.LGBMClassifier(n_estimators=4, random_state=7, verbosity=-1).fit(X, y)
+    captured_models = []
 
     def mutate_booster_params(model, features, class_index):
-        del class_index
-        model.booster_.params["temporary"] = "shap"
+        assert class_index == 1
+        captured_models.append(model)
+        model.params["temporary"] = "shap"
         return np.zeros_like(features)
 
     monkeypatch.setattr(shap_utils, "_shap_values_for_tree_model", mutate_booster_params)
 
-    values = _shap_values_for_tree_model_preserving_booster_params(classifier, np.ones((2, 3)))
+    with tempfile.TemporaryDirectory() as td:
+        model_path = os.path.join(td, "model.txt")
+        classifier.booster_.save_model(model_path)
+        native_classifier = NativeLightGBMBinaryClassifier(model_path)
+        original_params = dict(native_classifier.booster_.params)
 
-    np.testing.assert_array_equal(values, np.zeros((2, 3)))
-    assert classifier.booster_.params == {"keep": "value"}
+        values = _shap_values_for_tree_model_preserving_booster_params(native_classifier, X[:2])
+
+        np.testing.assert_array_equal(values, np.zeros((2, 4)))
+        assert captured_models == [native_classifier.booster_]
+        assert isinstance(captured_models[0], lgb.Booster)
+        assert native_classifier.booster_.params == original_params
 
 
 def test_write_claims_eval_shap_plots_requires_nameless_features(monkeypatch):

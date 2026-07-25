@@ -456,6 +456,8 @@ def pairwise_eval(
         Feature matrix of labels to do eval on.
     classifier: sklearn compatible classifier
         Classifier to do eval on.
+        SHAP plots require a directly fitted tree or LightGBM classifier;
+        pass ``skip_shap=True`` for calibrated, voting, stacking, or non-tree classifiers.
     figs_path: string
         Where to put the resulting evaluation figures.
     title: string
@@ -474,7 +476,8 @@ def pairwise_eval(
     nameless_feature_names: List[str]
         List of feature names for the SHAP plots excluding name features.
     skip_shap: bool
-        Whether to skip SHAP entirely.
+        Whether to skip SHAP entirely. Set this for classifiers that are not
+        directly fitted tree or LightGBM models.
 
     Returns
     -------
@@ -961,13 +964,13 @@ def _shap_values_for_tree_model_preserving_booster_params(
 ) -> np.ndarray:
     import s2and.shap_utils as shap_utils
 
-    base_estimator = shap_utils._base_estimator(classifier)
-    booster = getattr(base_estimator, "booster_", None)
+    booster = getattr(classifier, "booster_", None)
+    shap_model = booster if getattr(classifier, "prediction_backend", None) == "rust_lightgbm" else classifier
     booster_params = getattr(booster, "params", None)
     booster_params_dict = booster_params if isinstance(booster_params, dict) else None
     original_params = dict(booster_params_dict) if booster_params_dict is not None else None
     try:
-        return shap_utils._shap_values_for_tree_model(base_estimator, features, class_index=1)
+        return shap_utils._shap_values_for_tree_model(shap_model, features, class_index=1)
     finally:
         if booster_params_dict is not None and original_params is not None:
             booster_params_dict.clear()

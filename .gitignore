@@ -7,6 +7,7 @@ pypitoken
 *.pickle
 !tests/qian/specter.pickle
 !s2and/data/production_model_v*.pickle
+*.pdb
 
 # Legacy top-level data root. Current downloads and local datasets live under s2and/data/.
 /data/

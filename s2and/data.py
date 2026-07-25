@@ -5,6 +5,7 @@ import os
 import pickle
 import platform
 import time
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from functools import cached_property, partial
@@ -235,6 +236,110 @@ def _pair_sampling_uses_blocks(mode: PairSamplingMode) -> bool:
     """Return whether a pair sampling mode samples within blocks."""
 
     return mode != "global_balanced_classes"
+
+
+def _upper_triangle_pair_indices(block_size: int, pair_rank: int) -> tuple[int, int]:
+    """Map a lexicographic upper-triangle rank to its signature indices.
+
+    The rank order matches the nested loops used by ``ANDData.pair_sampling``:
+    ``(0, 1), (0, 2), ..., (1, 2), ...``.
+
+    Args:
+        block_size: Number of signatures in the block.
+        pair_rank: Zero-based rank within the block's upper triangle.
+
+    Returns:
+        The two signature indices for ``pair_rank``.
+    """
+
+    low = 0
+    high = block_size - 2
+    while low < high:
+        candidate = (low + high + 1) // 2
+        candidate_start = candidate * (2 * block_size - candidate - 1) // 2
+        if candidate_start <= pair_rank:
+            low = candidate
+        else:
+            high = candidate - 1
+
+    first_index = low
+    row_start = first_index * (2 * block_size - first_index - 1) // 2
+    second_index = first_index + 1 + pair_rank - row_start
+    return first_index, second_index
+
+
+def _sample_within_block_random_pairs(
+    blocks: Mapping[str, list[str]],
+    signature_to_cluster_id: Mapping[str, Any] | None,
+    sample_size: int,
+    random_seed: int,
+) -> list[tuple[str, str, int | float]]:
+    """Sample within-block pairs without materializing every candidate.
+
+    Sampling integer ranks from ``range(total_pairs)`` produces the same
+    selections and output order as sampling the legacy, exhaustively built
+    candidate list because ``random.sample`` depends only on population length
+    and rank. Memory is proportional to the requested sample size plus the
+    number of nontrivial blocks.
+
+    Args:
+        blocks: Ordered mapping of block IDs to ordered signature IDs.
+        signature_to_cluster_id: Optional signature-to-cluster labels.
+        sample_size: Maximum number of pairs to return.
+        random_seed: Seed passed to the deterministic sampler.
+
+    Returns:
+        Sampled signature pairs in legacy ``random.sample`` order.
+    """
+
+    started = time.perf_counter()
+    pair_blocks: list[tuple[list[str], int]] = []
+    cumulative_pair_counts: list[int] = []
+    total_pairs = 0
+    max_block_size = 0
+    for signatures in blocks.values():
+        block_size = len(signatures)
+        if block_size < 2:
+            continue
+        max_block_size = max(max_block_size, block_size)
+
+        if signature_to_cluster_id is not None:
+            # Preserve the legacy failure contract: missing cluster labels fail
+            # even when their pair would not have been selected.
+            for signature_id in signatures:
+                signature_to_cluster_id[signature_id]
+
+        block_pair_count = block_size * (block_size - 1) // 2
+        total_pairs += block_pair_count
+        pair_blocks.append((signatures, total_pairs - block_pair_count))
+        cumulative_pair_counts.append(total_pairs)
+
+    resolved_sample_size = min(total_pairs, sample_size)
+    sampled_pair_ranks = random_sampling(range(total_pairs), resolved_sample_size, random_seed)
+    sampled_pairs: list[tuple[str, str, int | float]] = []
+    for pair_rank in sampled_pair_ranks:
+        block_index = bisect_right(cumulative_pair_counts, pair_rank)
+        signatures, block_start = pair_blocks[block_index]
+        local_pair_rank = pair_rank - block_start
+        first_index, second_index = _upper_triangle_pair_indices(len(signatures), local_pair_rank)
+        first_signature = signatures[first_index]
+        second_signature = signatures[second_index]
+        if signature_to_cluster_id is None:
+            label: int | float = NUMPY_NAN
+        else:
+            label = int(signature_to_cluster_id[first_signature] == signature_to_cluster_id[second_signature])
+        sampled_pairs.append((first_signature, second_signature, label))
+    logger.info(
+        "Telemetry stage: stage=within_block_random_pair_sampling seconds=%.3f "
+        "candidate_pairs=%d requested_pairs=%d returned_pairs=%d nontrivial_blocks=%d max_block_size=%d",
+        time.perf_counter() - started,
+        total_pairs,
+        sample_size,
+        len(sampled_pairs),
+        len(pair_blocks),
+        max_block_size,
+    )
+    return sampled_pairs
 
 
 def _load_name_tuples_from_file(filename: str) -> set[tuple[str, str]]:
@@ -1775,6 +1880,18 @@ class ANDData:
         test_pairs_df = _map_fixed_pair_labels(self.test_pairs, "test")
         test_pairs = list(test_pairs_df.to_records(index=False))
 
+        identities = {
+            split_name: {tuple(sorted((str(pair[0]), str(pair[1])))) for pair in pairs}
+            for split_name, pairs in (("train", train_pairs), ("val", val_pairs), ("test", test_pairs))
+        }
+        for left, right in (("train", "val"), ("train", "test"), ("val", "test")):
+            overlap = identities[left] & identities[right]
+            if overlap:
+                raise ValueError(
+                    f"Fixed pair splits {left!r} and {right!r} overlap by unordered signature pair: "
+                    f"count={len(overlap)}, sample={sorted(overlap)[:5]}"
+                )
+
         return train_pairs, val_pairs, test_pairs
 
     def all_pairs(self) -> list[tuple[str, str, int | float]]:
@@ -1821,7 +1938,11 @@ class ANDData:
         all_pairs: bool = False,
     ) -> list[tuple[str, str, int | float]]:
         """
-        Enumerates all pairs exhaustively, and samples pairs according to the four different strategies.
+        Samples pairs according to the configured strategy.
+
+        Random within-block sampling maps sampled integer ranks directly to
+        signature pairs. Exhaustive output and balanced strategies still
+        enumerate their candidate pairs.
 
         Parameters
         ----------
@@ -1841,6 +1962,14 @@ class ANDData:
         list: list of signature pairs
         """
         pair_sampling_mode = _validate_pair_sampling_mode(str(self.pair_sampling_mode))
+
+        if pair_sampling_mode == "within_block_random" and not all_pairs:
+            return _sample_within_block_random_pairs(
+                blocks,
+                self.signature_to_cluster_id,
+                sample_size,
+                self.random_seed,
+            )
 
         same_name_different_cluster: list[tuple[str, str, int | float]] = []
         same_name_same_cluster: list[tuple[str, str, int | float]] = []

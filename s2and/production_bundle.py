@@ -414,17 +414,26 @@ def finalize_production_bundle(
     if not target_json.exists():
         raise FileNotFoundError(f"Incremental linker target JSON does not exist: {target_json}")
 
+    pairwise_manifest = _read_json(pairwise_bundle_dir / "manifest.json")
     inferred_version = production_version_from_bundle_dir(output_bundle_dir)
     if bundle_version is not None:
         _validate_named_bundle_version(output_bundle_dir, str(bundle_version))
-    resolved_bundle_version = str(
-        bundle_version or inferred_version or production_version_from_bundle_dir(pairwise_bundle_dir) or ""
-    )
+    pairwise_bundle_version = str(pairwise_manifest.get("bundle_version") or "").strip()
+    if (
+        bundle_version is None
+        and inferred_version is not None
+        and pairwise_bundle_version
+        and inferred_version != pairwise_bundle_version
+    ):
+        raise ValueError(
+            "Output directory bundle version disagrees with pairwise manifest: "
+            f"output={inferred_version!r}, pairwise={pairwise_bundle_version!r}"
+        )
+    resolved_bundle_version = str(bundle_version or inferred_version or pairwise_bundle_version)
     if not resolved_bundle_version:
-        raise ValueError("bundle_version is required when output_bundle_dir is not named production_model_vX.Y")
+        raise ValueError("bundle_version is missing from both the output path and pairwise manifest")
 
     pairwise_binding = pairwise_bundle_binding(pairwise_bundle_dir)
-    pairwise_manifest = _read_json(pairwise_bundle_dir / "manifest.json")
     linker_metadata = _read_json(incremental_linker_artifact_dir / "metadata.json")
     if linker_metadata.get("pairwise_bundle_binding_digest") != canonical_json_digest(pairwise_binding):
         raise ValueError("Incremental linker pairwise_bundle_binding_digest does not match pairwise bundle")

@@ -59,12 +59,20 @@ Performance with SPECTERv1 data, on zbmath (B3): (0.966, 0.984, 0.975)
 Performance with SPECTERv2 data, on zbmath (B3): (0.975, 0.991, 0.983)
 
 ================================================================================
-Without retraining (production model artifacts, random seed 42, dataset=mini)
+Without retraining (production model artifacts, dataset=mini) — HISTORICAL
 ================================================================================
 
 SPECTER2 numbers verified 2026-05-21 against the ANDData/Python backend; all
 six datasets reproduce bit-identically on 2026-05-28 by passing the evaluated
 bundle explicitly with `--specter2-model-path`.
+
+These numbers predate the split contract: they were measured with an
+evaluator-owned seed 42 against a bundle trained under seed 1111, so their
+"test" blocks overlapped that bundle's training split at the ~80% base rate.
+Bundle evaluation now derives its split seed from the bundle's recorded
+``data_random_seed`` (the trainer's actual held-out split) and rejects an
+explicit ``--seed``, so freshly measured numbers are genuinely held out and
+will not match the values below.
 
 Performance with SPECTERv2 data, on arnetminer (B3): (0.946, 0.982, 0.963)
 
@@ -84,7 +92,7 @@ Full-bundle Arrow numbers (no retraining, SPECTER2, --dataset full --use-arrow)
 
 For reference, when evaluating the full bundle through the Arrow + Rust
 production path (`--dataset full --use-arrow --specter2-model-path
-/path/to/bundle --seed 42`), measured 2026-05-28:
+/path/to/bundle`, evaluator seed 42, pre-split-contract), measured 2026-05-28:
 
 Performance on arnetminer (B3): (0.946, 0.982, 0.963)    # matches mini
 Performance on inspire    (B3): (0.983, 0.932, 0.957)    # mini ⊂ full
@@ -101,9 +109,10 @@ Usage
     uv run python scripts/eval_prod_models.py --dataset inventors_s2and \
         --specter2-model-path /path/to/production_model_bundle
 
-    # Reproduce the docstring numbers above (mini bundle, ANDData backend)
+    # Evaluate a bundle on mini via the ANDData/Python backend (split seed
+    # comes from the bundle's recorded data_random_seed)
     S2AND_BACKEND=python uv run python scripts/eval_prod_models.py \
-        --dataset mini --no-arrow --seed 42 \
+        --dataset mini --no-arrow \
         --specter2-model-path /path/to/production_model_bundle
 
     # Evaluate the full released benchmark via Arrow + Rust production path
@@ -117,8 +126,9 @@ Usage
     uv run python scripts/eval_prod_models.py --train \
         --specter-suffixes _specter.pickle _specter2.pkl
 
-    # Override seed / n_jobs
-    uv run python scripts/eval_prod_models.py --seed 42 --n_jobs 8
+    # Override seed / n_jobs (--seed is --train only; bundle evaluation always
+    # uses the bundle's recorded data_random_seed)
+    uv run python scripts/eval_prod_models.py --train --seed 42 --n_jobs 8
 """
 
 import argparse
@@ -164,8 +174,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Random seed (default: 42, matching documented production-model evaluation numbers)",
+        default=None,
+        help=(
+            "Random seed for --train research runs (default: 42). Production-bundle "
+            "evaluation derives its split seed from the bundle's recorded "
+            "data_random_seed and rejects an explicit --seed."
+        ),
     )
     parser.add_argument("--n_jobs", type=int, default=4, help="Number of parallel jobs (default: 4)")
     parser.add_argument(
@@ -452,6 +466,36 @@ def resolve_arrow_dataset_root(arrow_root: str, dataset_name: str) -> str:
         + [os.path.join(arrow_root, "*", "datasets", dataset_name, "manifest.json")]
     )
     raise FileNotFoundError(f"Missing Arrow manifest for dataset {dataset_name!r}; checked {formatted}")
+
+
+def bundle_data_random_seed(model_path: Path) -> int:
+    """Return the data-split seed the pairwise trainer recorded in a bundle.
+
+    Production-bundle evaluation reuses the trainer's seed. This reproduces
+    its split only while dataset bytes and ordering are identical; release
+    evaluation still requires persisted split identities.
+
+    Args:
+        model_path: Production bundle directory (``--specter2-model-path``).
+
+    Returns:
+        The ``data_random_seed`` from the bundle's pairwise training config.
+
+    Raises:
+        FileNotFoundError: If the bundle records no pairwise training config.
+        ValueError: If the config lacks an integer ``data_random_seed``.
+    """
+    config_path = Path(model_path) / "reproducibility" / "pairwise_training_config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"Production bundle records no training split seed (missing {config_path}); "
+            "evaluation refuses to guess a split for a bundle trained under an unknown one"
+        )
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    seed = config.get("data_random_seed")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError(f"Pairwise training config at {config_path} lacks an integer data_random_seed")
+    return seed
 
 
 def resolve_arrow_dataset_paths(
@@ -1105,7 +1149,6 @@ def main() -> None:
 
     args = _build_parser().parse_args()
     n_jobs = args.n_jobs
-    random_seed = args.seed
     train_flag = bool(args.train)
     if args.use_arrow and args.no_arrow:
         raise ValueError("Pass only one of --use-arrow or --no-arrow")
@@ -1147,6 +1190,15 @@ def main() -> None:
         raise ValueError("Explicit production model paths cannot be combined with --train")
     if not train_flag and args.specter2_model_path is None:
         raise ValueError("Production evaluation requires an explicit model path via --specter2-model-path")
+    if train_flag:
+        random_seed = 42 if args.seed is None else int(args.seed)
+    else:
+        if args.seed is not None:
+            raise ValueError(
+                "--seed applies only to --train; production-bundle evaluation uses the bundle's "
+                "recorded data_random_seed so its test split is the trainer's held-out split"
+            )
+        random_seed = bundle_data_random_seed(cast(Path, args.specter2_model_path))
     missing_arrow_error = (
         first_missing_arrow_dataset_error(arrow_data_root, datasets, active_specter_suffixes)
         if _supports_arrow_eval(args.dataset) and not train_flag
@@ -1161,8 +1213,9 @@ def main() -> None:
         arrow_available=bool(arrow_available),
     )
 
+    seed_source = "--train seed" if train_flag else "bundle data_random_seed"
     print(
-        f"Config: dataset={args.dataset}, seed={random_seed}, n_jobs={n_jobs}, "
+        f"Config: dataset={args.dataset}, seed={random_seed} ({seed_source}), n_jobs={n_jobs}, "
         f"train={train_flag}, use_arrow={use_arrow}"
     )
     print(f"Datasets: {datasets}")

@@ -157,7 +157,7 @@ def test_python_package_data_is_explicit() -> None:
     package_data = config["tool"]["setuptools"]["package-data"]["s2and"]
     canonical_orcid_artifacts = {
         "data/first_k_letter_counts_from_orcid.json",
-        "data/first_k_letter_counts_from_orcid.meta.json",
+        "data/first_k_letter_counts_from_orcid.manifest.json",
     }
     assert "arrow_schema_contract.json" in package_data
     assert canonical_orcid_artifacts <= set(package_data)
@@ -186,13 +186,13 @@ def _write_distribution_fixture(
     data_dir.mkdir(parents=True)
     orcid_data_payload = b"{}\n"
     (data_dir / "first_k_letter_counts_from_orcid.json").write_bytes(orcid_data_payload)
-    (data_dir / "first_k_letter_counts_from_orcid.meta.json").write_text(
+    (data_dir / "first_k_letter_counts_from_orcid.manifest.json").write_text(
         json.dumps(
             {
                 "data_sha256": hashlib.sha256(orcid_data_payload).hexdigest(),
                 "normalization_version": "canonical_v2",
                 "pair_key_semantics": "unordered_lexicographic",
-                "schema_version": 1,
+                "schema_version": "orcid_prefix_counts_v2",
             },
             sort_keys=True,
         )
@@ -276,9 +276,9 @@ def test_distribution_verifier_rejects_undeclared_model_assets(
     ("omit_wheel_path", "omit_sdist_path"),
     (
         ("s2and/data/first_k_letter_counts_from_orcid.json", None),
-        ("s2and/data/first_k_letter_counts_from_orcid.meta.json", None),
+        ("s2and/data/first_k_letter_counts_from_orcid.manifest.json", None),
         (None, "s2and/data/first_k_letter_counts_from_orcid.json"),
-        (None, "s2and/data/first_k_letter_counts_from_orcid.meta.json"),
+        (None, "s2and/data/first_k_letter_counts_from_orcid.manifest.json"),
     ),
 )
 def test_distribution_verifier_requires_canonical_orcid_artifact_pair(
@@ -302,7 +302,7 @@ def test_distribution_verifier_requires_canonical_orcid_artifact_pair(
     "missing_source_path",
     (
         "s2and/data/first_k_letter_counts_from_orcid.json",
-        "s2and/data/first_k_letter_counts_from_orcid.meta.json",
+        "s2and/data/first_k_letter_counts_from_orcid.manifest.json",
     ),
 )
 def test_distribution_verifier_rejects_missing_canonical_orcid_source(

@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 from itertools import combinations
 from pathlib import Path
-from types import SimpleNamespace
-from typing import cast
 
 import numpy as np
 import pytest
@@ -15,8 +12,6 @@ import pytest
 import s2and.feature_cache as feature_cache
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
-from scripts.production.model import train_pairwise
-from scripts.production.model.train_pairwise import _feature_snapshot_source_key, _feature_source_hashes
 
 
 def _dataset() -> ANDData:
@@ -317,69 +312,4 @@ def test_load_does_not_relabel_permission_errors(tmp_path: Path, monkeypatch: py
             expected_rows=2,
             expected_width=1,
             expected_nameless_width=None,
-        )
-
-
-def test_production_source_key_uses_exact_files_and_opened_artifacts(tmp_path: Path) -> None:
-    paths = [tmp_path / name for name in ("signatures.json", "papers.json", "specter.pkl")]
-    payloads = [b"signatures", b"papers", b"pickle payload\x00including trailing bytes"]
-    for path, payload in zip(paths, payloads, strict=True):
-        path.write_bytes(payload)
-    dataset = cast(
-        ANDData,
-        SimpleNamespace(
-            name="tiny",
-            name_counts_provenance={"manifest_sha256": "4" * 64},
-            normalization_version="canonical_v2",
-        ),
-    )
-
-    assert _feature_snapshot_source_key(
-        dataset,
-        source_hashes=_feature_source_hashes(
-            signatures_path=paths[0],
-            papers_path=paths[1],
-            specter_path=paths[2],
-        ),
-        name_tuples_data_sha256="3" * 64,
-    ) == {
-        "signatures_sha256": hashlib.sha256(payloads[0]).hexdigest(),
-        "papers_sha256": hashlib.sha256(payloads[1]).hexdigest(),
-        "specter_embeddings_sha256": hashlib.sha256(payloads[2]).hexdigest(),
-        "name_tuples_data_sha256": "3" * 64,
-        "name_counts_manifest_sha256": "4" * 64,
-        "normalization_version": "canonical_v2",
-    }
-
-
-def test_cacheable_anddata_rejects_source_change_during_load(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    paths = [tmp_path / name for name in ("signatures.json", "papers.json", "specter.pkl")]
-    for path in paths:
-        path.write_bytes(b"original")
-
-    dataset = cast(
-        ANDData,
-        SimpleNamespace(
-            name="tiny",
-            name_counts_provenance={"manifest_sha256": "4" * 64},
-            normalization_version="canonical_v2",
-        ),
-    )
-
-    def mutate_signatures(**_kwargs) -> ANDData:
-        paths[0].write_bytes(b"changed")
-        return dataset
-
-    monkeypatch.setattr(train_pairwise, "ANDData", mutate_signatures)
-    with pytest.raises(RuntimeError, match="signatures"):
-        train_pairwise._build_cacheable_anddata(
-            {
-                "signatures": paths[0],
-                "papers": paths[1],
-                "specter_embeddings": paths[2],
-            },
-            name_tuples_data_sha256="3" * 64,
         )

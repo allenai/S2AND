@@ -1,47 +1,63 @@
-"""Generate canonical unordered ORCID first-name prefix counts.
-
-Warehouse access is intentionally unavailable at import time. Use a bounded
-local JSON fixture for development, or pass ``--run-full`` explicitly on
-internal infrastructure. The output is one data file, its runtime metadata
-sidecar, and a producer-only generation report.
-"""
+"""Generate one immutable canonical ORCID first-name prefix-count artifact."""
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
+import os
 import re
+import shutil
 import tempfile
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from itertools import combinations
 from pathlib import Path
 from typing import Any
 
 import orjson
 
+from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.consts import NORMALIZATION_VERSION
-from s2and.data import _load_name_tuples_from_file
+from s2and.name_tuple_artifact import NameTupleArtifact, load_name_tuple_artifact
 from s2and.orcid_prefix_counts import (
     ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
     ORCID_PREFIX_DATA_FILENAME,
-    ORCID_PREFIX_METADATA_FILENAME,
+    ORCID_PREFIX_MANIFEST_FILENAME,
     ORCID_PREFIX_PAIR_KEY_SEMANTICS,
+    LoadedOrcidPrefixCounts,
+    load_canonical_orcid_prefix_counts,
     validate_orcid_prefix_counts,
 )
 from s2and.text import canonicalize_name_parts, normalize_orcid, same_prefix_tokens
+from scripts.production.counts._run_support import (
+    load_guardrails,
+    require_positive,
+    validate_fixture_path,
+    validate_output_container,
+)
 
 K_VALUES = (2, 3, 4, 5)
 MIN_ORCID_COUNT = 10
 MIN_ALIAS_COUNT = 2
-GENERATION_REPORT_FILENAME = "first_k_letter_counts_from_orcid.generation.json"
-GENERATION_REPORT_SCHEMA_VERSION = 1
-_CANONICAL_SOURCE_ORCID_PATTERN = re.compile(r"[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9Xx]")
-_CANONICAL_SOURCE_ORCID_SQL_PATTERN = (
-    r"(?<![0-9x])[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{4}[-‐‑‒–—−﹘﹣－]?" r"[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{3}[0-9x](?![0-9x])"
+FIXTURE_MAX_NAMES_PER_ORCID = 100
+PROGRESS_EVERY = 100_000
+GUARDRAIL_FIELDS = frozenset(
+    {
+        "max_source_rows",
+        "min_source_rows",
+        "max_names_per_orcid",
+        "max_pair_keys",
+        "min_orcid_pair_keys",
+    }
 )
+_CANONICAL_SOURCE_ORCID_PATTERN = re.compile(r"[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9Xx]")
 _ORCID_DASH_SQL_PATTERN = "[-‐‑‒–—−﹘﹣－]"
+_CANONICAL_SOURCE_ORCID_SQL_PATTERN = (
+    rf"(?<![0-9x])[0-9]{{4}}{_ORCID_DASH_SQL_PATTERN}?[0-9]{{4}}{_ORCID_DASH_SQL_PATTERN}?"
+    rf"[0-9]{{4}}{_ORCID_DASH_SQL_PATTERN}?[0-9]{{3}}[0-9x](?![0-9x])"
+)
 QUERY = f"""
 with source_rows as (
 select p.year, p.inserted paper_inserted,
@@ -74,17 +90,15 @@ join content_ext.authors au
 where pae.source in ('Crossref')
   and nullif(trim(coalesce(pae.first_name, '')), '') is not null
 )
-select year, paper_inserted, corpus_paper_id, source, raw_orcid,
-      case
-        when canonical_orcid_compact = '' then null
-        else substring(canonical_orcid_compact, 1, 4)
+select raw_orcid,
+       case
+         when canonical_orcid_compact = '' then null
+         else substring(canonical_orcid_compact, 1, 4)
           || '-' || substring(canonical_orcid_compact, 5, 4)
           || '-' || substring(canonical_orcid_compact, 9, 4)
           || '-' || substring(canonical_orcid_compact, 13, 4)
-      end orcid,
-      position, first_name, middle, last_name,
-      corpus_author_id, ai2_id, pa_inserted, pa_updated,
-      cluster_block_key, model_version, clusterer
+       end orcid,
+       first_name, middle
 from source_rows
 order by orcid nulls last,
          first_name, middle, corpus_paper_id, position
@@ -92,7 +106,7 @@ order by orcid nulls last,
 
 
 def _canonical_source_orcid(value: Any) -> str | None:
-    """Normalize source ORCIDs with a cheap path for the warehouse's canonical shape."""
+    """Normalize source ORCIDs with a cheap path for the warehouse shape."""
 
     if value is None:
         return None
@@ -118,13 +132,11 @@ def prefix_pairs_for_names(
 
     if not first_name or not second_name or first_name[0] != second_name[0]:
         return set()
-    first_prefixes = {first_name[:k] for k in k_values}
-    second_prefixes = {second_name[:k] for k in k_values}
     pairs: set[tuple[str, str]] = set()
-    for first_prefix in first_prefixes:
-        for second_prefix in second_prefixes:
+    for first_prefix in {first_name[:k] for k in k_values}:
+        for second_prefix in {second_name[:k] for k in k_values}:
             left, right = canonical_prefix_pair(first_prefix, second_prefix)
-            if left != right:
+            if left != right and not same_prefix_tokens(left, right):
                 pairs.add((left, right))
     return pairs
 
@@ -135,8 +147,9 @@ def _merge_prefix_counts(
     *,
     min_orcid_count: int,
     min_alias_count: int,
-) -> tuple[dict[str, dict[str, int]], dict[str, int], str]:
-    """Threshold and merge ORCID/alias counts without a duplicate merged mapping."""
+    max_pair_keys: int | None,
+) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
+    """Threshold and merge ORCID/alias counts under one live pair bound."""
 
     canonical_name_tuples: set[tuple[str, str]] = set()
     for pair in name_tuples:
@@ -147,48 +160,47 @@ def _merge_prefix_counts(
         ):
             raise ValueError("name_tuples must contain pairs of nonempty canonical strings")
         canonical_name_tuples.add(canonical_prefix_pair(*pair))
-    sorted_name_tuples = sorted(canonical_name_tuples)
-    del canonical_name_tuples
-    selected_name_tuple_count = len(sorted_name_tuples)
-    name_tuples_digest = hashlib.sha256(b"s2and-orcid-prefix-count-name-tuples-v1\0")
-    name_tuples_digest.update(selected_name_tuple_count.to_bytes(8, "little"))
+
     alias_counts: Counter[tuple[str, str]] = Counter()
-    for first_name, second_name in sorted_name_tuples:
-        for value in (first_name, second_name):
-            encoded = value.encode("utf-8")
-            name_tuples_digest.update(len(encoded).to_bytes(8, "little"))
-            name_tuples_digest.update(encoded)
-        pairs = prefix_pairs_for_names(first_name, second_name)
-        alias_counts.update(pair for pair in pairs if not same_prefix_tokens(*pair))
-    del sorted_name_tuples
+    for first_name, second_name in sorted(canonical_name_tuples):
+        alias_counts.update(prefix_pairs_for_names(first_name, second_name))
+        if max_pair_keys is not None and len(alias_counts) > max_pair_keys:
+            raise ValueError(f"alias prefix pairs exceeded guardrail max_pair_keys={max_pair_keys}")
 
     nested: dict[str, dict[str, int]] = {}
+    orcid_pair_keys_after_threshold = 0
     for (left, right), count in sorted(orcid_counts.items()):
         if count >= min_orcid_count:
             nested.setdefault(left, {})[right] = int(count)
+            orcid_pair_keys_after_threshold += 1
     for (left, right), count in sorted(alias_counts.items()):
         if count >= min_alias_count:
             nested.setdefault(left, {}).setdefault(right, int(count))
     output_pair_keys = sum(len(counts) for counts in nested.values())
-    metrics = {
+    if max_pair_keys is not None and output_pair_keys > max_pair_keys:
+        raise ValueError(f"published prefix pairs exceeded guardrail max_pair_keys={max_pair_keys}")
+    return nested, {
         "orcid_pair_keys_before_threshold": len(orcid_counts),
+        "orcid_pair_keys_after_threshold": orcid_pair_keys_after_threshold,
         "alias_pair_keys_before_threshold": len(alias_counts),
-        "selected_name_tuple_pairs": selected_name_tuple_count,
+        "selected_name_tuple_pairs": len(canonical_name_tuples),
         "output_pair_keys": output_pair_keys,
         "output_outer_keys": len(nested),
     }
-    return nested, metrics, name_tuples_digest.hexdigest()
 
 
 def build_prefix_counts_from_sorted_rows(
     rows: Iterable[Mapping[str, Any]],
     name_tuples: Iterable[tuple[str, str]],
     *,
-    min_orcid_count: int = 10,
-    min_alias_count: int = 2,
-    max_names_per_orcid: int = 100,
+    min_orcid_count: int = MIN_ORCID_COUNT,
+    min_alias_count: int = MIN_ALIAS_COUNT,
+    max_names_per_orcid: int = FIXTURE_MAX_NAMES_PER_ORCID,
+    max_source_rows: int | None = None,
+    max_pair_keys: int | None = None,
+    progress_callback: Callable[[dict[str, int]], None] | None = None,
 ) -> tuple[dict[str, dict[str, int]], dict[str, int], str]:
-    """Stream sorted source rows one ORCID at a time and hash the selected content."""
+    """Stream sorted rows one ORCID at a time under explicit expansion bounds."""
 
     if max_names_per_orcid < 2:
         raise ValueError("max_names_per_orcid must be at least 2")
@@ -208,28 +220,36 @@ def build_prefix_counts_from_sorted_rows(
         unique_name_count = len(current_names)
         metrics["orcid_groups"] += 1
         metrics["unique_orcid_names"] += unique_name_count
-        metrics["max_unique_names_per_orcid"] = max(
-            metrics["max_unique_names_per_orcid"],
-            unique_name_count,
-        )
+        metrics["max_unique_names_per_orcid"] = max(metrics["max_unique_names_per_orcid"], unique_name_count)
         sorted_names = sorted(current_names)
-        digest_group = bytearray()
-        orcid_bytes = current_orcid.encode("utf-8")
-        digest_group.extend(len(orcid_bytes).to_bytes(8, "little"))
-        digest_group.extend(orcid_bytes)
-        digest_group.extend(unique_name_count.to_bytes(8, "little"))
+        orcid_bytes = current_orcid.encode()
+        source_digest.update(len(orcid_bytes).to_bytes(8, "little"))
+        source_digest.update(orcid_bytes)
+        source_digest.update(unique_name_count.to_bytes(8, "little"))
         for name in sorted_names:
-            name_bytes = name.encode("utf-8")
-            digest_group.extend(len(name_bytes).to_bytes(8, "little"))
-            digest_group.extend(name_bytes)
-        source_digest.update(digest_group)
+            name_bytes = name.encode()
+            source_digest.update(len(name_bytes).to_bytes(8, "little"))
+            source_digest.update(name_bytes)
         metrics["selected_canonical_rows"] += unique_name_count
         for first_name, second_name in combinations(sorted_names, 2):
-            pairs = prefix_pairs_for_names(first_name, second_name)
-            orcid_counts.update(pair for pair in pairs if not same_prefix_tokens(*pair))
+            orcid_counts.update(prefix_pairs_for_names(first_name, second_name))
+        if max_pair_keys is not None and len(orcid_counts) > max_pair_keys:
+            raise ValueError(f"ORCID prefix pairs exceeded guardrail max_pair_keys={max_pair_keys}")
 
     for row in rows:
         metrics["source_rows"] += 1
+        if max_source_rows is not None and metrics["source_rows"] > max_source_rows:
+            raise ValueError(f"source rows exceeded guardrail max_source_rows={max_source_rows}")
+        if progress_callback is not None and metrics["source_rows"] % PROGRESS_EVERY == 0:
+            progress_callback(
+                {
+                    "source_rows": metrics["source_rows"],
+                    "accepted_rows": metrics["accepted_rows"],
+                    "orcid_groups_completed": metrics["orcid_groups"],
+                    "orcid_pair_keys": len(orcid_counts),
+                }
+            )
+
         raw_orcid = row.get("raw_orcid", row.get("orcid"))
         source_orcid = row.get("orcid")
         raw_first_value = row.get("first_name")
@@ -250,13 +270,14 @@ def build_prefix_counts_from_sorted_rows(
         if previous_orcid is not None and orcid < previous_orcid:
             raise ValueError("ORCID source rows must be sorted by canonical orcid")
         previous_orcid = orcid
-        raw_name_key = (raw_first, raw_middle)
-        normalized_first = canonical_first_cache.get(raw_name_key)
+
+        name_key = (raw_first, raw_middle)
+        normalized_first = canonical_first_cache.get(name_key)
         if normalized_first is None:
             normalized_first = canonicalize_name_parts(raw_first, raw_middle, None).first
             if len(canonical_first_cache) >= 100_000:
                 canonical_first_cache.clear()
-            canonical_first_cache[raw_name_key] = normalized_first
+            canonical_first_cache[name_key] = normalized_first
         if not normalized_first:
             metrics["rejected_empty_canonical_first"] += 1
             continue
@@ -267,133 +288,121 @@ def build_prefix_counts_from_sorted_rows(
             current_names.clear()
             current_orcid = orcid
         if normalized_first not in current_names and len(current_names) >= max_names_per_orcid:
-            raise ValueError(
-                f"ORCID {orcid!r} has more than max_names_per_orcid={max_names_per_orcid} unique names; "
-                "raise the explicit bound only after reviewing the source group"
-            )
+            raise ValueError(f"ORCID {orcid!r} has more than max_names_per_orcid={max_names_per_orcid} unique names")
         current_names.add(normalized_first)
         metrics["accepted_rows"] += 1
     flush_group()
-    canonical_first_cache.clear()
 
-    counts, count_metrics, name_tuples_digest = _merge_prefix_counts(
+    counts, count_metrics = _merge_prefix_counts(
         orcid_counts,
         name_tuples,
         min_orcid_count=min_orcid_count,
         min_alias_count=min_alias_count,
+        max_pair_keys=max_pair_keys,
     )
     metrics["max_names_per_orcid_limit"] = max_names_per_orcid
-    metrics["rejected_empty_group_names"] = 0
-    source_digest.update(b"\0canonical-name-tuples-sha256\0")
-    source_digest.update(bytes.fromhex(name_tuples_digest))
     return counts, {**dict(metrics), **count_metrics}, source_digest.hexdigest()
 
 
-def _artifact_payloads(
+def _publication_payloads(
     counts: Mapping[str, Mapping[str, int]],
-) -> tuple[bytes, bytes, str]:
-    """Encode and validate the runtime data/metadata pair in memory."""
+    *,
+    source_kind: str,
+    source_snapshot_id: str,
+    source_query_sha256: str,
+    selected_rows_sha256: str,
+    name_tuples_sha256: str,
+    generator_parameters: Mapping[str, object],
+    metrics: Mapping[str, int],
+) -> dict[str, bytes]:
+    """Serialize the only two files in the artifact."""
 
     validate_orcid_prefix_counts(counts, context="counts")
     data_payload = orjson.dumps(counts, option=orjson.OPT_SORT_KEYS)
     data_sha256 = hashlib.sha256(data_payload).hexdigest()
-    metadata = {
+    manifest = {
         "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
         "normalization_version": NORMALIZATION_VERSION,
         "pair_key_semantics": ORCID_PREFIX_PAIR_KEY_SEMANTICS,
+        "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
+        "source_kind": source_kind,
+        "source_snapshot_id": source_snapshot_id,
+        "source_query_sha256": source_query_sha256,
+        "selected_rows_sha256": selected_rows_sha256,
+        "name_tuples_sha256": name_tuples_sha256,
         "data_sha256": data_sha256,
+        "generator_parameters": dict(generator_parameters),
+        "metrics": dict(metrics),
     }
-    metadata_payload = json.dumps(metadata, sort_keys=True, indent=2).encode("utf-8")
-    return data_payload, metadata_payload, data_sha256
+    return {
+        ORCID_PREFIX_DATA_FILENAME: data_payload,
+        ORCID_PREFIX_MANIFEST_FILENAME: (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode(),
+    }
 
 
-def _preflight_publication(
-    output_dir: Path,
-    filenames: Iterable[str],
-    *,
-    overwrite: bool,
-) -> dict[str, Path]:
-    """Reject every no-overwrite collision before producer work begins."""
-
-    if output_dir.exists() and not output_dir.is_dir():
-        raise NotADirectoryError(f"ORCID prefix-count output path is not a directory: {output_dir}")
-    paths = {filename: output_dir / filename for filename in filenames}
-    existing_paths = [path for path in paths.values() if path.exists()]
-    if existing_paths and not overwrite:
-        raise FileExistsError(
-            "ORCID prefix-count publication already exists; pass --overwrite to replace it: "
-            + ", ".join(str(path) for path in existing_paths)
-        )
-    return paths
-
-
-def _publish_staged_payloads(
+def _publish(
     payloads: Mapping[str, bytes],
     *,
     output_dir: Path,
-) -> dict[str, Path]:
-    """Stage complete payloads and publish them in mapping order."""
+) -> LoadedOrcidPrefixCounts:
+    """Validate once in a sibling directory, then atomically publish it."""
 
-    paths = {filename: output_dir / filename for filename in payloads}
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".orcid-prefix-publication.", dir=output_dir) as staging_text:
-        staging_dir = Path(staging_text)
-        staged_paths: dict[str, Path] = {}
+    output_parent = output_dir.parent
+    output_parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_parent))
+    lock_path = output_parent / f".{output_dir.name}.publish.lock"
+    try:
         for filename, payload in payloads.items():
-            staged_path = staging_dir / filename
-            staged_path.write_bytes(payload)
-            staged_paths[filename] = staged_path
-
-        for filename in payloads:
-            staged_paths[filename].replace(paths[filename])
-    return paths
+            with (staging_dir / filename).open("wb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+        fsync_directory(staging_dir)
+        loaded = load_canonical_orcid_prefix_counts(staging_dir)
+        with exclusive_file_lock(lock_path):
+            if output_dir.exists():
+                raise FileExistsError(f"publication target already exists: {output_dir}")
+            staging_dir.rename(output_dir)
+        fsync_directory(output_parent)
+        return loaded
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
 
 
 def write_publication(
     counts: Mapping[str, Mapping[str, int]],
     *,
     output_dir: Path,
+    source_kind: str,
     source_snapshot_id: str,
-    source_digest: str,
+    source_query_sha256: str,
+    selected_rows_sha256: str,
+    name_tuples: NameTupleArtifact,
     generator_parameters: Mapping[str, object],
     metrics: Mapping[str, int],
-) -> tuple[Path, Path, Path, str, dict[str, object]]:
-    """Stage and publish the runtime pair and producer report together."""
+) -> LoadedOrcidPrefixCounts:
+    """Serialize, validate, and atomically publish one fresh artifact."""
 
-    data_payload, metadata_payload, data_sha256 = _artifact_payloads(counts)
-    report: dict[str, object] = {
-        "schema_version": GENERATION_REPORT_SCHEMA_VERSION,
-        "generator": "scripts/production/counts/generate_orcid_name_prefix_counts.py",
-        "source_snapshot_id": source_snapshot_id,
-        "source_digest": source_digest,
-        "data_sha256": data_sha256,
-        "generator_parameters": dict(generator_parameters),
-        "metrics": dict(metrics),
-    }
-    paths = _publish_staged_payloads(
-        {
-            ORCID_PREFIX_DATA_FILENAME: data_payload,
-            GENERATION_REPORT_FILENAME: json.dumps(report, sort_keys=True, indent=2).encode("utf-8"),
-            # Metadata is the runtime commit marker, so publish it last.
-            ORCID_PREFIX_METADATA_FILENAME: metadata_payload,
-        },
+    return _publish(
+        _publication_payloads(
+            counts,
+            source_kind=source_kind,
+            source_snapshot_id=source_snapshot_id,
+            source_query_sha256=source_query_sha256,
+            selected_rows_sha256=selected_rows_sha256,
+            name_tuples_sha256=name_tuples.data_sha256,
+            generator_parameters=generator_parameters,
+            metrics=metrics,
+        ),
         output_dir=output_dir,
-    )
-    return (
-        paths[ORCID_PREFIX_DATA_FILENAME],
-        paths[ORCID_PREFIX_METADATA_FILENAME],
-        paths[GENERATION_REPORT_FILENAME],
-        data_sha256,
-        report,
     )
 
 
 def _load_fixture_rows(path: Path, limit: int | None) -> list[Mapping[str, Any]]:
     rows = json.loads(path.read_bytes())
-    if not isinstance(rows, list):
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("--input-json must contain a JSON list of row objects")
-    if not all(isinstance(row, dict) for row in rows):
-        raise ValueError("--input-json rows must be JSON objects")
     rows.sort(
         key=lambda row: (
             _canonical_source_orcid(row.get("orcid")) or "",
@@ -404,18 +413,16 @@ def _load_fixture_rows(path: Path, limit: int | None) -> list[Mapping[str, Any]]
     return rows[:limit]
 
 
-def _warehouse_query(limit: int | None) -> str:
-    return QUERY if limit is None else f"{QUERY}\nlimit {int(limit)}"
+def _warehouse_query(max_source_rows: int) -> str:
+    return f"{QUERY.rstrip()}\nlimit {max_source_rows + 1}\n"
 
 
-def _load_warehouse_rows(limit: int | None) -> Iterable[Mapping[str, Any]]:
+def _load_warehouse_rows(max_source_rows: int) -> Iterable[Mapping[str, Any]]:
     try:
         from pys2.pys2 import _evaluate_redshift_query  # type: ignore
     except ImportError as error:
         raise RuntimeError("Warehouse generation requires internal package pys2") from error
-    query = _warehouse_query(limit)
-    print(json.dumps({"warehouse_query": query, "limit": limit}, indent=2))
-    dataframe = _evaluate_redshift_query(query)
+    dataframe = _evaluate_redshift_query(_warehouse_query(max_source_rows))
     columns = {str(column): index for index, column in enumerate(dataframe.columns)}
     required_columns = ("raw_orcid", "orcid", "first_name", "middle")
     missing_columns = [column for column in required_columns if column not in columns]
@@ -431,95 +438,144 @@ def _load_warehouse_rows(limit: int | None) -> Iterable[Mapping[str, Any]]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    source = parser.add_mutually_exclusive_group(required=False)
+    source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--input-json", type=Path, help="Bounded local row fixture")
-    source.add_argument("--run-full", action="store_true", help="Authorize the internal warehouse query")
-    parser.add_argument("--limit", type=int, help="Maximum source rows")
-    parser.add_argument("--dry-run", action="store_true", help="Print the intended source/query without executing")
+    source.add_argument("--run-full", action="store_true", help="Authorize warehouse access")
+    parser.add_argument("--limit", type=int, help="Fixture-only row limit")
+    parser.add_argument("--guardrails-json", type=Path, help="Reviewed full-run bounds")
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-snapshot-id", required=True)
-    parser.add_argument(
-        "--max-names-per-orcid",
-        type=int,
-        default=100,
-        help="Hard bound applied before quadratic within-ORCID name pairing",
-    )
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--name-tuples-path", type=Path, required=True)
+    parser.add_argument("--expected-name-tuples-sha256", required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the guarded generator CLI."""
+    """Run the guarded producer."""
 
     args = _parser().parse_args(argv)
-    if args.limit is not None and args.limit <= 0:
-        raise ValueError("--limit must be positive")
-    if args.max_names_per_orcid < 2:
-        raise ValueError("--max-names-per-orcid must be at least 2")
-    source_snapshot_id = args.source_snapshot_id.strip()
-    if not source_snapshot_id:
+    snapshot_id = args.source_snapshot_id.strip()
+    if not snapshot_id:
         raise ValueError("source_snapshot_id must be a nonempty string")
-    if args.input_json is None and not args.run_full:
-        raise ValueError("Choose --input-json for a fixture or explicitly authorize warehouse access with --run-full")
-    source_context = {
-        "input_json": None if args.input_json is None else str(args.input_json),
-        "run_full": bool(args.run_full),
-        "limit": args.limit,
-        "output_dir": str(args.output_dir),
-        "source_snapshot_id": source_snapshot_id,
-        "max_names_per_orcid": args.max_names_per_orcid,
+    limit = require_positive(args.limit, option="--limit")
+    if args.run_full and limit is not None:
+        raise ValueError("--limit is fixture-only; it does not bound warehouse scan cost")
+    output_dir = validate_output_container(args.output_dir, publication_path=args.output_dir)
+    fixture = None if args.run_full else validate_fixture_path(args.input_json)
+    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS) if args.run_full else None
+    if guardrails is not None:
+        if guardrails["min_source_rows"] > guardrails["max_source_rows"]:
+            raise ValueError("guardrail min_source_rows must not exceed max_source_rows")
+        if guardrails["min_orcid_pair_keys"] > guardrails["max_pair_keys"]:
+            raise ValueError("guardrail min_orcid_pair_keys must not exceed max_pair_keys")
+        if guardrails["max_names_per_orcid"] < 2:
+            raise ValueError("guardrail max_names_per_orcid must be at least 2")
+
+    expected_name_tuples_sha256 = args.expected_name_tuples_sha256.strip()
+    if len(expected_name_tuples_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_name_tuples_sha256
+    ):
+        raise ValueError("--expected-name-tuples-sha256 must be a lowercase SHA-256 digest")
+    name_tuples = load_name_tuple_artifact(args.name_tuples_path.resolve())
+    if name_tuples.data_sha256 != expected_name_tuples_sha256:
+        raise ValueError(
+            "name-tuple artifact SHA-256 does not match --expected-name-tuples-sha256: "
+            f"actual={name_tuples.data_sha256} expected={expected_name_tuples_sha256}"
+        )
+
+    if guardrails is not None:
+        query = _warehouse_query(guardrails["max_source_rows"])
+        query_sha256 = hashlib.sha256(query.encode()).hexdigest()
+        source_kind = "redshift:content_ext.paper_authors_orcids"
+        max_names_per_orcid = guardrails["max_names_per_orcid"]
+    else:
+        assert fixture is not None
+        fixture_sha256 = hashlib.sha256(fixture.read_bytes()).hexdigest()
+        query = f"fixture_file_sha256={fixture_sha256}\nlimit={limit}"
+        query_sha256 = fixture_sha256
+        source_kind = f"fixture:{fixture}"
+        max_names_per_orcid = FIXTURE_MAX_NAMES_PER_ORCID
+    plan = {
+        "source_kind": source_kind,
+        "source_snapshot_id": snapshot_id,
+        "output_dir": str(output_dir),
+        "query": query,
+        "query_sha256": query_sha256,
+        "guardrails": guardrails,
+        "limit": limit,
+        "name_tuples_sha256": name_tuples.data_sha256,
+        "dry_run": bool(args.dry_run),
     }
-    print(json.dumps(source_context, indent=2))
+    print(json.dumps({"plan": plan}, indent=2, sort_keys=True))
     if args.dry_run:
-        if args.run_full:
-            print(_warehouse_query(args.limit))
         return 0
 
-    _preflight_publication(
-        args.output_dir,
-        (
-            ORCID_PREFIX_DATA_FILENAME,
-            ORCID_PREFIX_METADATA_FILENAME,
-            GENERATION_REPORT_FILENAME,
-        ),
-        overwrite=bool(args.overwrite),
-    )
-    if args.input_json is not None:
-        rows = _load_fixture_rows(args.input_json, args.limit)
+    if guardrails is not None:
+        rows = _load_warehouse_rows(guardrails["max_source_rows"])
     else:
-        rows = _load_warehouse_rows(args.limit)
-    name_tuples = _load_name_tuples_from_file("s2and_name_tuples_canonical.txt")
-    counts, metrics, source_digest = build_prefix_counts_from_sorted_rows(
+        assert fixture is not None
+        rows = _load_fixture_rows(fixture, limit)
+
+    def report_progress(metrics: dict[str, int]) -> None:
+        print(json.dumps({"event": "orcid_prefix_progress", **metrics}, sort_keys=True))
+
+    counts, metrics, selected_rows_sha256 = build_prefix_counts_from_sorted_rows(
         rows,
-        name_tuples,
-        min_orcid_count=MIN_ORCID_COUNT,
-        min_alias_count=MIN_ALIAS_COUNT,
-        max_names_per_orcid=args.max_names_per_orcid,
+        name_tuples.pairs,
+        max_names_per_orcid=max_names_per_orcid,
+        max_source_rows=None if guardrails is None else guardrails["max_source_rows"],
+        max_pair_keys=None if guardrails is None else guardrails["max_pair_keys"],
+        progress_callback=report_progress,
     )
-    generator_parameters = {
-        "k_values": list(K_VALUES),
-        "limit": args.limit,
-        "max_names_per_orcid": args.max_names_per_orcid,
-        "min_alias_count": MIN_ALIAS_COUNT,
-        "min_orcid_count": MIN_ORCID_COUNT,
-    }
-    data_path, metadata_path, generation_report_path, data_sha256, generation_report = write_publication(
+    if int(metrics.get("source_rows", 0)) == 0:
+        raise RuntimeError("ORCID prefix-count generation selected zero source rows")
+    if int(metrics.get("accepted_rows", 0)) == 0 or int(metrics.get("orcid_groups", 0)) == 0:
+        raise RuntimeError("ORCID prefix-count generation selected no usable ORCID/name groups")
+    if int(metrics.get("output_pair_keys", 0)) == 0:
+        raise RuntimeError("ORCID prefix-count generation produced zero output pair keys")
+    if guardrails is not None:
+        source_rows = int(metrics["source_rows"])
+        orcid_pair_keys = int(metrics["orcid_pair_keys_after_threshold"])
+        if source_rows < guardrails["min_source_rows"]:
+            raise RuntimeError(
+                f"source rows {source_rows} are below guardrail min_source_rows={guardrails['min_source_rows']}"
+            )
+        if orcid_pair_keys < guardrails["min_orcid_pair_keys"]:
+            raise RuntimeError(
+                "ORCID-derived pair keys "
+                f"{orcid_pair_keys} are below guardrail min_orcid_pair_keys={guardrails['min_orcid_pair_keys']}"
+            )
+
+    loaded = write_publication(
         counts,
-        output_dir=args.output_dir,
-        source_snapshot_id=source_snapshot_id,
-        source_digest=source_digest,
-        generator_parameters=generator_parameters,
+        output_dir=output_dir,
+        source_kind=source_kind,
+        source_snapshot_id=snapshot_id,
+        source_query_sha256=query_sha256,
+        selected_rows_sha256=selected_rows_sha256,
+        name_tuples=name_tuples,
+        generator_parameters={
+            "k_values": list(K_VALUES),
+            "min_orcid_count": MIN_ORCID_COUNT,
+            "min_alias_count": MIN_ALIAS_COUNT,
+            "limit": limit,
+            "guardrails": guardrails,
+            "max_names_per_orcid": max_names_per_orcid,
+        },
         metrics=metrics,
     )
     print(
         json.dumps(
             {
-                "data": str(data_path),
-                "metadata": str(metadata_path),
-                "generation_report": str(generation_report_path),
-                **generation_report,
+                "data": str(output_dir / ORCID_PREFIX_DATA_FILENAME),
+                "manifest": str(output_dir / ORCID_PREFIX_MANIFEST_FILENAME),
+                "data_sha256": loaded.data_sha256,
+                "manifest_sha256": loaded.manifest_sha256,
+                "metrics": metrics,
             },
             indent=2,
+            sort_keys=True,
         )
     )
     return 0

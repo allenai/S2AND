@@ -735,6 +735,17 @@ def test_fixed_pairs_does_not_mutate_source_dataframes():
     assert set(all_labels).issubset({0, 1})
 
 
+def test_fixed_pairs_rejects_unordered_pair_overlap_across_splits():
+    dataset = ANDData.__new__(ANDData)
+    columns = ["signature_id_1", "signature_id_2", "label"]
+    dataset.train_pairs = pd.DataFrame([("a", "b", 1)], columns=columns)
+    dataset.val_pairs = pd.DataFrame([("b", "a", 1)], columns=columns)
+    dataset.test_pairs = pd.DataFrame([("c", "d", 0)], columns=columns)
+
+    with pytest.raises(ValueError, match="overlap by unordered signature pair"):
+        dataset.fixed_pairs()
+
+
 @pytest.mark.parametrize("invalid_split", ["train", "val", "test"])
 def test_fixed_pairs_rejects_unknown_labels(invalid_split):
     pair_frames = {

@@ -53,13 +53,16 @@ def _validate_resolved_arrow_path_keys(
     return paths
 
 
-def test_load_target_accepts_current_and_rejects_removed_promoted_features(tmp_path) -> None:
+def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path) -> None:
     target_path = tmp_path / "target.json"
+    feature_columns = list(promoted_train.promoted_linker_feature_columns())
     target_path.write_text(
         json.dumps(
             {
-                "feature_count": 3,
-                "features": ["min_distance", "pw_max_affiliation_overlap", "strong_positive_anchor_score"],
+                "feature_count": len(feature_columns),
+                "features": feature_columns,
+                "params": {"n_estimators": 10},
+                "metrics": {},
             }
         ),
         encoding="utf-8",
@@ -67,19 +70,114 @@ def test_load_target_accepts_current_and_rejects_removed_promoted_features(tmp_p
 
     target = _load_target(target_path)
 
-    assert target["features"] == ["min_distance", "pw_max_affiliation_overlap", "strong_positive_anchor_score"]
+    assert target["features"] == feature_columns
+
+    reordered_features = feature_columns.copy()
+    reordered_features[0], reordered_features[1] = reordered_features[1], reordered_features[0]
+    target_path.write_text(
+        json.dumps(
+            {
+                "feature_count": len(reordered_features),
+                "features": reordered_features,
+                "params": {"n_estimators": 10},
+                "metrics": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="canonical order"):
+        _load_target(target_path)
+
+
+def test_load_target_rejects_removed_promoted_features(tmp_path: Path) -> None:
+    target_path = tmp_path / "target.json"
 
     target_path.write_text(
         json.dumps(
             {
                 "feature_count": 1,
                 "features": ["pw_max_email_prefix_equal"],
+                "params": {"n_estimators": 10},
+                "metrics": {},
             }
         ),
         encoding="utf-8",
     )
 
     with pytest.raises(ValueError, match="unknown features"):
+        _load_target(target_path)
+
+
+@pytest.mark.parametrize("params", [{}, {"n_estimators": True}, {"n_estimators": 0}, {"n_estimators": 1.5}])
+def test_load_target_rejects_invalid_params(tmp_path: Path, params: dict[str, Any]) -> None:
+    feature_columns = list(promoted_train.promoted_linker_feature_columns())
+    target_path = tmp_path / "target.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "feature_count": len(feature_columns),
+                "features": feature_columns,
+                "params": params,
+                "metrics": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="params"):
+        _load_target(target_path)
+
+
+def test_load_target_rejects_nonfinite_metrics(tmp_path: Path) -> None:
+    feature_columns = list(promoted_train.promoted_linker_feature_columns())
+    target_path = tmp_path / "target.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "feature_count": len(feature_columns),
+                "features": feature_columns,
+                "params": {"n_estimators": 10},
+                "metrics": {"score": float("nan")},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must be finite"):
+        _load_target(target_path)
+
+
+@pytest.mark.parametrize(
+    ("metrics", "message"),
+    [
+        ({"score": 1.0}, "unknown metric keys"),
+        ({"stratified_test_accuracy": None}, "must be numeric"),
+        ({"stratified_test_accuracy": True}, "must be numeric"),
+        ({"stratified_test_errors": 1.5}, "nonnegative integer"),
+        ({"weighted_average_error_weights": {"wrong": 1.0}}, "must equal"),
+    ],
+)
+def test_load_target_rejects_invalid_metric_schema(
+    tmp_path: Path,
+    metrics: dict[str, Any],
+    message: str,
+) -> None:
+    feature_columns = list(promoted_train.promoted_linker_feature_columns())
+    target_path = tmp_path / "target.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "feature_count": len(feature_columns),
+                "features": feature_columns,
+                "params": {"n_estimators": 10},
+                "metrics": metrics,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
         _load_target(target_path)
 
 

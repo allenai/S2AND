@@ -16,6 +16,7 @@ from lightgbm import LGBMClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
+from s2and.incremental_linking.contracts import DEFAULT_RETRIEVAL_TOP_K
 from s2and.incremental_linking.features import PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS
 from s2and.incremental_linking.gate_buckets import first_name_bucket_from_token_view, normalize_bucket_letters
 from s2and.incremental_linking.linker_pairwise import promoted_pairwise_aggregate_columns
@@ -59,6 +60,16 @@ class ClassicStratifiedEvalScores:
     probabilities: np.ndarray
     choices: pd.DataFrame
     assignments: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class FittedClassicRun:
+    """Exact booster and gate evaluated by one classic pipeline run."""
+
+    summary: dict[str, Any]
+    model: LGBMClassifier
+    gate_config: dict[str, Any]
+    retrieval_top_k: int
 
 
 _GATE_BUCKETS = (
@@ -434,10 +445,18 @@ def _promoted_stratified_gate_spec(spec: dict[str, Any]) -> dict[str, Any] | Non
         ]
     if isinstance(calibration_splits, str) or not isinstance(calibration_splits, Sequence):
         raise ValueError("classic.promoted_stratified_gate.calibration_splits must be a sequence of split names")
-    out["calibration_splits"] = [str(split) for split in calibration_splits]
-    if not out["calibration_splits"]:
-        raise ValueError("classic.promoted_stratified_gate.calibration_splits must be non-empty")
-    out["test_split"] = str(out.get("test_split", split_spec.get("test_split", "test")))
+    resolved_calibration_splits = [str(split).strip() for split in calibration_splits]
+    if not resolved_calibration_splits or any(not split for split in resolved_calibration_splits):
+        raise ValueError("classic.promoted_stratified_gate.calibration_splits must contain nonempty names")
+    if len(set(resolved_calibration_splits)) != len(resolved_calibration_splits):
+        raise ValueError("classic.promoted_stratified_gate.calibration_splits must not contain duplicates")
+    test_split = str(out.get("test_split", split_spec.get("test_split", "test"))).strip()
+    if not test_split:
+        raise ValueError("classic.promoted_stratified_gate.test_split must be nonempty")
+    if test_split in resolved_calibration_splits:
+        raise ValueError("classic.promoted_stratified_gate calibration_splits must not include test_split")
+    out["calibration_splits"] = resolved_calibration_splits
+    out["test_split"] = test_split
     return out
 
 
@@ -1244,6 +1263,54 @@ def _validate_unique_stratified_candidate_rows(rows: pd.DataFrame) -> None:
     )
 
 
+def _validate_stratified_base_identity_split_disjointness(assignments: pd.DataFrame) -> None:
+    """Fail if one base identity is assigned to more than one split.
+
+    Query group ids are masked views (``full``, ``initial_only``, ...) of one
+    base query; splitting views of the same ``base_group_id`` across splits
+    leaks the same author between calibration and test. Split assignment must
+    group by ``base_group_id``, mirroring the identity notion the classic
+    train/holdout filter enforces.
+    """
+
+    base_group_ids = assignments["base_group_id"]
+    invalid_base_group_ids = base_group_ids.isna() | base_group_ids.astype(str).str.strip().eq("")
+    if bool(invalid_base_group_ids.any()):
+        raise ValueError(
+            "Stratified split assignments require a nonempty base_group_id for every row: "
+            f"invalid_rows={int(invalid_base_group_ids.sum())}"
+        )
+    split_values = assignments["split"]
+    invalid_splits = split_values.isna() | split_values.astype(str).str.strip().eq("")
+    if bool(invalid_splits.any()):
+        raise ValueError(
+            "Stratified split assignments require a nonempty split for every row: "
+            f"invalid_rows={int(invalid_splits.sum())}"
+        )
+
+    splits_per_base_identity = assignments.groupby("base_group_id", dropna=False)["split"].nunique()
+    leaking_base_identities = splits_per_base_identity[splits_per_base_identity > 1]
+    if leaking_base_identities.empty:
+        return
+
+    raise ValueError(
+        "Stratified split assignments place base_group_id values in multiple splits; "
+        "masked views of one base query would leak between calibration and test. "
+        "Regenerate the assignments with splits assigned per base_group_id: "
+        f"count={len(leaking_base_identities)}, sample={leaking_base_identities.head(5).to_dict()}"
+    )
+
+
+def _validate_stratified_split_assignments(assignments: pd.DataFrame) -> None:
+    """Validate the identity columns needed for leakage-safe split joins."""
+
+    required = {"query_group_id", "source_key", "split", "base_group_id"}
+    missing = sorted(required - set(assignments.columns))
+    if missing:
+        raise ValueError(f"Stratified split assignments missing required columns: {missing}")
+    _validate_stratified_base_identity_split_disjointness(assignments)
+
+
 def _active_stratified_label_metadata(rows: pd.DataFrame) -> pd.DataFrame:
     """Return query/source metadata recomputed from active candidate labels."""
 
@@ -1345,10 +1412,7 @@ def _load_classic_stratified_eval_rows(
     """Load source rows selected by the promoted query-level stratified split."""
 
     assignments = _read_csv(_resolve_path(bundle, str(split_spec["assignments_path"])))
-    required_assignment_columns = {"query_group_id", "source_key", "split"}
-    missing_assignment_columns = sorted(required_assignment_columns - set(assignments.columns))
-    if missing_assignment_columns:
-        raise ValueError(f"Stratified split assignments missing required columns: {missing_assignment_columns}")
+    _validate_stratified_split_assignments(assignments)
     source_frames: list[pd.DataFrame] = []
     for source_spec in _classic_stratified_eval_source_specs(spec):
         rows = _read_csv(_resolve_path(bundle, source_spec["path"]), compression="gzip")
@@ -1365,10 +1429,13 @@ def _load_classic_stratified_eval_rows(
         )
         source_frames.append(rows)
     all_rows = _drop_shadowed_calibration_source_rows(pd.concat(source_frames, ignore_index=True))
+    if "base_group_id" not in all_rows.columns:
+        raise ValueError("Stratified eval source rows must contain base_group_id")
     assignment_columns = [
         "query_group_id",
         "source_key",
         "split",
+        "base_group_id",
         "stratum_key",
         "source_stratum",
         "has_positive_candidate",
@@ -1385,6 +1452,28 @@ def _load_classic_stratified_eval_rows(
         how="inner",
         suffixes=("", "_split"),
     )
+    assignment_base_column = "base_group_id_split"
+    if assignment_base_column not in rows.columns:
+        raise ValueError("Stratified eval join did not retain assignment base_group_id")
+    source_base_ids = rows["base_group_id"]
+    assignment_base_ids = rows[assignment_base_column]
+    invalid_source_base_ids = source_base_ids.isna() | source_base_ids.astype(str).str.strip().eq("")
+    if bool(invalid_source_base_ids.any()):
+        raise ValueError(
+            "Stratified eval source rows require nonempty base_group_id values: "
+            f"invalid_rows={int(invalid_source_base_ids.sum())}"
+        )
+    mismatched_base_ids = source_base_ids.astype(str) != assignment_base_ids.astype(str)
+    if bool(mismatched_base_ids.any()):
+        sample = rows.loc[
+            mismatched_base_ids,
+            ["query_group_id", "source_key", "base_group_id", assignment_base_column],
+        ].head(5)
+        raise ValueError(
+            "Stratified split assignment base_group_id does not match source rows: "
+            f"mismatched_rows={int(mismatched_base_ids.sum())}, sample={sample.to_dict(orient='records')}"
+        )
+    rows = rows.drop(columns=[assignment_base_column])
     for column in selected_assignment_columns:
         if column in {"query_group_id", "source_key"}:
             continue
@@ -1710,12 +1799,15 @@ def run_classic(
     output_dir: Path,
     *,
     n_jobs: int = DEFAULT_CLASSIC_N_JOBS,
-) -> dict[str, Any]:
+) -> FittedClassicRun:
     """Fit, calibrate, and evaluate the official classic pipeline."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
     spec = bundle.models["classic"]
     feature_columns = tuple(spec["feature_columns"])
+    retrieval_top_k = int(spec.get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K))
+    if retrieval_top_k <= 0:
+        raise ValueError("classic.retrieval_top_k must be positive")
     monotone_constraints = _resolve_classic_monotone_constraints(spec, feature_columns)
     train_df = _read_csv(_resolve_path(bundle, spec["train_path"]), compression="gzip")
     train_df, unlabeled_singleton_filter_summary = _drop_unlabeled_singleton_orcid_rows(
@@ -1723,7 +1815,7 @@ def run_classic(
         context="classic_train",
     )
     train_df["retrieval_rank"] = pd.to_numeric(train_df["retrieval_rank"], errors="coerce")
-    train_df = train_df[train_df["retrieval_rank"] <= 25].copy()
+    train_df = train_df[train_df["retrieval_rank"] <= retrieval_top_k].copy()
     train_df["label"] = pd.to_numeric(train_df["label"], errors="coerce").fillna(0).astype(np.int8)
     holdout_query_group_ids, holdout_base_group_ids, holdout_sources = _read_classic_holdout_identity_sets(
         bundle,
@@ -1956,7 +2048,12 @@ def run_classic(
         selected_gate_tables_path.write_text(selected_gate_tables, encoding="utf-8")
         summary["selected_gate_tables_path"] = str(selected_gate_tables_path.relative_to(output_dir))
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    return summary
+    return FittedClassicRun(
+        summary=summary,
+        model=model,
+        gate_config=logistic_gate_config,
+        retrieval_top_k=retrieval_top_k,
+    )
 
 
 PROMOTED_PAIRWISE_COLUMNS = promoted_pairwise_aggregate_columns()

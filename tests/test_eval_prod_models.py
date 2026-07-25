@@ -323,6 +323,52 @@ def test_split_blocks_like_anddata_rejects_tiny_smoke_datasets_like_anddata(bloc
         eval_prod_models.split_blocks_like_anddata(blocks, random_seed=1)
 
 
+@pytest.mark.parametrize("seed", [42, 1111])
+def test_split_blocks_like_anddata_matches_anddata_split_blocks_helper(seed: int) -> None:
+    from s2and.data import ANDData
+
+    blocks = {
+        f"block {index}": [f"s{index}_{position}" for position in range((index * 7) % 13 + 1)] for index in range(40)
+    }
+    fake_anddata = SimpleNamespace(
+        num_clusters_for_block_size=1,
+        random_seed=seed,
+        train_ratio=0.8,
+        val_ratio=0.1,
+        test_ratio=0.1,
+    )
+
+    expected = ANDData.split_blocks_helper(cast(Any, fake_anddata), blocks)
+    actual = eval_prod_models.split_blocks_like_anddata(blocks, random_seed=seed)
+
+    assert actual == expected
+
+
+def _write_bundle_training_config(bundle_dir: Path, payload: Mapping[str, Any]) -> None:
+    reproducibility_dir = bundle_dir / "reproducibility"
+    reproducibility_dir.mkdir(parents=True, exist_ok=True)
+    (reproducibility_dir / "pairwise_training_config.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_bundle_data_random_seed_reads_recorded_seed(tmp_path: Path) -> None:
+    _write_bundle_training_config(tmp_path, {"data_random_seed": 1111})
+
+    assert eval_prod_models.bundle_data_random_seed(tmp_path) == 1111
+
+
+def test_bundle_data_random_seed_fails_closed_without_training_config(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="records no training split seed"):
+        eval_prod_models.bundle_data_random_seed(tmp_path)
+
+
+@pytest.mark.parametrize("bad_seed", [None, "1111", True, 1111.0])
+def test_bundle_data_random_seed_rejects_non_integer_seed(tmp_path: Path, bad_seed: Any) -> None:
+    _write_bundle_training_config(tmp_path, {"data_random_seed": bad_seed})
+
+    with pytest.raises(ValueError, match="integer data_random_seed"):
+        eval_prod_models.bundle_data_random_seed(tmp_path)
+
+
 def _read_minimal_incremental_signatures(signatures_path: Path) -> dict[str, Any]:
     import pyarrow as pa
 
@@ -619,6 +665,7 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
     )
     model_path = tmp_path / "explicit-model"
     model_path.mkdir()
+    _write_bundle_training_config(model_path, {"data_random_seed": 1111})
     monkeypatch.setattr(eval_prod_models.os.path, "exists", lambda _path: True)
     monkeypatch.setattr(
         sys,
@@ -647,7 +694,7 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
         "root": "arrow-root",
     }
     assert captured["kwargs"]["n_jobs"] == 1
-    assert captured["kwargs"]["random_seed"] == 42
+    assert captured["kwargs"]["random_seed"] == 1111
     assert captured["clusterer"].model_path == model_path
 
 
@@ -661,6 +708,10 @@ def test_eval_main_rejects_invalid_mode_combinations(monkeypatch: pytest.MonkeyP
         (["--train", "--specter2-model-path", "unused-model"], "cannot be combined with --train"),
         (["--dataset", "mini", "--use-arrow", "--train"], "cannot be combined with --train"),
         (["--dataset", "inventors_s2and", "--use-arrow"], "supports --dataset mini and --dataset full only"),
+        (
+            ["--dataset", "mini", "--specter2-model-path", "some-model", "--seed", "42"],
+            "--seed applies only to --train",
+        ),
     )
     for argv, message in cases:
         monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", *argv])

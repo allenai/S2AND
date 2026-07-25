@@ -73,7 +73,7 @@ s2and = [
   "arrow_schema_contract.json",
   "data/path_config.json",
   "data/first_k_letter_counts_from_orcid.json",
-  "data/first_k_letter_counts_from_orcid.meta.json",
+  "data/first_k_letter_counts_from_orcid.manifest.json",
   "data/s2and_name_tuples_canonical.txt",
   "data/s2and_name_tuples_canonical.txt.meta.json",
 ]

@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ def _resolve_path(project_root: str, maybe_relative_path: str) -> str:
 
 
 def _run_cluster_eval_arrow(
-    arrow_paths: dict[str, str],
+    arrow_paths: Mapping[str, str],
     clusterer: Any,
     cluster_eval_arrow_fn: Any,
     *,

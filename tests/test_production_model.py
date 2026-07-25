@@ -15,12 +15,10 @@ import s2and.incremental_linking.artifact as incremental_artifact_module
 import s2and.production_bundle as production_bundle_module
 import s2and.production_model as production_model_module
 import s2and.subblocking as subblocking_module
-from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
 from s2and.data import ANDData
-from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
-from s2and.model import Clusterer, FastCluster, _ensure_lightgbm_fitted, _selected_feature_indices
+from s2and.model import Clusterer, _ensure_lightgbm_fitted, _selected_feature_indices
 from s2and.model_pairwise import _validated_classifier_features
 from s2and.production_bundle import finalize_production_bundle, write_pairwise_production_bundle
 from s2and.production_model import (
@@ -32,7 +30,11 @@ from s2and.production_model import (
     pairwise_bundle_binding,
 )
 from tests.helpers import tiny_name_counts_index
-from tests.promoted_linking_helpers import build_tiny_promoted_booster
+from tests.promoted_linking_helpers import (
+    build_tiny_promoted_booster,
+    tiny_binary_booster,
+    write_synthetic_pairwise_bundle,
+)
 
 _TEST_CANONICAL_ARTIFACT_HASHES = {
     "name_tuples_data_sha256": "a" * 64,
@@ -61,26 +63,6 @@ class _PythonLightGBMScorer:
         return type(self)(self.model_path)
 
 
-def _tiny_binary_booster(width: int, *, seed: int) -> lgb.LGBMClassifier:
-    rng = np.random.default_rng(seed)
-    matrix = rng.normal(size=(32, width))
-    labels = np.asarray([0, 1] * 16, dtype=np.int8)
-    classifier = lgb.LGBMClassifier(
-        objective="binary",
-        verbosity=-1,
-        n_jobs=1,
-        learning_rate=0.2,
-        num_leaves=3,
-        min_child_samples=1,
-        min_data_in_bin=1,
-        force_col_wise=True,
-        n_estimators=4,
-        random_state=seed,
-    )
-    classifier.fit(matrix, labels)
-    return classifier
-
-
 @pytest.fixture
 def synthetic_pairwise_bundle(
     tmp_path: Path,
@@ -93,26 +75,10 @@ def synthetic_pairwise_bundle(
         "canonical_artifact_hashes",
         lambda: dict(_TEST_CANONICAL_ARTIFACT_HASHES),
     )
-    main_info = FeaturizationInfo(["name_similarity"], featurizer_version=FEATURIZER_VERSION)
-    nameless_info = FeaturizationInfo(["year_diff"], featurizer_version=FEATURIZER_VERSION)
-    source_clusterer = Clusterer(
-        main_info,
-        _tiny_binary_booster(len(_selected_feature_indices(main_info)), seed=101),
-        cluster_model=FastCluster(linkage="average", eps=0.5),
-        n_jobs=1,
-        nameless_classifier=_tiny_binary_booster(len(_selected_feature_indices(nameless_info)), seed=102),
-        nameless_featurizer_info=nameless_info,
-        batch_size=100,
-    )
-    source_clusterer.feature_contract = {
-        "normalization_version": NORMALIZATION_VERSION,
-        **_TEST_CANONICAL_ARTIFACT_HASHES,
-    }
-    source_clusterer.best_params = {"eps": 0.5, "linkage": "average"}
     bundle_dir = tmp_path / "production_model_v9.9"
-    write_pairwise_production_bundle(
-        source_clusterer,
+    source_clusterer = write_synthetic_pairwise_bundle(
         bundle_dir,
+        artifact_hashes=_TEST_CANONICAL_ARTIFACT_HASHES,
         bundle_version="9.9",
         source_model_version="9.9",
     )
@@ -321,7 +287,7 @@ def test_native_lightgbm_set_params_is_atomic_on_validation_failure(
     bundle_dir, _ = synthetic_pairwise_bundle
     classifier = _load_pairwise_staging_model(bundle_dir).classifier
     replacement_path = tmp_path / "replacement.lgb"
-    _tiny_binary_booster(classifier.n_features_in_ + 1, seed=103).booster_.save_model(str(replacement_path))
+    tiny_binary_booster(classifier.n_features_in_ + 1, seed=103).booster_.save_model(str(replacement_path))
     original_params = classifier.get_params()
     original_scorer = classifier._rust_scorer
     original_booster = classifier.booster_
@@ -1022,6 +988,46 @@ def test_finalization_defaults_pairwise_version_from_source_manifest(
     assert source_bundle.name == "production_model_v9.9"
     assert output_manifest["bundle_version"] == "8.8"
     assert output_manifest["pairwise_model_version"] == "1.2"
+
+
+def test_finalization_infers_bundle_version_from_manifest_for_generic_paths(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    source_bundle, _ = synthetic_pairwise_bundle
+    generic_source = tmp_path / "pairwise_stage"
+    source_bundle.rename(generic_source)
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(generic_source, linker_dir)
+    output_bundle = tmp_path / "complete_bundle"
+
+    finalize_production_bundle(
+        pairwise_bundle_dir=generic_source,
+        output_bundle_dir=output_bundle,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=target_json,
+    )
+
+    output_manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
+    assert output_manifest["bundle_version"] == "9.9"
+    assert output_manifest["incremental_linker_version"] == "9.9"
+
+
+def test_finalization_rejects_implicit_version_change(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    source_bundle, _ = synthetic_pairwise_bundle
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(source_bundle, linker_dir)
+
+    with pytest.raises(ValueError, match="disagrees with pairwise manifest"):
+        finalize_production_bundle(
+            pairwise_bundle_dir=source_bundle,
+            output_bundle_dir=tmp_path / "production_model_v8.8",
+            incremental_linker_artifact_dir=linker_dir,
+            target_json=target_json,
+        )
 
 
 def test_finalization_does_not_copy_undeclared_reproducibility_files(

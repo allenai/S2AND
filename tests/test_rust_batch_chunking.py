@@ -98,7 +98,7 @@ class FakeIndexedRustFeaturizer:
         return np.zeros((len(pairs), len(selected_indices)), dtype=np.float64)
 
 
-def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
+def test_rust_batch_uses_configured_plan_and_chunks_for_progress(monkeypatch):
     dataset = build_dummy_dataset("dummy_rust_chunking", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     _pin_stable_rss(monkeypatch)

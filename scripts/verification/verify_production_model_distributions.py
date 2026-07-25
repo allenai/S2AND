@@ -13,7 +13,7 @@ LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 REQUIRED_CANONICAL_RUNTIME_PATHS = frozenset(
     {
         "s2and/data/first_k_letter_counts_from_orcid.json",
-        "s2and/data/first_k_letter_counts_from_orcid.meta.json",
+        "s2and/data/first_k_letter_counts_from_orcid.manifest.json",
     }
 )
 

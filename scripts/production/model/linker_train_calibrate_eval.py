@@ -24,12 +24,13 @@ import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.dataset as pa_dataset
 import pyarrow.ipc as pa_ipc
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -42,40 +43,33 @@ from s2and import text as s2and_text  # noqa: E402
 from s2and.arrow_inputs import ValidatedArrowInputs, validate_arrow_prediction_artifacts  # noqa: E402
 from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, NORMALIZATION_VERSION  # noqa: E402
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d  # noqa: E402
-from s2and.incremental_linking.artifact import save_incremental_linking_artifact  # noqa: E402
-from s2and.incremental_linking.contracts import (  # noqa: E402
-    DEFAULT_RETRIEVAL_TOP_K,
+from s2and.incremental_linking.artifact import (  # noqa: E402
+    load_incremental_linking_artifact,
+    save_incremental_linking_artifact,
 )
 from s2and.incremental_linking.feature_block import (  # noqa: E402
     read_cluster_seed_disallows_arrow,
     read_cluster_seeds_arrow,
 )
+from s2and.incremental_linking.features import promoted_linker_feature_columns  # noqa: E402
 from s2and.incremental_linking.gate_buckets import first_name_bucket_from_token_view  # noqa: E402
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch  # noqa: E402
+from s2and.incremental_linking.policy import require_arrow_name_counts_index_for_clusterer  # noqa: E402
 from s2and.incremental_linking.retrieval import RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS  # noqa: E402
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features  # noqa: E402
 from s2and.incremental_linking.runtime import compute_candidate_batch_pairwise_model_and_aggregate_stats  # noqa: E402
 from s2and.incremental_linking_training.classic import (  # noqa: E402
-    NAN_POLICY_CHOICES,
     PROMOTED_NON_PAIRWISE_COLUMNS,
     PROMOTED_PAIRWISE_COLUMNS,
-    ROW_NAN_POLICY_CHOICES,
     SUPPORTED_PROMOTED_FEATURE_COLUMNS,
     WEIGHTED_ERROR_WEIGHTS,
+    FittedClassicRun,
     OfficialBundle,
-    _apply_classic_train_holdout_filter,
-    _apply_classic_train_row_cap,
-    _build_classic_classifier,
-    _classic_feature_matrix,
     _drop_unlabeled_singleton_orcid_rows,
-    _fit_promoted_logistic_gate,
     _load_classic_stratified_eval_rows,
     _promoted_stratified_gate_spec,
-    _read_classic_holdout_identity_sets,
-    _read_csv,
-    _resolve_classic_monotone_constraints,
     _resolve_path,
-    _score_classic_stratified_eval_test,
+    _validate_stratified_split_assignments,
     load_bundle,
     run_classic,
 )
@@ -87,16 +81,43 @@ from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E4
 
 os.environ.setdefault("S2AND_BACKEND", "rust")
 
-PACKAGE_DATA_ROOT = REPO_ROOT / "s2and" / "data"
-DEFAULT_SOURCE_BUNDLE_ROOT = PACKAGE_DATA_ROOT / "s2and_and_big_blocks_linker_dataset_20260525"
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "scratch" / "joint_safe_link_promoted_official_20260507"
 DEFAULT_NAME_COUNTS_INDEX_ROOT: Path | None = None
 DEFAULT_TOTAL_RAM_BYTES = 48 * 1024**3
+PRODUCTION_MAX_EXEMPLARS = 4
+PRODUCTION_PAIRWISE_MODEL_NAN_POLICY = "preserve"
+PRODUCTION_PAIRWISE_AGGREGATE_NAN_POLICY = "zero"
+PRODUCTION_ROW_NAN_POLICY = "finite"
+EVALUATED_ARTIFACT_DIRNAME = "incremental_linker_artifact"
 REQUIRED_TABLE_KEYS = (
     "train_path",
     "classic_gate_source_path",
     "s2and_eval_path",
     "hwang_eval_path",
+)
+INTEGER_OFFICIAL_METRIC_KEYS = frozenset(
+    {
+        "training_rows",
+        "training_positive_rows",
+        "stratified_test_queries",
+        "stratified_test_errors",
+        "stratified_test_false_abstain",
+        "stratified_test_false_link",
+        "stratified_test_wrong_candidate_link",
+    }
+)
+FLOAT_OFFICIAL_METRIC_KEYS = frozenset(
+    {
+        "stratified_test_accuracy",
+        "stratified_test_balanced_accuracy",
+        "stratified_test_error_rate",
+        "false_abstain_error_rate",
+        "false_link_error_rate",
+        "wrong_link_error_rate",
+        "weighted_average_error",
+    }
+)
+SUPPORTED_OFFICIAL_METRIC_KEYS = (
+    INTEGER_OFFICIAL_METRIC_KEYS | FLOAT_OFFICIAL_METRIC_KEYS | {"weighted_average_error_weights"}
 )
 
 
@@ -142,20 +163,30 @@ class ArrowRustTablePlan:
     started: float
 
 
-@dataclass(frozen=True)
-class ProdTrainingData:
-    """Final production fit rows and per-row weights."""
-
-    rows: pd.DataFrame
-    sample_weight: np.ndarray
-    source_summaries: list[dict[str, Any]]
-    train_holdout_filter_summary: dict[str, Any]
-    train_filter_summary: dict[str, Any] | None
-
-
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _require_finite_metric_values(
+    value: Any,
+    *,
+    path: str,
+    context: str,
+    error_type: type[Exception],
+) -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            _require_finite_metric_values(
+                nested,
+                path=f"{path}.{key}",
+                context=context,
+                error_type=error_type,
+            )
+    elif isinstance(value, bool) or not isinstance(value, int | float | np.integer | np.floating):
+        raise error_type(f"{context} {path} must be numeric, got {value!r}")
+    elif not math.isfinite(float(value)):
+        raise error_type(f"{context} {path} must be finite, got {value!r}")
 
 
 def _load_target(path: Path) -> dict[str, Any]:
@@ -188,6 +219,46 @@ def _load_target(path: Path) -> dict[str, Any]:
     unsupported = sorted(set(features) - SUPPORTED_PROMOTED_FEATURE_COLUMNS)
     if unsupported:
         raise ValueError(f"Promoted target contains unsupported features: {unsupported[:5]}")
+    expected_features = promoted_linker_feature_columns()
+    if features != expected_features:
+        raise ValueError(
+            "Promoted target features must exactly match promoted_linker_feature_columns() "
+            f"in canonical order in {path}"
+        )
+    params = target.get("params")
+    if not isinstance(params, Mapping) or not params:
+        raise ValueError(f"Promoted target params must be a nonempty object in {path}")
+    n_estimators = params.get("n_estimators")
+    if isinstance(n_estimators, bool) or not isinstance(n_estimators, int) or n_estimators <= 0:
+        raise ValueError(f"Promoted target params.n_estimators must be a positive integer in {path}")
+    metrics = target.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise ValueError(f"Promoted target metrics must be an object in {path}")
+    _require_finite_metric_values(
+        metrics,
+        path="metrics",
+        context="Promoted target metric",
+        error_type=ValueError,
+    )
+    unknown_metrics = sorted(set(metrics) - SUPPORTED_OFFICIAL_METRIC_KEYS)
+    if unknown_metrics:
+        raise ValueError(f"Promoted target contains unknown metric keys: {unknown_metrics}")
+    for key in INTEGER_OFFICIAL_METRIC_KEYS & set(metrics):
+        value = metrics[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"Promoted target metric metrics.{key} must be a nonnegative integer")
+    weights = metrics.get("weighted_average_error_weights")
+    if weights is not None:
+        if not isinstance(weights, Mapping) or dict(weights) != dict(WEIGHTED_ERROR_WEIGHTS):
+            raise ValueError(
+                "Promoted target metric metrics.weighted_average_error_weights "
+                f"must equal {dict(WEIGHTED_ERROR_WEIGHTS)}"
+            )
+    if metrics and set(metrics) != SUPPORTED_OFFICIAL_METRIC_KEYS:
+        raise ValueError(
+            "Promoted target metrics must be empty or contain the complete official metric set: "
+            f"missing={sorted(SUPPORTED_OFFICIAL_METRIC_KEYS - set(metrics))}"
+        )
     return target
 
 
@@ -221,180 +292,6 @@ def _bundle_with_promoted_target(bundle: OfficialBundle, target: Mapping[str, An
     )
 
 
-def _bundle_with_classic_params(bundle: OfficialBundle, params: Mapping[str, Any]) -> OfficialBundle:
-    models = copy.deepcopy(bundle.models)
-    classic = dict(models["classic"])
-    classic["best_params"] = dict(params)
-    models["classic"] = classic
-    return OfficialBundle(
-        root=bundle.root,
-        bundle_name=bundle.bundle_name,
-        assets=copy.deepcopy(bundle.assets),
-        models=models,
-        expected_metrics=copy.deepcopy(bundle.expected_metrics),
-    )
-
-
-def _intify_hyperopt_value(value: Any) -> Any:
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.floating):
-        return int(value) if float(value).is_integer() else float(value)
-    if hasattr(value, "is_integer") and value.is_integer():
-        return int(value)
-    return value
-
-
-def _normalize_hyperopt_params(params: Mapping[str, Any]) -> dict[str, Any]:
-    return {str(key): _intify_hyperopt_value(value) for key, value in params.items()}
-
-
-def _classic_hyperopt_search_space(base_params: Mapping[str, Any]) -> dict[str, Any]:
-    from hyperopt import hp
-    from hyperopt.pyll import scope
-
-    space = {
-        "colsample_bytree": hp.uniform("colsample_bytree", 0.6, 1.0),
-        "learning_rate": hp.loguniform("learning_rate", math.log(0.005), math.log(0.08)),
-        "max_depth": scope.int(hp.quniform("max_depth", 3, 16, 1)),
-        "min_child_samples": scope.int(hp.qloguniform("min_child_samples", math.log(50), math.log(2000), 1)),
-        "min_child_weight": hp.loguniform("min_child_weight", math.log(1e-3), math.log(10.0)),
-        "min_split_gain": hp.uniform("min_split_gain", 0.0, 1.0),
-        "n_estimators": scope.int(hp.quniform("n_estimators", 300, 1200, 25)),
-        "num_leaves": scope.int(hp.qloguniform("num_leaves", math.log(31), math.log(512), 1)),
-        "reg_alpha": hp.loguniform("reg_alpha", math.log(1e-4), math.log(32.0)),
-        "reg_lambda": hp.loguniform("reg_lambda", math.log(1e-4), math.log(64.0)),
-        "subsample": hp.uniform("subsample", 0.7, 1.0),
-        "subsample_freq": scope.int(hp.quniform("subsample_freq", 0, 3, 1)),
-    }
-    return {key: value for key, value in space.items() if key in base_params}
-
-
-def _hyperopt_loss(summary: Mapping[str, Any], metric: str) -> float:
-    observed = _observed_official_metrics(summary)
-    if metric == "weighted_average_error":
-        return float(observed["weighted_average_error"])
-    if metric == "stratified_test_errors":
-        return float(observed["stratified_test_errors"])
-    if metric == "stratified_test_error_rate":
-        return float(observed["stratified_test_error_rate"])
-    if metric == "stratified_test_balanced_accuracy":
-        return -float(observed["stratified_test_balanced_accuracy"])
-    raise ValueError(f"Unsupported hyperopt metric: {metric}")
-
-
-def _run_classic_hyperopt(
-    *,
-    feature_bundle: OfficialBundle,
-    output_dir: Path,
-    base_params: Mapping[str, Any],
-    hyperopt_evals: int,
-    metric: str,
-    seed: int,
-    n_jobs: int = 1,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Tune classic LightGBM params by running the full train/calibrate/eval stack."""
-
-    from hyperopt import STATUS_OK, Trials, fmin, tpe
-
-    if int(hyperopt_evals) <= 0:
-        raise ValueError("hyperopt_evals must be positive when hyperopt is enabled")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    search_space = _classic_hyperopt_search_space(base_params)
-    if not search_space:
-        raise ValueError("No tunable LightGBM parameters were present in base_params")
-    trial_records: list[dict[str, Any]] = []
-
-    def evaluate_params(resolved_params: Mapping[str, Any], *, source: str) -> float:
-        trial_index = len(trial_records)
-        trial_output_dir = output_dir / f"trial_{trial_index:03d}"
-        print(
-            json.dumps(
-                {
-                    "event": "classic_hyperopt_trial_start",
-                    "trial": trial_index,
-                    "source": source,
-                    "output_dir": str(trial_output_dir),
-                    "metric": metric,
-                    "params": dict(resolved_params),
-                }
-            ),
-            flush=True,
-        )
-        trial_summary = run_classic(
-            _bundle_with_classic_params(feature_bundle, dict(resolved_params)),
-            trial_output_dir,
-            n_jobs=n_jobs,
-        )
-        observed = _observed_official_metrics(trial_summary)
-        loss = _hyperopt_loss(trial_summary, metric)
-        record = {
-            "trial": trial_index,
-            "source": source,
-            "loss": float(loss),
-            "metric": metric,
-            "params": dict(resolved_params),
-            "observed_metrics": observed,
-            "classic_summary_path": str(trial_output_dir / "summary.json"),
-        }
-        trial_records.append(record)
-        _write_json(output_dir / "trials.json", trial_records)
-        print(json.dumps({"event": "classic_hyperopt_trial_done", **record}), flush=True)
-        return float(loss)
-
-    baseline_loss = evaluate_params(dict(base_params), source="base_params")
-
-    def objective(params: Mapping[str, Any]) -> dict[str, Any]:
-        resolved_params = dict(base_params)
-        resolved_params.update(_normalize_hyperopt_params(params))
-        loss = evaluate_params(resolved_params, source="tpe")
-        return {"loss": float(loss), "status": STATUS_OK}
-
-    trials = Trials()
-    search_evals = max(0, int(hyperopt_evals) - 1)
-    if search_evals:
-        _ = fmin(
-            fn=objective,
-            space=search_space,
-            algo=partial(tpe.suggest, n_startup_jobs=min(5, int(search_evals))),
-            max_evals=int(search_evals),
-            trials=trials,
-            rstate=np.random.default_rng(int(seed)),
-        )
-    best_record = min(trial_records, key=lambda record: float(record["loss"]))
-    best_params = dict(best_record["params"])
-    summary = {
-        "enabled": True,
-        "hyperopt_evals": int(hyperopt_evals),
-        "hyperopt_search_evals": int(search_evals),
-        "hyperopt_trials_ran": int(len(trial_records)),
-        "metric": metric,
-        "seed": int(seed),
-        "base_loss": float(baseline_loss),
-        "best_loss": float(best_record["loss"]),
-        "best_trial": int(best_record["trial"]),
-        "best_source": str(best_record["source"]),
-        "best_params": best_params,
-        "trials_path": str(output_dir / "trials.json"),
-    }
-    _write_json(output_dir / "summary.json", summary)
-    return best_params, summary
-
-
-def _classic_table_keys(spec: Mapping[str, Any]) -> tuple[str, ...]:
-    keys: list[str] = [key for key in REQUIRED_TABLE_KEYS if key in spec]
-    for optional_key in ("s_park_eval_path", "s_lee_eval_path"):
-        if optional_key in spec:
-            keys.append(optional_key)
-    extra_eval_paths = spec.get("extra_eval_paths", {})
-    if extra_eval_paths is not None:
-        if not isinstance(extra_eval_paths, Mapping):
-            raise ValueError("classic.extra_eval_paths must be a mapping")
-        for dataset_name in extra_eval_paths:
-            keys.append(f"extra_eval_paths.{dataset_name}")
-    return tuple(dict.fromkeys(keys))
-
-
 def _source_featureless_table_keys(bundle: OfficialBundle) -> tuple[str, ...]:
     files = bundle.assets.get("featureless_rows", {}).get("files", {})
     if not isinstance(files, Mapping):
@@ -420,16 +317,76 @@ def _output_table_relpath(table_key: str, labels_path: Path) -> Path:
     return Path("features_corrected") / labels_path.name
 
 
-def _selected_row_positions(labels: pd.DataFrame, datasets: set[str] | None, limit_rows: int | None) -> np.ndarray:
-    mask = np.ones(len(labels), dtype=bool)
-    if datasets is not None:
-        mask &= labels["dataset"].astype(str).isin(datasets).to_numpy()
-    positions = np.flatnonzero(mask)
-    if limit_rows is not None:
-        if int(limit_rows) <= 0:
-            raise ValueError("limit_rows must be > 0")
-        positions = positions[: int(limit_rows)]
-    return positions.astype(np.int64, copy=False)
+def _read_selected_parquet_rows(
+    path: Path,
+    *,
+    datasets: set[str] | None,
+    limit_rows: int | None,
+    columns: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Read selected rows through one bounded Arrow dataset scanner."""
+
+    rows, _source_rows, _available_datasets = _scan_parquet_rows(
+        path,
+        datasets=datasets,
+        limit_rows=limit_rows,
+        columns=columns,
+        inventory=False,
+    )
+    return rows
+
+
+def _scan_parquet_rows(
+    path: Path,
+    *,
+    datasets: set[str] | None,
+    limit_rows: int | None,
+    columns: Sequence[str] | None,
+    inventory: bool,
+) -> tuple[pd.DataFrame, int, set[str]]:
+    """Scan once, optionally continuing after the row limit for selector inventory."""
+
+    if limit_rows is not None and int(limit_rows) <= 0:
+        raise ValueError("limit_rows must be > 0")
+    dataset = pa_dataset.dataset(path, format="parquet")
+    schema_names = list(dataset.schema.names)
+    if "dataset" not in schema_names:
+        raise ValueError(f"Parquet source must contain a dataset column: {path}")
+    requested_columns = schema_names if columns is None else list(columns)
+    if "dataset" not in requested_columns:
+        requested_columns.append("dataset")
+    unknown_columns = sorted(set(requested_columns) - set(schema_names))
+    if unknown_columns:
+        raise ValueError(f"Parquet source is missing requested columns {unknown_columns}: {path}")
+
+    parts: list[pd.DataFrame] = []
+    available_datasets: set[str] = set()
+    scanned_rows = 0
+    selected_rows = 0
+    for batch in dataset.scanner(columns=requested_columns, batch_size=65_536).to_batches():
+        scanned_rows += int(batch.num_rows)
+        frame = batch.to_pandas()
+        available_datasets.update(frame["dataset"].astype(str))
+        if datasets is not None:
+            frame = frame.loc[frame["dataset"].astype(str).isin(datasets)]
+        if limit_rows is not None:
+            frame = frame.iloc[: max(0, int(limit_rows) - selected_rows)]
+        if not frame.empty:
+            parts.append(frame)
+            selected_rows += len(frame)
+        if limit_rows is not None and selected_rows >= int(limit_rows) and not inventory:
+            break
+
+    if parts:
+        rows = pd.concat(parts, ignore_index=True)
+    else:
+        rows = pa.Table.from_arrays(
+            [pa.array([], type=dataset.schema.field(name).type) for name in requested_columns],
+            names=requested_columns,
+        ).to_pandas()
+    if columns is not None:
+        rows = rows[list(columns)]
+    return rows, scanned_rows, available_datasets
 
 
 def _clean_arrow_rust_structural_rows(
@@ -936,19 +893,11 @@ def _assert_pairwise_model_supports_arrow_materialization(clusterer: Any, model_
             )
 
 
-def _nan_value_from_policy(policy: str) -> float:
-    if policy == "preserve":
-        return float("nan")
-    if policy == "zero":
-        return 0.0
-    raise ValueError(f"Unsupported NaN policy: {policy}")
-
-
-def _feature_nan_policy_summary(args: argparse.Namespace) -> dict[str, str]:
+def _feature_nan_policy_summary() -> dict[str, str]:
     return {
-        "pairwise_model_nan_policy": str(args.pairwise_model_nan_policy),
-        "pairwise_aggregate_nan_policy": str(args.pairwise_aggregate_nan_policy),
-        "row_nan_policy": str(args.row_nan_policy),
+        "pairwise_model_nan_policy": PRODUCTION_PAIRWISE_MODEL_NAN_POLICY,
+        "pairwise_aggregate_nan_policy": PRODUCTION_PAIRWISE_AGGREGATE_NAN_POLICY,
+        "row_nan_policy": PRODUCTION_ROW_NAN_POLICY,
     }
 
 
@@ -1620,6 +1569,7 @@ def _materialize_arrow_rust_feature_bundle(
     pairwise_aggregate_nan_value: float,
     row_nan_policy: str,
     name_counts_index_root: Path | None = None,
+    prevalidated_arrow_paths: Mapping[str, ValidatedArrowInputs] | None = None,
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
     _copy_bundle_support_files(source_bundle, output_bundle_root)
     table_key_set = set(table_keys) if table_keys is not None else None
@@ -1635,7 +1585,7 @@ def _materialize_arrow_rust_feature_bundle(
     table_plan_order: list[str] = []
     pending_by_dataset: dict[str, list[ArrowRustPendingShard]] = {}
     component_membership_cache: dict[str, pd.DataFrame] = {}
-    arrow_paths_cache: dict[str, ValidatedArrowInputs] = {}
+    arrow_paths_cache: dict[str, ValidatedArrowInputs] = dict(prevalidated_arrow_paths or {})
 
     def append_empty_selection_summary(
         *,
@@ -1674,9 +1624,11 @@ def _materialize_arrow_rust_feature_bundle(
             ),
             flush=True,
         )
-        labels = pd.read_parquet(labels_path)
-        positions = _selected_row_positions(labels, datasets, limit_rows)
-        labels = labels.iloc[positions].reset_index(drop=True)
+        labels = _read_selected_parquet_rows(
+            labels_path,
+            datasets=datasets,
+            limit_rows=limit_rows,
+        )
         labels, label_filtering_summary = _drop_unlabeled_singleton_orcid_rows(
             labels,
             context=f"arrow-rust:{table_key}",
@@ -1844,203 +1796,29 @@ def _materialize_arrow_rust_feature_bundle(
     )
 
 
-def _classic_candidate_training_rows(rows: pd.DataFrame, *, retrieval_rank_limit: int) -> pd.DataFrame:
-    required = {"query_group_id", "retrieval_rank", "label"}
-    missing = sorted(required - set(rows.columns))
-    if missing:
-        raise ValueError(f"Classic training rows are missing required columns: {missing}")
-    out, _filter_summary = _drop_unlabeled_singleton_orcid_rows(
-        rows,
-        context="prod_training_rows",
-    )
-    out["retrieval_rank"] = pd.to_numeric(out["retrieval_rank"], errors="coerce")
-    out = out[out["retrieval_rank"] <= int(retrieval_rank_limit)].copy()
-    out["label"] = pd.to_numeric(out["label"], errors="coerce").fillna(0).astype(np.int8)
-    return out
-
-
-def _prepare_prod_training_data(
-    bundle: OfficialBundle,
+def _save_evaluated_artifact(
     *,
-    holdout_importance_weight: float,
-    retrieval_rank_limit: int,
-) -> ProdTrainingData:
-    """Build final production rows: train plus stratified calibration rows."""
-
-    if float(holdout_importance_weight) <= 0.0:
-        raise ValueError("holdout_importance_weight must be positive")
-    spec = dict(bundle.models["classic"])
-    train_path = _resolve_path(bundle, spec["train_path"])
-    train_df = _classic_candidate_training_rows(
-        _read_csv(train_path, compression="gzip"),
-        retrieval_rank_limit=int(retrieval_rank_limit),
-    )
-    holdout_query_group_ids, holdout_base_group_ids, holdout_sources = _read_classic_holdout_identity_sets(
-        bundle,
-        spec,
-    )
-    train_df, train_holdout_filter_summary = _apply_classic_train_holdout_filter(
-        train_df,
-        holdout_query_group_ids=holdout_query_group_ids,
-        holdout_base_group_ids=holdout_base_group_ids,
-        holdout_sources=holdout_sources,
-    )
-    train_df, train_filter_summary = _apply_classic_train_row_cap(
-        train_df,
-        rule_name=spec.get("train_row_cap_rule"),
-        min_train_limit=(int(spec["train_row_cap_min_limit"]) if "train_row_cap_min_limit" in spec else None),
-    )
-
-    train_df = train_df.copy()
-    train_df["_prod_source_kind"] = "train"
-    train_df["_prod_importance_weight"] = 1.0
-    train_df["_prod_source_path"] = str(train_path.relative_to(bundle.root))
-    frames = [train_df]
-
-    promoted_gate_config = _promoted_stratified_gate_spec(spec)
-    if promoted_gate_config is None:
-        raise ValueError("classic.promoted_stratified_gate is required for final production training")
-    if spec.get("stratified_eval_test_split") is None:
-        raise ValueError("classic.stratified_eval_test_split is required for final production training")
-    split_spec = dict(spec["stratified_eval_test_split"])
-    calibration_splits = tuple(str(split) for split in promoted_gate_config["calibration_splits"])
-    split_rows, _assignments = _load_classic_stratified_eval_rows(bundle, spec, split_spec)
-    split_values = split_rows["split"].astype(str)
-    calibration_rows = split_rows[split_values.isin(calibration_splits)].copy()
-    if calibration_rows.empty:
-        raise ValueError(f"Final production training requires non-empty calibration splits: {list(calibration_splits)}")
-    calibration_rows = _classic_candidate_training_rows(
-        calibration_rows,
-        retrieval_rank_limit=int(retrieval_rank_limit),
-    )
-    calibration_rows["_prod_source_kind"] = "stratified_calibration_" + calibration_rows["split"].astype(str)
-    calibration_rows["_prod_importance_weight"] = float(holdout_importance_weight)
-    assignments_path = _resolve_path(bundle, str(split_spec["assignments_path"]))
-    calibration_rows["_prod_source_path"] = str(assignments_path.relative_to(bundle.root))
-    frames.append(calibration_rows)
-
-    combined = pd.concat(frames, ignore_index=True)
-    source_kinds = combined["_prod_source_kind"].astype(str)
-    importance_weights = pd.to_numeric(combined["_prod_importance_weight"], errors="raise").to_numpy(dtype=np.float32)
-    query_group_ids = combined["query_group_id"].astype(str)
-    group_sizes = query_group_ids.value_counts(sort=False)
-    base_weights = (1.0 / query_group_ids.map(group_sizes).astype(float)).to_numpy(dtype=np.float32)
-    sample_weight = (base_weights * importance_weights).astype(np.float32)
-
-    source_summaries: list[dict[str, Any]] = []
-    for source_name, source_rows in combined.groupby("_prod_source_kind", sort=False):
-        source_indices = source_rows.index.to_numpy(dtype=np.int64)
-        labels = pd.to_numeric(source_rows["label"], errors="coerce").fillna(0).astype(np.int8)
-        paths = sorted(set(source_rows["_prod_source_path"].astype(str)))
-        weight_values = sorted(float(value) for value in set(source_rows["_prod_importance_weight"].astype(float)))
-        source_summaries.append(
-            {
-                "source": str(source_name),
-                "paths": paths,
-                "rows": int(len(source_rows)),
-                "queries": int(source_rows["query_group_id"].astype(str).nunique()),
-                "positive_rows": int(labels.sum()),
-                "importance_weights": weight_values,
-                "sample_weight_sum": round(float(sample_weight[source_indices].sum()), 6),
-                **({"splits": sorted(set(source_rows["split"].astype(str)))} if "split" in source_rows.columns else {}),
-                **(
-                    {"source_keys": sorted(set(source_rows["source_key"].astype(str)))}
-                    if "source_key" in source_rows.columns
-                    else {}
-                ),
-            }
-        )
-
-    model_rows = combined.drop(columns=["_prod_source_kind", "_prod_importance_weight", "_prod_source_path"])
-    if len(model_rows) != len(source_kinds):
-        raise RuntimeError("Production training row metadata length mismatch")
-    return ProdTrainingData(
-        rows=model_rows,
-        sample_weight=sample_weight,
-        source_summaries=source_summaries,
-        train_holdout_filter_summary=train_holdout_filter_summary,
-        train_filter_summary=train_filter_summary,
-    )
-
-
-def _train_and_save_prod_artifact(
-    *,
-    feature_bundle: OfficialBundle,
-    output_dir: Path,
-    save_artifact_to: Path,
+    fitted: FittedClassicRun,
+    artifact_dir: Path,
     target_spec: Mapping[str, Any],
     artifact_pairwise_bundle_binding: Mapping[str, Any],
-    holdout_importance_weight: float,
 ) -> dict[str, Any]:
-    spec = dict(feature_bundle.models["classic"])
-    retrieval_top_k = int(spec.get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K))
-    if retrieval_top_k <= 0:
-        raise ValueError("classic.retrieval_top_k must be positive")
-    feature_columns = tuple(str(feature) for feature in spec["feature_columns"])
-    monotone_constraints = _resolve_classic_monotone_constraints(spec, feature_columns)
-    prod_training_data = _prepare_prod_training_data(
-        feature_bundle,
-        holdout_importance_weight=float(holdout_importance_weight),
-        retrieval_rank_limit=retrieval_top_k,
-    )
-    train_matrix = _classic_feature_matrix(prod_training_data.rows, feature_columns).to_numpy(dtype=np.float32)
-    train_labels = prod_training_data.rows["label"].to_numpy(dtype=np.int8, copy=False)
-    model = _build_classic_classifier(spec["best_params"], monotone_constraints=monotone_constraints)
-    started = time.perf_counter()
-    model.fit(train_matrix, train_labels, sample_weight=prod_training_data.sample_weight)
-    train_seconds = float(time.perf_counter() - started)
-
-    promoted_gate_config = _promoted_stratified_gate_spec(spec)
-    if promoted_gate_config is None:
-        raise ValueError("classic.promoted_stratified_gate is required to train the logistic artifact gate")
-    if spec.get("stratified_eval_test_split") is None:
-        raise ValueError("classic.stratified_eval_test_split is required to train the logistic artifact gate")
-    split_spec = dict(spec["stratified_eval_test_split"])
-    stratified_scores = _score_classic_stratified_eval_test(
-        feature_bundle,
-        spec,
-        split_spec,
-        model,
-        feature_columns,
-    )
-    logistic_gate_result = _fit_promoted_logistic_gate(
-        stratified_scores.rows,
-        stratified_scores.choices,
-        stratified_scores.probabilities,
-        calibration_splits=(str(promoted_gate_config["test_split"]),),
-    )
-    logistic_gate_config = dict(logistic_gate_result["gate_config"])
-    booster_training_splits = [str(split) for split in promoted_gate_config["calibration_splits"]]
-    gate_calibration_splits = [str(promoted_gate_config["test_split"])]
-
     artifact_metadata = save_incremental_linking_artifact(
-        model,
-        Path(save_artifact_to),
-        retrieval_top_k=retrieval_top_k,
-        gate_config=logistic_gate_config,
+        fitted.model,
+        artifact_dir,
+        retrieval_top_k=fitted.retrieval_top_k,
+        gate_config=fitted.gate_config,
         target_spec=target_spec,
         pairwise_bundle_binding=artifact_pairwise_bundle_binding,
     )
-    summary = {
-        "path": str(Path(save_artifact_to)),
+    loaded = load_incremental_linking_artifact(artifact_dir)
+    return {
+        "path": str(artifact_dir),
         "schema_version": artifact_metadata["schema_version"],
+        "booster_sha256": artifact_metadata["booster_sha256"],
         "target_spec_digest": artifact_metadata["target_spec_digest"],
-        "training_summary": {
-            "rows": int(len(prod_training_data.rows)),
-            "queries": int(prod_training_data.rows["query_group_id"].astype(str).nunique()),
-            "positive_rows": int(train_labels.sum()),
-            "sample_weight_sum": round(float(prod_training_data.sample_weight.sum()), 6),
-            "holdout_importance_weight": float(holdout_importance_weight),
-            "booster_training_splits": booster_training_splits,
-            "gate_calibration_splits": gate_calibration_splits,
-            "elapsed_seconds": round(train_seconds, 6),
-            "sources": prod_training_data.source_summaries,
-            "train_holdout_filter_summary": prod_training_data.train_holdout_filter_summary,
-            "train_filter_summary": prod_training_data.train_filter_summary,
-        },
+        "retrieval_top_k": loaded.retrieval_top_k,
     }
-    _write_json(output_dir / "prod_artifact_summary.json", summary)
-    return summary
 
 
 def _observed_official_metrics(summary: Mapping[str, Any]) -> dict[str, Any]:
@@ -2103,20 +1881,34 @@ def _assert_no_metric_drift(observed: Mapping[str, Any], target: Mapping[str, An
         raise RuntimeError("Official promoted target must contain a metrics object")
     if not target_metrics:
         raise RuntimeError("Official promoted target metrics must not be empty")
-    missing = sorted(set(target_metrics) - set(observed))
-    if missing:
-        raise RuntimeError(f"Official promoted run is missing target metrics: {missing}")
+    observed_keys = set(observed)
+    if observed_keys != SUPPORTED_OFFICIAL_METRIC_KEYS:
+        raise RuntimeError(
+            "Official promoted run produced an unexpected metric key set: "
+            f"missing={sorted(SUPPORTED_OFFICIAL_METRIC_KEYS - observed_keys)} "
+            f"extra={sorted(observed_keys - SUPPORTED_OFFICIAL_METRIC_KEYS)}"
+        )
+    target_keys = set(target_metrics)
+    if target_keys != SUPPORTED_OFFICIAL_METRIC_KEYS:
+        raise RuntimeError(
+            "Official promoted target must contain the complete official metric set: "
+            f"missing={sorted(SUPPORTED_OFFICIAL_METRIC_KEYS - target_keys)} "
+            f"extra={sorted(target_keys - SUPPORTED_OFFICIAL_METRIC_KEYS)}"
+        )
 
-    def require_finite(value: Any, *, path: str) -> None:
-        if isinstance(value, Mapping):
-            for key, nested in value.items():
-                require_finite(nested, path=f"{path}.{key}")
-        elif isinstance(value, float | np.floating) and not math.isfinite(float(value)):
-            raise RuntimeError(f"Official promoted metric {path} must be finite, got {value!r}")
-
-    for key in target_metrics:
-        require_finite(observed[key], path=str(key))
-        require_finite(target_metrics[key], path=f"target.{key}")
+    for key in SUPPORTED_OFFICIAL_METRIC_KEYS:
+        _require_finite_metric_values(
+            observed[key],
+            path=str(key),
+            context="Official promoted metric",
+            error_type=RuntimeError,
+        )
+        _require_finite_metric_values(
+            target_metrics[key],
+            path=f"target.{key}",
+            context="Official promoted metric",
+            error_type=RuntimeError,
+        )
     deltas = _metric_deltas(observed, target)
     bad: dict[str, Any] = {}
     for key, delta in deltas.items():
@@ -2144,49 +1936,342 @@ def _parse_datasets(values: Sequence[str] | None) -> set[str] | None:
     return {str(value) for value in values}
 
 
-def _resolve_hyperopt_evals(args: argparse.Namespace) -> int:
-    if args.hyperopt_evals is not None:
-        resolved = int(args.hyperopt_evals)
-    elif bool(args.hyperopt):
-        resolved = 25
-    else:
-        resolved = 0
-    if resolved < 0:
-        raise SystemExit("--hyperopt-evals must be non-negative")
-    if bool(args.hyperopt) and resolved == 0:
-        raise SystemExit("--hyperopt requires --hyperopt-evals > 0")
-    return resolved
+def _validate_run_mode(args: argparse.Namespace) -> None:
+    """Reject unsafe or internally inconsistent CLI modes before input loading."""
+
+    if args.allow_metric_drift and args.publish_to is not None:
+        raise SystemExit("--allow-metric-drift is diagnostic-only and cannot be combined with --publish-to")
+    if args.preflight_only and args.materialize_only:
+        raise SystemExit("--preflight-only and --materialize-only are mutually exclusive")
+    if args.materialize_only and args.publish_to is not None:
+        raise SystemExit("--materialize-only cannot be combined with --publish-to")
+    if args.allow_metric_drift and args.materialize_only:
+        raise SystemExit("--allow-metric-drift requires a full train/calibrate/evaluate run")
+    if args.limit_rows is not None and int(args.limit_rows) <= 0:
+        raise SystemExit("--limit-rows must be > 0")
+    for option_name in ("n_jobs", "total_ram_bytes"):
+        if int(getattr(args, option_name)) <= 0:
+            raise SystemExit(f"--{option_name.replace('_', '-')} must be > 0")
+    if not (args.materialize_only or args.preflight_only) and (
+        args.limit_rows is not None or args.tables or args.datasets
+    ):
+        raise SystemExit("limited/table-filtered materialization is smoke-only; pass --materialize-only")
+
+
+def _resolved_output_paths(args: argparse.Namespace) -> tuple[Path, Path | None, Path]:
+    """Validate fresh output targets without creating them."""
+
+    output_dir = Path(args.output_dir).resolve()
+    if output_dir.exists():
+        raise SystemExit(f"--output-dir must name a new directory: {output_dir}")
+    publish_dir = args.publish_to.resolve() if args.publish_to is not None else None
+    if publish_dir is not None:
+        if publish_dir.exists():
+            raise SystemExit(f"--publish-to must name a new directory: {publish_dir}")
+        if publish_dir.is_relative_to(output_dir) or output_dir.is_relative_to(publish_dir):
+            raise SystemExit("--output-dir and --publish-to must be separate directories")
+    return output_dir, publish_dir, output_dir / EVALUATED_ARTIFACT_DIRNAME
+
+
+def _assert_output_paths_outside_inputs(
+    *,
+    output_dir: Path,
+    publish_dir: Path | None,
+    source_bundle_root: Path,
+    pairwise_model_path: Path,
+) -> None:
+    """Reject any write target nested beneath an immutable input bundle."""
+
+    input_roots = {
+        "--source-bundle-root": source_bundle_root.resolve(),
+        "--pairwise-model-path": pairwise_model_path.resolve(),
+    }
+    output_paths = {
+        "--output-dir": output_dir.resolve(),
+        "--publish-to": None if publish_dir is None else publish_dir.resolve(),
+    }
+    collisions = [
+        f"{output_option}={output_path} under {input_option}={input_root}"
+        for output_option, output_path in output_paths.items()
+        if output_path is not None
+        for input_option, input_root in input_roots.items()
+        if output_path.is_relative_to(input_root)
+    ]
+    if collisions:
+        raise SystemExit("linker outputs must be outside immutable input bundles: " + "; ".join(collisions))
+
+
+def _validate_source_bundle_support_files(
+    source_bundle: OfficialBundle,
+    *,
+    require_training_contract: bool = False,
+) -> list[str]:
+    """Validate support files copied before feature materialization starts."""
+
+    required_files = [source_bundle.root / "bundle.json"]
+    splits_dir = source_bundle.root / "splits"
+    if not splits_dir.is_dir():
+        raise ValueError(f"source bundle is missing splits directory: {splits_dir}")
+    split_files = sorted(path for path in splits_dir.rglob("*") if path.is_file())
+    if not split_files:
+        raise ValueError(f"source bundle splits directory contains no files: {splits_dir}")
+    required_files.extend(split_files)
+
+    assignments_path: Path | None = None
+    internal_eval_path: Path | None = None
+    gate_spec: dict[str, Any] | None = None
+    classic = source_bundle.models.get("classic", {})
+    if require_training_contract and not isinstance(classic, Mapping):
+        raise ValueError("source bundle models.classic must be a mapping")
+    if isinstance(classic, Mapping):
+        direct_support_path = classic.get("classic_gate_internal_eval_base_groups_path")
+        if isinstance(direct_support_path, str) and direct_support_path:
+            internal_eval_path = _resolve_path(source_bundle, direct_support_path)
+            required_files.append(internal_eval_path)
+        split_spec = classic.get("stratified_eval_test_split")
+        if isinstance(split_spec, Mapping):
+            assignments_path_value = split_spec.get("assignments_path")
+            if isinstance(assignments_path_value, str) and assignments_path_value:
+                assignments_path = _resolve_path(source_bundle, assignments_path_value)
+                required_files.append(assignments_path)
+        gate_spec = _promoted_stratified_gate_spec(dict(classic))
+        if require_training_contract:
+            if internal_eval_path is None:
+                raise ValueError("classic.classic_gate_internal_eval_base_groups_path is required")
+            if not isinstance(split_spec, Mapping) or assignments_path is None:
+                raise ValueError("classic.stratified_eval_test_split.assignments_path is required")
+            if gate_spec is None:
+                raise ValueError("classic.promoted_stratified_gate is required")
+
+    missing = sorted(str(path) for path in required_files if not path.is_file())
+    if missing:
+        raise ValueError(f"source bundle is missing required support files: {missing}")
+    if assignments_path is not None:
+        if require_training_contract:
+            _, assignments = _load_classic_stratified_eval_rows(
+                source_bundle,
+                dict(classic),
+                dict(split_spec),
+            )
+        else:
+            assignments = pd.read_csv(assignments_path)
+            _validate_stratified_split_assignments(assignments)
+        if gate_spec is not None:
+            required_splits = {*gate_spec["calibration_splits"], str(gate_spec["test_split"])}
+            missing_splits = sorted(required_splits - set(assignments["split"].astype(str)))
+            if missing_splits:
+                raise ValueError(
+                    f"Stratified split assignments omit configured calibration/test splits: {missing_splits}"
+                )
+    return [str(path) for path in dict.fromkeys(required_files)]
+
+
+def _require_publish_version_matches_pairwise(clusterer: Any, publish_dir: Path | None) -> None:
+    """Reject an accidental release-version change before materialization."""
+
+    if publish_dir is None:
+        return
+    publish_version = production_version_from_bundle_dir(publish_dir)
+    pairwise_version = str(getattr(clusterer, "production_model_bundle_version", "") or "").strip()
+    if publish_version is None:
+        raise SystemExit("--publish-to must use a production_model_vX.Y directory name")
+    if not pairwise_version:
+        raise ValueError("Pairwise bundle does not declare production_model_bundle_version")
+    if publish_version != pairwise_version:
+        raise SystemExit(
+            "--publish-to version disagrees with the pairwise bundle: "
+            f"publish={publish_version!r}, pairwise={pairwise_version!r}"
+        )
+
+
+def _preflight_source_rows(
+    source_bundle: OfficialBundle,
+    *,
+    table_keys: Sequence[str] | None,
+    datasets: set[str] | None,
+    limit_rows: int | None,
+    require_full_tables: bool,
+    name_counts_index_root: Path | None,
+) -> tuple[dict[str, Any], dict[str, ValidatedArrowInputs]]:
+    """Validate selectors, row presence, and every referenced Arrow generation."""
+
+    available_tables = _source_featureless_table_keys(source_bundle)
+    if not available_tables:
+        raise ValueError("source bundle contains no supported featureless row tables")
+    available_table_set = set(available_tables)
+    if require_full_tables:
+        missing_required = sorted(set(REQUIRED_TABLE_KEYS) - available_table_set)
+        if missing_required:
+            raise ValueError(f"official linker source bundle is missing required tables: {missing_required}")
+
+    requested_tables = tuple(table_keys) if table_keys is not None else available_tables
+    unknown_tables = sorted(set(requested_tables) - available_table_set)
+    if unknown_tables:
+        raise ValueError(f"unknown --tables selectors: {unknown_tables}; available={list(available_tables)}")
+    if not requested_tables:
+        raise ValueError("no source tables were selected")
+
+    table_summaries: list[dict[str, Any]] = []
+    observed_selector_matches: set[str] = set()
+    observed_selected_datasets: set[str] = set()
+    for table_key in requested_tables:
+        labels_path = _asset_file(source_bundle, "featureless_rows", table_key)
+        try:
+            selected_dataset_rows, source_rows, available_datasets = _scan_parquet_rows(
+                labels_path,
+                datasets=datasets,
+                limit_rows=limit_rows,
+                columns=["dataset"],
+                inventory=True,
+            )
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"source table {table_key!r} must contain a dataset column: {labels_path}") from exc
+        if source_rows == 0:
+            raise ValueError(f"source table {table_key!r} is empty: {labels_path}")
+        if datasets is None:
+            observed_selector_matches.update(available_datasets)
+        else:
+            observed_selector_matches.update(available_datasets & datasets)
+        selected_rows = int(len(selected_dataset_rows))
+        if selected_rows == 0:
+            requested = "all datasets" if datasets is None else sorted(datasets)
+            raise ValueError(f"source table {table_key!r} selected zero rows for datasets={requested}")
+        selected_dataset_names = tuple(dict.fromkeys(selected_dataset_rows["dataset"].astype(str).tolist()))
+        observed_selected_datasets.update(selected_dataset_names)
+        table_summaries.append(
+            {
+                "table_key": table_key,
+                "path": str(labels_path),
+                "source_rows": source_rows,
+                "selected_rows": selected_rows,
+                "datasets": list(selected_dataset_names),
+            }
+        )
+
+    if datasets is not None:
+        unmatched_datasets = sorted(datasets - observed_selector_matches)
+        if unmatched_datasets:
+            raise ValueError(
+                f"unknown or unmatched --datasets selectors: {unmatched_datasets}; "
+                f"matched={sorted(observed_selected_datasets)}"
+            )
+
+    arrow_paths_by_dataset: dict[str, ValidatedArrowInputs] = {}
+    for dataset_name in sorted(observed_selected_datasets):
+        arrow_paths_by_dataset[dataset_name] = _arrow_paths_for_dataset(
+            source_bundle,
+            dataset_name,
+            name_counts_index_root=name_counts_index_root,
+        )
+
+    name_count_hashes = {
+        paths.name_counts_manifest.manifest_sha256
+        for paths in arrow_paths_by_dataset.values()
+        if paths.name_counts_manifest is not None
+    }
+    if len(name_count_hashes) > 1:
+        raise ValueError(
+            f"linker source datasets reference multiple name-count generations: {sorted(name_count_hashes)}"
+        )
+    summary = {
+        "available_tables": list(available_tables),
+        "selected_tables": list(requested_tables),
+        "tables": table_summaries,
+        "datasets": {
+            dataset_name: {
+                "generation_id": paths.generation_id,
+                "normalization_version": paths.normalization_version,
+                "name_counts_manifest_sha256": (
+                    None if paths.name_counts_manifest is None else paths.name_counts_manifest.manifest_sha256
+                ),
+            }
+            for dataset_name, paths in arrow_paths_by_dataset.items()
+        },
+        "total_selected_rows": sum(int(item["selected_rows"]) for item in table_summaries),
+    }
+    return summary, arrow_paths_by_dataset
+
+
+def _assert_materialization_nonempty(
+    summaries: Sequence[Mapping[str, Any]],
+    *,
+    require_full_tables: bool,
+) -> None:
+    """Reject successful-looking no-op or incomplete materialization."""
+
+    rows_by_table = {str(item["table_key"]): int(item.get("rows", 0)) for item in summaries}
+    total_rows = sum(rows_by_table.values())
+    if total_rows <= 0:
+        raise RuntimeError("linker feature materialization produced zero rows")
+    if require_full_tables:
+        missing_or_empty = sorted(key for key in REQUIRED_TABLE_KEYS if rows_by_table.get(key, 0) <= 0)
+        if missing_or_empty:
+            raise RuntimeError(
+                f"official linker materialization has missing or empty required tables: {missing_or_empty}"
+            )
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    if args.allow_metric_drift and (args.save_artifact_to is not None or args.save_production_bundle_to is not None):
-        raise SystemExit(
-            "--allow-metric-drift is diagnostic-only and cannot be combined with "
-            "--save-artifact-to or --save-production-bundle-to"
-        )
-    if args.limit_rows is not None and int(args.limit_rows) <= 0:
-        raise SystemExit("--limit-rows must be > 0")
-    target = _load_target(args.target_json)
-    output_dir = args.output_dir.resolve()
-    production_bundle_dir = (
-        args.save_production_bundle_to.resolve() if args.save_production_bundle_to is not None else None
-    )
-    if production_bundle_dir is not None:
-        if production_bundle_dir.exists():
-            raise SystemExit(f"--save-production-bundle-to must name a new directory: {production_bundle_dir}")
-        if output_dir == production_bundle_dir or output_dir.is_relative_to(production_bundle_dir):
-            raise SystemExit("--output-dir must be outside --save-production-bundle-to")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    pairwise_model_nan_value = _nan_value_from_policy(str(args.pairwise_model_nan_policy))
-    pairwise_aggregate_nan_value = _nan_value_from_policy(str(args.pairwise_aggregate_nan_policy))
-    feature_nan_policy = _feature_nan_policy_summary(args)
-    if args.limit_rows is None and not args.run_full:
+    _validate_run_mode(args)
+    output_dir, publish_dir, artifact_dir = _resolved_output_paths(args)
+    if args.limit_rows is None and not args.run_full and not args.preflight_only:
         raise SystemExit("unbounded Arrow/Rust feature materialization requires --run-full")
-    if not args.materialize_only and (args.limit_rows is not None or args.tables or args.datasets):
-        raise SystemExit("limited/table-filtered materialization is smoke-only; pass --materialize-only")
+    target = _load_target(args.target_json)
+    require_full_tables = not args.materialize_only
+    if require_full_tables and not args.allow_metric_drift and not target["metrics"]:
+        raise ValueError("Official promoted target metrics must not be empty without --allow-metric-drift")
+    pairwise_model_nan_value = float("nan")
+    pairwise_aggregate_nan_value = 0.0
+    feature_nan_policy = _feature_nan_policy_summary()
     source_bundle = load_bundle(args.source_bundle_root)
+    _assert_output_paths_outside_inputs(
+        output_dir=output_dir,
+        publish_dir=publish_dir,
+        source_bundle_root=source_bundle.root,
+        pairwise_model_path=Path(args.pairwise_model_path),
+    )
+    support_files = _validate_source_bundle_support_files(
+        source_bundle,
+        require_training_contract=require_full_tables,
+    )
+    name_counts_index_root = (
+        Path(args.arrow_name_counts_index_root) if args.arrow_name_counts_index_root is not None else None
+    )
+    preflight_summary, prevalidated_arrow_paths = _preflight_source_rows(
+        source_bundle,
+        table_keys=_parse_tables(args.tables),
+        datasets=_parse_datasets(args.datasets),
+        limit_rows=args.limit_rows,
+        require_full_tables=require_full_tables,
+        name_counts_index_root=name_counts_index_root,
+    )
     clusterer = load_clusterer(args.pairwise_model_path, n_jobs=int(args.n_jobs))
     _assert_pairwise_model_supports_arrow_materialization(clusterer, args.pairwise_model_path)
+    _require_publish_version_matches_pairwise(clusterer, publish_dir)
+    for dataset_name, arrow_paths in prevalidated_arrow_paths.items():
+        require_arrow_name_counts_index_for_clusterer(
+            clusterer,
+            arrow_paths,
+            context=f"linker train/calibrate/eval preflight dataset {dataset_name!r}",
+        )
+    pairwise_binding = dict(pairwise_bundle_binding(Path(args.pairwise_model_path)))
+    preflight_result = {
+        "mode": "preflight",
+        "source_bundle_root": str(source_bundle.root),
+        "target_json": str(Path(args.target_json).resolve()),
+        "pairwise_model_path": str(Path(args.pairwise_model_path).resolve()),
+        "pairwise_bundle_binding": pairwise_binding,
+        "output_dir": str(output_dir),
+        "feature_nan_policy": feature_nan_policy,
+        "max_exemplars": PRODUCTION_MAX_EXEMPLARS,
+        "source": preflight_summary,
+        "support_files": support_files,
+    }
+    if args.preflight_only:
+        return preflight_result
+
+    output_dir.mkdir(parents=True)
+    _write_json(output_dir / "preflight.json", preflight_result)
     feature_bundle_root = output_dir / "arrow_rust_feature_bundle"
     feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
         source_bundle=source_bundle,
@@ -2198,14 +2283,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         table_keys=_parse_tables(args.tables),
         datasets=_parse_datasets(args.datasets),
         limit_rows=args.limit_rows,
-        max_exemplars=int(args.max_exemplars),
+        max_exemplars=PRODUCTION_MAX_EXEMPLARS,
         pairwise_model_nan_value=pairwise_model_nan_value,
         pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
-        row_nan_policy=str(args.row_nan_policy),
-        name_counts_index_root=(
-            Path(args.arrow_name_counts_index_root) if args.arrow_name_counts_index_root is not None else None
-        ),
+        row_nan_policy=PRODUCTION_ROW_NAN_POLICY,
+        name_counts_index_root=name_counts_index_root,
+        prevalidated_arrow_paths=prevalidated_arrow_paths,
     )
+    _assert_materialization_nonempty(featureization_summaries, require_full_tables=require_full_tables)
     if args.materialize_only:
         result = {
             "mode": "arrow-rust",
@@ -2223,61 +2308,40 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     run_output_dir = output_dir / "classic"
     started = time.perf_counter()
     active_params = dict(feature_bundle.models["classic"]["best_params"])
-    hyperopt_evals = _resolve_hyperopt_evals(args)
-    hyperopt_summary: dict[str, Any] | None = None
-    if hyperopt_evals > 0:
-        active_params, hyperopt_summary = _run_classic_hyperopt(
-            feature_bundle=feature_bundle,
-            output_dir=output_dir / "classic_hyperopt",
-            base_params=active_params,
-            hyperopt_evals=int(hyperopt_evals),
-            metric=str(args.hyperopt_metric),
-            seed=int(args.hyperopt_seed),
-            n_jobs=int(args.n_jobs),
-        )
-        feature_bundle = _bundle_with_classic_params(feature_bundle, active_params)
 
-    save_artifact_to = args.save_artifact_to.resolve() if args.save_artifact_to is not None else None
-    if production_bundle_dir is not None:
-        if save_artifact_to is None:
-            save_artifact_to = output_dir / "production_incremental_linker"
-        if save_artifact_to == production_bundle_dir or save_artifact_to.is_relative_to(production_bundle_dir):
-            raise SystemExit("--save-artifact-to must be outside --save-production-bundle-to")
-    artifact_pairwise_binding = (
-        dict(pairwise_bundle_binding(Path(args.pairwise_model_path))) if save_artifact_to is not None else None
-    )
-    summary = run_classic(
-        feature_bundle,
-        run_output_dir,
-        n_jobs=int(args.n_jobs),
-    )
+    fitted = run_classic(feature_bundle, run_output_dir, n_jobs=int(args.n_jobs))
+    summary = fitted.summary
     observed = _observed_official_metrics(summary)
     deltas = _metric_deltas(observed, target)
-    if not args.allow_metric_drift:
+    candidate_target_path = None
+    if args.allow_metric_drift:
+        candidate_target_path = output_dir / "candidate_target.json"
+        candidate_target = {
+            **target,
+            "params": dict(active_params),
+            "metrics": observed,
+        }
+        _write_json(candidate_target_path, candidate_target)
+    else:
         _assert_no_metric_drift(observed, target)
-    prod_artifact_summary = None
+
+    artifact_summary = None
     production_bundle_summary = None
-    if save_artifact_to is not None:
-        assert artifact_pairwise_binding is not None
-        prod_artifact_summary = _train_and_save_prod_artifact(
-            feature_bundle=feature_bundle,
-            output_dir=output_dir,
-            save_artifact_to=save_artifact_to,
+    if not args.allow_metric_drift:
+        artifact_summary = _save_evaluated_artifact(
+            fitted=fitted,
+            artifact_dir=artifact_dir,
             target_spec=target,
-            artifact_pairwise_bundle_binding=artifact_pairwise_binding,
-            holdout_importance_weight=float(args.prod_holdout_importance_weight),
+            artifact_pairwise_bundle_binding=pairwise_binding,
         )
-    if production_bundle_dir is not None:
-        if save_artifact_to is None:
-            raise RuntimeError("production bundle finalization requires an incremental linker artifact path")
-        production_bundle_summary = finalize_production_bundle(
-            pairwise_bundle_dir=Path(args.pairwise_model_path),
-            output_bundle_dir=production_bundle_dir,
-            incremental_linker_artifact_dir=save_artifact_to,
-            target_json=Path(args.target_json),
-            bundle_version=args.production_bundle_version or production_version_from_bundle_dir(production_bundle_dir),
-            incremental_linker_version=str(args.linker_artifact_version).removeprefix("v"),
-        )
+        _write_json(output_dir / "artifact_summary.json", artifact_summary)
+        if publish_dir is not None:
+            production_bundle_summary = finalize_production_bundle(
+                pairwise_bundle_dir=Path(args.pairwise_model_path),
+                output_bundle_dir=publish_dir,
+                incremental_linker_artifact_dir=artifact_dir,
+                target_json=Path(args.target_json),
+            )
     result = {
         "mode": "arrow-rust",
         "feature_bundle_root": str(feature_bundle.root),
@@ -2293,12 +2357,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "target_metrics": dict(target["metrics"]),
         "metric_deltas": deltas,
         "classic_summary_path": str(run_output_dir / "summary.json"),
-        "hyperopt": hyperopt_summary or {"enabled": False},
         "feature_nan_policy": feature_nan_policy,
     }
-    if save_artifact_to is not None:
-        result["artifact_dir"] = str(save_artifact_to)
-        result["artifact_summary"] = dict(prod_artifact_summary or {})
+    if artifact_summary is not None:
+        result["artifact_dir"] = str(artifact_dir)
+        result["artifact_summary"] = artifact_summary
     if production_bundle_summary is not None:
         result["production_bundle_dir"] = str(production_bundle_summary.bundle_dir)
         result["production_bundle_summary"] = {
@@ -2307,6 +2370,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "files": list(production_bundle_summary.files),
             "manifest_path": str(production_bundle_summary.manifest_path),
         }
+    if candidate_target_path is not None:
+        result["candidate_target_path"] = str(candidate_target_path)
     result["component_scope"] = "block-local"
     if not args.allow_metric_drift:
         result["metric_drift_check"] = "passed"
@@ -2316,61 +2381,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-bundle-root", type=Path, default=DEFAULT_SOURCE_BUNDLE_ROOT)
+    parser.add_argument("--source-bundle-root", type=Path, required=True)
     parser.add_argument("--target-json", type=Path, required=True, help="Explicit promoted-linker target JSON.")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--pairwise-model-path",
         type=Path,
         required=True,
         help="Explicit v2 pairwise_only native bundle produced by train_pairwise.py.",
     )
-    parser.add_argument("--save-artifact-to", type=Path, default=None)
     parser.add_argument(
-        "--save-production-bundle-to",
+        "--publish-to",
         type=Path,
         default=None,
         help="Publish a complete production_model_vX.Y bundle to a new directory.",
     )
-    parser.add_argument(
-        "--production-bundle-version",
-        default=None,
-        help="Version recorded in the finalized production bundle; inferred from production_model_vX.Y if omitted.",
-    )
-    parser.add_argument("--linker-artifact-version", default="v1.2")
-    parser.add_argument(
-        "--prod-holdout-importance-weight",
-        type=float,
-        default=10.0,
-        help="Final production fit multiplier for calibration/eval candidate rows.",
-    )
-    parser.add_argument(
-        "--hyperopt",
-        action="store_true",
-        help="Run hyperopt over the initial train/calibrate/eval stack before the final production fit.",
-    )
-    parser.add_argument(
-        "--hyperopt-evals",
-        type=int,
-        default=None,
-        help="Number of train/calibrate/eval hyperopt trials. Passing a value enables hyperopt.",
-    )
-    parser.add_argument(
-        "--hyperopt-metric",
-        choices=(
-            "weighted_average_error",
-            "stratified_test_errors",
-            "stratified_test_error_rate",
-            "stratified_test_balanced_accuracy",
-        ),
-        default="weighted_average_error",
-        help=(
-            "Metric optimized by hyperopt. weighted_average_error uses "
-            "0.25*false_abstain_error_rate, 1.0*false_link_error_rate, "
-            "and 1.5*wrong_link_error_rate, divided by the total weight."
-        ),
-    )
-    parser.add_argument("--hyperopt-seed", type=int, default=13)
     parser.add_argument(
         "--arrow-name-counts-index-root",
         type=Path,
@@ -2380,42 +2405,23 @@ def build_parser() -> argparse.ArgumentParser:
             "manifest is the authority."
         ),
     )
-    parser.add_argument(
-        "--pairwise-model-nan-policy",
-        choices=NAN_POLICY_CHOICES,
-        default="preserve",
-        help=(
-            "Missing-value policy for pairwise model feature matrices in Arrow materialization. "
-            "The production default preserves NaNs for the pairwise distance model internals."
-        ),
-    )
-    parser.add_argument(
-        "--pairwise-aggregate-nan-policy",
-        choices=NAN_POLICY_CHOICES,
-        default="zero",
-        help=(
-            "Missing-value policy for promoted pw_* aggregates. The production default reproduces "
-            "prod12 dense zero-filled pairwise semantics; preserve uses nan-aware aggregation."
-        ),
-    )
-    parser.add_argument(
-        "--row-nan-policy",
-        choices=ROW_NAN_POLICY_CHOICES,
-        default="finite",
-        help="Missing-value policy for promoted non-pw row features.",
-    )
     parser.add_argument("--n-jobs", type=int, default=20)
     parser.add_argument("--total-ram-bytes", type=int, default=DEFAULT_TOTAL_RAM_BYTES)
-    parser.add_argument("--max-exemplars", type=int, default=4)
-    parser.add_argument("--tables", nargs="*", help="Optional table keys to materialize.")
-    parser.add_argument("--datasets", nargs="*", help="Optional dataset slugs to keep when materializing smoke checks.")
+    parser.add_argument("--tables", nargs="+", help="Optional table keys to materialize.")
+    parser.add_argument("--datasets", nargs="+", help="Optional dataset slugs to keep when materializing smoke checks.")
     parser.add_argument("--limit-rows", type=int, default=None, help="Optional per-table row limit for smoke checks.")
     parser.add_argument("--materialize-only", action="store_true", help="Stop after Rust feature materialization.")
-    parser.add_argument("--run-full", action="store_true", help="Explicitly allow an unbounded official run.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Validate all local inputs and bindings, print the run plan, and do not create output.",
+    )
+    mode.add_argument("--run-full", action="store_true", help="Explicitly allow an unbounded official run.")
     parser.add_argument(
         "--allow-metric-drift",
         action="store_true",
-        help="Diagnostic-only metric comparison override; incompatible with either artifact promotion option.",
+        help="Diagnostic-only metric comparison override; incompatible with --publish-to.",
     )
     return parser
 

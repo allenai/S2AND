@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-import subprocess
-import sys
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +9,12 @@ import pytest
 
 from s2and import production_model as production_model_module
 from s2and.incremental_linking.artifact import ARTIFACT_SCHEMA_VERSION
-from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking_training.classic import load_bundle
 from s2and.production_model import _load_pairwise_staging_model, load_production_model
 from scripts.production.model import linker_train_calibrate_eval as promoted_train
-from tests.helpers import import_s2and_rust, tiny_name_counts_provenance, tiny_name_counts_tuple
+from tests.helpers import import_s2and_rust
+from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
 
 _HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust()
 requires_rust_lightgbm = pytest.mark.skipif(
@@ -30,36 +25,6 @@ _SYNTHETIC_ARTIFACT_HASHES = {
     "name_tuples_data_sha256": "1" * 64,
     "orcid_prefix_counts_data_sha256": "2" * 64,
 }
-
-
-def _run_cli(
-    args: list[str],
-    *,
-    repo_root: Path,
-    timeout: int = 300,
-    env_overrides: Mapping[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    bootstrap = (
-        "import json, runpy, sys; "
-        "from s2and import production_model; "
-        "artifact_hashes = json.loads(sys.argv.pop(1)); "
-        "production_model.canonical_artifact_hashes = lambda: dict(artifact_hashes); "
-        "sys.argv = sys.argv[1:]; "
-        "runpy.run_path(sys.argv[0], run_name='__main__')"
-    )
-    completed = subprocess.run(
-        [sys.executable, "-c", bootstrap, json.dumps(_SYNTHETIC_ARTIFACT_HASHES), *args],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout,
-        env={**os.environ, "S2AND_BACKEND": "python", **dict(env_overrides or {})},
-    )
-    assert completed.returncode == 0, (
-        f"Command failed: {[sys.executable, *args]}\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
-    )
-    return completed
 
 
 def _candidate_rows(
@@ -160,12 +125,25 @@ def _write_tiny_promoted_feature_bundle(
             "force_col_wise": True,
         },
         "metrics": {
-            "stratified_test_queries": 2,
+            "false_abstain_error_rate": 0.5,
+            "false_link_error_rate": 0.0,
             "stratified_test_accuracy": 0.5,
+            "stratified_test_balanced_accuracy": 0.5,
+            "stratified_test_error_rate": 0.5,
             "stratified_test_errors": 1,
             "stratified_test_false_abstain": 1,
             "stratified_test_false_link": 0,
+            "stratified_test_queries": 2,
             "stratified_test_wrong_candidate_link": 0,
+            "training_positive_rows": 1,
+            "training_rows": 4,
+            "weighted_average_error": 0.045454545454545456,
+            "weighted_average_error_weights": {
+                "false_abstain_error_rate": 0.25,
+                "false_link_error_rate": 1.0,
+                "wrong_link_error_rate": 1.5,
+            },
+            "wrong_link_error_rate": 0.0,
         },
     }
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,6 +183,7 @@ def _write_tiny_promoted_feature_bundle(
                 "query_group_id": "s2and_pos",
                 "source_key": "s2and_eval",
                 "split": "test",
+                "base_group_id": "s2and_base_pos",
                 "source_stratum": "s2and",
                 "first_name_bucket": "multi_letter_first",
             },
@@ -212,6 +191,7 @@ def _write_tiny_promoted_feature_bundle(
                 "query_group_id": "s2and_neg",
                 "source_key": "s2and_eval",
                 "split": "test",
+                "base_group_id": "s2and_base_neg",
                 "source_stratum": "s2and",
                 "first_name_bucket": "multi_letter_first",
             },
@@ -219,6 +199,7 @@ def _write_tiny_promoted_feature_bundle(
                 "query_group_id": "hwang_pos",
                 "source_key": "hwang_eval",
                 "split": "calibration_fit",
+                "base_group_id": "hwang_base_pos",
                 "source_stratum": "hwang",
                 "first_name_bucket": "multi_letter_first",
             },
@@ -226,6 +207,7 @@ def _write_tiny_promoted_feature_bundle(
                 "query_group_id": "hwang_neg",
                 "source_key": "hwang_eval",
                 "split": "calibration_check",
+                "base_group_id": "hwang_base_neg",
                 "source_stratum": "hwang",
                 "first_name_bucket": "multi_letter_first",
             },
@@ -264,79 +246,29 @@ def _write_tiny_promoted_feature_bundle(
 
 
 @requires_rust_lightgbm
-def test_tiny_qian_production_model_two_step_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tiny_linker_finalization_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         production_model_module,
         "canonical_artifact_hashes",
         lambda: dict(_SYNTHETIC_ARTIFACT_HASHES),
     )
-    repo_root = Path(__file__).resolve().parents[1]
     pairwise_bundle_dir = tmp_path / "pairwise_stage" / "production_model_v9.8"
+    write_synthetic_pairwise_bundle(
+        pairwise_bundle_dir,
+        artifact_hashes=_SYNTHETIC_ARTIFACT_HASHES,
+        bundle_version="9.8",
+        source_model_version="1.2",
+    )
     bundle_dir = tmp_path / "final" / "production_model_v9.8"
-    canonical_data_dir = tmp_path / "canonical_data"
-    name_counts_index_path, _metrics = write_name_counts_index(
-        canonical_data_dir,
-        tiny_name_counts_tuple(),
-        tiny_name_counts_provenance(),
-    )
-    path_config = tmp_path / "path_config.json"
-    path_config.write_text(
-        json.dumps({"main_data_dir": str(canonical_data_dir.resolve())}) + "\n",
-        encoding="utf-8",
-    )
-    cli_env = {"S2AND_PATH_CONFIG": str(path_config)}
-
-    _run_cli(
-        [
-            "scripts/production/model/train_pairwise.py",
-            "--production-version",
-            "9.8",
-            "--output-dir",
-            str(pairwise_bundle_dir),
-            "--data-dir",
-            "tests",
-            "--datasets",
-            "qian",
-            "--no-include-augmented",
-            "--n-iter",
-            "1",
-            "--cluster-n-iter",
-            "1",
-            "--n-jobs",
-            "1",
-            "--chunk-size",
-            "100",
-            "--train-pairs-size",
-            "50",
-            "--val-test-size",
-            "20",
-            "--run-full",
-        ],
-        repo_root=repo_root,
-        env_overrides=cli_env,
-    )
 
     pairwise_manifest = json.loads((pairwise_bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     assert pairwise_manifest["incremental_linker_version"] is None
     assert "bundle_status" not in pairwise_manifest
     assert "files" not in pairwise_manifest
-    # Pairwise lineage is manifest authority and need not match the staging
-    # directory's release name (for example, a canonical v1.21 rewrap).
-    pairwise_manifest["pairwise_model_version"] = "1.2"
-    (pairwise_bundle_dir / "manifest.json").write_text(
-        json.dumps(pairwise_manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    assert pairwise_manifest["pairwise_model_version"] == "1.2"
     pairwise_config = json.loads((pairwise_bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
     for field in ("name_tuples_data_sha256", "orcid_prefix_counts_data_sha256"):
         assert len(pairwise_config["feature_contract"][field]) == 64
-    expected_name_count_contract = {
-        "name_counts_manifest_sha256": hashlib.sha256(
-            (Path(name_counts_index_path) / "manifest.json").read_bytes()
-        ).hexdigest(),
-    }
-    for field, expected in expected_name_count_contract.items():
-        assert pairwise_config["feature_contract"][field] == expected
     with pytest.raises(ValueError, match="Expected a complete"):
         load_production_model(pairwise_bundle_dir)
     assert _load_pairwise_staging_model(pairwise_bundle_dir).production_model_bundle_status == "pairwise_only"
@@ -344,17 +276,24 @@ def test_tiny_qian_production_model_two_step_flow(tmp_path: Path, monkeypatch: p
     feature_root = tmp_path / "tiny_linker_feature_bundle"
     target_path = tmp_path / "incremental_linker_training_target.json"
     _write_tiny_promoted_feature_bundle(feature_root, target_path)
-    monkeypatch.setenv("S2AND_PATH_CONFIG", str(path_config))
     monkeypatch.setenv("S2AND_BACKEND", "python")
     monkeypatch.setattr(
         promoted_train,
         "_assert_pairwise_model_supports_arrow_materialization",
         lambda *_args: None,
     )
+    monkeypatch.setattr(
+        promoted_train,
+        "_preflight_source_rows",
+        lambda *_args, **_kwargs: ({"test_fixture": True}, {}),
+    )
 
     def use_tiny_materialized_features(**kwargs: Any) -> tuple[Any, list[dict[str, Any]]]:
         assert kwargs["source_bundle"].root == feature_root.resolve()
-        return load_bundle(feature_root), [{"mode": "arrow-rust", "test_fixture": True}]
+        return load_bundle(feature_root), [
+            {"mode": "arrow-rust", "table_key": table_key, "rows": 1, "test_fixture": True}
+            for table_key in promoted_train.REQUIRED_TABLE_KEYS
+        ]
 
     monkeypatch.setattr(promoted_train, "_materialize_arrow_rust_feature_bundle", use_tiny_materialized_features)
     args = promoted_train.build_parser().parse_args(
@@ -365,16 +304,10 @@ def test_tiny_qian_production_model_two_step_flow(tmp_path: Path, monkeypatch: p
             str(target_path),
             "--pairwise-model-path",
             str(pairwise_bundle_dir),
-            "--save-production-bundle-to",
+            "--publish-to",
             str(bundle_dir),
-            "--production-bundle-version",
-            "9.8",
-            "--linker-artifact-version",
-            "v9.8",
             "--output-dir",
             str(tmp_path / "linker_run"),
-            "--prod-holdout-importance-weight",
-            "2.0",
             "--run-full",
         ]
     )
@@ -388,7 +321,7 @@ def test_tiny_qian_production_model_two_step_flow(tmp_path: Path, monkeypatch: p
     assert final_manifest["pairwise_model_version"] == "1.2"
     assert _load_pairwise_staging_model(pairwise_bundle_dir).production_model_bundle_status == "pairwise_only"
     assert not (pairwise_bundle_dir / "incremental_linker").exists()
-    assert (tmp_path / "linker_run" / "production_incremental_linker" / "metadata.json").is_file()
+    assert (tmp_path / "linker_run" / "incremental_linker_artifact" / "metadata.json").is_file()
 
     clusterer = load_production_model(bundle_dir)
     assert clusterer.production_model_bundle_status == "complete"

@@ -37,6 +37,7 @@ from s2and.incremental_linking_training.classic import (
     _summarize_classic_stratified_predictions,
     _summarize_training_gate_buckets,
     _summary_key_for_eval_dataset,
+    _validate_stratified_base_identity_split_disjointness,
     format_classic_selected_gate_tables,
     load_bundle,
 )
@@ -172,11 +173,20 @@ def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibrati
     hwang_path.parent.mkdir(parents=True)
     split_path.parent.mkdir(parents=True)
 
-    row_columns = ["query_group_id", "dataset", "query_view", "candidate_component_key", "retrieval_rank", "label"]
+    row_columns = [
+        "query_group_id",
+        "base_group_id",
+        "dataset",
+        "query_view",
+        "candidate_component_key",
+        "retrieval_rank",
+        "label",
+    ]
     pd.DataFrame(
         [
             {
                 "query_group_id": "h:q1",
+                "base_group_id": "h:b1",
                 "dataset": "h_wang",
                 "query_view": "full",
                 "candidate_component_key": "c1",
@@ -190,6 +200,7 @@ def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibrati
         [
             {
                 "query_group_id": "h:q1",
+                "base_group_id": "h:b1",
                 "dataset": "h_wang",
                 "query_view": "full",
                 "candidate_component_key": "c1",
@@ -206,6 +217,7 @@ def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibrati
                 "query_group_id": "h:q1",
                 "source_key": "hwang_eval",
                 "split": "test",
+                "base_group_id": "h:b1",
                 "source_stratum": "hwang_block",
                 "has_positive_candidate": False,
                 "positive_rank_bucket": "no_positive",
@@ -270,6 +282,31 @@ def test_promoted_stratified_gate_spec_rejects_removed_threshold_calibration() -
                 "promoted_stratified_gate": {
                     "mode": "full_calibration_fixed_grid_4score_2margin",
                     "calibration_splits": ["calibration_fit"],
+                }
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("calibration_splits", "test_split", "message"),
+    [
+        (["calibration_fit", "test"], "test", "must not include test_split"),
+        (["calibration_fit", "calibration_fit"], "test", "must not contain duplicates"),
+        ([""], "test", "must contain nonempty names"),
+        (["calibration_fit"], "", "test_split must be nonempty"),
+    ],
+)
+def test_promoted_stratified_gate_spec_rejects_ambiguous_or_leaky_splits(
+    calibration_splits: list[str],
+    test_split: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _promoted_stratified_gate_spec(
+            {
+                "promoted_stratified_gate": {
+                    "calibration_splits": calibration_splits,
+                    "test_split": test_split,
                 }
             }
         )
@@ -356,6 +393,47 @@ def test_apply_classic_train_holdout_filter_removes_eval_identities() -> None:
     assert summary["overlapping_query_groups"] == 1
     assert summary["overlapping_base_groups"] == 1
     assert summary["holdout_sources"] == [{"source": "demo", "query_groups": 1, "base_groups": 1}]
+
+
+def test_stratified_split_disjointness_rejects_base_identity_spanning_splits() -> None:
+    """Masked views of one base query must not straddle calibration and test."""
+
+    assignments = pd.DataFrame(
+        [
+            {"query_group_id": "q1:full", "base_group_id": "b1", "split": "test"},
+            {"query_group_id": "q1:initial_only", "base_group_id": "b1", "split": "calibration_check"},
+            {"query_group_id": "q2:full", "base_group_id": "b2", "split": "test"},
+        ]
+    )
+
+    with pytest.raises(ValueError, match="base_group_id values in multiple splits.*count=1"):
+        _validate_stratified_base_identity_split_disjointness(assignments)
+
+
+def test_stratified_split_disjointness_accepts_per_base_assignments() -> None:
+    """Views of one base query landing in one split (or repeated there) are fine."""
+
+    assignments = pd.DataFrame(
+        [
+            {"query_group_id": "q1:full", "base_group_id": "b1", "split": "test"},
+            {"query_group_id": "q1:initial_only", "base_group_id": "b1", "split": "test"},
+            {"query_group_id": "q2:full", "base_group_id": "b2", "split": "calibration_fit"},
+        ]
+    )
+
+    _validate_stratified_base_identity_split_disjointness(assignments)
+
+
+@pytest.mark.parametrize(
+    "assignments",
+    (
+        pd.DataFrame([{"base_group_id": "", "split": "test"}]),
+        pd.DataFrame([{"base_group_id": "b1", "split": None}]),
+    ),
+)
+def test_stratified_split_disjointness_requires_complete_identity_keys(assignments: pd.DataFrame) -> None:
+    with pytest.raises(ValueError, match="require a nonempty"):
+        _validate_stratified_base_identity_split_disjointness(assignments)
 
 
 def test_evaluate_logistic_manual_holdout_scores_fresh_candidates() -> None:
@@ -508,7 +586,11 @@ def test_load_bundle_requires_explicit_root(tmp_path: Path) -> None:
     assert bundle.expected_metrics == {}
 
 
-def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(tmp_path: Path) -> None:
+@pytest.mark.parametrize("assignment_base_group_id", ["rescue:b1", "wrong:b1"])
+def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(
+    tmp_path: Path,
+    assignment_base_group_id: str,
+) -> None:
     """Classic stratified scoring should refresh stale split targets from active labels."""
 
     bundle_root = tmp_path / "bundle"
@@ -524,6 +606,7 @@ def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(tm
     common_row = {
         "dataset": "demo",
         "query_view": "full",
+        "base_group_id": "rescue:b1",
         "candidate_component_key": "c1",
         "retrieval_rank": 1,
         "label": 0,
@@ -543,6 +626,7 @@ def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(tm
                 "query_group_id": "rescue:q1",
                 "source_key": "s2and_rescue_reviewed_eval",
                 "split": "test",
+                "base_group_id": assignment_base_group_id,
                 "manual_safe_target": 1,
                 "stratum_key": "s2and_block|has_pos=1|positive_first|multi_letter_first|multi_cand=0",
             }
@@ -567,6 +651,17 @@ def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(tm
     class AlwaysLinkModel:
         def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
             return np.repeat([[0.0, 1.0]], repeats=len(features), axis=0)
+
+    if assignment_base_group_id != "rescue:b1":
+        with pytest.raises(ValueError, match="base_group_id does not match source rows"):
+            _score_classic_stratified_eval_test(
+                bundle,
+                spec,
+                {"assignments_path": "calibration/stratified_eval_test_split/combined_query_split_assignments.csv"},
+                AlwaysLinkModel(),  # type: ignore[arg-type]
+                (),
+            )
+        return
 
     scored = _score_classic_stratified_eval_test(
         bundle,

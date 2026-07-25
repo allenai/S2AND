@@ -16,6 +16,12 @@ For release work, authority is intentionally split:
 3. [work_plan.md](work_plan.md) is only a remediation ledger. It is not an
    executable sequence.
 
+## Repository entry points
+
+- Project overview and public quick start: [../README.md](../README.md)
+- Native `s2and-rust` package build and test guide:
+  [../s2and_rust/README.md](../s2and_rust/README.md)
+
 ## User guides
 
 - Install and setup: [install.md](install.md)

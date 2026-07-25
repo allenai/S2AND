@@ -149,10 +149,14 @@ authoritative.
 No full warehouse query, data conversion, model job, or publish workflow may
 start until the blockers applicable to it are closed.
 
+B02 is already closed at the current HEAD and remains in this ledger so blocker
+IDs stay stable. Every other row is open until its required evidence is
+recorded.
+
 | ID | Blocker | Required resolution | Smallest verification |
 |---|---|---|---|
 | B01 | The release version meaning is ambiguous. | Decide whether Python/Rust remain `0.60.0` with model/data v1.3, or whether the packages become `1.3.0`. Record the decision in the release manifest. | `uv run --no-project python scripts/sync_version.py --check` and reviewed version matrix. |
-| B02 | `scripts/production/counts/_run_support.py` is untracked. | Track it in the release commit. | A clean clone imports both count producers. |
+| B02 | **Closed in `4a524d5`:** `scripts/production/counts/_run_support.py` is tracked. | Keep the shared helper tracked in every release candidate. | `git ls-files --error-unmatch scripts/production/counts/_run_support.py` returns the path, and clean-clone subprocess tests import both count producers. |
 | B03 | Both documented direct count-script invocations fail with `ModuleNotFoundError: scripts`. | Add the same repo-root bootstrap used by the model scripts, or declare module execution as the supported interface. Add subprocess `--help` tests for both commands. | Both supported commands return zero in a clean clone. |
 | B04 | Rust edits do not invalidate uv's local wheel cache. | Add reviewed cache keys for every actual wheel input, including root/local `pyproject.toml`, `s2and_rust/README.md`, `s2and_rust/**/*.py`, `s2and_rust/Cargo.toml`, `s2and_rust/Cargo.lock`, `s2and_rust/build.rs`, `s2and_rust/src/**/*.rs`, and patched `s2and_rust/vendor/cld2/**/*` inputs. Do not omit Python/package inputs: custom uv cache keys replace the defaults. | In a disposable checkout, make a compiled behavior/constant change, observe a cache miss/rebuild in logs, and prove the installed native behavior or binary digest changes. A `cfg(test)`-only edit is not sufficient. |
 | B05 | There is no valid v1.21 comparison protocol in current canonical code. | Run the historical model under a frozen compatible runtime/branch, or add an explicit comparison-only compatibility runner. Persist exact evaluation entity/block IDs, dataset hashes, assignments, and predictions. A guessed seed or recorded linker metrics is not sufficient. | A machine-readable legacy baseline can be rerun on the exact frozen evaluation population. |
@@ -597,8 +601,9 @@ Use the conservative rule when a dependency is unclear.
       required by B01-B30 is merged before the code-only candidate is frozen.
       Stage-specific runs, reviews, and external approvals may occur later;
       implementation may not.
-- [ ] B01-B04 are closed; B05's comparison runner/protocol is implemented
-      before its real baseline evidence is collected in Stage 1.
+- [ ] B01, B03, and B04 are closed, B02's tracked-file closure is reverified,
+      and B05's comparison runner/protocol is implemented before its real
+      baseline evidence is collected in Stage 1.
 - [ ] B06-B11 implementations and focused fixtures are closed before approving
       expensive model work; their real-data products still pass Stage 4.
 - [ ] B12-B20 and B27-B30 have an owner, implemented contracts, and focused

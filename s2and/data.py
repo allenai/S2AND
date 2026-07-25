@@ -1848,6 +1848,41 @@ class ANDData:
 
         return dict(cluster_to_signatures)
 
+    def _fixed_train_val_pairs(
+        self,
+        split_probabilities: np.ndarray | None,
+    ) -> tuple[list[tuple[str, str, int | float]], list[tuple[str, str, int | float]]]:
+        """Map fixed labels and apply an optional train/validation split."""
+
+        assert self.train_pairs is not None
+        train_pairs_df = _map_fixed_pair_labels(self.train_pairs, "train")
+        if self.val_pairs is not None:
+            val_pairs_df = _map_fixed_pair_labels(self.val_pairs, "val")
+            return list(train_pairs_df.to_records(index=False)), list(val_pairs_df.to_records(index=False))
+
+        assert split_probabilities is not None
+        train_prob = self.train_ratio / (self.train_ratio + self.val_ratio)
+        train_mask = split_probabilities < train_prob
+        return (
+            list(train_pairs_df[train_mask].to_records(index=False)),
+            list(train_pairs_df[~train_mask].to_records(index=False)),
+        )
+
+    def fixed_train_val_pairs(
+        self,
+    ) -> tuple[list[tuple[str, str, int | float]], list[tuple[str, str, int | float]]]:
+        """Resolve fixed train/validation pairs without accessing test pairs.
+
+        Returns:
+            Train and validation pairs with binary integer labels.
+        """
+
+        assert self.train_pairs is not None, "You need to pass in train pairs to use this function"
+        split_probabilities = (
+            np.random.RandomState(self.random_seed).rand(len(self.train_pairs)) if self.val_pairs is None else None
+        )
+        return self._fixed_train_val_pairs(split_probabilities)
+
     def fixed_pairs(
         self,
     ) -> tuple[
@@ -1865,18 +1900,11 @@ class ANDData:
         assert self.train_pairs is not None and self.test_pairs is not None, (
             "You need to pass in train and test pairs to use this function"
         )
-        train_pairs_df = _map_fixed_pair_labels(self.train_pairs, "train")
-        if self.val_pairs is not None:
-            val_pairs_df = _map_fixed_pair_labels(self.val_pairs, "val")
-            train_pairs = list(train_pairs_df.to_records(index=False))
-            val_pairs = list(val_pairs_df.to_records(index=False))
-        else:
+        split_probabilities = None
+        if self.val_pairs is None:
             np.random.seed(self.random_seed)
-            # split train into train/val
-            train_prob = self.train_ratio / (self.train_ratio + self.val_ratio)
-            msk = np.random.rand(len(train_pairs_df)) < train_prob
-            train_pairs = list(train_pairs_df[msk].to_records(index=False))
-            val_pairs = list(train_pairs_df[~msk].to_records(index=False))
+            split_probabilities = np.random.rand(len(self.train_pairs))
+        train_pairs, val_pairs = self._fixed_train_val_pairs(split_probabilities)
         test_pairs_df = _map_fixed_pair_labels(self.test_pairs, "test")
         test_pairs = list(test_pairs_df.to_records(index=False))
 

@@ -20,6 +20,7 @@ from s2and.featurizer import (
     _ensure_python_pair_signature_ngrams,
     _signature_id_to_index_or_raise,
     many_pairs_featurize,
+    resolve_selection_pairs,
 )
 from s2and.runtime import RuntimeContext
 from tests.helpers import tiny_name_counts_index
@@ -69,6 +70,34 @@ def test_default_features_are_instance_isolated() -> None:
 
 def test_default_feature_group_policy_is_canonical() -> None:
     assert tuple(FeaturizationInfo().features_to_use) == DEFAULT_FEATURE_GROUPS
+
+
+def test_resolve_selection_pairs_never_samples_test_pairs() -> None:
+    train_signatures = {"train": ["s1", "s2"]}
+    val_signatures = {"val": ["s3", "s4"]}
+    test_signatures = {"test": ["s5", "s6"]}
+    seen_test_signatures: list[dict[str, list[str]]] = []
+
+    def split_pairs(train, val, test):
+        assert train is train_signatures
+        assert val is val_signatures
+        seen_test_signatures.append(test)
+        return [("s1", "s2", 1)], [("s3", "s4", 0)], []
+
+    dataset = SimpleNamespace(
+        mode="train",
+        train_pairs=None,
+        train_blocks=None,
+        train_signatures=None,
+        split_cluster_signatures=lambda: (train_signatures, val_signatures, test_signatures),
+        split_pairs=split_pairs,
+    )
+
+    assert resolve_selection_pairs(cast(ANDData, dataset)) == (
+        [("s1", "s2", 1)],
+        [("s3", "s4", 0)],
+    )
+    assert seen_test_signatures == [{}]
 
 
 def test_featurization_info_rejects_unknown_feature_groups() -> None:

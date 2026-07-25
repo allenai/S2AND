@@ -1468,6 +1468,53 @@ def many_pairs_featurize(
     return features, labels, nameless_features
 
 
+def _training_signature_splits(
+    dataset: ANDData,
+) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
+    """Resolve signature splits from the dataset's configured split authority."""
+
+    if dataset.train_blocks is not None:
+        return dataset.split_cluster_signatures_fixed()
+    if dataset.train_signatures is not None:
+        return dataset.split_data_signatures_fixed()
+    return dataset.split_cluster_signatures()
+
+
+def resolve_selection_pairs(
+    dataset: ANDData,
+) -> tuple[list[tuple[str, str, int | float]], list[tuple[str, str, int | float]]]:
+    """Resolve train/validation pairs without accessing test-pair labels.
+
+    Args:
+        dataset: A ``mode='train'`` dataset.
+
+    Returns:
+        Tuple of (train_pairs, val_pairs).
+
+    Raises:
+        ValueError: If the dataset is not in training mode or the resolved
+            splits contain the same unordered signature pair.
+    """
+
+    if dataset.mode != "train":
+        raise ValueError(f"resolve_selection_pairs requires mode='train', got {dataset.mode!r}")
+    if dataset.train_pairs is not None:
+        train_pairs, val_pairs = dataset.fixed_train_val_pairs()
+    else:
+        train_signatures, val_signatures, _ = _training_signature_splits(dataset)
+        train_pairs, val_pairs, _ = dataset.split_pairs(train_signatures, val_signatures, {})
+
+    train_identities = {tuple(sorted((str(left), str(right)))) for left, right, _ in train_pairs}
+    val_identities = {tuple(sorted((str(left), str(right)))) for left, right, _ in val_pairs}
+    overlap = train_identities & val_identities
+    if overlap:
+        raise ValueError(
+            "Pairwise train and validation splits overlap by unordered signature pair: "
+            f"count={len(overlap)}, sample={sorted(overlap)[:5]}"
+        )
+    return train_pairs, val_pairs
+
+
 def resolve_training_pairs(
     dataset: ANDData,
 ) -> tuple[
@@ -1494,12 +1541,7 @@ def resolve_training_pairs(
         raise ValueError(f"resolve_training_pairs requires mode='train', got {dataset.mode!r}")
     if dataset.train_pairs is not None:
         return dataset.fixed_pairs()
-    if dataset.train_blocks is not None:
-        train_signatures, val_signatures, test_signatures = dataset.split_cluster_signatures_fixed()
-    elif dataset.train_signatures is not None:
-        train_signatures, val_signatures, test_signatures = dataset.split_data_signatures_fixed()
-    else:
-        train_signatures, val_signatures, test_signatures = dataset.split_cluster_signatures()
+    train_signatures, val_signatures, test_signatures = _training_signature_splits(dataset)
     return dataset.split_pairs(train_signatures, val_signatures, test_signatures)
 
 

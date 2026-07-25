@@ -121,10 +121,7 @@ def _cluster_model_payload(clusterer: Clusterer) -> dict[str, Any]:
     cluster_model = clusterer.cluster_model
     return {
         "eps": float(cluster_model.eps),
-        "family": type(cluster_model).__name__,
-        "input_as_observation_matrix": bool(getattr(cluster_model, "input_as_observation_matrix", False)),
         "linkage": str(cluster_model.linkage),
-        "preserve_input": bool(getattr(cluster_model, "preserve_input", True)),
     }
 
 
@@ -160,7 +157,6 @@ def _clusterer_config_payload(
             getattr(clusterer, "incremental_precluster_broadcast_mode", "always")
         ),
         "incremental_seed_score_mode": str(getattr(clusterer, "incremental_seed_score_mode", "mean")),
-        "n_iter": int(getattr(clusterer, "n_iter", 25)),
         "n_jobs": 1,
         "nameless_featurizer_info": _featurization_info_payload(nameless_featurizer_info),
         "random_state": int(getattr(clusterer, "random_state", 42)),
@@ -169,7 +165,6 @@ def _clusterer_config_payload(
         "use_default_constraints_as_supervision": bool(
             getattr(clusterer, "use_default_constraints_as_supervision", True)
         ),
-        "val_blocks_size": getattr(clusterer, "val_blocks_size", None),
     }
 
 
@@ -343,6 +338,77 @@ def write_pairwise_production_bundle(
         bundle_version=staged_summary.bundle_version,
         bundle_status=staged_summary.bundle_status,
         manifest_path=bundle_dir / "manifest.json",
+        files=staged_summary.files,
+    )
+
+
+def finalize_pairwise_eps(
+    *,
+    source_bundle_dir: Path,
+    output_bundle_dir: Path,
+    expected_manifest_sha256: str,
+    expected_old_eps: float,
+    new_eps: float,
+) -> ProductionBundleSummary:
+    """Write a fresh pairwise stage whose only semantic change is clustering EPS."""
+
+    source_bundle_dir = Path(source_bundle_dir)
+    output_bundle_dir = Path(output_bundle_dir)
+    if output_bundle_dir.exists():
+        raise FileExistsError(f"Pairwise EPS output already exists: {output_bundle_dir}")
+    manifest_path = source_bundle_dir / "manifest.json"
+    observed_manifest_sha256 = _sha256_file(manifest_path)
+    if observed_manifest_sha256 != expected_manifest_sha256:
+        raise ValueError(
+            "Pairwise source manifest SHA-256 mismatch: "
+            f"expected={expected_manifest_sha256} observed={observed_manifest_sha256}"
+        )
+    manifest = _read_json(manifest_path)
+    if manifest.get("incremental_linker_version") is not None:
+        raise ValueError("EPS finalization requires a pairwise-only bundle")
+    _load_pairwise_staging_model(source_bundle_dir)
+    config_path = source_bundle_dir / "clusterer.json"
+    config = _read_json(config_path)
+    observed_eps = float(config["cluster_model"]["eps"])
+    if observed_eps != float(expected_old_eps):
+        raise ValueError(f"Pairwise source EPS mismatch: expected={expected_old_eps} observed={observed_eps}")
+    if not np.isfinite(float(new_eps)) or not 0.0 <= float(new_eps) <= 1.0:
+        raise ValueError(f"new_eps must be finite and in [0, 1], got {new_eps!r}")
+
+    output_bundle_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_bundle_dir.name}.eps-staging-", dir=output_bundle_dir.parent))
+    try:
+        _copy_path(source_bundle_dir, staging_dir)
+        config["cluster_model"]["eps"] = float(new_eps)
+        _write_json(staging_dir / "clusterer.json", config)
+        staged_summary = write_production_manifest(
+            staging_dir,
+            bundle_version=str(manifest["bundle_version"]),
+            pairwise_model_version=str(manifest["pairwise_model_version"]),
+        )
+        source_files = {
+            path.relative_to(source_bundle_dir).as_posix(): path
+            for path in source_bundle_dir.rglob("*")
+            if path.is_file()
+        }
+        staged_files = {
+            path.relative_to(staging_dir).as_posix(): path for path in staging_dir.rglob("*") if path.is_file()
+        }
+        if set(source_files) != set(staged_files):
+            raise RuntimeError("EPS finalization changed the pairwise bundle file inventory")
+        for relpath in sorted(set(source_files) - {"clusterer.json", "manifest.json"}):
+            if source_files[relpath].read_bytes() != staged_files[relpath].read_bytes():
+                raise RuntimeError(f"EPS finalization changed immutable file {relpath}")
+        _load_pairwise_staging_model(staging_dir)
+        _publish_staged_bundle(staging_dir, output_bundle_dir)
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+    return ProductionBundleSummary(
+        bundle_dir=output_bundle_dir,
+        bundle_version=staged_summary.bundle_version,
+        bundle_status=staged_summary.bundle_status,
+        manifest_path=output_bundle_dir / "manifest.json",
         files=staged_summary.files,
     )
 

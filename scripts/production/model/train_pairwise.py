@@ -41,6 +41,8 @@ from s2and.featurizer import (  # noqa: E402
     FeaturizationInfo,
     TupleOfArrays,
     featurize,
+    many_pairs_featurize,
+    resolve_selection_pairs,
 )
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
 from s2and.name_counts_index import NameCountsIndex  # noqa: E402
@@ -149,6 +151,7 @@ def _resolve_dataset_inputs(
     dataset_name: str,
     signatures_suffix: str,
     specter_suffix: str,
+    include_test_pairs: bool,
 ) -> DatasetInputPlan:
     files = {
         "signatures": _resolve_dataset_file(
@@ -165,7 +168,8 @@ def _resolve_dataset_inputs(
     }
     if dataset_name in PAIRWISE_ONLY_DATASETS:
         files["train_pairs"] = _resolve_dataset_file(data_dir, dataset_name, "train_pairs.csv")
-        files["test_pairs"] = _resolve_dataset_file(data_dir, dataset_name, "test_pairs.csv")
+        if include_test_pairs:
+            files["test_pairs"] = _resolve_dataset_file(data_dir, dataset_name, "test_pairs.csv")
         val_pairs = _optional_dataset_file(data_dir, dataset_name, "val_pairs.csv")
         if val_pairs is not None:
             files["val_pairs"] = val_pairs
@@ -251,6 +255,8 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
         raise SystemExit(f"--matrix-work-dir must name an existing directory: {matrix_work_dir}")
 
     feature_cache_dir = args.feature_cache_dir
+    if selected is None and feature_cache_dir is not None:
+        raise SystemExit("full release training does not use --feature-cache-dir")
     if feature_cache_dir is not None:
         cache_path = Path(feature_cache_dir).resolve()
         if cache_path.exists() and not cache_path.is_dir():
@@ -273,7 +279,19 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
             dataset_name=dataset_name,
             signatures_suffix=str(args.signatures_suffix),
             specter_suffix=str(args.specter_suffix),
+            include_test_pairs=selected is not None,
         )
+
+    test_manifest_sha256 = args.pairwise_test_manifest_sha256
+    if selected is None:
+        if (
+            not isinstance(test_manifest_sha256, str)
+            or len(test_manifest_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in test_manifest_sha256)
+        ):
+            raise SystemExit("full release training requires lowercase --pairwise-test-manifest-sha256")
+    elif test_manifest_sha256 is not None:
+        raise SystemExit("--pairwise-test-manifest-sha256 is only valid for full release training")
 
     return PairwisePreflightPlan(
         output_dir=output_dir,
@@ -313,6 +331,7 @@ def _training_config(
         "nan_policy": "preserve_nan",
         "nameless_features_to_use": list(DEFAULT_NAMELESS_FEATURE_GROUPS),
         "production_version": str(args.production_version),
+        "pairwise_test_manifest_sha256": args.pairwise_test_manifest_sha256,
         "data_random_seed": int(args.random_seed),
         "model_random_seed": 42,
         "source_dataset_names": list(plan.dataset_names),
@@ -348,14 +367,17 @@ def _stage_dataset_features(
     root: Path,
     dataset_name: str,
     *,
-    train: tuple[np.ndarray, np.ndarray, np.ndarray | None],
-    val: tuple[np.ndarray, np.ndarray, np.ndarray | None],
-    test: tuple[np.ndarray, np.ndarray, np.ndarray | None],
+    train: TupleOfArrays,
+    val: TupleOfArrays,
+    test: TupleOfArrays | None = None,
 ) -> dict[str, Path]:
     dataset_root = root / dataset_name
     dataset_root.mkdir()
     arrays: dict[str, Path] = {}
-    for split_name, split in (("train", train), ("val", val), ("test", test)):
+    splits: list[tuple[str, TupleOfArrays]] = [("train", train), ("val", val)]
+    if test is not None:
+        splits.append(("test", test))
+    for split_name, split in splits:
         features, labels, nameless_features = split
         if nameless_features is None:
             raise RuntimeError(f"Expected nameless {split_name} features for dataset {dataset_name!r}")
@@ -366,6 +388,42 @@ def _stage_dataset_features(
         ):
             arrays[role] = _stage_array(dataset_root / f"{role}.npy", values)
     return arrays
+
+
+def _featurize_selection(
+    dataset: ANDData,
+    featurizer_info: FeaturizationInfo,
+    *,
+    n_jobs: int,
+    chunk_size: int,
+    nameless_featurizer_info: FeaturizationInfo,
+    total_ram_bytes: int | None,
+) -> tuple[TupleOfArrays, TupleOfArrays]:
+    """Featurize release train/validation pairs and never resolve a test split."""
+
+    train_pairs, val_pairs = resolve_selection_pairs(dataset)
+    return (
+        many_pairs_featurize(
+            train_pairs,
+            dataset,
+            featurizer_info,
+            n_jobs=n_jobs,
+            chunk_size=chunk_size,
+            nameless_featurizer_info=nameless_featurizer_info,
+            nan_value=np.nan,
+            total_ram_bytes=total_ram_bytes,
+        ),
+        many_pairs_featurize(
+            val_pairs,
+            dataset,
+            featurizer_info,
+            n_jobs=n_jobs,
+            chunk_size=chunk_size,
+            nameless_featurizer_info=nameless_featurizer_info,
+            nan_value=np.nan,
+            total_ram_bytes=total_ram_bytes,
+        ),
+    )
 
 
 def _load_staged_array(path: Path) -> np.ndarray:
@@ -420,7 +478,7 @@ def _fit_pairwise_model(
     return model
 
 
-def _pairwise_test_metrics(
+def _smoke_pairwise_metrics(
     *,
     labels: np.ndarray,
     main_probabilities: np.ndarray,
@@ -570,7 +628,24 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             if anddata.name_tuples != canonical_name_tuples.pairs:
                 raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
 
-            if plan.feature_cache_dir is None:
+            release_training = args.datasets is None
+            if release_training:
+                train, val = _featurize_selection(
+                    anddata,
+                    featurizer_info,
+                    n_jobs=int(args.n_jobs),
+                    chunk_size=int(args.chunk_size),
+                    nameless_featurizer_info=nameless_featurizer_info,
+                    total_ram_bytes=plan.total_ram_bytes,
+                )
+                staged = _stage_dataset_features(
+                    matrix_work_dir,
+                    dataset_name,
+                    train=train,
+                    val=val,
+                )
+                del train, val
+            elif plan.feature_cache_dir is None:
                 train, val, test = cast(
                     tuple[TupleOfArrays, TupleOfArrays, TupleOfArrays],
                     featurize(
@@ -605,18 +680,19 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                     nan_value=np.nan,
                     total_ram_bytes=plan.total_ram_bytes,
                 )
-
-            staged = _stage_dataset_features(
-                matrix_work_dir,
-                dataset_name,
-                train=train,
-                val=val,
-                test=test,
-            )
+            if not release_training:
+                staged = _stage_dataset_features(
+                    matrix_work_dir,
+                    dataset_name,
+                    train=train,
+                    val=val,
+                    test=test,
+                )
+                del train, val, test
             staged_datasets[dataset_name] = staged
             if dataset_name not in PAIRWISE_ONLY_DATASETS:
                 anddatas.append(anddata)
-            del train, val, test, staged
+            del staged
             if dataset_name in PAIRWISE_ONLY_DATASETS:
                 del anddata
             gc.collect()
@@ -656,17 +732,18 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         )
 
         pairwise_test_metrics: dict[str, dict[str, float | int]] = {}
-        for dataset_name in plan.dataset_names:
-            staged = staged_datasets[dataset_name]
-            X_test = _load_staged_array(staged["X_test"])
-            y_test = _load_staged_array(staged["y_test"])
-            nameless_X_test = _load_staged_array(staged["nameless_X_test"])
-            pairwise_test_metrics[dataset_name] = _pairwise_test_metrics(
-                labels=y_test,
-                main_probabilities=union_classifier.predict_proba(X_test),
-                nameless_probabilities=nameless_union_classifier.predict_proba(nameless_X_test),
-            )
-            del X_test, y_test, nameless_X_test
+        if args.datasets is not None:
+            for dataset_name in plan.dataset_names:
+                staged = staged_datasets[dataset_name]
+                X_test = _load_staged_array(staged["X_test"])
+                y_test = _load_staged_array(staged["y_test"])
+                nameless_X_test = _load_staged_array(staged["nameless_X_test"])
+                pairwise_test_metrics[dataset_name] = _smoke_pairwise_metrics(
+                    labels=y_test,
+                    main_probabilities=union_classifier.predict_proba(X_test),
+                    nameless_probabilities=nameless_union_classifier.predict_proba(nameless_X_test),
+                )
+                del X_test, y_test, nameless_X_test
 
         logger.info("fitting clustering threshold")
         union_clusterer = Clusterer(
@@ -685,7 +762,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         if best_params is None:
             raise RuntimeError("Clusterer fitting did not produce best clustering parameters.")
 
-        training_summary = {
+        training_summary: dict[str, Any] = {
             "best_clustering_params": dict(best_params),
             "elapsed_seconds": round(float(time.perf_counter() - started), 3),
             "main_pairwise_best_params": dict(union_classifier.best_params or {}),
@@ -694,8 +771,9 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             "nameless_pairwise_best_params": dict(nameless_union_classifier.best_params or {}),
             "nameless_train_rows": int(_load_staged_array(union_arrays["nameless_X_train"]).shape[0]),
             "nameless_val_rows": int(_load_staged_array(union_arrays["nameless_X_val"]).shape[0]),
-            "pairwise_test_metrics": pairwise_test_metrics,
         }
+        if pairwise_test_metrics:
+            training_summary["smoke_pairwise_test_metrics"] = pairwise_test_metrics
 
     result = _publish_result(
         args,
@@ -723,6 +801,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-test-size", type=int, default=DEFAULT_VAL_TEST_SIZE)
     parser.add_argument("--random-seed", type=int, default=DEFAULT_RANDOM_SEED)
     parser.add_argument("--matrix-work-dir", type=Path, required=True)
+    parser.add_argument(
+        "--pairwise-test-manifest-sha256",
+        help="Sealed Stage-8 pair-manifest digest; the full trainer records but never opens the manifest.",
+    )
     parser.add_argument(
         "--total-ram-bytes",
         type=int,

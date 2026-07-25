@@ -735,6 +735,34 @@ def test_fixed_pairs_does_not_mutate_source_dataframes():
     assert set(all_labels).issubset({0, 1})
 
 
+def test_fixed_train_val_pairs_matches_fixed_pairs_without_test_or_rng_side_effects():
+    columns = ["signature_id_1", "signature_id_2", "label"]
+    dataset = ANDData.__new__(ANDData)
+    dataset.train_pairs = pd.DataFrame(
+        [(f"s{index}", f"s{index + 1}", index % 2) for index in range(0, 20, 2)],
+        columns=columns,
+    )
+    dataset.val_pairs = None
+    dataset.test_pairs = None
+    dataset.train_ratio = 0.8
+    dataset.val_ratio = 0.1
+    dataset.random_seed = 1111
+
+    np.random.seed(7)
+    state_before = np.random.get_state()
+    selection_train, selection_val = dataset.fixed_train_val_pairs()
+    state_after = np.random.get_state()
+
+    assert state_before[0] == state_after[0]
+    np.testing.assert_array_equal(state_before[1], state_after[1])
+    assert state_before[2:] == state_after[2:]
+
+    dataset.test_pairs = pd.DataFrame([("test-1", "test-2", 0)], columns=columns)
+    full_train, full_val, _ = dataset.fixed_pairs()
+    assert selection_train == full_train
+    assert selection_val == full_val
+
+
 def test_fixed_pairs_rejects_unordered_pair_overlap_across_splits():
     dataset = ANDData.__new__(ANDData)
     columns = ["signature_id_1", "signature_id_2", "label"]

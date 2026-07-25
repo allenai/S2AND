@@ -5,7 +5,7 @@ from __future__ import annotations
 PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION = "s2and_production_model_bundle_v5"
 PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION = "pairwise_prediction_fixture_v1"
 PAIRWISE_PREDICTION_FIXTURE_TOLERANCE = 1e-10
-CLUSTERER_CONFIG_SCHEMA_VERSION = "s2and_clusterer_config_v4"
+CLUSTERER_CONFIG_SCHEMA_VERSION = "s2and_clusterer_config_v5"
 
 PAIRWISE_ONLY_MANIFEST_FILES = {
     "clusterer_config": "clusterer.json",

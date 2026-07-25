@@ -12,7 +12,7 @@ from s2and.incremental_linking.artifact import ARTIFACT_SCHEMA_VERSION
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking_training.classic import load_bundle
 from s2and.production_model import _load_pairwise_staging_model, load_production_model
-from scripts.production.model import linker_train_calibrate_eval as promoted_train
+from scripts.production.model import train_linker_and_finalize as promoted_train
 from tests.helpers import import_s2and_rust
 from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
 
@@ -298,6 +298,7 @@ def test_tiny_linker_finalization_flow(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(promoted_train, "_materialize_arrow_rust_feature_bundle", use_tiny_materialized_features)
     args = promoted_train.build_parser().parse_args(
         [
+            "publish",
             "--source-bundle-root",
             str(feature_root),
             "--target-json",
@@ -308,7 +309,6 @@ def test_tiny_linker_finalization_flow(tmp_path: Path, monkeypatch: pytest.Monke
             str(bundle_dir),
             "--output-dir",
             str(tmp_path / "linker_run"),
-            "--run-full",
         ]
     )
     promoted_train.run(args)

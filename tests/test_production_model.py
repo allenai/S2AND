@@ -150,87 +150,29 @@ def test_production_model_requires_explicit_complete_bundle_path() -> None:
         load_production_model()
 
 
-def test_published_v121_runtime_eps_policy_matches_exact_artifact_identity() -> None:
-    main_path = production_model_module.PAIRWISE_ONLY_MANIFEST_FILES["pairwise_main_model"]
-    nameless_path = production_model_module.PAIRWISE_ONLY_MANIFEST_FILES["pairwise_nameless_model"]
-    expected_hashes = dict(production_model_module._PUBLISHED_V121_PAIRWISE_SHA256)
-    exact_manifest = {
-        "bundle_version": "unrelated-name",
-        "pairwise_model_version": "1.2",
-        "sha256": expected_hashes,
-    }
-    stale_config = {"eps": production_model_module._PUBLISHED_V121_STORED_CLUSTER_EPS}
-
-    assert (
-        production_model_module._effective_cluster_eps(exact_manifest, stale_config)
-        == production_model_module.PUBLISHED_V121_RUNTIME_CLUSTER_EPS
-    )
-    assert production_model_module._effective_cluster_eps(exact_manifest, {"eps": 0.65}) == 0.65
-    assert production_model_module._effective_cluster_eps(exact_manifest, {"eps": 0.55}) == 0.55
-    assert (
-        production_model_module._effective_cluster_eps(
-            {**exact_manifest, "pairwise_model_version": "1.3"},
-            stale_config,
-        )
-        == production_model_module._PUBLISHED_V121_STORED_CLUSTER_EPS
-    )
-    changed_hashes = dict(expected_hashes)
-    changed_hashes[main_path] = "0" * 64
-    assert changed_hashes[nameless_path] == expected_hashes[nameless_path]
-    assert (
-        production_model_module._effective_cluster_eps(
-            {**exact_manifest, "sha256": changed_hashes},
-            stale_config,
-        )
-        == production_model_module._PUBLISHED_V121_STORED_CLUSTER_EPS
-    )
-
-
-def test_published_v121_runtime_eps_applies_to_staging_and_complete_loaders(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_clusterer_config_contains_only_inference_state(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
-    source_bundle, _ = synthetic_pairwise_bundle
-    config_path = source_bundle / "clusterer.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["cluster_model"]["eps"] = production_model_module._PUBLISHED_V121_STORED_CLUSTER_EPS
-    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    _refresh_manifest_checksum(source_bundle, "clusterer.json")
+    bundle_dir, _ = synthetic_pairwise_bundle
+    config = json.loads((bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
 
-    manifest_path = source_bundle / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["pairwise_model_version"] = "1.2"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    synthetic_booster_hashes = {
-        path: manifest["sha256"][path] for path in production_model_module._PUBLISHED_V121_PAIRWISE_SHA256
+    assert set(config) == {
+        "batch_size",
+        "cluster_model",
+        "dont_merge_cluster_seeds",
+        "feature_contract",
+        "featurizer_info",
+        "incremental_mean_min_hybrid_weight",
+        "incremental_precluster_broadcast_mode",
+        "incremental_seed_score_mode",
+        "n_jobs",
+        "nameless_featurizer_info",
+        "random_state",
+        "schema_version",
+        "suppress_orcid",
+        "use_default_constraints_as_supervision",
     }
-    monkeypatch.setattr(
-        production_model_module,
-        "_PUBLISHED_V121_PAIRWISE_SHA256",
-        synthetic_booster_hashes,
-    )
-
-    staged = _load_pairwise_staging_model(source_bundle)
-    assert staged.cluster_model.eps == 0.65
-    assert staged.best_params["eps"] == 0.65
-
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(source_bundle, linker_dir)
-    complete_bundle = tmp_path / "production_model_v1.21"
-    finalize_production_bundle(
-        pairwise_bundle_dir=source_bundle,
-        output_bundle_dir=complete_bundle,
-        incremental_linker_artifact_dir=linker_dir,
-        target_json=target_json,
-        bundle_version="1.21",
-        incremental_linker_version="1.21",
-    )
-
-    loaded = load_production_model(complete_bundle)
-    assert loaded.cluster_model.eps == 0.65
-    assert loaded.best_params["eps"] == 0.65
-    assert loaded.production_model_bundle_version == "1.21"
+    assert set(config["cluster_model"]) == {"eps", "linkage"}
 
 
 def test_native_production_bundle_loads_as_mutable_clusterer(
@@ -433,7 +375,6 @@ def test_synthetic_native_clusterer_runtime_config_round_trips(
         native_clusterer.use_default_constraints_as_supervision
         == source_clusterer.use_default_constraints_as_supervision
     )
-    assert native_clusterer.n_iter == source_clusterer.n_iter
     assert native_clusterer.random_state == source_clusterer.random_state
 
     assert getattr(native_clusterer, "suppress_orcid", False) == getattr(source_clusterer, "suppress_orcid", False)
@@ -532,6 +473,7 @@ def test_bundle_load_rejects_canonical_artifact_hash_mismatch(
         ("manifest.json", "s2and_production_model_bundle_v4"),
         ("clusterer.json", "s2and_clusterer_config_v2"),
         ("clusterer.json", "s2and_clusterer_config_v3"),
+        ("clusterer.json", "s2and_clusterer_config_v4"),
     ),
 )
 def test_bundle_rejects_previous_schema_versions(
@@ -687,7 +629,7 @@ def test_manifest_ignores_undeclared_runtime_file(
             lambda payload: payload.update({"incremental_mean_min_hybrid_weight": False}),
             "must be numeric",
         ),
-        (lambda payload: payload["cluster_model"].update({"family": "Other"}), "family"),
+        (lambda payload: payload["cluster_model"].update({"family": "Other"}), "exact FastCluster"),
         (lambda payload: payload.update({"unknown_runtime_field": 1}), "field mismatch"),
         (
             lambda payload: payload.update({"incremental_mean_min_hybrid_weight": 2.0}),

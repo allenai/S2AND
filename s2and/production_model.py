@@ -52,17 +52,6 @@ logger = logging.getLogger(__name__)
 
 _INCREMENTAL_BROADCAST_MODES = frozenset({"always", "never", "top1_consensus"})
 _INCREMENTAL_SEED_SCORE_MODES = frozenset({"mean", "min", "mean_min_hybrid"})
-PUBLISHED_V121_RUNTIME_CLUSTER_EPS = 0.65
-_PUBLISHED_V121_STORED_CLUSTER_EPS = 0.6064583975886222
-_PUBLISHED_V121_PAIRWISE_MODEL_VERSION = "1.2"
-_PUBLISHED_V121_PAIRWISE_SHA256 = {
-    PAIRWISE_ONLY_MANIFEST_FILES["pairwise_main_model"]: (
-        "7163ecbb7f0f16511da31478b7fcb9ca3ba36730635cb05fa5a2e0a00b5a2da7"
-    ),
-    PAIRWISE_ONLY_MANIFEST_FILES["pairwise_nameless_model"]: (
-        "659264660c33a891b23caac653ae17bebd039c9fd3651e702e57e57f1393d576"
-    ),
-}
 _CANONICAL_ARTIFACT_HASH_FIELDS = (
     "name_tuples_data_sha256",
     "orcid_prefix_counts_data_sha256",
@@ -77,14 +66,12 @@ _CLUSTERER_CONFIG_FIELDS = frozenset(
         "incremental_mean_min_hybrid_weight",
         "incremental_precluster_broadcast_mode",
         "incremental_seed_score_mode",
-        "n_iter",
         "n_jobs",
         "nameless_featurizer_info",
         "random_state",
         "schema_version",
         "suppress_orcid",
         "use_default_constraints_as_supervision",
-        "val_blocks_size",
     }
 )
 
@@ -425,18 +412,8 @@ def _validate_clusterer_config(payload: dict[str, Any]) -> None:
             f"extra={sorted(set(payload) - _CLUSTERER_CONFIG_FIELDS)}"
         )
     cluster_model = payload.get("cluster_model")
-    if not isinstance(cluster_model, dict) or set(cluster_model) != {
-        "eps",
-        "family",
-        "input_as_observation_matrix",
-        "linkage",
-        "preserve_input",
-    }:
+    if not isinstance(cluster_model, dict) or set(cluster_model) != {"eps", "linkage"}:
         raise ValueError("Production cluster_model must contain the exact FastCluster runtime configuration")
-    if cluster_model["family"] != "FastCluster":
-        raise ValueError(f"Unsupported production cluster_model family={cluster_model['family']!r}")
-    if cluster_model["input_as_observation_matrix"] is not False or cluster_model["preserve_input"] is not True:
-        raise ValueError("Production FastCluster requires condensed distances with preserve_input=true")
     eps = _require_finite_number(cluster_model["eps"], field="cluster_model.eps")
     if not 0.0 <= eps <= 1.0:
         raise ValueError(f"Production cluster_model.eps must be in [0, 1], got {eps!r}")
@@ -460,15 +437,8 @@ def _validate_clusterer_config(payload: dict[str, Any]) -> None:
     for field in ("batch_size", "n_jobs"):
         if not isinstance(payload[field], int) or isinstance(payload[field], bool) or int(payload[field]) <= 0:
             raise ValueError(f"Production model config {field} must be a positive integer")
-    if not isinstance(payload["n_iter"], int) or isinstance(payload["n_iter"], bool) or int(payload["n_iter"]) < 0:
-        raise ValueError("Production model config n_iter must be a non-negative integer")
     if not isinstance(payload["random_state"], int) or isinstance(payload["random_state"], bool):
         raise ValueError("Production model config random_state must be an integer")
-    val_blocks_size = payload["val_blocks_size"]
-    if val_blocks_size is not None and (
-        not isinstance(val_blocks_size, int) or isinstance(val_blocks_size, bool) or val_blocks_size <= 0
-    ):
-        raise ValueError("Production model config val_blocks_size must be null or a positive integer")
     for field in (
         "dont_merge_cluster_seeds",
         "suppress_orcid",
@@ -591,32 +561,6 @@ def _require_bundle_normalization_version(bundle_dir: Path, feature_contract: Ma
         )
 
 
-def _effective_cluster_eps(manifest: Mapping[str, Any], cluster_model_config: Mapping[str, Any]) -> float:
-    """Resolve the published v1.21 runtime threshold after bundle validation.
-
-    The historical v1.21 bundle stored the pre-release search result in
-    ``clusterer.json`` but production loaded it with ``eps=0.65``. Match that
-    exact pairwise artifact identity and stale stored value so a new model that
-    reuses either the version label or boosters keeps its own configured
-    threshold.
-    """
-
-    configured_eps = float(cluster_model_config["eps"])
-    if configured_eps != _PUBLISHED_V121_STORED_CLUSTER_EPS:
-        return configured_eps
-    if manifest["pairwise_model_version"] != _PUBLISHED_V121_PAIRWISE_MODEL_VERSION:
-        return configured_eps
-    manifest_hashes = cast(Mapping[str, Any], manifest["sha256"])
-    if any(manifest_hashes.get(path) != expected for path, expected in _PUBLISHED_V121_PAIRWISE_SHA256.items()):
-        return configured_eps
-    logger.info(
-        "Applying published v1.21 runtime cluster eps override: stored_eps=%s effective_eps=%s",
-        configured_eps,
-        PUBLISHED_V121_RUNTIME_CLUSTER_EPS,
-    )
-    return PUBLISHED_V121_RUNTIME_CLUSTER_EPS
-
-
 def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Clusterer:
     clusterer_config = _read_json(bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["clusterer_config"])
     _validate_clusterer_config(clusterer_config)
@@ -662,7 +606,7 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
     )
 
     cluster_model_config = clusterer_config["cluster_model"]
-    effective_eps = _effective_cluster_eps(manifest, cluster_model_config)
+    effective_eps = float(cluster_model_config["eps"])
     cluster_model = FastCluster(
         linkage=str(cluster_model_config["linkage"]),
         eps=effective_eps,
@@ -670,10 +614,8 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
     clusterer = Clusterer(
         featurizer_info=featurizer_info,
         classifier=classifier,
-        val_blocks_size=clusterer_config.get("val_blocks_size"),
         cluster_model=cluster_model,
         search_space=None,
-        n_iter=int(clusterer_config["n_iter"]),
         n_jobs=int(clusterer_config["n_jobs"]),
         use_default_constraints_as_supervision=bool(clusterer_config["use_default_constraints_as_supervision"]),
         random_state=int(clusterer_config["random_state"]),

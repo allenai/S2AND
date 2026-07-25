@@ -52,6 +52,7 @@ def _args(tmp_path: Path, *, data_dir: Path | None = None, output_dir: Path | No
         feature_cache_dir=None,
         matrix_work_dir=matrix_work_dir,
         total_ram_bytes=1_000_000_000_000,
+        pairwise_test_manifest_sha256=None,
     )
 
 
@@ -140,15 +141,85 @@ def test_full_preflight_uses_one_fixed_dataset_set(
     args = _args(tmp_path, data_dir=data_dir)
     args.datasets = None
     args.run_full = True
+    args.pairwise_test_manifest_sha256 = "a" * 64
+    include_test_pairs: list[bool] = []
+
+    def resolve(**kwargs):
+        include_test_pairs.append(kwargs["include_test_pairs"])
+        return train_pairwise.DatasetInputPlan(files={}, sha256={})
+
+    monkeypatch.setattr(
+        train_pairwise,
+        "_resolve_dataset_inputs",
+        resolve,
+    )
+
+    plan = train_pairwise._preflight_pairwise(args)
+
+    assert plan.dataset_names == (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "augmented")
+    assert include_test_pairs == [False] * len(plan.dataset_names)
+    config = train_pairwise._training_config(args, plan, artifact_hashes={})  # noqa: SLF001
+    assert config["pairwise_test_manifest_sha256"] == "a" * 64
+    assert all("test_pairs" not in spec["files"] for spec in config["dataset_inputs"].values())
+
+
+def test_full_preflight_requires_sealed_test_manifest_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    args = _args(tmp_path, data_dir=data_dir)
+    args.datasets = None
+    args.preflight_only = True
     monkeypatch.setattr(
         train_pairwise,
         "_resolve_dataset_inputs",
         lambda **_kwargs: train_pairwise.DatasetInputPlan(files={}, sha256={}),
     )
 
-    plan = train_pairwise._preflight_pairwise(args)
+    with pytest.raises(SystemExit, match="pairwise-test-manifest-sha256"):
+        train_pairwise._preflight_pairwise(args)
 
-    assert plan.dataset_names == (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "augmented")
+
+def test_release_input_resolution_never_opens_fixed_test_pairs(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "augmented"
+    dataset_dir.mkdir(parents=True)
+    for filename in (
+        "augmented_signatures.json",
+        "augmented_papers.json",
+        "augmented_specter2.pkl",
+        "train_pairs.csv",
+        "val_pairs.csv",
+    ):
+        (dataset_dir / filename).write_text("fixture\n", encoding="utf-8")
+
+    plan = train_pairwise._resolve_dataset_inputs(  # noqa: SLF001
+        data_dir=tmp_path,
+        dataset_name="augmented",
+        signatures_suffix=train_pairwise.DEFAULT_SIGNATURES_SUFFIX,
+        specter_suffix=train_pairwise.DEFAULT_SPECTER_SUFFIX,
+        include_test_pairs=False,
+    )
+
+    assert "test_pairs" not in plan.files
+
+
+def test_release_staging_contains_only_train_and_validation(tmp_path: Path) -> None:
+    split = (
+        np.asarray([[1.0]], dtype=np.float32),
+        np.asarray([1], dtype=np.int8),
+        np.asarray([[2.0]], dtype=np.float32),
+    )
+
+    paths = train_pairwise._stage_dataset_features(  # noqa: SLF001
+        tmp_path,
+        "toy",
+        train=split,
+        val=split,
+    )
+
+    assert set(paths) == {"X_train", "y_train", "nameless_X_train", "X_val", "y_val", "nameless_X_val"}
 
 
 @pytest.mark.parametrize(
@@ -312,6 +383,7 @@ def test_preflight_only_has_no_output_or_dataset_load(
 
     assert result["mode"] == "preflight"
     assert result["training_config"]["training_scope"] == "smoke_subset"
+    assert result["training_config"]["cluster_n_iter"] == args.cluster_n_iter
     assert not output_dir.exists()
     assert not output_dir.parent.exists()
 
@@ -342,8 +414,8 @@ def test_source_mutation_is_detected_after_featurization(tmp_path: Path) -> None
         train_pairwise._assert_sources_unchanged(plan)
 
 
-def test_pairwise_test_metrics_average_both_models() -> None:
-    metrics = train_pairwise._pairwise_test_metrics(
+def test_smoke_pairwise_metrics_average_both_models() -> None:
+    metrics = train_pairwise._smoke_pairwise_metrics(
         labels=np.asarray([0, 1]),
         main_probabilities=np.asarray([[0.9, 0.1], [0.1, 0.9]]),
         nameless_probabilities=np.asarray([[0.8, 0.2], [0.2, 0.8]]),
@@ -376,11 +448,11 @@ def test_subset_result_never_publishes(
         ),
         cast(train_pairwise.Clusterer, SimpleNamespace()),
         {"training_scope": "smoke_subset"},
-        {"pairwise_test_metrics": {"qian": {"auroc": 1.0}}},
+        {"smoke_pairwise_test_metrics": {"qian": {"auroc": 1.0}}},
     )
 
     assert result["mode"] == "smoke"
     assert result["bundle_status"] == "not_published"
     assert result["training_config"]["training_scope"] == "smoke_subset"
-    assert result["training_summary"]["pairwise_test_metrics"]["qian"]["auroc"] == pytest.approx(1.0)
+    assert result["training_summary"]["smoke_pairwise_test_metrics"]["qian"]["auroc"] == pytest.approx(1.0)
     assert not args.output_dir.exists()

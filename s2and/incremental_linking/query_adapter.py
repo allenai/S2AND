@@ -303,7 +303,7 @@ def extract_query_features(
         if paper is not None:
             venue_terms = _normalize_term_set(" ".join(part for part in [paper.venue, paper.journal_name] if part))
             title_terms = _normalize_term_set(getattr(paper, "title", None), is_title=True)
-            year = paper.year
+            year = paper.year if paper.year is not None and paper.year > 0 else None
             authors = getattr(paper, "authors", None)
             paper_author_count = len(authors) if authors is not None else 0
             local10_author_names = _local_author_name_set(authors, author_position, radius=10)

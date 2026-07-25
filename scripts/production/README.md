@@ -48,12 +48,17 @@ This stage is loadable for training/finalization, but it is not a complete
 runtime production model until the linker is added.
 
 Preflight resolves and hashes every selected dataset input before loading it.
-Matrices are staged under the required local `--matrix-work-dir`, writes check
-their actual byte requirement, and emitted metrics must be finite. Sampled
-clustered datasets honor the requested pair limits, but fixed-pair CSV datasets
-are currently loaded in full. Release blocker B22 therefore requires a
-separate deterministic pre-sampled smoke root; the pair-size flags alone do
-not bound that work. Use `--preflight-only` for a no-write readiness check.
+The operator must independently confirm that `--matrix-work-dir` is local and
+unsynced and that the reviewed size estimate fits. The CLI requires that
+directory to exist and be empty, verifies it with a temporary flushed and
+synced write, removes the probe, and records measured free bytes. Concrete
+matrix writes also check their actual byte requirement, and emitted metrics
+must be finite. Sampled clustered datasets honor the requested pair limits,
+but fixed-pair CSV datasets are currently loaded in full. Release blocker B22
+therefore requires a separate deterministic pre-sampled smoke root; the
+pair-size flags alone do not bound that work. Use `--preflight-only` for a
+readiness check that leaves the matrix-work directory empty and the output
+directory absent.
 
 Passing `--datasets ...` means smoke mode: it may exercise training, but it
 never creates a model bundle. A production run uses `--run-full`, the complete

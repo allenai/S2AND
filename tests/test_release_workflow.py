@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import io
 import json
-import re
 import tarfile
 import tomllib
 import zipfile
-from collections import Counter
 from pathlib import Path
 
 import pytest
 import yaml
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 from scripts.verification.verify_production_model_distributions import verify_production_model_distributions
 
@@ -63,14 +63,13 @@ def test_rust_wheel_matrix_matches_supported_python_versions() -> None:
     assert "python3.10" not in _all_run_text(jobs)
 
 
-def test_release_maturin_action_matches_rust_build_system_floor() -> None:
+def test_release_maturin_action_satisfies_rust_build_system_requirement() -> None:
     rust_project = tomllib.loads((REPO_ROOT / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8"))
-    maturin_requirement = next(
-        requirement for requirement in rust_project["build-system"]["requires"] if requirement.startswith("maturin")
+    maturin_requirement = Requirement(
+        next(
+            requirement for requirement in rust_project["build-system"]["requires"] if requirement.startswith("maturin")
+        )
     )
-    floor_match = re.search(r">=([^,]+)", maturin_requirement)
-    assert floor_match is not None
-    expected_action_version = f"v{floor_match.group(1)}"
 
     maturin_action_versions = [
         step["with"]["maturin-version"]
@@ -79,7 +78,11 @@ def test_release_maturin_action_matches_rust_build_system_floor() -> None:
         if str(step.get("uses", "")).startswith("PyO3/maturin-action@")
     ]
     assert maturin_action_versions
-    assert set(maturin_action_versions) == {expected_action_version}
+    assert len(set(maturin_action_versions)) == 1
+    assert all(version.startswith("v") for version in maturin_action_versions)
+    assert all(
+        Version(version.removeprefix("v")) in maturin_requirement.specifier for version in maturin_action_versions
+    )
 
 
 def test_rust_sdist_contains_vendored_cld2_and_is_clean_installed() -> None:
@@ -109,29 +112,50 @@ def test_release_workflow_consumes_only_final_policy_outputs() -> None:
     jobs = _release_workflow_jobs()
 
     assert _all_run_text(jobs).count("scripts/sync_version.py --release-policy") == 1
-    conditions = Counter(
-        condition
-        for job in jobs.values()
-        for condition in (job.get("if"), *(step.get("if") for step in job.get("steps", [])))
-        if condition
-    )
-    assert conditions["needs.detect-versions.outputs.build_s2and == 'true'"] == 1
-    assert conditions["needs.detect-versions.outputs.build_rust == 'true'"] == 4
-    assert conditions["needs.detect-versions.outputs.run_release_smoke == 'true'"] == 2
-    assert conditions["needs.detect-versions.outputs.publish_s2and == 'true'"] == 1
-    assert conditions["needs.detect-versions.outputs.publish_rust == 'true'"] == 1
-    needs_lists = [job.get("needs") for job in jobs.values() if isinstance(job.get("needs"), list)]
-    assert ["detect-versions", "s2and-dist", "release-smoke", "release-tests", "probe-rust-release"] in needs_lists
-    assert [
-        "detect-versions",
-        "wheels-windows",
-        "wheels-macos",
-        "wheels-linux",
-        "sdist",
-        "release-smoke",
-        "release-tests",
-    ] in needs_lists
-    assert ["detect-versions", "publish-rust"] in needs_lists
+    expected_conditions = {
+        "s2and-dist": "needs.detect-versions.outputs.build_s2and == 'true'",
+        "wheels-windows": "needs.detect-versions.outputs.build_rust == 'true'",
+        "wheels-macos": "needs.detect-versions.outputs.build_rust == 'true'",
+        "wheels-linux": "needs.detect-versions.outputs.build_rust == 'true'",
+        "sdist": "needs.detect-versions.outputs.build_rust == 'true'",
+        "release-smoke": "needs.detect-versions.outputs.run_release_smoke == 'true'",
+        "release-tests": "needs.detect-versions.outputs.run_release_smoke == 'true'",
+        "publish-s2and": "needs.detect-versions.outputs.publish_s2and == 'true'",
+        "publish-rust": "needs.detect-versions.outputs.publish_rust == 'true'",
+        "probe-rust-release": (
+            "always() && needs.detect-versions.outputs.publish_s2and == 'true' && "
+            "(needs.publish-rust.result == 'success' || needs.publish-rust.result == 'skipped')"
+        ),
+    }
+    assert {name: job["if"] for name, job in jobs.items() if "if" in job} == expected_conditions
+
+    expected_needs = {
+        "s2and-dist": {"detect-versions"},
+        "wheels-windows": {"detect-versions"},
+        "wheels-macos": {"detect-versions"},
+        "wheels-linux": {"detect-versions"},
+        "sdist": {"detect-versions"},
+        "release-smoke": {"detect-versions", "s2and-dist", "wheels-linux"},
+        "release-tests": {"detect-versions"},
+        "publish-s2and": {
+            "detect-versions",
+            "s2and-dist",
+            "release-smoke",
+            "release-tests",
+            "probe-rust-release",
+        },
+        "publish-rust": {
+            "detect-versions",
+            "wheels-windows",
+            "wheels-macos",
+            "wheels-linux",
+            "sdist",
+            "release-smoke",
+            "release-tests",
+        },
+        "probe-rust-release": {"detect-versions", "publish-rust"},
+    }
+    assert {name: set(job["needs"]) for name, job in jobs.items() if "needs" in job} == expected_needs
 
 
 def test_publish_jobs_require_manual_release_intent_and_full_release_gates() -> None:
@@ -165,6 +189,14 @@ def test_python_package_data_is_explicit() -> None:
             "data/s2and_unnormalized_filtered_name_tuples.txt",
         }
     )
+
+
+TUPLE_DATA_PATH = "s2and/data/s2and_name_tuples_canonical.txt"
+TUPLE_META_PATH = "s2and/data/s2and_name_tuples_canonical.txt.meta.json"
+ORCID_DATA_PATH = "s2and/data/first_k_letter_counts_from_orcid.json"
+ORCID_MANIFEST_PATH = "s2and/data/first_k_letter_counts_from_orcid.manifest.json"
+
+
 def _write_distribution_fixture(
     root: Path,
     *,
@@ -173,13 +205,34 @@ def _write_distribution_fixture(
     declare_model: bool = True,
     omit_wheel_path: str | None = None,
     omit_sdist_path: str | None = None,
+    include_orcid: bool = False,
+    declare_orcid: bool = True,
+    declare_tuples: bool = True,
+    corrupt_wheel_path: str | None = None,
+    sdist_package_parent: str | None = None,
 ) -> tuple[Path, Path]:
     data_dir = root / "s2and" / "data"
     data_dir.mkdir(parents=True)
     (root / "s2and" / "arrow_schema_contract.json").write_text("{}\n", encoding="utf-8")
     (data_dir / "path_config.json").write_text("{}\n", encoding="utf-8")
+    (root / TUPLE_DATA_PATH).write_text("alice\talicia\n", encoding="utf-8")
+    (root / TUPLE_META_PATH).write_text("{}\n", encoding="utf-8")
+    declared = ["arrow_schema_contract.json", "data/path_config.json"]
+    if declare_tuples:
+        declared += [
+            "data/s2and_name_tuples_canonical.txt",
+            "data/s2and_name_tuples_canonical.txt.meta.json",
+        ]
+    if include_orcid:
+        (root / ORCID_DATA_PATH).write_text("{}\n", encoding="utf-8")
+        (root / ORCID_MANIFEST_PATH).write_text("{}\n", encoding="utf-8")
+        if declare_orcid:
+            declared += [
+                "data/first_k_letter_counts_from_orcid.json",
+                "data/first_k_letter_counts_from_orcid.manifest.json",
+            ]
     (root / "pyproject.toml").write_text(
-        '[tool.setuptools.package-data]\ns2and = ["arrow_schema_contract.json", "data/path_config.json"]\n',
+        f"[tool.setuptools.package-data]\ns2and = {json.dumps(declared)}\n",
         encoding="utf-8",
     )
     if declare_model:
@@ -198,8 +251,9 @@ def _write_distribution_fixture(
     wheel_path = dist_dir / "s2and-0.0.0-py3-none-any.whl"
     with zipfile.ZipFile(wheel_path, "w") as wheel:
         for path, content in files.items():
-            if path != omit_wheel_path:
-                wheel.writestr(path, content)
+            if path == omit_wheel_path:
+                continue
+            wheel.writestr(path, b"tampered\n" if path == corrupt_wheel_path else content)
         if extra_wheel:
             wheel.writestr("s2and/data/production_model_v8.8/manifest.json", b"{}\n")
 
@@ -208,7 +262,8 @@ def _write_distribution_fixture(
         for path, content in files.items():
             if path == omit_sdist_path:
                 continue
-            member = tarfile.TarInfo(f"s2and-0.0.0/{path}")
+            member_path = path if sdist_package_parent is None else f"{sdist_package_parent}/{path}"
+            member = tarfile.TarInfo(f"s2and-0.0.0/{member_path}")
             member.size = len(content)
             sdist.addfile(member, io.BytesIO(content))
         if extra_sdist:
@@ -222,7 +277,19 @@ def _write_distribution_fixture(
 def test_distribution_verifier_accepts_only_declared_model(tmp_path: Path) -> None:
     dist_dir, source_root = _write_distribution_fixture(tmp_path, extra_wheel=False, extra_sdist=False)
 
-    verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+    verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
+
+
+def test_distribution_verifier_rejects_nested_sdist_package_decoys(tmp_path: Path) -> None:
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        sdist_package_parent="docs",
+    )
+
+    with pytest.raises(ValueError, match="missing required distribution files"):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
 
 
 def test_distribution_verifier_accepts_no_model_during_cutover(tmp_path: Path) -> None:
@@ -233,7 +300,7 @@ def test_distribution_verifier_accepts_no_model_during_cutover(tmp_path: Path) -
         declare_model=False,
     )
 
-    verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+    verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
 
 
 @pytest.mark.parametrize(
@@ -252,7 +319,7 @@ def test_distribution_verifier_rejects_undeclared_model_assets(
     )
 
     with pytest.raises(ValueError, match="undeclared production model assets"):
-        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
 
 
 @pytest.mark.parametrize(
@@ -276,7 +343,7 @@ def test_distribution_verifier_requires_declared_package_data(
     )
 
     with pytest.raises(ValueError, match="missing required distribution files"):
-        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
 
 
 @pytest.mark.parametrize(
@@ -294,4 +361,92 @@ def test_distribution_verifier_rejects_missing_declared_package_data_source(
     (source_root / missing_source_path).unlink()
 
     with pytest.raises(FileNotFoundError, match="package-data patterns match no source files"):
-        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
+
+
+def test_distribution_verifier_rejects_archive_content_drift(tmp_path: Path) -> None:
+    """Inventory alone is fail-open: a declared path can ship stale or truncated bytes."""
+
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        corrupt_wheel_path=TUPLE_DATA_PATH,
+    )
+
+    with pytest.raises(ValueError, match="content differs from the source tree"):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
+
+
+def test_distribution_verifier_requires_phase_runtime_artifacts(tmp_path: Path) -> None:
+    """Removing a declaration must fail, which pyproject-derived inventory alone cannot see."""
+
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        declare_tuples=False,
+    )
+
+    with pytest.raises(ValueError, match="requires these paths to be declared"):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
+
+
+def test_code_only_phase_forbids_orcid_artifacts(tmp_path: Path) -> None:
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        include_orcid=True,
+    )
+
+    with pytest.raises(ValueError, match="forbids declaring these paths"):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
+
+
+def test_code_only_phase_forbids_undeclared_orcid_source_files(tmp_path: Path) -> None:
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        include_orcid=True,
+        declare_orcid=False,
+    )
+
+    with pytest.raises(ValueError, match="forbids these source files"):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
+
+
+def test_release_candidate_phase_requires_orcid_artifacts(tmp_path: Path) -> None:
+    dist_dir, source_root = _write_distribution_fixture(tmp_path, extra_wheel=False, extra_sdist=False)
+
+    with pytest.raises(ValueError, match="requires these paths to be declared"):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="release_candidate")
+
+
+def test_release_candidate_phase_accepts_promoted_orcid_artifacts(tmp_path: Path) -> None:
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        include_orcid=True,
+    )
+
+    verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="release_candidate")
+
+
+def test_current_repository_state_is_a_valid_code_only_phase() -> None:
+    """The checked-in tree must satisfy the phase contract it claims to be in."""
+
+    from scripts.verification.verify_production_model_distributions import (
+        _load_expected_paths,
+    )
+
+    expected = _load_expected_paths(REPO_ROOT, phase="code_only")
+
+    assert TUPLE_DATA_PATH in expected
+    assert TUPLE_META_PATH in expected
+    assert ORCID_DATA_PATH not in expected
+
+    with pytest.raises(ValueError, match="requires these paths to be declared"):
+        _load_expected_paths(REPO_ROOT, phase="release_candidate")

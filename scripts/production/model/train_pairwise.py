@@ -25,7 +25,6 @@ from typing import Any, cast
 
 import numpy as np
 from hyperopt import hp
-from sklearn.metrics import average_precision_score, precision_recall_fscore_support, roc_auc_score
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -34,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and.consts import _PACKAGE_DATA_DIR, FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
+from s2and.eval import pairwise_probability_metrics  # noqa: E402
 from s2and.feature_cache import cached_featurize  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
@@ -81,6 +81,7 @@ class PairwisePreflightPlan:
     datasets: Mapping[str, DatasetInputPlan]
     feature_cache_dir: Path | None
     matrix_work_dir: Path
+    matrix_work_free_bytes: int
     total_ram_bytes: int | None
 
 
@@ -188,6 +189,24 @@ def _positive_int_arg(args: argparse.Namespace, name: str) -> int:
     return value
 
 
+def _preflight_matrix_work_dir(path: Path) -> int:
+    """Verify the scratch directory and return its measured free capacity."""
+
+    if not path.is_dir():
+        raise SystemExit(f"--matrix-work-dir must name an existing directory: {path}")
+    if next(path.iterdir(), None) is not None:
+        raise SystemExit(f"--matrix-work-dir must be empty: {path}")
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", prefix=".s2and_preflight_", dir=path) as probe:
+            probe.write(b"s2and matrix-work preflight\n")
+            probe.flush()
+            os.fsync(probe.fileno())
+    except OSError as exc:
+        raise SystemExit(f"--matrix-work-dir is not writable: {path}: {exc}") from exc
+    return int(shutil.disk_usage(path).free)
+
+
 def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     """Resolve and hash every launch input without loading artifacts or ANDData."""
 
@@ -251,8 +270,7 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
         )
 
     matrix_work_dir = Path(args.matrix_work_dir).resolve()
-    if not matrix_work_dir.is_dir():
-        raise SystemExit(f"--matrix-work-dir must name an existing directory: {matrix_work_dir}")
+    matrix_work_free_bytes = _preflight_matrix_work_dir(matrix_work_dir)
 
     feature_cache_dir = args.feature_cache_dir
     if selected is None and feature_cache_dir is not None:
@@ -299,6 +317,7 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
         datasets=resolved,
         feature_cache_dir=cache_path,
         matrix_work_dir=matrix_work_dir,
+        matrix_work_free_bytes=matrix_work_free_bytes,
         total_ram_bytes=None if requested_total_ram is None else int(requested_total_ram),
     )
 
@@ -334,6 +353,10 @@ def _training_config(
         "pairwise_test_manifest_sha256": args.pairwise_test_manifest_sha256,
         "data_random_seed": int(args.random_seed),
         "model_random_seed": 42,
+        "matrix_work_storage": {
+            "path": str(plan.matrix_work_dir),
+            "measured_free_bytes": plan.matrix_work_free_bytes,
+        },
         "source_dataset_names": list(plan.dataset_names),
         "specter_suffix": str(args.specter_suffix),
         "signatures_suffix": str(args.signatures_suffix),
@@ -484,34 +507,19 @@ def _smoke_pairwise_metrics(
     main_probabilities: np.ndarray,
     nameless_probabilities: np.ndarray,
 ) -> dict[str, float | int]:
-    y = np.asarray(labels).reshape(-1)
-    main = np.asarray(main_probabilities, dtype=np.float64)[:, 1]
-    nameless = np.asarray(nameless_probabilities, dtype=np.float64)[:, 1]
-    if y.shape != main.shape or y.shape != nameless.shape:
-        raise ValueError(
-            "Pairwise test labels and probabilities must have the same row count: "
-            f"labels={y.shape} main={main.shape} nameless={nameless.shape}"
-        )
-    if y.size == 0 or np.unique(y).size != 2:
-        raise ValueError("Pairwise test evaluation requires nonempty labels with both classes")
-    probabilities = (main + nameless) / 2.0
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        y,
-        probabilities > 0.5,
-        beta=1.0,
-        average="macro",
-        zero_division=0,
+    """Report smoke test metrics using the shared release metric contract.
+
+    This deliberately calls the same function as the sealed release evaluator so
+    that smoke evidence exercises the release report schema. ``average_precision``
+    is the only smoke-specific addition; it is diagnostic and is not a gate.
+    """
+
+    metrics, _ = pairwise_probability_metrics(
+        labels,
+        np.asarray(main_probabilities, dtype=np.float64)[:, 1],
+        np.asarray(nameless_probabilities, dtype=np.float64)[:, 1],
+        include_average_precision=True,
     )
-    metrics: dict[str, float | int] = {
-        "rows": int(y.size),
-        "auroc": float(roc_auc_score(y, probabilities)),
-        "average_precision": float(average_precision_score(y, probabilities)),
-        "f1": float(f1),
-        "precision": float(precision),
-        "recall": float(recall),
-    }
-    if not all(np.isfinite(float(value)) for key, value in metrics.items() if key != "rows"):
-        raise RuntimeError("Pairwise test evaluation produced a non-finite metric")
     return metrics
 
 

@@ -22,6 +22,7 @@ from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
     precision_recall_fscore_support,
+    roc_auc_score,
     roc_curve,
 )
 from tqdm import tqdm
@@ -577,6 +578,73 @@ def pairwise_eval(
     }
 
     return metrics
+
+
+PAIRWISE_METRIC_CONTRACT_VERSION = "s2and_pairwise_probability_metrics_v1"
+
+
+def pairwise_probability_metrics(
+    labels: np.ndarray,
+    main_positive: np.ndarray,
+    nameless_positive: np.ndarray,
+    *,
+    include_average_precision: bool = False,
+) -> tuple[dict[str, float | int], np.ndarray]:
+    """Compute the single pairwise metric contract shared by smoke and release runs.
+
+    Both the pairwise-only smoke path in ``train_pairwise.py`` and the sealed
+    release evaluator in ``release_pairwise.py`` must report identical keys
+    computed identically, so that smoke evidence actually exercises the release
+    report schema. Positive probabilities from the main and nameless models are
+    averaged exactly once, and the F1 threshold is strict ``> 0.5``.
+
+    Args:
+        labels: Binary ground-truth labels, one per pair.
+        main_positive: Positive-class probabilities from the main model.
+        nameless_positive: Positive-class probabilities from the nameless model.
+        include_average_precision: Whether to add ``average_precision``. Release
+            reports omit it; smoke reports include it as diagnostic evidence.
+
+    Returns:
+        The metric mapping and the averaged positive probabilities.
+
+    Raises:
+        ValueError: If shapes disagree, labels are empty, or only one class is
+            present.
+        RuntimeError: If any computed metric is non-finite.
+    """
+
+    y = np.asarray(labels).reshape(-1)
+    main = np.asarray(main_positive, dtype=np.float64).reshape(-1)
+    nameless = np.asarray(nameless_positive, dtype=np.float64).reshape(-1)
+    if y.shape != main.shape or y.shape != nameless.shape:
+        raise ValueError(
+            "Pair labels and both probability vectors must have equal shape: "
+            f"labels={y.shape} main={main.shape} nameless={nameless.shape}"
+        )
+    if y.size == 0 or np.unique(y).size != 2:
+        raise ValueError("Pair evaluation requires nonempty labels with both classes")
+    probabilities = (main + nameless) / 2.0
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y,
+        probabilities > 0.5,
+        beta=1.0,
+        average="macro",
+        zero_division=0,
+    )
+    metrics: dict[str, float | int] = {
+        "rows": int(y.size),
+        "auroc": float(roc_auc_score(y, probabilities)),
+        "macro_f1": float(f1),
+        "macro_precision": float(precision),
+        "macro_recall": float(recall),
+    }
+    if include_average_precision:
+        metrics["average_precision"] = float(average_precision_score(y, probabilities))
+    non_finite = sorted(key for key, value in metrics.items() if key != "rows" and not np.isfinite(float(value)))
+    if non_finite:
+        raise RuntimeError(f"Pair evaluation produced non-finite metrics: {non_finite}")
+    return metrics, probabilities
 
 
 def f1_score(precision: float, recall: float) -> float:

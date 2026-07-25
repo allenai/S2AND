@@ -73,7 +73,7 @@ jobs:
         run: >-
           uv run --no-project python
           scripts/verification/verify_production_model_distributions.py
-          --dist-dir dist --source-root .
+          --dist-dir dist --source-root . --phase code_only
 
       - uses: actions/upload-artifact@v6
         with:

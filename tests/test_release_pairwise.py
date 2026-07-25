@@ -52,6 +52,267 @@ def _bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return bundle
 
 
+class _StubCalibrationClusterer:
+    """Records the calibration call sequence so nesting and resources are provable."""
+
+    def __init__(self) -> None:
+        self.cluster_model = argparse.Namespace(eps=0.42)
+        self.n_jobs = 1
+        # A noncanonical bundle could still carry a finite cap; calibration must
+        # not read it, so make any use of it fail loudly.
+        self.val_blocks_size = 1
+        self.events: list[tuple[Any, ...]] = []
+        self.distance_ram: list[int | None] = []
+        self.predict_ram: list[int | None] = []
+
+    @staticmethod
+    def filter_blocks(block_dict: dict[str, list[str]], num_to_keep: int | None = None) -> dict[str, list[str]]:
+        assert num_to_keep is None, "calibration must not cap validation blocks"
+        return {key: values for key, values in block_dict.items() if len(values) > 1}
+
+    def make_distance_matrices(
+        self,
+        block_dict: dict[str, list[str]],
+        dataset: Any,
+        total_ram_bytes: int | None = None,
+    ) -> dict[str, object]:
+        self.events.append(("build", dataset.name))
+        self.distance_ram.append(total_ram_bytes)
+        return {key: object() for key in block_dict}
+
+    def predict(
+        self,
+        block_dict: dict[str, list[str]],
+        dataset: Any,
+        dists: dict[str, object] | None = None,
+        total_ram_bytes: int | None = None,
+    ) -> tuple[dict[str, list[str]], None]:
+        assert dists is not None, "calibration must reuse prebuilt distance matrices"
+        self.events.append(("predict", dataset.name, float(self.cluster_model.eps)))
+        self.predict_ram.append(total_ram_bytes)
+        return {"cluster": ["s1", "s2"]}, None
+
+
+def _write_calibration_bundle(tmp_path: Path, dataset_names: tuple[str, ...]) -> Path:
+    """Write a bundle whose training config declares digest-bound clustered inputs."""
+
+    bundle = tmp_path / "calibration_bundle"
+    (bundle / "reproducibility").mkdir(parents=True)
+    inputs_dir = tmp_path / "inputs"
+    inputs_dir.mkdir()
+    dataset_inputs: dict[str, Any] = {}
+    for name in dataset_names:
+        files: dict[str, Any] = {}
+        for role in ("signatures", "papers", "specter_embeddings", "clusters"):
+            path = inputs_dir / f"{name}_{role}.json"
+            path.write_text(json.dumps({"dataset": name, "role": role}), encoding="utf-8")
+            files[role] = {
+                "path": str(path),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        dataset_inputs[name] = {"split_mode": "random_blocks", "files": files}
+    dataset_inputs["augmented"] = {"split_mode": "fixed_pairs", "files": {}}
+    (bundle / "reproducibility" / "pairwise_training_config.json").write_text(
+        json.dumps(
+            {
+                "training_scope": "production_full",
+                "data_random_seed": 1111,
+                "dataset_inputs": dataset_inputs,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return bundle
+
+
+def _patch_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+    clusterer: _StubCalibrationClusterer,
+    *,
+    f1_by_eps: dict[float, float],
+) -> list[str]:
+    constructed: list[str] = []
+
+    def fake_anddata(name: str, files: Any, *, mode: str, random_seed: int = 1111) -> Any:
+        constructed.append(name)
+        return argparse.Namespace(
+            name=name,
+            split_cluster_signatures=lambda: ({}, {"b1": ["s1", "s2"], "b2": ["s3"]}, {}),
+            construct_cluster_to_signatures=lambda blocks: {"c1": ["s1", "s2"]},
+        )
+
+    monkeypatch.setattr(release_pairwise, "_load_pairwise_staging_model", lambda path: clusterer)
+    monkeypatch.setattr(release_pairwise, "_anddata", fake_anddata)
+    monkeypatch.setattr(
+        release_pairwise,
+        "_b3_report",
+        lambda true_clusters, predicted: {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": f1_by_eps[float(clusterer.cluster_model.eps)],
+            "signature_count": 2,
+        },
+    )
+    return constructed
+
+
+def test_calibrate_eps_builds_each_matrix_once_and_holds_one_dataset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _write_calibration_bundle(tmp_path, ("qian", "pubmed"))
+    clusterer = _StubCalibrationClusterer()
+    _patch_calibration(monkeypatch, clusterer, f1_by_eps={0.3: 0.5, 0.6: 0.9})
+
+    report = release_pairwise.calibrate_eps(
+        argparse.Namespace(
+            pairwise_model=bundle,
+            eps=[0.6, 0.3, 0.6],
+            output_json=tmp_path / "calibration.json",
+            n_jobs=5,
+            total_ram_bytes=2048,
+        )
+    )
+
+    # One build per dataset, not one per (dataset, eps): the sweep must not
+    # recompute distances.
+    assert [event for event in clusterer.events if event[0] == "build"] == [("build", "qian"), ("build", "pubmed")]
+    # All of a dataset's predictions occur before the next dataset is built, so
+    # only one dataset's condensed matrices are resident at a time.
+    assert clusterer.events == [
+        ("build", "qian"),
+        ("predict", "qian", 0.3),
+        ("predict", "qian", 0.6),
+        ("build", "pubmed"),
+        ("predict", "pubmed", 0.3),
+        ("predict", "pubmed", 0.6),
+    ]
+    assert clusterer.n_jobs == 5
+    assert clusterer.distance_ram == [2048, 2048]
+    assert set(clusterer.predict_ram) == {2048}
+    assert clusterer.cluster_model.eps == pytest.approx(0.42)
+    assert report["selected_eps"] == pytest.approx(0.6)
+    assert [trial["eps"] for trial in report["trials"]] == [0.3, 0.6]
+    assert set(report["validation_identities"]) == {"qian", "pubmed"}
+    assert (tmp_path / "calibration.json").is_file()
+
+
+def test_calibrate_eps_tie_breaks_to_smallest_eps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _write_calibration_bundle(tmp_path, ("qian",))
+    clusterer = _StubCalibrationClusterer()
+    _patch_calibration(monkeypatch, clusterer, f1_by_eps={0.2: 0.8, 0.7: 0.8})
+
+    report = release_pairwise.calibrate_eps(
+        argparse.Namespace(
+            pairwise_model=bundle,
+            eps=[0.7, 0.2],
+            output_json=tmp_path / "calibration.json",
+            n_jobs=1,
+            total_ram_bytes=None,
+        )
+    )
+
+    assert report["selected_eps"] == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("eps", ([1.5], [float("nan")], [-0.1]))
+def test_calibrate_eps_rejects_out_of_domain_before_any_dataset_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    eps: list[float],
+) -> None:
+    bundle = _write_calibration_bundle(tmp_path, ("qian",))
+    clusterer = _StubCalibrationClusterer()
+    constructed = _patch_calibration(monkeypatch, clusterer, f1_by_eps={})
+
+    with pytest.raises(ValueError, match="EPS values must be finite"):
+        release_pairwise.calibrate_eps(
+            argparse.Namespace(
+                pairwise_model=bundle,
+                eps=eps,
+                output_json=tmp_path / "calibration.json",
+                n_jobs=1,
+                total_ram_bytes=None,
+            )
+        )
+
+    assert constructed == []
+    assert clusterer.events == []
+
+
+def test_calibrate_eps_rejects_existing_output_before_any_dataset_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _write_calibration_bundle(tmp_path, ("qian",))
+    clusterer = _StubCalibrationClusterer()
+    constructed = _patch_calibration(monkeypatch, clusterer, f1_by_eps={})
+    output_path = tmp_path / "calibration.json"
+    output_path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="Calibration output already exists"):
+        release_pairwise.calibrate_eps(
+            argparse.Namespace(
+                pairwise_model=bundle,
+                eps=[0.5],
+                output_json=output_path,
+                n_jobs=1,
+                total_ram_bytes=None,
+            )
+        )
+
+    assert constructed == []
+    assert clusterer.events == []
+
+
+def test_calibrate_eps_rejects_input_drift_before_any_dataset_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _write_calibration_bundle(tmp_path, ("qian", "pubmed"))
+    clusterer = _StubCalibrationClusterer()
+    constructed = _patch_calibration(monkeypatch, clusterer, f1_by_eps={0.5: 0.5})
+    (tmp_path / "inputs" / "pubmed_papers.json").write_text("tampered", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Calibration input drift for pubmed:papers"):
+        release_pairwise.calibrate_eps(
+            argparse.Namespace(
+                pairwise_model=bundle,
+                eps=[0.5],
+                output_json=tmp_path / "calibration.json",
+                n_jobs=1,
+                total_ram_bytes=None,
+            )
+        )
+
+    assert constructed == []
+    assert clusterer.events == []
+
+
+def test_calibrate_eps_parser_exposes_resource_controls() -> None:
+    args = release_pairwise.build_parser().parse_args(
+        [
+            "calibrate-eps",
+            "--pairwise-model",
+            "bundle",
+            "--eps",
+            "0.5",
+            "--output-json",
+            "out.json",
+            "--n-jobs",
+            "8",
+            "--total-ram-bytes",
+            "4096",
+        ]
+    )
+
+    assert args.n_jobs == 8
+    assert args.total_ram_bytes == 4096
+
+
 def test_module_entrypoint_help() -> None:
     completed = subprocess.run(
         [sys.executable, "-m", "scripts.production.model.release_pairwise", "--help"],
@@ -260,6 +521,99 @@ def test_dataset_file_role_must_be_exact_object(tmp_path: Path) -> None:
             tmp_path / "manifest.json",
             {"name": "toy", "files": {"pairs": {"path": "pairs.json"}}},
             ("pairs",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("dataset_names", "message"),
+    [
+        ([""], "names must be nonempty strings"),
+        (["repeated", "repeated"], "duplicate dataset name 'repeated'"),
+    ],
+)
+@pytest.mark.parametrize(
+    "schema_version",
+    [release_pairwise.PAIR_MANIFEST_SCHEMA, release_pairwise.CLUSTER_MANIFEST_SCHEMA],
+)
+def test_manifest_requires_unique_nonempty_dataset_names(
+    tmp_path: Path,
+    dataset_names: list[str],
+    message: str,
+    schema_version: str,
+) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": schema_version,
+                "datasets": [{"name": name} for name in dataset_names],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        release_pairwise._verified_manifest(  # noqa: SLF001
+            manifest,
+            hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            schema_version,
+        )
+
+
+@pytest.mark.parametrize("invalid_label", [0.9, -0.1, "1", True])
+def test_pair_evaluator_rejects_noninteger_json_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_label: object,
+) -> None:
+    contents: dict[str, object] = {
+        "signatures": {},
+        "papers": {},
+        "specter_embeddings": {},
+        "pairs": [
+            {
+                "signature_id_1": "s1",
+                "signature_id_2": "s2",
+                "label": invalid_label,
+            }
+        ],
+    }
+    files: dict[str, dict[str, str]] = {}
+    for role, content in contents.items():
+        path = tmp_path / f"{role}.json"
+        path.write_text(json.dumps(content), encoding="utf-8")
+        files[role] = {
+            "path": path.name,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": release_pairwise.PAIR_MANIFEST_SCHEMA,
+                "datasets": [{"name": "toy", "files": files}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(release_pairwise, "_load_pairwise_staging_model", lambda _: object())
+    monkeypatch.setattr(
+        release_pairwise,
+        "_anddata",
+        lambda *args, **kwargs: pytest.fail("dataset constructed before pair labels were validated"),
+    )
+
+    with pytest.raises(ValueError, match="JSON integer 0 or 1"):
+        release_pairwise.evaluate_pairs(
+            argparse.Namespace(
+                output_json=tmp_path / "report.json",
+                manifest=manifest,
+                expected_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                pairwise_model=tmp_path / "model",
+                unblind_record=tmp_path / "unblind.json",
+                n_jobs=1,
+                total_ram_bytes=None,
+            )
         )
 
 

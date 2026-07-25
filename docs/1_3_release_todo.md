@@ -149,9 +149,16 @@ authoritative.
 No full warehouse query, data conversion, model job, or publish workflow may
 start until the blockers applicable to it are closed.
 
-B02 is already closed at the current HEAD and remains in this ledger so blocker
-IDs stay stable. Every other row is open until its required evidence is
-recorded.
+Closed rows remain in this ledger so blocker IDs stay stable. Read each row's
+own status text as authoritative; there are three states:
+
+- **Closed** — B02 and B03. No further work.
+- **Implementation closed, evidence or a dependency outstanding** — B12, B13,
+  B30. Their code and focused tests exist; B13 additionally waits on B20's
+  lifecycle transition, and B12/B30 wait on real-run evidence.
+- **Open** — every other row, until its required evidence is recorded.
+
+A row is never closed by prose elsewhere in this document.
 
 | ID | Blocker | Required resolution | Smallest verification |
 |---|---|---|---|
@@ -326,9 +333,13 @@ legacy index.
 ```
 
 Create `matrix-work` and `matrix-work-smoke` explicitly: the pairwise CLI
-requires each directory to exist. Keep both empty before their first run and
-record writability, free space, and resolved local paths. Create only parents
-for outputs that the CLIs require to be absent.
+requires each directory to exist and rejects a nonempty directory. Independently
+confirm and record that each resolved path is local and unsynced; a generic
+filesystem path cannot prove either property. The CLI verifies writability with
+a temporary flushed and synced write, removes that probe, and records measured
+free bytes. Compare the measurement with the separately reviewed matrix/output
+size estimate. Create only parents for outputs that the CLIs require to be
+absent.
 
 ```powershell
 $MatrixRoots = @(
@@ -462,11 +473,28 @@ remove identities.
     }
   },
   "acceptance": {
-    "pairwise_aggregate_auc_max_drop": 0.001,
-    "pairwise_aggregate_f1_max_drop": 0.005,
-    "pairwise_per_dataset_policy": "TBD",
-    "cluster_signature_weighted_b3_f1_max_drop": 0.005,
-    "cluster_per_dataset_b3_f1_policy": "TBD",
+    "no_op_alignment": {
+      "applies_to": "REVIEWED_NO_OP_ARTIFACT_OR_null",
+      "pairwise_aggregate_auc_max_drop": 0.001,
+      "pairwise_aggregate_f1_max_drop": 0.005,
+      "pairwise_per_dataset_policy": "TBD",
+      "cluster_signature_weighted_b3_f1_max_drop": 0.005,
+      "cluster_per_dataset_b3_f1_policy": "TBD"
+    },
+    "intentional_retrain": {
+      "comparator": "TBD",
+      "comparator_manifest_sha256": "TBD",
+      "primary_metric": "TBD",
+      "primary_metric_max_drop": "TBD",
+      "pairwise_per_dataset_policy": "TBD",
+      "cluster_per_dataset_b3_f1_policy": "TBD"
+    },
+    "removed_feature_ablations": {
+      "features": ["sinonym", "fasttext", "reference_features"],
+      "protocol": "TBD",
+      "is_release_gate": "TBD",
+      "per_feature_policy": "TBD"
+    },
     "linker": {
       "primary_metric": "TBD",
       "primary_metric_max_drop": "TBD",
@@ -706,7 +734,9 @@ Before executing or reading the historical evaluation, freeze and hash:
 - the complete metric set, formulas, thresholds, denominators, aggregation and
   weighting rules;
 - the primary metric and every numeric drop/floor/ceiling policy in
-  `release.json.acceptance`;
+  `release.json.acceptance`, with `no_op_alignment` and `intentional_retrain`
+  populated as separate contracts and the comparator of each named explicitly;
+- the removed-feature ablation protocol and whether it gates;
 - per-dataset, source, bucket, abstention, subblocking, and exception policies;
 - every new-model feature set, dataset/split rule, hyperparameter search space,
   seed, EPS objective/grid/tie-break, and linker train/calibration/target
@@ -1352,11 +1382,14 @@ preflight, not after eight other datasets have been processed.
 
 ### 5.1 Pairwise preflight
 
-Verify the matrix-work directory is existing, empty for its first run, local,
-writable, and large enough. Full release training deliberately does not use the
-smoke feature cache. Freeze the Stage-8 pair manifest and record its SHA-256
-before preflight; the trainer records that digest but has no manifest-path
-argument.
+Before invoking the trainer, independently attest that the matrix-work path is
+local and unsynced. The trainer enforces that it exists and is empty, probes
+writability without leaving the probe behind, and records measured free bytes
+in `training_config.matrix_work_storage`. Compare that measurement with the
+reviewed matrix/output size estimate; the CLI has no authoritative estimate to
+invent. Full release training deliberately does not use the smoke feature
+cache. Freeze the Stage-8 pair manifest and record its SHA-256 before preflight;
+the trainer records that digest but has no manifest-path argument.
 
 ```powershell
 uv run --no-sync python scripts/production/model/train_pairwise.py `
@@ -1382,9 +1415,11 @@ Preflight gate:
       `pairwise_inputs_manifest.json` and the release-manifest digest.
 - [ ] All dataset files and fixed-pair CSVs are present, hashed, and validated.
 - [ ] No fixed pair occurs across train/validation/test splits.
-- [ ] The matrix root is local, fresh, writable, and has measured free-space
-      headroom.
-- [ ] Expected matrix/output sizes are recorded.
+- [ ] The resolved matrix root is independently attested local and unsynced.
+- [ ] Preflight proves the matrix root was empty and writable and records its
+      measured free bytes.
+- [ ] Expected matrix/output sizes are recorded and fit within that measured
+      capacity with reviewed headroom.
 - [ ] Rust is freshly built and its identity is recorded.
 - [ ] No output directory was created by preflight.
 
@@ -1848,11 +1883,12 @@ atomically record the first-unblind event. The B30 output is the sole producer
 for pairwise release gates; per-dataset metrics generated by historical trainer
 splits are not a substitute.
 
-Each manifest dataset has a `name` and one exact `files` mapping. Pair
-manifests require `signatures`, `papers`, `specter_embeddings`, and `pairs`;
-cluster manifests replace `pairs` with `clusters` and `blocks`. Every role is
-`{"path": "...", "sha256": "..."}`, with relative paths resolved from the manifest
-directory.
+Each manifest dataset has a unique, nonempty string `name` and one exact
+`files` mapping. Pair manifests require `signatures`, `papers`,
+`specter_embeddings`, and `pairs`; cluster manifests replace `pairs` with
+`clusters` and `blocks`. Every role is `{"path": "...", "sha256": "..."}`, with
+relative paths resolved from the manifest directory. Pair-row labels must be
+the JSON integer `0` or `1`; floats, strings, and booleans are invalid.
 
 ```powershell
 uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-pairs `
@@ -1873,19 +1909,40 @@ uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-cl
   --n-jobs "REVIEWED_N_JOBS"
 ```
 
-- [ ] Pairwise aggregate AUROC drop is no more than `0.001` on the exact frozen
-      comparable pairs, using averaged main/nameless positive probabilities.
-- [ ] Pairwise aggregate macro-F1 drop is no more than `0.005`, using the same
-      averaged probability and strict `> 0.5` threshold as the trainer.
-- [ ] Signature-weighted clustering B3 F1 drop is no more than `0.005`.
+Apply the correct contract to each artifact. The `0.001`/`0.005` bands in
+[normalization_migration_blocked.md](normalization_migration_blocked.md) are
+**no-op/alignment** tolerances: they bound a comparison in which the model is
+expected to be behaviorally equivalent. The v1.3 candidate is an intentional
+feature-changing retrain, so it is judged by
+`release.json.acceptance.intentional_retrain`, not by the no-op bands. Do not
+apply a no-op tolerance to the candidate, and do not widen a no-op tolerance
+because the intended change has a large blast radius.
+
+- [ ] `release.json.acceptance.no_op_alignment.applies_to` names the specific
+      no-op artifact and comparison, or is explicitly `null` when no no-op
+      comparison is part of this release.
+- [ ] If a no-op comparison exists: pairwise aggregate AUROC drop is no more
+      than `0.001` on the exact frozen comparable pairs using averaged
+      main/nameless positive probabilities; pairwise aggregate macro-F1 drop is
+      no more than `0.005` using the same averaged probability and strict
+      `> 0.5` threshold as the trainer; signature-weighted clustering B3 F1 drop
+      is no more than `0.005`.
+- [ ] `release.json.acceptance.intentional_retrain` names the shipped-production
+      comparator, its manifest digest, the primary metric, the maximum
+      acceptable drop, and the per-dataset policies. No field may remain `TBD`
+      at the pre-unblind freeze.
+- [ ] The v1.3 candidate satisfies the `intentional_retrain` contract on
+      identical evaluation sets.
 - [ ] Pairwise and clustering macro aggregates are also reported, with
       denominators and weighting definitions.
-- [ ] Every dataset satisfies the predeclared per-dataset floor/drop policy;
-      aggregate metrics cannot mask a failing dataset.
-- [ ] The intentional canonical-v2 feature-changing result shows declared
-      end-metric non-regression.
-- [ ] Removed Sinonym, fastText, and reference-feature effects are reported,
-      not inferred from parity tests.
+- [ ] Every dataset satisfies the predeclared per-dataset floor/drop policy for
+      whichever contract applies; aggregate metrics cannot mask a failing
+      dataset.
+- [ ] Removed Sinonym, fastText, and reference-feature effects are reported per
+      `release.json.acceptance.removed_feature_ablations`, not inferred from
+      parity tests. That block must state the treatment/control protocol and
+      whether the ablations are a release gate or diagnostic reporting; a
+      numeric per-feature policy is required only if they gate.
 - [ ] The one-shot cluster-test B3 result passes the frozen acceptance gate.
 
 Any pairwise or cluster failure aborts the release. Do not tune and rerun on
@@ -2011,8 +2068,17 @@ uv build --sdist --wheel --out-dir dist --clear
 ```powershell
 uv run --no-sync python scripts/verification/verify_production_model_distributions.py `
   --dist-dir dist `
-  --source-root .
+  --source-root . `
+  --phase release_candidate
 ```
+
+`--phase` is required and has no default. `code_only` requires the canonical
+tuple pair and asserts both ORCID artifacts are absent and undeclared;
+`release_candidate` requires the tuple pair and both ORCID artifacts. The
+verifier also compares archive bytes against source bytes, so an altered
+declared file fails even when the inventory is complete. Release builds after
+Stage 3 promotion use `release_candidate`; CI on the code-only candidate uses
+`code_only`.
 
 - [ ] Every `pyproject.toml` package-data declaration resolves to source bytes
       and is present in both archives; after Stage 3 this includes the reviewed

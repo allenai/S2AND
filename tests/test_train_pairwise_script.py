@@ -120,6 +120,54 @@ def test_preflight_hashes_inputs_and_derives_smoke_scope(tmp_path: Path) -> None
     assert plan.dataset_names == ("qian",)
     assert plan.datasets["qian"].files == {role: path.resolve() for role, path in paths.items()}
     assert plan.datasets["qian"].sha256 == {role: sha256(path.read_bytes()).hexdigest() for role, path in paths.items()}
+    assert plan.matrix_work_free_bytes > 0
+    assert list(plan.matrix_work_dir.iterdir()) == []
+
+
+def test_preflight_rejects_nonempty_matrix_work_dir(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    _write_qian_inputs(data_dir)
+    args = _args(tmp_path, data_dir=data_dir)
+    (args.matrix_work_dir / "stale.npy").write_bytes(b"stale")
+
+    with pytest.raises(SystemExit, match="--matrix-work-dir must be empty"):
+        train_pairwise._preflight_pairwise(args)
+
+
+def test_preflight_records_measured_matrix_work_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    _write_qian_inputs(data_dir)
+    args = _args(tmp_path, data_dir=data_dir)
+    monkeypatch.setattr(train_pairwise.shutil, "disk_usage", lambda _path: SimpleNamespace(free=99))
+
+    plan = train_pairwise._preflight_pairwise(args)
+    config = train_pairwise._training_config(args, plan, artifact_hashes={})
+
+    assert plan.matrix_work_free_bytes == 99
+    assert config["matrix_work_storage"] == {
+        "path": str(args.matrix_work_dir.resolve()),
+        "measured_free_bytes": 99,
+    }
+
+
+def test_preflight_probes_matrix_work_writability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    _write_qian_inputs(data_dir)
+    args = _args(tmp_path, data_dir=data_dir)
+
+    def reject_write(**_kwargs: object) -> None:
+        raise PermissionError("read-only fixture")
+
+    monkeypatch.setattr(train_pairwise.tempfile, "NamedTemporaryFile", reject_write)
+
+    with pytest.raises(SystemExit, match="--matrix-work-dir is not writable"):
+        train_pairwise._preflight_pairwise(args)
 
 
 def test_preflight_rejects_feature_cache_at_output_path(tmp_path: Path) -> None:
@@ -422,7 +470,31 @@ def test_smoke_pairwise_metrics_average_both_models() -> None:
     )
     assert metrics["rows"] == 2
     assert metrics["auroc"] == pytest.approx(1.0)
-    assert metrics["f1"] == pytest.approx(1.0)
+    assert metrics["macro_f1"] == pytest.approx(1.0)
+    assert metrics["average_precision"] == pytest.approx(1.0)
+
+
+def test_smoke_pairwise_metrics_match_the_release_evaluator_schema() -> None:
+    """Smoke evidence must exercise the sealed release report schema, not a parallel one."""
+
+    from scripts.production.model.release_pairwise import pairwise_metrics
+
+    labels = np.asarray([0, 1, 1, 0])
+    main = np.asarray([[0.8, 0.2], [0.3, 0.7], [0.1, 0.9], [0.6, 0.4]])
+    nameless = np.asarray([[0.7, 0.3], [0.4, 0.6], [0.2, 0.8], [0.9, 0.1]])
+
+    smoke = train_pairwise._smoke_pairwise_metrics(
+        labels=labels,
+        main_probabilities=main,
+        nameless_probabilities=nameless,
+    )
+    release, _ = pairwise_metrics(labels, main[:, 1], nameless[:, 1])
+
+    # The smoke report is the release report plus one diagnostic-only field.
+    assert set(smoke) - set(release) == {"average_precision"}
+    assert set(release) - set(smoke) == set()
+    for key, value in release.items():
+        assert smoke[key] == pytest.approx(value), key
 
 
 def test_subset_result_never_publishes(
@@ -444,6 +516,7 @@ def test_subset_result_never_publishes(
             datasets={},
             feature_cache_dir=None,
             matrix_work_dir=args.matrix_work_dir,
+            matrix_work_free_bytes=1_000_000,
             total_ram_bytes=args.total_ram_bytes,
         ),
         cast(train_pairwise.Clusterer, SimpleNamespace()),

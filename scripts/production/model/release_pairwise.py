@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import gc
 import hashlib
 import json
 import math
@@ -13,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
@@ -21,7 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and.consts import NAME_COUNTS_INDEX_PATH  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
-from s2and.eval import b3_precision_recall_fscore  # noqa: E402
+from s2and.eval import b3_precision_recall_fscore, pairwise_probability_metrics  # noqa: E402
 from s2and.featurizer import many_pairs_featurize  # noqa: E402
 from s2and.incremental_linking.contracts import canonical_json_digest  # noqa: E402
 from s2and.production_bundle import finalize_pairwise_eps  # noqa: E402
@@ -57,6 +57,16 @@ def _verified_manifest(path: Path, expected_sha256: str, schema_version: str) ->
     datasets = payload.get("datasets")
     if not isinstance(datasets, list) or not datasets:
         raise ValueError("Evaluation manifest datasets must be a nonempty list")
+    dataset_names: set[str] = set()
+    for spec in datasets:
+        if not isinstance(spec, Mapping):
+            raise ValueError("Each evaluation manifest dataset must be a named object")
+        name = spec.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("Evaluation manifest dataset names must be nonempty strings")
+        if name in dataset_names:
+            raise ValueError(f"Evaluation manifest contains duplicate dataset name {name!r}")
+        dataset_names.add(name)
     return payload
 
 
@@ -107,30 +117,7 @@ def pairwise_metrics(
 ) -> tuple[dict[str, float | int], np.ndarray]:
     """Return the fixed release metric contract and averaged probabilities."""
 
-    y = np.asarray(labels).reshape(-1)
-    main = np.asarray(main_positive, dtype=np.float64).reshape(-1)
-    nameless = np.asarray(nameless_positive, dtype=np.float64).reshape(-1)
-    if y.shape != main.shape or y.shape != nameless.shape:
-        raise ValueError("Pair labels and both probability vectors must have equal shape")
-    if y.size == 0 or np.unique(y).size != 2:
-        raise ValueError("Pair evaluation requires nonempty labels with both classes")
-    probabilities = (main + nameless) / 2.0
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        y,
-        probabilities > 0.5,
-        average="macro",
-        zero_division=0,
-    )
-    metrics: dict[str, float | int] = {
-        "rows": int(y.size),
-        "auroc": float(roc_auc_score(y, probabilities)),
-        "macro_f1": float(f1),
-        "macro_precision": float(precision),
-        "macro_recall": float(recall),
-    }
-    if not all(math.isfinite(float(value)) for key, value in metrics.items() if key != "rows"):
-        raise RuntimeError("Pair evaluation produced a non-finite metric")
-    return metrics, probabilities
+    return pairwise_probability_metrics(labels, main_positive, nameless_positive)
 
 
 def _anddata(name: str, files: Mapping[str, Path], *, mode: str, random_seed: int = 1111) -> ANDData:
@@ -158,8 +145,6 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
     verified: list[tuple[Mapping[str, Any], dict[str, Path]]] = []
     roles = ("signatures", "papers", "specter_embeddings", "pairs")
     for spec in manifest["datasets"]:
-        if not isinstance(spec, Mapping) or not isinstance(spec.get("name"), str):
-            raise ValueError("Each pair manifest dataset must be a named object")
         verified.append((spec, _resolved_dataset_files(manifest_path, spec, roles)))
     model_path = Path(args.pairwise_model).resolve()
     clusterer = _load_pairwise_staging_model(model_path)
@@ -186,9 +171,9 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
                 raise ValueError(f"Pair row for {name!r} must be an object")
             left = str(row["signature_id_1"])
             right = str(row["signature_id_2"])
-            label = int(row["label"])
-            if label not in (0, 1):
-                raise ValueError(f"Pair label for {name!r} must be 0 or 1")
+            label = row.get("label")
+            if isinstance(label, bool) or not isinstance(label, int) or label not in (0, 1):
+                raise ValueError(f"Pair label for {name!r} must be the JSON integer 0 or 1")
             pairs.append((left, right, label))
             identities.append({"signature_id_1": left, "signature_id_2": right, "label": label})
         dataset = _anddata(name, files, mode="inference")
@@ -281,13 +266,39 @@ def _training_config(bundle_dir: Path) -> dict[str, Any]:
 
 
 def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
-    """Evaluate explicit EPS values on the immutable training validation identities."""
+    """Evaluate explicit EPS values on the immutable training validation identities.
+
+    Every cheap precondition — output absence, EPS domain, bundle load, and input
+    digests — is checked before any distance matrix is built, so an operator
+    error cannot surface only after hours of featurization.
+
+    One dataset's condensed distance matrices are resident at a time: the
+    dataset loop is outer and the EPS loop is inner. Matrices are still built
+    exactly once per dataset and reused across every EPS value, so this bounds
+    peak RSS without adding recomputation.
+
+    Validation blocks are filtered only for singletons. Canonical pairwise
+    bundles no longer persist ``val_blocks_size``, and the production trainer
+    constructs its ``Clusterer`` without one, so training and calibration both
+    score all non-singleton validation blocks. Passing the loaded attribute here
+    would silently cap calibration for a noncanonical bundle that still carries
+    a finite value.
+    """
+
+    output_path = Path(args.output_json)
+    if output_path.exists():
+        raise FileExistsError(f"Calibration output already exists: {output_path}")
+    eps_values = sorted({float(value) for value in args.eps})
+    for eps in eps_values:
+        if not math.isfinite(eps) or not 0.0 <= eps <= 1.0:
+            raise ValueError(f"EPS values must be finite and in [0, 1], got {eps!r}")
 
     bundle_dir = Path(args.pairwise_model).resolve()
     clusterer = _load_pairwise_staging_model(bundle_dir)
+    clusterer.n_jobs = args.n_jobs
     config = _training_config(bundle_dir)
-    prepared: list[tuple[str, ANDData, dict[str, list[str]], dict[str, list[str]], Any]] = []
-    identities: dict[str, Any] = {}
+
+    resolved_inputs: list[tuple[str, dict[str, Path]]] = []
     for name, dataset_spec in config["dataset_inputs"].items():
         if dataset_spec["split_mode"] != "random_blocks":
             continue
@@ -300,39 +311,48 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
             if observed != source["sha256"]:
                 raise ValueError(f"Calibration input drift for {name}:{role}")
             files[role] = path
-        dataset = _anddata(
-            str(name),
-            files,
-            mode="train",
-            random_seed=int(config["data_random_seed"]),
-        )
-        _, val_blocks, _ = dataset.split_cluster_signatures()
-        val_blocks = clusterer.filter_blocks(val_blocks, clusterer.val_blocks_size)
-        true_clusters = dataset.construct_cluster_to_signatures(val_blocks)
-        distances = clusterer.make_distance_matrices(val_blocks, dataset)
-        prepared.append((str(name), dataset, val_blocks, true_clusters, distances))
-        identities[str(name)] = {
-            "blocks": val_blocks,
-            "digest": canonical_json_digest(val_blocks),
-        }
-    if not prepared:
+        resolved_inputs.append((str(name), files))
+    if not resolved_inputs:
         raise ValueError("EPS calibration found no clustered validation datasets")
 
-    trials: list[dict[str, Any]] = []
+    identities: dict[str, Any] = {}
+    metrics_by_eps: dict[float, dict[str, Any]] = {eps: {} for eps in eps_values}
     original_eps = float(clusterer.cluster_model.eps)
     try:
-        for eps in sorted(set(float(value) for value in args.eps)):
-            if not math.isfinite(eps) or not 0.0 <= eps <= 1.0:
-                raise ValueError(f"EPS values must be finite and in [0, 1], got {eps!r}")
-            clusterer.cluster_model.eps = eps
-            metrics: dict[str, Any] = {}
-            for name, dataset, blocks, true_clusters, distances in prepared:
-                predicted, _ = clusterer.predict(blocks, dataset, dists=distances)
-                metrics[name] = _b3_report(true_clusters, predicted)
-            aggregate = _aggregate_b3(metrics)
-            trials.append({"eps": eps, "datasets": metrics, **aggregate})
+        for name, files in resolved_inputs:
+            dataset = _anddata(
+                name,
+                files,
+                mode="train",
+                random_seed=int(config["data_random_seed"]),
+            )
+            _, val_blocks, _ = dataset.split_cluster_signatures()
+            val_blocks = clusterer.filter_blocks(val_blocks)
+            true_clusters = dataset.construct_cluster_to_signatures(val_blocks)
+            distances = clusterer.make_distance_matrices(
+                val_blocks,
+                dataset,
+                total_ram_bytes=args.total_ram_bytes,
+            )
+            identities[name] = {
+                "blocks": val_blocks,
+                "digest": canonical_json_digest(val_blocks),
+            }
+            for eps in eps_values:
+                clusterer.cluster_model.eps = eps
+                predicted, _ = clusterer.predict(
+                    val_blocks,
+                    dataset,
+                    dists=distances,
+                    total_ram_bytes=args.total_ram_bytes,
+                )
+                metrics_by_eps[eps][name] = _b3_report(true_clusters, predicted)
+            del distances, dataset, val_blocks, true_clusters
+            gc.collect()
     finally:
         clusterer.cluster_model.eps = original_eps
+
+    trials = [{"eps": eps, "datasets": metrics_by_eps[eps], **_aggregate_b3(metrics_by_eps[eps])} for eps in eps_values]
     selected = max(trials, key=lambda trial: (trial["signature_weighted"]["f1"], -trial["eps"]))
     report = {
         "schema_version": "s2and_eps_calibration_report_v1",
@@ -342,7 +362,7 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
         "validation_identities": identities,
         "trials": trials,
     }
-    _write_fresh_json(Path(args.output_json), report)
+    _write_fresh_json(output_path, report)
     return report
 
 
@@ -357,8 +377,6 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
     roles = ("signatures", "papers", "specter_embeddings", "clusters", "blocks")
     verified: list[tuple[Mapping[str, Any], dict[str, Path]]] = []
     for spec in manifest["datasets"]:
-        if not isinstance(spec, Mapping) or not isinstance(spec.get("name"), str):
-            raise ValueError("Each cluster manifest dataset must be a named object")
         verified.append((spec, _resolved_dataset_files(manifest_path, spec, roles)))
     model_path = Path(args.pairwise_model).resolve()
     clusterer = _load_pairwise_staging_model(model_path)
@@ -436,6 +454,8 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--pairwise-model", type=Path, required=True)
     calibrate.add_argument("--eps", type=float, nargs="+", required=True)
     calibrate.add_argument("--output-json", type=Path, required=True)
+    calibrate.add_argument("--n-jobs", type=_positive_int, default=1)
+    calibrate.add_argument("--total-ram-bytes", type=_positive_int)
     calibrate.set_defaults(handler=calibrate_eps)
 
     finalizer = commands.add_parser("finalize-eps", help="Write a fresh pairwise stage with reviewed EPS.")

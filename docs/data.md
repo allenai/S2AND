@@ -2,10 +2,13 @@
 
 This document covers dataset download, checked-in model artifacts, and `path_config.json`.
 
-> **Canonical-v2 migration status (2026-07-09):** the published Arrow release,
+> **Canonical-v2 migration status (2026-07-24):** the published Arrow release,
 > shared name counts, and checked-in v1.21 model are legacy inputs. They are not
 > a compatible production release unit for this branch. Canonical counts and the
-> v1.3 bundle are pending; see [work_plan.md](work_plan.md).
+> v1.3 bundle are pending; see the
+> [v1.3 release runbook](1_3_release_todo.md). Here, “v1.3” names the coordinated
+> model/data release. The Python/Rust package version is still an explicit
+> release decision.
 
 ## Dataset download
 
@@ -75,14 +78,19 @@ for.
 The source bundle is excluded from package data, the obsolete v1.0-v1.2 model
 pickles have been removed, and no default production model declaration is
 distributed during cutover. Evaluation and validation tools must receive an
-explicit model bundle path. After v1.3 passes the installed-wheel release gate,
-that validated bundle can become the declared packaged default.
+explicit model bundle path. Release blocker B15 leaves the v1.3 distribution
+policy open: the validated bundle may remain an explicit external artifact, or
+it may become a packaged default only after package-data, loader, size, and
+installed-distribution gates are implemented and approved.
 
-New production releases must be built as immutable native bundle directories with
-`scripts/production/model/train_pairwise.py` followed by
+New production releases use immutable native bundle directories. The component
+entry points are `scripts/production/model/train_pairwise.py` and
 `scripts/production/model/train_linker_and_finalize.py`; stage, validate, and
-rename the complete bundle rather than mutating a live directory. Do not create
-new production pickles.
+rename the complete bundle rather than mutating a live directory. They are not
+by themselves the full v1.3 protocol: EPS selection, linker candidate
+finalization, one-shot evaluation, release attestation, and exact-byte
+publication remain governed by [1_3_release_todo.md](1_3_release_todo.md). Do
+not create new production pickles.
 
 The replay target for rebuilding/auditing the promoted incremental linker lives
 at:
@@ -100,8 +108,9 @@ Arrow release prefix. Use the standalone replay-subbundle download command in
 [Dataset download](#dataset-download) when you need to rebuild or audit the
 promoted linker artifact.
 
-This source bundle is the default `--source-bundle-root` for
-`scripts/production/model/linker_train_calibrate_eval.py`.
+Pass the downloaded source bundle explicitly with `--source-bundle-root` to
+`scripts/production/model/linker_train_calibrate_eval.py`; the release command
+has no implicit replay-bundle default.
 
 ## Configuring `s2and/data/path_config.json`
 

@@ -1,6 +1,6 @@
 # Canonical-v2 Normalization Migration
 
-Status date: 2026-07-10
+Status date: 2026-07-24
 
 ## Status
 
@@ -17,8 +17,14 @@ the cutover. This is a migration state, not a releasable package state.
 The active engineering remediation ledger is
 [work_plan.md](work_plan.md). It includes provenance, cross-artifact binding,
 batching, cache, schema, parity, resource, packaging, and documentation defects
-found in the 2026-07-09 audit. Those items are part of release readiness even
+found in the release-readiness audits. Those items are part of release readiness even
 when they do not directly alter normalization.
+
+The executable order, current blocker list, approvals, immutable run record,
+test-unblinding protocol, and publication sequence are in
+[1_3_release_todo.md](1_3_release_todo.md). This document remains the authority
+for the frozen normalization semantics and acceptance thresholds, not for
+launch commands.
 
 ## Cutover Readiness Checklist
 
@@ -34,11 +40,13 @@ when they do not directly alter normalization.
    Python and Rust runtime paths consume only this index.
 3. **Runtime validation and bundle binding complete; generation pending:**
    regenerate `first_k_letter_counts_from_orcid.json` and its adjacent
-   `.meta.json` sidecar. Runtime loading is lazy and requires the matching
-   schema, normalization version, pair semantics, and exact data SHA-256; a
-   data file without its sidecar is rejected. Production training records its
-   exact data SHA-256 in `feature_contract`; export and load require that hash
-   to match the packaged priors used by default subblocking.
+   `.manifest.json`. Runtime loading is lazy and requires the matching schema,
+   normalization version, pair semantics, producer provenance, and exact data
+   SHA-256; a data file without its manifest is rejected. Production training
+   records the exact data and manifest SHA-256 values in `feature_contract`.
+   Runtime compatibility is keyed by the behavior-defining data hash; the
+   manifest hash remains release provenance and part of the linker’s pairwise
+   bundle binding.
 4. **Artifact validation and bundle binding complete:** deterministically
    regenerate and package `s2and/data/s2and_name_tuples_canonical.txt` with its
    strict source/data checksum, cardinality, normalization, and semantics
@@ -138,13 +146,18 @@ content and semantics. The shared minimum is an artifact schema, the
 `canonical_v2` normalization version, and a content digest. Richer source,
 generation, cardinality, or command provenance belongs only to artifacts whose
 lineage is part of the model contract, such as name counts, Arrow datasets, and
-trained model bundles. The small ORCID prior instead uses its direct data file
-and adjacent sidecar with schema, normalization, pair semantics, and data
-SHA-256.
+trained model bundles. The ORCID prior uses its direct data file and one
+adjacent `.manifest.json`; that manifest is the authority for schema,
+normalization, unordered-pair semantics, source provenance, canonical tuple
+binding, generator parameters, cardinalities, and the data SHA-256.
 
-Provenance is copied from verified sources rather than inferred from the
-currently imported code. Each writer uses its own publication contract; there
-is no universal generation-pointer or fsync protocol.
+Release provenance must be copied from independently verifiable sources rather
+than inferred from the currently imported code or trusted caller labels. The
+current warehouse producers do not yet meet that gate: B27 must bind snapshot
+IDs to query-result evidence, and B28 must pin and record the internal query
+dependency. Full warehouse generation remains blocked until both close. Each
+writer uses its own publication contract; there is no universal
+generation-pointer or fsync protocol.
 
 The release validator must compare, not merely parse, normalization and
 generation contracts across:
@@ -160,8 +173,13 @@ generation contracts across:
 ## Benchmark Name Re-export
 
 Production training benchmarks must be re-exported with upstream canonical
-names joined by signature ID. Add canonical columns alongside raw historical
-columns rather than overwriting them. Record:
+names joined by signature ID. The joined canonical names must reach the exact
+fields consumed by `ANDData`, Arrow conversion, and pairwise featurization.
+Merely adding side-by-side canonical columns is not sufficient because current
+loaders ignore them. Either replace the consumed `first`/`middle`/`last` fields
+and preserve raw historical names in a separate immutable audit artifact, or
+first change every loader/converter/trainer to select named canonical fields
+explicitly. Record:
 
 - source and target row counts;
 - duplicate and missing signature IDs;
@@ -182,9 +200,11 @@ linker digest, and replay-target digest.
 
 Required quality evidence:
 
-- Pairwise no-op/alignment comparisons: `AUC delta <= 0.001` and
-  `F1 delta <= 0.005` on unchanged inputs.
-- Clustering no-op/alignment comparisons: `B3 delta <= 0.005`.
+- Pairwise no-op/alignment comparisons: aggregate AUROC drop `<= 0.001` and
+  macro-F1 drop `<= 0.005` on the exact frozen comparable pairs, plus the
+  predeclared per-dataset gates.
+- Clustering no-op/alignment comparisons: signature-weighted B3 F1 drop
+  `<= 0.005`, plus reported macro and per-dataset results.
 - The intentional feature-changing retrain must show end-metric non-regression
   versus the shipped production release on identical evaluation sets.
 - Report per-dataset effects of removing Sinonym, fastText, and reference
@@ -194,8 +214,12 @@ Required quality evidence:
 - Runtime and peak RSS must be within 10% of the pinned protocol unless the
   repository owner explicitly accepts a measured tradeoff.
 
-Metrics must be present and finite and must pass before any artifact is promoted.
-Hyperparameter search does not bypass the same gate.
+Metrics must be present and finite and must pass before any artifact is
+promoted. Hyperparameter search does not bypass the same gate. Pairwise and
+clustering test scores remain sealed until Stage 8; linker test scoring occurs
+once only after pairwise, EPS, linker parameters, metrics, and gates are frozen.
+A failed one-shot gate aborts the release rather than becoming another tuning
+iteration on that holdout.
 
 ## Release and Rollback
 
@@ -209,7 +233,13 @@ The release flow must:
    pairwise/incremental fixtures;
 5. publish Rust first and publish Python only after the exact Rust version is
    installable;
-6. promote only the already-validated release unit.
+6. publish the exact already-reviewed workflow artifact bytes rather than
+   rebuilding them in a later publish run;
+7. bind the immutable quality report, pre-publish release attestation, remote
+   data/model digest, and real-v1.3 installed smoke into a machine-enforced
+   release gate; and
+8. create a separate immutable public release receipt after public-index and
+   public-data verification.
 
 Rollback is deployment of the previous package together with its complete
 legacy artifact set. There is no dual runtime normalization mode and no mixing
@@ -222,8 +252,10 @@ of old code with canonical artifacts or canonical code with legacy artifacts.
 - Last-name compare policy: `s2and.text.canonical_lasts_equivalent`.
 - Version constant: `s2and.consts.NORMALIZATION_VERSION`.
 - Production Arrow validation: `s2and.arrow_inputs`.
-- Count-index format/publication:
-  `s2and.incremental_linking.feature_block_arrow`.
+- Count-index format/loading: `s2and.name_counts_index` and
+  `s2and.name_counts_manifest`.
+- Count-index production writer:
+  `scripts/production/counts/generate_name_counts.py`.
 - Canonical tuple artifact:
   `s2and/data/s2and_name_tuples_canonical.txt` and its metadata.
   The adjacent `<artifact>.meta.json` uses
@@ -257,7 +289,7 @@ of old code with canonical artifacts or canonical code with legacy artifacts.
 ## Current Small Verification Gate
 
 ```powershell
-uv run pytest -q tests/test_canonical_name_examples.py tests/test_normalization_version_contract.py tests/test_subblocking_merge_candidates.py tests/test_production_model.py -ra
+uv run pytest -q tests/test_canonical_name_examples.py tests/test_normalization_version_contract.py tests/test_name_counts_binding.py tests/test_generate_orcid_name_prefix_counts.py tests/test_subblocking_merge_candidates.py tests/test_production_model.py -ra
 ```
 
 This gate checks code behavior only. It does not replace regenerated artifacts,

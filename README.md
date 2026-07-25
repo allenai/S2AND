@@ -2,10 +2,18 @@
 
 S2AND provides the S2AND author-name-disambiguation benchmark datasets and the reference model described in the paper [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421) by Shivashankar Subramanian, Daniel King, Doug Downey, and Sergey Feldman.
 
+> **Release status (2026-07-24):** this development branch contains the
+> canonical-v2 code migration, but it is not yet a complete production release.
+> Canonical artifacts and the model bundle `production_model_v1.3` still need to
+> be generated, retrained, evaluated, and published. The package manifests
+> currently say `0.60.0`; whether the coordinated package release keeps that
+> version or becomes `1.3.0` is an explicit open decision. Release operators
+> must use [docs/1_3_release_todo.md](docs/1_3_release_todo.md).
+
 As of this version, S2AND requires the `s2and-rust` extension at install time.
-Python fallback paths still exist for selected stages, but production model
-loading and the maintained large-scale runtime assume the Rust package is
-installed.
+Explicit classic Python routes still exist for selected `ANDData` stages, but
+they are not silent fallbacks from Arrow/Rust APIs. Production model loading
+and the maintained large-scale runtime require the Rust package.
 
 ## What S2AND Provides
 
@@ -22,6 +30,7 @@ installed.
 | Download the benchmark datasets | [Download Data or Model](#download-data-or-model) | [docs/data.md](docs/data.md) |
 | Train or evaluate a model | [Training and Evaluation Essentials](#training-and-evaluation-essentials) | [docs/training.md](docs/training.md) |
 | Build a production release bundle | `scripts/production/` | [docs/production_inference.md](docs/production_inference.md) |
+| Operate the v1.3 retrain and release | [v1.3 release runbook](docs/1_3_release_todo.md) | Follow its stages, blockers, approvals, and immutable release record |
 | Operate Rust-backed large-scale inference | [Runtime and Scaling](#runtime-and-scaling) | [docs/rust/runtime.md](docs/rust/runtime.md), [docs/subblocking.md](docs/subblocking.md), [docs/threading.md](docs/threading.md) |
 | Work on the repo itself | [Development](#development) | [docs/development.md](docs/development.md) |
 
@@ -34,6 +43,10 @@ Package install:
 ```bash
 uv pip install s2and
 ```
+
+That command installs the latest package available from the configured index;
+it does not install this unreleased worktree. Use the repo-checkout flow below
+when validating canonical-v2 before publication.
 
 The base install includes the exactly matched `s2and-rust` runtime. During the
 canonical-v2 cutover, no default production model is packaged; inference callers
@@ -59,12 +72,12 @@ commands, WSL notes, and install variants, see [docs/install.md](docs/install.md
 
 ## Download Data or Model
 
-> **Canonical-v2 migration status (2026-07-10):** this branch contains the
+> **Canonical-v2 migration status (2026-07-24):** this branch contains the
 > canonical-v2 code cutover but does not yet contain a compatible production
 > model or canonical count artifacts. No default model is distributed by this
 > branch. Use the previous published S2AND release for working v1.21 inference
 > until canonical v1.3 is trained, validated, and packaged. See
-> [docs/work_plan.md](docs/work_plan.md).
+> [docs/1_3_release_todo.md](docs/1_3_release_todo.md).
 
 Rust/Arrow dataset download:
 
@@ -109,6 +122,12 @@ Full inference and bundle publication details are in
 [docs/production_inference.md](docs/production_inference.md).
 
 ## Training and Evaluation Essentials
+
+The example below is a small research/API example, not the production release
+protocol: it materializes test features and permits immediate evaluation.
+During the v1.3 release, test identities and scores remain sealed until the
+one-shot gates in Stages 7 and 8 of the
+[release runbook](docs/1_3_release_todo.md).
 
 Minimal training flow:
 
@@ -233,6 +252,7 @@ Details:
 - Training and saved-model workflows: [docs/training.md](docs/training.md)
 - Development workflow: [docs/development.md](docs/development.md)
 - Paper-era reproducibility notes: [docs/reproducibility.md](docs/reproducibility.md)
+- v1.3 retrain and release runbook: [docs/1_3_release_todo.md](docs/1_3_release_todo.md)
 - Docs index: [docs/README.md](docs/README.md)
 
 ## Development
@@ -293,7 +313,8 @@ Notes:
 ### Docs
 
 - Index (start here): `docs/README.md`
-- Rust/Arrow execution backlog: `docs/work_plan.md`
+- v1.3 release operator runbook: `docs/1_3_release_todo.md`
+- Canonical-v2 remediation ledger: `docs/work_plan.md`
 
 ---
 

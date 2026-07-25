@@ -1,6 +1,10 @@
 # Canonical-v2 Release Work Plan
 
-Status date: 2026-07-21
+Status date: 2026-07-24
+
+> **Execution order:** Use [1_3_release_todo.md](1_3_release_todo.md) for the
+> reviewed v1.3 operator sequence, approvals, commands, and release gates. This
+> file is a remediation ledger and is not safe to execute in numbered order.
 
 This file tracks only work that remains before a canonical-v2 release. The
 frozen normalization contract, acceptance thresholds, rollback requirements,
@@ -14,7 +18,7 @@ and artifact requirements are in
   inference requires validated Arrow inputs, and production loading requires
   an explicit complete bundle.
 - Canonical tuple, name-count, and ORCID artifact contracts are provenance
-  bound. The canonical ORCID bytes and sidecar have not yet been generated or
+  bound. The canonical ORCID data and manifest have not yet been generated or
   packaged.
 - No canonical v1.3 production bundle or implicit default is packaged. The
   historical v1.21 bundle remains available for source/parity work but is not
@@ -23,43 +27,38 @@ and artifact requirements are in
   publication remain external work. Run them only from a clean, exact commit
   after the owner approves the reviewed inputs and full commands.
 
-## Canonical artifacts and retraining
+## Remaining remediation groups
 
-Run a tiny fixture for every generator and training entry point before any
-expensive or internal-data operation. Then:
+Do not execute this section as a pipeline. The complete, dependency-safe order
+is the staged flow in [1_3_release_todo.md](1_3_release_todo.md); its blocker
+table is the source of truth for status and acceptance evidence.
 
-1. Generate immutable canonical `name_counts` data and its binary
-   `name_counts_index` from the reviewed source snapshot.
-2. Run the ORCID query on a bounded warehouse sample and verify that emitted
-   canonical keys are monotonic before full prefix-count generation.
-3. Publish the ORCID direct JSON, runtime metadata sidecar, and producer
-   generation report; verify that their identities agree.
-4. Regenerate canonical v3 name-tuple data and metadata from the reviewed
-   source file.
-5. Replace the excluded legacy ORCID JSON with the reviewed canonical JSON and
-   sidecar, and make distribution checks require exactly those bytes.
-6. Record source snapshot IDs, generation IDs, selected/rejected row counts,
-   cardinalities, byte sizes, and SHA-256 digests for every generated artifact.
-7. Audit nullable `signatures.author_position` in every release dataset;
-   repair source data or explicitly retain nullability.
-8. Re-export benchmark names by signature-ID join and report join and
-   divergence counts.
-9. Train the pairwise model from the exact immutable dataset, count, tuple,
-   and ORCID identities.
-10. Train the promoted linker against that pairwise bundle and target digest.
-    Materialize a fresh Arrow/Rust feature bundle into a new output directory.
-11. Finalize and reload the complete bundle, then verify every cross-artifact
-    identity before evaluation. A canonical parity rewrap of the published
-    v1.21 boosters must load with effective clustering `eps=0.65`; a newly
-    tuned v1.3 bundle must retain its own configured threshold.
-12. Run pairwise, clustering, subblocking, Python/Rust parity, quality,
-    throughput, and peak-RSS gates.
-13. Build clean Python and Rust distributions, install them outside the source
-    checkout, and run pairwise and incremental smoke tests with the explicit
-    complete bundle path.
+- **Release identity and publication (B01, B15-B18, B24, B26-B29):** decide
+  package/model/data versions and model distribution policy; make distribution
+  inventories complete; assemble and verify immutable remote data; publish only
+  the exact reviewed workflow bytes through machine-enforced quality,
+  attestation, installed-real-model, and public-index gates.
+- **Generators and immutable inputs (B02-B10, B19, B25):** make count commands
+  clean-clone runnable; bind warehouse snapshots to independently verifiable
+  evidence; generate tuples before the ORCID artifact that binds them; re-export
+  benchmark names into fields actually consumed by training; produce
+  leakage-safe linker assignments and complete byte inventories; prove whether
+  linker candidate members are EPS-independent.
+- **Pairwise and EPS (B11-B12, B21-B23, B30):** move all pair-overlap checks
+  into preflight; create bounded fixed-pair smoke inputs; persist selection
+  evidence and sealed test identities; add a publication-boundary smoke,
+  validation-only EPS calibration/finalization, and separately invocable
+  one-shot pairwise and clustering test evaluators.
+- **Linker lifecycle (B13-B14, B20):** keep target inputs outside fresh output
+  directories; retain the exact evaluated candidate and deterministic
+  query-level predictions; implement one reviewed no-retraining
+  candidate-to-production transition that preserves learned bytes and candidate
+  ancestry while making target/artifact lifecycle digests agree.
 
-Record the exact commit, commands, logs, artifact identities, metrics, runtime,
-and peak RSS in the release run report. Do not copy changing test totals here.
+Every expensive or warehouse operation still requires a tiny fixture,
+reviewed exact command, explicit owner approval, detached execution, durable
+logs, and a completion record. Do not copy changing test totals into this
+ledger.
 
 ## Verification gates
 

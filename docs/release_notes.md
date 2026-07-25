@@ -1,6 +1,10 @@
 # Release Notes
 
-## 0.60.0
+## Unreleased canonical-v2 migration
+
+The manifests currently say `0.60.0`; the coordinated release may retain that
+package version or become `1.3.0`. Model/data bundle v1.3 is a separate version
+axis. This decision is release blocker B01.
 
 - **Unreleased migration state:** the artifact-independent canonical-v2 code
   and release hardening are implemented, but canonical name counts, canonical
@@ -8,7 +12,7 @@
   release-candidate quality/scale measurements are still pending. The legacy
   v1.21/v1.0-v1.2 models are not packaged and are rejected by the canonical
   loader, so 0.60.0 is not yet a usable production release. See
-  [work_plan.md](work_plan.md).
+  [1_3_release_todo.md](1_3_release_todo.md).
 - Breaking: Python and Rust now share one `canonical_v2` name contract and one
   versioned feature contract. `FEATURIZER_VERSION` is 10. Titles retain letters
   and digits, CLD2 runs in explicit plain-text mode, malformed email is missing
@@ -42,6 +46,30 @@
   SPECTER1 production bundle or `--specter1-model-path`; SPECTER1 remains an
   explicit `--train` research comparison, while its historical production
   surface remains in S2AND v1.21 and earlier.
+- Breaking: production-bundle evaluation reuses the trainer's recorded split
+  seed. `eval_prod_models.py` reads `data_random_seed` from
+  `reproducibility/pairwise_training_config.json`, fails closed for bundles
+  without one, and rejects an explicit `--seed` outside `--train`. This only
+  reproduces the same split when dataset bytes and ordering are identical;
+  canonical release evaluation remains blocked on persisted split identities.
+- Breaking: promoted stratified split assignments must carry `base_group_id`,
+  and no base identity may appear in more than one split. Masked views
+  (`full`, `initial_only`) of one base query previously straddled calibration
+  and test (394 base identities affecting 316 test queries, or 2.67% of test
+  queries, in the 20260525 assignments); the classic loader now fails closed,
+  and regenerated datasets must assign splits per `base_group_id` — the same
+  identity notion the classic train/holdout filter already enforces.
+- Breaking: ORCID prefix counts now use one
+  `first_k_letter_counts_from_orcid.manifest.json`; the former runtime metadata
+  and producer-report sidecars are removed.
+- Breaking: pairwise `--datasets` runs are non-publishable smoke runs by
+  definition. The redundant `--smoke-only` and guessed disk-headroom flags are
+  removed.
+- Breaking: linker training publishes only through `--publish-to`. It saves
+  the exact evaluated model and gate under the run output and infers release
+  versions from the pairwise stage. The metric-drift diagnostic is the
+  exception: it writes only `candidate_target.json` and currently discards the
+  evaluated learned artifact, which is why B13/B20 block release promotion.
 - Breaking: `NameTupleArtifact.identity` and
   `s2and_rust.read_name_tuple_artifact_identity` are removed. The Python loader
   validates each artifact once and retains only frozen alias pairs plus
@@ -59,14 +87,15 @@
   budgeted row chunks, avoiding the previous full float64 widening transient.
   Loaded incremental linker artifacts are retained on the clusterer instead of
   being reloaded and rehashed per request.
-- Name-count pickle, binary index, Arrow inputs, pairwise boosters, and linker
-  metadata now carry and verify normalization, generation, size, SHA-256, and
-  feature-contract provenance. Manifest-relative paths cannot escape their
-  authority or depend on process CWD. Equal-size/equal-mtime mutation of
+- The native name-count index, Arrow inputs, pairwise boosters, and linker
+  metadata carry and verify normalization, generation, size, SHA-256, and
+  feature-contract provenance. The historical name-count pickle is not a
+  runtime or published representation. Manifest-relative paths cannot escape
+  their authority or depend on process CWD. Equal-size/equal-mtime mutation of
   altered-profile/disallow inputs is detected before altered-presplit reuse.
-  Models selecting name-count features
-  compare the exact four-field generation binding at Python, Arrow, and
-  prebuilt-Rust-featurizer boundaries before feature work.
+  Models selecting name-count features compare the exact
+  `name_counts_manifest_sha256` at Python, Arrow, and prebuilt-Rust-featurizer
+  boundaries before feature work.
 - Arrow production inputs require a canonical content-addressed generation
   manifest. Immutable dataset files and indexes are inventoried centrally;
   request-local seed/query sidecars are kept outside that identity and parsed
@@ -81,10 +110,20 @@
   published with one rename into an absent `name_counts_index` target. Existing
   targets are immutable; regeneration uses a new output directory. Warehouse
   access requires an explicit full-run flag and local fixtures are bounded.
-  ORCID counts now use one direct JSON file plus an adjacent metadata sidecar,
-  with no pointer manifest, cross-process lock, fsync protocol, retry loop, or
-  legacy fallback. Both paths remain excluded from distributions until the
-  approved canonical generation replaces the checked-in legacy JSON.
+  ORCID counts now use one direct JSON file plus one provenance manifest, with
+  no pointer manifest, retry loop, or legacy fallback. Both paths remain
+  declared required package data; this checkout is intentionally
+  distribution-incomplete until the approved canonical generation replaces the
+  checked-in legacy JSON and adds its currently missing manifest.
+- Generated `within_block_random` pair sampling now uses exact seeded rank
+  sampling. It preserves the legacy candidate order, selected pairs, and labels
+  while memory scales with requested samples plus blocks instead of all
+  candidate pairs. Fixed-pair CSV datasets remain fully loaded and therefore
+  still require the bounded pre-sampled smoke root in B22.
+- Fixed train/validation/test CSV inputs now reject any unordered pair that
+  appears in more than one split. B11 still requires this schema, duplication,
+  and overlap validation to run during preflight before expensive
+  featurization.
 - Pairwise bundles and linker artifacts validate in sibling staging
   directories and publish with one rename into a new path; finalization never
   mutates the pairwise source in place. Metric promotion rejects

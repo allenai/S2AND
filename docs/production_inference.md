@@ -1,5 +1,7 @@
 # Production Inference
 
+Status date: 2026-07-24.
+
 S2AND is in the canonical-v2 cutover. This branch deliberately distributes no
 production model and declares no default. `load_production_model()` without a
 path therefore raises; callers must pass an explicit compatible bundle.
@@ -11,7 +13,10 @@ parity artifact. It is not packaged, is rejected by canonical-v2, and must not
 be used for inference with this branch. Use the previous compatible S2AND
 release when reproducing v1.21 behavior.
 
-The remaining release work is tracked in [work_plan.md](work_plan.md).
+The component behavior in this document is implemented, but a releasable v1.3
+bundle does not yet exist. Use [1_3_release_todo.md](1_3_release_todo.md) for
+execution order and blockers; [work_plan.md](work_plan.md) is only the
+remediation ledger.
 
 ## Complete model bundles
 
@@ -82,29 +87,47 @@ A failed finalization therefore leaves the pairwise source unchanged and does
 not expose a partial final bundle. Publishing to an existing final path is an
 error; a changed release gets a new path.
 
-A release flow is:
+After the applicable release-runbook blockers are closed, the component
+interfaces look like this:
 
 ```powershell
 uv run python scripts\production\model\train_pairwise.py `
   --production-version X.Y `
+  --data-dir path\to\canonical_benchmark_data `
+  --matrix-work-dir D:\local-unsynced\s2and-pairwise-matrices `
   --output-dir scratch\pairwise_stage\production_model_vX.Y `
   --run-full
 
 uv run python scripts\production\model\train_linker_and_finalize.py `
-  --production-bundle-version X.Y `
   --pairwise-model-path scratch\pairwise_stage\production_model_vX.Y `
   --source-bundle-root path\to\canonical_arrow_training_bundle `
-  --target-json scratch\production_linker_vX.Y\incremental_linker_training_target.json `
-  --save-production-bundle-to s2and\data\production_model_vX.Y `
-  --linker-artifact-version vX.Y `
+  --target-json scratch\release_inputs\incremental_linker_training_target.json `
   --output-dir scratch\joint_safe_link_promoted_vX.Y_full `
+  --publish-to s2and\data\production_model_vX.Y `
   --run-full
 ```
 
-Run the existing small materialization smoke before the full command. The full
-retrain is a large job and requires explicit owner approval, captured logs, and
-quality/runtime/RSS evidence. `--allow-metric-drift` is diagnostic-only and
-cannot publish a linker or production bundle.
+This is not a complete release sequence. Between pairwise training and linker
+training, v1.3 requires validation-only EPS selection and an atomic fresh-output
+pairwise-stage finalizer. The current linker candidate-to-production lifecycle
+also remains blocked: a drift run writes a candidate target but does not retain
+the evaluated learned artifact, and a second full run is not presumed
+equivalent. Do not use the two commands above to bypass blockers B12, B13, B20,
+B25, or the one-shot evaluation gates.
+
+Run the existing small materialization smoke before any approved full command.
+The full retrain is a large job and requires explicit owner approval, captured
+logs, and quality/runtime/RSS evidence. `--allow-metric-drift` is
+diagnostic-only and cannot publish a linker or production bundle.
+
+Before materialization, run the linker command with `--preflight-only` instead
+of `--run-full`. It validates the frozen target, all source-table selectors,
+Arrow generations, and the pairwise/name-count binding without creating the
+output directory. Pairwise training likewise requires explicit data and output
+roots, records hashes for every selected benchmark input, and requires an
+explicit local matrix work directory. Replace `--run-full` with
+`--preflight-only` for its no-write readiness check. Passing `--datasets`
+selects a pairwise smoke run automatically; smoke runs never publish a bundle.
 
 ## Explicit execution routes
 
@@ -270,12 +293,13 @@ adjacent metadata once for the packaged immutable artifact, retains frozen
 pairs plus `data_sha256`, and passes those pairs explicitly to Rust-backed
 flows.
 
-Canonical ORCID prefix counts likewise use a direct JSON data file and adjacent
-`.meta.json` sidecar. The lazy runtime loader reads each once, validates the
-small metadata schema and data SHA-256, and retains the result in-process. There
-is no ORCID generation pointer, publication lock, retry loop, or legacy
+Canonical ORCID prefix counts use a direct JSON data file and one adjacent
+`.manifest.json`. The lazy runtime loader reads each once and validates the
+schema, normalization version, unordered-pair semantics, source provenance,
+tuple binding, cardinalities, and data SHA-256 before retaining the result
+in-process. There is no ORCID generation pointer, retry loop, or legacy
 fallback. During cutover, the checked-in legacy JSON and absent canonical
-sidecar remain excluded from distributions until the approved canonical
+manifest remain excluded from distributions until the approved canonical
 generation is produced.
 
 `last_first_initial_count_min` uses
@@ -301,4 +325,5 @@ git diff --check
 
 These tests validate code and synthetic bundles only. A release additionally
 needs a clean wheel/sdist check, exact-version Rust wheel install, a real
-canonical bundle, and the approved quality/runtime/RSS gates.
+canonical bundle, and the approved quality/runtime/RSS gates in
+[1_3_release_todo.md](1_3_release_todo.md).

@@ -1,5 +1,10 @@
 # Scripts
 
+This catalog describes implemented entry points in the current canonical-v2
+worktree. It does not authorize expensive production work or imply that the
+v1.3 release blockers are closed. Release operators must follow
+[../docs/1_3_release_todo.md](../docs/1_3_release_todo.md).
+
 ## Quick reference
 
 ### Rust profiling & parity
@@ -20,10 +25,11 @@
 | Script | What it does |
 |---|---|
 | `production/model/train_pairwise.py` | Train the pairwise half of a native `production_model_vX.Y/` bundle |
-| `production/model/train_linker_and_finalize.py` | Train the promoted incremental linker and finalize the production model bundle |
+| `production/model/train_linker_and_finalize.py` | Component wrapper for promoted-linker training and bundle finalization; the v1.3 candidate lifecycle is still blocked by B13/B20 |
 | `production/model/linker_train_calibrate_eval.py` | Low-level promoted linker replay implementation used by the finalization wrapper |
-| `production/counts/generate_name_counts.py` | Documentation for how production name-count metadata was collected (internal data) |
-| `production/counts/generate_orcid_name_prefix_counts.py` | Documentation for how ORCID prefix counts were collected (internal data) |
+| `production/generate_canonical_name_tuples.py` | Deterministically generate canonical tuple data and strict adjacent metadata from the reviewed source artifact |
+| `production/counts/generate_name_counts.py` | Guarded fixture/warehouse producer for an immutable manifest-backed `name_counts_index/`; invoke as a module until B03 is closed |
+| `production/counts/generate_orcid_name_prefix_counts.py` | Guarded fixture/warehouse producer for canonical ORCID prefix-count JSON plus its single provenance manifest; invoke as a module until B03 is closed |
 
 ### Tutorials
 
@@ -40,7 +46,7 @@
 | `make_inventors_split_and_histograms.py` | Split inventors data and generate histograms (defaults to a local ignored output path) |
 | `make_inventors_hf_specter_embeddings.py` | Generate one inventors SPECTER embedding set per invocation (`--model specter` or `--model specter2`; defaults to a local ignored output path) |
 | `extract_big_block_dataset.py` | Convert a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, and `specter.pickle` files; supports both pretty-printed and minified JSON exports |
-| `convert_to_arrow.py` | Convert service JSON, benchmark datasets, and linker replay inputs into bounded Arrow runtime artifacts with current raw-planner batch-index sidecars (`S2ABI002`); subcommands are `service-json`, `benchmark`, `linker-replay`, `validate-name-counts-index`, and `validate` |
+| `convert_to_arrow.py` | Convert service JSON, benchmark datasets, and linker replay inputs into bounded Arrow runtime artifacts with current raw-planner batch-index sidecars (`S2ABI002`); also validates name counts/datasets and refreshes existing root-manifest entries |
 | `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on an extracted giant block and write preservation metrics, plots, and tables |
 | `bench_preprocess_phases.py` | Benchmark preprocessing phases (papers, signatures) across serial / threads / processes |
 
@@ -49,7 +55,10 @@
 | Script | What it does |
 |---|---|
 | `eval_prod_models.py` | Evaluate current SPECTER2 production models on full, inventors_s2and, or mini datasets; SPECTER1 is available only as an explicit from-scratch research retraining comparison, and non-training evals use Arrow automatically when complete artifacts exist |
+| `eps_sweep/sweep_eps_on_linking_gold.py` | Research EPS sweep over linking gold; it is not the validation-only pairwise-stage selector/finalizer required by release blocker B12 |
 | `verification/validate_local_arrow_release.py` | Non-network local Arrow release-root smoke; checks manifests, checksum fields, required files, batch-index paths, replay bundle manifests, and `name_counts_index` targets without scanning large Arrow tables |
+| `verification/verify_production_model_distributions.py` | Require canonical runtime artifacts and the selected default-model inventory in built wheel/sdist archives; currently fails until the canonical ORCID manifest exists |
+| `verification/smoke_installed_incremental_arrow.py` | Installed-wheel synthetic canonical Arrow/linker smoke; release blocker B16 additionally requires the real v1.3 bundle |
 | `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
 | `verification/compare_existing_arrow_anddata_feature_parity.py` | Compare Rust feature matrices from existing raw `ANDData` JSON/pickle inputs against existing Arrow release bundles |
 
@@ -92,4 +101,6 @@ The following former archive files remain intentionally deleted:
 
 ## Notes
 
-**`production/model/linker_train_calibrate_eval.py`**: Defaults to safe smoke/materialization behavior unless `--run-full` is passed. Full runs can be expensive; use `--limit-rows`, `--tables`, or `--datasets` with `--materialize-only` for bounded checks.
+**`production/model/linker_train_calibrate_eval.py`**: Use
+`--preflight-only` for a no-write check, selectors plus `--materialize-only`
+for a bounded feature smoke, and `--run-full` only for an approved full run.

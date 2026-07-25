@@ -4,13 +4,12 @@ Centralized reference for supported S2AND environment variables.
 
 ---
 
-## Runtime Backend
+## Runtime and telemetry
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `S2AND_BACKEND` | `python`, `rust` | `python` | Backend used when a caller builds a runtime context without an explicit backend. Invalid values fail immediately. Public APIs have fixed routes: classic `ANDData` construction and prediction use Python, while Arrow-training and `*_from_arrow_paths` APIs use Rust. Rust requires the exact version pinned by the project metadata; there is no silent fallback. |
-
----
+| `S2AND_MEMORY_TELEMETRY_JSONL` | `<path>` | unset | Append structured memory-telemetry JSONL when a caller has not configured a sink programmatically. Parent directories are created. Prefer a fresh run-specific path; records append under an in-process lock. |
 
 ---
 
@@ -45,6 +44,7 @@ See `docs/threading.md` for detailed guidance on avoiding nested parallelism and
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `S2AND_CI_TY_PLATFORM` | `linux`, `windows`, etc. | `linux` | Override platform emulation for local `ty` checks. By default, local CI runs use `--python-platform linux` to match GitHub Linux runners. |
+| `S2AND_TEST_REQUIRE_RUST` | truthy/falsey string | unset/false | CI/test-only guard. Truthy values (`1`, `true`, `yes`, `on`) require the installed Rust extension instead of allowing Rust-dependent tests to skip. Normal applications should not set it. |
 
 ---
 

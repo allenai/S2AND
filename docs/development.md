@@ -23,7 +23,10 @@ uv run --no-project python scripts/run_ci_locally.py
 
 - lint (`scripts/sync_version.py --check`, `ruff check`, and `ruff format --check`)
 - one required-runtime `typecheck-and-test` job
-- an installed-Rust smoke check, `ty`, and the full pytest suite with `S2AND_BACKEND=python`
+- native `cargo fmt`, correctness/suspicious `clippy`, and Rust library-test
+  gates
+- a local Maturin build, installed-Rust API smoke, `ty`, and the full pytest
+  suite with `S2AND_BACKEND=python` and `S2AND_TEST_REQUIRE_RUST=1`
 
 The lint job runs the version check without a project environment and executes the exact Ruff pin from the `dev`
 extra in an isolated uv tool environment. It does not install the runtime or ML dependency stack.
@@ -66,6 +69,11 @@ and CI commands may set it only when they are intentionally exercising the check
 
 Versioning is centralized in `VERSION`.
 
+This synchronizes Python/Rust package manifests mechanically. For the v1.3
+release, it does not decide whether package versions remain `0.60.0` or become
+`1.3.0`, choose the model packaging policy, or authorize publication. Those
+decisions and gates are in [1_3_release_todo.md](1_3_release_todo.md).
+
 Recommended one-time hook setup:
 
 ```bash
@@ -96,3 +104,4 @@ Notes:
 - Docs index: [docs/README.md](README.md)
 - Rust runtime contract: [rust/runtime.md](rust/runtime.md)
 - Rust promotion baselines: [rust/baselines.md](rust/baselines.md)
+- v1.3 release operator runbook: [1_3_release_todo.md](1_3_release_todo.md)

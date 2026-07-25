@@ -3,6 +3,13 @@
 This document expands the root README's Arrow-native training example with the
 main steps for training, evaluating, and publishing a model.
 
+The examples are research/API examples and intentionally make a test split
+available for immediate inspection. They are not the v1.3 release protocol.
+Release training must keep pairwise and clustering test identities sealed until
+the one-shot Stage 8 evaluators, and must freeze linker choices before its
+one-shot test reveal. Follow [1_3_release_todo.md](1_3_release_todo.md), not the
+example order below, for production work.
+
 ## Build a Rust-backed training dataset
 
 The maintained training constructor consumes a manifest-backed Arrow
@@ -153,20 +160,27 @@ promoted linker, reproducibility target, and checksummed manifest. The
 production training scripts write a pairwise-only staging bundle and then
 atomically finalize a complete bundle; see
 [production_inference.md](production_inference.md#staged-publication) for the
-exact commands and release gates.
+component interfaces. The intervening EPS freeze, linker candidate lifecycle,
+one-shot evaluation, and publication gates are defined only in the
+[v1.3 release runbook](1_3_release_todo.md).
 
-Pairwise production training also verifies that every dataset uses the packaged
-canonical name tuples and records two data hashes in `feature_contract`:
-`name_tuples_data_sha256` and `orcid_prefix_counts_data_sha256`. Bundle export
-does not synthesize missing hashes. Export and load both compare the recorded
-values with the canonical artifacts installed in the package.
+Pairwise production training verifies the packaged canonical name tuples and
+records `name_tuples_data_sha256`, `name_counts_manifest_sha256`,
+`orcid_prefix_counts_data_sha256`, and
+`orcid_prefix_counts_manifest_sha256` in `feature_contract`. Bundle export does
+not synthesize missing behavior hashes. Export and load compare tuple/ORCID
+data hashes with the canonical package artifacts; the exact name-count
+manifest and complete ordered feature contract are also bound into model and
+linker provenance.
 
 The promoted incremental-linker artifact uses the strict
 `incremental_linking_artifact_v5` contract. It stores the booster checksum,
 runtime gate, retrieval top-k, and canonical digests binding the exact pairwise
 bundle and complete training target JSON. Final bundle assembly and production
 loading reject either mismatch, including a target modified after manifest
-checksums are refreshed.
+checksums are refreshed. The current command still lacks the reviewed
+candidate-to-production lifecycle transition required by blockers B13 and B20,
+so this format validation is necessary but not sufficient for release.
 
 After a bundle passes those gates, reload it explicitly:
 

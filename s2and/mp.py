@@ -146,11 +146,7 @@ class UniversalPool:
             if fut.cancel():
                 cancelled_count += 1
             pending.discard(fut)
-        try:
-            self._pool.shutdown(wait=False, cancel_futures=True)
-        except TypeError:
-            # Python executors that do not support cancel_futures.
-            self._pool.shutdown(wait=False)
+        self._pool.shutdown(wait=False, cancel_futures=True)
         return cancelled_count
 
     # ---------- context manager ----------

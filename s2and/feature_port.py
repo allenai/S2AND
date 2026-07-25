@@ -251,8 +251,8 @@ def _dataset_name_for_logs(dataset: Any) -> str:
     return str(name) if name is not None else f"<unnamed:{id(dataset)}>"
 
 
-def _rust_featurizer_source_paths(dataset: Any) -> tuple[_SourcePathFingerprint, ...]:
-    arrow_paths = getattr(dataset, "arrow_paths", None)
+def _rust_featurizer_source_paths(dataset: ANDData) -> tuple[_SourcePathFingerprint, ...]:
+    arrow_paths = dataset.arrow_paths
     if not isinstance(arrow_paths, Mapping) or not arrow_paths:
         raise RuntimeError("Rust training featurization requires dataset.arrow_paths")
     generation = getattr(dataset, "arrow_artifact_generation", None)
@@ -262,14 +262,13 @@ def _rust_featurizer_source_paths(dataset: Any) -> tuple[_SourcePathFingerprint,
     return (("validated_arrow_generation", generation, exact_paths),)
 
 
-def _rust_featurizer_build_inputs(dataset: Any) -> tuple[Any, ...]:
-    name_tuples = getattr(dataset, "name_tuples", None)
+def _rust_featurizer_build_inputs(dataset: ANDData) -> tuple[Any, ...]:
     return (
-        bool(getattr(dataset, "preprocess", False)),
-        bool(getattr(dataset, "use_orcid_id", True)),
-        resolve_n_jobs(getattr(dataset, "n_jobs", 1)),
+        bool(dataset.preprocess),
+        bool(dataset.use_orcid_id),
+        resolve_n_jobs(dataset.n_jobs),
         _rust_featurizer_source_paths(dataset),
-        frozenset(name_tuples or ()),
+        frozenset(dataset.name_tuples or ()),
     )
 
 
@@ -412,8 +411,8 @@ def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
     """
     pre_build_start = time.perf_counter()
     _require_rust_runtime()
-    num_threads = resolve_n_jobs(getattr(dataset, "n_jobs", 1))
-    arrow_paths = getattr(dataset, "arrow_paths", None)
+    num_threads = resolve_n_jobs(dataset.n_jobs)
+    arrow_paths = dataset.arrow_paths
     if not arrow_paths:
         raise RuntimeError(
             "Rust featurizer construction requires Arrow IPC artifacts "
@@ -432,13 +431,13 @@ def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
             context="Arrow-backed training name-count provenance",
         ),
         signature_ids=None,
-        name_tuples=getattr(dataset, "name_tuples", None),
+        name_tuples=dataset.name_tuples,
         load_name_counts=True,
-        preprocess=bool(getattr(dataset, "preprocess", True)),
+        preprocess=bool(dataset.preprocess),
         cluster_seed_require_value=float(CLUSTER_SEEDS_LOOKUP["require"]),
         cluster_seed_disallow_value=float(CLUSTER_SEEDS_LOOKUP["disallow"]),
         num_threads=num_threads,
-        use_orcid_id=bool(getattr(dataset, "use_orcid_id", True)),
+        use_orcid_id=bool(dataset.use_orcid_id),
     )
     ffi_seconds = time.perf_counter() - ffi_start
     return (

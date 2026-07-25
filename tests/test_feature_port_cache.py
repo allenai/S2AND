@@ -231,6 +231,24 @@ def test_cache_is_owned_by_each_dataset_and_evicts() -> None:
 
 
 @pytest.mark.parametrize(
+    "attribute",
+    [
+        "arrow_paths",
+        "name_tuples",
+        "preprocess",
+        "use_orcid_id",
+        "n_jobs",
+    ],
+)
+def test_missing_mandatory_build_input_fails_fast(attribute: str) -> None:
+    dataset = DummyDataset("missing-build-input")
+    delattr(dataset, attribute)
+
+    with pytest.raises(AttributeError, match=attribute):
+        feature_port._rust_featurizer_build_inputs(dataset)
+
+
+@pytest.mark.parametrize(
     "mutate",
     [
         lambda dataset: setattr(dataset, "preprocess", False),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -70,6 +71,7 @@ class FittedClassicRun:
     model: LGBMClassifier
     gate_config: dict[str, Any]
     retrieval_top_k: int
+    query_predictions: dict[str, Any]
 
 
 _GATE_BUCKETS = (
@@ -1612,6 +1614,47 @@ def _summarize_classic_stratified_predictions(
     }
 
 
+def _write_query_predictions(predictions: pd.DataFrame, path: Path) -> dict[str, Any]:
+    """Persist the exact query-level decisions in a deterministic CSV."""
+
+    required = {
+        "base_group_id",
+        "chosen_candidate_component_key",
+        "chosen_probability",
+        "correct",
+        "predicted_action",
+        "query_case_id",
+        "query_safe_target",
+        "source_key",
+        "split",
+    }
+    missing = sorted(required - set(predictions.columns))
+    if missing:
+        raise ValueError(f"Linker query predictions are missing required columns: {missing}")
+    frame = predictions.copy()
+    identity_columns = ["source_key", "query_case_id"]
+    if frame.duplicated(identity_columns).any():
+        raise ValueError("Linker query predictions contain duplicate source/query identities")
+    frame["label"] = pd.to_numeric(frame["query_safe_target"], errors="raise").astype(int)
+    leading_columns = [*identity_columns, "base_group_id", "split", "label"]
+    remaining_columns = sorted(set(frame.columns) - set(leading_columns))
+    frame = frame[[*leading_columns, *remaining_columns]].sort_values(
+        ["split", "source_key", "base_group_id", "query_case_id"],
+        kind="mergesort",
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(path, index=False, lineterminator="\n", float_format="%.17g")
+    with path.open("rb") as input_file:
+        digest = hashlib.file_digest(input_file, "sha256").hexdigest()
+    return {
+        "path": str(path),
+        "sha256": digest,
+        "bytes": path.stat().st_size,
+        "rows": len(frame),
+        "columns": list(frame.columns),
+    }
+
+
 def _format_metric_float(value: Any) -> str:
     """Format a metric value compactly for markdown tables."""
 
@@ -2047,12 +2090,17 @@ def run_classic(
         selected_gate_tables_path = output_dir / "selected_gate_tables.md"
         selected_gate_tables_path.write_text(selected_gate_tables, encoding="utf-8")
         summary["selected_gate_tables_path"] = str(selected_gate_tables_path.relative_to(output_dir))
+    query_predictions = _write_query_predictions(
+        selected_gate_result["predictions"],
+        output_dir / "query_predictions.csv",
+    )
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return FittedClassicRun(
         summary=summary,
         model=model,
         gate_config=logistic_gate_config,
         retrieval_top_k=retrieval_top_k,
+        query_predictions=query_predictions,
     )
 
 

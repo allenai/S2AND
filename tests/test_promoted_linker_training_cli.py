@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,10 +13,11 @@ import pandas as pd
 import pytest
 
 from s2and.arrow_inputs import ValidatedArrowInputs
-from scripts.production.model import linker_train_calibrate_eval as promoted_train
+from s2and.incremental_linking_training import classic as classic_training
+from scripts.production.model import train_linker_and_finalize as promoted_train
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
-REQUIRED_TRAINING_ARGS = (
+COMMON_TRAINING_ARGS = (
     "--source-bundle-root",
     "source-bundle",
     "--output-dir",
@@ -23,6 +27,7 @@ REQUIRED_TRAINING_ARGS = (
     "--target-json",
     "target.json",
 )
+REPO_ROOT = Path(__file__).resolve().parents[1]
 FULL_MATERIALIZATION_SUMMARIES = tuple({"table_key": key, "rows": 1} for key in promoted_train.REQUIRED_TABLE_KEYS)
 
 
@@ -38,6 +43,43 @@ def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
         "_validate_source_bundle_support_files",
         lambda *_args, **_kwargs: ["test-support"],
     )
+
+
+def test_canonical_cli_help_and_import_leave_backend_unchanged() -> None:
+    help_result = subprocess.run(
+        [sys.executable, "scripts/production/model/train_linker_and_finalize.py", "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert help_result.returncode == 0, help_result.stderr
+    assert "{preflight,materialize,candidate,publish}" in help_result.stdout
+
+    for backend in (None, "python"):
+        env = os.environ.copy()
+        if backend is None:
+            env.pop("S2AND_BACKEND", None)
+        else:
+            env["S2AND_BACKEND"] = backend
+        import_result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os; "
+                    "import scripts.production.model.train_linker_and_finalize; "
+                    "print(os.environ.get('S2AND_BACKEND'))"
+                ),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert import_result.returncode == 0, import_result.stderr
+        assert import_result.stdout.strip() == str(backend)
 
 
 def test_incremental_linking_runtime_imports_stay_runtime_safe() -> None:
@@ -65,36 +107,29 @@ def test_incremental_linking_runtime_imports_stay_runtime_safe() -> None:
 
 
 def test_negative_limit_rows_is_rejected() -> None:
-    args = promoted_train.build_parser().parse_args([*REQUIRED_TRAINING_ARGS, "--limit-rows", "-1"])
-
-    with pytest.raises(SystemExit, match="--limit-rows must be > 0"):
-        promoted_train.run(args)
+    with pytest.raises(SystemExit):
+        promoted_train.build_parser().parse_args(["materialize", *COMMON_TRAINING_ARGS, "--limit-rows", "-1"])
 
 
-def test_linker_modes_reject_ignored_actions_and_allow_selector_preflight() -> None:
+def test_linker_commands_make_invalid_mode_combinations_unrepresentable() -> None:
     parser = promoted_train.build_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args([*REQUIRED_TRAINING_ARGS, "--preflight-only", "--run-full"])
-
-    for extra_args, message in (
-        (["--preflight-only", "--materialize-only"], "mutually exclusive"),
-        (["--materialize-only", "--publish-to", "production_model_v9.9"], "cannot be combined"),
-        (["--materialize-only", "--allow-metric-drift"], "requires a full"),
-    ):
-        args = parser.parse_args([*REQUIRED_TRAINING_ARGS, *extra_args])
-        with pytest.raises(SystemExit, match=message):
-            promoted_train._validate_run_mode(args)  # noqa: SLF001
+        parser.parse_args(["materialize", *COMMON_TRAINING_ARGS])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["candidate", *COMMON_TRAINING_ARGS, "--publish-to", "production_model_v9.9"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["publish", *COMMON_TRAINING_ARGS])
 
     selector_preflight = parser.parse_args(
-        [*REQUIRED_TRAINING_ARGS, "--preflight-only", "--datasets", "qian", "--limit-rows", "10"]
+        ["preflight", *COMMON_TRAINING_ARGS, "--datasets", "qian", "--limit-rows", "10"]
     )
-    promoted_train._validate_run_mode(selector_preflight)  # noqa: SLF001
+    assert selector_preflight.command == "preflight"
 
 
 @pytest.mark.parametrize("selector", ["--tables", "--datasets"])
 def test_selectors_require_at_least_one_value(selector: str) -> None:
     with pytest.raises(SystemExit):
-        promoted_train.build_parser().parse_args([*REQUIRED_TRAINING_ARGS, selector])
+        promoted_train.build_parser().parse_args(["preflight", *COMMON_TRAINING_ARGS, selector])
 
 
 def test_source_preflight_rejects_unknown_selectors_and_reports_valid_rows(
@@ -317,7 +352,11 @@ def test_preflight_only_does_not_create_output_or_materialize(
     monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
     monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
     _stub_preflight(monkeypatch)
-    monkeypatch.setattr(promoted_train, "load_clusterer", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(
+        promoted_train,
+        "load_clusterer",
+        lambda *_args, **_kwargs: SimpleNamespace(production_model_bundle_version="9.9"),
+    )
     monkeypatch.setattr(promoted_train, "_assert_pairwise_model_supports_arrow_materialization", lambda *_args: None)
     monkeypatch.setattr(
         promoted_train,
@@ -327,10 +366,10 @@ def test_preflight_only_does_not_create_output_or_materialize(
     output_dir = tmp_path / "output"
     args = promoted_train.build_parser().parse_args(
         [
-            *REQUIRED_TRAINING_ARGS,
+            "preflight",
+            *COMMON_TRAINING_ARGS,
             "--output-dir",
             str(output_dir),
-            "--preflight-only",
         ]
     )
 
@@ -390,10 +429,10 @@ def test_run_rejects_name_count_binding_before_materialization(
     output_dir = tmp_path / "output"
     args = promoted_train.build_parser().parse_args(
         [
-            *REQUIRED_TRAINING_ARGS,
+            "preflight",
+            *COMMON_TRAINING_ARGS,
             "--output-dir",
             str(output_dir),
-            "--preflight-only",
         ]
     )
 
@@ -423,7 +462,7 @@ def test_materialization_summary_must_be_nonempty_and_complete() -> None:
 )
 def test_removed_cached_feature_interfaces_are_rejected(removed_args: tuple[str, ...]) -> None:
     with pytest.raises(SystemExit):
-        promoted_train.build_parser().parse_args([*REQUIRED_TRAINING_ARGS, *removed_args])
+        promoted_train.build_parser().parse_args(["candidate", *COMMON_TRAINING_ARGS, *removed_args])
 
 
 def test_publish_destination_must_be_fresh_and_separate(
@@ -436,7 +475,7 @@ def test_publish_destination_must_be_fresh_and_separate(
 
     with pytest.raises(SystemExit, match="must name a new directory"):
         promoted_train._resolved_output_paths(  # noqa: SLF001
-            parser.parse_args([*REQUIRED_TRAINING_ARGS, "--publish-to", str(existing_publish)])
+            parser.parse_args(["publish", *COMMON_TRAINING_ARGS, "--publish-to", str(existing_publish)])
         )
 
     nested_publish = output_dir / "production_model_v9.9"
@@ -444,7 +483,8 @@ def test_publish_destination_must_be_fresh_and_separate(
         promoted_train._resolved_output_paths(  # noqa: SLF001
             parser.parse_args(
                 [
-                    *REQUIRED_TRAINING_ARGS,
+                    "publish",
+                    *COMMON_TRAINING_ARGS,
                     "--output-dir",
                     str(output_dir),
                     "--publish-to",
@@ -487,8 +527,8 @@ def test_publish_version_must_match_pairwise_before_materialization(
     )
     args = promoted_train.build_parser().parse_args(
         [
-            *REQUIRED_TRAINING_ARGS,
-            "--run-full",
+            "publish",
+            *COMMON_TRAINING_ARGS,
             "--output-dir",
             str(tmp_path / "run"),
             "--publish-to",
@@ -519,14 +559,16 @@ def test_empty_target_metrics_are_rejected_before_materialization(
     output_dir = tmp_path / "must_not_be_created"
     args = promoted_train.build_parser().parse_args(
         [
-            *REQUIRED_TRAINING_ARGS,
-            "--run-full",
+            "publish",
+            *COMMON_TRAINING_ARGS,
             "--output-dir",
             str(output_dir),
+            "--publish-to",
+            str(tmp_path / "production_model_v9.9"),
         ]
     )
 
-    with pytest.raises(ValueError, match="must not be empty without --allow-metric-drift"):
+    with pytest.raises(ValueError, match="Published target metrics must not be empty"):
         promoted_train.run(args)
 
     assert not output_dir.exists()
@@ -549,32 +591,6 @@ def test_partial_target_metrics_are_rejected_when_loaded(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="complete official metric set"):
         promoted_train._load_target(target_path)  # noqa: SLF001
-
-
-def test_metric_drift_override_cannot_promote_before_loading_inputs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_load(_path: Path) -> dict[str, Any]:
-        raise AssertionError("promotion validation must run before loading the target")
-
-    monkeypatch.setattr(promoted_train, "_load_target", fail_load)  # noqa: SLF001
-    output_dir = tmp_path / "must_not_be_created"
-    args = promoted_train.build_parser().parse_args(
-        [
-            *REQUIRED_TRAINING_ARGS,
-            "--allow-metric-drift",
-            "--publish-to",
-            str(tmp_path / "promotion"),
-            "--output-dir",
-            str(output_dir),
-        ]
-    )
-
-    with pytest.raises(SystemExit, match="--allow-metric-drift is diagnostic-only"):
-        promoted_train.run(args)
-
-    assert not output_dir.exists()
 
 
 @pytest.mark.parametrize("retrieval_rank", [-1, 0, 65536])
@@ -812,11 +828,54 @@ def test_metric_gate_requires_complete_finite_official_metrics() -> None:
         promoted_train._assert_no_metric_drift(observed, nonfinite_target)  # noqa: SLF001
 
 
-@pytest.mark.parametrize("allow_metric_drift", [False, True])
-def test_metric_gate_prevents_unapproved_artifact(
+def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
+    rows = pd.DataFrame(
+        [
+            {
+                "base_group_id": "base-2",
+                "chosen_candidate_component_key": "candidate-2",
+                "chosen_probability": 0.25,
+                "correct": 0,
+                "predicted_action": "abstain",
+                "query_case_id": "query-2",
+                "query_safe_target": 1,
+                "query_safe_target_source": "retrieved_window",
+                "source_key": "source",
+                "split": "test",
+            },
+            {
+                "base_group_id": "base-1",
+                "chosen_candidate_component_key": "candidate-1",
+                "chosen_probability": 0.75,
+                "correct": 1,
+                "predicted_action": "link_candidate",
+                "query_case_id": "query-1",
+                "query_safe_target": 1,
+                "query_safe_target_source": "manual_override",
+                "source_key": "source",
+                "split": "test",
+            },
+        ]
+    )
+    first_path = tmp_path / "first.csv"
+    second_path = tmp_path / "second.csv"
+
+    first = classic_training._write_query_predictions(rows, first_path)  # noqa: SLF001
+    second = classic_training._write_query_predictions(rows.iloc[::-1], second_path)  # noqa: SLF001
+
+    assert first["sha256"] == second["sha256"]
+    assert first_path.read_bytes() == second_path.read_bytes()
+    assert first["columns"][:5] == ["source_key", "query_case_id", "base_group_id", "split", "label"]
+    written = pd.read_csv(first_path)
+    assert written["query_safe_target"].tolist() == [1, 1]
+    assert written["query_safe_target_source"].tolist() == ["manual_override", "retrieved_window"]
+
+
+@pytest.mark.parametrize("command", ["candidate", "publish"])
+def test_candidate_preserves_artifact_while_publish_gates_metric_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    allow_metric_drift: bool,
+    command: str,
 ) -> None:
     target = {
         "features": ["f0"],
@@ -850,12 +909,12 @@ def test_metric_gate_prevents_unapproved_artifact(
     }
     target["metrics"] = promoted_train._observed_official_metrics(summary)  # noqa: SLF001
     target["metrics"]["stratified_test_errors"] = 0
-    promoted = False
+    saved_target: dict[str, Any] | None = None
 
-    def fail_if_promoted(**_kwargs: Any) -> dict[str, Any]:
-        nonlocal promoted
-        promoted = True
-        raise AssertionError("artifact promotion ran before metric gate")
+    def save_artifact(**kwargs: Any) -> dict[str, Any]:
+        nonlocal saved_target
+        saved_target = dict(kwargs["target_spec"])
+        return {"booster_sha256": "a" * 64}
 
     monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
     monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
@@ -870,35 +929,64 @@ def test_metric_gate_prevents_unapproved_artifact(
         "_assert_pairwise_model_supports_arrow_materialization",
         lambda *_args: None,
     )
+    output_dir = tmp_path / "out"
+    query_predictions_path = output_dir / "classic" / "query_predictions.csv"
+    query_predictions_bytes = b"query_case_id\nquery-1\n"
     fitted = promoted_train.FittedClassicRun(
         summary=summary,
         model=object(),
         gate_config={"model_type": "test"},
         retrieval_top_k=25,
+        query_predictions={
+            "path": str(query_predictions_path),
+            "sha256": "a" * 64,
+            "bytes": len(query_predictions_bytes),
+            "rows": 1,
+            "columns": ["query_case_id"],
+        },
     )
-    monkeypatch.setattr(promoted_train, "run_classic", lambda *_args, **_kwargs: fitted)
-    monkeypatch.setattr(promoted_train, "_save_evaluated_artifact", fail_if_promoted)  # noqa: SLF001
-    monkeypatch.setattr(promoted_train, "load_clusterer", lambda *_args, **_kwargs: SimpleNamespace())
+
+    def run_classic(_bundle: Any, classic_output_dir: Path, **_kwargs: Any) -> Any:
+        assert classic_output_dir == query_predictions_path.parent
+        classic_output_dir.mkdir()
+        query_predictions_path.write_bytes(query_predictions_bytes)
+        return fitted
+
+    monkeypatch.setattr(promoted_train, "run_classic", run_classic)
+    monkeypatch.setattr(promoted_train, "_save_evaluated_artifact", save_artifact)  # noqa: SLF001
+    monkeypatch.setattr(
+        promoted_train,
+        "load_clusterer",
+        lambda *_args, **_kwargs: SimpleNamespace(production_model_bundle_version="9.9"),
+    )
     args = promoted_train.build_parser().parse_args(
         [
-            *REQUIRED_TRAINING_ARGS,
-            "--run-full",
+            command,
+            *COMMON_TRAINING_ARGS,
             "--output-dir",
-            str(tmp_path / "out"),
-            *(["--allow-metric-drift"] if allow_metric_drift else []),
+            str(output_dir),
+            *(["--publish-to", str(tmp_path / "production_model_v9.9")] if command == "publish" else []),
         ]
     )
 
-    if allow_metric_drift:
+    if command == "candidate":
         result = promoted_train.run(args)
         assert Path(result["candidate_target_path"]).is_file()
-        assert "artifact_dir" not in result
+        assert result["artifact_dir"] == str(output_dir / promoted_train.EVALUATED_ARTIFACT_DIRNAME)
+        assert Path(result["query_predictions"]["path"]).is_file()
+        assert result["query_predictions"]["rows"] == 1
+        assert (
+            json.loads((output_dir / "run_summary.json").read_text(encoding="utf-8"))["query_predictions"]
+            == (result["query_predictions"])
+        )
+        assert not (output_dir / "query_predictions_inventory.json").exists()
+        assert saved_target is not None
+        assert saved_target["metrics"]["stratified_test_errors"] == 1
     else:
         with pytest.raises(RuntimeError, match="drifted from target metrics"):
             promoted_train.run(args)
-
-    assert not promoted
-    assert not (tmp_path / "out" / promoted_train.EVALUATED_ARTIFACT_DIRNAME).exists()
+        assert saved_target is None
+        assert not (output_dir / promoted_train.EVALUATED_ARTIFACT_DIRNAME).exists()
 
 
 def test_saved_artifact_uses_exact_evaluated_model_and_gate(
@@ -912,6 +1000,7 @@ def test_saved_artifact_uses_exact_evaluated_model_and_gate(
         model=model,
         gate_config=gate_config,
         retrieval_top_k=17,
+        query_predictions={},
     )
     captured: dict[str, Any] = {}
 

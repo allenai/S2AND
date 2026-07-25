@@ -17,8 +17,9 @@ and artifact requirements are in
   normalization is `canonical_v2`, `FEATURIZER_VERSION = 10`, production
   inference requires validated Arrow inputs, and production loading requires
   an explicit complete bundle.
-- Canonical tuple, name-count, and ORCID artifact contracts are provenance
-  bound. The canonical ORCID data and manifest have not yet been generated or
+- Canonical tuple, name-count, and ORCID schemas bind their content identities,
+  but full warehouse source provenance is not yet independently bound (B27/B28).
+  The canonical ORCID data and manifest have not yet been generated or
   packaged.
 - No canonical v1.3 production bundle or implicit default is packaged. The
   historical v1.21 bundle remains available for source/parity work but is not

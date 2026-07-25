@@ -11,7 +11,7 @@ for the Rust integration.
 
 | File | Purpose |
 |---|---|
-| [baselines.md](baselines.md) | Gate operator guide: canonical gate commands, artifact conventions, and promotion policy. Start here when verifying Rust behavior or promoting a new baseline. |
+| [baselines.md](baselines.md) | Rust performance/baseline command authority and artifact conventions. Start here when refreshing Rust evidence; use the v1.3 runbook for release acceptance. |
 | [runtime.md](runtime.md) | Runtime contract: explicit Python/Rust routes, exact native-version loading, failure semantics, Arrow validation, and verification commands. |
 | [artifact_formats.md](artifact_formats.md) | Current artifact-format choices and rejected alternatives. |
 | [arrow_dataset_spec.md](arrow_dataset_spec.md) | Required Arrow dataset layout, schemas, manifests, and validation checks for direct Rust predict and predict_incremental inputs. |
@@ -21,15 +21,21 @@ for the Rust integration.
 
 ## Key policies
 
-- **`baselines.md` is the gate authority.** Any promotion decision must cite an artifact from there.
+- **`baselines.md` is the Rust command and baseline-evidence authority.** The
+  complete v1.3 gate, execution order, thresholds, and approvals live in
+  [../1_3_release_todo.md](../1_3_release_todo.md).
 - **Point-in-time profiling evidence** belongs in `profiling/YYYY-MM-DD.md`, not inline in design docs.
-- **Next steps + backlog** live in `docs/work_plan.md`.
-- **Artifacts** (benchmark JSONs, logs) live under `scratch/` (gitignored).
+- **Release sequence** lives in `docs/1_3_release_todo.md`; the remediation
+  backlog lives in `docs/work_plan.md`.
+- **Development artifacts** may live under `scratch/` (gitignored). Release
+  JSON/log evidence must instead be retained under the runbook's durable
+  reports root and bound by `quality_report.json` and `release.json`.
 
 ---
 
 ## Quick links
 
 - Rust/Arrow execution backlog: [`docs/work_plan.md`](../work_plan.md)
+- v1.3 release runbook: [`docs/1_3_release_todo.md`](../1_3_release_todo.md)
 - Verification commands: [`runtime.md` -- Verification Commands section](runtime.md)
 - Gate commands + artifact conventions: [`baselines.md`](baselines.md)

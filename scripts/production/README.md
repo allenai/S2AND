@@ -56,7 +56,8 @@ not bound that work. Use `--preflight-only` for a no-write readiness check.
 Passing `--datasets ...` means smoke mode: it may exercise training, but it
 never creates a model bundle. A production run uses `--run-full` with the
 complete fixed dataset set; `--datasets` and `--run-full` are mutually
-exclusive.
+exclusive. This smoke stops before bundle publication and Rust fixture reload,
+so it does not satisfy B21.
 
 The current full-run report also lacks the complete selection evidence and
 sealed test-identity record required by B23, and the trainer is not the
@@ -67,9 +68,11 @@ until those blockers and the overlap preflight in B11 are closed.
 
 Do not train the v1.3 linker directly from the raw pairwise stage. Select EPS
 on validation identities only, persist every trial and weighting definition,
-then use the fresh-output pairwise-stage finalizer required by blocker B12.
-That finalizer and the separate one-shot cluster-test evaluator do not yet
-exist. Stage 6 of the release runbook is authoritative.
+then freeze the reviewed pairwise stage. If the trainer-selected EPS is
+accepted, designate that exact stage; if review selects a different EPS, use
+the fresh-output pairwise-stage finalizer required by blocker B12. That
+finalizer and the separate one-shot cluster-test evaluator do not yet exist.
+Stage 6 of the release runbook is authoritative.
 
 ## 3. Train Linker And Finalize
 
@@ -126,7 +129,8 @@ source tables, and fresh output paths without creating the output directory.
 Selector-based runs are materialization-only, and zero-row, unknown-selector,
 mixed-count-generation, pairwise/count-binding, or split-identity overlap
 fails before publication. Production policy is fixed in code; the script has
-no hyperparameter-search or policy-tuning CLI.
+no hyperparameter-search or policy-tuning CLI. Current preflight is not yet the
+complete B08/B10/B19 source-path and byte-inventory gate.
 
 When a new pairwise bundle intentionally changes linker metrics,
 `--allow-metric-drift` is diagnostic only. It writes
@@ -144,7 +148,7 @@ passed do users load the complete model with:
 ```python
 from s2and.production_model import load_production_model
 
-clusterer = load_production_model("s2and/data/production_model_vX.Y")
+clusterer = load_production_model("/path/to/production_model_vX.Y")
 ```
 
 There is no implicit default model. Runtime callers must pass the complete

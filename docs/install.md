@@ -6,6 +6,7 @@ This document covers the fuller install and setup options for S2AND.
 
 - Python `3.11.x`
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+- Git LFS for the Arrow fixtures in a source checkout
 - Rust, if you are working from a source checkout or building the native extension from source:
   [`rustup`](https://www.rust-lang.org/tools/install)
 
@@ -42,7 +43,19 @@ Runtime install:
 uv pip install s2and
 ```
 
+This installs the latest version available from the configured package index,
+not the unreleased canonical-v2 worktree. The canonical-v2/v1.3 package version
+is still a release decision; use the checkout flow for pre-release validation.
+
 ## Repo checkout
+
+Hydrate the LFS-managed Arrow fixtures after cloning and after switching to a
+branch that changes them:
+
+```bash
+git lfs install
+git lfs pull --include "tests/fixtures/arrow/pubmed_specter2/**"
+```
 
 Create and activate a Python 3.11 environment:
 
@@ -83,7 +96,8 @@ Notes:
 
 - This installs the compiled module into `site-packages`.
 - If you just installed Rust with `rustup` in the current shell, load its environment first if needed.
-- If you prefer a non-editable repo install, you can `uv pip install .` and then run the `maturin develop` step.
+- Keep the Python and Rust packages from the same checkout. Do not rely on a
+  public `s2and-rust` wheel for unreleased source behavior.
 
 ## Running repo scripts
 

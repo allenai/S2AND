@@ -111,10 +111,12 @@ axis. This decision is release blocker B01.
   targets are immutable; regeneration uses a new output directory. Warehouse
   access requires an explicit full-run flag and local fixtures are bounded.
   ORCID counts now use one direct JSON file plus one provenance manifest, with
-  no pointer manifest, retry loop, or legacy fallback. Both paths remain
-  declared required package data; this checkout is intentionally
-  distribution-incomplete until the approved canonical generation replaces the
-  checked-in legacy JSON and adds its currently missing manifest.
+  no pointer manifest, retry loop, or legacy fallback. The large name-count
+  index belongs in the immutable external data release, not Python package
+  data. The ORCID JSON and manifest are both declared required package data;
+  this checkout is intentionally distribution-incomplete until the approved
+  canonical generation replaces the checked-in legacy JSON and adds its
+  currently missing manifest.
 - Generated `within_block_random` pair sampling now uses exact seeded rank
   sampling. It preserves the legacy candidate order, selected pairs, and labels
   while memory scales with requested samples plus blocks instead of all

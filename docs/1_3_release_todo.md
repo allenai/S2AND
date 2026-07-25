@@ -390,7 +390,15 @@ remove identities.
     "native_extension_sha256": "TBD",
     "warehouse_client_source": "TBD",
     "warehouse_client_version": "TBD",
-    "warehouse_client_sha256": "TBD"
+    "warehouse_client_sha256": "TBD",
+    "thread_environment": {
+      "OMP_NUM_THREADS": "TBD",
+      "RAYON_NUM_THREADS": "TBD",
+      "MKL_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "NUMEXPR_NUM_THREADS": "1",
+      "PYTHONUNBUFFERED": "1"
+    }
   },
   "inputs": {
     "version_availability_evidence_sha256": "TBD",
@@ -521,7 +529,10 @@ Before every full job, write a stage-specific `launch.json` containing:
 - exact command and working directory;
 - exact Git commit and dirty status;
 - package lock and native library identity;
-- host, OS, CPU, RAM, GPU if applicable, and thread settings;
+- host, OS, CPU, RAM, GPU if applicable, and the exact inherited environment
+  map for `S2AND_BACKEND`, `OMP_NUM_THREADS`, `RAYON_NUM_THREADS`,
+  `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `NUMEXPR_NUM_THREADS`,
+  `PYTHONUNBUFFERED`, and any job-specific variables;
 - source manifests and SHA-256 digests;
 - reviewed configuration and seed;
 - output, stdout, stderr, and telemetry paths;
@@ -621,6 +632,27 @@ uv run --no-project python scripts/run_ci_locally.py
 
 Record the wrapper log. A plain green `uv run pytest` is insufficient evidence
 if native cache identity is unknown.
+
+Freeze a reviewed thread environment before any preflight, smoke, detached
+worker, or imported model code. Do not rely on a script assigning
+`OMP_NUM_THREADS` after LightGBM or another native library has already been
+imported. For one process intended to use `REVIEWED_THREAD_COUNT` cores, the
+default starting envelope is:
+
+```powershell
+$env:OMP_NUM_THREADS = "REVIEWED_THREAD_COUNT"
+$env:RAYON_NUM_THREADS = "REVIEWED_THREAD_COUNT"
+$env:MKL_NUM_THREADS = "1"
+$env:OPENBLAS_NUM_THREADS = "1"
+$env:NUMEXPR_NUM_THREADS = "1"
+$env:PYTHONUNBUFFERED = "1"
+```
+
+If an outer scheduler launches multiple workers, divide cores deliberately and
+normally set each worker's inner thread counts to `1`; do not stack full-size
+outer and inner pools. Record the exact values in `release.json` and every
+`launch.json`, ensure detached children inherit them, and keep them identical
+between comparable baseline/candidate runs. See [threading.md](threading.md).
 
 ### 0.3 Freeze the code-only candidate
 

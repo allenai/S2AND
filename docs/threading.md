@@ -1,6 +1,6 @@
 # Threading and parallelism
 
-Status date: 2026-07-10
+Status date: 2026-07-24
 
 S2AND uses multiple libraries that can each create their own thread pools (Rust Rayon, LightGBM/OpenMP, BLAS, etc.).
 If those pools are configured independently, runs can oversubscribe CPU cores and show higher-than-expected CPU usage.
@@ -91,6 +91,11 @@ Python preprocessing route.
 
    Many OpenMP runtimes read environment variables at first use / first load; setting them after importing `lightgbm`
    is not reliable.
+
+   For v1.3 release jobs, set this envelope in the parent process before every
+   preflight, smoke, and detached launch; require children to inherit it and
+   record the exact values in `release.json`/`launch.json`. See
+   [1_3_release_todo.md](1_3_release_todo.md#stage-0-make-the-repository-runnable).
 
 3. **Choose the env pattern that matches your deployment shape**:
 

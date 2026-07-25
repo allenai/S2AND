@@ -1,6 +1,6 @@
 ﻿# Arrow Dataset Specification
 
-Status date: 2026-07-10
+Status date: 2026-07-24
 
 This document defines the Arrow artifact contract for engineers assembling
 datasets for direct Rust S2AND routes. These artifacts are used by
@@ -66,6 +66,9 @@ Preferred on-disk layout:
 ```text
 <arrow_root>/
   manifest.json
+  name_counts_index/
+    manifest.json
+    generations/<publication-generation>/...
   <dataset>/
     manifest.json
     signatures.arrow
@@ -326,7 +329,7 @@ Migration warning: although this table currently permits null
 exclusion cannot be reconstructed without a focal position. The canonical
 target is a required/non-null field after intended release datasets are audited
 and repaired; see the
-[canonical artifact generation and retraining plan](../work_plan.md#canonical-artifact-generation-and-retraining).
+[v1.3 benchmark regeneration stage](../1_3_release_todo.md#stage-4-regenerate-canonical-benchmark-and-linker-data).
 
 ### `papers.arrow`
 
@@ -506,16 +509,20 @@ writers must publish through that contract.
 ## Name Aliases
 
 Production datasets must not contain per-dataset `name_pairs.arrow` files or
-manifest path keys. The runtime default is the packaged canonical alias file:
+manifest path keys. The runtime default is one strict packaged two-file
+artifact:
 
 ```text
 s2and_name_tuples_canonical.txt
+s2and_name_tuples_canonical.txt.meta.json
 ```
 
-If a non-default alias set is ever needed, make it an explicit shared/global
-runtime artifact loaded through the Python name-tuple artifact loader and
-passed to Rust as explicit pairs, not something duplicated into every dataset
-directory or hidden in path bundles.
+The metadata binds the exact data filename, SHA-256, size, cardinality,
+canonical-v2 semantics, and source identity. If a non-default alias set is ever
+needed, make it an explicit shared/global two-file artifact with the same
+strict contract, load it through the Python name-tuple artifact loader, and
+pass the validated pairs to Rust. Do not duplicate it into every dataset or
+hide it in Arrow path bundles.
 
 ---
 
@@ -713,8 +720,11 @@ Required physical-layout checks for large-block optimized artifacts:
 - One-batch lookup tables have
   `row_count <= max_record_batch_rows`; otherwise they should be rejected as
   unoptimized for indexed raw planning.
-- If batch-index sidecars are present, they were generated from the final Arrow
-  files and the manifest path keys point to those sidecars.
+- Canonical production/eval generations contain batch indexes for signatures,
+  papers, paper authors, and the selected embedding; they were generated from
+  the final Arrow files and the manifest path keys point to them. Reduced
+  non-production fixtures may omit only indexes their validation profile does
+  not require.
 - Batch-index validation must not require source file mtimes to match. Object
   store downloads can rewrite mtimes; validators use source size plus the
   stored full-file source fingerprint for portable release artifacts.
@@ -736,8 +746,7 @@ uv run python scripts/eval_prod_models.py `
   --use-arrow `
   --datasets qian `
   --specter2-model-path path\to\production_model_bundle `
-  --n_jobs 4 `
-  --seed 42
+  --n_jobs 4
 ```
 
 Bash:
@@ -753,12 +762,16 @@ uv run python scripts/eval_prod_models.py \
   --use-arrow \
   --datasets qian \
   --specter2-model-path /path/to/production_model_bundle \
-  --n_jobs 4 \
-  --seed 42
+  --n_jobs 4
 ```
 
 The eval command should report `use_arrow=True` and `Arrow data root:
 s2and/data` after the public Arrow release has been synced locally.
+Production-bundle evaluation rejects an explicit `--seed`; it reads the
+trainer's recorded `data_random_seed`. That reproduces a split only when input
+bytes and ordering are identical. The v1.3 release uses persisted, digested
+split identities and the one-shot evaluators in the release runbook instead of
+treating a seed as identity evidence.
 
 ---
 

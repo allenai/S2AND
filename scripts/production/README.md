@@ -18,11 +18,13 @@ is a separate open decision.
 ## 1. Train Pairwise
 
 ```powershell
+$RunRoot = "D:/local-unsynced/s2and-vX.Y"
+
 uv run python scripts/production/model/train_pairwise.py `
   --production-version X.Y `
   --data-dir path/to/canonical_benchmark_data `
-  --matrix-work-dir D:/local-unsynced/s2and-pairwise-matrices `
-  --output-dir scratch/pairwise_stage/production_model_vX.Y `
+  --matrix-work-dir "$RunRoot/matrix-work" `
+  --output-dir "$RunRoot/pairwise_stage/production_model_vX.Y" `
   --run-full
 ```
 
@@ -77,12 +79,15 @@ Stage 6 of the release runbook is authoritative.
 ## 3. Train Linker And Finalize
 
 ```powershell
+$PairwiseModel = "$RunRoot/pairwise_calibrated/production_model_vX.Y"
+# If validation accepted the trainer-selected EPS, point this at pairwise_stage instead.
+
 uv run python scripts/production/model/train_linker_and_finalize.py `
   --source-bundle-root path/to/official_linker_source_bundle `
-  --target-json scratch/release_inputs/incremental_linker_training_target.json `
-  --pairwise-model-path scratch/pairwise_calibrated/production_model_vX.Y `
-  --output-dir scratch/production_linker_vX.Y `
-  --publish-to path/to/fresh/production_model_vX.Y `
+  --target-json "$RunRoot/release_inputs/incremental_linker_training_target.json" `
+  --pairwise-model-path "$PairwiseModel" `
+  --output-dir "$RunRoot/production_linker_vX.Y" `
+  --publish-to "$RunRoot/release_candidate/production_model_vX.Y" `
   --run-full
 ```
 
@@ -94,7 +99,8 @@ record. The target JSON must live in an immutable input directory outside the
 fresh `--output-dir`.
 
 The command saves and reloads the exact trained, calibrated, and evaluated
-linker under `scratch/production_linker_vX.Y/incremental_linker_artifact/`.
+linker under
+`$RunRoot/production_linker_vX.Y/incremental_linker_artifact/`.
 When `--publish-to` is present, it infers the bundle version from the pairwise
 stage, requires the destination basename to agree, and atomically publishes a
 complete bundle to that fresh destination. The pairwise stage remains
@@ -124,13 +130,15 @@ bundle. The feature-bundle destination must not already exist. Use
 `--materialize-only --limit-rows N`, optionally with `--tables` or
 `--datasets`, for a bounded smoke run before approving an unbounded
 `--run-full` job.
-Use `--preflight-only` to validate the target, pairwise/name-count bindings,
-source tables, and fresh output paths without creating the output directory.
-Selector-based runs are materialization-only, and zero-row, unknown-selector,
-mixed-count-generation, pairwise/count-binding, or split-identity overlap
-fails before publication. Production policy is fixed in code; the script has
-no hyperparameter-search or policy-tuning CLI. Current preflight is not yet the
-complete B08/B10/B19 source-path and byte-inventory gate.
+Use `--preflight-only` to validate the currently implemented target
+feature/parameter/metric fields, pairwise/name-count bindings, source tables,
+and fresh output paths without creating the output directory. It does not yet
+enforce B20's target lifecycle fields. Selector-based runs are
+materialization-only, and zero-row, unknown-selector, mixed-count-generation,
+pairwise/count-binding, or split-identity overlap fails before publication.
+Production policy is fixed in code; the script has no hyperparameter-search or
+policy-tuning CLI. Current preflight is not yet the complete B08/B10/B19
+source-path and byte-inventory gate.
 
 When a new pairwise bundle intentionally changes linker metrics,
 `--allow-metric-drift` is diagnostic only. It writes
@@ -173,7 +181,8 @@ deeper per-dataset Arrow schema/table validation.
 
 The `counts/` scripts are guarded producers for production count artifacts:
 
-- `counts/generate_name_counts.py` writes a provenance-bound immutable
+- `counts/generate_name_counts.py` writes a content-bound,
+  provenance-carrying immutable
   `name_counts_index/` into a previously absent target. It requires an explicit
   source snapshot, verifies selected-row content, and supports bounded fixture
   runs before any authorized warehouse run. The writer builds the complete

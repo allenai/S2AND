@@ -141,22 +141,25 @@ axis. This decision is release blocker B01.
   retains their historical load-time clustering threshold of `0.65`; the
   identity check includes both booster hashes and the stale stored threshold,
   so newly tuned bundles retain their own `clusterer.json` value.
-- The release workflow builds and installs the exact Python and Rust wheels
-  outside the source tree. A synthetic public
+- The release workflow can build and install Python and Rust wheel candidates
+  outside the source tree. A synthetic
   `Clusterer.predict_incremental_from_arrow_paths` smoke has passed from the
   installed wheels and itself carries the strict canonical Arrow manifest.
   Rust-enabled CI fails hard on import/ABI drift, and Windows/macOS jobs execute
   their built wheels. The Rust build-system floor and release action are aligned
-  at Maturin 1.14.1. A real declared-bundle smoke remains an external gate on
-  the new v1.3 artifacts.
+  at Maturin 1.14.1. The current publish controls are not authorized for v1.3:
+  B26 still requires the immutable attestation/release gate and publication of
+  the exact reviewed candidate bytes, and B16 requires a real v1.3 bundle smoke.
 - Arrow training iterates record batches and avoids duplicate full-table
   materialization. Paper-author inputs reject duplicate positions, empty names,
   and dangling references consistently in Python and Rust. Python subblocking
   rejects duplicate IDs with explicit runtime invariants.
 - Canonical-v2 removes legacy pickle/count-dictionary loading and redundant
   artifact plumbing. Bounded native name-count lookups, optimized float32
-  scoring, and deterministic publication preserve output hashes while meeting
-  the recorded memory and throughput gates.
+  scoring, and deterministic component publication reduce resource use and
+  preserve artifact identities. Release-grade v1.3 memory and throughput gates
+  remain pending; the retained 2026-05-28 Rust snapshot is dirty-worktree
+  historical evidence, not an accepted baseline.
 
 ## 0.51.1
 

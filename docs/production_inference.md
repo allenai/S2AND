@@ -91,29 +91,35 @@ After the applicable release-runbook blockers are closed, the component
 interfaces look like this:
 
 ```powershell
+$RunRoot = "D:\local-unsynced\s2and-vX.Y"
+
 uv run python scripts\production\model\train_pairwise.py `
   --production-version X.Y `
   --data-dir path\to\canonical_benchmark_data `
-  --matrix-work-dir D:\local-unsynced\s2and-pairwise-matrices `
-  --output-dir scratch\pairwise_stage\production_model_vX.Y `
+  --matrix-work-dir "$RunRoot\matrix-work" `
+  --output-dir "$RunRoot\pairwise_stage\production_model_vX.Y" `
   --run-full
 
+$PairwiseModel = "$RunRoot\pairwise_calibrated\production_model_vX.Y"
+# If validation accepted the trainer-selected EPS, use pairwise_stage instead.
+
 uv run python scripts\production\model\train_linker_and_finalize.py `
-  --pairwise-model-path scratch\pairwise_stage\production_model_vX.Y `
-  --source-bundle-root path\to\canonical_arrow_training_bundle `
-  --target-json scratch\release_inputs\incremental_linker_training_target.json `
-  --output-dir scratch\joint_safe_link_promoted_vX.Y_full `
-  --publish-to s2and\data\production_model_vX.Y `
+  --pairwise-model-path "$PairwiseModel" `
+  --source-bundle-root path\to\official_linker_source_bundle `
+  --target-json "$RunRoot\release_inputs\incremental_linker_training_target.json" `
+  --output-dir "$RunRoot\joint_safe_link_promoted_vX.Y_full" `
+  --publish-to "$RunRoot\release_candidate\production_model_vX.Y" `
   --run-full
 ```
 
 This is not a complete release sequence. Between pairwise training and linker
-training, v1.3 requires validation-only EPS selection and an atomic fresh-output
-pairwise-stage finalizer. The current linker candidate-to-production lifecycle
-also remains blocked: a drift run writes a candidate target but does not retain
-the evaluated learned artifact, and a second full run is not presumed
-equivalent. Do not use the two commands above to bypass blockers B12, B13, B20,
-B25, or the one-shot evaluation gates.
+training, v1.3 requires validation-only EPS selection. The original pairwise
+stage may be designated when its selected EPS is accepted; a changed EPS
+requires B12's atomic fresh-output finalizer. The current linker
+candidate-to-production lifecycle also remains blocked: a drift run writes a
+candidate target but does not retain the evaluated learned artifact, and a
+second full run is not presumed equivalent. Do not use the two commands above
+to bypass blockers B12, B13, B20, B25, or the one-shot evaluation gates.
 
 Run the existing small materialization smoke before any approved full command.
 The full retrain is a large job and requires explicit owner approval, captured
@@ -121,13 +127,21 @@ logs, and quality/runtime/RSS evidence. `--allow-metric-drift` is
 diagnostic-only and cannot publish a linker or production bundle.
 
 Before materialization, run the linker command with `--preflight-only` instead
-of `--run-full`. It validates the frozen target, all source-table selectors,
-Arrow generations, and the pairwise/name-count binding without creating the
-output directory. Pairwise training likewise requires explicit data and output
-roots, records hashes for every selected benchmark input, and requires an
-explicit local matrix work directory. Replace `--run-full` with
-`--preflight-only` for its no-write readiness check. Passing `--datasets`
-selects a pairwise smoke run automatically; smoke runs never publish a bundle.
+of `--run-full`. It validates the currently implemented target
+feature/parameter/metric fields, source-table selectors, Arrow generations, and
+pairwise/name-count binding without creating the output directory; it does not
+yet enforce B20's target lifecycle fields. Pairwise training likewise requires
+explicit data and output roots, records hashes for every selected benchmark
+input, and requires an explicit local matrix work directory. Replace
+`--run-full` with `--preflight-only` for its no-write readiness check. Passing
+`--datasets` selects a pairwise smoke run automatically; smoke runs never
+publish a bundle.
+Those checks are component-level only: B08/B10/B19 still require complete
+linker source-path and byte-inventory validation, while B11/B21-B23/B30 require
+earlier pair overlap checks, bounded fixed-pair inputs, publication reload, full
+selection evidence, and separate test evaluation. See the
+[production command reference](../scripts/production/README.md) for the current
+limitations.
 
 ## Explicit execution routes
 
@@ -299,8 +313,9 @@ schema, normalization version, unordered-pair semantics, source provenance,
 tuple binding, cardinalities, and data SHA-256 before retaining the result
 in-process. There is no ORCID generation pointer, retry loop, or legacy
 fallback. During cutover, the checked-in legacy JSON and absent canonical
-manifest remain excluded from distributions until the approved canonical
-generation is produced.
+manifest make this checkout distribution-incomplete. Both filenames are
+already declared required package data and are enforced by distribution
+verification; Stage 3 must replace/add the approved canonical pair.
 
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key
@@ -319,6 +334,7 @@ The focused code gate is:
 ```powershell
 uv run pytest -q tests/test_production_model.py tests/test_production_model_cli_flow.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 uv run pytest -q tests/test_name_tuple_artifact.py tests/test_generate_orcid_name_prefix_counts.py
+uv run pytest -q tests/test_train_pairwise_script.py tests/test_promoted_linker_training_cli.py tests/test_eval_prod_models.py
 uv run ruff check s2and scripts/production/model tests/test_production_model.py tests/test_production_model_cli_flow.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 git diff --check
 ```

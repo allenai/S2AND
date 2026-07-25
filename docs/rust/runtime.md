@@ -1,6 +1,6 @@
 # Rust Runtime Contract
 
-Status date: 2026-07-10
+Status date: 2026-07-24
 
 S2AND has two explicit execution routes. Classic `ANDData` workflows use
 Python. Arrow-native training and prediction use the pinned Rust extension.

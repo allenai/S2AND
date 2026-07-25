@@ -1,6 +1,6 @@
 # Rust Artifact Formats
 
-Status date: 2026-05-22
+Status date: 2026-07-24
 
 This is the current artifact-format decision table for Rust-backed inference.
 It replaces the older artifact-divergence migration log.
@@ -14,19 +14,21 @@ It replaces the older artifact-divergence migration log.
 | Paper authors | `paper_authors.arrow` Arrow IPC table | Required for coauthor and paper-author row signals. |
 | Cluster seeds | `cluster_seeds.arrow` Arrow IPC table | Required for seeded/incremental Arrow prediction. Omit for unseeded full prediction. |
 | Cluster seed disallows | `cluster_seed_disallows.arrow` Arrow IPC table | Optional for seeded/incremental Arrow prediction. Include it when pairwise seed disallow constraints are present; omitted means no disallows. |
-| SPECTER | `specter.arrow` Arrow fixed-size-list `float32` table | Preferred direct-path embedding input. Include the embedding version required by the model. |
-| Raw-planner batch indexes | `<arrow-stem>.<path-key>.bin` S2AND binary sidecar | Optional derived indexes for large-block raw planning. Current writers emit `arrow_batch_lookup_index` with magic `S2ABI002`; regenerate from the final Arrow IPC files. |
-| Name counts | `s2and/data/name_counts_index/` sorted binary sidecar | Preferred Rust hot-path lookup artifact for models that use name-count features. |
-| Name aliases | Packaged canonical text file | Shared runtime default. Avoid per-dataset alias artifacts unless running an explicit experiment. |
+| SPECTER | Physical `specter2.arrow` under manifest key `specter`, Arrow fixed-size-list `float32` | Canonical production/eval embedding input. An explicit historical research-training bundle may select `specter.arrow` under the same logical key. |
+| Raw-planner batch indexes | `<arrow-stem>.<path-key>.bin` S2AND binary sidecar | Required for canonical filtered reads of signatures, papers, paper authors, and the selected embedding. Current writers emit `arrow_batch_lookup_index` with magic `S2ABI002`; regenerate from the final Arrow IPC files. |
+| Name counts | `<main_data_dir>/name_counts_index/` sorted binary index | Sole supported runtime representation when the model selects name-count features; referenced from immutable Arrow manifests. |
+| Name aliases | Packaged `s2and_name_tuples_canonical.txt` plus strict adjacent `.meta.json` | Shared runtime default validated by Python and passed to Rust as explicit pairs. Avoid per-dataset alias artifacts. |
 | Pairwise and linker models | Native LightGBM text plus JSON metadata | Current production model-bundle format. |
 | Eval clusters | Existing clusters JSON | Offline evaluation truth only; not part of production inference scoring. |
 
 ## Name Counts
 
-The preferred production publication layout is:
+The production data-release layout is below. `<main_data_dir>` is selected by
+`path_config.json`/`S2AND_PATH_CONFIG`; `s2and/data` is only the checkout's
+default placeholder and the large index is not Python package data.
 
 ```text
-s2and/data/name_counts_index/
+<main_data_dir>/name_counts_index/
   manifest.json
   generations/<publication-generation>/
     .published
@@ -52,6 +54,9 @@ is a storage identifier and need not equal `source_provenance.generation_id`.
 `source_row_count`; the duplicate `selected_row_count` field from v1 is not
 accepted. It retains warehouse snapshot, query, selected-row, cardinality, and
 generation audit facts, but does not name a separately published pickle.
+Those fields currently carry producer assertions; v1.3 release acceptance
+still requires B27/B28's independently traceable snapshot/query-result and
+pinned internal-dependency evidence.
 
 The native Rust opener is the runtime authority for manifest, file-digest, and
 record validation. Python freezes the provenance and resolved file facts

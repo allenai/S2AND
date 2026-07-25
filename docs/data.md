@@ -40,8 +40,11 @@ The promoted-linker replay subbundle can also be downloaded by itself:
 uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow/s2and_and_big_blocks_linker_dataset_20260525 s2and/data/s2and_and_big_blocks_linker_dataset_20260525
 ```
 
-`s2and/data/s2and_and_big_blocks_linker_dataset_20260525` is the canonical
-local name for the published Arrow replay subbundle.
+`s2and/data/s2and_and_big_blocks_linker_dataset_20260525` is the conventional
+local name for the previously published replay subbundle. Its manifests predate
+the canonical generation contract, so it is now a legacy source/parity input
+and is rejected by strict v1.3 validation. B09 requires a regenerated replay
+bundle before linker training.
 
 The Arrow release stores runtime signatures, papers, paper authors, and SPECTER
 rows as Arrow IPC files. It intentionally does not duplicate legacy `raw/`,
@@ -103,10 +106,10 @@ Prediction logic does not consume it, but bundle load validation includes its
 manifest checksum. It records feature order and training params for the replay
 script.
 
-The promoted linker train/calibrate/eval replay data is published under the
-Arrow release prefix. Use the standalone replay-subbundle download command in
-[Dataset download](#dataset-download) when you need to rebuild or audit the
-promoted linker artifact.
+The previous promoted-linker replay data is published under the Arrow release
+prefix. Use the standalone download only to audit historical inputs; do not use
+it as the v1.3 source bundle without the B07-B10/B19 regeneration, assignment,
+and inventory work.
 
 Pass the downloaded source bundle explicitly with `--source-bundle-root` to
 `scripts/production/model/linker_train_calibrate_eval.py`; the release command

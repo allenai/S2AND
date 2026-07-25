@@ -35,7 +35,7 @@ for the Rust integration.
 
 ## Quick links
 
-- Rust/Arrow execution backlog: [`docs/work_plan.md`](../work_plan.md)
+- Canonical-v2 remediation ledger: [`docs/work_plan.md`](../work_plan.md)
 - v1.3 release runbook: [`docs/1_3_release_todo.md`](../1_3_release_todo.md)
 - Verification commands: [`runtime.md` -- Verification Commands section](runtime.md)
 - Gate commands + artifact conventions: [`baselines.md`](baselines.md)

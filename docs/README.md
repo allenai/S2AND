@@ -48,7 +48,7 @@ For release work, authority is intentionally split:
 
 - v1.3 artifact regeneration, retraining, and release operator runbook:
   [1_3_release_todo.md](1_3_release_todo.md)
-- Rust and platform backlog: [work_plan.md](work_plan.md)
+- Canonical-v2 remediation ledger: [work_plan.md](work_plan.md)
 - Normalization migration plan [blocked]: [normalization_migration_blocked.md](normalization_migration_blocked.md)
 
 ## Script documentation

@@ -1,6 +1,6 @@
 # Improving Stage-Wise Memory Estimates
 
-Status date: 2026-03-02
+Status date: 2026-07-24
 
 This doc explains what S2AND stage-wise memory predictors and telemetry
 measure, why they can be wrong, and how to calibrate them.
@@ -37,8 +37,10 @@ Boundary rules:
 ## Status
 
 No dedicated memory-estimate backlog is active right now. These predictors are
-treated as best-effort; the active TODO plan is in
-[work_plan.md](work_plan.md).
+treated as best-effort; predictor remediation belongs in
+[work_plan.md](work_plan.md). The v1.3 release's measured runtime/RSS protocol
+and acceptance gate are in
+[1_3_release_todo.md](1_3_release_todo.md#stage-8-release-candidate-evaluation).
 
 Regression coverage:
 - `tests/test_memory_budget.py`

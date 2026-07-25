@@ -67,11 +67,12 @@ Run focused checks while changing a boundary:
 
 ```powershell
 uv run pytest -q tests/test_incremental_linking_production.py
-uv run pytest -q tests/test_feature_snapshot_cache.py tests/test_name_counts_binding.py
+uv run pytest -q tests/test_feature_snapshot_cache.py tests/test_name_counts_binding.py tests/test_generate_name_counts_script.py
 uv run pytest -q tests/test_arrow_training_ingestion.py
 uv run pytest -q tests/test_generate_orcid_name_prefix_counts.py
 uv run pytest -q tests/test_incremental_linking_artifact.py tests/test_production_model.py tests/test_production_bundle_publication.py
 uv run pytest -q tests/test_promoted_linker_training_cli.py tests/test_production_model_cli_flow.py
+uv run pytest -q tests/test_train_pairwise_script.py tests/test_eval_prod_models.py tests/test_release_workflow.py
 ```
 
 Before handoff, artifact generation, or retraining, run the complete local
@@ -103,8 +104,10 @@ the canonical bundle exists.
 - Full scans are explicit compatibility/test opt-ins, never silent fallbacks.
 - Name-count and name-tuple loaders have one artifact authority; do not add
   legacy fallbacks or duplicate validation paths.
-- No production model or implicit default is packaged until the canonical v1.3
-  bundle passes all artifact, quality, parity, and performance gates.
+- Do not package a production model or declare an implicit default during the
+  cutover. After the canonical v1.3 bundle passes all artifact, quality, parity,
+  and performance gates, B15 still decides between external-only distribution
+  and a packaged default.
 - Large generation, retraining, release-scale profiling, paid APIs, and
   internal warehouse queries require a tiny fixture first and explicit owner
   approval.

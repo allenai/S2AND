@@ -2,6 +2,13 @@
 
 Date: 2026-05-28 UTC
 
+> **Historical snapshot:** paths, the word “canonical,” and command lines below
+> describe the 2026-05-28 environment. The current profiler requires explicit
+> `--model-path` and v1.3 uses an explicit regenerated `--arrow-root`; do not
+> rerun these commands as a current release gate. See
+> [../baselines.md](../baselines.md) and
+> [../../1_3_release_todo.md](../../1_3_release_todo.md).
+
 ## Scope
 
 Release-build comparison of the name-count index reader before and after

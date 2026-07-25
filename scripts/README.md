@@ -15,7 +15,7 @@ v1.3 release blockers are closed. Release operators must follow
 | `rust_suite.py transfer-mini` | Smoke-scale KISTI transfer run by default; pass the full preset for the historical 3-dataset reduced-scale run | Per-stage timing, peak RSS, clustering quality (python vs rust) |
 | `rust_suite.py featurizer-reuse` | Repeated production-model predictions through Arrow/Rust, comparing reuse of one validated Arrow input object with revalidated inputs | Per-iteration timing, RSS, and Arrow prediction telemetry |
 | `rust_suite.py largest-block` | Profile one bounded large block; compare mode requires a current Arrow release and runs Python/JSON against Rust/Arrow on an identity-checked signature sequence | Partition diff (digest + per-signature), latency, RSS; optional `--quality-check`; cross-representation constraint parity uses the dedicated full-predict verifier |
-| `rust_suite.py promoted-incremental-arrow-profile` | Arrow-only promoted Rust `predict_incremental` profiling against the canonical `s2and_and_big_blocks_linker_dataset_20260525` bundle | Per-run wall time, p50 latency, peak RSS, promoted incremental telemetry, Arrow planner/summary timings |
+| `rust_suite.py promoted-incremental-arrow-profile` | Arrow-only promoted Rust `predict_incremental` profiling. The published `s2and_and_big_blocks_linker_dataset_20260525` bundle is now a legacy input; v1.3 release runs require the regenerated canonical replay root from B09. | Per-run wall time, p50 latency, peak RSS, promoted incremental telemetry, Arrow planner/summary timings |
 | `rust_suite.py stress-rebuild` | Repeat Arrow Rust featurizer construction to stress lifecycle stability | Per-iteration elapsed + RSS peaks, RSS growth fraction, failure payloads |
 | `rust_suite.py calibrate-phase-a` | Calibrate memory estimates for phase-A accumulator from memory telemetry JSONL | Per-entry byte overhead percentiles |
 | `rust_suite.py calibrate-rust-batch` | Calibrate memory estimates for Rust batch persistent overhead from memory telemetry JSONL | Per-row byte overhead percentiles |
@@ -54,10 +54,10 @@ v1.3 release blockers are closed. Release operators must follow
 
 | Script | What it does |
 |---|---|
-| `eval_prod_models.py` | Evaluate current SPECTER2 production models on full, inventors_s2and, or mini datasets; SPECTER1 is available only as an explicit from-scratch research retraining comparison, and non-training evals use Arrow automatically when complete artifacts exist |
+| `eval_prod_models.py` | Evaluate an explicitly supplied SPECTER2 bundle on full, inventors_s2and, or mini datasets. Non-training evaluation derives `data_random_seed` from the bundle, rejects `--seed`, and auto-uses Arrow when complete artifacts exist; SPECTER1 is an explicit `--train` research comparison only. |
 | `eps_sweep/sweep_eps_on_linking_gold.py` | Research EPS sweep over linking gold; it is not the validation-only pairwise-stage selector/finalizer required by release blocker B12 |
 | `verification/validate_local_arrow_release.py` | Non-network local Arrow release-root smoke; checks manifests, checksum fields, required files, batch-index paths, replay bundle manifests, and `name_counts_index` targets without scanning large Arrow tables |
-| `verification/verify_production_model_distributions.py` | Require canonical runtime artifacts and the selected default-model inventory in built wheel/sdist archives; currently fails until the canonical ORCID manifest exists |
+| `verification/verify_production_model_distributions.py` | Require the ORCID runtime pair and selected default-model inventory in built wheel/sdist archives; currently fails until the canonical ORCID manifest exists, and B24 must add tuple data/metadata enforcement |
 | `verification/smoke_installed_incremental_arrow.py` | Installed-wheel synthetic canonical Arrow/linker smoke; release blocker B16 additionally requires the real v1.3 bundle |
 | `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
 | `verification/compare_existing_arrow_anddata_feature_parity.py` | Compare Rust feature matrices from existing raw `ANDData` JSON/pickle inputs against existing Arrow release bundles |

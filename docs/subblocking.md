@@ -49,6 +49,15 @@ normalization while reading raw name columns.
 
 ## ORCID policy
 
+The default merge-prior mapping is loaded lazily from the packaged
+`first_k_letter_counts_from_orcid.json` and its required adjacent
+`.manifest.json`, then resolved at subblocking entry. The loader validates the
+complete canonical artifact and data digest; a missing or tampered file fails
+closed before partitioning. These learned prefix-pair counts are considered
+only after exact-name and `same_prefix_tokens` merge candidates, so they do not
+override stronger compatibility evidence. A caller may supply an explicit
+mapping for a controlled experiment.
+
 `make_subblocks(...)` and `make_subblocks_with_telemetry(...)` have a `use_orcid_subblocking` flag. When enabled, the
 final repair pass can merge whole subblocks that contain the same ORCID, but it never extracts only ORCID signatures
 from an existing subblock. The merge runs only when the combined whole subblocks fit within `maximum_size`; otherwise
@@ -57,6 +66,8 @@ the split is preserved and telemetry records the capacity skip.
 The ORCID key is canonicalized to match Rust Arrow ingestion: keep digits and `X`/`x`, require exactly 16 ORCID
 characters, uppercase the check digit, and format as `0000-0000-0000-0000`. Blank or invalid values are ignored.
 This subblocking policy is independent from same-ORCID hard-link distance constraints.
+The `use_orcid_subblocking` flag controls only that final same-ORCID repair; it
+does not disable the prefix-pair merge priors described above.
 
 ## Graph fallback
 

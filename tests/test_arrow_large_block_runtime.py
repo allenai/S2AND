@@ -334,6 +334,113 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     assert predict_telemetry["block_count"] == 2
 
 
+def test_arrow_subblocking_avoids_generated_key_collisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_native_subblocking(_paths: Mapping[str, Any], signature_ids: list[str], **_kwargs: Any):
+        assert signature_ids == ["s1", "s2"]
+        return {"x": ["s1"], "y": ["s2"]}, {}
+
+    monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
+
+    result = _clusterer()._build_arrow_subblocked_block_dict(
+        {
+            "a": ["s1", "s2"],
+            "a|subblock=x": ["other"],
+        },
+        {},
+        batching_threshold=1,
+        cluster_seeds_require={},
+    )
+
+    assert result == {
+        "a|subblock=x|collision=0001": ["s1"],
+        "a|subblock=y": ["s2"],
+        "a|subblock=x": ["other"],
+    }
+
+
+def test_arrow_subblocking_presplits_altered_profiles_before_prediction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    rewritten_seeds = {"s1": "claimed_0", "s2": "claimed_0", "s3": "claimed_1"}
+    events: list[str] = []
+
+    def fake_seed_setup(self: Clusterer, dataset: Any, *_args: Any, **_kwargs: Any):
+        del self
+        events.append("presplit")
+        assert dataset.cluster_seeds_require == {"s1": "claimed", "s2": "claimed", "s3": "claimed"}
+        assert dataset.altered_cluster_signatures == ["s1"]
+        return rewritten_seeds, {"claimed_0": "claimed", "claimed_1": "claimed"}, {}, {}
+
+    def fake_load_signature_info(_paths: Mapping[str, Any], signature_ids: list[str]):
+        return {
+            signature_id: SimpleNamespace(
+                author_info_first="john",
+                author_info_first_normalized_without_apostrophe="john",
+                author_info_orcid=None,
+            )
+            for signature_id in signature_ids
+        }
+
+    def fake_predict_validated(
+        self: Clusterer,
+        block_dict: dict[str, list[str]],
+        request_paths: ValidatedArrowInputs,
+        **kwargs: Any,
+    ):
+        del self
+        events.append("prediction")
+        assert block_dict == {"block": ["s1", "s2", "s3"]}
+        assert model_module._read_cluster_seeds_arrow(Path(request_paths["cluster_seeds"])) == rewritten_seeds
+        assert kwargs["prediction_cluster_seeds_require"] == rewritten_seeds
+        assert kwargs["needs_subblocking"] is True
+        return {"cluster": ["s1", "s2", "s3"]}, None
+
+    monkeypatch.setattr(Clusterer, "_build_incremental_seed_setup", fake_seed_setup)
+    monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_signature_info)
+    monkeypatch.setattr(Clusterer, "_predict_from_validated_arrow_paths", fake_predict_validated)
+
+    result, _ = _clusterer().predict_from_arrow_paths(
+        {"block": ["s1", "s2", "s3"]},
+        arrow_paths,
+        batching_threshold=2,
+        name_tuples=set(),
+        cluster_seeds_require={"s1": "claimed", "s2": "claimed", "s3": "claimed"},
+        altered_cluster_signatures=["s1"],
+    )
+
+    assert events == ["presplit", "prediction"]
+    assert result == {"cluster": ["s1", "s2", "s3"]}
+
+
+def test_all_initial_arrow_subblocks_stay_on_bulk_path() -> None:
+    block_dict = {
+        "block|subblock=a": ["i0", "i1"],
+        "block|subblock=b": ["i2"],
+    }
+    dataset = SimpleNamespace(
+        signatures={
+            signature_id: SimpleNamespace(
+                author_info_first="J",
+                author_info_first_normalized_without_apostrophe="j",
+            )
+            for signature_id in ("i0", "i1", "i2")
+        }
+    )
+
+    bulk_blocks, incremental_blocks, alert_flag = _clusterer()._partition_subblocked_first_name_groups(
+        block_dict,
+        dataset,
+    )
+
+    assert bulk_blocks == block_dict
+    assert incremental_blocks == {}
+    assert alert_flag is True
+
+
 def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -105,6 +105,7 @@ IncrementalSeedScoreMode = Literal["mean", "min", "mean_min_hybrid"]
 IncrementalDistStats = tuple[float, int, float]
 _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES = 128
 _ALTERED_PRESPLIT_CACHE_INIT_LOCK = threading.Lock()
+_PREDICT_FEATURE_COPY_MAX_BYTES = 128 * (1 << 20)
 _PATH_CACHE_KEY: TypeAlias = tuple[str, int | None, int | None, Any]
 
 
@@ -1255,9 +1256,8 @@ def _predict_and_combine(
         return main_pred, main_sec
 
     # Boolean indexing creates a large temporary copy (often comparable to the full
-    # features matrix) when most rows are predicted. Avoid that peak by predicting
-    # on the full matrix in that case and overriding constrained rows afterwards.
-    copy_avoid_threshold_bytes = 128 * (1 << 20)
+    # feature matrix) when most rows are predicted. Keep each copy bounded without
+    # exposing constrained sentinel rows to the classifiers.
     would_copy_bytes = 0
     if predicted_rows > 0 and predicted_rows < row_count:
         would_copy_bytes += int(predicted_rows) * int(features.shape[1]) * int(features.dtype.itemsize)
@@ -1266,12 +1266,8 @@ def _predict_and_combine(
                 int(predicted_rows) * int(nameless_features.shape[1]) * int(nameless_features.dtype.itemsize)
             )
 
-    predict_on_full_matrix = predicted_rows > 0 and (
-        predicted_rows == row_count or would_copy_bytes >= int(copy_avoid_threshold_bytes)
-    )
-
     if predicted_rows > 0:
-        if predict_on_full_matrix:
+        if predicted_rows == row_count:
             combined_predictions, batch_seconds = _predict_rows(
                 features,
                 nameless_features,
@@ -1279,6 +1275,21 @@ def _predict_and_combine(
             )
             predictions[:] = combined_predictions
             seconds += batch_seconds
+        elif would_copy_bytes >= _PREDICT_FEATURE_COPY_MAX_BYTES:
+            predicted_indices = np.flatnonzero(predict_flag)
+            bytes_per_row = max(1, would_copy_bytes // predicted_rows)
+            rows_per_chunk = max(1, _PREDICT_FEATURE_COPY_MAX_BYTES // bytes_per_row)
+            for start in range(0, predicted_rows, rows_per_chunk):
+                row_indices = predicted_indices[start : start + rows_per_chunk]
+                predict_features = features[row_indices, :]
+                predict_nameless_features = nameless_features[row_indices, :] if nameless_features is not None else None
+                combined_predictions, batch_seconds = _predict_rows(
+                    predict_features,
+                    predict_nameless_features,
+                    row_total=len(row_indices),
+                )
+                predictions[row_indices] = combined_predictions
+                seconds += batch_seconds
         else:
             predict_features = features[predict_flag, :]
             predict_nameless_features = nameless_features[predict_flag, :] if nameless_features is not None else None

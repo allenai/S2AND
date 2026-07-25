@@ -1,5 +1,7 @@
 import numpy as np
+import pytest
 
+import s2and.model as model_module
 from s2and.consts import LARGE_INTEGER
 from s2and.model import _predict_and_combine
 
@@ -38,6 +40,19 @@ class FakePositiveClassifier:
 
     def predict_proba(self, features_2d: np.ndarray) -> np.ndarray:
         raise AssertionError("predict_proba should not be called when predict_proba_positive is available")
+
+
+class NonnegativeClassifier:
+    def __init__(self) -> None:
+        self.seen_rows: list[np.ndarray] = []
+
+    def predict_proba(self, features_2d: np.ndarray) -> np.ndarray:
+        features_2d = np.asarray(features_2d, dtype=np.float64)
+        if np.any(features_2d < 0):
+            raise ValueError("negative input")
+        self.seen_rows.extend(features_2d)
+        class0 = features_2d[:, 0] / 10.0
+        return np.stack([class0, 1.0 - class0], axis=1)
 
 
 def test_predict_and_combine_all_predicted_rows():
@@ -153,3 +168,43 @@ def test_predict_and_combine_averages_nameless_classifier():
     expected[:2] = (main_pred + nl_pred) / 2.0
     expected[2] = 0.0
     assert np.allclose(predictions, expected)
+
+
+def test_large_constrained_batch_never_sends_sentinel_rows_to_classifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_module, "_PREDICT_FEATURE_COPY_MAX_BYTES", 16)
+    classifier = NonnegativeClassifier()
+    nameless_classifier = NonnegativeClassifier()
+    features = np.asarray(
+        [
+            [1.0, 2.0],
+            [-LARGE_INTEGER, -LARGE_INTEGER],
+            [3.0, 4.0],
+            [5.0, 6.0],
+        ],
+        dtype=np.float64,
+    )
+    nameless_features = np.asarray(
+        [
+            [2.0],
+            [-LARGE_INTEGER],
+            [4.0],
+            [6.0],
+        ],
+        dtype=np.float64,
+    )
+    labels = np.asarray([np.nan, -LARGE_INTEGER, np.nan, np.nan], dtype=np.float64)
+
+    predictions, _ = _predict_and_combine(
+        classifier,
+        nameless_classifier,
+        features,
+        labels,
+        nameless_features,
+        "batch",
+    )
+
+    assert np.array_equal(np.asarray(classifier.seen_rows), features[[0, 2, 3]])
+    assert np.array_equal(np.asarray(nameless_classifier.seen_rows), nameless_features[[0, 2, 3]])
+    assert np.allclose(predictions, [0.15, 0.0, 0.35, 0.55])

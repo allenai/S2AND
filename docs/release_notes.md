@@ -65,11 +65,12 @@ axis. This decision is release blocker B01.
 - Breaking: pairwise `--datasets` runs are non-publishable smoke runs by
   definition. The redundant `--smoke-only` and guessed disk-headroom flags are
   removed.
-- Breaking: linker training publishes only through `--publish-to`. It saves
-  the exact evaluated model and gate under the run output and infers release
-  versions from the pairwise stage. The metric-drift diagnostic is the
-  exception: it writes only `candidate_target.json` and currently discards the
-  evaluated learned artifact, which is why B13/B20 block release promotion.
+- Breaking: linker training now has explicit `preflight`, `materialize`,
+  `candidate`, and `publish` commands. Candidate runs retain the exact
+  evaluated model and gate beside `candidate_target.json`; they cannot publish.
+  They also persist deterministic query-level decisions and their digest
+  inventory. B20's reviewed no-retraining lifecycle transition still blocks
+  promotion.
 - Breaking: `NameTupleArtifact.identity` and
   `s2and_rust.read_name_tuple_artifact_identity` are removed. The Python loader
   validates each artifact once and retains only frozen alias pairs plus
@@ -113,10 +114,9 @@ axis. This decision is release blocker B01.
   ORCID counts now use one direct JSON file plus one provenance manifest, with
   no pointer manifest, retry loop, or legacy fallback. The large name-count
   index belongs in the immutable external data release, not Python package
-  data. The ORCID JSON and manifest are both declared required package data;
-  this checkout is intentionally distribution-incomplete until the approved
-  canonical generation replaces the checked-in legacy JSON and adds its
-  currently missing manifest.
+  data. The code-only checkout declares neither ORCID file. The approved
+  canonical JSON and manifest are added with both package-data declarations in
+  one Stage-3 promotion commit.
 - Generated `within_block_random` pair sampling now uses exact seeded rank
   sampling. It preserves the legacy candidate order, selected pairs, and labels
   while memory scales with requested samples plus blocks instead of all

@@ -157,7 +157,7 @@ recorded.
 |---|---|---|---|
 | B01 | The release version meaning is ambiguous. | Decide whether Python/Rust remain `0.60.0` with model/data v1.3, or whether the packages become `1.3.0`. Record the decision in the release manifest. | `uv run --no-project python scripts/sync_version.py --check` and reviewed version matrix. |
 | B02 | **Closed in `4a524d5`:** `scripts/production/counts/_run_support.py` is tracked. | Keep the shared helper tracked in every release candidate. | `git ls-files --error-unmatch scripts/production/counts/_run_support.py` returns the path, and clean-clone subprocess tests import both count producers. |
-| B03 | Both documented direct count-script invocations fail with `ModuleNotFoundError: scripts`. | Add the same repo-root bootstrap used by the model scripts, or declare module execution as the supported interface. Add subprocess `--help` tests for both commands. | Both supported commands return zero in a clean clone. |
+| B03 | **Closed:** both count producers use one module-only interface with relative package imports. | Keep `python -m scripts.production.counts...` as the documented interface; do not add a second bootstrap path. | Subprocess help and real fixture publications for both modules return zero from the repository root. |
 | B04 | Rust edits do not invalidate uv's local wheel cache. | Add reviewed cache keys for every actual wheel input, including root/local `pyproject.toml`, `s2and_rust/README.md`, `s2and_rust/**/*.py`, `s2and_rust/Cargo.toml`, `s2and_rust/Cargo.lock`, `s2and_rust/build.rs`, `s2and_rust/src/**/*.rs`, and patched `s2and_rust/vendor/cld2/**/*` inputs. Do not omit Python/package inputs: custom uv cache keys replace the defaults. | In a disposable checkout, make a compiled behavior/constant change, observe a cache miss/rebuild in logs, and prove the installed native behavior or binary digest changes. A `cfg(test)`-only edit is not sufficient. |
 | B05 | There is no valid v1.21 comparison protocol in current canonical code. | Run the historical model under a frozen compatible runtime/branch, or add an explicit comparison-only compatibility runner. Persist exact evaluation entity/block IDs, dataset hashes, assignments, and predictions. A guessed seed or recorded linker metrics is not sufficient. | A machine-readable legacy baseline can be rerun on the exact frozen evaluation population. |
 | B06 | Benchmark canonical-name re-export has no deterministic producer, and side-by-side canonical columns would currently be ignored. `ANDData` and Arrow conversion consume the existing `author_info.first/middle/last` fields. | Define a reviewed output schema and add a deterministic signature-ID join. Either write joined canonical names into the exact consumed fields while preserving raw names in a separate immutable audit artifact, or update every loader/converter/trainer to explicitly select canonical fields. Report duplicate, missing, joined, unjoined, and divergence counts plus input/output digests. | A fixed end-to-end fixture proves duplicate/missing handling, deterministic output, preserved raw evidence, and that the exact names seen by `ANDData`, Arrow rows, and pairwise featurization are the joined canonical values. |
@@ -166,8 +166,8 @@ recorded.
 | B09 | The checked-in linker replay Arrow manifests predate the canonical generation contract. | Regenerate linker replay Arrow from the required raw JSON and SPECTER2 inputs and the exact new name-count index. | Deep local release validation passes; no manifest lacks normalization or generation identity. |
 | B10 | There is no standalone pre-pairwise validator for the complete linker source bundle. | Add a source-bundle validation command that checks assets, support paths, assignments, required tables, Arrow generations, and name-count bindings without requiring a pairwise model. | The exact release source bundle passes before pairwise training is approved. |
 | B11 | Pairwise preflight does not validate every fixed-pair CSV overlap before expensive featurization. | Move fixed-pair schema, duplication, and cross-split-overlap checks into preflight. | A deliberately overlapping fixture fails during preflight; current reviewed inputs pass. |
-| B12 | EPS search evidence and pairwise-stage clustering/finalization tooling are incomplete. | Persist every trial, exact validation block IDs/digests, per-dataset B3, macro and signature-weighted B3, selected EPS, objective, and tie-break rationale. Add: (1) pairwise-stage validation calibration, (2) a separately invocable one-shot cluster-test evaluator reserved for Stage 8, and (3) an atomic fresh-output EPS finalizer that requires the source digest/expected old EPS, changes only the EPS lifecycle field semantically, preserves booster bytes/provenance, and rewrites/reloads valid manifests. The public complete-bundle evaluator cannot serve this stage. | A reviewed validation report reproduces the selection; the frozen stage can later be evaluated on sealed test identities; and a focused finalizer test proves a different EPS yields a valid fresh bundle with identical booster digests and a new recorded bundle digest. |
-| B13 | A linker drift run discards the evaluated artifact and does not persist deterministic query-level predictions, forcing a second full train with insufficient equivalence evidence. | Prefer saving the exact evaluated candidate, binding it to the candidate-target digest, persisting query-level predictions plus a complete inventory/digests, and adding a cheap reviewed finalization command. B20 may deterministically rewrite only the lifecycle envelope; the learned model payload must remain byte-identical and retain candidate ancestry. If the owner retains the two-run workflow, pin the machine, dependency lock, `n_jobs`, RAM budget, and all input digests, then compare persisted predictions/metrics and separately review the newly trained artifact. | The reviewed candidate's learned payload is finalized without retraining and only authorized lifecycle metadata changes, or the approved two-run exception has deterministic prediction-level comparison and a separate digest/approval for the second artifact. |
+| B12 | Tooling is implemented in `release_pairwise.py`; real validation evidence is not yet recorded. | Run `calibrate-eps`, review every trial/identity digest, and reserve `evaluate-clusters` for Stage 8. Use `finalize-eps` only when review changes EPS. | Focused tests prove fresh-output finalization changes only `clusterer.json`/`manifest.json`, preserves all other bytes, and reloads; the real calibration report remains a release gate. |
+| B13 | **Implementation closed; promotion still depends on B20.** Candidate runs retain the exact evaluated artifact bound to `candidate_target.json` and a deterministic query-level CSV plus its row/column/byte/SHA-256 inventory. | Preserve this evidence and add only B20's reviewed lifecycle transition; do not retrain to recover the candidate artifact. | Focused tests prove the artifact is retained and prediction export is order-independent with explicit identity/label columns. |
 | B14 | The linker README target path is inside an output directory that must not exist. | Keep seed and reviewed candidate-target JSON files in an immutable input directory separate from every output directory. | The documented preflight command can run exactly as written. |
 | B15 | Package/default-model policy is unresolved. | Choose either an explicit external v1.3 model bundle or a packaged default. A packaged default requires package-data entries, `default_production_model.json`, loader behavior, and tests. | Built wheel/sdist inventory and public loader behavior match the reviewed decision. |
 | B16 | Installed-package smoke uses a synthetic model. | Add a clean-environment smoke that locates, loads, and predicts with the real candidate v1.3 bundle and embedded fixtures. | Smoke passes using only installed distributions plus the declared release artifact. |
@@ -184,7 +184,7 @@ recorded.
 | B27 | The count CLIs accept `--source-snapshot-id` as an unchecked label; neither warehouse query is actually bound to that identity. | Use an owner-approved immutable warehouse snapshot, transaction/export, or immutable source object and make the executed query provenance prove that exact identity. Record the query text, query ID, source object/snapshot, timestamps, and result digest. | Changing the typed label alone cannot satisfy preflight; an independent reviewer can trace both full query results to the recorded immutable warehouse source. |
 | B28 | The internal `pys2` warehouse client is neither pinned in `pyproject.toml`/`uv.lock` nor consistently imported by both count producers. | Choose one supported import/API and a reviewed, uv-managed internal source/version/commit. Add an exact provisioning/overlay command and record distribution metadata, source digest, and dependency lock without adding an accidental public production dependency. | On the internal host, both producers import the same pinned client in the recorded uv environment and a tiny query succeeds; an unpinned ambient install fails preflight. |
 | B29 | Destination name-count validation does not report the selected generation/manifest digest or exercise the configured `NAME_COUNTS_INDEX_PATH`. | Extend the validator or add an exact inspection command that reports resolved generation files and manifest SHA-256, then add a production-loader smoke through `S2AND_PATH_CONFIG`/`s2and.consts.NAME_COUNTS_INDEX_PATH`. | The copied `$DataRoot` index is resolved through the same selector used by training, and the reported digest equals `release.json`. |
-| B30 | Full pairwise training currently scores generated test splits before EPS/linker freeze, and no evaluator consumes the frozen baseline/independent-gold pair manifest. | Add a release mode that trains/selects on train/validation only while sealing test identities without scores. Add a one-shot pairwise-stage evaluator that consumes the frozen pair manifest, verifies exact identities/digests, and emits per-dataset plus declared aggregate metrics; reserve it and the cluster-test evaluator for Stage 8. | A focused test proves the release training/EPS path cannot read test labels/results, while the Stage 8 evaluator rejects identity drift and produces the exact averaged-main/nameless metric contract once. |
+| B30 | **Implementation closed; real one-shot evidence remains Stage 8.** Full release training records only `--pairwise-test-manifest-sha256`, resolves/featurizes train and validation only, and emits no real test metrics. `release_pairwise.py evaluate-pairs` is the sole sealed evaluator. | Keep smoke-only test metrics isolated under `smoke_pairwise_test_metrics`; never pass a test-manifest path to full training. | Focused tests prove full input resolution omits fixed test pairs, release staging has no test arrays, the evaluator rejects digest drift, averages main/nameless probabilities once, and uses strict `> 0.5`. |
 
 A blocker that requires a new producer, validator, evaluator, finalizer, smoke,
 or workflow gate is not closed until this runbook contains its exact supported
@@ -896,8 +896,7 @@ Before any full query:
 
 ### 3.3 Exact-environment fixture runs
 
-Until B03 is resolved, module form is the only currently working count
-invocation.
+Module form is the sole supported count invocation.
 
 Before running either command, copy reviewed bounded fixtures into
 `$Inputs\fixtures` from a committed or separately immutable source. Do not
@@ -1083,12 +1082,16 @@ ORCID counts:
 - [ ] Spot-check canonical unordered pairs and invalid/missing ORCIDs.
 - [ ] Copy the reviewed JSON and manifest into `s2and/data` in the clean local
       release-candidate checkout and verify copied hashes.
+- [ ] In the same artifact-promotion commit, add both exact paths to
+      `[tool.setuptools.package-data]`. The code-only candidate intentionally
+      declares and packages neither the legacy JSON nor an absent manifest.
 
 ### 3.7 Freeze the exact training commit
 
 After tuple and ORCID promotion:
 
-- [ ] Distribution verification requires the new ORCID manifest.
+- [ ] Distribution verification derives its required inventory from
+      `pyproject.toml` and therefore requires both newly declared ORCID files.
 - [ ] `S2AND_PATH_CONFIG` selects the exact external name-count generation.
 - [ ] Tuple, ORCID, and name-count identities are written to `release.json`.
 - [ ] `git status --short` and the staged diff contain only the intended
@@ -1349,13 +1352,11 @@ preflight, not after eight other datasets have been processed.
 
 ### 5.1 Pairwise preflight
 
-Verify the two matrix-work directories created in the run layout are existing,
-empty for their first run, local, writable, and large enough. The feature-cache
-paths may be new directories, but their parents must exist.
-
-When B30 is implemented, add its exact mandatory test-deferral/release-mode
-option to this preflight command and record it here. The current skeleton below
-is not approval to launch without that option.
+Verify the matrix-work directory is existing, empty for its first run, local,
+writable, and large enough. Full release training deliberately does not use the
+smoke feature cache. Freeze the Stage-8 pair manifest and record its SHA-256
+before preflight; the trainer records that digest but has no manifest-path
+argument.
 
 ```powershell
 uv run --no-sync python scripts/production/model/train_pairwise.py `
@@ -1363,7 +1364,7 @@ uv run --no-sync python scripts/production/model/train_pairwise.py `
   --data-dir "$PairwiseDataRoot" `
   --output-dir "$Stages\pairwise\production_model_v1.3" `
   --matrix-work-dir "$RunRoot\matrix-work" `
-  --feature-cache-dir "$RunRoot\feature-cache" `
+  --pairwise-test-manifest-sha256 "REVIEWED_PAIR_MANIFEST_SHA256" `
   --n-iter 50 `
   --cluster-n-iter 25 `
   --train-pairs-size 100000 `
@@ -1381,9 +1382,9 @@ Preflight gate:
       `pairwise_inputs_manifest.json` and the release-manifest digest.
 - [ ] All dataset files and fixed-pair CSVs are present, hashed, and validated.
 - [ ] No fixed pair occurs across train/validation/test splits.
-- [ ] Matrix and cache roots are local, fresh, writable, and have measured
-      free-space headroom.
-- [ ] Expected matrix/cache/output sizes are recorded.
+- [ ] The matrix root is local, fresh, writable, and has measured free-space
+      headroom.
+- [ ] Expected matrix/output sizes are recorded.
 - [ ] Rust is freshly built and its identity is recorded.
 - [ ] No output directory was created by preflight.
 
@@ -1441,10 +1442,8 @@ prediction result. Do not claim the dataset-subset smoke covers this boundary.
 
 ### 5.4 Full pairwise launch
 
-Use the exact reviewed B30-enabled preflight command, replace only
-`--preflight-only` with `--run-full`, and launch detached into the same
-still-absent output path. Until that release mode exists and is present in both
-commands, the full launch is prohibited.
+Use the exact reviewed preflight command, replace only `--preflight-only` with
+`--run-full`, and launch detached into the same still-absent output path.
 
 Before launch:
 
@@ -1520,10 +1519,26 @@ Close B12 before this stage with three explicit pairwise-stage commands:
    preserve booster bytes/provenance, update valid manifests/checksums, and
    reload the result.
 
-Record the implemented CLI names and exact expanded commands in the run record.
-They must not require a complete linker bundle, and the calibration command
-must have no route to test identities. There is no currently valid command to
-substitute silently for this B12 contract.
+The implemented commands do not require a complete linker bundle, and
+`calibrate-eps` has no test-manifest argument:
+
+```powershell
+uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-eps `
+  --pairwise-model "$Stages\pairwise\production_model_v1.3" `
+  --eps 0.55 0.60 0.65 0.70 `
+  --output-json "$Reports\eps\calibration.json"
+```
+
+If review selects a different EPS:
+
+```powershell
+uv run --no-sync python scripts/production/model/release_pairwise.py finalize-eps `
+  --source-bundle "$Stages\pairwise\production_model_v1.3" `
+  --expected-manifest-sha256 "REVIEWED_SOURCE_MANIFEST_SHA256" `
+  --expected-old-eps "REVIEWED_OLD_EPS" `
+  --new-eps "REVIEWED_NEW_EPS" `
+  --output-bundle "$Stages\pairwise-calibrated\production_model_v1.3"
+```
 
 ### Review and freeze
 
@@ -1548,11 +1563,10 @@ existing pairwise output:
 $PairwiseModel = "$Stages\pairwise\production_model_v1.3"
 ```
 
-If review selects a different EPS, use B12's exact reviewed atomic finalizer to
-write a fresh validated pairwise stage. If that command is not present in this
-runbook with its focused test, the branch is blocked. Do not edit
-`clusterer.json`, bundle manifests, or checksums in place. After that fresh
-stage reloads and its inventory validates, point all downstream commands at it:
+If review selects a different EPS, use the exact atomic finalizer above to
+write a fresh validated pairwise stage. Do not edit `clusterer.json`, bundle
+manifests, or checksums in place. After that fresh stage reloads and its
+inventory validates, point all downstream commands at it:
 
 ```powershell
 $PairwiseModel = "$Stages\pairwise-calibrated\production_model_v1.3"
@@ -1595,20 +1609,17 @@ area and record its hash. Historical metrics are not a quality baseline.
 After pairwise/EPS freeze:
 
 ```powershell
-uv run --no-sync python scripts/production/model/train_linker_and_finalize.py `
+uv run --no-sync python scripts/production/model/train_linker_and_finalize.py preflight `
   --source-bundle-root "$LinkerSourceBundle" `
   --target-json "$Inputs\targets\linker_seed_target.json" `
   --pairwise-model-path "$PairwiseModel" `
   --output-dir "$Stages\linker-preflight" `
   --n-jobs "REVIEWED_N_JOBS" `
-  --total-ram-bytes "REVIEWED_RAM_BYTES" `
-  --allow-metric-drift `
-  --preflight-only
+  --total-ram-bytes "REVIEWED_RAM_BYTES"
 ```
 
-The initial seed target may have empty metrics, so its preflight uses
-`--allow-metric-drift`. Preflight the later reviewed candidate target without
-that flag.
+The initial seed target may have empty metrics because `preflight` does not
+score or publish.
 
 Preflight gate:
 
@@ -1629,15 +1640,14 @@ if provided, its manifest must still exactly match every Arrow binding.
 ### 7.2 Bounded materialization smoke
 
 ```powershell
-uv run --no-sync python scripts/production/model/train_linker_and_finalize.py `
+uv run --no-sync python scripts/production/model/train_linker_and_finalize.py materialize `
   --source-bundle-root "$LinkerSourceBundle" `
   --target-json "$Inputs\targets\linker_seed_target.json" `
   --pairwise-model-path "$PairwiseModel" `
   --output-dir "$Stages\linker-materialize-smoke" `
   --n-jobs 4 `
   --total-ram-bytes "REVIEWED_SMOKE_RAM_BYTES" `
-  --limit-rows 1000 `
-  --materialize-only
+  --limit-rows 1000
 ```
 
 Smoke gate:
@@ -1666,15 +1676,13 @@ may only pass or abort. It is never a second selection opportunity.
 The command is:
 
 ```powershell
-uv run --no-sync python scripts/production/model/train_linker_and_finalize.py `
+uv run --no-sync python scripts/production/model/train_linker_and_finalize.py candidate `
   --source-bundle-root "$LinkerSourceBundle" `
   --target-json "$Inputs\targets\linker_seed_target.json" `
   --pairwise-model-path "$PairwiseModel" `
   --output-dir "$Stages\linker-candidate" `
   --n-jobs "REVIEWED_N_JOBS" `
-  --total-ram-bytes "REVIEWED_RAM_BYTES" `
-  --allow-metric-drift `
-  --run-full
+  --total-ram-bytes "REVIEWED_RAM_BYTES"
 ```
 
 Launch detached only after linker owner approval.
@@ -1689,9 +1697,9 @@ Required candidate outputs:
   complete file inventory and digests, run summary, runtime, and peak RSS; and
 - candidate-only status that cannot be mistaken for production.
 
-Current code writes the candidate target but intentionally discards the
-evaluated artifact in drift mode. Close B13 before relying on the preferred
-single-run promotion flow.
+The command retains the exact evaluated artifact bound to the emitted
+candidate target and writes deterministic query-level predictions plus their
+inventory. B20 remains open for the no-retraining lifecycle transition.
 
 ### 7.4 Human review
 
@@ -1734,7 +1742,7 @@ command is present and recorded, the preferred path is not executable; do not
 improvise artifact copying around bundle manifests.
 
 After the reviewed candidate target is copied, run a mandatory promotion
-preflight without `--allow-metric-drift`. B20's finalizer must accept only a
+preflight. B20's finalizer must accept only a
 valid candidate-status input plus the reviewed approval and must reject a
 premature production-status input. Use the exact final output and publish
 paths, both of which must still be absent:
@@ -1744,34 +1752,31 @@ $ReviewedCandidateTarget = "$Inputs\targets\linker_reviewed_candidate_target.jso
 $LinkerPromotionOutput = "$Stages\linker-promotion"
 $CompleteModel = "$Stages\complete-model\production_model_v1.3"
 
-uv run --no-sync python scripts/production/model/train_linker_and_finalize.py `
+uv run --no-sync python scripts/production/model/train_linker_and_finalize.py preflight `
   --source-bundle-root "$LinkerSourceBundle" `
   --target-json "$ReviewedCandidateTarget" `
   --pairwise-model-path "$PairwiseModel" `
   --output-dir "$LinkerPromotionOutput" `
   --publish-to "$CompleteModel" `
   --n-jobs "EXACT_MINT_N_JOBS" `
-  --total-ram-bytes "EXACT_MINT_RAM_BYTES" `
-  --preflight-only
+  --total-ram-bytes "EXACT_MINT_RAM_BYTES"
 ```
 
 This validates target metrics/schema/status, version/basename agreement,
 bindings, and destination freshness before expensive materialization.
 
-If the owner explicitly accepts the current two-run fallback, replace only
-`--preflight-only` in that exact reviewed command with `--run-full`. In
-expanded form, it is:
+If the owner explicitly accepts the current two-run fallback, use `publish`
+with the exact same arguments. In expanded form:
 
 ```powershell
-uv run --no-sync python scripts/production/model/train_linker_and_finalize.py `
+uv run --no-sync python scripts/production/model/train_linker_and_finalize.py publish `
   --source-bundle-root "$LinkerSourceBundle" `
   --target-json "$ReviewedCandidateTarget" `
   --pairwise-model-path "$PairwiseModel" `
   --output-dir "$LinkerPromotionOutput" `
   --publish-to "$CompleteModel" `
   --n-jobs "EXACT_MINT_N_JOBS" `
-  --total-ram-bytes "EXACT_MINT_RAM_BYTES" `
-  --run-full
+  --total-ram-bytes "EXACT_MINT_RAM_BYTES"
 ```
 
 The fallback must use the same dependency lock, inputs, machine class,
@@ -1842,6 +1847,31 @@ Both commands must verify exact identity/digest equality before scoring and
 atomically record the first-unblind event. The B30 output is the sole producer
 for pairwise release gates; per-dataset metrics generated by historical trainer
 splits are not a substitute.
+
+Each manifest dataset has a `name` and one exact `files` mapping. Pair
+manifests require `signatures`, `papers`, `specter_embeddings`, and `pairs`;
+cluster manifests replace `pairs` with `clusters` and `blocks`. Every role is
+`{"path": "...", "sha256": "..."}`, with relative paths resolved from the manifest
+directory.
+
+```powershell
+uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-pairs `
+  --pairwise-model "$PairwiseModel" `
+  --manifest "$Inputs\manifests\pairwise_test.json" `
+  --expected-manifest-sha256 "REVIEWED_PAIR_MANIFEST_SHA256" `
+  --unblind-record "$Reports\pairwise\first_unblind.json" `
+  --output-json "$Reports\pairwise\test.json" `
+  --n-jobs "REVIEWED_N_JOBS" `
+  --total-ram-bytes "REVIEWED_RAM_BYTES"
+
+uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-clusters `
+  --pairwise-model "$PairwiseModel" `
+  --manifest "$Inputs\manifests\cluster_test.json" `
+  --expected-manifest-sha256 "REVIEWED_CLUSTER_MANIFEST_SHA256" `
+  --unblind-record "$Reports\eps\first_unblind.json" `
+  --output-json "$Reports\eps\test.json" `
+  --n-jobs "REVIEWED_N_JOBS"
+```
 
 - [ ] Pairwise aggregate AUROC drop is no more than `0.001` on the exact frozen
       comparable pairs, using averaged main/nameless positive probabilities.
@@ -1984,7 +2014,9 @@ uv run --no-sync python scripts/verification/verify_production_model_distributio
   --source-root .
 ```
 
-- [ ] Required tuple and ORCID bytes are present.
+- [ ] Every `pyproject.toml` package-data declaration resolves to source bytes
+      and is present in both archives; after Stage 3 this includes the reviewed
+      ORCID JSON/manifest pair.
 - [ ] B24 is closed: altering or removing tuple data **or its metadata** makes
       verification fail.
 - [ ] Model/default files exactly match the packaging decision.

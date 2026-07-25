@@ -19,8 +19,9 @@ and artifact requirements are in
   an explicit complete bundle.
 - Canonical tuple, name-count, and ORCID schemas bind their content identities,
   but full warehouse source provenance is not yet independently bound (B27/B28).
-  The canonical ORCID data and manifest have not yet been generated or
-  packaged.
+  The canonical ORCID data and manifest have not yet been generated. The
+  code-only candidate packages neither; Stage 3 promotes and declares both
+  together.
 - No canonical v1.3 production bundle or implicit default is packaged. The
   historical v1.21 bundle remains available for source/parity work but is not
   accepted by the canonical loader.
@@ -51,10 +52,11 @@ table is the source of truth for status and acceptance evidence.
   validation-only EPS calibration/finalization, and separately invocable
   one-shot pairwise and clustering test evaluators.
 - **Linker lifecycle (B13-B14, B20):** keep target inputs outside fresh output
-  directories; retain the exact evaluated candidate and deterministic
-  query-level predictions; implement one reviewed no-retraining
-  candidate-to-production transition that preserves learned bytes and candidate
-  ancestry while making target/artifact lifecycle digests agree.
+  directories. Candidate runs now retain the exact evaluated artifact and
+  deterministic query-level predictions; the remaining implementation is one
+  reviewed no-retraining candidate-to-production transition that preserves
+  learned bytes and candidate ancestry while making target/artifact lifecycle
+  digests agree.
 
 Every expensive or warehouse operation still requires a tiny fixture,
 reviewed exact command, explicit owner approval, detached execution, durable

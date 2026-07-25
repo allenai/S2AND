@@ -9,7 +9,7 @@ Centralized reference for supported S2AND environment variables.
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `S2AND_BACKEND` | `python`, `rust` | `python` | Backend used when a caller builds a runtime context without an explicit backend. Invalid values fail immediately. Public APIs have fixed routes: classic `ANDData` construction and prediction use Python, while Arrow-training and `*_from_arrow_paths` APIs use Rust. Rust requires the exact version pinned by the project metadata; there is no silent fallback. |
-| `S2AND_MEMORY_TELEMETRY_JSONL` | `<path>` | unset | Append structured memory-telemetry JSONL when a caller has not configured a sink programmatically. Parent directories are created. Prefer a fresh run-specific path; records append under an in-process lock. |
+| `S2AND_MEMORY_TELEMETRY_JSONL` | `<path>` | unset | Sole library authority for appending structured memory-telemetry JSONL. Parent directories are created. Prefer a fresh run-specific path; records append under an in-process lock. |
 
 ---
 

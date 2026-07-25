@@ -88,7 +88,8 @@ installed-distribution gates are implemented and approved.
 
 New production releases use immutable native bundle directories. The component
 entry points are `scripts/production/model/train_pairwise.py` and
-`scripts/production/model/train_linker_and_finalize.py`; stage, validate, and
+`scripts/production/model/train_linker_and_finalize.py`, with release-only
+calibration/evaluation in `scripts/production/model/release_pairwise.py`; stage, validate, and
 rename the complete bundle rather than mutating a live directory. They are not
 by themselves the full v1.3 protocol: EPS selection, linker candidate
 finalization, one-shot evaluation, release attestation, and exact-byte
@@ -112,7 +113,7 @@ it as the v1.3 source bundle without the B07-B10/B19 regeneration, assignment,
 and inventory work.
 
 Pass the downloaded source bundle explicitly with `--source-bundle-root` to
-`scripts/production/model/linker_train_calibrate_eval.py`; the release command
+`scripts/production/model/train_linker_and_finalize.py`; the release command
 has no implicit replay-bundle default.
 
 ## Configuring `s2and/data/path_config.json`

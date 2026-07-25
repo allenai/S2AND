@@ -25,11 +25,11 @@ v1.3 release blockers are closed. Release operators must follow
 | Script | What it does |
 |---|---|
 | `production/model/train_pairwise.py` | Train the pairwise half of a native `production_model_vX.Y/` bundle |
-| `production/model/train_linker_and_finalize.py` | Component wrapper for promoted-linker training and bundle finalization; the v1.3 candidate lifecycle is still blocked by B13/B20 |
-| `production/model/linker_train_calibrate_eval.py` | Low-level promoted linker replay implementation used by the finalization wrapper |
+| `production/model/train_linker_and_finalize.py` | Canonical promoted-linker preflight, bounded materialization, candidate evaluation, and bundle publication CLI |
+| `production/model/release_pairwise.py` | Validation-only EPS calibration/finalization and sealed Stage-8 pair/cluster evaluation |
 | `production/generate_canonical_name_tuples.py` | Deterministically generate canonical tuple data and strict adjacent metadata from the reviewed source artifact |
-| `production/counts/generate_name_counts.py` | Guarded fixture/warehouse producer for an immutable manifest-backed `name_counts_index/`; invoke as a module until B03 is closed |
-| `production/counts/generate_orcid_name_prefix_counts.py` | Guarded fixture/warehouse producer for canonical ORCID prefix-count JSON plus its single provenance manifest; invoke as a module until B03 is closed |
+| `production/counts/generate_name_counts.py` | Guarded fixture/warehouse producer for an immutable manifest-backed `name_counts_index/`; invoke with `python -m` |
+| `production/counts/generate_orcid_name_prefix_counts.py` | Guarded fixture/warehouse producer for canonical ORCID prefix-count JSON plus its single provenance manifest; invoke with `python -m` |
 
 ### Tutorials
 
@@ -57,7 +57,7 @@ v1.3 release blockers are closed. Release operators must follow
 | `eval_prod_models.py` | Evaluate an explicitly supplied SPECTER2 bundle on full, inventors_s2and, or mini datasets. Non-training evaluation derives `data_random_seed` from the bundle, rejects `--seed`, and auto-uses Arrow when complete artifacts exist; SPECTER1 is an explicit `--train` research comparison only. |
 | `eps_sweep/sweep_eps_on_linking_gold.py` | Research EPS sweep over linking gold; it is not the validation-only pairwise-stage selector/finalizer required by release blocker B12 |
 | `verification/validate_local_arrow_release.py` | Non-network local Arrow release-root smoke; checks manifests, checksum fields, required files, batch-index paths, replay bundle manifests, and `name_counts_index` targets without scanning large Arrow tables |
-| `verification/verify_production_model_distributions.py` | Require the ORCID runtime pair and selected default-model inventory in built wheel/sdist archives; currently fails until the canonical ORCID manifest exists, and B24 must add tuple data/metadata enforcement |
+| `verification/verify_production_model_distributions.py` | Require every declared package-data source in built wheel/sdist archives plus the selected default-model inventory; Stage 3 adds the reviewed ORCID pair atomically |
 | `verification/smoke_installed_incremental_arrow.py` | Installed-wheel synthetic canonical Arrow/linker smoke; release blocker B16 additionally requires the real v1.3 bundle |
 | `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
 | `verification/compare_existing_arrow_anddata_feature_parity.py` | Compare Rust feature matrices from existing raw `ANDData` JSON/pickle inputs against existing Arrow release bundles |
@@ -101,6 +101,7 @@ The following former archive files remain intentionally deleted:
 
 ## Notes
 
-**`production/model/linker_train_calibrate_eval.py`**: Use
-`--preflight-only` for a no-write check, selectors plus `--materialize-only`
-for a bounded feature smoke, and `--run-full` only for an approved full run.
+**`production/model/train_linker_and_finalize.py`**: Use `preflight` for a
+no-write check, `materialize --limit-rows N` for a bounded feature smoke,
+`candidate` for the one-shot diagnostic evaluation, and `publish` only against
+the frozen accepted target.

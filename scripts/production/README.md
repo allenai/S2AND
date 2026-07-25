@@ -56,15 +56,16 @@ separate deterministic pre-sampled smoke root; the pair-size flags alone do
 not bound that work. Use `--preflight-only` for a no-write readiness check.
 
 Passing `--datasets ...` means smoke mode: it may exercise training, but it
-never creates a model bundle. A production run uses `--run-full` with the
-complete fixed dataset set; `--datasets` and `--run-full` are mutually
-exclusive. This smoke stops before bundle publication and Rust fixture reload,
-so it does not satisfy B21.
+never creates a model bundle. A production run uses `--run-full`, the complete
+fixed dataset set, and the reviewed `--pairwise-test-manifest-sha256`; the
+trainer records that digest but never opens the manifest or featurizes/scores
+test pairs. Full release training does not use `--feature-cache-dir`.
+`--datasets` and `--run-full` are mutually exclusive. This smoke stops before
+bundle publication and Rust fixture reload, so it does not satisfy B21.
 
-The current full-run report also lacks the complete selection evidence and
-sealed test-identity record required by B23, and the trainer is not the
-release-test evaluator required by B30. Do not start the full pairwise job
-until those blockers and the overlap preflight in B11 are closed.
+The current full-run report still lacks the complete selection evidence
+required by B23. The sealed test manifest is opened only by
+`release_pairwise.py evaluate-pairs` in Stage 8.
 
 ## 2. Select and freeze EPS
 
@@ -72,9 +73,23 @@ Do not train the v1.3 linker directly from the raw pairwise stage. Select EPS
 on validation identities only, persist every trial and weighting definition,
 then freeze the reviewed pairwise stage. If the trainer-selected EPS is
 accepted, designate that exact stage; if review selects a different EPS, use
-the fresh-output pairwise-stage finalizer required by blocker B12. That
-finalizer and the separate one-shot cluster-test evaluator do not yet exist.
-Stage 6 of the release runbook is authoritative.
+`release_pairwise.py finalize-eps`. Validation calibration is `calibrate-eps`;
+the sealed Stage-8 routes are `evaluate-pairs` and `evaluate-clusters`. Stage 6
+of the release runbook is authoritative.
+
+```powershell
+uv run python scripts/production/model/release_pairwise.py calibrate-eps `
+  --pairwise-model "$RunRoot/pairwise_stage/production_model_vX.Y" `
+  --eps 0.55 0.60 0.65 0.70 `
+  --output-json "$RunRoot/reports/eps/calibration.json"
+
+uv run python scripts/production/model/release_pairwise.py finalize-eps `
+  --source-bundle "$RunRoot/pairwise_stage/production_model_vX.Y" `
+  --expected-manifest-sha256 REVIEWED_SOURCE_MANIFEST_SHA256 `
+  --expected-old-eps REVIEWED_OLD_EPS `
+  --new-eps REVIEWED_NEW_EPS `
+  --output-bundle "$RunRoot/pairwise_calibrated/production_model_vX.Y"
+```
 
 ## 3. Train Linker And Finalize
 
@@ -82,13 +97,12 @@ Stage 6 of the release runbook is authoritative.
 $PairwiseModel = "$RunRoot/pairwise_calibrated/production_model_vX.Y"
 # If validation accepted the trainer-selected EPS, point this at pairwise_stage instead.
 
-uv run python scripts/production/model/train_linker_and_finalize.py `
+uv run python scripts/production/model/train_linker_and_finalize.py publish `
   --source-bundle-root path/to/official_linker_source_bundle `
   --target-json "$RunRoot/release_inputs/incremental_linker_training_target.json" `
   --pairwise-model-path "$PairwiseModel" `
   --output-dir "$RunRoot/production_linker_vX.Y" `
-  --publish-to "$RunRoot/release_candidate/production_model_vX.Y" `
-  --run-full
+  --publish-to "$RunRoot/release_candidate/production_model_vX.Y"
 ```
 
 `--source-bundle-root` is the official linker source-bundle root, not a generic
@@ -126,11 +140,11 @@ production_model_vX.Y/
 
 Linker training has one feature path: it materializes a fresh Arrow/Rust
 feature bundle under the requested output directory, then trains from that
-bundle. The feature-bundle destination must not already exist. Use
-`--materialize-only --limit-rows N`, optionally with `--tables` or
-`--datasets`, for a bounded smoke run before approving an unbounded
-`--run-full` job.
-Use `--preflight-only` to validate the currently implemented target
+bundle. The feature-bundle destination must not already exist. Use the
+`materialize` command with `--limit-rows N`, optionally with `--tables` or
+`--datasets`, for a bounded smoke run before approving `candidate` or
+`publish`.
+Use `preflight` to validate the currently implemented target
 feature/parameter/metric fields, pairwise/name-count bindings, source tables,
 and fresh output paths without creating the output directory. It does not yet
 enforce B20's target lifecycle fields. Selector-based runs are
@@ -140,15 +154,11 @@ Production policy is fixed in code; the script has no hyperparameter-search or
 policy-tuning CLI. Current preflight is not yet the complete B08/B10/B19
 source-path and byte-inventory gate.
 
-When a new pairwise bundle intentionally changes linker metrics,
-`--allow-metric-drift` is diagnostic only. It writes
-`candidate_target.json`, but the current command discards the evaluated learned
-artifact. Do **not** treat that target followed by a fresh full retrain as an
-approved promotion: B13 requires retaining the exact candidate and
-deterministic query-level predictions, while B20 requires an atomic
-candidate-to-production lifecycle transition that preserves learned bytes and
-candidate ancestry. Diagnostic runs cannot publish artifacts or production
-bundles.
+The `candidate` command writes `candidate_target.json`, retains the exact
+evaluated learned artifact, and writes deterministic query-level predictions
+with a complete digest inventory; it cannot publish. B20 still requires an
+atomic no-retraining candidate-to-production lifecycle transition that
+preserves learned bytes and candidate ancestry.
 
 Only after the runbook's lifecycle, one-shot evaluation, and release gates have
 passed do users load the complete model with:
@@ -201,9 +211,8 @@ The `counts/` scripts are guarded producers for production count artifacts:
   `max_names_per_orcid` guard is checked before quadratic pair expansion.
   Install its JSON serializer with `uv sync --extra orcid-counts`.
 
-Both scripts are import-safe without the internal warehouse package. Start
-with module execution because direct file execution currently lacks a repo-root
-bootstrap (B03):
+Both scripts are import-safe without the internal warehouse package. Module
+execution is the supported interface:
 
 ```powershell
 uv run --no-sync python -m scripts.production.counts.generate_name_counts --help
@@ -225,9 +234,10 @@ The snapshot ID is currently a caller-supplied label, not independent proof of
 warehouse snapshot identity, and the ORCID `selected_rows_sha256` is computed
 after rows reach the client. B27 and B28 must bind both full producers to
 verifiable warehouse snapshot/query-result evidence before release use.
-Distribution verification already requires both canonical ORCID filenames, but
-this checkout still has the legacy JSON and no canonical manifest; it is
-intentionally not distribution-ready until Stage 3 promotes the reviewed pair.
+The code-only checkout declares neither ORCID file as package data. Stage 3
+promotes the reviewed JSON and manifest and adds both declarations in one
+commit; distribution verification derives its required inventory from those
+declarations.
 
 Full warehouse generation and model training are deliberately not part of the
 local verification suite.

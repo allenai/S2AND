@@ -49,11 +49,12 @@ normalization while reading raw name columns.
 
 ## ORCID policy
 
-The default merge-prior mapping is loaded lazily from the packaged
+After Stage-3 artifact promotion, the default merge-prior mapping is loaded lazily from the packaged
 `first_k_letter_counts_from_orcid.json` and its required adjacent
 `.manifest.json`, then resolved at subblocking entry. The loader validates the
 complete canonical artifact and data digest; a missing or tampered file fails
-closed before partitioning. These learned prefix-pair counts are considered
+closed before partitioning. The code-only candidate intentionally contains
+neither file. These learned prefix-pair counts are considered
 only after exact-name and `same_prefix_tokens` merge candidates, so they do not
 override stronger compatibility evidence. A caller may supply an explicit
 mapping for a controlled experiment.

@@ -50,10 +50,11 @@ replay scripts should not depend on machine-local analysis artifacts.
 Promoted-linker replay always materializes a fresh Arrow/Rust feature bundle
 from the source bundle, target JSON, and pairwise model. The destination must be
 new, so a replay cannot silently consume stale feature tables. A bounded
-`--materialize-only` smoke is necessary, but it does not authorize a full v1.3
-replay: B13/B20 still require retention and reviewed no-retraining promotion of
-the exact evaluated candidate. Follow [1_3_release_todo.md](1_3_release_todo.md)
-before any full command, and record all source identities, runtime, peak RSS,
-predictions, and bundle hashes in the durable release record.
+`materialize --limit-rows N` smoke is necessary, but it does not authorize a full v1.3
+replay. Candidate runs retain the exact artifact and deterministic prediction
+inventory; B20 still requires reviewed no-retraining promotion. Follow
+[1_3_release_todo.md](1_3_release_todo.md) before any full command, and record
+all source identities, runtime, peak RSS, predictions, and bundle hashes in the
+durable release record.
 
 See [production_inference.md](production_inference.md) for the current inference contract.

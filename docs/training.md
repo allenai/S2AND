@@ -178,9 +178,10 @@ The promoted incremental-linker artifact uses the strict
 runtime gate, retrieval top-k, and canonical digests binding the exact pairwise
 bundle and complete training target JSON. Final bundle assembly and production
 loading reject either mismatch, including a target modified after manifest
-checksums are refreshed. The current command still lacks the reviewed
-candidate-to-production lifecycle transition required by blockers B13 and B20,
-so this format validation is necessary but not sufficient for release.
+checksums are refreshed. Candidate runs retain their exact learned artifact and
+deterministic query-level prediction inventory. The current command still lacks
+the reviewed B20 candidate-to-production lifecycle transition, so this format
+validation is necessary but not sufficient for release.
 
 After a bundle passes those gates, reload it explicitly:
 
@@ -200,6 +201,7 @@ pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow_paths(
 ## Reference scripts
 
 - `scripts/production/model/train_pairwise.py`: pairwise production-bundle stage
+- `scripts/production/model/release_pairwise.py`: EPS calibration/finalization and sealed evaluation
 - `scripts/production/model/train_linker_and_finalize.py`: complete native-bundle finalization
 - `scripts/tutorial_for_predicting_with_the_prod_model.py`: released-model inference example
 - `scripts/README.md`: script catalog

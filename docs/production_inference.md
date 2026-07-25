@@ -65,13 +65,12 @@ The loader validates the complete bundle, loads the linker once, and retains
 that immutable native artifact on the clusterer. Deep copies share it; pickle
 round trips revalidate and reload it from the recorded bundle path.
 
-`clusterer.json` is the authority for clustering `eps` except for one published
-compatibility policy: after all current-schema and checksum validation passes,
-the exact historical v1.21 pairwise artifact identity resolves its stored
-`0.6064583975886222` value to the effective production value `0.65`. The match
-uses the pairwise version plus both verified booster hashes, never a bundle
-path or bundle-version name. Every other bundle, including a newly tuned model
-that reuses old boosters, keeps its configured value.
+`clusterer.json` is inference-only. It contains the pairwise feature contracts,
+runtime controls, and only the clustering algorithm fields consumed by
+prediction (`eps` and `linkage`). Training/search controls such as
+`cluster_n_iter` live in
+`reproducibility/pairwise_training_config.json`; they are not duplicated in the
+runtime schema. Canonical-v2 has no v1.21 compatibility branch.
 
 ### Staged publication
 
@@ -98,36 +97,33 @@ uv run python scripts\production\model\train_pairwise.py `
   --data-dir path\to\canonical_benchmark_data `
   --matrix-work-dir "$RunRoot\matrix-work" `
   --output-dir "$RunRoot\pairwise_stage\production_model_vX.Y" `
+  --pairwise-test-manifest-sha256 REVIEWED_SHA256 `
   --run-full
 
 $PairwiseModel = "$RunRoot\pairwise_calibrated\production_model_vX.Y"
 # If validation accepted the trainer-selected EPS, use pairwise_stage instead.
 
-uv run python scripts\production\model\train_linker_and_finalize.py `
+uv run python scripts\production\model\train_linker_and_finalize.py publish `
   --pairwise-model-path "$PairwiseModel" `
   --source-bundle-root path\to\official_linker_source_bundle `
   --target-json "$RunRoot\release_inputs\incremental_linker_training_target.json" `
   --output-dir "$RunRoot\joint_safe_link_promoted_vX.Y_full" `
-  --publish-to "$RunRoot\release_candidate\production_model_vX.Y" `
-  --run-full
+  --publish-to "$RunRoot\release_candidate\production_model_vX.Y"
 ```
 
 This is not a complete release sequence. Between pairwise training and linker
-training, v1.3 requires validation-only EPS selection. The original pairwise
-stage may be designated when its selected EPS is accepted; a changed EPS
-requires B12's atomic fresh-output finalizer. The current linker
-candidate-to-production lifecycle also remains blocked: a drift run writes a
-candidate target but does not retain the evaluated learned artifact, and a
-second full run is not presumed equivalent. Do not use the two commands above
-to bypass blockers B12, B13, B20, B25, or the one-shot evaluation gates.
+training, run `release_pairwise.py calibrate-eps`; if review changes EPS, use
+its atomic `finalize-eps` command. Stage-8 pair and cluster identities are
+opened only by `evaluate-pairs` and `evaluate-clusters`. Candidate linker runs
+retain their evaluated artifact and deterministic query-level prediction
+inventory, but B20's no-retraining lifecycle transition remains open.
 
-Run the existing small materialization smoke before any approved full command.
-The full retrain is a large job and requires explicit owner approval, captured
-logs, and quality/runtime/RSS evidence. `--allow-metric-drift` is
-diagnostic-only and cannot publish a linker or production bundle.
+Run `train_linker_and_finalize.py materialize --limit-rows N` before any
+approved full command. The full candidate or publish run is a large job and
+requires explicit owner approval, captured logs, and quality/runtime/RSS
+evidence.
 
-Before materialization, run the linker command with `--preflight-only` instead
-of `--run-full`. It validates the currently implemented target
+Before materialization, run the linker `preflight` command. It validates the currently implemented target
 feature/parameter/metric fields, source-table selectors, Arrow generations, and
 pairwise/name-count binding without creating the output directory; it does not
 yet enforce B20's target lifecycle fields. Pairwise training likewise requires
@@ -137,9 +133,9 @@ input, and requires an explicit local matrix work directory. Replace
 `--datasets` selects a pairwise smoke run automatically; smoke runs never
 publish a bundle.
 Those checks are component-level only: B08/B10/B19 still require complete
-linker source-path and byte-inventory validation, while B11/B21-B23/B30 require
-earlier pair overlap checks, bounded fixed-pair inputs, publication reload, full
-selection evidence, and separate test evaluation. See the
+linker source-path and byte-inventory validation, while B11/B21-B23 still require
+earlier pair overlap checks, bounded fixed-pair inputs, publication reload, and
+full selection evidence. See the
 [production command reference](../scripts/production/README.md) for the current
 limitations.
 

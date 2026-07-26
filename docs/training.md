@@ -6,7 +6,7 @@ main steps for training, evaluating, and publishing a model.
 The examples are research/API examples and intentionally make a test split
 available for immediate inspection. They are not the v1.3 release protocol.
 Release training must keep pairwise and clustering test identities sealed until
-the one-shot Stage 8 evaluators, and must freeze linker choices before its
+the one-shot Stage 6 evaluators, and must freeze linker choices before its
 one-shot test reveal. Follow [1_3_release_todo.md](1_3_release_todo.md), not the
 example order below, for production work.
 

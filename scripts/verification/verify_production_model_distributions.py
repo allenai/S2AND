@@ -3,8 +3,8 @@
 Two properties are checked, and they are deliberately separate:
 
 1. **Inventory** — every file declared in ``[tool.setuptools.package-data]``, plus
-   any declared default production bundle, is present in both the wheel and the
-   sdist, and no undeclared ``production_model_v*`` asset has leaked in.
+   any phase-permitted default production bundle, is present in both the wheel
+   and the sdist, and no undeclared ``production_model_v*`` asset has leaked in.
    Deriving the baseline from ``pyproject.toml`` keeps this check from drifting
    away from what setuptools actually ships.
 
@@ -15,11 +15,12 @@ Two properties are checked, and they are deliberately separate:
 Inventory derived purely from ``pyproject.toml`` cannot notice a *removed
 declaration*, because the expectation disappears along with the requirement.
 That matters here because the canonical ORCID artifacts are intentionally
-undeclared during the code-only phase and are declared in one Stage 3 promotion
+undeclared during the code-only phase and are declared in one Stage 1 promotion
 commit. ``--phase`` therefore names the release phase whose runtime-artifact
 contract applies, and each phase asserts both required and forbidden paths. It
 is required rather than defaulted: a permissive default is exactly the mistake
-this guard exists to catch.
+this guard exists to catch. The release-candidate phase also forbids packaged
+default-model declarations and ``production_model_v*`` directories.
 """
 
 from __future__ import annotations
@@ -47,11 +48,15 @@ CANONICAL_ORCID_PATHS = frozenset(
         "s2and/data/first_k_letter_counts_from_orcid.manifest.json",
     }
 )
+DEFAULT_PRODUCTION_MODEL_PATH = "s2and/data/default_production_model.json"
 
 # phase -> (paths that must be declared and shipped, paths that must not be)
 PHASE_CONTRACTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "code_only": (CANONICAL_TUPLE_PATHS, CANONICAL_ORCID_PATHS),
-    "release_candidate": (CANONICAL_TUPLE_PATHS | CANONICAL_ORCID_PATHS, frozenset()),
+    "release_candidate": (
+        CANONICAL_TUPLE_PATHS | CANONICAL_ORCID_PATHS,
+        frozenset({DEFAULT_PRODUCTION_MODEL_PATH}),
+    ),
 }
 
 
@@ -105,7 +110,8 @@ def _apply_phase_contract(expected: set[str], *, phase: str, source_root: Path) 
 
 def _load_expected_paths(source_root: Path, *, phase: str) -> set[str]:
     expected = _declared_package_data_paths(source_root)
-    declaration_path = source_root / "s2and" / "data" / "default_production_model.json"
+    _apply_phase_contract(expected, phase=phase, source_root=source_root)
+    declaration_path = source_root / DEFAULT_PRODUCTION_MODEL_PATH
     if declaration_path.is_file():
         declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
         bundle_dir_name = str(declaration["bundle_dir"])
@@ -116,10 +122,9 @@ def _load_expected_paths(source_root: Path, *, phase: str) -> set[str]:
         if not default_dir.is_dir():
             raise FileNotFoundError(f"Declared default production bundle is missing: {default_dir}")
         expected |= {
-            "s2and/data/default_production_model.json",
+            DEFAULT_PRODUCTION_MODEL_PATH,
             *(path.relative_to(source_root).as_posix() for path in sorted(default_dir.rglob("*")) if path.is_file()),
         }
-    _apply_phase_contract(expected, phase=phase, source_root=source_root)
     return expected
 
 

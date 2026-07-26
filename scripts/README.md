@@ -26,7 +26,7 @@ v1.3 release blockers are closed. Release operators must follow
 |---|---|
 | `production/model/train_pairwise.py` | Train the pairwise half of a native `production_model_vX.Y/` bundle |
 | `production/model/train_linker_and_finalize.py` | Canonical promoted-linker preflight, bounded materialization, candidate evaluation, and bundle publication CLI |
-| `production/model/release_pairwise.py` | Validation-only EPS calibration/finalization and sealed Stage-8 pair/cluster evaluation |
+| `production/model/release_pairwise.py` | Validation-only EPS calibration/finalization and sealed Stage 6 pair/cluster evaluation |
 | `production/generate_canonical_name_tuples.py` | Deterministically generate canonical tuple data and strict adjacent metadata from the reviewed source artifact |
 | `production/counts/generate_name_counts.py` | Guarded fixture/warehouse producer for an immutable manifest-backed `name_counts_index/`; invoke with `python -m` |
 | `production/counts/generate_orcid_name_prefix_counts.py` | Guarded fixture/warehouse producer for canonical ORCID prefix-count JSON plus its single provenance manifest; invoke with `python -m` |

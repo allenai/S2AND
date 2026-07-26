@@ -62,12 +62,14 @@ DEFAULT_N_ITER = 50
 DEFAULT_N_JOBS = 25
 DEFAULT_CHUNK_SIZE = 100
 DEFAULT_RANDOM_SEED = 1111
+TRAINING_PLAN_SCHEMA = "s2and_pairwise_training_plan_v1"
 
 
 @dataclass(frozen=True)
 class DatasetInputPlan:
     """Resolved immutable input files for one production training dataset."""
 
+    split_mode: str
     files: Mapping[str, Path]
     sha256: Mapping[str, str]
 
@@ -83,6 +85,8 @@ class PairwisePreflightPlan:
     matrix_work_dir: Path
     matrix_work_free_bytes: int
     total_ram_bytes: int | None
+    source_manifest_sha256: str | None
+    sealed_test_manifests: Mapping[str, Any]
 
 
 def _sha256_file(path: str | os.PathLike[str]) -> str:
@@ -178,7 +182,118 @@ def _resolve_dataset_inputs(
         files["clusters"] = _resolve_dataset_file(
             data_dir, dataset_name, f"{dataset_name}_clusters.json", "clusters.json"
         )
-    return DatasetInputPlan(files=files, sha256=_hash_source_files(files))
+    return DatasetInputPlan(
+        split_mode="fixed_pairs" if "train_pairs" in files else "random_blocks",
+        files=files,
+        sha256=_hash_source_files(files),
+    )
+
+
+def _sha256_digest(value: Any, *, label: str) -> str:
+    """Return one lowercase SHA-256 digest."""
+
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise SystemExit(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _verified_training_plan(
+    path: Path,
+    expected_sha256: str,
+) -> tuple[dict[str, DatasetInputPlan], str, dict[str, Any]]:
+    """Load one digest-bound plan whose sealed test bindings contain no paths."""
+
+    expected_sha256 = _sha256_digest(expected_sha256, label="--expected-training-plan-sha256")
+    observed_sha256 = _sha256_file(path)
+    if observed_sha256 != expected_sha256:
+        raise SystemExit(f"Training-plan SHA-256 mismatch: expected={expected_sha256} observed={observed_sha256}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    expected_keys = {"schema_version", "source_manifest_sha256", "datasets", "sealed_test_manifests"}
+    if not isinstance(payload, Mapping) or set(payload) != expected_keys:
+        raise SystemExit(f"Training plan must contain exactly {sorted(expected_keys)}")
+    if payload["schema_version"] != TRAINING_PLAN_SCHEMA:
+        raise SystemExit(f"Training plan schema_version must be {TRAINING_PLAN_SCHEMA!r}")
+    source_manifest_sha256 = _sha256_digest(
+        payload["source_manifest_sha256"],
+        label="Training plan source_manifest_sha256",
+    )
+
+    sealed = payload["sealed_test_manifests"]
+    if not isinstance(sealed, Mapping) or set(sealed) != {"pairwise", "cluster"}:
+        raise SystemExit("Training plan sealed_test_manifests must contain exactly pairwise and cluster")
+    normalized_sealed: dict[str, Any] = {}
+    for kind in ("pairwise", "cluster"):
+        binding = sealed[kind]
+        if not isinstance(binding, Mapping) or set(binding) != {"manifest_sha256", "members"}:
+            raise SystemExit(f"Training plan sealed {kind} binding must contain exactly manifest_sha256 and members")
+        members = binding["members"]
+        if not isinstance(members, Mapping) or not members:
+            raise SystemExit(f"Training plan sealed {kind} members must be a nonempty object")
+        normalized_members: dict[str, dict[str, str]] = {}
+        for dataset_name, roles in members.items():
+            if not isinstance(dataset_name, str) or not dataset_name or not isinstance(roles, Mapping) or not roles:
+                raise SystemExit(f"Training plan sealed {kind} members must map dataset names to file digests")
+            normalized_members[dataset_name] = {
+                str(role): _sha256_digest(digest, label=f"Training plan sealed {kind} {dataset_name}:{role}")
+                for role, digest in roles.items()
+            }
+        normalized_sealed[kind] = {
+            "manifest_sha256": _sha256_digest(
+                binding["manifest_sha256"],
+                label=f"Training plan sealed {kind} manifest_sha256",
+            ),
+            "members": normalized_members,
+        }
+
+    raw_datasets = payload["datasets"]
+    if not isinstance(raw_datasets, list):
+        raise SystemExit("Training plan datasets must be a list")
+    by_name: dict[str, DatasetInputPlan] = {}
+    common_roles = {"papers", "signatures", "specter_embeddings"}
+    for spec in raw_datasets:
+        if not isinstance(spec, Mapping) or set(spec) != {"name", "split_mode", "files"}:
+            raise SystemExit("Each training-plan dataset must contain exactly name, split_mode, files")
+        name = spec["name"]
+        if not isinstance(name, str) or not name or name in by_name:
+            raise SystemExit(f"Training plan contains an invalid or duplicate dataset name: {name!r}")
+        expected_mode = "fixed_pairs" if name == "augmented" else "random_blocks"
+        if spec["split_mode"] != expected_mode:
+            raise SystemExit(f"Training plan dataset {name!r} must use split_mode={expected_mode!r}")
+        roles = common_roles | ({"train_pairs", "val_pairs"} if expected_mode == "fixed_pairs" else {"clusters"})
+        raw_files = spec["files"]
+        if not isinstance(raw_files, Mapping) or set(raw_files) != roles:
+            raise SystemExit(f"Training plan dataset {name!r} must declare exact file roles {sorted(roles)}")
+        files: dict[str, Path] = {}
+        digests: dict[str, str] = {}
+        for role in sorted(roles):
+            file_spec = raw_files[role]
+            if not isinstance(file_spec, Mapping) or set(file_spec) != {"path", "sha256"}:
+                raise SystemExit(f"Training plan file {name}:{role} must contain exactly path and sha256")
+            raw_path = file_spec["path"]
+            if not isinstance(raw_path, str) or not raw_path or not Path(raw_path).is_absolute():
+                raise SystemExit(f"Training plan file {name}:{role} path must be absolute")
+            file_path = Path(raw_path).resolve()
+            digest = _sha256_digest(file_spec["sha256"], label=f"Training plan file {name}:{role} sha256")
+            observed = _sha256_file(file_path)
+            if observed != digest:
+                raise SystemExit(
+                    f"Training plan file {name}:{role} SHA-256 mismatch: expected={digest} observed={observed}"
+                )
+            files[role] = file_path
+            digests[role] = digest
+        by_name[name] = DatasetInputPlan(split_mode=expected_mode, files=files, sha256=digests)
+
+    expected_names = set((*DEFAULT_SOURCE_DATASET_NAMES, "augmented"))
+    if set(by_name) != expected_names:
+        raise SystemExit(
+            "Training plan dataset names disagree with the production set: "
+            f"missing={sorted(expected_names - set(by_name))} extra={sorted(set(by_name) - expected_names)}"
+        )
+    return by_name, source_manifest_sha256, normalized_sealed
 
 
 def _positive_int_arg(args: argparse.Namespace, name: str) -> int:
@@ -254,9 +369,6 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     if all(name in PAIRWISE_ONLY_DATASETS for name in dataset_names):
         raise SystemExit("At least one clustered dataset is required to fit the clusterer")
 
-    data_dir = Path(args.data_dir).resolve()
-    if not data_dir.is_dir():
-        raise SystemExit(f"--data-dir must name an existing directory: {data_dir}")
     output_dir = Path(args.output_dir).resolve()
     if output_dir.exists():
         raise SystemExit(f"--output-dir must name a new directory: {output_dir}")
@@ -290,26 +402,33 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     if requested_total_ram is not None and int(requested_total_ram) <= 0:
         raise SystemExit(f"--total-ram-bytes must be positive, got {requested_total_ram}")
 
-    resolved: dict[str, DatasetInputPlan] = {}
-    for dataset_name in dataset_names:
-        resolved[dataset_name] = _resolve_dataset_inputs(
-            data_dir=data_dir,
-            dataset_name=dataset_name,
-            signatures_suffix=str(args.signatures_suffix),
-            specter_suffix=str(args.specter_suffix),
-            include_test_pairs=selected is not None,
-        )
-
-    test_manifest_sha256 = args.pairwise_test_manifest_sha256
     if selected is None:
-        if (
-            not isinstance(test_manifest_sha256, str)
-            or len(test_manifest_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in test_manifest_sha256)
-        ):
-            raise SystemExit("full release training requires lowercase --pairwise-test-manifest-sha256")
-    elif test_manifest_sha256 is not None:
-        raise SystemExit("--pairwise-test-manifest-sha256 is only valid for full release training")
+        if args.training_plan is None or args.expected_training_plan_sha256 is None:
+            raise SystemExit("full release training requires --training-plan and --expected-training-plan-sha256")
+        resolved, source_manifest_sha256, sealed_test_manifests = _verified_training_plan(
+            Path(args.training_plan).resolve(),
+            args.expected_training_plan_sha256,
+        )
+    else:
+        if args.training_plan is not None or args.expected_training_plan_sha256 is not None:
+            raise SystemExit("--training-plan is only valid for full release training")
+        if args.data_dir is None:
+            raise SystemExit("smoke training requires --data-dir")
+        data_dir = Path(args.data_dir).resolve()
+        if not data_dir.is_dir():
+            raise SystemExit(f"--data-dir must name an existing directory: {data_dir}")
+        resolved = {
+            dataset_name: _resolve_dataset_inputs(
+                data_dir=data_dir,
+                dataset_name=dataset_name,
+                signatures_suffix=str(args.signatures_suffix),
+                specter_suffix=str(args.specter_suffix),
+                include_test_pairs=True,
+            )
+            for dataset_name in dataset_names
+        }
+        source_manifest_sha256 = None
+        sealed_test_manifests = {}
 
     return PairwisePreflightPlan(
         output_dir=output_dir,
@@ -319,6 +438,8 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
         matrix_work_dir=matrix_work_dir,
         matrix_work_free_bytes=matrix_work_free_bytes,
         total_ram_bytes=None if requested_total_ram is None else int(requested_total_ram),
+        source_manifest_sha256=source_manifest_sha256,
+        sealed_test_manifests=sealed_test_manifests,
     )
 
 
@@ -337,7 +458,7 @@ def _training_config(
                     role: {"path": str(path), "sha256": plan.datasets[name].sha256[role]}
                     for role, path in plan.datasets[name].files.items()
                 },
-                "split_mode": "fixed_pairs" if "train_pairs" in plan.datasets[name].files else "random_blocks",
+                "split_mode": plan.datasets[name].split_mode,
             }
             for name in plan.dataset_names
         },
@@ -350,7 +471,8 @@ def _training_config(
         "nan_policy": "preserve_nan",
         "nameless_features_to_use": list(DEFAULT_NAMELESS_FEATURE_GROUPS),
         "production_version": str(args.production_version),
-        "pairwise_test_manifest_sha256": args.pairwise_test_manifest_sha256,
+        "pairwise_inputs_manifest_sha256": plan.source_manifest_sha256,
+        "sealed_test_manifests": plan.sealed_test_manifests,
         "data_random_seed": int(args.random_seed),
         "model_random_seed": 42,
         "matrix_work_storage": {
@@ -613,6 +735,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             logger.info("processing dataset %s", dataset_name)
             dataset_input = plan.datasets[dataset_name]
             files = dataset_input.files
+            release_training = args.datasets is None
             anddata_kwargs: dict[str, Any] = {
                 "signatures": str(files["signatures"]),
                 "papers": str(files["papers"]),
@@ -636,7 +759,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             if anddata.name_tuples != canonical_name_tuples.pairs:
                 raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
 
-            release_training = args.datasets is None
             if release_training:
                 train, val = _featurize_selection(
                     anddata,
@@ -798,7 +920,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--production-version", required=True, help="Version suffix for production_model_vX.Y.")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument("--data-dir", type=Path, help="Dataset root for non-publishable smoke runs.")
     parser.add_argument("--specter-suffix", default=DEFAULT_SPECTER_SUFFIX)
     parser.add_argument("--signatures-suffix", default=DEFAULT_SIGNATURES_SUFFIX)
     parser.add_argument("--n-iter", type=int, default=DEFAULT_N_ITER)
@@ -810,8 +932,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random-seed", type=int, default=DEFAULT_RANDOM_SEED)
     parser.add_argument("--matrix-work-dir", type=Path, required=True)
     parser.add_argument(
-        "--pairwise-test-manifest-sha256",
-        help="Sealed Stage-8 pair-manifest digest; the full trainer records but never opens the manifest.",
+        "--training-plan",
+        type=Path,
+        help="Test-path-free plan emitted by release_pairwise.py preflight-training-inputs.",
+    )
+    parser.add_argument(
+        "--expected-training-plan-sha256",
+        help="Expected SHA-256 of --training-plan.",
     )
     parser.add_argument(
         "--total-ram-bytes",

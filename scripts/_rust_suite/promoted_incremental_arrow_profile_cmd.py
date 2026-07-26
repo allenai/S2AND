@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import statistics
@@ -33,8 +34,33 @@ from s2and.arrow_inputs import (  # noqa: E402
 
 DEFAULT_ARROW_ROOT = PROJECT_ROOT / "s2and" / "data" / "s2and_and_big_blocks_linker_dataset_20260525"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "scratch" / "promoted_incremental_arrow_profile"
+REPORT_SCHEMA = "s2and_performance_evaluation_report_v1"
 
 RESULT_JSON_START, RESULT_JSON_END = get_result_markers("profile")
+
+
+def _sha256_file(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def _require_sha256(path: Path, expected: str, *, label: str) -> str:
+    observed = _sha256_file(path)
+    if observed != expected:
+        raise ValueError(f"{label} SHA-256 mismatch: expected={expected} observed={observed}")
+    return observed
+
+
+def _write_fresh_json(path: Path, payload: dict[str, Any]) -> None:
+    if path.exists():
+        raise FileExistsError(f"Report output already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        staging.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.link(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -58,6 +84,22 @@ class ProfileWorkload:
     @property
     def block_signatures(self) -> list[str]:
         return [*self.seed_signature_to_cluster.keys(), *self.query_signature_ids]
+
+
+def _workload_sha256(workload: ProfileWorkload, args: argparse.Namespace, seed_source: str) -> str:
+    payload = {
+        "batching_threshold": int(args.batching_threshold),
+        "dataset": str(args.dataset),
+        "n_jobs": int(args.n_jobs),
+        "query_signature_ids": workload.query_signature_ids,
+        "runs": int(args.runs),
+        "seed_signature_to_cluster": workload.seed_signature_to_cluster,
+        "seed_source": seed_source,
+        "target_block": workload.target_block,
+        "total_ram_bytes": int(args.total_ram_bytes),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _resolve_arrow_dataset_root(arrow_root: Path, dataset: str) -> Path:
@@ -302,6 +344,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("Refusing large profiling run without --full-run")
 
     arrow_root = Path(args.arrow_root)
+    model_manifest = (Path(args.model_path) / "manifest.json").resolve()
+    model_manifest_sha256 = _require_sha256(
+        model_manifest,
+        args.expected_model_manifest_sha256,
+        label="Model manifest",
+    )
+    dataset_root = _resolve_arrow_dataset_root(arrow_root, args.dataset)
+    data_manifest = (dataset_root / "manifest.json").resolve()
+    data_manifest_sha256 = _require_sha256(
+        data_manifest,
+        args.expected_data_manifest_sha256,
+        label="Data manifest",
+    )
     arrow_paths = _resolve_arrow_dataset_paths(arrow_root, args.dataset)
     signature_rows = _read_signature_rows(Path(arrow_paths["signatures"]))
     blocks = _block_dict(signature_rows)
@@ -327,6 +382,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         query_limit=int(args.query_limit),
         max_seed_clusters=int(args.max_seed_clusters),
     )
+    workload_sha256 = _workload_sha256(workload, args, seed_source)
+    if workload_sha256 != args.expected_workload_sha256:
+        raise ValueError(
+            f"Workload SHA-256 mismatch: expected={args.expected_workload_sha256} observed={workload_sha256}"
+        )
     from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
     from s2and.production_model import load_production_model
 
@@ -359,6 +419,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 elapsed = time.perf_counter() - start
             telemetry = dict(result.get("incremental_linker_telemetry", {}))
+            if result.get("incremental_linker_query_view") != "raw_arrow":
+                raise RuntimeError("Profile run did not use raw Arrow")
+            if telemetry.get("arrow_promoted_incremental") != 1:
+                raise RuntimeError("Profile run missed promoted Arrow incremental execution")
+            clustered_signature_ids = {
+                str(signature_id) for members in dict(result.get("clusters", {})).values() for signature_id in members
+            }
+            if clustered_signature_ids != set(workload.block_signatures):
+                raise RuntimeError("Profile run lost or added signatures")
             per_run.append(
                 {
                     "run_index": run_index,
@@ -372,6 +441,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _restore_runtime_env(prior_env)
 
     payload = {
+        "schema_version": REPORT_SCHEMA,
+        "data_manifest_sha256": data_manifest_sha256,
+        "model_manifest_sha256": model_manifest_sha256,
+        "workload_sha256": workload_sha256,
         "runner": "promoted_incremental_arrow_profile",
         "canonical_arrow_root": str(DEFAULT_ARROW_ROOT),
         "arrow_root": str(arrow_root),
@@ -387,10 +460,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "rust_extension": collect_rust_extension_identity(require_release=bool(args.require_rust_release)),
         "run_metadata": build_run_metadata(script_path=Path(__file__).resolve(), project_root=PROJECT_ROOT),
     }
-    if args.write_json:
-        output_path = Path(args.write_json)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return payload
 
 
@@ -400,7 +469,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--arrow-root", type=Path, default=DEFAULT_ARROW_ROOT)
     parser.add_argument("--dataset", required=True)
+    parser.add_argument("--expected-data-manifest-sha256", required=True)
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
+    parser.add_argument("--expected-model-manifest-sha256", required=True)
+    parser.add_argument("--expected-workload-sha256", required=True)
     parser.add_argument("--target-block", default="")
     parser.add_argument("--query-limit", type=int, default=25)
     parser.add_argument("--max-seed-clusters", type=int, default=0)
@@ -414,14 +486,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batching-threshold", type=int, default=0)
     parser.add_argument("--total-ram-bytes", type=int, default=0)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--write-json", default="")
+    parser.add_argument("--write-json", type=Path, required=True)
     parser.add_argument("--require-rust-release", action="store_true")
     parser.add_argument("--full-run", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    payload = run(parse_args(argv))
+    args = parse_args(argv)
+    if args.write_json.exists():
+        raise FileExistsError(f"Report output already exists: {args.write_json}")
+    payload = run(args)
+    _write_fresh_json(args.write_json, payload)
     print(RESULT_JSON_START)
     print(json.dumps(payload, indent=2, sort_keys=True))
     print(RESULT_JSON_END)

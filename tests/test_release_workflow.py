@@ -48,6 +48,23 @@ def test_ci_checkout_is_the_single_lfs_hydration_authority() -> None:
     assert "git-lfs.github.com/spec" not in run_text
 
 
+def test_native_cache_keys_hash_rust_inputs_not_build_outputs() -> None:
+    workflow = yaml.safe_load(MAIN_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["typecheck-and-test"]["steps"]
+    cache_keys = {
+        step["name"]: step["with"]["key"]
+        for step in steps
+        if step.get("name") in {"Cache cargo build", "Cache uv + venv"}
+    }
+
+    assert set(cache_keys) == {"Cache cargo build", "Cache uv + venv"}
+    rust_globs = "'s2and_rust/**', '!s2and_rust/target/**', '!s2and_rust/dist/**'"
+    assert f"hashFiles({rust_globs})" in cache_keys["Cache cargo build"]
+    assert f"hashFiles('pyproject.toml', 'uv.lock', {rust_globs})" in cache_keys["Cache uv + venv"]
+    uv_cache = next(step for step in steps if step.get("name") == "Cache uv + venv")
+    assert "restore-keys" not in uv_cache["with"]
+
+
 def test_rust_wheel_matrix_matches_supported_python_versions() -> None:
     rust_project = tomllib.loads((REPO_ROOT / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8"))
     assert rust_project["project"]["requires-python"] == ">=3.11,<3.14"
@@ -180,7 +197,6 @@ def test_python_package_data_is_explicit() -> None:
     package_data = config["tool"]["setuptools"]["package-data"]["s2and"]
     assert "arrow_schema_contract.json" in package_data
     assert all((REPO_ROOT / "s2and" / path).is_file() for path in package_data)
-    assert all("first_k_letter_counts_from_orcid" not in pattern for pattern in package_data)
     assert all("production_model" not in pattern for pattern in package_data)
     assert set(package_data).isdisjoint(
         {
@@ -195,6 +211,9 @@ TUPLE_DATA_PATH = "s2and/data/s2and_name_tuples_canonical.txt"
 TUPLE_META_PATH = "s2and/data/s2and_name_tuples_canonical.txt.meta.json"
 ORCID_DATA_PATH = "s2and/data/first_k_letter_counts_from_orcid.json"
 ORCID_MANIFEST_PATH = "s2and/data/first_k_letter_counts_from_orcid.manifest.json"
+DEFAULT_MODEL_PATH = "s2and/data/default_production_model.json"
+MODEL_MEMBER_PATH = "s2and/data/production_model_v8.8/manifest.json"
+GENERIC_MEMBER_PATH = "s2and/arrow_schema_contract.json"
 
 
 def _write_distribution_fixture(
@@ -209,6 +228,9 @@ def _write_distribution_fixture(
     declare_orcid: bool = True,
     declare_tuples: bool = True,
     corrupt_wheel_path: str | None = None,
+    corrupt_sdist_path: str | None = None,
+    extra_wheel_path: str | None = None,
+    extra_sdist_path: str | None = None,
     sdist_package_parent: str | None = None,
 ) -> tuple[Path, Path]:
     data_dir = root / "s2and" / "data"
@@ -255,20 +277,28 @@ def _write_distribution_fixture(
                 continue
             wheel.writestr(path, b"tampered\n" if path == corrupt_wheel_path else content)
         if extra_wheel:
-            wheel.writestr("s2and/data/production_model_v8.8/manifest.json", b"{}\n")
+            wheel.writestr(MODEL_MEMBER_PATH, b"{}\n")
+        if extra_wheel_path is not None:
+            wheel.writestr(extra_wheel_path, b"{}\n")
 
     sdist_path = dist_dir / "s2and-0.0.0.tar.gz"
     with tarfile.open(sdist_path, "w:gz") as sdist:
         for path, content in files.items():
             if path == omit_sdist_path:
                 continue
+            archive_content = b"tampered\n" if path == corrupt_sdist_path else content
             member_path = path if sdist_package_parent is None else f"{sdist_package_parent}/{path}"
             member = tarfile.TarInfo(f"s2and-0.0.0/{member_path}")
-            member.size = len(content)
-            sdist.addfile(member, io.BytesIO(content))
+            member.size = len(archive_content)
+            sdist.addfile(member, io.BytesIO(archive_content))
         if extra_sdist:
             content = b"{}\n"
-            member = tarfile.TarInfo("s2and-0.0.0/s2and/data/production_model_v8.8/manifest.json")
+            member = tarfile.TarInfo(f"s2and-0.0.0/{MODEL_MEMBER_PATH}")
+            member.size = len(content)
+            sdist.addfile(member, io.BytesIO(content))
+        if extra_sdist_path is not None:
+            content = b"{}\n"
+            member = tarfile.TarInfo(f"s2and-0.0.0/{extra_sdist_path}")
             member.size = len(content)
             sdist.addfile(member, io.BytesIO(content))
     return dist_dir, root
@@ -325,8 +355,8 @@ def test_distribution_verifier_rejects_undeclared_model_assets(
 @pytest.mark.parametrize(
     ("omit_wheel_path", "omit_sdist_path"),
     (
-        ("s2and/arrow_schema_contract.json", None),
-        (None, "s2and/data/path_config.json"),
+        (GENERIC_MEMBER_PATH, None),
+        (None, GENERIC_MEMBER_PATH),
     ),
 )
 def test_distribution_verifier_requires_declared_package_data(
@@ -364,14 +394,24 @@ def test_distribution_verifier_rejects_missing_declared_package_data_source(
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="code_only")
 
 
-def test_distribution_verifier_rejects_archive_content_drift(tmp_path: Path) -> None:
-    """Inventory alone is fail-open: a declared path can ship stale or truncated bytes."""
-
+@pytest.mark.parametrize(
+    ("corrupt_wheel_path", "corrupt_sdist_path"),
+    (
+        (GENERIC_MEMBER_PATH, None),
+        (None, GENERIC_MEMBER_PATH),
+    ),
+)
+def test_distribution_verifier_rejects_archive_content_drift(
+    tmp_path: Path,
+    corrupt_wheel_path: str | None,
+    corrupt_sdist_path: str | None,
+) -> None:
     dist_dir, source_root = _write_distribution_fixture(
         tmp_path,
         extra_wheel=False,
         extra_sdist=False,
-        corrupt_wheel_path=TUPLE_DATA_PATH,
+        corrupt_wheel_path=corrupt_wheel_path,
+        corrupt_sdist_path=corrupt_sdist_path,
     )
 
     with pytest.raises(ValueError, match="content differs from the source tree"):
@@ -418,7 +458,12 @@ def test_code_only_phase_forbids_undeclared_orcid_source_files(tmp_path: Path) -
 
 
 def test_release_candidate_phase_requires_orcid_artifacts(tmp_path: Path) -> None:
-    dist_dir, source_root = _write_distribution_fixture(tmp_path, extra_wheel=False, extra_sdist=False)
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        declare_model=False,
+    )
 
     with pytest.raises(ValueError, match="requires these paths to be declared"):
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="release_candidate")
@@ -429,24 +474,48 @@ def test_release_candidate_phase_accepts_promoted_orcid_artifacts(tmp_path: Path
         tmp_path,
         extra_wheel=False,
         extra_sdist=False,
+        declare_model=False,
         include_orcid=True,
     )
 
     verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="release_candidate")
 
 
-def test_current_repository_state_is_a_valid_code_only_phase() -> None:
-    """The checked-in tree must satisfy the phase contract it claims to be in."""
-
-    from scripts.verification.verify_production_model_distributions import (
-        _load_expected_paths,
+def test_release_candidate_phase_rejects_default_model_source(tmp_path: Path) -> None:
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        include_orcid=True,
     )
 
-    expected = _load_expected_paths(REPO_ROOT, phase="code_only")
+    with pytest.raises(ValueError, match="forbids these source files"):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="release_candidate")
 
-    assert TUPLE_DATA_PATH in expected
-    assert TUPLE_META_PATH in expected
-    assert ORCID_DATA_PATH not in expected
 
-    with pytest.raises(ValueError, match="requires these paths to be declared"):
-        _load_expected_paths(REPO_ROOT, phase="release_candidate")
+@pytest.mark.parametrize("archive_kind", ("wheel", "sdist"))
+@pytest.mark.parametrize(
+    ("forbidden_path", "error"),
+    (
+        (DEFAULT_MODEL_PATH, "ships paths forbidden"),
+        (MODEL_MEMBER_PATH, "undeclared production model assets"),
+    ),
+)
+def test_release_candidate_phase_rejects_model_archive_paths(
+    tmp_path: Path,
+    archive_kind: str,
+    forbidden_path: str,
+    error: str,
+) -> None:
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        declare_model=False,
+        include_orcid=True,
+        extra_wheel_path=forbidden_path if archive_kind == "wheel" else None,
+        extra_sdist_path=forbidden_path if archive_kind == "sdist" else None,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root, phase="release_candidate")

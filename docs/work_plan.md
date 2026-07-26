@@ -1,10 +1,12 @@
 # Canonical-v2 Release Work Plan
 
-Status date: 2026-07-24
+Status date: 2026-07-25
 
 > **Execution order:** Use [1_3_release_todo.md](1_3_release_todo.md) for the
 > reviewed v1.3 operator sequence, approvals, commands, and release gates. This
 > file is a remediation ledger and is not safe to execute in numbered order.
+> Use [1_3_release_blockers.md](1_3_release_blockers.md) for current B01-B30
+> status and closure evidence.
 
 This file tracks only work that remains before a canonical-v2 release. The
 frozen normalization contract, acceptance thresholds, rollback requirements,
@@ -20,10 +22,10 @@ and artifact requirements are in
 - Canonical tuple, name-count, and ORCID schemas bind their content identities,
   but full warehouse source provenance is not yet independently bound (B27/B28).
   The canonical ORCID data and manifest have not yet been generated. The
-  code-only candidate packages neither; Stage 3 promotes and declares both
-  together.
+  code-only candidate packages neither; Stage 1 of the v1.3 runbook promotes
+  and declares both together.
 - No canonical v1.3 production bundle or implicit default is packaged. The
-  historical v1.21 bundle remains available for source/parity work but is not
+  historical v1.21 bundle remains available for comparison work but is not
   accepted by the canonical loader.
 - Full warehouse generation, retraining, release-scale profiling, and
   publication remain external work. Run them only from a clean, exact commit
@@ -32,36 +34,36 @@ and artifact requirements are in
 ## Remaining remediation groups
 
 Do not execute this section as a pipeline. The complete, dependency-safe order
-is the staged flow in [1_3_release_todo.md](1_3_release_todo.md); its blocker
-table is the source of truth for status and acceptance evidence.
+is the staged flow in [1_3_release_todo.md](1_3_release_todo.md). The separate
+[blocker ledger](1_3_release_blockers.md) is the source of truth for B01-B30
+status and closure evidence.
 
-- **Release identity and publication (B01, B15-B18, B24, B26-B29):** decide
-  package/model/data versions and model distribution policy; make distribution
-  inventories complete; assemble and verify immutable remote data; publish only
-  the exact reviewed workflow bytes through machine-enforced quality,
-  attestation, installed-real-model, and public-index gates.
+- **Release identity and publication (B01, B15-B18, B24, B26-B29):** select an
+  unused package version under the fixed external-model policy; make
+  distribution inventories complete; assemble and verify immutable remote data;
+  publish only the exact reviewed workflow bytes through machine-enforced
+  quality, protected approval, installed-real-model, and public-index gates.
 - **Generators and immutable inputs (B02-B10, B19, B25):** make count commands
   clean-clone runnable; bind warehouse snapshots to independently verifiable
   evidence; generate tuples before the ORCID artifact that binds them; re-export
   benchmark names into fields actually consumed by training; produce
-  leakage-safe linker assignments and complete byte inventories; prove whether
-  linker candidate members are EPS-independent.
-- **Pairwise and EPS (B11-B12, B21-B23, B30):** move all pair-overlap checks
-  into preflight; create bounded fixed-pair smoke inputs; persist selection
-  evidence and sealed test identities; add a publication-boundary smoke,
-  validation-only EPS calibration/finalization, and separately invocable
-  one-shot pairwise and clustering test evaluators.
-- **Linker lifecycle (B13-B14, B20):** keep target inputs outside fresh output
-  directories. Candidate runs now retain the exact evaluated artifact and
-  deterministic query-level predictions; the remaining implementation is one
-  reviewed no-retraining candidate-to-production transition that preserves
-  learned bytes and candidate ancestry while making target/artifact lifecycle
-  digests agree.
+  leakage-safe linker assignments and complete byte inventories; always
+  finalize candidate members after EPS is frozen.
+- **Pairwise and EPS (B11-B12, B21-B23, B30):** validate fixed-pair overlap
+  before training; create bounded smoke inputs; persist selection evidence and
+  sealed test identities; keep the non-vacuous publication-boundary case in
+  ordinary CI; use one validation-only EPS command; and expose separate sealed
+  pairwise and clustering evaluators.
+- **Linker lifecycle (B13-B14, B20):** B14's input/output separation is closed.
+  Candidate runs retain the exact evaluated artifact, artifact-bound target,
+  and deterministic predictions. The remaining implementation is a thin
+  no-training wrapper around the existing v5 complete-bundle finalizer.
 
-Every expensive or warehouse operation still requires a tiny fixture,
-reviewed exact command, explicit owner approval, detached execution, durable
-logs, and a completion record. Do not copy changing test totals into this
-ledger.
+Every expensive or warehouse operation still requires a tiny fixture, reviewed
+exact command, explicit owner approval, detached execution, and durable logs.
+Use the validated producer report as completion evidence; add a small completion
+record only when no producer/scheduler report supplies exit status and output
+digests. Do not copy changing test totals into this ledger.
 
 ## Verification gates
 
@@ -107,9 +109,9 @@ the canonical bundle exists.
 - Name-count and name-tuple loaders have one artifact authority; do not add
   legacy fallbacks or duplicate validation paths.
 - Do not package a production model or declare an implicit default during the
-  cutover. After the canonical v1.3 bundle passes all artifact, quality, parity,
-  and performance gates, B15 still decides between external-only distribution
-  and a packaged default.
+  cutover. The v1.3 decision is an immutable external bundle; B15 remains
+  partial until the release-candidate distribution verifier rejects even a
+  declared packaged default.
 - Large generation, retraining, release-scale profiling, paid APIs, and
   internal warehouse queries require a tiny fixture first and explicit owner
   approval.

@@ -52,8 +52,45 @@ def _args(tmp_path: Path, *, data_dir: Path | None = None, output_dir: Path | No
         feature_cache_dir=None,
         matrix_work_dir=matrix_work_dir,
         total_ram_bytes=1_000_000_000_000,
-        pairwise_test_manifest_sha256=None,
+        training_plan=None,
+        expected_training_plan_sha256=None,
     )
+
+
+def _write_training_plan(tmp_path: Path) -> tuple[Path, str]:
+    input_root = tmp_path / "planned_inputs"
+    input_root.mkdir()
+    datasets = []
+    for name in (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "augmented"):
+        roles = {"papers", "signatures", "specter_embeddings"}
+        roles |= {"train_pairs", "val_pairs"} if name == "augmented" else {"clusters"}
+        files = {}
+        for role in sorted(roles):
+            path = input_root / f"{name}_{role}"
+            if role in {"train_pairs", "val_pairs"}:
+                path.write_text("signature_id_1,signature_id_2,label\na,b,1\n", encoding="utf-8")
+            else:
+                path.write_text(f"{name}:{role}\n", encoding="utf-8")
+            files[role] = {"path": str(path.resolve()), "sha256": sha256(path.read_bytes()).hexdigest()}
+        datasets.append(
+            {
+                "name": name,
+                "split_mode": "fixed_pairs" if name == "augmented" else "random_blocks",
+                "files": files,
+            }
+        )
+    plan = {
+        "schema_version": train_pairwise.TRAINING_PLAN_SCHEMA,
+        "source_manifest_sha256": "a" * 64,
+        "datasets": datasets,
+        "sealed_test_manifests": {
+            "pairwise": {"manifest_sha256": "b" * 64, "members": {"test": {"pairs": "c" * 64}}},
+            "cluster": {"manifest_sha256": "d" * 64, "members": {"test": {"blocks": "e" * 64}}},
+        },
+    }
+    path = tmp_path / "training_plan.json"
+    path.write_text(json.dumps(plan), encoding="utf-8")
+    return path, sha256(path.read_bytes()).hexdigest()
 
 
 @pytest.mark.parametrize("backend", [None, "python"])
@@ -180,54 +217,77 @@ def test_preflight_rejects_feature_cache_at_output_path(tmp_path: Path) -> None:
         train_pairwise._preflight_pairwise(args)
 
 
-def test_full_preflight_uses_one_fixed_dataset_set(
+def test_full_preflight_uses_test_free_plan_without_data_discovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    args = _args(tmp_path, data_dir=data_dir)
+    plan_path, plan_sha256 = _write_training_plan(tmp_path)
+    args = _args(tmp_path)
     args.datasets = None
     args.run_full = True
-    args.pairwise_test_manifest_sha256 = "a" * 64
-    include_test_pairs: list[bool] = []
-
-    def resolve(**kwargs):
-        include_test_pairs.append(kwargs["include_test_pairs"])
-        return train_pairwise.DatasetInputPlan(files={}, sha256={})
-
-    monkeypatch.setattr(
-        train_pairwise,
-        "_resolve_dataset_inputs",
-        resolve,
-    )
+    args.data_dir = tmp_path / "must-not-be-discovered"
+    args.training_plan = plan_path
+    args.expected_training_plan_sha256 = plan_sha256
+    monkeypatch.setattr(train_pairwise, "_resolve_dataset_inputs", lambda **_kwargs: pytest.fail("data discovered"))
 
     plan = train_pairwise._preflight_pairwise(args)
 
     assert plan.dataset_names == (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "augmented")
-    assert include_test_pairs == [False] * len(plan.dataset_names)
     config = train_pairwise._training_config(args, plan, artifact_hashes={})  # noqa: SLF001
-    assert config["pairwise_test_manifest_sha256"] == "a" * 64
+    assert config["pairwise_inputs_manifest_sha256"] == "a" * 64
+    assert config["sealed_test_manifests"]["pairwise"]["manifest_sha256"] == "b" * 64
+    assert '"path"' not in json.dumps(config["sealed_test_manifests"])
     assert all("test_pairs" not in spec["files"] for spec in config["dataset_inputs"].values())
 
 
-def test_full_preflight_requires_sealed_test_manifest_digest(
+def test_full_preflight_requires_digest_bound_training_plan(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.datasets = None
+    args.preflight_only = True
+
+    with pytest.raises(SystemExit, match="--training-plan and --expected-training-plan-sha256"):
+        train_pairwise._preflight_pairwise(args)
+
+
+def test_training_plan_rejects_wrong_digest(tmp_path: Path) -> None:
+    plan_path, _ = _write_training_plan(tmp_path)
+
+    with pytest.raises(SystemExit, match="Training-plan SHA-256 mismatch"):
+        train_pairwise._verified_training_plan(plan_path, "0" * 64)  # noqa: SLF001
+
+
+def test_full_training_reaches_anddata_without_any_test_input(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    args = _args(tmp_path, data_dir=data_dir)
+    plan_path, plan_sha256 = _write_training_plan(tmp_path)
+    args = _args(tmp_path)
     args.datasets = None
-    args.preflight_only = True
+    args.run_full = True
+    args.data_dir = tmp_path / "must-not-be-discovered"
+    args.training_plan = plan_path
+    args.expected_training_plan_sha256 = plan_sha256
+
+    class BoundaryReached(Exception):
+        pass
+
+    def inspect_anddata(**kwargs: object) -> None:
+        assert kwargs["test_pairs"] is None
+        assert not {"train_ratio", "val_ratio", "test_ratio"} & set(kwargs)
+        assert all("test" not in str(value) for key, value in kwargs.items() if key.endswith("_pairs"))
+        raise BoundaryReached
+
+    monkeypatch.setattr(train_pairwise, "_resolve_dataset_inputs", lambda **_kwargs: pytest.fail("data discovered"))
     monkeypatch.setattr(
         train_pairwise,
-        "_resolve_dataset_inputs",
-        lambda **_kwargs: train_pairwise.DatasetInputPlan(files={}, sha256={}),
+        "load_packaged_name_tuple_artifact",
+        lambda: SimpleNamespace(data_sha256="a" * 64),
     )
+    monkeypatch.setattr(train_pairwise, "_canonical_training_artifact_hashes", lambda _sha: {})
+    monkeypatch.setattr(train_pairwise, "ANDData", inspect_anddata)
 
-    with pytest.raises(SystemExit, match="pairwise-test-manifest-sha256"):
-        train_pairwise._preflight_pairwise(args)
+    with pytest.raises(BoundaryReached):
+        train_pairwise.train_pairwise_bundle(args)
 
 
 def test_release_input_resolution_never_opens_fixed_test_pairs(tmp_path: Path) -> None:
@@ -518,6 +578,8 @@ def test_subset_result_never_publishes(
             matrix_work_dir=args.matrix_work_dir,
             matrix_work_free_bytes=1_000_000,
             total_ram_bytes=args.total_ram_bytes,
+            source_manifest_sha256=None,
+            sealed_test_manifests={},
         ),
         cast(train_pairwise.Clusterer, SimpleNamespace()),
         {"training_scope": "smoke_subset"},

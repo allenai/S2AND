@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 
@@ -22,6 +23,33 @@ from scripts.verification.compare_full_predict_arrow_parity import (  # noqa: E4
     _numeric_report,
     _write_raw_planner_indexes_and_layout,
 )
+
+
+def _parity_argv(
+    tmp_path,
+    *,
+    fixture_dir=None,
+    model_dir=None,
+    expected_fixture="1" * 64,
+    expected_model="2" * 64,
+) -> list[str]:
+    return [
+        "compare_full_predict_arrow_parity.py",
+        "--fixture-dir",
+        str(fixture_dir or tmp_path),
+        "--expected-fixture-manifest-sha256",
+        expected_fixture,
+        "--output-dir",
+        str(tmp_path / "out"),
+        "--output-json",
+        str(tmp_path / "report.json"),
+        "--model-path",
+        str(model_dir or tmp_path / "model"),
+        "--expected-model-manifest-sha256",
+        expected_model,
+        "--block-size",
+        "2",
+    ]
 
 
 def test_assert_exact_rejects_constraint_index_mismatch_with_equal_values() -> None:
@@ -102,35 +130,65 @@ def test_cluster_partition_ignores_cluster_labels_and_member_order() -> None:
     assert _cluster_partition(incumbent) != _cluster_partition({"a": ["s1"], "b": ["s2", "s3"]})
 
 
-def test_parity_main_writes_output_json_before_asserting_mismatch(tmp_path, monkeypatch) -> None:
+def test_parity_main_rejects_mismatch_without_report(tmp_path, monkeypatch) -> None:
     report = {
         "distance_comparison": {"block-a": {"allclose_equal_nan": False}},
         "clusters_exact_match": True,
     }
     output_json = tmp_path / "report.json"
     monkeypatch.setattr(parity_module, "run", lambda _args: report)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "compare_full_predict_arrow_parity.py",
-            "--fixture-dir",
-            str(tmp_path),
-            "--output-dir",
-            str(tmp_path / "out"),
-            "--output-json",
-            str(output_json),
-            "--model-path",
-            str(tmp_path / "model"),
-            "--block-size",
-            "2",
-        ],
-    )
+    monkeypatch.setattr(sys, "argv", _parity_argv(tmp_path))
 
     with pytest.raises(AssertionError, match="distance mismatch"):
         parity_module.main()
 
+    assert not output_json.exists()
+
+
+def test_parity_main_writes_fresh_report_on_success(tmp_path, monkeypatch) -> None:
+    report = {
+        "schema_version": parity_module.REPORT_SCHEMA,
+        "distance_comparison": {},
+        "clusters_exact_match": True,
+    }
+    output_json = tmp_path / "report.json"
+    monkeypatch.setattr(parity_module, "run", lambda _args: report)
+    monkeypatch.setattr(sys, "argv", _parity_argv(tmp_path))
+
+    parity_module.main()
+
     assert json.loads(output_json.read_text(encoding="utf-8")) == report
+
+
+@pytest.mark.parametrize("wrong_binding", ["fixture", "model"])
+def test_parity_wrong_digest_fails_before_fixture_loading(tmp_path, monkeypatch, wrong_binding) -> None:
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    fixture_manifest = fixture_dir / "meta.json"
+    fixture_manifest.write_text("{}\n", encoding="utf-8")
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    model_manifest = model_dir / "manifest.json"
+    model_manifest.write_text("{}\n", encoding="utf-8")
+    fixture_sha256 = hashlib.sha256(fixture_manifest.read_bytes()).hexdigest()
+    model_sha256 = hashlib.sha256(model_manifest.read_bytes()).hexdigest()
+    args = parity_module._build_arg_parser().parse_args(
+        _parity_argv(
+            tmp_path,
+            fixture_dir=fixture_dir,
+            model_dir=model_dir,
+            expected_fixture="0" * 64 if wrong_binding == "fixture" else fixture_sha256,
+            expected_model="0" * 64 if wrong_binding == "model" else model_sha256,
+        )[1:]
+    )
+    monkeypatch.setattr(
+        parity_module,
+        "_load_json",
+        lambda _path: pytest.fail("fixture loading must not run"),
+    )
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        parity_module.run(args)
 
 
 def test_parity_fixture_meta_paths_resolve_relative_to_fixture_dir(tmp_path) -> None:

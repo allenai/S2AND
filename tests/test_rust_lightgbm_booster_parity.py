@@ -190,6 +190,47 @@ def _rust_from_booster(lgb_booster: lgb.Booster) -> Any:
     return RustLightGBMBooster.from_string(lgb_booster.model_to_string())
 
 
+@pytest.mark.parametrize(
+    ("filename", "params", "inject_nans", "inject_zeros", "missing_key"),
+    [
+        ("main.lgb", {}, True, False, "missing_nan"),
+        ("nameless.lgb", {"zero_as_missing": True}, False, True, "missing_zero"),
+    ],
+)
+def test_written_pairwise_boosters_reload_with_python_rust_parity(
+    tmp_path: Path,
+    filename: str,
+    params: dict[str, Any],
+    inject_nans: bool,
+    inject_zeros: bool,
+    missing_key: str,
+) -> None:
+    """Synthetic main and nameless boosters retain missing/default behavior after reload."""
+
+    rng = np.random.default_rng(20260726)
+    trained = _train_booster(
+        rng,
+        params=params,
+        inject_nans=inject_nans,
+        inject_zeros=inject_zeros,
+    )
+    model_path = tmp_path / filename
+    trained.save_model(model_path)
+
+    python_booster = lgb.Booster(model_file=str(model_path))
+    rust_booster = RustLightGBMBooster(str(model_path))
+    summary = rust_booster.decision_type_summary()
+    assert summary[missing_key] > 0
+    assert 0 < summary["default_left"] < summary["num_splits"]
+
+    features = _mixed_matrix(
+        model_path.read_text(encoding="utf-8"),
+        python_booster.num_feature(),
+        rng,
+    )
+    _assert_parity(python_booster, rust_booster, features)
+
+
 # ---------------------------------------------------------------------------
 # Explicit historical source-bundle boosters: bit-exact raw scores, fixture agreement
 # ---------------------------------------------------------------------------

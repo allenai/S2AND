@@ -1,3 +1,5 @@
+import hashlib
+import json
 import sys
 
 import numpy as np
@@ -16,10 +18,30 @@ def _base_argv() -> list[str]:
         "specter.pkl",
         "--arrow-root",
         "arrow",
+        "--expected-input-manifest-sha256",
+        "0" * 64,
         "--output-dir",
         "out",
         "--maximum-size",
         "2500",
+    ]
+
+
+def _release_argv(arrow_root, output_dir, expected_sha256) -> list[str]:
+    return [
+        "compare_graph_subblocking_arrow_quality.py",
+        "--arrow-root",
+        str(arrow_root),
+        "--expected-input-manifest-sha256",
+        expected_sha256,
+        "--output-dir",
+        str(output_dir),
+        "--comparison-mode",
+        "rust-only",
+        "--maximum-size",
+        "2",
+        "--limit",
+        "2",
     ]
 
 
@@ -109,3 +131,47 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
     assert dataset.papers["p1"]["authors"][2] == {"position": 2, "author_name": ""}
     assert dataset.papers["p2"]["authors"][2] == {"position": 2, "author_name": "   "}
     assert np.allclose(dataset.specter_embeddings["p1"], np.array([1.0, 0.0], dtype=np.float32))
+
+
+def test_subblocking_release_report_binds_input_and_output(tmp_path, monkeypatch) -> None:
+    arrow_root = tmp_path / "arrow"
+    arrow_root.mkdir()
+    manifest_path = arrow_root / "manifest.json"
+    manifest_path.write_text('{"schema":"fixture"}\n', encoding="utf-8")
+    expected_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    output_dir = tmp_path / "report"
+    monkeypatch.setattr(sys, "argv", _release_argv(arrow_root, output_dir, expected_sha256))
+    monkeypatch.setattr(script, "load_signature_ids_from_arrow", lambda *_args, **_kwargs: ["s1", "s2"])
+    monkeypatch.setattr(
+        script,
+        "_run_rust_subblocking",
+        lambda *_args, **_kwargs: ({"a": ["s1"], "b": ["s2"]}, {"ok": 1}),
+    )
+
+    script.main()
+
+    report = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+    assert report["schema_version"] == script.REPORT_SCHEMA
+    assert report["input_manifest_sha256"] == expected_sha256
+    assert (
+        report["output_sha256"]["rust_subblocks.json"]
+        == hashlib.sha256((output_dir / "rust_subblocks.json").read_bytes()).hexdigest()
+    )
+
+
+def test_subblocking_wrong_digest_fails_before_loading_data(tmp_path, monkeypatch) -> None:
+    arrow_root = tmp_path / "arrow"
+    arrow_root.mkdir()
+    (arrow_root / "manifest.json").write_text("{}\n", encoding="utf-8")
+    output_dir = tmp_path / "report"
+    monkeypatch.setattr(sys, "argv", _release_argv(arrow_root, output_dir, "0" * 64))
+    monkeypatch.setattr(
+        script,
+        "load_signature_ids_from_arrow",
+        lambda *_args, **_kwargs: pytest.fail("data loading must not run"),
+    )
+
+    with pytest.raises(ValueError, match="Input manifest SHA-256 mismatch"):
+        script.main()
+
+    assert not (output_dir / "summary.json").exists()

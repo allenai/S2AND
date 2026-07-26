@@ -26,6 +26,49 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+REPORT_SCHEMA = "s2and_parity_evaluation_report_v1"
+
+
+def _sha256_file(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def _require_sha256(path: Path, expected: str, *, label: str) -> str:
+    observed = _sha256_file(path)
+    if observed != expected:
+        raise ValueError(f"{label} SHA-256 mismatch: expected={expected} observed={observed}")
+    return observed
+
+
+def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
+    if path.exists():
+        raise FileExistsError(f"Report output already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        staging.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.link(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def _verified_input_sha256(args: argparse.Namespace) -> tuple[str, str]:
+    fixture_manifest = (Path(args.fixture_dir) / "meta.json").resolve()
+    model_manifest = (Path(args.model_path) / "manifest.json").resolve()
+    return (
+        _require_sha256(
+            fixture_manifest,
+            args.expected_fixture_manifest_sha256,
+            label="Fixture manifest",
+        ),
+        _require_sha256(
+            model_manifest,
+            args.expected_model_manifest_sha256,
+            label="Model manifest",
+        ),
+    )
+
 
 def _load_json(path: str | Path) -> Any:
     with open(path, encoding="utf-8") as infile:
@@ -106,7 +149,7 @@ def _load_cluster_seeds_require(
     selected_signature_ids: Sequence[str],
     *,
     enabled: bool,
-) -> dict[str, str]:
+) -> dict[str, int | str]:
     if not enabled:
         return {}
     path = meta.get("paths", {}).get("cluster_seeds_require")
@@ -379,6 +422,7 @@ def _resolve_parity_name_counts_index(
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    fixture_manifest_sha256, model_manifest_sha256 = _verified_input_sha256(args)
     os.environ.setdefault("S2AND_BACKEND", "rust")
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
 
@@ -573,6 +617,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     arrow_partition = _cluster_partition(arrow_clusters)
     clusters_exact_match = incumbent_partition == arrow_partition
     report = {
+        "schema_version": REPORT_SCHEMA,
+        "fixture_manifest_sha256": fixture_manifest_sha256,
+        "model_manifest_sha256": model_manifest_sha256,
         "fixture_dir": str(args.fixture_dir),
         "output_dir": str(args.output_dir),
         "dataset": str(meta["dataset"]),
@@ -608,6 +655,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture-dir", type=Path, required=True)
+    parser.add_argument("--expected-fixture-manifest-sha256", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument(
@@ -617,6 +665,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional existing canonical_v2 name-count index; otherwise a bounded index is generated.",
     )
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
+    parser.add_argument("--expected-model-manifest-sha256", required=True)
     parser.add_argument("--block-size", type=int, required=True)
     parser.add_argument("--n-jobs", type=int, default=20)
     parser.add_argument("--total-ram-bytes", type=int, default=1_000_000_000_000)
@@ -635,19 +684,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--use-cluster-seeds", action="store_true")
     parser.add_argument("--no-specter", action="store_true")
-    parser.add_argument("--allow-mismatch", action="store_true")
     return parser
 
 
 def main() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
+    if args.output_json.exists():
+        raise FileExistsError(f"Report output already exists: {args.output_json}")
 
     report = run(args)
-    args.output_json.parent.mkdir(parents=True, exist_ok=True)
-    args.output_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if not args.allow_mismatch:
-        _assert_exact(report)
+    _assert_exact(report)
+    _write_fresh_json(args.output_json, report)
     print(json.dumps({k: v for k, v in report.items() if k not in {"incumbent_clusters", "arrow_clusters"}}, indent=2))
 
 

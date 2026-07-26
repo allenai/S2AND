@@ -45,7 +45,9 @@ def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_canonical_cli_help_and_import_leave_backend_unchanged() -> None:
+def test_canonical_cli_help_and_import_leave_backend_unchanged(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     help_result = subprocess.run(
         [sys.executable, "scripts/production/model/train_linker_and_finalize.py", "--help"],
         cwd=REPO_ROOT,
@@ -55,6 +57,11 @@ def test_canonical_cli_help_and_import_leave_backend_unchanged() -> None:
     )
     assert help_result.returncode == 0, help_result.stderr
     assert "{preflight,materialize,candidate,publish}" in help_result.stdout
+
+    with pytest.raises(SystemExit) as help_exit:
+        promoted_train.build_parser().parse_args(["preflight", "--help"])
+    assert help_exit.value.code == 0
+    assert "Explicit v5 pairwise_only native bundle" in capsys.readouterr().out
 
     for backend in (None, "python"):
         env = os.environ.copy()
@@ -714,20 +721,28 @@ def test_arrow_rust_materialization_passes_concrete_paths_to_native_planner(
     assert captured["reused_name_counts_index"] is True
 
 
-def test_finalized_arrow_materialization_bundle_creates_corrected_feature_asset_group(tmp_path: Path) -> None:
+def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tmp_path: Path) -> None:
     source_root = tmp_path / "source"
     output_root = tmp_path / "output"
-    labels_path = source_root / "labels" / "train.parquet"
-    labels_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([{"query_group_id": "q1", "retrieval_rank": 1, "label": 1}]).to_parquet(labels_path, index=False)
+    source_files = {
+        "train_path": "labels/train.parquet",
+        "s_park_eval_path": "labels/s_park.parquet",
+        "s_lee_eval_path": "labels/s_lee.parquet",
+        "extra_eval_paths.j_smith": "labels/j_smith.parquet",
+    }
+    for index, relpath in enumerate(source_files.values()):
+        path = source_root / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"query_group_id": f"q{index}", "retrieval_rank": 1, "label": 1}]).to_parquet(
+            path,
+            index=False,
+        )
     payload = {
         "bundle_name": "arrow_source",
         "assets": {
             "featureless_rows": {
                 "root": "labels",
-                "files": {
-                    "train_path": "labels/train.parquet",
-                },
+                "files": source_files,
             },
         },
         "models": {
@@ -742,18 +757,28 @@ def test_finalized_arrow_materialization_bundle_creates_corrected_feature_asset_
     (source_root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    for relpath in source_files.values():
+        output_path = output_root / "features_corrected" / Path(relpath).name
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"query_group_id": Path(relpath).stem}]).to_parquet(output_path, index=False)
 
     bundle = promoted_train._finalize_arrow_rust_bundle_metadata(  # noqa: SLF001
         source_bundle=promoted_train.load_bundle(source_root),
         output_bundle_root=output_root,
         target={"feature_count": 1, "features": ["f0"], "params": {"n_estimators": 10}, "metrics": {}},
-        selected_keys=["train_path"],
+        selected_keys=list(source_files),
     )
 
     assert bundle.assets["corrected_feature_rows"]["root"] == "features_corrected"
-    feature_path = "features_corrected/train.parquet"
-    assert bundle.assets["corrected_feature_rows"]["files"] == {"train_path": feature_path}
-    assert bundle.models["classic"]["train_path"] == feature_path
+    assert bundle.models["classic"]["s_park_eval_path"] == "features_corrected/s_park.parquet"
+    assert bundle.models["classic"]["s_lee_eval_path"] == "features_corrected/s_lee.parquet"
+    assert bundle.models["classic"]["extra_eval_paths"] == {
+        "j_smith": "features_corrected/j_smith.parquet",
+    }
+    optional_paths = classic_training._iter_extra_eval_paths(bundle.models["classic"])  # noqa: SLF001
+    assert [dataset for dataset, _path in optional_paths] == ["s_park", "s_lee", "j_smith"]
+    for _dataset, path in optional_paths:
+        assert len(pd.read_parquet(classic_training._resolve_path(bundle, path))) == 1  # noqa: SLF001
 
 
 def test_observed_metrics_use_weighted_average_error() -> None:

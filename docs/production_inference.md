@@ -94,48 +94,51 @@ $RunRoot = "D:\local-unsynced\s2and-vX.Y"
 
 uv run python scripts\production\model\train_pairwise.py `
   --production-version X.Y `
-  --data-dir path\to\canonical_benchmark_data `
+  --training-plan "$RunRoot\pairwise_training_plan.json" `
+  --expected-training-plan-sha256 REVIEWED_PLAN_SHA256 `
   --matrix-work-dir "$RunRoot\matrix-work" `
   --output-dir "$RunRoot\pairwise_stage\production_model_vX.Y" `
-  --pairwise-test-manifest-sha256 REVIEWED_SHA256 `
   --run-full
 
 $PairwiseModel = "$RunRoot\pairwise_calibrated\production_model_vX.Y"
 # If validation accepted the trainer-selected EPS, use pairwise_stage instead.
 
-uv run python scripts\production\model\train_linker_and_finalize.py publish `
+uv run python scripts\production\model\train_linker_and_finalize.py materialize `
   --pairwise-model-path "$PairwiseModel" `
   --source-bundle-root path\to\official_linker_source_bundle `
-  --target-json "$RunRoot\release_inputs\incremental_linker_training_target.json" `
-  --output-dir "$RunRoot\joint_safe_link_promoted_vX.Y_full" `
-  --publish-to "$RunRoot\release_candidate\production_model_vX.Y"
+  --target-json "$RunRoot\inputs\targets\incremental_linker_training_target.json" `
+  --output-dir "$RunRoot\linker_materialized_smoke" `
+  --limit-rows 1000
 ```
 
 This is not a complete release sequence. Between pairwise training and linker
-training, run `release_pairwise.py calibrate-eps`; if review changes EPS, use
-its atomic `finalize-eps` command. Stage-8 pair and cluster identities are
+training, B12 must replace the current conditional
+`calibrate-eps`/`finalize-eps` surface with the runbook's single
+validation-only calibration command. Stage 6 pair and cluster identities are
 opened only by `evaluate-pairs` and `evaluate-clusters`. Candidate linker runs
-retain their evaluated artifact and deterministic query-level prediction
-inventory, but B20's no-retraining lifecycle transition remains open.
+retain their evaluated artifact, target, deterministic query-level prediction
+inventory, and measured report, but B20's no-training complete-bundle assembly
+wrapper remains open.
 
 Run `train_linker_and_finalize.py materialize --limit-rows N` before any
-approved full command. The full candidate or publish run is a large job and
-requires explicit owner approval, captured logs, and quality/runtime/RSS
-evidence.
+approved full command. A full candidate run is a large job and requires
+explicit owner approval, captured logs, and quality/runtime/RSS evidence. The
+existing `publish` command is not an authorized v1.3 release transition.
 
-Before materialization, run the linker `preflight` command. It validates the currently implemented target
-feature/parameter/metric fields, source-table selectors, Arrow generations, and
-pairwise/name-count binding without creating the output directory; it does not
-yet enforce B20's target lifecycle fields. Pairwise training likewise requires
-explicit data and output roots, records hashes for every selected benchmark
-input, and requires an explicit local matrix work directory. Replace
+Before materialization, run the linker `preflight` command. It validates the
+currently implemented target feature/parameter/metric fields, source-table
+selectors, Arrow generations, and pairwise/name-count binding without creating
+the output directory; B13/B19 still need exact candidate/source digest
+arguments. Pairwise training likewise requires explicit data and output roots,
+records hashes for every selected benchmark input, and requires an explicit
+local matrix work directory. Replace
 `--run-full` with `--preflight-only` for its no-write readiness check. Passing
 `--datasets` selects a pairwise smoke run automatically; smoke runs never
 publish a bundle.
-Those checks are component-level only: B08/B10/B19 still require complete
-linker source-path and byte-inventory validation, while B11/B21-B23 still require
-earlier pair overlap checks, bounded fixed-pair inputs, publication reload, and
-full selection evidence. See the
+Those checks are component-level only: B10/B19 still require complete linker
+source-path and byte-inventory validation, while B11/B22-B23 still require
+earlier pair-overlap checks, bounded fixed-pair inputs, and full selection
+evidence. B08/B21/B24 remain ordinary CI regressions. See the
 [production command reference](../scripts/production/README.md) for the current
 limitations.
 
@@ -311,7 +314,8 @@ in-process. There is no ORCID generation pointer, retry loop, or legacy
 fallback. During cutover, the checked-in legacy JSON and absent canonical
 manifest make this checkout distribution-incomplete. Both filenames are
 already declared required package data and are enforced by distribution
-verification; Stage 3 must replace/add the approved canonical pair.
+verification; Stage 1 of the v1.3 runbook must replace/add the approved
+canonical pair.
 
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key

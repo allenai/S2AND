@@ -10,7 +10,7 @@ gitignored. A dated Markdown snapshot is the durable record of the command,
 environment, metrics, and interpretation worth retaining.
 
 The retained 2026-05-28 snapshot came from a dirty worktree and is historical
-evidence, not the pinned v1.3 Stage-8 baseline. For the release, use the
+evidence, not the accepted v1.3 performance baseline. For the release, use the
 commands here but write JSON, logs, environment, and hardware evidence to the
 durable reports root required by
 [../1_3_release_todo.md](../1_3_release_todo.md), then bind it into the

@@ -42,9 +42,10 @@ uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2an
 
 `s2and/data/s2and_and_big_blocks_linker_dataset_20260525` is the conventional
 local name for the previously published replay subbundle. Its manifests predate
-the canonical generation contract, so it is now a legacy source/parity input
-and is rejected by strict v1.3 validation. B09 requires a regenerated replay
-bundle before linker training.
+the canonical generation contract, so it is now a legacy historical input and
+is rejected by strict v1.3 validation. B09 in
+[1_3_release_blockers.md](1_3_release_blockers.md) requires a regenerated
+replay bundle before linker training.
 
 The Arrow release stores runtime signatures, papers, paper authors, and SPECTER
 rows as Arrow IPC files. It intentionally does not duplicate legacy `raw/`,
@@ -81,18 +82,17 @@ for.
 The source bundle is excluded from package data, the obsolete v1.0-v1.2 model
 pickles have been removed, and no default production model declaration is
 distributed during cutover. Evaluation and validation tools must receive an
-explicit model bundle path. Release blocker B15 leaves the v1.3 distribution
-policy open: the validated bundle may remain an explicit external artifact, or
-it may become a packaged default only after package-data, loader, size, and
-installed-distribution gates are implemented and approved.
+explicit model bundle path. The v1.3 decision is an immutable external artifact,
+not a packaged default. B15 remains partial until the release-candidate
+distribution verifier enforces that absence.
 
 New production releases use immutable native bundle directories. The component
 entry points are `scripts/production/model/train_pairwise.py` and
 `scripts/production/model/train_linker_and_finalize.py`, with release-only
 calibration/evaluation in `scripts/production/model/release_pairwise.py`; stage, validate, and
 rename the complete bundle rather than mutating a live directory. They are not
-by themselves the full v1.3 protocol: EPS selection, linker candidate
-finalization, one-shot evaluation, release attestation, and exact-byte
+by themselves the full v1.3 protocol: EPS selection, no-training linker
+candidate assembly, sealed evaluation, protected approval, and exact-byte
 publication remain governed by [1_3_release_todo.md](1_3_release_todo.md). Do
 not create new production pickles.
 

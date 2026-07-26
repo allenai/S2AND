@@ -56,7 +56,7 @@ accepted. It retains warehouse snapshot, query, selected-row, cardinality, and
 generation audit facts, but does not name a separately published pickle.
 Those fields currently carry producer assertions; v1.3 release acceptance
 still requires B27/B28's independently traceable snapshot/query-result and
-pinned internal-dependency evidence.
+replacement tool/source evidence. The retired `pys2` route is not accepted.
 
 The native Rust opener is the runtime authority for manifest, file-digest, and
 record validation. Python freezes the provenance and resolved file facts

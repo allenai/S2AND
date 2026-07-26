@@ -40,7 +40,7 @@ No dedicated memory-estimate backlog is active right now. These predictors are
 treated as best-effort; predictor remediation belongs in
 [work_plan.md](work_plan.md). The v1.3 release's measured runtime/RSS protocol
 and acceptance gate are in
-[1_3_release_todo.md](1_3_release_todo.md#stage-8-release-candidate-evaluation).
+[1_3_release_todo.md](1_3_release_todo.md#stage-6-evaluate-the-complete-candidate).
 
 Regression coverage:
 - `tests/test_memory_budget.py`

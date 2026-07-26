@@ -67,10 +67,11 @@ axis. This decision is release blocker B01.
   removed.
 - Breaking: linker training now has explicit `preflight`, `materialize`,
   `candidate`, and `publish` commands. Candidate runs retain the exact
-  evaluated model and gate beside `candidate_target.json`; they cannot publish.
-  They also persist deterministic query-level decisions and their digest
-  inventory. B20's reviewed no-retraining lifecycle transition still blocks
-  promotion.
+  evaluated model and measured report beside `candidate_target.json`; they
+  cannot approve a release. They also persist deterministic query-level
+  decisions and their digest inventory. The existing `publish` command is not a
+  v1.3 release authority: B20 still requires a thin no-training v5 assembly
+  wrapper, and the aggregate quality report alone decides release eligibility.
 - Breaking: `NameTupleArtifact.identity` and
   `s2and_rust.read_name_tuple_artifact_identity` are removed. The Python loader
   validates each artifact once and retains only frozen alias pairs plus
@@ -116,7 +117,7 @@ axis. This decision is release blocker B01.
   index belongs in the immutable external data release, not Python package
   data. The code-only checkout declares neither ORCID file. The approved
   canonical JSON and manifest are added with both package-data declarations in
-  one Stage-3 promotion commit.
+  one Stage 1 promotion commit.
 - Generated `within_block_random` pair sampling now uses exact seeded rank
   sampling. It preserves the legacy candidate order, selected pairs, and labels
   while memory scales with requested samples plus blocks instead of all
@@ -136,11 +137,12 @@ axis. This decision is release blocker B01.
   data SHA-256 values in the feature contract; bundle export and load require
   exact matches, and the linker binding covers both through its ordered
   feature-contract digest. The production-bundle schema is version 5 and the
-  clusterer-config schema is version 4; older bundles are rejected rather than
-  adapted. A canonical rewrap of the exact published v1.21 pairwise boosters
-  retains their historical load-time clustering threshold of `0.65`; the
-  identity check includes both booster hashes and the stale stored threshold,
-  so newly tuned bundles retain their own `clusterer.json` value.
+  clusterer-config schema is version 5; older bundles are rejected rather than
+  adapted. Historical commit `e54c6ba` documents the published v1.21 loader's
+  explicit clustering-threshold override to `0.65` for versions `1.2`/`1.21`;
+  the stored threshold is stale. The current canonical loader has no legacy
+  override, so a v1.21 baseline must use that compatible historical runtime.
+  Newly tuned canonical bundles use their own `clusterer.json` value.
 - The release workflow can build and install Python and Rust wheel candidates
   outside the source tree. A synthetic
   `Clusterer.predict_incremental_from_arrow_paths` smoke has passed from the
@@ -148,8 +150,9 @@ axis. This decision is release blocker B01.
   Rust-enabled CI fails hard on import/ABI drift, and Windows/macOS jobs execute
   their built wheels. The Rust build-system floor and release action are aligned
   at Maturin 1.14.1. The current publish controls are not authorized for v1.3:
-  B26 still requires the immutable attestation/release gate and publication of
-  the exact reviewed candidate bytes, and B16 requires a real v1.3 bundle smoke.
+  B26 still requires one digest-pinned evidence archive, protected release gate,
+  and publication of the exact reviewed candidate bytes, and B16 requires a
+  real external v1.3 bundle smoke.
 - Arrow training iterates record batches and avoids duplicate full-table
   materialization. Paper-author inputs reject duplicate positions, empty names,
   and dangling references consistently in Python and Rust. Python subblocking

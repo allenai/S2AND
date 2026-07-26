@@ -1,6 +1,6 @@
 # Canonical-v2 Normalization Migration
 
-Status date: 2026-07-24
+Status date: 2026-07-25
 
 ## Status
 
@@ -10,21 +10,27 @@ the v1.3 retrain. Code, models, name counts, ORCID prefix counts, name tuples,
 Arrow datasets, and benchmark names must be validated as one release unit.
 
 The v1.0-v1.2 pickles have been removed. The v1.21 bundle remains only as an
-explicit historical source/parity artifact; it is not packaged or loadable by
+explicit historical comparison artifact; it is not packaged or loadable by
 canonical-v2. No production model or default declaration is distributed during
-the cutover. This is a migration state, not a releasable package state.
+the cutover. The v1.3 model will be an explicit immutable external bundle, not
+a packaged default.
 
-The active engineering remediation ledger is
-[work_plan.md](work_plan.md). It includes provenance, cross-artifact binding,
-batching, cache, schema, parity, resource, packaging, and documentation defects
-found in the release-readiness audits. Those items are part of release readiness even
-when they do not directly alter normalization.
+The active v1.3 implementation ledger is
+[1_3_release_blockers.md](1_3_release_blockers.md). The broader historical
+remediation ledger remains [work_plan.md](work_plan.md), but work in that file
+is not automatically part of the v1.3 release.
 
-The executable order, current blocker list, approvals, immutable run record,
-test-unblinding protocol, and publication sequence are in
-[1_3_release_todo.md](1_3_release_todo.md). This document remains the authority
-for the frozen normalization semantics and acceptance thresholds, not for
-launch commands.
+The executable order, approvals, test-reveal protocol, and publication sequence
+are in [1_3_release_todo.md](1_3_release_todo.md). This document remains the
+normative authority for frozen normalization semantics and minimum acceptance
+thresholds. The frozen `quality_policy.json` is their exact machine-executable
+instantiation for one release and must not weaken them.
+
+For v1.3, retain the already implemented persisted formats:
+`s2and_name_tuples_v3`, `name_counts_index_v2` with
+`name_counts_provenance_v3`, `orcid_prefix_counts_v2`, and
+`s2and_production_model_bundle_v5`. Format cleanup is not a cutover
+prerequisite and is outside the v1.3 critical path.
 
 ## Cutover Readiness Checklist
 
@@ -154,10 +160,10 @@ binding, generator parameters, cardinalities, and the data SHA-256.
 Release provenance must be copied from independently verifiable sources rather
 than inferred from the currently imported code or trusted caller labels. The
 current warehouse producers do not yet meet that gate: B27 must bind snapshot
-IDs to query-result evidence, and B28 must pin and record the internal query
-dependency. Full warehouse generation remains blocked until both close. Each
-writer uses its own publication contract; there is no universal
-generation-pointer or fsync protocol.
+IDs to query-result evidence, and B28 must replace the retired `pys2` route and
+record the replacement tool/source identity. Full warehouse generation remains
+blocked until both close. Each writer uses its own publication contract; there
+is no universal generation-pointer or fsync protocol.
 
 The release validator must compare, not merely parse, normalization and
 generation contracts across:
@@ -167,7 +173,7 @@ generation contracts across:
 - ORCID prefix counts;
 - canonical name tuples;
 - pairwise main/nameless boosters and feature contract;
-- promoted incremental linker and replay target;
+- assembled incremental linker and replay target;
 - the explicit complete production bundle manifest.
 
 ## Benchmark Name Re-export
@@ -211,15 +217,18 @@ Required quality evidence:
   features; do not infer their safety from implementation parity.
 - Subblocking checks include size distributions, merge behavior, ORCID
   co-location, and dash/name-alias cases.
-- Runtime and peak RSS must be within 10% of the pinned protocol unless the
-  repository owner explicitly accepts a measured tradeoff.
+- Runtime and peak RSS must be within 10% of the pinned protocol. For v1.3 this
+  is a hard gate: there is no post-result owner waiver.
 
-Metrics must be present and finite and must pass before any artifact is
-promoted. Hyperparameter search does not bypass the same gate. Pairwise and
-clustering test scores remain sealed until Stage 8; linker test scoring occurs
-once only after pairwise, EPS, linker parameters, metrics, and gates are frozen.
-A failed one-shot gate aborts the release rather than becoming another tuning
-iteration on that holdout.
+Metrics must be present and finite and must pass before release. Hyperparameter
+search does not bypass the same gate. Pairwise and clustering test scores remain
+sealed until the complete candidate is assembled. Linker test scoring occurs
+only after pairwise, EPS, source, payload, metrics, and gates are frozen, and the
+payload is serialized before that population is opened. The aggregate quality
+report applies the frozen gates once. A failed gate aborts the release rather
+than becoming another tuning iteration on that holdout. An infrastructure retry
+may rescore the exact serialized payload on unchanged inputs, but it may not
+refit.
 
 ## Release and Rollback
 
@@ -235,11 +244,13 @@ The release flow must:
    installable;
 6. publish the exact already-reviewed workflow artifact bytes rather than
    rebuilding them in a later publish run;
-7. bind the immutable quality report, pre-publish release attestation, remote
-   data/model digest, and real-v1.3 installed smoke into a machine-enforced
-   release gate; and
-8. create a separate immutable public release receipt after public-index and
-   public-data verification.
+7. bind the immutable quality report, rollback report, remote data/model digest,
+   evidence-archive digest, and real-v1.3 installed smoke into one
+   machine-enforced release gate;
+8. use the protected-environment platform record as the publication approval
+   rather than duplicating it in a handwritten attestation; and
+9. write one immutable public probe report after public-index and public-data
+   verification.
 
 Rollback is deployment of the previous package together with its complete
 legacy artifact set. There is no dual runtime normalization mode and no mixing

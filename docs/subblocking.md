@@ -49,7 +49,7 @@ normalization while reading raw name columns.
 
 ## ORCID policy
 
-After Stage-3 artifact promotion, the default merge-prior mapping is loaded lazily from the packaged
+After Stage 1 artifact promotion, the default merge-prior mapping is loaded lazily from the packaged
 `first_k_letter_counts_from_orcid.json` and its required adjacent
 `.manifest.json`, then resolved at subblocking entry. The loader validates the
 complete canonical artifact and data digest; a missing or tampered file fails

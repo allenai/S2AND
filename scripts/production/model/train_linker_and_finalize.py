@@ -2210,7 +2210,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--pairwise-model-path",
         type=Path,
         required=True,
-        help="Explicit v2 pairwise_only native bundle produced by train_pairwise.py.",
+        help="Explicit v5 pairwise_only native bundle produced by train_pairwise.py.",
     )
     parser.add_argument(
         "--arrow-name-counts-index-root",

@@ -60,7 +60,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             s2and_rust/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('s2and_rust/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('s2and_rust/**', '!s2and_rust/target/**', '!s2and_rust/dist/**') }}
           restore-keys: |
             cargo-${{ runner.os }}-
 
@@ -71,10 +71,7 @@ jobs:
           path: |
             ~/.cache/uv
             .venv
-          key: uv-venv-${{ runner.os }}-py311-${{ hashFiles('pyproject.toml', 'uv.lock') }}
-          restore-keys: |
-            uv-venv-${{ runner.os }}-py311-
-            uv-venv-
+          key: uv-venv-${{ runner.os }}-py311-${{ hashFiles('pyproject.toml', 'uv.lock', 's2and_rust/**', '!s2and_rust/target/**', '!s2and_rust/dist/**') }}
 
       - name: Run shared typecheck-and-test policy
         run: uv run --no-project python scripts/run_ci_locally.py typecheck-and-test

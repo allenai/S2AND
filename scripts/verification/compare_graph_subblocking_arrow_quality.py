@@ -9,7 +9,9 @@ large real-data runs are explicit.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import pickle
 import random
 import sys
@@ -37,11 +39,37 @@ from s2and.subblocking import (  # noqa: E402
 from s2and.text import compute_block, normalize_text  # noqa: E402
 
 _DEFAULT_GRAPH_CONFIG = GraphSubblockingConfig()
+REPORT_SCHEMA = "s2and_subblocking_evaluation_report_v1"
+
+
+def _sha256_file(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def _require_sha256(path: Path, expected: str) -> str:
+    observed = _sha256_file(path)
+    if observed != expected:
+        raise ValueError(f"Input manifest SHA-256 mismatch: expected={expected} observed={observed}")
+    return observed
+
+
+def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
+    if path.exists():
+        raise FileExistsError(f"Report output already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        staging.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.link(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arrow-root", type=Path, required=True)
+    parser.add_argument("--expected-input-manifest-sha256", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--raw-root", type=Path, default=None)
     parser.add_argument("--specter-pickle", type=Path, default=None)
@@ -565,6 +593,25 @@ def _partition_metrics(subblocks: Mapping[str, Iterable[str]]) -> dict[str, Any]
     }
 
 
+def _validated_partition(
+    subblocks: Mapping[str, list[str]],
+    signature_ids: Sequence[str],
+    maximum_size: int,
+    component_labels: Mapping[str, str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    observed_ids = set(_signature_to_subblock(subblocks))
+    expected_ids = {str(signature_id) for signature_id in signature_ids}
+    if observed_ids != expected_ids:
+        raise ValueError("Subblocking output lost or added signatures")
+    partition = _partition_metrics(subblocks)
+    if partition["max_subblock_size"] > maximum_size:
+        raise ValueError("Subblocking output exceeds maximum_size")
+    components = _component_preservation_metrics(subblocks, component_labels)
+    if components and components["component_preserved_count"] != components["repeated_component_count"]:
+        raise ValueError("Subblocking output split a required component")
+    return partition, components
+
+
 def _load_component_labels(path: Path | None, selected_signature_ids: set[str]) -> dict[str, str]:
     if path is None:
         return {}
@@ -737,7 +784,19 @@ def _baseline_deltas(summary: dict[str, Any], baseline_path: Path | None) -> dic
 
 def main() -> None:
     args = parse_args()
+    report_path = args.output_dir / "summary.json"
+    if report_path.exists():
+        raise FileExistsError(f"Report output already exists: {report_path}")
+    input_manifest_path = args.arrow_root / "manifest.json"
+    input_manifest_sha256 = _require_sha256(
+        input_manifest_path,
+        args.expected_input_manifest_sha256,
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    report_identity = {
+        "schema_version": REPORT_SCHEMA,
+        "input_manifest_sha256": input_manifest_sha256,
+    }
     config = _graph_config(args)
     _log_progress(
         f"starting comparison_mode={args.comparison_mode} python_source={args.python_source} "
@@ -758,8 +817,16 @@ def main() -> None:
         _log_progress("running Rust graph subblocking")
         rust_subblocks, rust_telemetry = _run_rust_subblocking(args, signature_ids, config)
         rust_seconds = time.perf_counter() - rust_start
-        _write_subblocks(args.output_dir / "rust_subblocks.json", rust_subblocks)
+        rust_subblocks_path = args.output_dir / "rust_subblocks.json"
+        _write_subblocks(rust_subblocks_path, rust_subblocks)
+        rust_partition, rust_components = _validated_partition(
+            rust_subblocks,
+            signature_ids,
+            int(args.maximum_size),
+            component_labels,
+        )
         summary = {
+            **report_identity,
             "inputs": {
                 "comparison_mode": "rust-only",
                 "python_source": None,
@@ -784,16 +851,17 @@ def main() -> None:
             "rust": {
                 "seconds": float(rust_seconds),
                 "telemetry": rust_telemetry,
-                "partition": _partition_metrics(rust_subblocks),
-                "component_preservation": _component_preservation_metrics(rust_subblocks, component_labels),
+                "partition": rust_partition,
+                "component_preservation": rust_components,
             },
+            "output_sha256": {"rust_subblocks.json": _sha256_file(rust_subblocks_path)},
             "artifacts": {
-                "summary": str(args.output_dir / "summary.json"),
-                "rust_subblocks": str(args.output_dir / "rust_subblocks.json"),
+                "summary": str(report_path),
+                "rust_subblocks": str(rust_subblocks_path),
             },
         }
         summary["baseline_deltas"] = _baseline_deltas(summary, args.baseline_summary)
-        (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        _write_fresh_json(report_path, summary)
         print(json.dumps(summary, indent=2), flush=True)
         return
 
@@ -856,8 +924,23 @@ def main() -> None:
     ).to_csv(rust_diff_path, index=False)
     _write_subblocks(args.output_dir / f"{source_label}_subblocks.json", source_subblocks)
     _write_subblocks(args.output_dir / "rust_subblocks.json", rust_subblocks)
+    source_partition, source_components = _validated_partition(
+        source_subblocks,
+        signature_ids,
+        int(args.maximum_size),
+        component_labels,
+    )
+    rust_partition, rust_components = _validated_partition(
+        rust_subblocks,
+        signature_ids,
+        int(args.maximum_size),
+        component_labels,
+    )
+    source_subblocks_path = args.output_dir / f"{source_label}_subblocks.json"
+    rust_subblocks_path = args.output_dir / "rust_subblocks.json"
 
     summary = {
+        **report_identity,
         "inputs": {
             "comparison_mode": "python-vs-rust",
             "python_source": str(args.python_source),
@@ -884,25 +967,31 @@ def main() -> None:
             "seconds": float(source_seconds),
             "telemetry": source_telemetry,
             "hook_telemetry": source_hook_telemetry,
-            "partition": _partition_metrics(source_subblocks),
-            "component_preservation": _component_preservation_metrics(source_subblocks, component_labels),
+            "partition": source_partition,
+            "component_preservation": source_components,
         },
         "rust": {
             "seconds": float(rust_seconds),
             "telemetry": rust_telemetry,
-            "partition": _partition_metrics(rust_subblocks),
-            "component_preservation": _component_preservation_metrics(rust_subblocks, component_labels),
+            "partition": rust_partition,
+            "component_preservation": rust_components,
+        },
+        "output_sha256": {
+            source_diff_path.name: _sha256_file(source_diff_path),
+            rust_diff_path.name: _sha256_file(rust_diff_path),
+            source_subblocks_path.name: _sha256_file(source_subblocks_path),
+            rust_subblocks_path.name: _sha256_file(rust_subblocks_path),
         },
         "artifacts": {
-            "summary": str(args.output_dir / "summary.json"),
+            "summary": str(report_path),
             f"{source_label}_diff_csv": str(source_diff_path),
             "rust_diff_csv": str(rust_diff_path),
-            f"{source_label}_subblocks": str(args.output_dir / f"{source_label}_subblocks.json"),
-            "rust_subblocks": str(args.output_dir / "rust_subblocks.json"),
+            f"{source_label}_subblocks": str(source_subblocks_path),
+            "rust_subblocks": str(rust_subblocks_path),
         },
     }
     summary["baseline_deltas"] = _baseline_deltas(summary, args.baseline_summary)
-    (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    _write_fresh_json(report_path, summary)
     print(json.dumps(summary, indent=2), flush=True)
 
 

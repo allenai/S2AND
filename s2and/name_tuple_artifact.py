@@ -10,6 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from s2and._sha256 import is_lowercase_sha256
 from s2and.consts import _PACKAGE_DATA_DIR, NORMALIZATION_VERSION
 from s2and.text import canonicalize_name_text, same_prefix_tokens
 
@@ -60,7 +61,7 @@ def _require_nonnegative_int(value: Any, *, field: str, metadata_path: Path) -> 
 
 def _require_sha256(value: Any, *, field: str, metadata_path: Path) -> str:
     digest = _require_string(value, field=field, metadata_path=metadata_path)
-    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+    if not is_lowercase_sha256(digest):
         raise ValueError(f"Name-tuple metadata {metadata_path} requires lowercase SHA-256 field {field!r}")
     return digest
 

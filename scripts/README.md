@@ -24,9 +24,9 @@ v1.3 release blockers are closed. Release operators must follow
 
 | Script | What it does |
 |---|---|
-| `production/model/train_pairwise.py` | Train the pairwise half of a native `production_model_vX.Y/` bundle |
-| `production/model/train_linker_and_finalize.py` | Canonical promoted-linker preflight, bounded materialization, candidate evaluation, and bundle publication CLI |
-| `production/model/release_pairwise.py` | Validation-only EPS calibration/finalization and sealed Stage 6 pair/cluster evaluation |
+| `production/model/train_pairwise.py` | Release-only training of the pairwise half of a native `production_model_vX.Y/` bundle |
+| `production/model/train_linker_and_finalize.py` | One-fit complete-v5-bundle linker finalization, reload, and evaluation |
+| `production/model/release_pairwise.py` | Validation-only EPS calibration plus measurement components and `evaluate-release` aggregation into one report |
 | `production/generate_canonical_name_tuples.py` | Deterministically generate canonical tuple data and strict adjacent metadata from the reviewed source artifact |
 | `production/counts/generate_name_counts.py` | Guarded fixture/warehouse producer for an immutable manifest-backed `name_counts_index/`; invoke with `python -m` |
 | `production/counts/generate_orcid_name_prefix_counts.py` | Guarded fixture/warehouse producer for canonical ORCID prefix-count JSON plus its single provenance manifest; invoke with `python -m` |
@@ -57,7 +57,7 @@ v1.3 release blockers are closed. Release operators must follow
 | `eval_prod_models.py` | Evaluate an explicitly supplied SPECTER2 bundle on full, inventors_s2and, or mini datasets. Non-training evaluation derives `data_random_seed` from the bundle, rejects `--seed`, and auto-uses Arrow when complete artifacts exist; SPECTER1 is an explicit `--train` research comparison only. |
 | `eps_sweep/sweep_eps_on_linking_gold.py` | Research EPS sweep over linking gold; it is not the validation-only pairwise-stage selector/finalizer required by release blocker B12 |
 | `verification/validate_local_arrow_release.py` | Non-network local Arrow release-root smoke; checks manifests, checksum fields, required files, batch-index paths, replay bundle manifests, and `name_counts_index` targets without scanning large Arrow tables |
-| `verification/verify_production_model_distributions.py` | Require every declared package-data source in built wheel/sdist archives plus the selected default-model inventory, compare archive bytes against source bytes, and enforce the required `--phase` runtime-artifact contract (`code_only` forbids the ORCID pair; `release_candidate` requires it) |
+| `verification/verify_production_model_distributions.py` | Verify wheel/sdist bytes, require canonical tuple/ORCID assets, and reject packaged default/model paths |
 | `verification/smoke_installed_incremental_arrow.py` | Installed-wheel synthetic canonical Arrow/linker smoke; release blocker B16 additionally requires the real v1.3 bundle |
 | `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
 | `verification/compare_existing_arrow_anddata_feature_parity.py` | Compare Rust feature matrices from existing raw `ANDData` JSON/pickle inputs against existing Arrow release bundles |
@@ -67,7 +67,7 @@ v1.3 release blockers are closed. Release operators must follow
 | Script | What it does |
 |---|---|
 | `run_ci_locally.py` | Shared hosted/local CI policy. With no argument it runs both jobs; pass `lint` or `typecheck-and-test` to run one job. |
-| `sync_version.py` | Sync VERSION file into pyproject.toml + Cargo.toml |
+| `sync_version.py` | Sync `VERSION` into Python/Rust manifests, lockfiles, and the runtime guard |
 
 ### Archived historical artifacts
 
@@ -80,7 +80,7 @@ attempt to rerun one needs an explicit bounded migration plan first.
 | Script | Status | Why it is retained |
 |---|---|---|
 | `archive/LLM_based_filtering_of_name_tuples.py` | Provenance only; do not run | Records the paid/nondeterministic curation pipeline that produced the raw source consumed by canonical name-tuple generation |
-| `archive/blog_post_eval.py` | Historical private-data workflow | Preserves the blog ablation and claims-evaluation recipe |
+| `archive/blog_post_eval.py` | Historical private-data workflow | Preserves the blog and claims-evaluation recipe |
 | `archive/make_augmentation_dataset_a.py` | Provenance only; incompatible as written | Records pair selection and title-only embedding inputs for the augmented training data |
 | `archive/make_augmentation_dataset_b.py` | Provenance only; incompatible as written | Records the exact feature-corruption and translation policy for the augmented training data |
 | `archive/make_claims_dataset.py` | Historical private-data workflow | Records how block-local Semantic Scholar corrections datasets were constructed |
@@ -101,7 +101,6 @@ The following former archive files remain intentionally deleted:
 
 ## Notes
 
-**`production/model/train_linker_and_finalize.py`**: Use `preflight` for a
-no-write check, `materialize --limit-rows N` for a bounded feature smoke,
-`candidate` for the one-shot diagnostic evaluation, and `publish` only against
-the frozen accepted target.
+**`production/model/train_linker_and_finalize.py`**: One direct invocation fits
+once, writes a complete v5 bundle with its embedded replay target, reloads
+those exact bytes, and evaluates them. Feature staging is temporary.

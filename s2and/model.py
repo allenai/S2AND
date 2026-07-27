@@ -8,7 +8,7 @@ import pickle
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from functools import partial
@@ -1665,6 +1665,31 @@ def _incremental_cluster_score(
     )
 
 
+def _allocate_subblock_key(
+    base_key: str,
+    *,
+    original_block_keys: Collection[str],
+    emitted_block_keys: Collection[str],
+) -> str:
+    """Return a deterministic generated key that cannot overwrite a block.
+
+    Args:
+        base_key: Preferred generated subblock key.
+        original_block_keys: Keys supplied by the caller.
+        emitted_block_keys: Generated or copied keys already emitted.
+
+    Returns:
+        The preferred key, or its first available collision-suffixed variant.
+    """
+
+    allocated_key = base_key
+    collision_index = 1
+    while allocated_key in original_block_keys or allocated_key in emitted_block_keys:
+        allocated_key = f"{base_key}|collision={collision_index:04d}"
+        collision_index += 1
+    return allocated_key
+
+
 class Clusterer:
     """
     A wrapper for learning a clusterer
@@ -3193,11 +3218,11 @@ class Clusterer:
                     repaired_key_base = f"{block_key}|subblock={subblock_key}"
                     if len(repaired_parts) > 1:
                         repaired_key_base += f"|repair_part={part_index:04d}"
-                    repaired_key = repaired_key_base
-                    collision_index = 1
-                    while repaired_key in normalized_blocks or repaired_key in subblocked:
-                        repaired_key = f"{repaired_key_base}|collision={collision_index:04d}"
-                        collision_index += 1
+                    repaired_key = _allocate_subblock_key(
+                        repaired_key_base,
+                        original_block_keys=normalized_blocks.keys(),
+                        emitted_block_keys=subblocked.keys(),
+                    )
                     subblocked[repaired_key] = repaired_part
                     repaired_subblock_count += 1
 
@@ -3876,7 +3901,12 @@ class Clusterer:
                 subblocks = make_subblocks(block_signatures, dataset, **kwargs)
                 for subblock_key in sorted(subblocks):
                     subblock_signatures = subblocks[subblock_key]
-                    block_dict_subblocked[f"{block_key}|subblock={subblock_key}"] = subblock_signatures
+                    generated_key = _allocate_subblock_key(
+                        f"{block_key}|subblock={subblock_key}",
+                        original_block_keys=block_dict.keys(),
+                        emitted_block_keys=block_dict_subblocked.keys(),
+                    )
+                    block_dict_subblocked[generated_key] = subblock_signatures
                     assert len(subblock_signatures) <= batching_threshold, "Subblock is too big for some reason!"
             else:
                 block_dict_subblocked[block_key] = block_signatures

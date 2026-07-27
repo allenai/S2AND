@@ -314,6 +314,45 @@ def test_constraint_row_signals_summarize_require_and_disallow_labels() -> None:
     np.testing.assert_allclose(signals["constraint_disallow_fraction"], [0.5, 0.5, 1.0])
 
 
+def test_runtime_pair_constraint_features_suppress_orcid_like_training(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, bool] = {}
+
+    def fake_constraint_labels(
+        _left: np.ndarray,
+        _right: np.ndarray,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        observed["suppress_orcid"] = bool(kwargs["suppress_orcid"])
+        return np.asarray([np.nan], dtype=np.float64)
+
+    monkeypatch.setattr(
+        runtime_module.feature_port,
+        "get_constraint_labels_index_arrays_rust",
+        fake_constraint_labels,
+    )
+    candidate_batch = LinkerCandidateBatch(
+        row_count=1,
+        left_signature_indices=np.asarray([0], dtype=np.uint32),
+        right_signature_indices=np.asarray([1], dtype=np.uint32),
+        pair_row_indices=np.asarray([0], dtype=np.uint32),
+    )
+
+    labels, _telemetry = runtime_module._resolve_candidate_batch_pair_labels_rust(
+        candidate_batch=candidate_batch,
+        signature_ids_by_index=("query", "seed"),
+        partial_supervision={},
+        use_default_constraints_as_supervision=True,
+        dont_merge_cluster_seeds=True,
+        n_jobs=1,
+        featurizer=object(),
+    )
+
+    assert observed == {"suppress_orcid": True}
+    assert np.isnan(labels[0])
+
+
 class FakeRuntimeFeaturizer:
     def __init__(self, signature_ids: list[str], *, default_label: float = float("nan")) -> None:
         self._signature_ids = tuple(signature_ids)
@@ -1469,6 +1508,42 @@ def test_compact_orcid_match_forces_link_and_beats_non_orcid_rows() -> None:
     # candidate at 0.95), not just within the ORCID-forced subset.
     assert result.decisions[0].runner_up_score == pytest.approx(0.95)
     assert result.decisions[0].score_margin == pytest.approx(-0.85)
+
+
+def test_runtime_orcid_force_link_policy_is_independent_of_model_features(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _static_artifact(
+        np.asarray([0.95, 0.10], dtype=np.float64),
+        gate_config=_promoted_gate_config(0.99),
+    )
+    retrieval_batch = _retrieval_batch(
+        row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
+        row_component_keys=("non_orcid_high_score", "orcid_low_score"),
+        retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
+    )
+    retrieval_batch.row_signals["orcid_match"] = np.asarray([0, 1], dtype=np.uint8)
+    monkeypatch.setattr(
+        runtime_module,
+        "build_promoted_non_pairwise_row_features_with_telemetry",
+        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.95, 0.10], dtype=np.float32)),
+    )
+
+    force_enabled = _predict_incremental_link_or_abstain_retrieved_candidates(
+        artifact,
+        retrieval_batch,
+        pairwise_stats=_static_pairwise_stats(row_count=2),
+        orcid_force_link_enabled=True,
+    )
+    force_disabled = _predict_incremental_link_or_abstain_retrieved_candidates(
+        artifact,
+        retrieval_batch,
+        pairwise_stats=_static_pairwise_stats(row_count=2),
+        orcid_force_link_enabled=False,
+    )
+
+    assert force_enabled.compact_result.decisions[0].component_key == "orcid_low_score"
+    assert force_disabled.compact_result.decisions[0].action == "abstain"
 
 
 def test_constraint_disallow_veto_policy_pins_two_pair_half_disallow_fall_through() -> None:

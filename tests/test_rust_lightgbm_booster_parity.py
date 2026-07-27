@@ -1,10 +1,10 @@
 """Parity tests for the pure-Rust LightGBM evaluator (RustLightGBMBooster).
 
-The parity bar is deliberately stronger than the bundle fixture tolerance:
-raw scores (sum of leaf values) must be BIT-EXACT against Python lightgbm,
-because both sides accumulate the same doubles in the same tree order. Any
-residual probability difference is then provably confined to the final
-sigmoid's exp() call, which is asserted to 1e-12 (bundle fixtures use 1e-10).
+Covered raw-score cases must be bit-exact against the serialized Python
+LightGBM booster because both evaluators accumulate the same doubles in tree
+order. This is a regression bar over deterministic adversaries, not a claim of
+exhaustive equivalence for every model LightGBM can produce. Probability
+agreement is asserted to 1e-12 (bundle fixtures use 1e-10).
 
 Coverage targets the three spots where a homegrown evaluator can silently
 diverge:
@@ -13,13 +13,19 @@ diverge:
    zero window, NaN->0.0 conversion on non-NaN-missing splits)
 3. the raw-score -> probability sigmoid, including non-default sigmoid params
 
-Grids inject the exact split thresholds harvested from each model so the
-`fval <= threshold` boundary itself is exercised, not just values around it.
+Synthetic and writer-gate grids construct ancestor-compatible rows for every
+numerical split, assert that at least one row reaches its target node, and place
+each reachable threshold neighbor in that split's feature. Repeated-feature
+ancestors can make a descendant boundary unreachable; those nodes receive an
+explicit path witness instead. The much larger historical boosters use an
+evenly spaced deterministic split sample plus zero-sentinel representatives.
+All grids exercise missing-value sentinels per split feature instead of relying
+on random cell placement.
 """
 
 from __future__ import annotations
 
-import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -47,69 +53,257 @@ K_ZERO_THRESHOLD = float(np.float32(1e-35))
 
 PROBA_ATOL = 1e-12
 
+ONE_SPLIT_INTERIOR_ZERO_MODEL = """\
+tree
+version=v4
+num_class=1
+num_tree_per_iteration=1
+label_index=0
+max_feature_idx=0
+objective=binary sigmoid:1
+feature_names=f0
+feature_infos=[-2:2]
 
-def _model_split_thresholds(model_text: str) -> np.ndarray:
-    """Harvest every numerical split threshold from a .lgb model text."""
-    values: list[float] = []
-    for match in re.finditer(r"^threshold=(.*)$", model_text, flags=re.MULTILINE):
-        values.extend(float(token) for token in match.group(1).split())
-    return np.asarray(values, dtype=np.float64)
+Tree=0
+num_leaves=2
+num_cat=0
+split_feature=0
+split_gain=80
+threshold=-5.0000000900125474e-36
+decision_type=2
+left_child=-1
+right_child=-2
+leaf_value=-0.2 0.2
+leaf_weight=10 10
+leaf_count=40 40
+internal_value=0
+internal_weight=20
+internal_count=80
+is_linear=0
+shrinkage=0.1
 
 
-def _special_value_pool(model_text: str, rng: np.random.Generator) -> np.ndarray:
-    """Adversarial cell values: zero-window boundaries, NaN, signed zeros, infs,
-    plus exact split thresholds (and their float neighbors) from the model."""
-    boundary = np.asarray(
-        [
-            np.nan,
-            0.0,
-            -0.0,
-            K_ZERO_THRESHOLD,
-            -K_ZERO_THRESHOLD,
-            np.nextafter(K_ZERO_THRESHOLD, 0.0),
-            np.nextafter(K_ZERO_THRESHOLD, 1.0),
-            np.nextafter(-K_ZERO_THRESHOLD, 0.0),
-            np.nextafter(-K_ZERO_THRESHOLD, -1.0),
-            1e-36,
-            -1e-36,
-            1e-34,
-            -1e-34,
-            np.inf,
-            -np.inf,
-            1.0,
-            -1.0,
-        ],
-        dtype=np.float64,
+end of trees
+"""
+
+
+@dataclass(frozen=True)
+class _NumericalSplit:
+    """One numerical node and the branch constraints needed to reach it."""
+
+    tree_index: int
+    node_index: int
+    feature: int
+    threshold: float
+    default_left: bool
+    missing_type: str
+    ancestors: tuple[tuple[_NumericalSplit, bool], ...]
+
+
+def _model_numerical_splits(
+    booster: lgb.Booster,
+) -> list[_NumericalSplit]:
+    """Read numerical splits and paths from LightGBM's public model dump."""
+
+    splits: list[_NumericalSplit] = []
+
+    def visit(
+        tree_index: int,
+        node: dict[str, Any],
+        ancestors: tuple[tuple[_NumericalSplit, bool], ...],
+    ) -> None:
+        if "split_index" not in node:
+            return
+        assert node["decision_type"] == "<="
+        split = _NumericalSplit(
+            tree_index,
+            int(node["split_index"]),
+            int(node["split_feature"]),
+            float(node["threshold"]),
+            bool(node["default_left"]),
+            str(node["missing_type"]),
+            ancestors,
+        )
+        splits.append(split)
+        visit(tree_index, node["left_child"], (*ancestors, (split, True)))
+        visit(tree_index, node["right_child"], (*ancestors, (split, False)))
+
+    for tree_index, tree in enumerate(booster.dump_model()["tree_info"]):
+        visit(tree_index, tree["tree_structure"], ())
+    return splits
+
+
+def _split_goes_left(split: _NumericalSplit, value: float) -> bool:
+    """Apply LightGBM's dense-adapter and numerical-decision semantics."""
+
+    if not np.isnan(value) and -K_ZERO_THRESHOLD <= value <= K_ZERO_THRESHOLD:
+        value = 0.0
+    if np.isnan(value) and split.missing_type != "NaN":
+        value = 0.0
+    takes_default = (split.missing_type == "Zero" and -K_ZERO_THRESHOLD <= value <= K_ZERO_THRESHOLD) or (
+        split.missing_type == "NaN" and np.isnan(value)
     )
-    thresholds = _model_split_thresholds(model_text)
-    if thresholds.size > 400:
-        thresholds = rng.choice(thresholds, size=400, replace=False)
-    neighbors = np.concatenate([np.nextafter(thresholds, np.inf), np.nextafter(thresholds, -np.inf)])
-    return np.concatenate([boundary, thresholds, neighbors])
+    if takes_default:
+        return split.default_left
+    return value <= split.threshold
 
 
-def _mixed_matrix(
-    model_text: str,
+def _select_adversarial_splits(
+    splits: list[_NumericalSplit],
+    max_splits: int | None,
+) -> list[_NumericalSplit]:
+    """Select all splits or a deterministic sample plus zero-window boundaries."""
+
+    if max_splits is None or len(splits) <= max_splits:
+        return splits
+    indices = set(np.linspace(0, len(splits) - 1, num=max_splits, dtype=int))
+    indices.update(
+        index for index, split in enumerate(splits) if split.threshold in {-K_ZERO_THRESHOLD, K_ZERO_THRESHOLD}
+    )
+    return [split for index, split in enumerate(splits) if index in indices]
+
+
+def _candidate_path_values(
+    constraints: list[tuple[_NumericalSplit, bool]],
+) -> list[float]:
+    """Return deterministic candidates spanning every ancestor boundary."""
+
+    candidates: list[float] = [
+        0.0,
+        -1.0,
+        1.0,
+        -np.inf,
+        np.inf,
+        np.nan,
+        -K_ZERO_THRESHOLD,
+        K_ZERO_THRESHOLD,
+    ]
+    candidates.extend(
+        value
+        for split, _ in constraints
+        for value in (
+            np.nextafter(split.threshold, -np.inf),
+            split.threshold,
+            np.nextafter(split.threshold, np.inf),
+        )
+    )
+    return list(dict.fromkeys(candidates))
+
+
+def _path_constrained_row(
+    target: _NumericalSplit,
+    target_value: float | None,
+    num_features: int,
+) -> np.ndarray | None:
+    """Construct a verified target row, or None for an unreachable fixed value."""
+
+    by_feature: dict[int, list[tuple[_NumericalSplit, bool]]] = {}
+    for constraint in target.ancestors:
+        by_feature.setdefault(constraint[0].feature, []).append(constraint)
+    by_feature.setdefault(target.feature, [])
+
+    row = np.zeros(num_features, dtype=np.float64)
+    for feature, constraints in by_feature.items():
+        if feature == target.feature:
+            candidates = [target_value] if target_value is not None else _candidate_path_values(constraints)
+        else:
+            candidates = _candidate_path_values(constraints)
+        value = next(
+            (
+                candidate
+                for candidate in candidates
+                if all(_split_goes_left(split, candidate) == take_left for split, take_left in constraints)
+            ),
+            None,
+        )
+        if value is None and feature == target.feature and target_value is not None:
+            return None
+        assert value is not None, (
+            f"no value reaches tree {target.tree_index} node {target.node_index} through feature {feature}"
+        )
+        row[feature] = value
+
+    assert all(_split_goes_left(split, row[split.feature]) == take_left for split, take_left in target.ancestors)
+    return row
+
+
+def _adversarial_matrix(
+    booster: lgb.Booster,
     num_features: int,
     rng: np.random.Generator,
-    n_rows: int = 4096,
-    special_fraction: float = 0.35,
+    n_random_rows: int = 1024,
+    max_split_boundaries: int | None = None,
 ) -> np.ndarray:
-    """Random matrix mixing multi-scale uniforms with adversarial specials."""
-    scales = rng.choice([1.0, 1e2, 1e4, 1e6], size=(n_rows, num_features))
-    matrix = rng.uniform(0.0, 1.0, size=(n_rows, num_features)) * scales
+    """Mix broad random rows with deterministic split-feature adversaries."""
+
+    scales = rng.choice([1.0, 1e2, 1e4, 1e6], size=(n_random_rows, num_features))
+    matrix = rng.uniform(0.0, 1.0, size=(n_random_rows, num_features)) * scales
     negate = rng.random(size=matrix.shape) < 0.25
     matrix[negate] *= -1.0
-
-    pool = _special_value_pool(model_text, rng)
-    special_mask = rng.random(size=matrix.shape) < special_fraction
-    matrix[special_mask] = rng.choice(pool, size=int(special_mask.sum()))
 
     matrix[0, :] = np.nan
     matrix[1, :] = 0.0
     matrix[2, :] = np.inf
     matrix[3, :] = -np.inf
-    return matrix
+    matrix[4, ::2] = np.nan
+    matrix[4, 1::2] = 0.0
+
+    splits = _model_numerical_splits(booster)
+    selected_splits = _select_adversarial_splits(splits, max_split_boundaries)
+
+    threshold_rows: list[np.ndarray] = []
+    for split in selected_splits:
+        split_rows: list[np.ndarray] = []
+        for value in (
+            np.nextafter(split.threshold, -np.inf),
+            split.threshold,
+            np.nextafter(split.threshold, np.inf),
+        ):
+            row = _path_constrained_row(
+                split,
+                value,
+                num_features,
+            )
+            if row is not None:
+                split_rows.append(row)
+        if not split_rows:
+            witness = _path_constrained_row(
+                split,
+                None,
+                num_features,
+            )
+            assert witness is not None
+            split_rows.append(witness)
+        threshold_rows.extend(split_rows)
+
+    missing_rows: list[np.ndarray] = []
+    missing_values = (
+        np.nan,
+        0.0,
+        -0.0,
+        K_ZERO_THRESHOLD,
+        -K_ZERO_THRESHOLD,
+        np.nextafter(K_ZERO_THRESHOLD, 0.0),
+        np.nextafter(K_ZERO_THRESHOLD, np.inf),
+        np.nextafter(-K_ZERO_THRESHOLD, 0.0),
+        np.nextafter(-K_ZERO_THRESHOLD, -np.inf),
+        1e-36,
+        -1e-36,
+        1e-34,
+        -1e-34,
+        np.inf,
+        -np.inf,
+    )
+    for feature in sorted({split.feature for split in splits}):
+        for value in missing_values:
+            row = np.full(num_features, 0.5, dtype=np.float64)
+            row[feature] = value
+            missing_rows.append(row)
+
+    deterministic_rows = threshold_rows + missing_rows
+    if not deterministic_rows:
+        return matrix
+    return np.vstack((matrix, np.stack(deterministic_rows)))
 
 
 def _assert_parity(lgb_booster: lgb.Booster, rust_booster: Any, features: np.ndarray) -> None:
@@ -194,7 +388,7 @@ def _rust_from_booster(lgb_booster: lgb.Booster) -> Any:
     ("filename", "params", "inject_nans", "inject_zeros", "missing_key"),
     [
         ("main.lgb", {}, True, False, "missing_nan"),
-        ("nameless.lgb", {"zero_as_missing": True}, False, True, "missing_zero"),
+        ("nameless.lgb", {"zero_as_missing": True}, True, True, "missing_zero"),
     ],
 )
 def test_written_pairwise_boosters_reload_with_python_rust_parity(
@@ -223,12 +417,73 @@ def test_written_pairwise_boosters_reload_with_python_rust_parity(
     assert summary[missing_key] > 0
     assert 0 < summary["default_left"] < summary["num_splits"]
 
-    features = _mixed_matrix(
-        model_path.read_text(encoding="utf-8"),
+    features = _adversarial_matrix(
+        python_booster,
         python_booster.num_feature(),
         rng,
     )
     _assert_parity(python_booster, rust_booster, features)
+
+
+def test_negative_zero_sentinel_split_matches_lightgbm() -> None:
+    """Pin LightGBM's strict equality behavior at a serialized ``-1e-35f`` split."""
+
+    rng = np.random.default_rng(8)
+    lgb_booster = _train_booster(rng, inject_nans=True)
+    splits = _model_numerical_splits(lgb_booster)
+    sentinel_features = {split.feature for split in splits if split.threshold == -K_ZERO_THRESHOLD}
+    assert sentinel_features, "fixture must contain a serialized lower-zero-sentinel split"
+
+    rows: list[np.ndarray] = []
+    for feature in sorted(sentinel_features):
+        for value in (
+            np.nextafter(-K_ZERO_THRESHOLD, -np.inf),
+            -K_ZERO_THRESHOLD,
+            np.nextafter(-K_ZERO_THRESHOLD, np.inf),
+        ):
+            row = np.zeros(lgb_booster.num_feature(), dtype=np.float64)
+            row[feature] = value
+            rows.append(row)
+
+    rust_booster = _rust_from_booster(lgb_booster)
+    features = np.stack(rows)
+    _assert_parity(lgb_booster, rust_booster, features)
+
+    features_f32 = np.ascontiguousarray(features, dtype=np.float32)
+    raw_python_f32 = np.asarray(lgb_booster.predict(features_f32, raw_score=True), dtype=np.float64)
+    raw_rust_f32 = np.asarray(rust_booster.predict_raw_f32(features_f32), dtype=np.float64)
+    assert raw_python_f32.tobytes() == raw_rust_f32.tobytes()
+
+
+@pytest.mark.parametrize("decision_type", [0, 2, 4, 6, 8, 10])
+def test_dense_zero_window_precedes_one_split_missing_semantics(decision_type: int) -> None:
+    """Dense values inside LightGBM's zero window become zero for every missing type."""
+
+    model_text = ONE_SPLIT_INTERIOR_ZERO_MODEL.replace(
+        "decision_type=2",
+        f"decision_type={decision_type}",
+    )
+    python_booster = lgb.Booster(model_str=model_text)
+    rust_booster = RustLightGBMBooster.from_string(model_text)
+    features = np.asarray(
+        [
+            [np.nextafter(-K_ZERO_THRESHOLD, -np.inf)],
+            [-0.75 * K_ZERO_THRESHOLD],
+            [-0.5 * K_ZERO_THRESHOLD],
+            [-0.25 * K_ZERO_THRESHOLD],
+            [0.0],
+            [0.75 * K_ZERO_THRESHOLD],
+            [np.nextafter(K_ZERO_THRESHOLD, np.inf)],
+            [np.nan],
+        ],
+        dtype=np.float64,
+    )
+    _assert_parity(python_booster, rust_booster, features)
+
+    features_f32 = np.ascontiguousarray(features, dtype=np.float32)
+    raw_python_f32 = np.asarray(python_booster.predict(features_f32, raw_score=True), dtype=np.float64)
+    raw_rust_f32 = np.asarray(rust_booster.predict_raw_f32(features_f32), dtype=np.float64)
+    assert raw_python_f32.tobytes() == raw_rust_f32.tobytes()
 
 
 # ---------------------------------------------------------------------------
@@ -247,8 +502,12 @@ def test_source_bundle_booster_bit_exact_parity(relpath: str) -> None:
     assert rust_booster.objective_name() == "binary"
 
     rng = np.random.default_rng(20260707)
-    model_text = model_path.read_text(encoding="utf-8")
-    features = _mixed_matrix(model_text, lgb_booster.num_feature(), rng)
+    features = _adversarial_matrix(
+        lgb_booster,
+        lgb_booster.num_feature(),
+        rng,
+        max_split_boundaries=512,
+    )
     _assert_parity(lgb_booster, rust_booster, features)
     _assert_float32_matches_prior_widening(rust_booster, features)
 
@@ -306,7 +565,7 @@ def test_missing_type_nan_semantics() -> None:
     summary = rust_booster.decision_type_summary()
     assert summary["missing_nan"] > 0, "model must contain NaN-missing splits for coverage"
 
-    features = _mixed_matrix(lgb_booster.model_to_string(), lgb_booster.num_feature(), rng)
+    features = _adversarial_matrix(lgb_booster, lgb_booster.num_feature(), rng)
     _assert_parity(lgb_booster, rust_booster, features)
     _assert_float32_matches_prior_widening(rust_booster, features)
 
@@ -319,7 +578,7 @@ def test_missing_type_none_semantics() -> None:
     summary = rust_booster.decision_type_summary()
     assert summary["missing_none"] == summary["num_splits"] > 0
 
-    features = _mixed_matrix(lgb_booster.model_to_string(), lgb_booster.num_feature(), rng)
+    features = _adversarial_matrix(lgb_booster, lgb_booster.num_feature(), rng)
     _assert_parity(lgb_booster, rust_booster, features)
     _assert_float32_matches_prior_widening(rust_booster, features)
 
@@ -336,16 +595,20 @@ def test_missing_type_zero_semantics() -> None:
     """zero_as_missing=True writes missing_type=Zero; the |v| <= 1e-35f window
     and NaN->0.0->default routing are the trickiest branch in the evaluator."""
     rng = np.random.default_rng(3)
-    lgb_booster = _train_booster(rng, params={"zero_as_missing": True}, inject_zeros=True)
+    lgb_booster = _train_booster(
+        rng,
+        params={"zero_as_missing": True},
+        inject_nans=True,
+        inject_zeros=True,
+    )
     rust_booster = _rust_from_booster(lgb_booster)
     summary = rust_booster.decision_type_summary()
     assert summary["missing_zero"] > 0, "model must contain Zero-missing splits for coverage"
 
-    features = _mixed_matrix(
-        lgb_booster.model_to_string(),
+    features = _adversarial_matrix(
+        lgb_booster,
         lgb_booster.num_feature(),
         rng,
-        special_fraction=0.5,
     )
     _assert_parity(lgb_booster, rust_booster, features)
     _assert_float32_matches_prior_widening(rust_booster, features)
@@ -379,7 +642,7 @@ def test_non_default_sigmoid_parameter() -> None:
     rust_booster = _rust_from_booster(lgb_booster)
     assert rust_booster.sigmoid() == 2.5
 
-    features = _mixed_matrix(lgb_booster.model_to_string(), lgb_booster.num_feature(), rng)
+    features = _adversarial_matrix(lgb_booster, lgb_booster.num_feature(), rng)
     _assert_parity(lgb_booster, rust_booster, features)
 
     # The probability path is exactly sigmoid(raw): verify against numpy so a
@@ -394,7 +657,12 @@ def test_single_leaf_trees() -> None:
     rng = np.random.default_rng(6)
     lgb_booster = _train_booster(rng, params={"min_child_samples": 10_000_000}, num_boost_round=5)
     rust_booster = _rust_from_booster(lgb_booster)
-    features = _mixed_matrix(lgb_booster.model_to_string(), lgb_booster.num_feature(), rng, n_rows=64)
+    features = _adversarial_matrix(
+        lgb_booster,
+        lgb_booster.num_feature(),
+        rng,
+        n_random_rows=64,
+    )
     _assert_parity(lgb_booster, rust_booster, features)
 
 

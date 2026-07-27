@@ -198,9 +198,24 @@ def test_subdivide_helper_keeps_distinct_unsplittable_full_names_separate() -> N
 
     assert output == {}
     assert {key: values.tolist() for key, values in dead_ends.items()} == {
-        "full=anna": ["s1", "s2"],
-        "full=anne": ["s3", "s4"],
+        "anna": ["s1", "s2"],
+        "anne": ["s3", "s4"],
     }
+
+
+def test_subdivide_helper_terminal_name_does_not_collide_with_longer_prefix() -> None:
+    names = np.array(["ann", "ann", "anna"])
+    signature_ids = np.array(["s1", "s2", "s3"])
+
+    output, dead_ends = subblocking.subdivide_helper(names, signature_ids, maximum_size=1, starting_k=2)
+
+    assert {key: values.tolist() for key, values in output.items()} == {"anna": ["s3"]}
+    assert {key: values.tolist() for key, values in dead_ends.items()} == {"ann": ["s1", "s2"]}
+    assert sorted(value for values in (*output.values(), *dead_ends.values()) for value in values) == [
+        "s1",
+        "s2",
+        "s3",
+    ]
 
 
 def test_make_subblocks_does_not_fallback_when_longer_name_prefixes_fit(monkeypatch) -> None:
@@ -448,6 +463,16 @@ def test_subblock_merge_candidate_metadata_preserves_middle_values_with_equals()
     assert subblocking._subblock_merge_candidate_metadata("a|middle=b=c", 2) == (2, "a", "b=c", "b=c", "b=c")
 
 
+def test_terminal_full_name_is_used_for_merge_scoring() -> None:
+    candidates = subblocking._sorted_subblock_merge_candidates(
+        {"chen|middle=w": ["s1"], "cheng": ["s2"]},
+        maximum_size=2,
+        first_k_letter_counts_sorted={},
+    )
+
+    assert candidates == [(("chen|middle=w", "cheng"), 100004.0)]
+
+
 def test_make_subblocks_merges_normalized_orcid_components_when_enabled(monkeypatch):
     dataset = SimpleNamespace(
         signatures={
@@ -678,6 +703,74 @@ def _write_signatures_arrow(
 def _add_batch_index(path, index_path, *, key_column: str, table_name: str) -> str:
     write_arrow_batch_lookup_index(path, index_path, key_column=key_column, table_name=table_name)
     return str(index_path)
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        (
+            [("s1", "anna", ""), ("s2", "anne", ""), ("s3", "anny", "")],
+            {"anna": ["s1"], "anne": ["s2"], "anny": ["s3"]},
+        ),
+        (
+            [("s1", "h", "will"), ("s2", "h", "william"), ("s3", "h", "wim")],
+            {
+                "h|middle=will": ["s1"],
+                "h|middle=willi": ["s2"],
+                "h|middle=wim": ["s3"],
+            },
+        ),
+        (
+            [("s1", "anna", "w"), ("s2", "anna", "x"), ("s3", "anne", "y"), ("s4", "anne", "z")],
+            {
+                "anna|middle=w": ["s1"],
+                "anna|middle=x": ["s2"],
+                "anne|middle=y": ["s3"],
+                "anne|middle=z": ["s4"],
+            },
+        ),
+    ],
+)
+def test_rust_arrow_prefix_subdivision_matches_python(
+    tmp_path,
+    rows: list[tuple[str, str, str]],
+    expected: dict[str, list[str]],
+) -> None:
+    _require_rust_arrow_subblocking()
+    signatures_path = tmp_path / "signatures.arrow"
+    _write_signatures_arrow(signatures_path, [(*row, None) for row in rows])
+    signature_ids = [row[0] for row in rows]
+    dataset = SimpleNamespace(
+        signatures={
+            signature_id: _signature(signature_id, first=first, middle=middle) for signature_id, first, middle in rows
+        },
+        random_seed=0,
+    )
+
+    python_subblocks, _python_telemetry = subblocking.make_subblocks_with_telemetry(
+        signature_ids,
+        dataset,
+        maximum_size=1,
+        first_k_letter_counts_sorted={},
+    )
+    rust_subblocks, _rust_telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
+        {
+            "signatures": str(signatures_path),
+            "signatures_batch_index": _add_batch_index(
+                signatures_path,
+                tmp_path / "signatures.signatures_batch_index.bin",
+                key_column="signature_id",
+                table_name="signatures",
+            ),
+        },
+        signature_ids,
+        maximum_size=1,
+        first_k_letter_counts_sorted={},
+        graph_subblocking_config=subblocking.GraphSubblockingConfig(),
+    )
+
+    assert {key: sorted(values) for key, values in python_subblocks.items()} == expected
+    assert {key: sorted(values) for key, values in rust_subblocks.items()} == expected
 
 
 def test_rust_arrow_make_subblocks_matches_python_orcid_repair(tmp_path):

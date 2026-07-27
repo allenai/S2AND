@@ -14,6 +14,7 @@ from s2and.incremental_linking.logistic_gate import (
     LOGISTIC_GATE_CLASSES,
     LOGISTIC_GATE_ERROR_WEIGHTS,
     NumpyLogisticGate,
+    load_logistic_gate_config,
     logistic_gate_config,
 )
 from s2and.incremental_linking_training.classic import (
@@ -25,13 +26,14 @@ from s2and.incremental_linking_training.classic import (
     _drop_unlabeled_singleton_orcid_rows,
     _evaluate_logistic_manual_holdout,
     _evaluate_logistic_scored_windows,
+    _filter_candidate_rows_to_retrieval_top_k,
     _fit_multiclass_logistic_gate,
     _fold_standard_scaler_into_logistic,
     _iter_extra_eval_paths,
     _promoted_stratified_gate_spec,
     _resolve_classic_monotone_constraints,
     _resolve_path,
-    _score_classic_stratified_eval_test,
+    _score_classic_stratified_rows,
     _score_eval_candidate_rows,
     _score_query_choices,
     _summarize_classic_stratified_predictions,
@@ -159,6 +161,99 @@ def test_drop_unlabeled_singleton_orcid_rows_reports_removed_queries() -> None:
     assert summary["queries_removed"] == 1
 
 
+def test_filter_candidate_rows_to_retrieval_top_k_rejects_invalid_ranks() -> None:
+    rows = pd.DataFrame({"retrieval_rank": [1, 0, 1.5, "bad"]})
+
+    with pytest.raises(ValueError, match="retrieval_rank must contain positive integers"):
+        _filter_candidate_rows_to_retrieval_top_k(
+            rows,
+            retrieval_top_k=1,
+            context="unit",
+        )
+
+
+def test_stratified_gate_scoring_uses_artifact_retrieval_top_k(tmp_path: Path) -> None:
+    bundle_root = tmp_path / "bundle"
+    calibration_path = bundle_root / "calibration" / "gate_rows.csv.gz"
+    s2and_path = bundle_root / "test" / "s2and_eval_rows.csv.gz"
+    hwang_path = bundle_root / "test" / "hwang_eval_rows.csv.gz"
+    split_path = bundle_root / "calibration" / "stratified_eval_test_split" / "assignments.csv"
+    calibration_path.parent.mkdir(parents=True)
+    hwang_path.parent.mkdir(parents=True)
+    split_path.parent.mkdir(parents=True)
+    row_columns = [
+        "query_group_id",
+        "base_group_id",
+        "dataset",
+        "query_view",
+        "candidate_component_key",
+        "retrieval_rank",
+        "label",
+    ]
+    pd.DataFrame([], columns=row_columns).to_csv(calibration_path, index=False, compression="gzip")
+    pd.DataFrame([], columns=row_columns).to_csv(s2and_path, index=False, compression="gzip")
+    pd.DataFrame(
+        [
+            {
+                "query_group_id": "q",
+                "base_group_id": "base",
+                "dataset": "h_wang",
+                "query_view": "full",
+                "candidate_component_key": "inside_window",
+                "retrieval_rank": 1,
+                "label": 0,
+            },
+            {
+                "query_group_id": "q",
+                "base_group_id": "base",
+                "dataset": "h_wang",
+                "query_view": "full",
+                "candidate_component_key": "positive_outside_window",
+                "retrieval_rank": 30,
+                "label": 1,
+            },
+        ],
+        columns=row_columns,
+    ).to_csv(hwang_path, index=False, compression="gzip")
+    pd.DataFrame(
+        [
+            {
+                "query_group_id": "q",
+                "source_key": "hwang_eval",
+                "split": "calibration_fit",
+                "base_group_id": "base",
+            }
+        ]
+    ).to_csv(split_path, index=False)
+    spec = {
+        "classic_gate_source_path": "calibration/gate_rows.csv.gz",
+        "s2and_eval_path": "test/s2and_eval_rows.csv.gz",
+        "hwang_eval_path": "test/hwang_eval_rows.csv.gz",
+        "retrieval_top_k": 1,
+    }
+    bundle = OfficialBundle(
+        root=bundle_root,
+        bundle_name="demo",
+        assets={},
+        models={"classic": spec},
+        expected_metrics={},
+    )
+
+    scored = _score_classic_stratified_rows(
+        bundle,
+        spec,
+        {"assignments_path": "calibration/stratified_eval_test_split/assignments.csv"},
+        lambda features: np.ones(len(features), dtype=np.float64),
+        (),
+        splits=("calibration_fit",),
+        include_calibration_source=True,
+    )
+
+    assert scored.rows["candidate_component_key"].tolist() == ["inside_window"]
+    assert scored.choices.loc[0, "query_safe_target"] == 0
+    assert not bool(scored.assignments.loc[0, "has_positive_candidate"])
+
+
 def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibration_rows(
     tmp_path: Path,
 ) -> None:
@@ -240,16 +335,14 @@ def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibrati
         expected_metrics={},
     )
 
-    class AlwaysLinkModel:
-        def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
-            return np.repeat([[0.0, 1.0]], repeats=len(features), axis=0)
-
-    scored = _score_classic_stratified_eval_test(
+    scored = _score_classic_stratified_rows(
         bundle,
         spec,
         {"assignments_path": "calibration/stratified_eval_test_split/combined_query_split_assignments.csv"},
-        AlwaysLinkModel(),  # type: ignore[arg-type]
+        lambda features: np.ones(len(features), dtype=np.float64),
         (),
+        splits=("test",),
+        include_calibration_source=True,
     )
 
     choice = scored.choices.set_index("query_case_id").loc["h:q1"]
@@ -491,7 +584,7 @@ def test_evaluate_logistic_manual_holdout_scores_fresh_candidates() -> None:
     summary = _evaluate_logistic_manual_holdout(
         manual_holdout,
         probabilities=np.array([0.1, 0.9, 0.1, 0.05], dtype=np.float64),
-        gate_config=gate_config,
+        gate=load_logistic_gate_config(gate_config),
     )
 
     assert summary["overall"]["balanced_accuracy"] == 1.0
@@ -516,7 +609,7 @@ def test_logistic_eval_summaries_accept_empty_candidate_tables() -> None:
     window_summary = _evaluate_logistic_scored_windows(
         candidate_rows,
         probabilities=np.asarray([], dtype=np.float64),
-        gate_config=gate_config,
+        gate=load_logistic_gate_config(gate_config),
     )
 
     assert window_summary["5"]["overall"]["n_queries"] == 0
@@ -536,7 +629,7 @@ def test_logistic_eval_summaries_accept_empty_candidate_tables() -> None:
     manual_summary = _evaluate_logistic_manual_holdout(
         manual_holdout,
         probabilities=np.asarray([], dtype=np.float64),
-        gate_config=gate_config,
+        gate=load_logistic_gate_config(gate_config),
     )
 
     assert manual_summary["overall"]["n_queries"] == 0
@@ -648,27 +741,27 @@ def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(
         expected_metrics={},
     )
 
-    class AlwaysLinkModel:
-        def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
-            return np.repeat([[0.0, 1.0]], repeats=len(features), axis=0)
-
     if assignment_base_group_id != "rescue:b1":
         with pytest.raises(ValueError, match="base_group_id does not match source rows"):
-            _score_classic_stratified_eval_test(
+            _score_classic_stratified_rows(
                 bundle,
                 spec,
                 {"assignments_path": "calibration/stratified_eval_test_split/combined_query_split_assignments.csv"},
-                AlwaysLinkModel(),  # type: ignore[arg-type]
+                lambda features: np.ones(len(features), dtype=np.float64),
                 (),
+                splits=("test",),
+                include_calibration_source=True,
             )
         return
 
-    scored = _score_classic_stratified_eval_test(
+    scored = _score_classic_stratified_rows(
         bundle,
         spec,
         {"assignments_path": "calibration/stratified_eval_test_split/combined_query_split_assignments.csv"},
-        AlwaysLinkModel(),  # type: ignore[arg-type]
+        lambda features: np.ones(len(features), dtype=np.float64),
         (),
+        splits=("test",),
+        include_calibration_source=True,
     )
 
     row = scored.choices.set_index("query_case_id").loc["rescue:q1"]

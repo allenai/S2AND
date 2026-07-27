@@ -13,6 +13,7 @@ from typing import Any, cast
 import lightgbm as lgb
 import numpy as np
 
+from s2and._sha256 import is_lowercase_sha256
 from s2and.arrow_inputs import require_normalization_version
 from s2and.consts import (
     FEATURIZER_VERSION,
@@ -56,6 +57,14 @@ _CANONICAL_ARTIFACT_HASH_FIELDS = (
     "name_tuples_data_sha256",
     "orcid_prefix_counts_data_sha256",
 )
+EXPLICIT_RELEASE_ARTIFACT_HASH_FIELDS = frozenset(
+    {
+        "name_counts_manifest_sha256",
+        "name_tuples_data_sha256",
+        "orcid_prefix_counts_data_sha256",
+        "orcid_prefix_counts_manifest_sha256",
+    }
+)
 _CLUSTERER_CONFIG_FIELDS = frozenset(
     {
         "batch_size",
@@ -98,10 +107,11 @@ class NativeLightGBMBinaryClassifier:
     """Small sklearn-compatible wrapper around a native LightGBM binary model.
 
     Scoring runs through the pure-Rust evaluator (``RustLightGBMBooster``),
-    whose raw scores are parity-gated bit-exact against Python lightgbm
-    (tests/test_rust_lightgbm_booster_parity.py). ``booster_`` lazily loads a
-    Python ``lgb.Booster`` only for training-side consumers such as bundle
-    writing and SHAP diagnostics; runtime scoring never touches it.
+    whose supported split and missing-value cases are covered by deterministic
+    Python/Rust parity tests (tests/test_rust_lightgbm_booster_parity.py).
+    ``booster_`` lazily loads a Python ``lgb.Booster`` only for training-side
+    consumers such as bundle writing and SHAP diagnostics; runtime scoring
+    never touches it.
     """
 
     prediction_backend = "rust_lightgbm"
@@ -325,7 +335,7 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
         path = bundle_dir / relpath
         if not path.is_file():
             raise FileNotFoundError(f"Production model bundle is missing {relpath}: {path}")
-        if not isinstance(expected, str) or len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+        if not is_lowercase_sha256(expected):
             raise ValueError(f"Production model bundle has invalid SHA-256 for {relpath}")
         observed = _sha256_file(path)
         if observed != expected:
@@ -380,29 +390,69 @@ def canonical_artifact_hashes() -> dict[str, str]:
     }
 
 
-def require_canonical_artifact_hashes(feature_contract: Mapping[str, Any], *, context: str) -> None:
-    """Require a contract to match this package's two canonical data artifacts."""
+def _require_matching_artifact_hashes(
+    feature_contract: Mapping[str, Any],
+    expected_artifact_hashes: Mapping[str, Any],
+    *,
+    context: str,
+) -> None:
+    """Require selected feature-contract hashes to match one authority."""
 
-    observed: dict[str, str] = {}
-    for field in _CANONICAL_ARTIFACT_HASH_FIELDS:
-        value = feature_contract.get(field)
-        if (
-            not isinstance(value, str)
-            or len(value) != 64
-            or any(character not in "0123456789abcdef" for character in value)
-        ):
+    for field, expected in expected_artifact_hashes.items():
+        if not is_lowercase_sha256(expected):
+            raise ValueError(f"{context} expected artifact hash {field!r} must be a lowercase SHA-256")
+        observed = feature_contract.get(field)
+        if not is_lowercase_sha256(observed):
             raise ValueError(f"{context} requires lowercase SHA-256 field {field!r}")
-        observed[field] = value
-    expected = canonical_artifact_hashes()
-    for field in _CANONICAL_ARTIFACT_HASH_FIELDS:
-        if observed[field] != expected[field]:
+        if observed != expected:
             raise ValueError(
-                f"{context} {field} does not match the canonical artifact installed with this package: "
-                f"contract={observed[field]} package={expected[field]}"
+                f"{context} {field} does not match the explicit artifact authority: "
+                f"contract={observed} expected={expected}"
             )
 
 
-def _validate_clusterer_config(payload: dict[str, Any]) -> None:
+def require_expected_artifact_hashes(
+    feature_contract: Mapping[str, Any],
+    expected_artifact_hashes: Mapping[str, Any],
+    *,
+    context: str,
+) -> None:
+    """Require a feature contract to match the exact explicit release authority."""
+
+    if not isinstance(expected_artifact_hashes, Mapping) or not expected_artifact_hashes:
+        raise ValueError(f"{context} requires nonempty expected artifact hashes")
+    if any(not isinstance(field, str) or not field for field in expected_artifact_hashes):
+        raise ValueError(f"{context} expected artifact hash fields must be nonempty strings")
+    observed_fields = set(expected_artifact_hashes)
+    if observed_fields != EXPLICIT_RELEASE_ARTIFACT_HASH_FIELDS:
+        raise ValueError(
+            f"{context} explicit artifact authority field mismatch: "
+            f"missing={sorted(EXPLICIT_RELEASE_ARTIFACT_HASH_FIELDS - observed_fields)} "
+            f"extra={sorted(observed_fields - EXPLICIT_RELEASE_ARTIFACT_HASH_FIELDS)}"
+        )
+    _require_matching_artifact_hashes(
+        feature_contract,
+        expected_artifact_hashes,
+        context=context,
+    )
+
+
+def require_canonical_artifact_hashes(feature_contract: Mapping[str, Any], *, context: str) -> None:
+    """Require a contract to match this package's two canonical data artifacts."""
+
+    expected = canonical_artifact_hashes()
+    _require_matching_artifact_hashes(
+        feature_contract,
+        {field: expected[field] for field in _CANONICAL_ARTIFACT_HASH_FIELDS},
+        context=f"{context} canonical artifacts installed with this package",
+    )
+
+
+def _validate_clusterer_config(
+    payload: dict[str, Any],
+    *,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
+) -> None:
     if payload.get("schema_version") != CLUSTERER_CONFIG_SCHEMA_VERSION:
         raise ValueError(f"Unsupported clusterer config schema_version={payload.get('schema_version')!r}")
     if set(payload) != _CLUSTERER_CONFIG_FIELDS:
@@ -453,16 +503,30 @@ def _validate_clusterer_config(payload: dict[str, Any]) -> None:
         feature_contract.get("normalization_version"),
         context="Production model config feature_contract",
     )
-    require_canonical_artifact_hashes(feature_contract, context="Production model config feature_contract")
+    if expected_artifact_hashes is None:
+        require_canonical_artifact_hashes(feature_contract, context="Production model config feature_contract")
+    else:
+        require_expected_artifact_hashes(
+            feature_contract,
+            expected_artifact_hashes,
+            context="Production model config feature_contract",
+        )
 
 
-def pairwise_bundle_binding(bundle_dir: str | Path) -> dict[str, Any]:
+def pairwise_bundle_binding(
+    bundle_dir: str | Path,
+    *,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return the immutable pairwise contract used to bind a linker artifact."""
 
     root = Path(bundle_dir)
     manifest = _validate_manifest(root)
     clusterer_config = _read_json(root / PAIRWISE_ONLY_MANIFEST_FILES["clusterer_config"])
-    _validate_clusterer_config(clusterer_config)
+    _validate_clusterer_config(
+        clusterer_config,
+        expected_artifact_hashes=expected_artifact_hashes,
+    )
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
     return _pairwise_binding_from_validated_parts(manifest, clusterer_config, featurizer_info, nameless_info)
@@ -561,9 +625,17 @@ def _require_bundle_normalization_version(bundle_dir: Path, feature_contract: Ma
         )
 
 
-def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Clusterer:
+def _load_bundle_clusterer(
+    bundle_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
+) -> Clusterer:
     clusterer_config = _read_json(bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["clusterer_config"])
-    _validate_clusterer_config(clusterer_config)
+    _validate_clusterer_config(
+        clusterer_config,
+        expected_artifact_hashes=expected_artifact_hashes,
+    )
     feature_contract = clusterer_config["feature_contract"]
     _require_bundle_normalization_version(bundle_dir, feature_contract)
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
@@ -673,7 +745,11 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
     return clusterer
 
 
-def _load_pairwise_staging_model(path: str | Path) -> Clusterer:
+def _load_pairwise_staging_model(
+    path: str | Path,
+    *,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
+) -> Clusterer:
     """Load an internal pairwise-only bundle used during training/finalization."""
 
     bundle_dir = Path(path).resolve()
@@ -683,10 +759,18 @@ def _load_pairwise_staging_model(path: str | Path) -> Clusterer:
     status = production_bundle_status(manifest["incremental_linker_version"])
     if status != "pairwise_only":
         raise ValueError(f"Expected a pairwise_only production model bundle, got {status!r}: {bundle_dir}")
-    return _load_bundle_clusterer(bundle_dir, manifest)
+    return _load_bundle_clusterer(
+        bundle_dir,
+        manifest,
+        expected_artifact_hashes=expected_artifact_hashes,
+    )
 
 
-def load_production_model(path: str | Path | None = None) -> Clusterer:
+def load_production_model(
+    path: str | Path | None = None,
+    *,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
+) -> Clusterer:
     """Load a complete native production model bundle."""
 
     if path is None:
@@ -698,4 +782,8 @@ def load_production_model(path: str | Path | None = None) -> Clusterer:
     status = production_bundle_status(manifest["incremental_linker_version"])
     if status != "complete":
         raise ValueError(f"Expected a complete production model bundle, got {status!r}: {bundle_dir}")
-    return _load_bundle_clusterer(bundle_dir, manifest)
+    return _load_bundle_clusterer(
+        bundle_dir,
+        manifest,
+        expected_artifact_hashes=expected_artifact_hashes,
+    )

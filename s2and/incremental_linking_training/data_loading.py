@@ -6,6 +6,7 @@ import json
 import os
 import pickle
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -202,10 +203,18 @@ def load_giant_block_dataset(
     return dataset, load_info
 
 
-def load_clusterer(model_path: Path, *, n_jobs: int) -> Any:
+def load_clusterer(
+    model_path: Path,
+    *,
+    n_jobs: int,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
+) -> Any:
     """Load the production clusterer and prepare it for inference."""
 
-    clusterer = _load_pairwise_staging_model(model_path)
+    clusterer = _load_pairwise_staging_model(
+        model_path,
+        expected_artifact_hashes=expected_artifact_hashes,
+    )
     _ensure_lightgbm_fitted(clusterer.classifier)
     _ensure_lightgbm_fitted(clusterer.nameless_classifier)
     clusterer.n_jobs = int(n_jobs)

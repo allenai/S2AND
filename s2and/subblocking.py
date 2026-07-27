@@ -1533,7 +1533,7 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
     if len(names) > 0:
         for full_name in pd.Series(names).value_counts().index:
             flag = names == full_name
-            output_cant_subdivide[f"full={full_name}"] = signature_ids[flag]
+            output_cant_subdivide[full_name] = signature_ids[flag]
     # assert that the combo of the output and output_cant_subdivide is a complete clustering of the input signature_ids
     assert (
         sum(len(subblock) for subblock in output.values())

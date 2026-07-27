@@ -89,12 +89,14 @@ distribution verifier enforces that absence.
 New production releases use immutable native bundle directories. The component
 entry points are `scripts/production/model/train_pairwise.py` and
 `scripts/production/model/train_linker_and_finalize.py`, with release-only
-calibration/evaluation in `scripts/production/model/release_pairwise.py`; stage, validate, and
-rename the complete bundle rather than mutating a live directory. They are not
-by themselves the full v1.3 protocol: EPS selection, no-training linker
-candidate assembly, sealed evaluation, protected approval, and exact-byte
-publication remain governed by [1_3_release_todo.md](1_3_release_todo.md). Do
-not create new production pickles.
+  calibration/evaluation in `scripts/production/model/release_pairwise.py`;
+  stage, validate, and rename the complete bundle rather than mutating a live
+  directory. They are not by themselves the full v1.3 protocol: EPS selection,
+  a fresh linker fit against the calibrated pairwise bundle, no-second-fit
+  complete-bundle assembly, sealed evaluation, protected approval, and
+  exact-byte publication remain governed by
+  [1_3_release_todo.md](1_3_release_todo.md). Do not create new production
+  pickles.
 
 The replay target for rebuilding/auditing the promoted incremental linker lives
 at:

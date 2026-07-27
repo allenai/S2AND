@@ -32,7 +32,11 @@ from s2and.incremental_linking.logistic_gate import (
     NumpyLogisticGate,
     build_runtime_logistic_gate_matrix,
 )
-from s2and.incremental_linking.policy import require_arrow_name_counts_index_for_clusterer
+from s2and.incremental_linking.policy import (
+    PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
+    promoted_linker_orcid_force_link_enabled,
+    require_arrow_name_counts_index_for_clusterer,
+)
 from s2and.incremental_linking.retrieval import (
     LinkerRetrievalBatch,
     RawArrowPlanBundle,
@@ -1177,7 +1181,6 @@ def _resolve_candidate_batch_pair_labels_rust(
     partial_supervision: Mapping[tuple[str, str], int | float],
     use_default_constraints_as_supervision: bool,
     dont_merge_cluster_seeds: bool,
-    suppress_orcid: bool,
     n_jobs: int,
     featurizer: Any | None,
 ) -> tuple[np.ndarray, Any]:
@@ -1192,7 +1195,7 @@ def _resolve_candidate_batch_pair_labels_rust(
             dont_merge_cluster_seeds=dont_merge_cluster_seeds,
             incremental_dont_use_cluster_seeds=False,
             num_threads=resolve_n_jobs(n_jobs),
-            suppress_orcid=suppress_orcid,
+            suppress_orcid=PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
         )
 
     partial_hits = 0
@@ -1350,6 +1353,7 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
     runtime_context: Any | None = None,
     featurizer: Any | None = None,
     hard_excluded_rows: np.ndarray | None = None,
+    orcid_force_link_enabled: bool = True,
 ) -> LinkOrAbstainRetrievedCandidatesResult:
     """Private vertical slice over retrieved candidates.
 
@@ -1361,6 +1365,9 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
         raise NotImplementedError("partial supervision is not yet wired into the compact linker runtime")
     candidate_batch = retrieval_batch.candidate_batch
     row_signals = _merge_extra_row_signals(retrieval_batch.row_signals, extra_row_signals)
+    if not orcid_force_link_enabled and "orcid_match" in row_signals:
+        row_signals = dict(row_signals)
+        row_signals.pop("orcid_match")
     feature_matrix, row_feature_telemetry = _featureize_linker_candidates_with_telemetry(
         dataset=dataset,
         candidate_batch=candidate_batch,
@@ -1565,7 +1572,6 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         partial_supervision=partial_supervision_dict,
         use_default_constraints_as_supervision=bool(getattr(clusterer, "use_default_constraints_as_supervision", True)),
         dont_merge_cluster_seeds=bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
-        suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False)),
         n_jobs=n_jobs_resolved,
         featurizer=constraint_featurizer,
     )
@@ -1615,6 +1621,9 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
             signature_id_to_index=signature_id_to_index,
             excluded_components_by_query_id=cluster_seed_disallow_excluded_components,
         )
+    orcid_force_link_enabled = promoted_linker_orcid_force_link_enabled(
+        suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False))
+    )
     private_result = _predict_incremental_link_or_abstain_retrieved_candidates(
         artifact,
         retrieval_batch,
@@ -1628,6 +1637,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         runtime_context=resolved_runtime_context,
         featurizer=featurizer,
         hard_excluded_rows=hard_excluded_rows,
+        orcid_force_link_enabled=orcid_force_link_enabled,
     )
 
     raw_linked_clusters = {
@@ -1649,6 +1659,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         "seed_component_count": int(len({str(value) for value in cluster_seeds_require.values()})),
         "retrieval_top_k": retrieval_top_k_resolved,
         "retrieved_component_count": int(len(retrieved_component_keys)),
+        "orcid_force_link_enabled": orcid_force_link_enabled,
     }
     return LinkOrAbstainProductionResult(
         feature_matrix=private_result.feature_matrix,

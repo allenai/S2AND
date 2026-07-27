@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,6 +17,19 @@ from s2and.name_tuple_artifact import (
     load_name_tuple_artifact,
 )
 from scripts.production import generate_canonical_name_tuples
+
+
+@pytest.mark.parametrize("argv", [[], ["--source", "source.txt"], ["--output", "output.txt"]])
+def test_canonical_name_tuple_generator_requires_explicit_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["generate_canonical_name_tuples.py", *argv])
+
+    with pytest.raises(SystemExit) as exc_info:
+        generate_canonical_name_tuples.main()
+
+    assert exc_info.value.code == 2
 
 
 def _write_artifact(
@@ -52,9 +67,25 @@ def test_checked_in_canonical_name_tuple_hash_matches_unchanged_data() -> None:
         (Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt.meta.json").read_text(encoding="utf-8")
     )
 
-    assert len(artifact.pairs) == 3684
-    assert artifact.data_sha256 == "a6eafc93ee5af6c883c6d9dfa8abc2c26c88427ef2428fa4b99a681b0eaefb5b"
+    assert len(artifact.pairs) == 5027
+    assert artifact.data_sha256 == "b21638351149389c57eca547b0f79c80084e56ad273f31e778cb1db1866945a8"
     assert metadata["generation_counts"]["dropped_duplicate_canonical"] == 3768
+
+
+def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
+    evidence_path = (
+        Path(__file__).resolve().parents[1] / "docs" / "release_evidence" / "name_tuple_legacy_adjudication_v1.jsonl.gz"
+    )
+    records = [json.loads(line) for line in gzip.decompress(evidence_path.read_bytes()).decode("utf-8").splitlines()]
+    accepted = {(record["left"], record["right"]) for record in records if record["label"] == "accept"}
+    excluded = {(record["left"], record["right"]) for record in records if record["label"] != "accept"}
+    artifact = load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt")
+
+    assert len(records) == 2266
+    assert len(accepted) == 1343
+    assert len(excluded) == 923
+    assert accepted <= artifact.pairs
+    assert artifact.pairs.isdisjoint(excluded)
 
 
 def test_custom_artifact_requires_sidecar_and_rejects_data_tamper(tmp_path: Path) -> None:

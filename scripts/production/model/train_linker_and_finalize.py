@@ -1,15 +1,4 @@
-"""Train, calibrate, and evaluate the promoted joint-safe linker target.
-
-This is the official replay entrypoint for the promoted LightGBM
-linker/reranker target. It intentionally pins the promoted target JSON instead
-of trusting bundle manifests whose classic model specs predate the promotion.
-
-The flow starts from the self-contained Arrow+labels bundle, rebuilds the
-promoted feature tables through Rust/Arrow query, summary, row-signal,
-pairwise, and row-formula paths, then runs the train/calibrate/eval stack. The
-active candidate-member contract is block-local for retrieval, pairwise
-distance summaries, and appended `pw_*` aggregates.
-"""
+"""Train the linker once, publish a complete v5 bundle, reload, and evaluate."""
 
 from __future__ import annotations
 
@@ -20,6 +9,7 @@ import json
 import math
 import shutil
 import sys
+import tempfile
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -28,7 +18,6 @@ from typing import Any, cast
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 import pyarrow.dataset as pa_dataset
 import pyarrow.ipc as pa_ipc
 
@@ -38,13 +27,11 @@ for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
         sys.path.insert(0, str(extra_path))
 
 from s2and import feature_port  # noqa: E402
+from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ValidatedArrowInputs, validate_arrow_prediction_artifacts  # noqa: E402
 from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, NORMALIZATION_VERSION  # noqa: E402
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d  # noqa: E402
-from s2and.incremental_linking.artifact import (  # noqa: E402
-    load_incremental_linking_artifact,
-    save_incremental_linking_artifact,
-)
+from s2and.incremental_linking.artifact import save_incremental_linking_artifact  # noqa: E402
 from s2and.incremental_linking.feature_block import (  # noqa: E402
     read_cluster_seed_disallows_arrow,
     read_cluster_seeds_arrow,
@@ -52,69 +39,51 @@ from s2and.incremental_linking.feature_block import (  # noqa: E402
 from s2and.incremental_linking.features import promoted_linker_feature_columns  # noqa: E402
 from s2and.incremental_linking.gate_buckets import first_name_bucket_from_token_view  # noqa: E402
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch  # noqa: E402
-from s2and.incremental_linking.policy import require_arrow_name_counts_index_for_clusterer  # noqa: E402
+from s2and.incremental_linking.policy import (  # noqa: E402
+    PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
+    require_arrow_name_counts_index_for_clusterer,
+)
 from s2and.incremental_linking.retrieval import RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS  # noqa: E402
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features  # noqa: E402
 from s2and.incremental_linking.runtime import compute_candidate_batch_pairwise_model_and_aggregate_stats  # noqa: E402
 from s2and.incremental_linking_training.classic import (  # noqa: E402
+    DEFAULT_RETRIEVAL_TOP_K,
     PROMOTED_NON_PAIRWISE_COLUMNS,
     PROMOTED_PAIRWISE_COLUMNS,
     SUPPORTED_PROMOTED_FEATURE_COLUMNS,
     WEIGHTED_ERROR_WEIGHTS,
-    FittedClassicRun,
     OfficialBundle,
+    _classic_stratified_eval_source_specs,
     _drop_unlabeled_singleton_orcid_rows,
-    _load_classic_stratified_eval_rows,
+    _filter_candidate_rows_to_retrieval_top_k,
     _promoted_stratified_gate_spec,
     _resolve_path,
     _validate_stratified_split_assignments,
+    evaluate_classic,
+    fit_classic,
     load_bundle,
-    run_classic,
 )
 from s2and.incremental_linking_training.data_loading import load_clusterer  # noqa: E402
-from s2and.production_bundle import finalize_production_bundle, production_version_from_bundle_dir  # noqa: E402
-from s2and.production_model import pairwise_bundle_binding  # noqa: E402
+from s2and.production_bundle import finalize_production_bundle  # noqa: E402
+from s2and.production_model import load_production_model, pairwise_bundle_binding  # noqa: E402
+from s2and.production_training_contract import (  # noqa: E402
+    INTEGER_OFFICIAL_METRIC_KEYS,
+    LINKER_EVALUATION_REPORT_SCHEMA,
+    LINKER_TARGET_SCHEMA,
+    REQUIRED_LINKER_TABLE_KEYS,
+    SUPPORTED_OFFICIAL_METRIC_KEYS,
+    load_packaged_artifact_authority,
+)
 from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
 
-DEFAULT_NAME_COUNTS_INDEX_ROOT: Path | None = None
 DEFAULT_TOTAL_RAM_BYTES = 48 * 1024**3
 PRODUCTION_MAX_EXEMPLARS = 4
 PRODUCTION_PAIRWISE_MODEL_NAN_POLICY = "preserve"
 PRODUCTION_PAIRWISE_AGGREGATE_NAN_POLICY = "zero"
 PRODUCTION_ROW_NAN_POLICY = "finite"
-EVALUATED_ARTIFACT_DIRNAME = "incremental_linker_artifact"
-REQUIRED_TABLE_KEYS = (
-    "train_path",
-    "classic_gate_source_path",
-    "s2and_eval_path",
-    "hwang_eval_path",
-)
-INTEGER_OFFICIAL_METRIC_KEYS = frozenset(
-    {
-        "training_rows",
-        "training_positive_rows",
-        "stratified_test_queries",
-        "stratified_test_errors",
-        "stratified_test_false_abstain",
-        "stratified_test_false_link",
-        "stratified_test_wrong_candidate_link",
-    }
-)
-FLOAT_OFFICIAL_METRIC_KEYS = frozenset(
-    {
-        "stratified_test_accuracy",
-        "stratified_test_balanced_accuracy",
-        "stratified_test_error_rate",
-        "false_abstain_error_rate",
-        "false_link_error_rate",
-        "wrong_link_error_rate",
-        "weighted_average_error",
-    }
-)
-SUPPORTED_OFFICIAL_METRIC_KEYS = (
-    INTEGER_OFFICIAL_METRIC_KEYS | FLOAT_OFFICIAL_METRIC_KEYS | {"weighted_average_error_weights"}
-)
+LINKER_STAGING_DIRNAME = ".incremental_linker_staging"
+REQUIRED_TABLE_KEYS = REQUIRED_LINKER_TABLE_KEYS
 
 
 @dataclass
@@ -189,6 +158,8 @@ def _load_target(path: Path) -> dict[str, Any]:
     target = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(target, dict):
         raise ValueError(f"Promoted target must be a JSON object in {path}")
+    if target.get("schema_version") != LINKER_TARGET_SCHEMA:
+        raise ValueError(f"Promoted target schema_version must be {LINKER_TARGET_SCHEMA!r} in {path}")
     raw_features = target.get("features")
     if not isinstance(raw_features, list) or any(
         not isinstance(feature, str) or not feature for feature in raw_features
@@ -307,47 +278,24 @@ def _asset_file(bundle: OfficialBundle, asset_group: str, table_key: str) -> Pat
     return _resolve_path(bundle, str(files[table_key]))
 
 
-def _output_table_relpath(table_key: str, labels_path: Path) -> Path:
-    if table_key.startswith("extra_eval_paths."):
-        return Path("features_corrected") / labels_path.name
+def _output_table_relpath(labels_path: Path) -> Path:
     return Path("features_corrected") / labels_path.name
 
 
-def _read_selected_parquet_rows(
+def _read_parquet_rows(
     path: Path,
     *,
-    datasets: set[str] | None,
-    limit_rows: int | None,
+    query_ids: set[str] | None = None,
     columns: Sequence[str] | None = None,
 ) -> pd.DataFrame:
-    """Read selected rows through one bounded Arrow dataset scanner."""
+    """Read a source table, optionally filtering it to lifecycle query IDs."""
 
-    rows, _source_rows, _available_datasets = _scan_parquet_rows(
-        path,
-        datasets=datasets,
-        limit_rows=limit_rows,
-        columns=columns,
-        inventory=False,
-    )
-    return rows
-
-
-def _scan_parquet_rows(
-    path: Path,
-    *,
-    datasets: set[str] | None,
-    limit_rows: int | None,
-    columns: Sequence[str] | None,
-    inventory: bool,
-) -> tuple[pd.DataFrame, int, set[str]]:
-    """Scan once, optionally continuing after the row limit for selector inventory."""
-
-    if limit_rows is not None and int(limit_rows) <= 0:
-        raise ValueError("limit_rows must be > 0")
     dataset = pa_dataset.dataset(path, format="parquet")
     schema_names = list(dataset.schema.names)
     if "dataset" not in schema_names:
         raise ValueError(f"Parquet source must contain a dataset column: {path}")
+    if query_ids is not None and "query_group_id" not in schema_names:
+        raise ValueError(f"Parquet source must contain query_group_id for lifecycle filtering: {path}")
     requested_columns = schema_names if columns is None else list(columns)
     if "dataset" not in requested_columns:
         requested_columns.append("dataset")
@@ -355,34 +303,16 @@ def _scan_parquet_rows(
     if unknown_columns:
         raise ValueError(f"Parquet source is missing requested columns {unknown_columns}: {path}")
 
-    parts: list[pd.DataFrame] = []
-    available_datasets: set[str] = set()
-    scanned_rows = 0
-    selected_rows = 0
-    for batch in dataset.scanner(columns=requested_columns, batch_size=65_536).to_batches():
-        scanned_rows += int(batch.num_rows)
-        frame = batch.to_pandas()
-        available_datasets.update(frame["dataset"].astype(str))
-        if datasets is not None:
-            frame = frame.loc[frame["dataset"].astype(str).isin(datasets)]
-        if limit_rows is not None:
-            frame = frame.iloc[: max(0, int(limit_rows) - selected_rows)]
-        if not frame.empty:
-            parts.append(frame)
-            selected_rows += len(frame)
-        if limit_rows is not None and selected_rows >= int(limit_rows) and not inventory:
-            break
-
-    if parts:
-        rows = pd.concat(parts, ignore_index=True)
-    else:
-        rows = pa.Table.from_arrays(
-            [pa.array([], type=dataset.schema.field(name).type) for name in requested_columns],
-            names=requested_columns,
-        ).to_pandas()
+    row_filter = None
+    if query_ids is not None:
+        row_filter = pa_dataset.field("query_group_id").isin(sorted(query_ids))
+    rows = dataset.to_table(
+        columns=requested_columns,
+        filter=row_filter,
+    ).to_pandas()
     if columns is not None:
         rows = rows[list(columns)]
-    return rows, scanned_rows, available_datasets
+    return rows
 
 
 def _clean_arrow_rust_structural_rows(
@@ -846,7 +776,7 @@ def _resolve_arrow_rust_pair_labels(
             incremental_dont_use_cluster_seeds=False,
             num_threads=max(1, int(n_jobs)),
             featurizer=featurizer,
-            suppress_orcid=True,
+            suppress_orcid=PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
         )
     seed_bypass_indices = np.flatnonzero(pair_seed_bypass) if constraints_enabled else np.asarray([], dtype=np.int64)
     if len(seed_bypass_indices):
@@ -857,7 +787,7 @@ def _resolve_arrow_rust_pair_labels(
             incremental_dont_use_cluster_seeds=True,
             num_threads=max(1, int(n_jobs)),
             featurizer=featurizer,
-            suppress_orcid=True,
+            suppress_orcid=PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
         )
     disallow_ignored = 0
     if np.any(pair_ignore_disallow):
@@ -1121,6 +1051,7 @@ def _materialize_arrow_rust_dataset_rows(
     context: ArrowRustDatasetContext,
     rows: pd.DataFrame,
     target_features: Sequence[str],
+    name_tuples: frozenset[tuple[str, str]],
     clusterer: Any,
     n_jobs: int,
     total_ram_bytes: int,
@@ -1150,7 +1081,7 @@ def _materialize_arrow_rust_dataset_rows(
         dataset_rows["candidate_component_key"].astype(str).tolist(),
         retrieval_ranks.tolist(),
         context.component_members,
-        orcid_enabled=False,
+        orcid_enabled=not PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
         num_threads=max(1, int(n_jobs)),
         max_exemplars=int(max_exemplars),
         name_counts_index=context.arrow_paths.native_name_counts_index,
@@ -1162,7 +1093,7 @@ def _materialize_arrow_rust_dataset_rows(
         context.arrow_paths,
         expected_normalization_version=NORMALIZATION_VERSION,
         signature_ids=signature_ids,
-        name_tuples=None,
+        name_tuples=name_tuples,
         load_name_counts=True,
         preprocess=True,
         num_threads=max(1, int(n_jobs)),
@@ -1376,7 +1307,7 @@ def _finalize_arrow_rust_bundle_metadata(
         raise ValueError("models.classic.extra_eval_paths must be an object")
     for table_key in selected_keys:
         labels_path = _asset_file(source_bundle, "featureless_rows", table_key)
-        relpath = _output_table_relpath(table_key, labels_path).as_posix()
+        relpath = _output_table_relpath(labels_path).as_posix()
         corrected_feature_files[table_key] = relpath
         if table_key.startswith("extra_eval_paths."):
             dataset_name = table_key.split(".", 1)[1]
@@ -1398,12 +1329,12 @@ def _materialize_arrow_rust_feature_bundle(
     source_bundle: OfficialBundle,
     output_bundle_root: Path,
     target: Mapping[str, Any],
+    name_tuples: frozenset[tuple[str, str]],
     clusterer: Any,
     n_jobs: int,
     total_ram_bytes: int,
-    table_keys: Sequence[str] | None,
-    datasets: set[str] | None,
-    limit_rows: int | None,
+    table_keys: Sequence[str],
+    query_ids_by_table: Mapping[str, set[str]] | None = None,
     max_exemplars: int,
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
@@ -1411,12 +1342,11 @@ def _materialize_arrow_rust_feature_bundle(
     prevalidated_arrow_paths: Mapping[str, ValidatedArrowInputs] | None = None,
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
     _copy_bundle_support_files(source_bundle, output_bundle_root)
-    table_key_set = set(table_keys) if table_keys is not None else None
-    selected_keys = [
-        table_key
-        for table_key in _source_featureless_table_keys(source_bundle)
-        if table_key_set is None or table_key in table_key_set
-    ]
+    classic_spec = source_bundle.models.get("classic")
+    if not isinstance(classic_spec, Mapping):
+        raise ValueError("Source bundle models.classic must be an object")
+    retrieval_top_k = int(classic_spec.get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K))
+    selected_keys = list(dict.fromkeys(table_keys))
     materialized_keys: list[str] = []
     summaries: list[dict[str, Any]] = []
     target_features = tuple(str(feature) for feature in target["features"])
@@ -1451,7 +1381,7 @@ def _materialize_arrow_rust_feature_bundle(
 
     for table_key in selected_keys:
         labels_path = _asset_file(source_bundle, "featureless_rows", table_key)
-        output_relpath = _output_table_relpath(table_key, labels_path)
+        output_relpath = _output_table_relpath(labels_path)
         output_path = output_bundle_root / output_relpath
         print(
             json.dumps(
@@ -1463,15 +1393,26 @@ def _materialize_arrow_rust_feature_bundle(
             ),
             flush=True,
         )
-        labels = _read_selected_parquet_rows(
+        labels = _read_parquet_rows(
             labels_path,
-            datasets=datasets,
-            limit_rows=limit_rows,
+            query_ids=(None if query_ids_by_table is None else query_ids_by_table.get(table_key)),
         )
         labels, label_filtering_summary = _drop_unlabeled_singleton_orcid_rows(
             labels,
             context=f"arrow-rust:{table_key}",
         )
+        rows_before_retrieval_window = int(len(labels))
+        labels = _filter_candidate_rows_to_retrieval_top_k(
+            labels,
+            retrieval_top_k=retrieval_top_k,
+            context=f"arrow-rust:{table_key}",
+        )
+        label_filtering_summary["retrieval_window"] = {
+            "retrieval_top_k": retrieval_top_k,
+            "rows_before": rows_before_retrieval_window,
+            "rows_after": int(len(labels)),
+            "rows_removed": rows_before_retrieval_window - int(len(labels)),
+        }
         if labels.empty:
             append_empty_selection_summary(
                 table_key=table_key,
@@ -1580,6 +1521,7 @@ def _materialize_arrow_rust_feature_bundle(
                     context=context,
                     rows=shard.rows,
                     target_features=target_features,
+                    name_tuples=name_tuples,
                     clusterer=clusterer,
                     n_jobs=n_jobs,
                     total_ram_bytes=total_ram_bytes,
@@ -1622,6 +1564,12 @@ def _materialize_arrow_rust_feature_bundle(
         summaries.append(summary)
         print(json.dumps({"event": "arrow_rust_table_featureization_done", **summary}), flush=True)
 
+    if not materialized_keys:
+        raise RuntimeError("linker feature materialization produced zero rows")
+    missing_or_empty = sorted(set(selected_keys) - set(materialized_keys))
+    if missing_or_empty:
+        raise RuntimeError(f"official linker materialization has missing or empty required tables: {missing_or_empty}")
+
     _write_json(output_bundle_root / "featureization_summary.json", summaries)
     return (
         _finalize_arrow_rust_bundle_metadata(
@@ -1632,31 +1580,6 @@ def _materialize_arrow_rust_feature_bundle(
         ),
         summaries,
     )
-
-
-def _save_evaluated_artifact(
-    *,
-    fitted: FittedClassicRun,
-    artifact_dir: Path,
-    target_spec: Mapping[str, Any],
-    artifact_pairwise_bundle_binding: Mapping[str, Any],
-) -> dict[str, Any]:
-    artifact_metadata = save_incremental_linking_artifact(
-        fitted.model,
-        artifact_dir,
-        retrieval_top_k=fitted.retrieval_top_k,
-        gate_config=fitted.gate_config,
-        target_spec=target_spec,
-        pairwise_bundle_binding=artifact_pairwise_bundle_binding,
-    )
-    loaded = load_incremental_linking_artifact(artifact_dir)
-    return {
-        "path": str(artifact_dir),
-        "schema_version": artifact_metadata["schema_version"],
-        "booster_sha256": artifact_metadata["booster_sha256"],
-        "target_spec_digest": artifact_metadata["target_spec_digest"],
-        "retrieval_top_k": loaded.retrieval_top_k,
-    }
 
 
 def _observed_official_metrics(summary: Mapping[str, Any]) -> dict[str, Any]:
@@ -1695,105 +1618,23 @@ def _observed_official_metrics(summary: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _metric_deltas(observed: Mapping[str, Any], target: Mapping[str, Any]) -> dict[str, Any]:
-    target_metrics = dict(target.get("metrics", {}))
-    deltas: dict[str, Any] = {}
-    for key, observed_value in observed.items():
-        if key not in target_metrics:
-            continue
-        expected_value = target_metrics[key]
-        if isinstance(observed_value, str):
-            deltas[key] = observed_value == str(expected_value)
-        elif isinstance(observed_value, Mapping) or isinstance(expected_value, Mapping):
-            deltas[key] = dict(observed_value) == dict(expected_value)
-        elif isinstance(observed_value, int):
-            deltas[key] = int(observed_value) - int(expected_value)
-        else:
-            deltas[key] = float(observed_value) - float(expected_value)
-    return deltas
-
-
-def _assert_no_metric_drift(observed: Mapping[str, Any], target: Mapping[str, Any]) -> None:
-    target_metrics = target.get("metrics")
-    if not isinstance(target_metrics, Mapping):
-        raise RuntimeError("Official promoted target must contain a metrics object")
-    if not target_metrics:
-        raise RuntimeError("Official promoted target metrics must not be empty")
-    observed_keys = set(observed)
-    if observed_keys != SUPPORTED_OFFICIAL_METRIC_KEYS:
-        raise RuntimeError(
-            "Official promoted run produced an unexpected metric key set: "
-            f"missing={sorted(SUPPORTED_OFFICIAL_METRIC_KEYS - observed_keys)} "
-            f"extra={sorted(observed_keys - SUPPORTED_OFFICIAL_METRIC_KEYS)}"
-        )
-    target_keys = set(target_metrics)
-    if target_keys != SUPPORTED_OFFICIAL_METRIC_KEYS:
-        raise RuntimeError(
-            "Official promoted target must contain the complete official metric set: "
-            f"missing={sorted(SUPPORTED_OFFICIAL_METRIC_KEYS - target_keys)} "
-            f"extra={sorted(target_keys - SUPPORTED_OFFICIAL_METRIC_KEYS)}"
-        )
-
-    for key in SUPPORTED_OFFICIAL_METRIC_KEYS:
-        _require_finite_metric_values(
-            observed[key],
-            path=str(key),
-            context="Official promoted metric",
-            error_type=RuntimeError,
-        )
-        _require_finite_metric_values(
-            target_metrics[key],
-            path=f"target.{key}",
-            context="Official promoted metric",
-            error_type=RuntimeError,
-        )
-    deltas = _metric_deltas(observed, target)
-    bad: dict[str, Any] = {}
-    for key, delta in deltas.items():
-        if isinstance(delta, bool):
-            if not delta:
-                bad[key] = {"observed": observed[key], "expected": target["metrics"][key]}
-        elif isinstance(delta, int):
-            if delta != 0:
-                bad[key] = delta
-        elif abs(float(delta)) > 1e-12:
-            bad[key] = delta
-    if bad:
-        raise RuntimeError(f"Official promoted run drifted from target metrics: {bad}")
-
-
-def _parse_tables(values: Sequence[str] | None) -> tuple[str, ...] | None:
-    if not values:
-        return None
-    return tuple(dict.fromkeys(str(value) for value in values))
-
-
-def _parse_datasets(values: Sequence[str] | None) -> set[str] | None:
-    if not values:
-        return None
-    return {str(value) for value in values}
-
-
-def _resolved_output_paths(args: argparse.Namespace) -> tuple[Path, Path | None, Path]:
+def _resolved_output_paths(args: argparse.Namespace) -> tuple[Path, Path]:
     """Validate fresh output targets without creating them."""
 
     output_dir = Path(args.output_dir).resolve()
     if output_dir.exists():
         raise SystemExit(f"--output-dir must name a new directory: {output_dir}")
-    publish_to = getattr(args, "publish_to", None)
-    publish_dir = publish_to.resolve() if publish_to is not None else None
-    if publish_dir is not None:
-        if publish_dir.exists():
-            raise SystemExit(f"--publish-to must name a new directory: {publish_dir}")
-        if publish_dir.is_relative_to(output_dir) or output_dir.is_relative_to(publish_dir):
-            raise SystemExit("--output-dir and --publish-to must be separate directories")
-    return output_dir, publish_dir, output_dir / EVALUATED_ARTIFACT_DIRNAME
+    pairwise_model_path = Path(args.pairwise_model_path).resolve()
+    return (
+        output_dir,
+        output_dir / pairwise_model_path.name,
+    )
 
 
 def _assert_output_paths_outside_inputs(
     *,
     output_dir: Path,
-    publish_dir: Path | None,
+    complete_model_dir: Path,
     source_bundle_root: Path,
     pairwise_model_path: Path,
 ) -> None:
@@ -1803,26 +1644,18 @@ def _assert_output_paths_outside_inputs(
         "--source-bundle-root": source_bundle_root.resolve(),
         "--pairwise-model-path": pairwise_model_path.resolve(),
     }
-    output_paths = {
-        "--output-dir": output_dir.resolve(),
-        "--publish-to": None if publish_dir is None else publish_dir.resolve(),
-    }
     collisions = [
-        f"{output_option}={output_path} under {input_option}={input_root}"
-        for output_option, output_path in output_paths.items()
-        if output_path is not None
+        f"--output-dir={output_dir.resolve()} under {input_option}={input_root}"
         for input_option, input_root in input_roots.items()
-        if output_path.is_relative_to(input_root)
+        if output_dir.resolve().is_relative_to(input_root)
     ]
     if collisions:
         raise SystemExit("linker outputs must be outside immutable input bundles: " + "; ".join(collisions))
+    if complete_model_dir == pairwise_model_path.resolve():
+        raise SystemExit("complete model output must not replace the calibrated pairwise input")
 
 
-def _validate_source_bundle_support_files(
-    source_bundle: OfficialBundle,
-    *,
-    require_training_contract: bool = False,
-) -> list[str]:
+def _validate_source_bundle_support_files(source_bundle: OfficialBundle) -> list[str]:
     """Validate support files copied before feature materialization starts."""
 
     required_files = [source_bundle.root / "bundle.json"]
@@ -1834,147 +1667,112 @@ def _validate_source_bundle_support_files(
         raise ValueError(f"source bundle splits directory contains no files: {splits_dir}")
     required_files.extend(split_files)
 
-    assignments_path: Path | None = None
-    internal_eval_path: Path | None = None
-    gate_spec: dict[str, Any] | None = None
-    classic = source_bundle.models.get("classic", {})
-    if require_training_contract and not isinstance(classic, Mapping):
+    classic = source_bundle.models.get("classic")
+    if not isinstance(classic, Mapping):
         raise ValueError("source bundle models.classic must be a mapping")
-    if isinstance(classic, Mapping):
-        direct_support_path = classic.get("classic_gate_internal_eval_base_groups_path")
-        if isinstance(direct_support_path, str) and direct_support_path:
-            internal_eval_path = _resolve_path(source_bundle, direct_support_path)
-            required_files.append(internal_eval_path)
-        split_spec = classic.get("stratified_eval_test_split")
-        if isinstance(split_spec, Mapping):
-            assignments_path_value = split_spec.get("assignments_path")
-            if isinstance(assignments_path_value, str) and assignments_path_value:
-                assignments_path = _resolve_path(source_bundle, assignments_path_value)
-                required_files.append(assignments_path)
-        gate_spec = _promoted_stratified_gate_spec(dict(classic))
-        if require_training_contract:
-            if internal_eval_path is None:
-                raise ValueError("classic.classic_gate_internal_eval_base_groups_path is required")
-            if not isinstance(split_spec, Mapping) or assignments_path is None:
-                raise ValueError("classic.stratified_eval_test_split.assignments_path is required")
-            if gate_spec is None:
-                raise ValueError("classic.promoted_stratified_gate is required")
+    direct_support_path = classic.get("classic_gate_internal_eval_base_groups_path")
+    if not isinstance(direct_support_path, str) or not direct_support_path:
+        raise ValueError("classic.classic_gate_internal_eval_base_groups_path is required")
+    internal_eval_path = _resolve_path(source_bundle, direct_support_path)
+    split_spec = classic.get("stratified_eval_test_split")
+    if not isinstance(split_spec, Mapping):
+        raise ValueError("classic.stratified_eval_test_split.assignments_path is required")
+    assignments_path_value = split_spec.get("assignments_path")
+    if not isinstance(assignments_path_value, str) or not assignments_path_value:
+        raise ValueError("classic.stratified_eval_test_split.assignments_path is required")
+    assignments_path = _resolve_path(source_bundle, assignments_path_value)
+    gate_spec = _promoted_stratified_gate_spec(dict(classic))
+    if gate_spec is None:
+        raise ValueError("classic.promoted_stratified_gate is required")
+    required_files.extend((internal_eval_path, assignments_path))
 
     missing = sorted(str(path) for path in required_files if not path.is_file())
     if missing:
         raise ValueError(f"source bundle is missing required support files: {missing}")
-    if assignments_path is not None:
-        if require_training_contract:
-            _, assignments = _load_classic_stratified_eval_rows(
-                source_bundle,
-                dict(classic),
-                dict(split_spec),
-            )
-        else:
-            assignments = pd.read_csv(assignments_path)
-            _validate_stratified_split_assignments(assignments)
-        if gate_spec is not None:
-            required_splits = {*gate_spec["calibration_splits"], str(gate_spec["test_split"])}
-            missing_splits = sorted(required_splits - set(assignments["split"].astype(str)))
-            if missing_splits:
-                raise ValueError(
-                    f"Stratified split assignments omit configured calibration/test splits: {missing_splits}"
-                )
+    assignments = pd.read_csv(assignments_path)
+    _validate_stratified_split_assignments(assignments)
+    required_splits = {*gate_spec["calibration_splits"], str(gate_spec["test_split"])}
+    missing_splits = sorted(required_splits - set(assignments["split"].astype(str)))
+    if missing_splits:
+        raise ValueError(f"Stratified split assignments omit configured calibration/test splits: {missing_splits}")
     return [str(path) for path in dict.fromkeys(required_files)]
 
 
-def _require_publish_version_matches_pairwise(clusterer: Any, publish_dir: Path | None) -> None:
-    """Reject an accidental release-version change before materialization."""
+def _release_table_plan(
+    source_bundle: OfficialBundle,
+) -> tuple[tuple[str, ...], dict[str, set[str]], tuple[str, ...]]:
+    """Separate train/calibration rows from frozen evaluation tables."""
 
-    if publish_dir is None:
-        return
-    publish_version = production_version_from_bundle_dir(publish_dir)
-    pairwise_version = str(getattr(clusterer, "production_model_bundle_version", "") or "").strip()
-    if publish_version is None:
-        raise SystemExit("--publish-to must use a production_model_vX.Y directory name")
-    if not pairwise_version:
-        raise ValueError("Pairwise bundle does not declare production_model_bundle_version")
-    if publish_version != pairwise_version:
-        raise SystemExit(
-            "--publish-to version disagrees with the pairwise bundle: "
-            f"publish={publish_version!r}, pairwise={pairwise_version!r}"
+    classic = dict(source_bundle.models["classic"])
+    split_spec = dict(classic["stratified_eval_test_split"])
+    gate_spec = _promoted_stratified_gate_spec(classic)
+    if gate_spec is None:
+        raise ValueError("classic.promoted_stratified_gate is required")
+    assignments = pd.read_csv(_resolve_path(source_bundle, str(split_spec["assignments_path"])))
+    _validate_stratified_split_assignments(assignments)
+    calibration_splits = {str(split) for split in gate_spec["calibration_splits"]}
+    calibration_assignments = assignments[assignments["split"].astype(str).isin(calibration_splits)]
+    if calibration_assignments.empty:
+        raise ValueError("Linker calibration splits contain no assigned queries")
+
+    table_keys = _source_featureless_table_keys(source_bundle)
+    path_to_table_key = {
+        _asset_file(source_bundle, "featureless_rows", table_key).resolve(): table_key for table_key in table_keys
+    }
+    calibration_query_ids: dict[str, set[str]] = {}
+    for source_spec in _classic_stratified_eval_source_specs(classic):
+        if source_spec["source_kind"] == "calibration_source":
+            continue
+        table_key = path_to_table_key.get(_resolve_path(source_bundle, source_spec["path"]).resolve())
+        if table_key is None:
+            raise ValueError(f"Stratified source has no featureless table: {source_spec['path']}")
+        query_ids = set(
+            calibration_assignments.loc[
+                calibration_assignments["source_key"].astype(str).eq(str(source_spec["source_key"])),
+                "query_group_id",
+            ].astype(str)
         )
+        if query_ids:
+            calibration_query_ids[table_key] = query_ids
+
+    training_keys = tuple(
+        dict.fromkeys(
+            (
+                "train_path",
+                "classic_gate_source_path",
+                *calibration_query_ids,
+            )
+        )
+    )
+    evaluation_keys = tuple(key for key in table_keys if key not in {"train_path", "classic_gate_source_path"})
+    return training_keys, calibration_query_ids, evaluation_keys
 
 
 def _preflight_source_rows(
     source_bundle: OfficialBundle,
     *,
-    table_keys: Sequence[str] | None,
-    datasets: set[str] | None,
-    limit_rows: int | None,
-    require_full_tables: bool,
     name_counts_index_root: Path | None,
-) -> tuple[dict[str, Any], dict[str, ValidatedArrowInputs]]:
-    """Validate selectors, row presence, and every referenced Arrow generation."""
+) -> tuple[int, dict[str, ValidatedArrowInputs]]:
+    """Validate source row presence and every referenced Arrow generation."""
 
     available_tables = _source_featureless_table_keys(source_bundle)
-    if not available_tables:
-        raise ValueError("source bundle contains no supported featureless row tables")
     available_table_set = set(available_tables)
-    if require_full_tables:
-        missing_required = sorted(set(REQUIRED_TABLE_KEYS) - available_table_set)
-        if missing_required:
-            raise ValueError(f"official linker source bundle is missing required tables: {missing_required}")
+    missing_required = sorted(set(REQUIRED_TABLE_KEYS) - available_table_set)
+    if missing_required:
+        raise ValueError(f"official linker source bundle is missing required tables: {missing_required}")
 
-    requested_tables = tuple(table_keys) if table_keys is not None else available_tables
-    unknown_tables = sorted(set(requested_tables) - available_table_set)
-    if unknown_tables:
-        raise ValueError(f"unknown --tables selectors: {unknown_tables}; available={list(available_tables)}")
-    if not requested_tables:
-        raise ValueError("no source tables were selected")
-
-    table_summaries: list[dict[str, Any]] = []
-    observed_selector_matches: set[str] = set()
-    observed_selected_datasets: set[str] = set()
-    for table_key in requested_tables:
+    source_rows = 0
+    observed_datasets: set[str] = set()
+    for table_key in available_tables:
         labels_path = _asset_file(source_bundle, "featureless_rows", table_key)
-        try:
-            selected_dataset_rows, source_rows, available_datasets = _scan_parquet_rows(
-                labels_path,
-                datasets=datasets,
-                limit_rows=limit_rows,
-                columns=["dataset"],
-                inventory=True,
-            )
-        except (KeyError, ValueError) as exc:
-            raise ValueError(f"source table {table_key!r} must contain a dataset column: {labels_path}") from exc
-        if source_rows == 0:
+        rows = _read_parquet_rows(labels_path, columns=["dataset"])
+        if rows.empty:
             raise ValueError(f"source table {table_key!r} is empty: {labels_path}")
-        if datasets is None:
-            observed_selector_matches.update(available_datasets)
-        else:
-            observed_selector_matches.update(available_datasets & datasets)
-        selected_rows = int(len(selected_dataset_rows))
-        if selected_rows == 0:
-            requested = "all datasets" if datasets is None else sorted(datasets)
-            raise ValueError(f"source table {table_key!r} selected zero rows for datasets={requested}")
-        selected_dataset_names = tuple(dict.fromkeys(selected_dataset_rows["dataset"].astype(str).tolist()))
-        observed_selected_datasets.update(selected_dataset_names)
-        table_summaries.append(
-            {
-                "table_key": table_key,
-                "path": str(labels_path),
-                "source_rows": source_rows,
-                "selected_rows": selected_rows,
-                "datasets": list(selected_dataset_names),
-            }
-        )
-
-    if datasets is not None:
-        unmatched_datasets = sorted(datasets - observed_selector_matches)
-        if unmatched_datasets:
-            raise ValueError(
-                f"unknown or unmatched --datasets selectors: {unmatched_datasets}; "
-                f"matched={sorted(observed_selected_datasets)}"
-            )
+        source_rows += len(rows)
+        observed_datasets.update(rows["dataset"].astype(str))
 
     arrow_paths_by_dataset: dict[str, ValidatedArrowInputs] = {}
-    for dataset_name in sorted(observed_selected_datasets):
+    for dataset_name in sorted(observed_datasets):
         arrow_paths_by_dataset[dataset_name] = _arrow_paths_for_dataset(
             source_bundle,
             dataset_name,
@@ -1990,208 +1788,147 @@ def _preflight_source_rows(
         raise ValueError(
             f"linker source datasets reference multiple name-count generations: {sorted(name_count_hashes)}"
         )
-    summary = {
-        "available_tables": list(available_tables),
-        "selected_tables": list(requested_tables),
-        "tables": table_summaries,
-        "datasets": {
-            dataset_name: {
-                "generation_id": paths.generation_id,
-                "normalization_version": paths.normalization_version,
-                "name_counts_manifest_sha256": (
-                    None if paths.name_counts_manifest is None else paths.name_counts_manifest.manifest_sha256
-                ),
-            }
-            for dataset_name, paths in arrow_paths_by_dataset.items()
-        },
-        "total_selected_rows": sum(int(item["selected_rows"]) for item in table_summaries),
-    }
-    return summary, arrow_paths_by_dataset
-
-
-def _assert_materialization_nonempty(
-    summaries: Sequence[Mapping[str, Any]],
-    *,
-    require_full_tables: bool,
-) -> None:
-    """Reject successful-looking no-op or incomplete materialization."""
-
-    rows_by_table = {str(item["table_key"]): int(item.get("rows", 0)) for item in summaries}
-    total_rows = sum(rows_by_table.values())
-    if total_rows <= 0:
-        raise RuntimeError("linker feature materialization produced zero rows")
-    if require_full_tables:
-        missing_or_empty = sorted(key for key in REQUIRED_TABLE_KEYS if rows_by_table.get(key, 0) <= 0)
-        if missing_or_empty:
-            raise RuntimeError(
-                f"official linker materialization has missing or empty required tables: {missing_or_empty}"
-            )
+    return source_rows, arrow_paths_by_dataset
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    command = str(args.command)
-    is_preflight = command == "preflight"
-    is_materialize = command == "materialize"
-    is_candidate = command == "candidate"
-    output_dir, publish_dir, artifact_dir = _resolved_output_paths(args)
+    output_dir, complete_model_dir = _resolved_output_paths(args)
     target = _load_target(args.target_json)
-    selected_subset = args.limit_rows is not None or bool(args.tables) or bool(args.datasets)
-    require_full_tables = command in {"candidate", "publish"} or (is_preflight and not selected_subset)
-    if publish_dir is not None and not target["metrics"]:
-        raise ValueError("Published target metrics must not be empty")
+    artifact_authority = load_packaged_artifact_authority(
+        name_counts_index_root=Path(args.name_counts_index_root),
+    )
+    artifact_hashes = artifact_authority.hashes
+    name_tuples = artifact_authority.name_tuples.pairs
     pairwise_model_nan_value = float("nan")
     pairwise_aggregate_nan_value = 0.0
     feature_nan_policy = _feature_nan_policy_summary()
     source_bundle = load_bundle(args.source_bundle_root)
+    training_table_keys, calibration_query_ids, evaluation_table_keys = _release_table_plan(source_bundle)
     _assert_output_paths_outside_inputs(
         output_dir=output_dir,
-        publish_dir=publish_dir,
+        complete_model_dir=complete_model_dir,
         source_bundle_root=source_bundle.root,
         pairwise_model_path=Path(args.pairwise_model_path),
     )
-    support_files = _validate_source_bundle_support_files(
+    _validate_source_bundle_support_files(source_bundle)
+    name_counts_index_root = Path(args.name_counts_index_root)
+    _, prevalidated_arrow_paths = _preflight_source_rows(
         source_bundle,
-        require_training_contract=require_full_tables,
-    )
-    name_counts_index_root = (
-        Path(args.arrow_name_counts_index_root) if args.arrow_name_counts_index_root is not None else None
-    )
-    preflight_summary, prevalidated_arrow_paths = _preflight_source_rows(
-        source_bundle,
-        table_keys=_parse_tables(args.tables),
-        datasets=_parse_datasets(args.datasets),
-        limit_rows=args.limit_rows,
-        require_full_tables=require_full_tables,
         name_counts_index_root=name_counts_index_root,
     )
-    clusterer = load_clusterer(args.pairwise_model_path, n_jobs=int(args.n_jobs))
+    clusterer = load_clusterer(
+        args.pairwise_model_path,
+        n_jobs=int(args.n_jobs),
+        expected_artifact_hashes=artifact_hashes,
+    )
     _assert_pairwise_model_supports_arrow_materialization(clusterer, args.pairwise_model_path)
-    _require_publish_version_matches_pairwise(clusterer, publish_dir)
     for dataset_name, arrow_paths in prevalidated_arrow_paths.items():
         require_arrow_name_counts_index_for_clusterer(
             clusterer,
             arrow_paths,
             context=f"linker train/calibrate/eval preflight dataset {dataset_name!r}",
         )
-    pairwise_binding = dict(pairwise_bundle_binding(Path(args.pairwise_model_path)))
-    preflight_result = {
-        "mode": "preflight",
-        "source_bundle_root": str(source_bundle.root),
-        "target_json": str(Path(args.target_json).resolve()),
-        "pairwise_model_path": str(Path(args.pairwise_model_path).resolve()),
-        "pairwise_bundle_binding": pairwise_binding,
-        "output_dir": str(output_dir),
-        "feature_nan_policy": feature_nan_policy,
-        "max_exemplars": PRODUCTION_MAX_EXEMPLARS,
-        "source": preflight_summary,
-        "support_files": support_files,
-    }
-    if is_preflight:
-        return preflight_result
-
+    pairwise_binding = dict(
+        pairwise_bundle_binding(
+            Path(args.pairwise_model_path),
+            expected_artifact_hashes=artifact_hashes,
+        )
+    )
     output_dir.mkdir(parents=True)
-    _write_json(output_dir / "preflight.json", preflight_result)
-    feature_bundle_root = output_dir / "arrow_rust_feature_bundle"
-    feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
+    work = tempfile.TemporaryDirectory(prefix=".linker-release-", dir=output_dir)
+    work_dir = Path(work.name)
+    artifact_dir = work_dir / LINKER_STAGING_DIRNAME
+    feature_bundle_root = work_dir / "training_features"
+    feature_bundle, _featureization_summaries = _materialize_arrow_rust_feature_bundle(
         source_bundle=source_bundle,
         output_bundle_root=feature_bundle_root,
         target=target,
+        name_tuples=name_tuples,
         clusterer=clusterer,
         n_jobs=int(args.n_jobs),
         total_ram_bytes=int(args.total_ram_bytes),
-        table_keys=_parse_tables(args.tables),
-        datasets=_parse_datasets(args.datasets),
-        limit_rows=args.limit_rows,
+        table_keys=training_table_keys,
+        query_ids_by_table=calibration_query_ids or None,
         max_exemplars=PRODUCTION_MAX_EXEMPLARS,
         pairwise_model_nan_value=pairwise_model_nan_value,
         pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
         name_counts_index_root=name_counts_index_root,
         prevalidated_arrow_paths=prevalidated_arrow_paths,
     )
-    _assert_materialization_nonempty(featureization_summaries, require_full_tables=require_full_tables)
-    if is_materialize:
-        result = {
-            "mode": "arrow-rust",
-            "source_bundle_root": str(source_bundle.root),
-            "feature_bundle_root": str(feature_bundle.root),
-            "pairwise_model_path": str(args.pairwise_model_path),
-            "feature_count": int(target["feature_count"]),
-            "component_scope": "block-local",
-            "feature_nan_policy": feature_nan_policy,
-            "featureization": featureization_summaries,
-        }
-        _write_json(output_dir / "run_summary.json", result)
-        return result
 
-    run_output_dir = output_dir / "classic"
     started = time.perf_counter()
     active_params = dict(feature_bundle.models["classic"]["best_params"])
 
-    fitted = run_classic(feature_bundle, run_output_dir, n_jobs=int(args.n_jobs))
-    summary = fitted.summary
-    observed = _observed_official_metrics(summary)
-    deltas = _metric_deltas(observed, target)
-    candidate_target_path = None
-    if not is_candidate:
-        _assert_no_metric_drift(observed, target)
-    if is_candidate:
-        candidate_target_path = output_dir / "candidate_target.json"
-        candidate_target = {
-            **target,
-            "params": dict(active_params),
-            "metrics": observed,
-        }
-        _write_json(candidate_target_path, candidate_target)
-
-    artifact_summary = _save_evaluated_artifact(
-        fitted=fitted,
-        artifact_dir=artifact_dir,
-        target_spec=candidate_target if is_candidate else target,
-        artifact_pairwise_bundle_binding=pairwise_binding,
+    calibrated = fit_classic(feature_bundle, n_jobs=int(args.n_jobs))
+    artifact_metadata = save_incremental_linking_artifact(
+        calibrated.model,
+        artifact_dir,
+        retrieval_top_k=calibrated.retrieval_top_k,
+        gate_config=calibrated.gate_config,
+        target_spec=target,
+        pairwise_bundle_binding=pairwise_binding,
     )
-    _write_json(output_dir / "artifact_summary.json", artifact_summary)
-    production_bundle_summary = None
-    if publish_dir is not None:
-        production_bundle_summary = finalize_production_bundle(
-            pairwise_bundle_dir=Path(args.pairwise_model_path),
-            output_bundle_dir=publish_dir,
-            incremental_linker_artifact_dir=artifact_dir,
-            target_json=Path(args.target_json),
-        )
+    finalized = finalize_production_bundle(
+        pairwise_bundle_dir=Path(args.pairwise_model_path),
+        output_bundle_dir=complete_model_dir,
+        incremental_linker_artifact_dir=artifact_dir,
+        target_json=Path(args.target_json),
+        expected_artifact_hashes=artifact_hashes,
+    )
+    complete_model = load_production_model(
+        complete_model_dir,
+        expected_artifact_hashes=artifact_hashes,
+    )
+    if complete_model.incremental_linker_artifact is None:
+        raise RuntimeError("Reloaded complete model does not contain an incremental linker artifact")
+    shutil.rmtree(artifact_dir)
+
+    evaluation_feature_bundle_root = work_dir / "evaluation_features"
+    evaluation_feature_bundle, _evaluation_featureization_summaries = _materialize_arrow_rust_feature_bundle(
+        source_bundle=source_bundle,
+        output_bundle_root=evaluation_feature_bundle_root,
+        target=target,
+        name_tuples=name_tuples,
+        clusterer=complete_model,
+        n_jobs=int(args.n_jobs),
+        total_ram_bytes=int(args.total_ram_bytes),
+        table_keys=evaluation_table_keys,
+        max_exemplars=PRODUCTION_MAX_EXEMPLARS,
+        pairwise_model_nan_value=pairwise_model_nan_value,
+        pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
+        name_counts_index_root=name_counts_index_root,
+    )
+    evaluation = evaluate_classic(
+        evaluation_feature_bundle,
+        calibrated=calibrated,
+        artifact=complete_model.incremental_linker_artifact,
+        n_jobs=int(args.n_jobs),
+    )
+    summary = evaluation.summary
+    observed = _observed_official_metrics(summary)
+    artifact_summary = dict(artifact_metadata)
     result = {
+        "schema_version": LINKER_EVALUATION_REPORT_SCHEMA,
         "mode": "arrow-rust",
-        "feature_bundle_root": str(feature_bundle.root),
-        "target_json": str(args.target_json),
+        "complete_model_path": str(complete_model_dir),
+        "model_manifest_path": str(finalized.manifest_path),
+        "model_manifest_sha256": sha256_file(finalized.manifest_path),
+        "source_bundle_root": str(source_bundle.root),
+        "target_json": str(Path(args.target_json).resolve()),
         "feature_count": int(target["feature_count"]),
         "n_estimators": int(active_params["n_estimators"]),
-        "target_n_estimators": int(target["params"]["n_estimators"]),
         "model_params": dict(active_params),
-        "target_params": dict(target["params"]),
         "elapsed_seconds": round(float(time.perf_counter() - started), 3),
-        "featureization": featureization_summaries,
+        "pairwise_bundle_binding": pairwise_binding,
+        "input_artifact_hashes": artifact_hashes,
         "observed_metrics": observed,
-        "target_metrics": dict(target["metrics"]),
-        "metric_deltas": deltas,
-        "query_predictions": fitted.query_predictions,
-        "classic_summary_path": str(run_output_dir / "summary.json"),
+        "query_predictions": evaluation.query_predictions,
         "feature_nan_policy": feature_nan_policy,
+        "artifact_summary": artifact_summary,
+        "component_scope": "block-local",
     }
-    result["artifact_dir"] = str(artifact_dir)
-    result["artifact_summary"] = artifact_summary
-    if production_bundle_summary is not None:
-        result["production_bundle_dir"] = str(production_bundle_summary.bundle_dir)
-        result["production_bundle_summary"] = {
-            "bundle_status": production_bundle_summary.bundle_status,
-            "bundle_version": production_bundle_summary.bundle_version,
-            "files": list(production_bundle_summary.files),
-            "manifest_path": str(production_bundle_summary.manifest_path),
-        }
-    if candidate_target_path is not None:
-        result["candidate_target_path"] = str(candidate_target_path)
-    result["component_scope"] = "block-local"
-    if not is_candidate:
-        result["metric_drift_check"] = "passed"
-    _write_json(output_dir / "run_summary.json", result)
+    work.cleanup()
+    _write_json(output_dir / "linker_evaluation_report.json", result)
     return result
 
 
@@ -2212,56 +1949,14 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         required=True,
         help="Explicit v5 pairwise_only native bundle produced by train_pairwise.py.",
     )
-    parser.add_argument(
-        "--arrow-name-counts-index-root",
-        type=Path,
-        default=DEFAULT_NAME_COUNTS_INDEX_ROOT,
-        help=(
-            "Optional override for the Arrow name_counts_index root. By default, each Arrow dataset "
-            "manifest is the authority."
-        ),
-    )
+    parser.add_argument("--name-counts-index-root", type=Path, required=True)
     parser.add_argument("--n-jobs", type=_positive_int, default=20)
     parser.add_argument("--total-ram-bytes", type=_positive_int, default=DEFAULT_TOTAL_RAM_BYTES)
 
 
-def _add_selectors(parser: argparse.ArgumentParser, *, require_limit: bool) -> None:
-    parser.add_argument("--tables", nargs="+", help="Optional table keys to materialize.")
-    parser.add_argument("--datasets", nargs="+", help="Optional dataset slugs to keep when materializing smoke checks.")
-    parser.add_argument(
-        "--limit-rows",
-        type=_positive_int,
-        required=require_limit,
-        help="Per-table row limit for bounded checks.",
-    )
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
-
-    preflight = commands.add_parser("preflight", help="Validate inputs and write nothing.")
-    _add_common_arguments(preflight)
-    _add_selectors(preflight, require_limit=False)
-    preflight.add_argument("--publish-to", type=Path, help="Fresh destination to validate without writing.")
-
-    materialize = commands.add_parser("materialize", help="Run bounded Arrow/Rust materialization.")
-    _add_common_arguments(materialize)
-    _add_selectors(materialize, require_limit=True)
-
-    candidate = commands.add_parser("candidate", help="Train and evaluate one release candidate.")
-    _add_common_arguments(candidate)
-    candidate.set_defaults(tables=None, datasets=None, limit_rows=None, publish_to=None)
-
-    publish = commands.add_parser("publish", help="Train against a frozen target and publish the matching bundle.")
-    _add_common_arguments(publish)
-    publish.add_argument(
-        "--publish-to",
-        type=Path,
-        required=True,
-        help="Publish a complete production_model_vX.Y bundle to this new directory.",
-    )
-    publish.set_defaults(tables=None, datasets=None, limit_rows=None)
+    _add_common_arguments(parser)
     return parser
 
 

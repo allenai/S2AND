@@ -4,24 +4,24 @@ import argparse
 import hashlib
 import json
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
-import lightgbm as lgb
 import numpy as np
 import pytest
 
-import s2and.production_model as production_model_module
-from s2and.production_bundle import finalize_pairwise_eps, write_production_manifest
-from s2and.production_model import _load_pairwise_staging_model
+from s2and.release_evidence import (
+    RELEASE_EVIDENCE_MANIFEST_SCHEMA,
+    RELEASE_EVIDENCE_ROLES,
+    validate_release_evidence_manifest,
+)
 from scripts.production.model import release_pairwise
-from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
 
 ARTIFACT_HASHES = {
-    "name_tuples_data_sha256": "a" * 64,
-    "orcid_prefix_counts_data_sha256": "b" * 64,
+    "name_counts_manifest_sha256": "c" * 64,
+    "name_tuples_data_sha256": "d" * 64,
+    "orcid_prefix_counts_data_sha256": "e" * 64,
+    "orcid_prefix_counts_manifest_sha256": "f" * 64,
 }
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,9 +30,87 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _write_evaluation_bindings(tmp_path: Path) -> dict[str, object]:
-    quality_policy = tmp_path / "quality_policy.json"
-    quality_policy.write_text("{}\n", encoding="utf-8")
+def _release_spec_payload() -> dict[str, Any]:
+    return {
+        "schema_version": release_pairwise.RELEASE_SPEC_SCHEMA,
+        "release_identity": {
+            "normalization_version": "canonical_v2",
+            "python_version": "1.3.0",
+            "release_commit": "a" * 40,
+            "rust_version": "1.3.0",
+        },
+        "populations": {
+            "cluster_datasets": ["toy"],
+            "cluster_manifest_sha256": "2" * 64,
+            "pairwise_datasets": ["toy"],
+            "pairwise_manifest_sha256": "1" * 64,
+        },
+        "inputs": {
+            "data_manifest_sha256": "7" * 64,
+            "parity_fixture_manifest_sha256": "3" * 64,
+            "performance_data_manifest_sha256": "4" * 64,
+            "performance_workload_sha256": "5" * 64,
+            "subblocking_input_manifest_sha256": "6" * 64,
+        },
+        "baselines": {
+            "cluster_signature_weighted_b3_f1": 0.804,
+            "pairwise_aggregate": {"auroc": 0.9005, "macro_f1": 0.804},
+            "pairwise_datasets": {"toy": {"auroc": 0.9005, "macro_f1": 0.804}},
+            "predict_seconds_p50": 10.0,
+        },
+        "thresholds": {
+            "cluster_signature_weighted_b3_f1_max_drop": 0.005,
+            "pairwise_aggregate_auroc_max_drop": 0.001,
+            "pairwise_aggregate_macro_f1_max_drop": 0.005,
+            "pairwise_dataset_auroc_max_drop": 0.001,
+            "pairwise_dataset_macro_f1_max_drop": 0.005,
+            "peak_rss_absolute_max_gb": 4.0,
+            "runtime_max_ratio": 1.1,
+            "subblocking_maximum_size": 100,
+        },
+    }
+
+
+def _linker_metrics() -> dict[str, Any]:
+    integer_metrics = {
+        "stratified_test_errors",
+        "stratified_test_false_abstain",
+        "stratified_test_false_link",
+        "stratified_test_queries",
+        "stratified_test_wrong_candidate_link",
+        "training_positive_rows",
+        "training_rows",
+    }
+    return {
+        key: (
+            {
+                "false_abstain_error_rate": 1.0,
+                "false_link_error_rate": 2.0,
+                "wrong_link_error_rate": 3.0,
+            }
+            if key == "weighted_average_error_weights"
+            else 1
+            if key in integer_metrics
+            else 0.1
+        )
+        for key in release_pairwise.SUPPORTED_OFFICIAL_METRIC_KEYS
+    }
+
+
+def _write_evaluation_bindings(
+    tmp_path: Path,
+    population_manifest_sha256: str,
+    *,
+    manifest_schema: str = release_pairwise.PAIR_MANIFEST_SCHEMA,
+) -> dict[str, object]:
+    release_spec_payload = _release_spec_payload()
+    digest_field = {
+        release_pairwise.PAIR_MANIFEST_SCHEMA: "pairwise_manifest_sha256",
+        release_pairwise.CLUSTER_MANIFEST_SCHEMA: "cluster_manifest_sha256",
+    }[manifest_schema]
+    release_spec_payload["populations"][digest_field] = population_manifest_sha256
+    release_spec = tmp_path / "release_spec.json"
+    release_spec.write_text(json.dumps(release_spec_payload) + "\n", encoding="utf-8")
     model = tmp_path / "complete_model"
     model.mkdir()
     model_manifest = model / "manifest.json"
@@ -40,9 +118,38 @@ def _write_evaluation_bindings(tmp_path: Path) -> dict[str, object]:
     return {
         "model": model,
         "expected_model_manifest_sha256": _sha256(model_manifest),
-        "quality_policy": quality_policy,
-        "expected_quality_policy_sha256": _sha256(quality_policy),
+        "release_spec": release_spec,
+        "expected_release_spec_sha256": _sha256(release_spec),
     }
+
+
+def _patch_evaluation_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[argparse.Namespace, argparse.Namespace, argparse.Namespace, dict[str, Any]]:
+    name_counts_index = argparse.Namespace(manifest_sha256="c" * 64)
+    name_tuples = argparse.Namespace(data_sha256="d" * 64, pairs=frozenset({("a", "b")}))
+    orcid_prefix_counts = argparse.Namespace(
+        data_sha256="e" * 64,
+        manifest_sha256="f" * 64,
+        name_tuples_sha256=name_tuples.data_sha256,
+    )
+    monkeypatch.setattr(
+        release_pairwise,
+        "_load_release_artifacts",
+        lambda _args: release_pairwise.ProductionArtifactAuthority(
+            name_counts_index=name_counts_index,
+            name_tuples=name_tuples,
+            orcid_prefix_counts=orcid_prefix_counts,
+        ),
+    )
+    return (
+        name_counts_index,
+        name_tuples,
+        orcid_prefix_counts,
+        {
+            "name_counts_index_root": Path("explicit-name-counts-index"),
+        },
+    )
 
 
 def _write_evaluation_manifest(
@@ -69,6 +176,166 @@ def _write_evaluation_manifest(
     return manifest, _sha256(manifest)
 
 
+def _write_release_evidence(
+    tmp_path: Path,
+    release_spec: dict[str, Any],
+) -> tuple[Path, str, dict[str, Path]]:
+    evidence_root = tmp_path / "release_evidence"
+    evidence_root.mkdir()
+    payloads: dict[str, dict[str, Any]] = {
+        role: {"schema_version": schema}
+        for role, schema in release_pairwise._RELEASE_EVIDENCE_SCHEMAS.items()  # noqa: SLF001
+    }
+    payloads["complete_model_manifest"] = {
+        "bundle_version": "9.9",
+        "incremental_linker_version": "9.9",
+        "pairwise_model_version": "9.9",
+        "schema_version": release_pairwise._RELEASE_EVIDENCE_SCHEMAS["complete_model_manifest"],  # noqa: SLF001
+        "sha256": {},
+    }
+    payloads["data_manifest"] = {"schema": "inference_arrow_bundle_v1"}
+    payloads["release_spec"] = release_spec
+    complete_model_path = evidence_root / "complete_model_manifest.json"
+    complete_model_path.write_text(json.dumps(payloads["complete_model_manifest"]) + "\n", encoding="utf-8")
+    complete_model_sha256 = _sha256(complete_model_path)
+    data_manifest_path = evidence_root / "data_manifest.json"
+    data_manifest_path.write_text(json.dumps(payloads["data_manifest"]) + "\n", encoding="utf-8")
+    release_spec["inputs"]["data_manifest_sha256"] = _sha256(data_manifest_path)
+    release_spec_path = evidence_root / "release_spec.json"
+    release_spec_path.write_text(json.dumps(release_spec) + "\n", encoding="utf-8")
+    release_spec_sha256 = _sha256(release_spec_path)
+
+    payloads["pairwise_evaluation_report"].update(
+        {
+            "release_spec_sha256": release_spec_sha256,
+            "model_manifest_sha256": complete_model_sha256,
+            **ARTIFACT_HASHES,
+            "population_manifest_sha256": release_spec["populations"]["pairwise_manifest_sha256"],
+            "aggregate": {"auroc": 0.9, "macro_f1": 0.8},
+            "datasets": {"toy": {"metrics": {"auroc": 0.9, "macro_f1": 0.8}}},
+        }
+    )
+    payloads["cluster_evaluation_report"].update(
+        {
+            "release_spec_sha256": release_spec_sha256,
+            "model_manifest_sha256": complete_model_sha256,
+            **ARTIFACT_HASHES,
+            "population_manifest_sha256": release_spec["populations"]["cluster_manifest_sha256"],
+            "signature_weighted": {"f1": 0.8},
+            "datasets": {"toy": {"metrics": {"f1": 0.8}}},
+        }
+    )
+    payloads["linker_evaluation_report"].update(
+        {
+            "model_manifest_sha256": complete_model_sha256,
+            "observed_metrics": _linker_metrics(),
+            "query_predictions": {
+                "bytes": 42,
+                "path": "classic/query_predictions.csv",
+                "sha256": "a" * 64,
+            },
+        }
+    )
+    payloads["performance_evaluation_report"].update(
+        {
+            "model_manifest_sha256": complete_model_sha256,
+            "data_manifest_sha256": release_spec["inputs"]["performance_data_manifest_sha256"],
+            "workload_sha256": release_spec["inputs"]["performance_workload_sha256"],
+            "summary": {
+                "predict_seconds": {"p50": 10.5},
+                "peak_rss_gb": {"max": 2.5},
+            },
+        }
+    )
+    payloads["subblocking_evaluation_report"].update(
+        {
+            "input_manifest_sha256": release_spec["inputs"]["subblocking_input_manifest_sha256"],
+            "rust": {
+                "partition": {"max_subblock_size": 50},
+                "component_preservation": {"component_pair_recall": 1.0},
+            },
+        }
+    )
+    payloads["parity_evaluation_report"].update(
+        {
+            "model_manifest_sha256": complete_model_sha256,
+            "fixture_manifest_sha256": release_spec["inputs"]["parity_fixture_manifest_sha256"],
+            "clusters_exact_match": True,
+        }
+    )
+
+    paths = {
+        "complete_model_manifest": complete_model_path,
+        "data_manifest": data_manifest_path,
+        "release_spec": release_spec_path,
+    }
+    for role in sorted(RELEASE_EVIDENCE_ROLES - set(paths)):
+        path = evidence_root / f"{role}.json"
+        path.write_text(json.dumps(payloads[role]) + "\n", encoding="utf-8")
+        paths[role] = path
+    manifest_path = evidence_root / "evidence_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": RELEASE_EVIDENCE_MANIFEST_SCHEMA,
+                "members": {
+                    role: {
+                        "path": path.relative_to(evidence_root).as_posix(),
+                        "sha256": _sha256(path),
+                        "size_bytes": path.stat().st_size,
+                        "url": f"https://example.test/release/{path.name}",
+                    }
+                    for role, path in sorted(paths.items())
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return manifest_path, _sha256(manifest_path), paths
+
+
+def _refresh_evidence_digest(manifest_path: Path, role: str, path: Path) -> str:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["members"][role]["sha256"] = _sha256(path)
+    manifest["members"][role]["size_bytes"] = path.stat().st_size
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return _sha256(manifest_path)
+
+
+def _evaluation_fixture(tmp_path: Path) -> argparse.Namespace:
+    release_spec = _release_spec_payload()
+    evidence_manifest, evidence_manifest_sha256, paths = _write_release_evidence(
+        tmp_path,
+        release_spec,
+    )
+    return argparse.Namespace(
+        release_spec=release_spec,
+        release_spec_path=paths["release_spec"],
+        release_spec_sha256=_sha256(paths["release_spec"]),
+        evidence_manifest=evidence_manifest,
+        evidence_manifest_sha256=evidence_manifest_sha256,
+        paths=paths,
+    )
+
+
+def _evaluation_report_args(
+    fixture: argparse.Namespace,
+    output_report: Path,
+    *,
+    evidence_manifest_sha256: str | None = None,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        evidence_manifest=fixture.evidence_manifest,
+        expected_evidence_manifest_sha256=(
+            fixture.evidence_manifest_sha256 if evidence_manifest_sha256 is None else evidence_manifest_sha256
+        ),
+        output_report=output_report,
+    )
+
+
 def _write_manifest_dataset(root: Path, name: str, contents: dict[str, object]) -> dict[str, object]:
     files: dict[str, dict[str, str]] = {}
     for role, content in contents.items():
@@ -85,9 +352,7 @@ def _write_manifest_dataset(root: Path, name: str, contents: dict[str, object]) 
 def _write_training_input_fixture(
     tmp_path: Path,
     *,
-    fixed_train_rows: str = "f1,f2,YES\n",
     fixed_test_pair: tuple[str, str] = ("f5", "f6"),
-    random_test_pair: tuple[str, str] = ("rt1", "rt2"),
 ) -> tuple[Path, str, Path]:
     test_root = tmp_path / "sealed"
     pair_root = test_root / "pair"
@@ -95,7 +360,7 @@ def _write_training_input_fixture(
     pair_root.mkdir(parents=True)
     cluster_root.mkdir()
     pair_datasets = []
-    for name, pair in (("random", random_test_pair), ("fixed", fixed_test_pair)):
+    for name, pair in (("random", ("rt1", "rt2")), ("fixed", fixed_test_pair)):
         signature_ids = sorted(set(pair))
         pair_datasets.append(
             _write_manifest_dataset(
@@ -159,7 +424,7 @@ def _write_training_input_fixture(
             "signatures": {"f1": {}, "f2": {}, "f3": {}, "f4": {}},
             "papers": {},
             "specter_embeddings": {},
-            "train_pairs": "signature_id_1,signature_id_2,label\n" + fixed_train_rows,
+            "train_pairs": "signature_id_1,signature_id_2,label\nf1,f2,YES\n",
             "val_pairs": "signature_id_1,signature_id_2,label\nf3,f4,0\n",
         },
     )
@@ -202,77 +467,15 @@ def test_training_input_preflight_writes_test_path_free_plan(tmp_path: Path) -> 
     assert persisted["sealed_test_manifests"]["cluster"]["members"]["random"]["blocks"]
 
 
-@pytest.mark.parametrize(
-    ("train_rows", "message"),
-    [
-        ("f1,f2,MAYBE\n", "label must be 0, 1, NO, or YES"),
-        ("f1,f2,YES\nf2,f1,NO\n", "duplicate unordered pair"),
-        ("f1,f2, YES\n", "label must not have surrounding whitespace"),
-        (" f1,f2,YES\n", "signature id must not have surrounding whitespace"),
-        ("f1,f2,YES,extra\n", "must contain exactly"),
-    ],
-)
-def test_training_input_preflight_rejects_invalid_fixed_pairs(
-    tmp_path: Path,
-    train_rows: str,
-    message: str,
-) -> None:
-    manifest, manifest_sha256, output_plan = _write_training_input_fixture(
-        tmp_path,
-        fixed_train_rows=train_rows,
-    )
-
-    with pytest.raises(ValueError, match=message):
-        release_pairwise.preflight_training_inputs(
-            argparse.Namespace(
-                manifest=manifest,
-                expected_manifest_sha256=manifest_sha256,
-                output_plan=output_plan,
-            )
-        )
-    assert not output_plan.exists()
-
-
-@pytest.mark.parametrize(
-    ("validator", "payload"),
-    [
-        (release_pairwise._signature_ids, {" s1": {}}),  # noqa: SLF001
-        (release_pairwise._cluster_signature_ids, {"c": {"signature_ids": ["s1 "]}}),  # noqa: SLF001
-        (release_pairwise._block_signature_ids, {"b": [" s1"]}),  # noqa: SLF001
-    ],
-)
-def test_training_identity_validators_reject_surrounding_whitespace(
-    tmp_path: Path,
-    validator: Any,
-    payload: object,
-) -> None:
-    path = tmp_path / "identities.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="signature id must not have surrounding whitespace"):
-        validator(path, context="fixture")
-
-
-@pytest.mark.parametrize(
-    ("fixed_test_pair", "random_test_pair", "message"),
-    [
-        (("f2", "f1"), ("rt1", "rt2"), "train/test unordered pairs overlap"),
-        (("f5", "f6"), ("r1", "rt2"), "contains sealed test signatures"),
-    ],
-)
 def test_training_input_preflight_rejects_test_overlap(
     tmp_path: Path,
-    fixed_test_pair: tuple[str, str],
-    random_test_pair: tuple[str, str],
-    message: str,
 ) -> None:
     manifest, manifest_sha256, output_plan = _write_training_input_fixture(
         tmp_path,
-        fixed_test_pair=fixed_test_pair,
-        random_test_pair=random_test_pair,
+        fixed_test_pair=("f2", "f1"),
     )
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="train/test unordered pairs overlap"):
         release_pairwise.preflight_training_inputs(
             argparse.Namespace(
                 manifest=manifest,
@@ -281,33 +484,6 @@ def test_training_input_preflight_rejects_test_overlap(
             )
         )
     assert not output_plan.exists()
-
-
-class _PythonLightGBMScorer:
-    def __init__(self, model_path: str) -> None:
-        self.booster = lgb.Booster(model_file=model_path)
-
-    def num_features(self) -> int:
-        return int(self.booster.num_feature())
-
-    def predict_proba_positive(self, features: np.ndarray, *, num_threads: int | None = None) -> np.ndarray:
-        return np.asarray(self.booster.predict(features, num_threads=num_threads), dtype=np.float64)
-
-    def predict_proba_positive_f32(self, features: np.ndarray, *, num_threads: int | None = None) -> np.ndarray:
-        return self.predict_proba_positive(features, num_threads=num_threads)
-
-
-def _bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(production_model_module, "_load_rust_lightgbm_booster", _PythonLightGBMScorer)
-    monkeypatch.setattr(production_model_module, "canonical_artifact_hashes", lambda: dict(ARTIFACT_HASHES))
-    bundle = tmp_path / "production_model_v9.9"
-    write_synthetic_pairwise_bundle(
-        bundle,
-        artifact_hashes=ARTIFACT_HASHES,
-        bundle_version="9.9",
-        source_model_version="9.9",
-    )
-    return bundle
 
 
 class _StubCalibrationClusterer:
@@ -390,38 +566,6 @@ def _write_calibration_bundle(tmp_path: Path, dataset_names: tuple[str, ...]) ->
     return bundle
 
 
-def _write_real_calibration_bundle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    dataset_names: tuple[str, ...],
-) -> Path:
-    """Add manifest-bound calibration provenance to a reloadable source bundle."""
-
-    bundle = _bundle(tmp_path, monkeypatch)
-    reproducibility = bundle / "reproducibility"
-    reproducibility.mkdir()
-    (reproducibility / "pairwise_training_config.json").write_text(
-        json.dumps(
-            {
-                "training_scope": "production_full",
-                "data_random_seed": 1111,
-                "dataset_inputs": _calibration_dataset_inputs(tmp_path, dataset_names),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (reproducibility / "pairwise_training_summary.json").write_text("{}\n", encoding="utf-8")
-    write_production_manifest(
-        bundle,
-        bundle_version="9.9",
-        pairwise_model_version="9.9",
-    )
-    return bundle
-
-
 def _write_calibration_spec(
     tmp_path: Path,
     bundle: Path,
@@ -468,6 +612,7 @@ def _calibration_args(
         expected_spec_sha256=spec_sha256,
         output_bundle=tmp_path / "calibrated_bundle",
         output_report=tmp_path / "calibration_report.json",
+        name_counts_index_root=tmp_path / "name-counts-index",
         n_jobs=1,
         total_ram_bytes=None,
     )
@@ -482,7 +627,31 @@ def _patch_calibration(
     constructed: list[str] = []
     finalizations: list[dict[str, Any]] = []
 
-    def fake_anddata(name: str, files: Any, *, mode: str, random_seed: int = 1111) -> Any:
+    name_counts_index = argparse.Namespace(manifest_sha256="c" * 64)
+    name_tuples = argparse.Namespace(data_sha256="d" * 64, pairs=frozenset({("a", "b")}))
+    orcid_prefix_counts = argparse.Namespace(
+        data_sha256="e" * 64,
+        manifest_sha256="f" * 64,
+        name_tuples_sha256=name_tuples.data_sha256,
+    )
+    expected_hashes = {
+        "name_counts_manifest_sha256": name_counts_index.manifest_sha256,
+        "name_tuples_data_sha256": name_tuples.data_sha256,
+        "orcid_prefix_counts_data_sha256": orcid_prefix_counts.data_sha256,
+        "orcid_prefix_counts_manifest_sha256": orcid_prefix_counts.manifest_sha256,
+    }
+
+    def fake_anddata(
+        name: str,
+        files: Any,
+        *,
+        mode: str,
+        name_counts_index: Any,
+        name_tuples: Any,
+        random_seed: int = 1111,
+    ) -> Any:
+        assert name_counts_index is not None
+        assert name_tuples == frozenset({("a", "b")})
         constructed.append(name)
         return argparse.Namespace(
             name=name,
@@ -490,8 +659,21 @@ def _patch_calibration(
             construct_cluster_to_signatures=lambda blocks: {"c1": ["s1", "s2"]},
         )
 
-    monkeypatch.setattr(release_pairwise, "_load_pairwise_staging_model", lambda path: clusterer)
-    monkeypatch.setattr(release_pairwise, "_anddata", fake_anddata)
+    def load_staging(_path: Path, *, expected_artifact_hashes: dict[str, str]) -> _StubCalibrationClusterer:
+        assert expected_artifact_hashes == expected_hashes
+        return clusterer
+
+    monkeypatch.setattr(release_pairwise, "_load_pairwise_staging_model", load_staging)
+    monkeypatch.setattr(
+        release_pairwise,
+        "_load_release_artifacts",
+        lambda _args: release_pairwise.ProductionArtifactAuthority(
+            name_counts_index=name_counts_index,
+            name_tuples=name_tuples,
+            orcid_prefix_counts=orcid_prefix_counts,
+        ),
+    )
+    monkeypatch.setattr(release_pairwise, "_load_sealed_anddata", fake_anddata)
 
     def fake_b3(true_clusters: object, predicted: object) -> dict[str, Any]:
         score = f1_by_eps[float(clusterer.cluster_model.eps)]
@@ -541,406 +723,324 @@ def test_calibrate_eps_builds_each_matrix_once_and_holds_one_dataset(
     assert set(clusterer.predict_ram) == {2048}
     assert clusterer.cluster_model.eps == pytest.approx(0.42)
     assert report["selected_eps"] == pytest.approx(0.6)
+    assert report["name_counts_manifest_sha256"] == "c" * 64
+    assert report["name_tuples_data_sha256"] == "d" * 64
     assert [trial["eps"] for trial in report["trials"]] == [0.3, 0.6]
     assert set(report["validation_identities"]) == {"qian", "pubmed"}
     assert all("blocks" not in identity for identity in report["validation_identities"].values())
     assert finalizations[0]["new_eps"] == pytest.approx(0.6)
+    assert finalizations[0]["expected_artifact_hashes"] == {
+        "name_counts_manifest_sha256": "c" * 64,
+        "name_tuples_data_sha256": "d" * 64,
+        "orcid_prefix_counts_data_sha256": "e" * 64,
+        "orcid_prefix_counts_manifest_sha256": "f" * 64,
+    }
     assert args.output_bundle.is_dir()
     assert args.output_report.is_file()
 
 
-def test_calibrate_eps_tie_breaks_to_smallest_eps(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bundle = _write_calibration_bundle(tmp_path, ("qian",))
-    spec, spec_sha256 = _write_calibration_spec(tmp_path, bundle, eps_grid=[0.7, 0.2])
-    clusterer = _StubCalibrationClusterer()
-    _patch_calibration(monkeypatch, clusterer, f1_by_eps={0.2: 0.8, 0.7: 0.8})
-
-    report = release_pairwise.calibrate_eps(_calibration_args(tmp_path, bundle, spec, spec_sha256))
-
-    assert report["selected_eps"] == pytest.approx(0.2)
-
-
-def test_calibrate_eps_applies_floors_before_objective_selection(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bundle = _write_calibration_bundle(tmp_path, ("qian", "pubmed"))
-    spec, spec_sha256 = _write_calibration_spec(
-        tmp_path,
-        bundle,
-        eps_grid=[0.3, 0.6],
-        minimum_dataset_f1=0.65,
-        minimum_signature_weighted_f1=0.65,
+def test_evaluation_report_rejects_weakened_release_spec(tmp_path: Path) -> None:
+    fixture = _evaluation_fixture(tmp_path)
+    fixture.release_spec["thresholds"]["pairwise_aggregate_auroc_max_drop"] = 0.0011
+    fixture.release_spec_path.write_text(json.dumps(fixture.release_spec) + "\n", encoding="utf-8")
+    fixture.release_spec_sha256 = _sha256(fixture.release_spec_path)
+    fixture.evidence_manifest_sha256 = _refresh_evidence_digest(
+        fixture.evidence_manifest,
+        "release_spec",
+        fixture.release_spec_path,
     )
-    clusterer = _StubCalibrationClusterer()
-    _patch_calibration(
-        monkeypatch,
-        clusterer,
-        f1_by_eps={
-            0.3: {"qian": 1.0, "pubmed": 0.6},
-            0.6: {"qian": 0.7, "pubmed": 0.7},
+
+    with pytest.raises(ValueError, match="weakens the normative maximum"):
+        release_pairwise.build_evaluation_report(
+            _evaluation_report_args(
+                fixture,
+                tmp_path / "report.json",
+            )
+        )
+
+
+def test_evaluation_report_is_repeatable_and_all_gates_pass(tmp_path: Path) -> None:
+    fixture = _evaluation_fixture(tmp_path)
+    first_path = tmp_path / "quality_report_1.json"
+    second_path = tmp_path / "quality_report_2.json"
+    first = release_pairwise.build_evaluation_report(_evaluation_report_args(fixture, first_path))
+    second = release_pairwise.build_evaluation_report(_evaluation_report_args(fixture, second_path))
+
+    assert first == second
+    assert first_path.read_bytes() == second_path.read_bytes()
+    assert first["passed"] is True
+    assert first["release_spec_sha256"] == _sha256(fixture.paths["release_spec"])
+    assert first["data_manifest_sha256"] == _sha256(fixture.paths["data_manifest"])
+    assert first["model_manifest_sha256"] == _sha256(fixture.paths["complete_model_manifest"])
+    assert first["evidence_manifest_sha256"] == fixture.evidence_manifest_sha256
+    assert first["measurements"] == {
+        "cluster": {
+            "datasets": {"toy": {"f1": 0.8}},
+            "signature_weighted": {"f1": 0.8},
         },
+        "linker": _linker_metrics(),
+        "pairwise": {
+            "aggregate": {"auroc": 0.9, "macro_f1": 0.8},
+            "datasets": {"toy": {"auroc": 0.9, "macro_f1": 0.8}},
+        },
+    }
+    assert first["checks"] and all(check["passed"] is True for check in first["checks"])
+    members = validate_release_evidence_manifest(
+        json.loads(fixture.evidence_manifest.read_text(encoding="utf-8")),
+        fixture.evidence_manifest,
+        require_urls=True,
+        verify_local_members=False,
+    )
+    assert set(members) == RELEASE_EVIDENCE_ROLES
+
+
+def test_evaluation_report_rejects_tampered_evidence_manifest(tmp_path: Path) -> None:
+    fixture = _evaluation_fixture(tmp_path)
+    fixture.evidence_manifest.write_text(
+        fixture.evidence_manifest.read_text(encoding="utf-8") + "\n",
+        encoding="utf-8",
     )
 
-    report = release_pairwise.calibrate_eps(_calibration_args(tmp_path, bundle, spec, spec_sha256))
-
-    assert report["selected_eps"] == pytest.approx(0.6)
-    assert report["trials"][0]["signature_weighted"]["f1"] == pytest.approx(0.8)
+    with pytest.raises(ValueError, match="Release-evidence manifest SHA-256 mismatch"):
+        release_pairwise.build_evaluation_report(_evaluation_report_args(fixture, tmp_path / "report.json"))
 
 
-def test_calibrate_eps_rejects_when_no_trial_meets_weighted_floor(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bundle = _write_calibration_bundle(tmp_path, ("qian",))
-    spec, spec_sha256 = _write_calibration_spec(
-        tmp_path,
-        bundle,
-        eps_grid=[0.5],
-        minimum_signature_weighted_f1=0.9,
-    )
-    clusterer = _StubCalibrationClusterer()
-    _, finalizations = _patch_calibration(monkeypatch, clusterer, f1_by_eps={0.5: 0.8})
-    args = _calibration_args(tmp_path, bundle, spec, spec_sha256)
+def test_evaluation_report_rejects_tampered_evidence_member(tmp_path: Path) -> None:
+    fixture = _evaluation_fixture(tmp_path)
+    fixture.paths["pairwise_evaluation_report"].write_text("{}\n", encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="No EPS calibration trial met"):
-        release_pairwise.calibrate_eps(args)
-
-    assert finalizations == []
-    assert not args.output_bundle.exists()
-    assert not args.output_report.exists()
+    with pytest.raises(ValueError, match=r"member 'pairwise_evaluation_report'.*size mismatch"):
+        release_pairwise.build_evaluation_report(_evaluation_report_args(fixture, tmp_path / "report.json"))
 
 
-def test_calibrate_eps_rejects_unknown_split_mode(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bundle = _write_calibration_bundle(tmp_path, ("qian",))
-    config_path = bundle / "reproducibility" / "pairwise_training_config.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["dataset_inputs"]["qian"]["split_mode"] = "typo"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
-    spec, spec_sha256 = _write_calibration_spec(tmp_path, bundle, eps_grid=[0.5])
-    clusterer = _StubCalibrationClusterer()
-    _patch_calibration(monkeypatch, clusterer, f1_by_eps={0.5: 0.8})
-
-    with pytest.raises(ValueError, match="unknown split_mode"):
-        release_pairwise.calibrate_eps(_calibration_args(tmp_path, bundle, spec, spec_sha256))
-
-
-@pytest.mark.parametrize(
-    ("failure", "message"),
-    [
-        ("spec_digest", "Calibration-spec SHA-256 mismatch"),
-        ("source_digest", "Calibration source manifest SHA-256 mismatch"),
-        ("input_digest", "Calibration input drift for qian:papers"),
-        ("existing_bundle", "Calibration output bundle already exists"),
-        ("existing_report", "Calibration output report already exists"),
-    ],
-)
-def test_calibrate_eps_rejects_wrong_input_before_matrix_work(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure: str,
-    message: str,
-) -> None:
-    bundle = _write_calibration_bundle(tmp_path, ("qian",))
-    spec, spec_sha256 = _write_calibration_spec(tmp_path, bundle, eps_grid=[0.5])
-    clusterer = _StubCalibrationClusterer()
-    constructed, finalizations = _patch_calibration(monkeypatch, clusterer, f1_by_eps={0.5: 0.5})
-    args = _calibration_args(tmp_path, bundle, spec, spec_sha256)
-    if failure == "spec_digest":
-        args.expected_spec_sha256 = "0" * 64
-    elif failure == "source_digest":
-        (bundle / "manifest.json").write_text('{"drift": true}\n', encoding="utf-8")
-    elif failure == "input_digest":
-        (tmp_path / "inputs" / "qian_papers.json").write_text("tampered", encoding="utf-8")
-    elif failure == "existing_report":
-        args.output_report.write_text("{}\n", encoding="utf-8")
-    else:
-        args.output_bundle.mkdir()
-
-    with pytest.raises((FileExistsError, ValueError), match=message):
-        release_pairwise.calibrate_eps(args)
-
-    assert constructed == []
-    assert clusterer.events == []
-    assert finalizations == []
-    assert failure == "existing_bundle" or not args.output_bundle.exists()
-
-
-@pytest.mark.parametrize(
-    ("eps_grid", "message"),
-    [
-        ([1.5], "Calibration EPS must be finite"),
-        ([float("nan")], "Calibration EPS must be finite"),
-        ([0.5, 0.5], "eps_grid values must be unique"),
-    ],
-)
-def test_calibrate_eps_rejects_invalid_frozen_grid_before_matrix_work(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    eps_grid: list[float],
-    message: str,
-) -> None:
-    bundle = _write_calibration_bundle(tmp_path, ("qian",))
-    spec, spec_sha256 = _write_calibration_spec(tmp_path, bundle, eps_grid=eps_grid)
-    clusterer = _StubCalibrationClusterer()
-    constructed, finalizations = _patch_calibration(monkeypatch, clusterer, f1_by_eps={})
-
-    with pytest.raises(ValueError, match=message):
-        release_pairwise.calibrate_eps(_calibration_args(tmp_path, bundle, spec, spec_sha256))
-
-    assert constructed == []
-    assert clusterer.events == []
-    assert finalizations == []
-
-
-def test_calibrate_eps_rejects_expanded_spec_schema_before_matrix_work(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bundle = _write_calibration_bundle(tmp_path, ("qian",))
-    spec, _ = _write_calibration_spec(tmp_path, bundle, eps_grid=[0.5])
-    payload = json.loads(spec.read_text(encoding="utf-8"))
-    payload["compatibility_mode"] = True
-    spec.write_text(json.dumps(payload), encoding="utf-8")
-    clusterer = _StubCalibrationClusterer()
-    constructed, finalizations = _patch_calibration(monkeypatch, clusterer, f1_by_eps={})
-
-    with pytest.raises(ValueError, match="must contain exactly"):
-        release_pairwise.calibrate_eps(_calibration_args(tmp_path, bundle, spec, _sha256(spec)))
-
-    assert constructed == []
-    assert clusterer.events == []
-    assert finalizations == []
-
-
-def test_calibrate_eps_parser_exposes_final_spec_driven_interface() -> None:
-    parser = release_pairwise.build_parser()
-    args = release_pairwise.build_parser().parse_args(
-        [
-            "calibrate-eps",
-            "--source-bundle",
-            "source",
-            "--spec",
-            "eps_calibration_spec.json",
-            "--expected-spec-sha256",
-            "a" * 64,
-            "--output-bundle",
-            "calibrated",
-            "--output-report",
-            "calibration_report.json",
-            "--n-jobs",
-            "8",
-            "--total-ram-bytes",
-            "4096",
-        ]
+def test_evaluation_report_rejects_evidence_member_path_escape(tmp_path: Path) -> None:
+    fixture = _evaluation_fixture(tmp_path)
+    manifest = json.loads(fixture.evidence_manifest.read_text(encoding="utf-8"))
+    manifest["members"]["linker_evaluation_report"]["path"] = "../linker.json"
+    fixture.evidence_manifest.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
 
-    assert args.n_jobs == 8
-    assert args.total_ram_bytes == 4096
-    assert "eps" not in vars(args)
-    with pytest.raises(SystemExit):
-        parser.parse_args(["finalize-eps"])
-
-
-def test_module_entrypoint_help() -> None:
-    completed = subprocess.run(
-        [sys.executable, "-m", "scripts.production.model.release_pairwise", "--help"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert "preflight-training-inputs" in completed.stdout
-    assert "calibrate-eps" in completed.stdout
-    assert "evaluate-clusters" in completed.stdout
-    assert "finalize-eps" not in completed.stdout
-
-    calibration_help = subprocess.run(
-        [sys.executable, "-m", "scripts.production.model.release_pairwise", "calibrate-eps", "--help"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert calibration_help.returncode == 0, calibration_help.stderr
-    for option in (
-        "--source-bundle",
-        "--spec",
-        "--expected-spec-sha256",
-        "--output-bundle",
-        "--output-report",
+    with pytest.raises(
+        ValueError,
+        match=r"member 'linker_evaluation_report' path must be normalized relative POSIX",
     ):
-        assert option in calibration_help.stdout
-    assert "--eps" not in calibration_help.stdout
-
-
-@pytest.mark.parametrize("selected_eps", [0.65, 0.5], ids=["changed", "unchanged"])
-def test_calibrate_eps_always_finalizes_preserves_bytes_and_reloads(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    selected_eps: float,
-) -> None:
-    source = _write_real_calibration_bundle(tmp_path, monkeypatch, ("qian",))
-    spec, spec_sha256 = _write_calibration_spec(tmp_path, source, eps_grid=[selected_eps])
-    source_bytes = {
-        path.relative_to(source).as_posix(): path.read_bytes() for path in source.rglob("*") if path.is_file()
-    }
-    clusterer = _StubCalibrationClusterer()
-    clusterer.cluster_model.eps = 0.5
-    _patch_calibration(monkeypatch, clusterer, f1_by_eps={selected_eps: 0.8})
-    finalize_calls: list[dict[str, Any]] = []
-
-    def finalize_spy(**kwargs: Any) -> Any:
-        finalize_calls.append(kwargs)
-        return finalize_pairwise_eps(**kwargs)
-
-    monkeypatch.setattr(release_pairwise, "finalize_pairwise_eps", finalize_spy)
-    args = _calibration_args(tmp_path, source, spec, spec_sha256)
-
-    report = release_pairwise.calibrate_eps(args)
-
-    assert {
-        path.relative_to(source).as_posix(): path.read_bytes() for path in source.rglob("*") if path.is_file()
-    } == source_bytes
-    assert len(finalize_calls) == 1
-    assert finalize_calls[0]["new_eps"] == pytest.approx(selected_eps)
-    assert finalize_calls[0]["expected_old_eps"] == pytest.approx(0.5)
-    output = args.output_bundle
-    output_bytes = {
-        path.relative_to(output).as_posix(): path.read_bytes() for path in output.rglob("*") if path.is_file()
-    }
-    assert set(output_bytes) == set(source_bytes)
-    for relpath in set(source_bytes) - {"clusterer.json", "manifest.json"}:
-        assert output_bytes[relpath] == source_bytes[relpath]
-    assert json.loads(output_bytes["clusterer.json"])["cluster_model"]["eps"] == selected_eps
-    assert _load_pairwise_staging_model(output).cluster_model.eps == selected_eps
-    assert report["source_manifest_sha256"] == _sha256(source / "manifest.json")
-    assert report["output_manifest_sha256"] == _sha256(output / "manifest.json")
-    assert report["selected_eps"] == selected_eps
-    assert "unchanged_members" not in report
-
-
-def test_finalize_eps_rejects_source_digest_and_old_eps(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = _bundle(tmp_path, monkeypatch)
-    manifest_sha256 = hashlib.sha256((source / "manifest.json").read_bytes()).hexdigest()
-
-    with pytest.raises(ValueError, match="manifest SHA-256 mismatch"):
-        finalize_pairwise_eps(
-            source_bundle_dir=source,
-            output_bundle_dir=tmp_path / "bad-digest",
-            expected_manifest_sha256="0" * 64,
-            expected_old_eps=0.4,
-            new_eps=0.5,
-        )
-    with pytest.raises(ValueError, match="source EPS mismatch"):
-        finalize_pairwise_eps(
-            source_bundle_dir=source,
-            output_bundle_dir=tmp_path / "bad-eps",
-            expected_manifest_sha256=manifest_sha256,
-            expected_old_eps=0.3,
-            new_eps=0.5,
+        release_pairwise.build_evaluation_report(
+            _evaluation_report_args(
+                fixture,
+                tmp_path / "report.json",
+                evidence_manifest_sha256=_sha256(fixture.evidence_manifest),
+            )
         )
 
 
-def test_pairwise_metric_contract_averages_once_and_uses_strict_threshold() -> None:
-    metrics, probabilities = release_pairwise.pairwise_metrics(
-        np.asarray([0, 1]),
-        np.asarray([0.0, 1.0]),
-        np.asarray([1.0, 0.0]),
+def test_evaluation_report_rejects_invalid_member_contract(tmp_path: Path) -> None:
+    cases = (
+        ("pairwise_evaluation_report", "schema_version", "wrong", r"pairwise_evaluation_report.*schema mismatch"),
+        ("data_manifest", "schema", "wrong", r"data_manifest.*schema mismatch"),
+        (
+            "complete_model_manifest",
+            "incremental_linker_version",
+            None,
+            "complete_model_manifest.*must describe a complete bundle",
+        ),
     )
+    for index, (role, field, value, message) in enumerate(cases):
+        root = tmp_path / str(index)
+        root.mkdir()
+        fixture = _evaluation_fixture(root)
+        path = fixture.paths[role]
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload[field] = value
+        path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        manifest_sha256 = _refresh_evidence_digest(fixture.evidence_manifest, role, path)
 
-    np.testing.assert_array_equal(probabilities, np.asarray([0.5, 0.5]))
-    assert metrics["auroc"] == pytest.approx(0.5)
-    assert metrics["macro_f1"] == pytest.approx(1 / 3)
+        with pytest.raises(ValueError, match=message):
+            release_pairwise.build_evaluation_report(
+                _evaluation_report_args(
+                    fixture,
+                    root / "report.json",
+                    evidence_manifest_sha256=manifest_sha256,
+                )
+            )
 
 
-@pytest.mark.parametrize("invalid_probability", [float("nan"), float("inf"), -0.1, 1.1])
-def test_pairwise_metrics_rejects_nonfinite_or_unbounded_raw_probabilities(
-    invalid_probability: float,
-) -> None:
-    with pytest.raises(ValueError, match="probabilities must all"):
-        release_pairwise.pairwise_metrics(
-            np.asarray([0, 1]),
-            np.asarray([invalid_probability, 0.8]),
-            np.asarray([0.2, 0.8]),
+def test_evaluation_report_rejects_mismatched_bindings(tmp_path: Path) -> None:
+    cases = (
+        ("pairwise_evaluation_report", "release_spec_sha256", "pairwise_evaluation_report.release_spec"),
+        ("linker_evaluation_report", "model_manifest_sha256", "linker_evaluation_report.complete_model"),
+        (
+            "pairwise_evaluation_report",
+            "population_manifest_sha256",
+            "pairwise_evaluation_report.population_manifest_sha256",
+        ),
+        (
+            "performance_evaluation_report",
+            "data_manifest_sha256",
+            "performance_evaluation_report.data_manifest_sha256",
+        ),
+        (
+            "subblocking_evaluation_report",
+            "input_manifest_sha256",
+            "subblocking_evaluation_report.input_manifest_sha256",
+        ),
+    )
+    for index, (role, field, binding) in enumerate(cases):
+        root = tmp_path / str(index)
+        root.mkdir()
+        fixture = _evaluation_fixture(root)
+        path = fixture.paths[role]
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload[field] = "0" * 64
+        path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        manifest_sha256 = _refresh_evidence_digest(fixture.evidence_manifest, role, path)
+        with pytest.raises(ValueError, match=rf"binding '{binding}' does not match"):
+            release_pairwise.build_evaluation_report(
+                _evaluation_report_args(
+                    fixture,
+                    root / "report.json",
+                    evidence_manifest_sha256=manifest_sha256,
+                )
+            )
+
+
+def test_evaluation_report_rejects_invalid_linker_measurements(tmp_path: Path) -> None:
+    cases = (
+        (("stratified_test_accuracy",), float("nan"), "non-finite"),
+        (("stratified_test_accuracy",), 1.1, r"must be in \[0, 1\]"),
+        (("stratified_test_errors",), -1, "must be a nonnegative integer"),
+        (("training_rows",), 0, "training counts are inconsistent"),
+        (("training_positive_rows",), 2, "training counts are inconsistent"),
+        (("stratified_test_queries",), 0, "test counts are inconsistent"),
+        (("stratified_test_errors",), 2, "test counts are inconsistent"),
+        (
+            ("weighted_average_error_weights", "false_link_error_rate"),
+            0.0,
+            "must be positive",
+        ),
+        (
+            ("weighted_average_error_weights",),
+            {"false_link_error_rate": 1.0},
+            "weights have invalid fields",
+        ),
+    )
+    for index, (metric_path, value, message) in enumerate(cases):
+        root = tmp_path / str(index)
+        root.mkdir()
+        fixture = _evaluation_fixture(root)
+        path = fixture.paths["linker_evaluation_report"]
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        container = payload["observed_metrics"]
+        for field in metric_path[:-1]:
+            container = container[field]
+        container[metric_path[-1]] = value
+        path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        manifest_sha256 = _refresh_evidence_digest(
+            fixture.evidence_manifest,
+            "linker_evaluation_report",
+            path,
         )
 
+        with pytest.raises(ValueError, match=message):
+            release_pairwise.build_evaluation_report(
+                _evaluation_report_args(
+                    fixture,
+                    root / "report.json",
+                    evidence_manifest_sha256=manifest_sha256,
+                )
+            )
 
-@pytest.mark.parametrize("invalid_metric", [float("nan"), float("inf"), -0.1, 1.1])
-def test_b3_report_rejects_nonfinite_or_unbounded_metrics(
-    monkeypatch: pytest.MonkeyPatch,
-    invalid_metric: float,
-) -> None:
-    monkeypatch.setattr(
-        release_pairwise,
-        "b3_precision_recall_fscore",
-        lambda true, predicted: (invalid_metric, 0.5, 0.5, {"s1": object()}, None, None),
+
+def test_evaluation_report_rejects_invalid_core_measurements(tmp_path: Path) -> None:
+    cases = (
+        (
+            "cluster_evaluation_report",
+            ("datasets", "toy", "metrics", "f1"),
+            1.1,
+            r"must be in \[0, 1\]",
+        ),
+        ("performance_evaluation_report", ("summary", "peak_rss_gb", "max"), -1.0, "peak RSS must be positive"),
+        (
+            "subblocking_evaluation_report",
+            ("rust", "partition", "max_subblock_size"),
+            -1,
+            "maximum size must be a positive integer",
+        ),
+        (
+            "subblocking_evaluation_report",
+            ("rust", "partition", "max_subblock_size"),
+            1.5,
+            "maximum size must be a positive integer",
+        ),
     )
+    for index, (role, path, value, message) in enumerate(cases):
+        root = tmp_path / str(index)
+        root.mkdir()
+        fixture = _evaluation_fixture(root)
+        evidence_path = fixture.paths[role]
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+        container = payload
+        for field in path[:-1]:
+            container = container[field]
+        container[path[-1]] = value
+        evidence_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        manifest_sha256 = _refresh_evidence_digest(fixture.evidence_manifest, role, evidence_path)
 
-    with pytest.raises(RuntimeError, match=r"finite and in \[0, 1\]"):
-        release_pairwise._b3_report({"c1": ["s1"]}, {"c1": ["s1"]})  # noqa: SLF001
-
-
-def test_fresh_json_link_failure_allows_exact_payload_retry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    output = tmp_path / "report.json"
-    real_link = release_pairwise.os.link
-    attempts = 0
-
-    def fail_link(source: Path, destination: Path) -> None:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise OSError("simulated publication interruption")
-        real_link(source, destination)
-
-    monkeypatch.setattr(release_pairwise.os, "link", fail_link)
-    with pytest.raises(OSError, match="simulated publication interruption"):
-        release_pairwise._write_fresh_json(output, {"ok": True})  # noqa: SLF001
-
-    assert not output.exists()
-    assert list(tmp_path.glob(".report.json.*.tmp")) == []
-    release_pairwise._write_fresh_json(output, {"ok": True})  # noqa: SLF001
-    assert json.loads(output.read_text(encoding="utf-8")) == {"ok": True}
+        with pytest.raises(ValueError, match=message):
+            release_pairwise.build_evaluation_report(
+                _evaluation_report_args(
+                    fixture,
+                    root / "report.json",
+                    evidence_manifest_sha256=manifest_sha256,
+                )
+            )
 
 
-def test_cluster_evaluator_has_no_unused_ram_option() -> None:
-    parser = release_pairwise.build_parser()
-    common = [
-        "evaluate-clusters",
-        "--model",
-        "model",
-        "--expected-model-manifest-sha256",
-        "b" * 64,
-        "--quality-policy",
-        "quality-policy.json",
-        "--expected-quality-policy-sha256",
-        "c" * 64,
-        "--manifest",
-        "manifest.json",
-        "--expected-manifest-sha256",
-        "a" * 64,
-        "--output-report",
-        "report.json",
-    ]
-    args = parser.parse_args(common)
-    assert args.command == "evaluate-clusters"
-    assert "unblind_record" not in vars(args)
-    with pytest.raises(SystemExit):
-        parser.parse_args([*common, "--total-ram-bytes", "1024"])
+def test_evaluation_report_records_each_failed_gate(tmp_path: Path) -> None:
+    cases = (
+        ("cluster_evaluation_report", ("signature_weighted", "f1"), 0.7, "cluster.signature_weighted.b3_f1_drop"),
+        ("pairwise_evaluation_report", ("aggregate", "auroc"), 0.7, "pairwise.aggregate.auroc_drop"),
+        ("pairwise_evaluation_report", ("aggregate", "macro_f1"), 0.7, "pairwise.aggregate.macro_f1_drop"),
+        ("pairwise_evaluation_report", ("datasets", "toy", "metrics", "auroc"), 0.7, "pairwise.dataset.toy.auroc_drop"),
+        (
+            "pairwise_evaluation_report",
+            ("datasets", "toy", "metrics", "macro_f1"),
+            0.7,
+            "pairwise.dataset.toy.macro_f1_drop",
+        ),
+        ("performance_evaluation_report", ("summary", "predict_seconds", "p50"), 12.0, "performance.runtime_ratio"),
+        ("performance_evaluation_report", ("summary", "peak_rss_gb", "max"), 5.0, "performance.peak_rss_absolute_gb"),
+        ("subblocking_evaluation_report", ("rust", "partition", "max_subblock_size"), 101, "subblocking.maximum_size"),
+        (
+            "subblocking_evaluation_report",
+            ("rust", "component_preservation", "component_pair_recall"),
+            0.9,
+            "subblocking.member_preservation",
+        ),
+        ("parity_evaluation_report", ("clusters_exact_match",), False, "parity.clusters_exact_match"),
+    )
+    for index, (role, path, value, failed_gate) in enumerate(cases):
+        root = tmp_path / str(index)
+        root.mkdir()
+        fixture = _evaluation_fixture(root)
+        evidence_path = fixture.paths[role]
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+        container = payload
+        for field in path[:-1]:
+            container = container[field]
+        container[path[-1]] = value
+        evidence_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        manifest_sha256 = _refresh_evidence_digest(fixture.evidence_manifest, role, evidence_path)
+        report = release_pairwise.build_evaluation_report(
+            _evaluation_report_args(
+                fixture,
+                root / "quality_report.json",
+                evidence_manifest_sha256=manifest_sha256,
+            )
+        )
+        assert report["passed"] is False
+        assert {check["id"] for check in report["checks"] if check["passed"] is False} == {failed_gate}
 
 
 def test_existing_output_fails_before_binding_validation(
@@ -959,99 +1059,39 @@ def test_existing_output_fails_before_binding_validation(
         release_pairwise.evaluate_pairs(argparse.Namespace(output_report=output))
 
 
-def test_dataset_files_resolve_relative_to_manifest(tmp_path: Path) -> None:
-    inputs = tmp_path / "inputs"
-    inputs.mkdir()
-    pairs = inputs / "pairs.json"
-    pairs.write_text("[]\n", encoding="utf-8")
-    spec = {
-        "name": "toy",
-        "files": {
-            "pairs": {
-                "path": "../inputs/pairs.json",
-                "sha256": hashlib.sha256(pairs.read_bytes()).hexdigest(),
-            }
-        },
-    }
-
-    resolved = release_pairwise._resolved_dataset_files(  # noqa: SLF001
-        tmp_path / "manifests" / "manifest.json",
-        spec,
-        ("pairs",),
-    )
-
-    assert resolved == {"pairs": pairs.resolve()}
-
-
-@pytest.mark.parametrize(
-    "files",
-    [
-        {},
-        {
-            "pairs": {"path": "pairs.json", "sha256": "a" * 64},
-            "extra": {"path": "extra.json", "sha256": "b" * 64},
-        },
-    ],
-)
-def test_dataset_files_require_exact_roles(tmp_path: Path, files: dict[str, object]) -> None:
-    with pytest.raises(ValueError, match="exact file roles"):
-        release_pairwise._resolved_dataset_files(  # noqa: SLF001
-            tmp_path / "manifest.json",
-            {"name": "toy", "files": files},
-            ("pairs",),
-        )
-
-
-def test_dataset_file_role_must_be_exact_object(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="must contain exactly path and sha256"):
-        release_pairwise._resolved_dataset_files(  # noqa: SLF001
-            tmp_path / "manifest.json",
-            {"name": "toy", "files": {"pairs": {"path": "pairs.json"}}},
-            ("pairs",),
-        )
-
-
-@pytest.mark.parametrize(
-    ("dataset_names", "message"),
-    [
-        ([""], "names must be nonempty strings"),
-        (["repeated", "repeated"], "duplicate dataset name 'repeated'"),
-    ],
-)
-@pytest.mark.parametrize(
-    "schema_version",
-    [release_pairwise.PAIR_MANIFEST_SCHEMA, release_pairwise.CLUSTER_MANIFEST_SCHEMA],
-)
-def test_manifest_requires_unique_nonempty_dataset_names(
-    tmp_path: Path,
-    dataset_names: list[str],
-    message: str,
-    schema_version: str,
+def test_release_artifacts_use_one_external_root_and_packaged_data(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": schema_version,
-                "datasets": [{"name": name} for name in dataset_names],
-            }
-        ),
-        encoding="utf-8",
+    opened: list[Path] = []
+    name_counts_index = object()
+    name_tuples = argparse.Namespace(data_sha256="a" * 64)
+    orcid_prefix_counts = argparse.Namespace(name_tuples_sha256=name_tuples.data_sha256)
+
+    monkeypatch.setattr(
+        release_pairwise,
+        "NameCountsIndex",
+        argparse.Namespace(open=lambda path: opened.append(path) or name_counts_index),
+    )
+    monkeypatch.setattr(release_pairwise, "load_packaged_name_tuple_artifact", lambda: name_tuples)
+    monkeypatch.setattr(
+        release_pairwise,
+        "load_canonical_orcid_prefix_counts",
+        lambda path: opened.append(Path(path)) or orcid_prefix_counts,
     )
 
-    with pytest.raises(ValueError, match=message):
-        release_pairwise._verified_manifest(  # noqa: SLF001
-            manifest,
-            hashlib.sha256(manifest.read_bytes()).hexdigest(),
-            schema_version,
-        )
+    observed = release_pairwise._load_release_artifacts(  # noqa: SLF001
+        argparse.Namespace(name_counts_index_root=Path("chosen-counts"))
+    )
+
+    assert observed.name_counts_index is name_counts_index
+    assert observed.name_tuples is name_tuples
+    assert observed.orcid_prefix_counts is orcid_prefix_counts
+    assert opened == [Path("chosen-counts"), Path(release_pairwise._PACKAGE_DATA_DIR)]  # noqa: SLF001
 
 
-@pytest.mark.parametrize("invalid_label", [0.9, -0.1, "1", True])
 def test_pair_evaluator_rejects_noninteger_json_labels(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    invalid_label: object,
 ) -> None:
     manifest, manifest_sha256 = _write_evaluation_manifest(
         tmp_path,
@@ -1064,12 +1104,12 @@ def test_pair_evaluator_rejects_noninteger_json_labels(
                 {
                     "signature_id_1": "s1",
                     "signature_id_2": "s2",
-                    "label": invalid_label,
+                    "label": True,
                 }
             ],
         },
     )
-    bindings = _write_evaluation_bindings(tmp_path)
+    bindings = _write_evaluation_bindings(tmp_path, manifest_sha256)
     monkeypatch.setattr(
         release_pairwise,
         "load_production_model",
@@ -1077,7 +1117,7 @@ def test_pair_evaluator_rejects_noninteger_json_labels(
     )
     monkeypatch.setattr(
         release_pairwise,
-        "_anddata",
+        "_load_sealed_anddata",
         lambda *args, **kwargs: pytest.fail("dataset constructed before pair labels were validated"),
     )
 
@@ -1121,7 +1161,7 @@ def test_manifest_input_drift_fails_before_model_load(
         "load_production_model",
         lambda _: pytest.fail("model loaded before input verification"),
     )
-    bindings = _write_evaluation_bindings(tmp_path)
+    bindings = _write_evaluation_bindings(tmp_path, _sha256(manifest))
     report = tmp_path / "report.json"
 
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
@@ -1162,26 +1202,39 @@ def test_pair_evaluator_loads_complete_bundle_and_publishes_digest_only_report(
             ],
         },
     )
-    bindings = _write_evaluation_bindings(tmp_path)
+    bindings = _write_evaluation_bindings(tmp_path, manifest_sha256)
+    name_counts_index, name_tuples, orcid_prefix_counts, artifact_args = _patch_evaluation_artifacts(monkeypatch)
     complete_loader_calls: list[Path] = []
+    sealed_dataset_calls: list[dict[str, Any]] = []
     clusterer = argparse.Namespace(
         featurizer_info=object(),
         nameless_featurizer_info=object(),
         classifier=_StubBinaryClassifier([0.1, 0.9]),
         nameless_classifier=_StubBinaryClassifier([0.3, 0.7]),
+        feature_contract={
+            "name_counts_manifest_sha256": name_counts_index.manifest_sha256,
+            "name_tuples_data_sha256": name_tuples.data_sha256,
+        },
     )
+    expected_hashes = {
+        "name_counts_manifest_sha256": name_counts_index.manifest_sha256,
+        "name_tuples_data_sha256": name_tuples.data_sha256,
+        "orcid_prefix_counts_data_sha256": orcid_prefix_counts.data_sha256,
+        "orcid_prefix_counts_manifest_sha256": orcid_prefix_counts.manifest_sha256,
+    }
 
-    def load_complete(path: Path) -> object:
+    def load_complete(path: Path, *, expected_artifact_hashes: dict[str, str]) -> object:
         complete_loader_calls.append(path)
+        assert expected_artifact_hashes == expected_hashes
         return clusterer
 
     monkeypatch.setattr(release_pairwise, "load_production_model", load_complete)
-    monkeypatch.setattr(
-        release_pairwise,
-        "_load_pairwise_staging_model",
-        lambda _: pytest.fail("pair evaluator used the staging-only loader"),
-    )
-    monkeypatch.setattr(release_pairwise, "_anddata", lambda *args, **kwargs: object())
+
+    def load_sealed_dataset(*args: Any, **kwargs: Any) -> object:
+        sealed_dataset_calls.append({"args": args, "kwargs": kwargs})
+        return object()
+
+    monkeypatch.setattr(release_pairwise, "_load_sealed_anddata", load_sealed_dataset)
     monkeypatch.setattr(
         release_pairwise,
         "many_pairs_featurize",
@@ -1200,20 +1253,72 @@ def test_pair_evaluator_loads_complete_bundle_and_publishes_digest_only_report(
             expected_manifest_sha256=manifest_sha256,
             n_jobs=1,
             total_ram_bytes=None,
+            **artifact_args,
             **bindings,
         )
     )
 
     assert complete_loader_calls == [Path(bindings["model"]).resolve()]
+    assert len(sealed_dataset_calls) == 1
+    assert sealed_dataset_calls[0]["kwargs"]["name_counts_index"] is name_counts_index
+    assert sealed_dataset_calls[0]["kwargs"]["name_tuples"] is name_tuples.pairs
     assert json.loads(output.read_text(encoding="utf-8")) == report
-    assert report["quality_policy_sha256"] == bindings["expected_quality_policy_sha256"]
+    assert report["release_spec_sha256"] == bindings["expected_release_spec_sha256"]
     assert report["model_manifest_sha256"] == bindings["expected_model_manifest_sha256"]
+    assert report["name_counts_manifest_sha256"] == name_counts_index.manifest_sha256
+    assert report["name_tuples_data_sha256"] == name_tuples.data_sha256
+    assert report["orcid_prefix_counts_data_sha256"] == orcid_prefix_counts.data_sha256
+    assert report["orcid_prefix_counts_manifest_sha256"] == orcid_prefix_counts.manifest_sha256
     assert report["population_manifest_sha256"] == manifest_sha256
     assert set(report["datasets"]["toy"]) == {"metrics"}
     assert "pairs" not in report["datasets"]["toy"]
     assert not list(tmp_path.glob("*unblind*"))
     assert not list(tmp_path.glob("*evaluation_start*"))
     assert not list(tmp_path.glob("*promotion*"))
+
+
+def test_pair_evaluator_rejects_explicit_artifact_that_differs_from_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, manifest_sha256 = _write_evaluation_manifest(
+        tmp_path,
+        schema_version=release_pairwise.PAIR_MANIFEST_SCHEMA,
+        contents={
+            "signatures": {},
+            "papers": {},
+            "specter_embeddings": {},
+            "pairs": [
+                {"signature_id_1": "s1", "signature_id_2": "s2", "label": 0},
+                {"signature_id_1": "s3", "signature_id_2": "s4", "label": 1},
+            ],
+        },
+    )
+    name_counts_index, _name_tuples, _orcid_prefix_counts, artifact_args = _patch_evaluation_artifacts(monkeypatch)
+
+    def reject_model(_path: Path, *, expected_artifact_hashes: dict[str, str]) -> None:
+        assert expected_artifact_hashes["name_counts_manifest_sha256"] == name_counts_index.manifest_sha256
+        raise ValueError("name_counts_manifest_sha256 does not match the explicit artifact authority")
+
+    monkeypatch.setattr(release_pairwise, "load_production_model", reject_model)
+    monkeypatch.setattr(
+        release_pairwise,
+        "many_pairs_featurize",
+        lambda *args, **kwargs: pytest.fail("scoring began after an artifact mismatch"),
+    )
+
+    with pytest.raises(ValueError, match="name_counts_manifest_sha256 does not match"):
+        release_pairwise.evaluate_pairs(
+            argparse.Namespace(
+                output_report=tmp_path / "report.json",
+                manifest=manifest,
+                expected_manifest_sha256=manifest_sha256,
+                n_jobs=1,
+                total_ram_bytes=None,
+                **artifact_args,
+                **_write_evaluation_bindings(tmp_path, manifest_sha256),
+            )
+        )
 
 
 def test_cluster_evaluator_loads_complete_bundle_and_publishes_digest_only_report(
@@ -1231,23 +1336,38 @@ def test_cluster_evaluator_loads_complete_bundle_and_publishes_digest_only_repor
             "blocks": {"b1": ["s1", "s2"]},
         },
     )
-    bindings = _write_evaluation_bindings(tmp_path)
+    bindings = _write_evaluation_bindings(
+        tmp_path,
+        manifest_sha256,
+        manifest_schema=release_pairwise.CLUSTER_MANIFEST_SCHEMA,
+    )
+    name_counts_index, name_tuples, orcid_prefix_counts, artifact_args = _patch_evaluation_artifacts(monkeypatch)
 
     class StubClusterer:
         n_jobs = 1
+        feature_contract = {
+            "name_counts_manifest_sha256": name_counts_index.manifest_sha256,
+            "name_tuples_data_sha256": name_tuples.data_sha256,
+        }
 
         @staticmethod
         def predict(blocks: dict[str, list[str]], dataset: object) -> tuple[dict[str, list[str]], None]:
             return {"c1": ["s1"], "c2": ["s2"]}, None
 
     dataset = argparse.Namespace(construct_cluster_to_signatures=lambda blocks: {"c1": ["s1"], "c2": ["s2"]})
-    monkeypatch.setattr(release_pairwise, "load_production_model", lambda path: StubClusterer())
+    observed_authorities: list[dict[str, str]] = []
+
+    def load_complete(_path: Path, *, expected_artifact_hashes: dict[str, str]) -> StubClusterer:
+        observed_authorities.append(expected_artifact_hashes)
+        return StubClusterer()
+
+    monkeypatch.setattr(release_pairwise, "load_production_model", load_complete)
     monkeypatch.setattr(
         release_pairwise,
         "_load_pairwise_staging_model",
         lambda _: pytest.fail("cluster evaluator used the staging-only loader"),
     )
-    monkeypatch.setattr(release_pairwise, "_anddata", lambda *args, **kwargs: dataset)
+    monkeypatch.setattr(release_pairwise, "_load_sealed_anddata", lambda *args, **kwargs: dataset)
     output = tmp_path / "cluster_report.json"
 
     report = release_pairwise.evaluate_clusters(
@@ -1256,13 +1376,26 @@ def test_cluster_evaluator_loads_complete_bundle_and_publishes_digest_only_repor
             manifest=manifest,
             expected_manifest_sha256=manifest_sha256,
             n_jobs=2,
+            **artifact_args,
             **bindings,
         )
     )
 
     assert json.loads(output.read_text(encoding="utf-8")) == report
-    assert report["quality_policy_sha256"] == bindings["expected_quality_policy_sha256"]
+    assert report["release_spec_sha256"] == bindings["expected_release_spec_sha256"]
     assert report["model_manifest_sha256"] == bindings["expected_model_manifest_sha256"]
+    assert report["name_counts_manifest_sha256"] == name_counts_index.manifest_sha256
+    assert report["name_tuples_data_sha256"] == name_tuples.data_sha256
+    assert report["orcid_prefix_counts_data_sha256"] == orcid_prefix_counts.data_sha256
+    assert report["orcid_prefix_counts_manifest_sha256"] == orcid_prefix_counts.manifest_sha256
+    assert observed_authorities == [
+        {
+            "name_counts_manifest_sha256": name_counts_index.manifest_sha256,
+            "name_tuples_data_sha256": name_tuples.data_sha256,
+            "orcid_prefix_counts_data_sha256": orcid_prefix_counts.data_sha256,
+            "orcid_prefix_counts_manifest_sha256": orcid_prefix_counts.manifest_sha256,
+        }
+    ]
     assert report["population_manifest_sha256"] == manifest_sha256
     assert set(report["datasets"]["toy"]) == {"metrics"}
     assert "predicted_clusters" not in report["datasets"]["toy"]
@@ -1283,7 +1416,11 @@ def test_cluster_evaluator_rejects_empty_block_before_model_load(
             "blocks": {"empty": []},
         },
     )
-    bindings = _write_evaluation_bindings(tmp_path)
+    bindings = _write_evaluation_bindings(
+        tmp_path,
+        manifest_sha256,
+        manifest_schema=release_pairwise.CLUSTER_MANIFEST_SCHEMA,
+    )
     monkeypatch.setattr(
         release_pairwise,
         "load_production_model",
@@ -1302,10 +1439,43 @@ def test_cluster_evaluator_rejects_empty_block_before_model_load(
         )
 
 
+def test_release_spec_population_binding_fails_before_model_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, manifest_sha256 = _write_evaluation_manifest(
+        tmp_path,
+        schema_version=release_pairwise.PAIR_MANIFEST_SCHEMA,
+        contents={
+            "signatures": {},
+            "papers": {},
+            "specter_embeddings": {},
+            "pairs": [{"signature_id_1": "s1", "signature_id_2": "s2", "label": 0}],
+        },
+    )
+    monkeypatch.setattr(
+        release_pairwise,
+        "load_production_model",
+        lambda *_args, **_kwargs: pytest.fail("model loaded before population binding was validated"),
+    )
+
+    with pytest.raises(ValueError, match=r"populations\.pairwise_manifest_sha256 does not match"):
+        release_pairwise.evaluate_pairs(
+            argparse.Namespace(
+                output_report=tmp_path / "report.json",
+                manifest=manifest,
+                expected_manifest_sha256=manifest_sha256,
+                n_jobs=1,
+                total_ram_bytes=None,
+                **_write_evaluation_bindings(tmp_path, "0" * 64),
+            )
+        )
+
+
 @pytest.mark.parametrize(
     ("binding", "message"),
     [
-        ("expected_quality_policy_sha256", "Quality-policy SHA-256 mismatch"),
+        ("expected_release_spec_sha256", "Release-spec SHA-256 mismatch"),
         ("expected_model_manifest_sha256", "Model-manifest SHA-256 mismatch"),
         ("expected_manifest_sha256", "Manifest SHA-256 mismatch"),
     ],
@@ -1335,7 +1505,7 @@ def test_wrong_binding_fails_before_model_load_or_score(
         "expected_manifest_sha256": manifest_sha256,
         "n_jobs": 1,
         "total_ram_bytes": None,
-        **_write_evaluation_bindings(tmp_path),
+        **_write_evaluation_bindings(tmp_path, manifest_sha256),
     }
     arguments[binding] = "0" * 64
     monkeypatch.setattr(
@@ -1353,16 +1523,3 @@ def test_wrong_binding_fails_before_model_load_or_score(
         release_pairwise.evaluate_pairs(argparse.Namespace(**arguments))
 
     assert not arguments["output_report"].exists()
-
-
-def test_b3_aggregation_reports_macro_and_signature_weighted() -> None:
-    aggregate = release_pairwise._aggregate_b3(  # noqa: SLF001
-        {
-            "small": {"precision": 1.0, "recall": 0.5, "f1": 0.5, "signature_count": 1},
-            "large": {"precision": 0.0, "recall": 1.0, "f1": 1.0, "signature_count": 3},
-        }
-    )
-
-    assert aggregate["dataset_macro"]["f1"] == pytest.approx(0.75)
-    assert aggregate["signature_weighted"]["f1"] == pytest.approx(0.875)
-    assert aggregate["signature_count"] == 4

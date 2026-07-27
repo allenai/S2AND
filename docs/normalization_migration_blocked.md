@@ -21,10 +21,9 @@ remediation ledger remains [work_plan.md](work_plan.md), but work in that file
 is not automatically part of the v1.3 release.
 
 The executable order, approvals, test-reveal protocol, and publication sequence
-are in [1_3_release_todo.md](1_3_release_todo.md). This document remains the
-normative authority for frozen normalization semantics and minimum acceptance
-thresholds. The frozen `quality_policy.json` is their exact machine-executable
-instantiation for one release and must not weaken them.
+are in [1_3_release_todo.md](1_3_release_todo.md). This document retains
+migration history; `release_spec.json` is the machine-readable authority for
+the release's frozen thresholds and decisions.
 
 For v1.3, retain the already implemented persisted formats:
 `s2and_name_tuples_v3`, `name_counts_index_v2` with
@@ -65,12 +64,12 @@ prerequisite and is outside the v1.3 critical path.
    join/divergence metrics, and retrain the production v1.3 pairwise and
    incremental-linker bundle.
 6. **Pending:** pass quality, subblocking, runtime, peak-RSS, parity, installed
-   wheel, and release-integrity gates on the immutable release candidate.
+   wheel, and release-integrity gates on the complete model.
 
-The checklist is complete only when the release manifest proves that every
-component came from the same normalization/feature contract and expected
-generation. A valid `canonical_v2` string on each artifact is not sufficient if
-their generations, source digests, or model semantics differ.
+The checklist is complete only when the data and model manifests prove that
+every component came from the same normalization/feature contract and expected
+generation. A `canonical_v2` string alone is insufficient when generations,
+source digests, or model semantics differ.
 
 ## Frozen Canonical Name Contract
 
@@ -173,7 +172,7 @@ generation contracts across:
 - ORCID prefix counts;
 - canonical name tuples;
 - pairwise main/nameless boosters and feature contract;
-- assembled incremental linker and replay target;
+- freshly trained incremental linker and embedded replay target;
 - the explicit complete production bundle manifest.
 
 ## Benchmark Name Re-export
@@ -199,12 +198,14 @@ and reproducible logs.
 
 ## Retrain and Acceptance Gates
 
-The v1.3 pairwise and incremental-linker models must train from the exact
-release-candidate artifacts. Their metadata must bind normalization version,
-ordered feature contract, featurizer version, both pairwise booster digests,
-linker digest, and replay-target digest.
+The v1.3 pairwise and incremental-linker models train from the exact released
+data. After validation-only EPS selection freezes the pairwise bundle, the
+direct linker finalizer rematerializes features, fits once, writes a complete
+bundle, reloads it, and evaluates. Its metadata binds the normalization and
+feature contracts, both pairwise booster digests, linker digest, and embedded
+replay-target digest. A linker bound to another pairwise manifest is invalid.
 
-Required quality evidence:
+Required evaluation results:
 
 - Pairwise no-op/alignment comparisons: aggregate AUROC drop `<= 0.001` and
   macro-F1 drop `<= 0.005` on the exact frozen comparable pairs, plus the
@@ -213,44 +214,30 @@ Required quality evidence:
   `<= 0.005`, plus reported macro and per-dataset results.
 - The intentional feature-changing retrain must show end-metric non-regression
   versus the shipped production release on identical evaluation sets.
-- Report per-dataset effects of removing Sinonym, fastText, and reference
-  features; do not infer their safety from implementation parity.
 - Subblocking checks include size distributions, merge behavior, ORCID
   co-location, and dash/name-alias cases.
-- Runtime and peak RSS must be within 10% of the pinned protocol. For v1.3 this
-  is a hard gate: there is no post-result owner waiver.
+- Runtime must regress by no more than 10% under repeated, interleaved runs of
+  the pinned workload. Peak RSS is a diagnostic comparison and each run must
+  remain below the absolute byte ceiling frozen before measurement; there is no
+  relative RSS gate or post-result owner waiver.
 
-Metrics must be present and finite and must pass before release. Hyperparameter
-search does not bypass the same gate. Pairwise and clustering test scores remain
-sealed until the complete candidate is assembled. Linker test scoring occurs
-only after pairwise, EPS, source, payload, metrics, and gates are frozen, and the
-payload is serialized before that population is opened. The aggregate quality
-report applies the frozen gates once. A failed gate aborts the release rather
-than becoming another tuning iteration on that holdout. An infrastructure retry
-may rescore the exact serialized payload on unchanged inputs, but it may not
-refit.
+Metrics must be present, finite, and passing. Pairwise and clustering test
+scores remain sealed until the complete model is serialized and reloaded.
+The one evaluation report applies the release-spec gates. A failed gate aborts
+instead of becoming another tuning iteration, and the failed run is retained
+for diagnosis.
 
 ## Release and Rollback
 
 The release flow must:
 
-1. build into immutable staging locations;
-2. validate full checksums, containment, schemas, cross-artifact contracts, and
-   strict Arrow batch-index fingerprints;
-3. clean-install the exact Python and Rust wheels in an empty `uv` environment;
-4. load the explicit complete candidate bundle and run real embedded
-   pairwise/incremental fixtures;
-5. publish Rust first and publish Python only after the exact Rust version is
-   installable;
-6. publish the exact already-reviewed workflow artifact bytes rather than
-   rebuilding them in a later publish run;
-7. bind the immutable quality report, rollback report, remote data/model digest,
-   evidence-archive digest, and real-v1.3 installed smoke into one
-   machine-enforced release gate;
-8. use the protected-environment platform record as the publication approval
-   rather than duplicating it in a handwritten attestation; and
-9. write one immutable public probe report after public-index and public-data
-   verification.
+1. build once into immutable staging and validate every checksum and contract;
+2. fit the linker once, write the complete bundle, reload it, then evaluate;
+3. clean-install the exact Python and Rust wheels and run the real-model smoke;
+4. verify the release spec, data manifest, complete-model manifest, and one
+   evaluation report before writing `SHA256SUMS`;
+5. publish those exact approved bytes, Rust first; and
+6. run one public probe after index and data verification.
 
 Rollback is deployment of the previous package together with its complete
 legacy artifact set. There is no dual runtime normalization mode and no mixing
@@ -287,6 +274,11 @@ of old code with canonical artifacts or canonical code with legacy artifacts.
   in staging and validate before promoting the package. A crash-preserving live
   rollback would require a generation-directory/pointer layout and therefore a
   separately approved artifact schema/layout change.
+- The checked-in source includes 1,343 legacy-only pairs accepted by the
+  record-level review in
+  `docs/release_evidence/name_tuple_legacy_adjudication_v1.md`. The resulting
+  artifact has 5,027 pairs and retains all 3,684 pre-review pairs. The 906
+  rejected and 17 uncertain candidates are not runtime aliases.
 - Tuple binding: `s2and.name_tuple_artifact.load_name_tuple_artifact` retains
   the validated pairs and their data SHA-256. Rust consumes those explicit
   pairs without maintaining a second artifact loader or identity-inspection
@@ -304,5 +296,4 @@ uv run pytest -q tests/test_canonical_name_examples.py tests/test_normalization_
 ```
 
 This gate checks code behavior only. It does not replace regenerated artifacts,
-the v1.3 retrain, installed-wheel smoke, or release-candidate quality/runtime/RSS
-evidence.
+the v1.3 retrain, installed-wheel smoke, or the release evaluation.

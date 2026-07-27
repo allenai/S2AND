@@ -6,12 +6,15 @@
 //! random-forest averaging are rejected at load time so an unsupported model
 //! fails loudly instead of scoring silently wrong.
 //!
-//! Decision semantics mirror LightGBM's `Tree::NumericalDecision`
-//! (include/LightGBM/tree.h): NaN is converted to 0.0 unless the split's
-//! missing type is NaN; Zero/NaN missing values take the default_left branch;
-//! otherwise `fval <= threshold` goes left. Raw scores are sums of leaf values
-//! in tree order (bit-identical to LightGBM's sequential accumulation), and
-//! binary probabilities apply `1 / (1 + exp(-sigmoid * raw))`.
+//! Dense-input and decision semantics mirror LightGBM: finite values in
+//! `[-kZeroThreshold, kZeroThreshold]` become zero at the prediction adapter;
+//! then `Tree::NumericalDecision` converts NaN to 0.0 unless the split's
+//! missing type is NaN, routes Zero/NaN missing values by `default_left`, and
+//! otherwise sends `fval <= threshold` left. Raw scores are sums of leaf values
+//! in tree order, and binary probabilities apply
+//! `1 / (1 + exp(-sigmoid * raw))`. Deterministic parity tests cover the
+//! supported split and missing-value cases; this module does not claim an
+//! exhaustive proof over every model LightGBM can produce.
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
@@ -56,6 +59,24 @@ fn is_zero_f32(fval: f32) -> bool {
     (-K_ZERO_THRESHOLD_F32..=K_ZERO_THRESHOLD_F32).contains(&fval)
 }
 
+#[inline]
+fn normalize_dense_zero(fval: f64) -> f64 {
+    if is_zero(fval) {
+        0.0
+    } else {
+        fval
+    }
+}
+
+#[inline]
+fn normalize_dense_zero_f32(fval: f32) -> f32 {
+    if is_zero_f32(fval) {
+        0.0
+    } else {
+        fval
+    }
+}
+
 #[derive(Debug, Clone)]
 struct LgbTree {
     num_leaves: usize,
@@ -77,7 +98,9 @@ impl LgbTree {
         for _ in 0..self.left_child.len() {
             let decision_type = self.decision_type[node];
             let missing = missing_type(decision_type);
-            let mut fval = row[self.split_feature[node] as usize];
+            // LightGBM's dense prediction adapter omits every finite value in
+            // the zero window, so the tree observes zero for all missing types.
+            let mut fval = normalize_dense_zero(row[self.split_feature[node] as usize]);
             if fval.is_nan() && missing != MISSING_TYPE_NAN {
                 fval = 0.0;
             }
@@ -125,7 +148,7 @@ impl LgbTree {
             let missing = missing_type(decision_type);
             // The batch boundary asserts row width against the same model
             // feature count used to validate split_feature above.
-            let mut fval = unsafe { *row.get_unchecked(feature) };
+            let mut fval = normalize_dense_zero_f32(unsafe { *row.get_unchecked(feature) });
             if fval.is_nan() && missing != MISSING_TYPE_NAN {
                 fval = 0.0;
             }
@@ -812,6 +835,27 @@ mod tests {
             model.predict_row_raw(&[0.4, above_zero_threshold]),
             1.0 + 10.0
         );
+    }
+
+    #[test]
+    fn dense_zero_window_is_normalized_before_tree_comparison() {
+        assert_eq!(normalize_dense_zero(-K_ZERO_THRESHOLD), 0.0);
+        assert_eq!(normalize_dense_zero(-K_ZERO_THRESHOLD * 0.75), 0.0);
+        assert_eq!(normalize_dense_zero(K_ZERO_THRESHOLD), 0.0);
+        assert_eq!(
+            normalize_dense_zero(-K_ZERO_THRESHOLD * 1.01),
+            -K_ZERO_THRESHOLD * 1.01
+        );
+        assert!(normalize_dense_zero(f64::NAN).is_nan());
+
+        assert_eq!(normalize_dense_zero_f32(-K_ZERO_THRESHOLD_F32), 0.0);
+        assert_eq!(normalize_dense_zero_f32(-K_ZERO_THRESHOLD_F32 * 0.75), 0.0);
+        assert_eq!(normalize_dense_zero_f32(K_ZERO_THRESHOLD_F32), 0.0);
+        assert_eq!(
+            normalize_dense_zero_f32(-K_ZERO_THRESHOLD_F32 * 1.01),
+            -K_ZERO_THRESHOLD_F32 * 1.01
+        );
+        assert!(normalize_dense_zero_f32(f32::NAN).is_nan());
     }
 
     #[test]

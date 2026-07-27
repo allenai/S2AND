@@ -187,20 +187,16 @@ def validate_source_bundle(source_bundle_root: Path, data_root: Path) -> dict[st
     validate_release_root(source_bundle_root, include_replay_bundles=False)
     validate_release_root(data_root)
     bundle = load_bundle(source_bundle_root)
-    _validate_source_bundle_support_files(bundle, require_training_contract=True)
-    source_summary, _arrow_paths = _preflight_source_rows(
+    _validate_source_bundle_support_files(bundle)
+    selected_source_rows, _arrow_paths = _preflight_source_rows(
         bundle,
-        table_keys=None,
-        datasets=None,
-        limit_rows=None,
-        require_full_tables=True,
         name_counts_index_root=None,
     )
     return {
         "source_manifest_sha256": _sha256(manifest_path),
         "data_root_manifest_sha256": _sha256(data_root / "manifest.json"),
         "name_counts_manifest_sha256": next(iter(count_hashes)),
-        "selected_source_rows": int(source_summary["total_selected_rows"]),
+        "selected_source_rows": selected_source_rows,
     }
 
 

@@ -39,6 +39,7 @@ import os
 import subprocess
 import sys
 import time
+from numbers import Real
 from pathlib import Path
 from typing import Any, cast
 
@@ -215,10 +216,16 @@ def _normalize_hyperopt_trial_vals(values: Any) -> dict[str, list[Any]]:
     normalized: dict[str, list[Any]] = {}
     for key, raw_value in sorted(values.items(), key=lambda item: str(item[0])):
         if isinstance(raw_value, list):
-            normalized[str(key)] = [
-                int(value) if hasattr(value, "is_integer") and value.is_integer() else value for value in raw_value
-            ]
+            normalized[str(key)] = [_normalize_hyperopt_trial_value(value) for value in raw_value]
     return normalized
+
+
+def _normalize_hyperopt_trial_value(value: Any) -> Any:
+    """Represent integral floating-point choices as stable JSON integers."""
+
+    if isinstance(value, Real) and not isinstance(value, bool) and float(value).is_integer():
+        return int(value)
+    return value
 
 
 def _summarize_hyperopt_trials(trials_obj: Any) -> dict[str, Any]:

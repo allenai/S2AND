@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import subprocess
@@ -26,7 +27,15 @@ COMMON_TRAINING_ARGS = (
     "pairwise-stage",
     "--target-json",
     "target.json",
+    "--name-counts-index-root",
+    "name-counts-index",
 )
+EXPLICIT_ARTIFACT_HASHES = {
+    "name_counts_manifest_sha256": "a" * 64,
+    "name_tuples_data_sha256": "b" * 64,
+    "orcid_prefix_counts_data_sha256": "c" * 64,
+    "orcid_prefix_counts_manifest_sha256": "d" * 64,
+}
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FULL_MATERIALIZATION_SUMMARIES = tuple({"table_key": key, "rows": 1} for key in promoted_train.REQUIRED_TABLE_KEYS)
 
@@ -34,14 +43,31 @@ FULL_MATERIALIZATION_SUMMARIES = tuple({"table_key": key, "rows": 1} for key in 
 def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         promoted_train,
-        "_preflight_source_rows",
-        lambda *_args, **_kwargs: ({"total_selected_rows": 4}, {}),
+        "load_packaged_artifact_authority",
+        lambda **_kwargs: SimpleNamespace(
+            hashes=dict(EXPLICIT_ARTIFACT_HASHES),
+            name_tuples=SimpleNamespace(pairs=frozenset()),
+        ),
     )
-    monkeypatch.setattr(promoted_train, "pairwise_bundle_binding", lambda _path: {"test": "binding"})
+    monkeypatch.setattr(
+        promoted_train,
+        "_preflight_source_rows",
+        lambda *_args, **_kwargs: (4, {}),
+    )
+    monkeypatch.setattr(promoted_train, "pairwise_bundle_binding", lambda _path, **_kwargs: {"test": "binding"})
     monkeypatch.setattr(
         promoted_train,
         "_validate_source_bundle_support_files",
         lambda *_args, **_kwargs: ["test-support"],
+    )
+    monkeypatch.setattr(
+        promoted_train,
+        "_release_table_plan",
+        lambda _bundle: (
+            ("train_path", "classic_gate_source_path"),
+            {},
+            ("s2and_eval_path", "hwang_eval_path"),
+        ),
     )
 
 
@@ -56,10 +82,10 @@ def test_canonical_cli_help_and_import_leave_backend_unchanged(
         check=False,
     )
     assert help_result.returncode == 0, help_result.stderr
-    assert "{preflight,materialize,candidate,publish}" in help_result.stdout
+    assert "--pairwise-model-path" in help_result.stdout
 
     with pytest.raises(SystemExit) as help_exit:
-        promoted_train.build_parser().parse_args(["preflight", "--help"])
+        promoted_train.build_parser().parse_args(["--help"])
     assert help_exit.value.code == 0
     assert "Explicit v5 pairwise_only native bundle" in capsys.readouterr().out
 
@@ -113,151 +139,13 @@ def test_incremental_linking_runtime_imports_stay_runtime_safe() -> None:
     assert model_imports == []
 
 
-def test_negative_limit_rows_is_rejected() -> None:
+def test_linker_commands_require_name_counts_root() -> None:
+    arguments = list(COMMON_TRAINING_ARGS)
+    option_index = arguments.index("--name-counts-index-root")
+    del arguments[option_index : option_index + 2]
+
     with pytest.raises(SystemExit):
-        promoted_train.build_parser().parse_args(["materialize", *COMMON_TRAINING_ARGS, "--limit-rows", "-1"])
-
-
-def test_linker_commands_make_invalid_mode_combinations_unrepresentable() -> None:
-    parser = promoted_train.build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["materialize", *COMMON_TRAINING_ARGS])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["candidate", *COMMON_TRAINING_ARGS, "--publish-to", "production_model_v9.9"])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["publish", *COMMON_TRAINING_ARGS])
-
-    selector_preflight = parser.parse_args(
-        ["preflight", *COMMON_TRAINING_ARGS, "--datasets", "qian", "--limit-rows", "10"]
-    )
-    assert selector_preflight.command == "preflight"
-
-
-@pytest.mark.parametrize("selector", ["--tables", "--datasets"])
-def test_selectors_require_at_least_one_value(selector: str) -> None:
-    with pytest.raises(SystemExit):
-        promoted_train.build_parser().parse_args(["preflight", *COMMON_TRAINING_ARGS, selector])
-
-
-def test_source_preflight_rejects_unknown_selectors_and_reports_valid_rows(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source_root = tmp_path / "source"
-    labels_path = source_root / "labels" / "train.parquet"
-    labels_path.parent.mkdir(parents=True)
-    pd.DataFrame({"dataset": ["qian", "qian"]}).to_parquet(labels_path, index=False)
-    bundle = promoted_train.OfficialBundle(
-        root=source_root.resolve(),
-        bundle_name="preflight",
-        assets={"featureless_rows": {"files": {"train_path": "labels/train.parquet"}}},
-        models={},
-        expected_metrics={},
-    )
-    arrow_paths = ValidatedArrowInputs(
-        paths={},
-        generation_id="fixture-generation",
-        normalization_version=promoted_train.NORMALIZATION_VERSION,
-    )
-    monkeypatch.setattr(promoted_train, "_arrow_paths_for_dataset", lambda *_args, **_kwargs: arrow_paths)
-
-    with pytest.raises(ValueError, match="unknown --tables"):
-        promoted_train._preflight_source_rows(  # noqa: SLF001
-            bundle,
-            table_keys=("unknown",),
-            datasets=None,
-            limit_rows=1,
-            require_full_tables=False,
-            name_counts_index_root=None,
-        )
-    with pytest.raises(ValueError, match="selected zero rows"):
-        promoted_train._preflight_source_rows(  # noqa: SLF001
-            bundle,
-            table_keys=("train_path",),
-            datasets={"missing"},
-            limit_rows=1,
-            require_full_tables=False,
-            name_counts_index_root=None,
-        )
-
-    summary, resolved_paths = promoted_train._preflight_source_rows(  # noqa: SLF001
-        bundle,
-        table_keys=("train_path",),
-        datasets={"qian"},
-        limit_rows=1,
-        require_full_tables=False,
-        name_counts_index_root=None,
-    )
-
-    assert summary["total_selected_rows"] == 1
-    assert summary["selected_tables"] == ["train_path"]
-    assert resolved_paths == {"qian": arrow_paths}
-
-
-def test_limited_source_preflight_validates_only_datasets_that_will_be_materialized(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source_root = tmp_path / "source"
-    labels_path = source_root / "labels" / "train.parquet"
-    labels_path.parent.mkdir(parents=True)
-    pd.DataFrame({"dataset": ["qian", "pubmed"]}).to_parquet(labels_path, index=False)
-    bundle = promoted_train.OfficialBundle(
-        root=source_root.resolve(),
-        bundle_name="preflight",
-        assets={"featureless_rows": {"files": {"train_path": "labels/train.parquet"}}},
-        models={},
-        expected_metrics={},
-    )
-    qian_paths = ValidatedArrowInputs(
-        paths={},
-        generation_id="qian-generation",
-        normalization_version=promoted_train.NORMALIZATION_VERSION,
-    )
-
-    def resolve_paths(_bundle: Any, dataset_name: str, **_kwargs: Any) -> ValidatedArrowInputs:
-        assert dataset_name == "qian"
-        return qian_paths
-
-    monkeypatch.setattr(promoted_train, "_arrow_paths_for_dataset", resolve_paths)
-
-    summary, resolved_paths = promoted_train._preflight_source_rows(  # noqa: SLF001
-        bundle,
-        table_keys=("train_path",),
-        datasets={"qian", "pubmed"},
-        limit_rows=1,
-        require_full_tables=False,
-        name_counts_index_root=None,
-    )
-
-    assert summary["tables"][0]["datasets"] == ["qian"]
-    assert resolved_paths == {"qian": qian_paths}
-
-
-def test_limited_parquet_read_does_not_call_unbounded_pandas_reader(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = tmp_path / "rows.parquet"
-    pd.DataFrame(
-        {
-            "dataset": ["qian", "pubmed", "qian"],
-            "value": [1, 2, 3],
-        }
-    ).to_parquet(path, index=False)
-    monkeypatch.setattr(
-        promoted_train.pd,
-        "read_parquet",
-        lambda *_args, **_kwargs: pytest.fail("bounded read used pd.read_parquet"),
-    )
-
-    rows = promoted_train._read_selected_parquet_rows(  # noqa: SLF001
-        path,
-        datasets={"qian"},
-        limit_rows=1,
-    )
-
-    assert rows.to_dict("records") == [{"dataset": "qian", "value": 1}]
+        promoted_train.build_parser().parse_args(arguments)
 
 
 def test_output_paths_cannot_be_nested_under_input_bundles(tmp_path: Path) -> None:
@@ -267,7 +155,7 @@ def test_output_paths_cannot_be_nested_under_input_bundles(tmp_path: Path) -> No
     with pytest.raises(SystemExit, match="immutable input bundles"):
         promoted_train._assert_output_paths_outside_inputs(  # noqa: SLF001
             output_dir=pairwise_root / "linker-run",
-            publish_dir=source_root / "production_model_v9.9",
+            complete_model_dir=pairwise_root / "linker-run" / "production_model_v9.9",
             source_bundle_root=source_root,
             pairwise_model_path=pairwise_root,
         )
@@ -280,7 +168,7 @@ def test_source_support_preflight_requires_declared_split_files(tmp_path: Path) 
         root=tmp_path.resolve(),
         bundle_name="support",
         assets={},
-        models={},
+        models={"classic": {}},
         expected_metrics={},
     )
 
@@ -289,10 +177,7 @@ def test_source_support_preflight_requires_declared_split_files(tmp_path: Path) 
 
     (tmp_path / "splits" / "placeholder.csv").write_text("unused\n", encoding="utf-8")
     with pytest.raises(ValueError, match="classic_gate_internal_eval_base_groups_path"):
-        promoted_train._validate_source_bundle_support_files(  # noqa: SLF001
-            bundle,
-            require_training_contract=True,
-        )
+        promoted_train._validate_source_bundle_support_files(bundle)  # noqa: SLF001
 
 
 def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -> None:
@@ -300,6 +185,8 @@ def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -
     splits_dir = tmp_path / "splits"
     splits_dir.mkdir()
     assignments_path = splits_dir / "assignments.csv"
+    internal_eval_path = splits_dir / "internal_eval.csv"
+    pd.DataFrame({"base_group_id": ["internal"]}).to_csv(internal_eval_path, index=False)
     pd.DataFrame(
         [
             {"query_group_id": "q1", "source_key": "s", "base_group_id": "b1", "split": "calibration_fit"},
@@ -307,6 +194,7 @@ def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -
         ]
     ).to_csv(assignments_path, index=False)
     classic = {
+        "classic_gate_internal_eval_base_groups_path": "splits/internal_eval.csv",
         "stratified_eval_test_split": {"assignments_path": "splits/assignments.csv", "test_split": "test"},
         "promoted_stratified_gate": {
             "calibration_splits": ["calibration_fit"],
@@ -339,52 +227,57 @@ def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -
         promoted_train._validate_source_bundle_support_files(bundle)  # noqa: SLF001
 
 
-def test_preflight_only_does_not_create_output_or_materialize(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = {
-        "features": ["f0"],
-        "feature_count": 1,
-        "params": {"n_estimators": 1},
-        "metrics": {"stratified_test_errors": 0},
+def test_release_table_plan_keeps_frozen_test_queries_out_of_training(tmp_path: Path) -> None:
+    paths = {
+        "train_path": "rows/train.parquet",
+        "classic_gate_source_path": "rows/gate.parquet",
+        "s2and_eval_path": "rows/s2and.parquet",
+        "hwang_eval_path": "rows/hwang.parquet",
     }
+    for relative_path in paths.values():
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    assignments_path = tmp_path / "splits" / "assignments.csv"
+    assignments_path.parent.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "query_group_id": "calibration-query",
+                "source_key": "hwang_eval",
+                "split": "calibration_fit",
+                "base_group_id": "calibration-base",
+            },
+            {
+                "query_group_id": "frozen-test-query",
+                "source_key": "s2and_eval",
+                "split": "test",
+                "base_group_id": "test-base",
+            },
+        ]
+    ).to_csv(assignments_path, index=False)
     bundle = promoted_train.OfficialBundle(
-        root=(tmp_path / "source").resolve(),
-        bundle_name="preflight",
-        assets={},
-        models={},
+        root=tmp_path.resolve(),
+        bundle_name="lifecycle",
+        assets={"featureless_rows": {"files": paths}},
+        models={
+            "classic": {
+                **paths,
+                "stratified_eval_test_split": {"assignments_path": "splits/assignments.csv"},
+                "promoted_stratified_gate": {
+                    "calibration_splits": ["calibration_fit"],
+                    "test_split": "test",
+                },
+            }
+        },
         expected_metrics={},
     )
-    monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
-    monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
-    _stub_preflight(monkeypatch)
-    monkeypatch.setattr(
-        promoted_train,
-        "load_clusterer",
-        lambda *_args, **_kwargs: SimpleNamespace(production_model_bundle_version="9.9"),
-    )
-    monkeypatch.setattr(promoted_train, "_assert_pairwise_model_supports_arrow_materialization", lambda *_args: None)
-    monkeypatch.setattr(
-        promoted_train,
-        "_materialize_arrow_rust_feature_bundle",
-        lambda **_kwargs: pytest.fail("preflight-only must not materialize features"),
-    )
-    output_dir = tmp_path / "output"
-    args = promoted_train.build_parser().parse_args(
-        [
-            "preflight",
-            *COMMON_TRAINING_ARGS,
-            "--output-dir",
-            str(output_dir),
-        ]
-    )
 
-    result = promoted_train.run(args)
+    training_keys, query_ids, evaluation_keys = promoted_train._release_table_plan(bundle)  # noqa: SLF001
 
-    assert result["mode"] == "preflight"
-    assert result["source"]["total_selected_rows"] == 4
-    assert not output_dir.exists()
+    assert training_keys == ("train_path", "classic_gate_source_path", "hwang_eval_path")
+    assert query_ids == {"hwang_eval_path": {"calibration-query"}}
+    assert evaluation_keys == ("s2and_eval_path", "hwang_eval_path")
 
 
 def test_run_rejects_name_count_binding_before_materialization(
@@ -416,7 +309,7 @@ def test_run_rejects_name_count_binding_before_materialization(
     monkeypatch.setattr(
         promoted_train,
         "_preflight_source_rows",
-        lambda *_args, **_kwargs: ({"total_selected_rows": 1}, {"toy": arrow_paths}),
+        lambda *_args, **_kwargs: (1, {"toy": arrow_paths}),
     )
     monkeypatch.setattr(promoted_train, "load_clusterer", lambda *_args, **_kwargs: clusterer)
     monkeypatch.setattr(promoted_train, "_assert_pairwise_model_supports_arrow_materialization", lambda *_args: None)
@@ -436,7 +329,6 @@ def test_run_rejects_name_count_binding_before_materialization(
     output_dir = tmp_path / "output"
     args = promoted_train.build_parser().parse_args(
         [
-            "preflight",
             *COMMON_TRAINING_ARGS,
             "--output-dir",
             str(output_dir),
@@ -449,144 +341,13 @@ def test_run_rejects_name_count_binding_before_materialization(
     assert not output_dir.exists()
 
 
-def test_materialization_summary_must_be_nonempty_and_complete() -> None:
-    with pytest.raises(RuntimeError, match="produced zero rows"):
-        promoted_train._assert_materialization_nonempty([], require_full_tables=False)  # noqa: SLF001
-    with pytest.raises(RuntimeError, match="missing or empty required tables"):
-        promoted_train._assert_materialization_nonempty(  # noqa: SLF001
-            [{"table_key": "train_path", "rows": 1}],
-            require_full_tables=True,
-        )
-
-
-@pytest.mark.parametrize(
-    "removed_args",
-    (
-        ("--feature-mode", "precomputed-promoted"),
-        ("--precomputed-feature-bundle-root", "features"),
-        ("--reuse-existing-features",),
-    ),
-)
-def test_removed_cached_feature_interfaces_are_rejected(removed_args: tuple[str, ...]) -> None:
-    with pytest.raises(SystemExit):
-        promoted_train.build_parser().parse_args(["candidate", *COMMON_TRAINING_ARGS, *removed_args])
-
-
-def test_publish_destination_must_be_fresh_and_separate(
-    tmp_path: Path,
-) -> None:
-    output_dir = tmp_path / "run"
-    existing_publish = tmp_path / "production_model_v9.9"
-    existing_publish.mkdir()
-    parser = promoted_train.build_parser()
-
-    with pytest.raises(SystemExit, match="must name a new directory"):
-        promoted_train._resolved_output_paths(  # noqa: SLF001
-            parser.parse_args(["publish", *COMMON_TRAINING_ARGS, "--publish-to", str(existing_publish)])
-        )
-
-    nested_publish = output_dir / "production_model_v9.9"
-    with pytest.raises(SystemExit, match="separate directories"):
-        promoted_train._resolved_output_paths(  # noqa: SLF001
-            parser.parse_args(
-                [
-                    "publish",
-                    *COMMON_TRAINING_ARGS,
-                    "--output-dir",
-                    str(output_dir),
-                    "--publish-to",
-                    str(nested_publish),
-                ]
-            )
-        )
-
-
-def test_publish_version_must_match_pairwise_before_materialization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = {
-        "features": ["f0"],
-        "feature_count": 1,
-        "params": {"n_estimators": 1},
-        "metrics": {"stratified_test_errors": 0},
-    }
-    bundle = promoted_train.OfficialBundle(
-        root=(tmp_path / "source").resolve(),
-        bundle_name="preflight",
-        assets={},
-        models={},
-        expected_metrics={},
-    )
-    monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
-    monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
-    _stub_preflight(monkeypatch)
-    monkeypatch.setattr(
-        promoted_train,
-        "load_clusterer",
-        lambda *_args, **_kwargs: SimpleNamespace(production_model_bundle_version="9.9"),
-    )
-    monkeypatch.setattr(promoted_train, "_assert_pairwise_model_supports_arrow_materialization", lambda *_args: None)
-    monkeypatch.setattr(
-        promoted_train,
-        "_materialize_arrow_rust_feature_bundle",
-        lambda **_kwargs: pytest.fail("version mismatch reached materialization"),
-    )
-    args = promoted_train.build_parser().parse_args(
-        [
-            "publish",
-            *COMMON_TRAINING_ARGS,
-            "--output-dir",
-            str(tmp_path / "run"),
-            "--publish-to",
-            str(tmp_path / "production_model_v8.8"),
-        ]
-    )
-
-    with pytest.raises(SystemExit, match="version disagrees with the pairwise bundle"):
-        promoted_train.run(args)
-
-
-def test_empty_target_metrics_are_rejected_before_materialization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = {
-        "features": ["f0"],
-        "feature_count": 1,
-        "params": {"n_estimators": 1},
-        "metrics": {},
-    }
-    monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
-    monkeypatch.setattr(
-        promoted_train,
-        "load_bundle",
-        lambda _path: pytest.fail("bundle loading ran before target metric validation"),
-    )
-    output_dir = tmp_path / "must_not_be_created"
-    args = promoted_train.build_parser().parse_args(
-        [
-            "publish",
-            *COMMON_TRAINING_ARGS,
-            "--output-dir",
-            str(output_dir),
-            "--publish-to",
-            str(tmp_path / "production_model_v9.9"),
-        ]
-    )
-
-    with pytest.raises(ValueError, match="Published target metrics must not be empty"):
-        promoted_train.run(args)
-
-    assert not output_dir.exists()
-
-
 def test_partial_target_metrics_are_rejected_when_loaded(tmp_path: Path) -> None:
     target_path = tmp_path / "partial-target.json"
     features = list(promoted_train.promoted_linker_feature_columns())
     target_path.write_text(
         json.dumps(
             {
+                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "features": features,
                 "feature_count": len(features),
                 "params": {"n_estimators": 1},
@@ -600,54 +361,12 @@ def test_partial_target_metrics_are_rejected_when_loaded(tmp_path: Path) -> None
         promoted_train._load_target(target_path)  # noqa: SLF001
 
 
-@pytest.mark.parametrize("retrieval_rank", [-1, 0, 65536])
-def test_arrow_rust_materialization_rejects_invalid_retrieval_rank(
-    monkeypatch: pytest.MonkeyPatch,
-    retrieval_rank: int,
-) -> None:
-    class RustModule:
-        @staticmethod
-        def raw_arrow_labeled_candidate_plan(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-            raise AssertionError("rank validation should run before Rust planning")
+def test_target_schema_is_required_when_loaded(tmp_path: Path) -> None:
+    target_path = tmp_path / "target.json"
+    target_path.write_text("{}\n", encoding="utf-8")
 
-    monkeypatch.setattr(promoted_train.feature_port, "_require_rust_runtime", lambda: RustModule)
-    context = promoted_train.ArrowRustDatasetContext(
-        dataset_name="dummy",
-        row_component_scope="block-local",
-        pairwise_component_scope="block-local",
-        runtime_context=SimpleNamespace(),
-        arrow_paths={},
-        component_members={},
-        cluster_seeds_require={},
-        cluster_seeds_disallow=frozenset(),
-        seed_constrained_signature_ids=frozenset(),
-        max_block_component_size=1,
-    )
-    rows = pd.DataFrame(
-        [
-            {
-                "query_signature_id": "q1",
-                "query_view": "full",
-                "query_group_id": "g1",
-                "candidate_component_key": "c1",
-                "retrieval_rank": retrieval_rank,
-                "label": 0,
-            }
-        ]
-    )
-
-    with pytest.raises(ValueError, match="retrieval_rank"):
-        promoted_train._materialize_arrow_rust_dataset_rows(  # noqa: SLF001
-            context=context,
-            rows=rows,
-            target_features=[],
-            clusterer=SimpleNamespace(),
-            n_jobs=1,
-            total_ram_bytes=1,
-            max_exemplars=1,
-            pairwise_model_nan_value=0.0,
-            pairwise_aggregate_nan_value=0.0,
-        )
+    with pytest.raises(ValueError, match="schema_version must be"):
+        promoted_train._load_target(target_path)  # noqa: SLF001
 
 
 def test_arrow_rust_materialization_passes_concrete_paths_to_native_planner(
@@ -709,6 +428,7 @@ def test_arrow_rust_materialization_passes_concrete_paths_to_native_planner(
             context=context,
             rows=rows,
             target_features=[],
+            name_tuples=frozenset(),
             clusterer=SimpleNamespace(),
             n_jobs=1,
             total_ram_bytes=1,
@@ -807,48 +527,6 @@ def test_observed_metrics_use_weighted_average_error() -> None:
     assert observed["false_link_error_rate"] == pytest.approx(0.03)
     assert observed["wrong_link_error_rate"] == pytest.approx(0.03)
     assert observed["weighted_average_error"] == pytest.approx(((0.25 * 0.04) + 0.03 + (1.5 * 0.03)) / 2.75)
-    assert promoted_train._metric_deltas(  # noqa: SLF001
-        {"weighted_average_error_weights": observed["weighted_average_error_weights"]},
-        {"metrics": {"weighted_average_error_weights": observed["weighted_average_error_weights"]}},
-    ) == {"weighted_average_error_weights": True}
-
-
-def test_metric_gate_requires_complete_finite_official_metrics() -> None:
-    observed = promoted_train._observed_official_metrics(  # noqa: SLF001
-        {
-            "training_summary": {"rows": 10, "positive_rows": 3},
-            "stratified_eval_test_split": {
-                "overall": {
-                    "test": {
-                        "n_queries": 10,
-                        "accuracy": 0.9,
-                        "balanced_accuracy": 0.8,
-                        "error_rate": 0.1,
-                        "errors": 1,
-                        "false_abstain": 1,
-                        "false_link": 0,
-                        "wrong_candidate_link": 0,
-                    }
-                }
-            },
-        }
-    )
-    target = {"metrics": dict(observed)}
-    promoted_train._assert_no_metric_drift(observed, target)  # noqa: SLF001
-
-    incomplete_target = {"metrics": dict(observed)}
-    incomplete_target["metrics"].pop("stratified_test_error_rate")
-    with pytest.raises(RuntimeError, match="complete official metric set"):
-        promoted_train._assert_no_metric_drift(observed, incomplete_target)  # noqa: SLF001
-
-    incomplete_observed = dict(observed)
-    incomplete_observed.pop("stratified_test_error_rate")
-    with pytest.raises(RuntimeError, match="unexpected metric key set"):
-        promoted_train._assert_no_metric_drift(incomplete_observed, target)  # noqa: SLF001
-
-    nonfinite_target = {"metrics": {**observed, "stratified_test_error_rate": float("nan")}}
-    with pytest.raises(RuntimeError, match="must be finite"):
-        promoted_train._assert_no_metric_drift(observed, nonfinite_target)  # noqa: SLF001
 
 
 def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
@@ -894,13 +572,12 @@ def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
     assert written["query_safe_target_source"].tolist() == ["manual_override", "retrieved_window"]
 
 
-@pytest.mark.parametrize("command", ["candidate", "publish"])
-def test_candidate_preserves_artifact_while_publish_gates_metric_drift(
+def test_release_serializes_complete_bundle_before_evaluation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    command: str,
 ) -> None:
     target = {
+        "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
         "features": ["f0"],
         "feature_count": 1,
         "params": {"n_estimators": 1},
@@ -930,22 +607,36 @@ def test_candidate_preserves_artifact_while_publish_gates_metric_drift(
             }
         },
     }
-    target["metrics"] = promoted_train._observed_official_metrics(summary)  # noqa: SLF001
-    target["metrics"]["stratified_test_errors"] = 0
-    saved_target: dict[str, Any] | None = None
+    order: list[str] = []
 
-    def save_artifact(**kwargs: Any) -> dict[str, Any]:
-        nonlocal saved_target
-        saved_target = dict(kwargs["target_spec"])
-        return {"booster_sha256": "a" * 64}
+    def save_artifact(model: Any, artifact_dir: Path, **kwargs: Any) -> dict[str, Any]:
+        order.append("serialize")
+        assert model is calibrated.model
+        assert kwargs["target_spec"] == target
+        artifact_dir.mkdir()
+        (artifact_dir / "booster.lgb").write_bytes(b"calibrated-booster\n")
+        (artifact_dir / "metadata.json").write_text('{"schema_version":"test"}\n', encoding="utf-8")
+        return {
+            "schema_version": "test",
+            "booster_sha256": "a" * 64,
+            "pairwise_bundle_binding_digest": "b" * 64,
+            "target_spec_digest": "c" * 64,
+            "retrieval_top_k": 25,
+        }
 
     monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
     monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
     _stub_preflight(monkeypatch)
+
+    def materialize(**_kwargs: Any) -> tuple[Any, list[dict[str, Any]]]:
+        stage = "materialize_training" if "materialize_training" not in order else "materialize_evaluation"
+        order.append(stage)
+        return bundle, list(FULL_MATERIALIZATION_SUMMARIES)
+
     monkeypatch.setattr(
         promoted_train,
         "_materialize_arrow_rust_feature_bundle",
-        lambda **_kwargs: (bundle, list(FULL_MATERIALIZATION_SUMMARIES)),
+        materialize,
     )
     monkeypatch.setattr(
         promoted_train,
@@ -953,30 +644,52 @@ def test_candidate_preserves_artifact_while_publish_gates_metric_drift(
         lambda *_args: None,
     )
     output_dir = tmp_path / "out"
-    query_predictions_path = output_dir / "classic" / "query_predictions.csv"
     query_predictions_bytes = b"query_case_id\nquery-1\n"
-    fitted = promoted_train.FittedClassicRun(
-        summary=summary,
+    calibrated = classic_training.CalibratedClassicModel(
         model=object(),
         gate_config={"model_type": "test"},
         retrieval_top_k=25,
-        query_predictions={
-            "path": str(query_predictions_path),
-            "sha256": "a" * 64,
-            "bytes": len(query_predictions_bytes),
-            "rows": 1,
-            "columns": ["query_case_id"],
-        },
+        training_summary=summary["training_summary"],
+        abstain_rule_summary={},
     )
 
-    def run_classic(_bundle: Any, classic_output_dir: Path, **_kwargs: Any) -> Any:
-        assert classic_output_dir == query_predictions_path.parent
-        classic_output_dir.mkdir()
-        query_predictions_path.write_bytes(query_predictions_bytes)
-        return fitted
+    def fit_classic(_bundle: Any, **_kwargs: Any) -> Any:
+        order.append("fit")
+        return calibrated
 
-    monkeypatch.setattr(promoted_train, "run_classic", run_classic)
-    monkeypatch.setattr(promoted_train, "_save_evaluated_artifact", save_artifact)  # noqa: SLF001
+    def finalize_bundle(**kwargs: Any) -> Any:
+        order.append("finalize")
+        complete_model_dir = Path(kwargs["output_bundle_dir"])
+        complete_model_dir.mkdir()
+        manifest_path = complete_model_dir / "manifest.json"
+        manifest_path.write_text('{"schema_version":"s2and_production_model_bundle_v5"}\n', encoding="utf-8")
+        return SimpleNamespace(manifest_path=manifest_path)
+
+    loaded_artifact = SimpleNamespace()
+
+    def load_complete(path: Path, **_kwargs: Any) -> Any:
+        order.append("reload")
+        assert Path(path).is_dir()
+        return SimpleNamespace(incremental_linker_artifact=loaded_artifact)
+
+    def evaluate_classic(_bundle: Any, **kwargs: Any) -> Any:
+        order.append("evaluate")
+        assert kwargs["artifact"] is loaded_artifact
+        return classic_training.ClassicEvaluation(
+            summary=summary,
+            query_predictions={
+                "sha256": hashlib.sha256(query_predictions_bytes).hexdigest(),
+                "bytes": len(query_predictions_bytes),
+                "rows": 1,
+                "columns": ["query_case_id"],
+            },
+        )
+
+    monkeypatch.setattr(promoted_train, "fit_classic", fit_classic)
+    monkeypatch.setattr(promoted_train, "evaluate_classic", evaluate_classic)
+    monkeypatch.setattr(promoted_train, "save_incremental_linking_artifact", save_artifact)
+    monkeypatch.setattr(promoted_train, "finalize_production_bundle", finalize_bundle)
+    monkeypatch.setattr(promoted_train, "load_production_model", load_complete)
     monkeypatch.setattr(
         promoted_train,
         "load_clusterer",
@@ -984,74 +697,31 @@ def test_candidate_preserves_artifact_while_publish_gates_metric_drift(
     )
     args = promoted_train.build_parser().parse_args(
         [
-            command,
             *COMMON_TRAINING_ARGS,
             "--output-dir",
             str(output_dir),
-            *(["--publish-to", str(tmp_path / "production_model_v9.9")] if command == "publish" else []),
         ]
     )
 
-    if command == "candidate":
-        result = promoted_train.run(args)
-        assert Path(result["candidate_target_path"]).is_file()
-        assert result["artifact_dir"] == str(output_dir / promoted_train.EVALUATED_ARTIFACT_DIRNAME)
-        assert Path(result["query_predictions"]["path"]).is_file()
-        assert result["query_predictions"]["rows"] == 1
-        assert (
-            json.loads((output_dir / "run_summary.json").read_text(encoding="utf-8"))["query_predictions"]
-            == (result["query_predictions"])
-        )
-        assert not (output_dir / "query_predictions_inventory.json").exists()
-        assert saved_target is not None
-        assert saved_target["metrics"]["stratified_test_errors"] == 1
-    else:
-        with pytest.raises(RuntimeError, match="drifted from target metrics"):
-            promoted_train.run(args)
-        assert saved_target is None
-        assert not (output_dir / promoted_train.EVALUATED_ARTIFACT_DIRNAME).exists()
-
-
-def test_saved_artifact_uses_exact_evaluated_model_and_gate(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    model = object()
-    gate_config = {"model_type": "evaluated-gate"}
-    fitted = promoted_train.FittedClassicRun(
-        summary={},
-        model=model,
-        gate_config=gate_config,
-        retrieval_top_k=17,
-        query_predictions={},
+    result = promoted_train.run(args)
+    assert order == [
+        "materialize_training",
+        "fit",
+        "serialize",
+        "finalize",
+        "reload",
+        "materialize_evaluation",
+        "evaluate",
+    ]
+    assert result["schema_version"] == promoted_train.LINKER_EVALUATION_REPORT_SCHEMA
+    assert result["pairwise_bundle_binding"] == {"test": "binding"}
+    assert result["complete_model_path"] == str(output_dir / "pairwise-stage")
+    assert result["query_predictions"]["rows"] == 1
+    assert set(output_dir.iterdir()) == {
+        output_dir / "pairwise-stage",
+        output_dir / "linker_evaluation_report.json",
+    }
+    assert (
+        json.loads((output_dir / "linker_evaluation_report.json").read_text(encoding="utf-8"))["query_predictions"]
+        == result["query_predictions"]
     )
-    captured: dict[str, Any] = {}
-
-    def save(actual_model: Any, artifact_dir: Path, **kwargs: Any) -> dict[str, Any]:
-        captured.update(model=actual_model, artifact_dir=artifact_dir, kwargs=kwargs)
-        return {
-            "schema_version": "test",
-            "booster_sha256": "a" * 64,
-            "target_spec_digest": "b" * 64,
-        }
-
-    monkeypatch.setattr(promoted_train, "save_incremental_linking_artifact", save)
-    monkeypatch.setattr(
-        promoted_train,
-        "load_incremental_linking_artifact",
-        lambda _path: SimpleNamespace(retrieval_top_k=17),
-    )
-    artifact_dir = tmp_path / promoted_train.EVALUATED_ARTIFACT_DIRNAME
-
-    summary = promoted_train._save_evaluated_artifact(  # noqa: SLF001
-        fitted=fitted,
-        artifact_dir=artifact_dir,
-        target_spec={"features": ["f0"]},
-        artifact_pairwise_bundle_binding={"manifest": "digest"},
-    )
-
-    assert captured["model"] is model
-    assert captured["artifact_dir"] == artifact_dir
-    assert captured["kwargs"]["gate_config"] is gate_config
-    assert captured["kwargs"]["retrieval_top_k"] == 17
-    assert summary["booster_sha256"] == "a" * 64

@@ -1426,7 +1426,7 @@ def test_raw_arrow_candidate_plan_orcid_override_respects_seed_disallows(tmp_pat
     assert plan["telemetry"]["cluster_seed_disallowed_candidate_count"] == 1
 
 
-def test_raw_arrow_candidate_plan_missing_query_position_has_no_coauthor_overlap(
+def test_raw_arrow_candidate_plan_rejects_missing_query_position(
     tmp_path: Path,
 ) -> None:
     signatures = pa.table(
@@ -1475,18 +1475,39 @@ def test_raw_arrow_candidate_plan_missing_query_position_has_no_coauthor_overlap
     }
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
-    plan = _raw_candidate_plan_arrow(
-        paths,
-        ["q1"],
-        top_k=2,
-        query_view="full",
-        orcid_enabled=False,
-        num_threads=1,
-    )
+    with pytest.raises(ValueError, match="author_position is null"):
+        _raw_candidate_plan_arrow(
+            paths,
+            ["q1"],
+            top_k=2,
+            query_view="full",
+            orcid_enabled=False,
+            num_threads=1,
+        )
 
-    overlap_by_component = dict(zip(plan["row_component_keys"], plan["coauthor_overlap"], strict=True))
-    assert overlap_by_component["c_self"] == 0.0
-    assert overlap_by_component["c_real"] == 0.0
+
+def test_raw_arrow_candidate_planner_rejects_missing_seed_position(tmp_path: Path) -> None:
+    paths = _base_arrow_paths(tmp_path, with_indexes=False)
+    with pa.memory_map(paths["signatures"], "r") as source:
+        signatures = pa.ipc.open_file(source).read_all()
+    position_index = signatures.schema.get_field_index("author_position")
+    signatures = signatures.set_column(
+        position_index,
+        "author_position",
+        pa.array([0, None, 0], type=pa.int64()),
+    )
+    paths["signatures"] = _write_ipc(tmp_path / "signatures_with_null_seed_position.arrow", signatures)
+    paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
+
+    with pytest.raises(ValueError, match="author_position is null"):
+        _raw_candidate_plan_arrow(
+            paths,
+            ["q1"],
+            top_k=2,
+            query_view="full",
+            orcid_enabled=False,
+            num_threads=1,
+        )
 
 
 def test_raw_arrow_candidate_plan_matches_multi_query_auto_views_and_specter(tmp_path: Path) -> None:
@@ -1607,7 +1628,7 @@ def test_raw_arrow_candidate_plan_excludes_query_seed_and_handles_missing_metada
             "author_suffix": pa.array([None, None, None], type=pa.string()),
             "author_affiliations": pa.array([None, None, []], type=pa.list_(pa.string())),
             "author_orcid": pa.array([None, None, None], type=pa.string()),
-            "author_position": pa.array([None, None, None], type=pa.int64()),
+            "author_position": pa.array([0, 0, 0], type=pa.int64()),
         }
     )
     papers = pa.table(

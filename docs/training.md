@@ -5,10 +5,10 @@ main steps for training, evaluating, and publishing a model.
 
 The examples are research/API examples and intentionally make a test split
 available for immediate inspection. They are not the v1.3 release protocol.
-Release training must keep pairwise and clustering test identities sealed until
-the one-shot Stage 6 evaluators, and must freeze linker choices before its
-one-shot test reveal. Follow [1_3_release_todo.md](1_3_release_todo.md), not the
-example order below, for production work.
+Release training must keep pairwise, clustering, and linker test identities
+sealed until the one-shot Stage 6 evaluation. Follow
+[1_3_release_todo.md](1_3_release_todo.md), not the example order below, for
+production work.
 
 ## Build a Rust-backed training dataset
 
@@ -97,11 +97,10 @@ pairwise_model = PairwiseModeler(
 pairwise_model.fit(X_train, y_train, X_val, y_val)
 ```
 
-For repeated training experiments on unchanged inputs, wrap featurization with
-the snapshot cache instead, exposed only by `train_pairwise.py` as
-`--feature-cache-dir`. It stores each split's output
-matrices as one content-addressed uncompressed NPZ file and recomputes on any
-input change. See [caching.md](caching.md) for the exact semantics.
+The production `train_pairwise.py` command always featurizes from its pinned
+training plan and has no cache or smoke mode. Programmatic research callers can
+use `s2and.feature_cache.cached_featurize`; see
+[caching.md](caching.md) for its exact semantics.
 
 ## Evaluate the pairwise classifier
 
@@ -157,14 +156,11 @@ print(metrics)
 
 ## Publish and reload a trained model
 
-Do not publish a pickle. The public loader accepts only a complete canonical
-native bundle containing the pairwise boosters, clusterer configuration,
-promoted linker, reproducibility target, and checksummed manifest. The
-production training scripts write a pairwise-only staging bundle and then
-atomically finalize a complete bundle; see
-[production_inference.md](production_inference.md#staged-publication) for the
-component interfaces. The intervening EPS freeze, linker candidate lifecycle,
-one-shot evaluation, and publication gates are defined only in the
+Do not publish a pickle. The public loader accepts one complete canonical native
+bundle containing pairwise boosters, clusterer configuration, promoted linker,
+embedded replay target, and checksummed manifest. After EPS is frozen,
+`train_linker_and_finalize.py` fits the linker once, atomically writes
+the complete bundle, reloads those exact bytes, and evaluates them. See the
 [v1.3 release runbook](1_3_release_todo.md).
 
 Pairwise production training verifies the packaged canonical name tuples and
@@ -176,15 +172,12 @@ data hashes with the canonical package artifacts; the exact name-count
 manifest and complete ordered feature contract are also bound into model and
 linker provenance.
 
-The promoted incremental-linker artifact uses the strict
-`incremental_linking_artifact_v5` contract. It stores the booster checksum,
-runtime gate, retrieval top-k, and canonical digests binding the exact pairwise
-bundle and complete training target JSON. Final bundle assembly and production
-loading reject either mismatch, including a target modified after manifest
-checksums are refreshed. Candidate runs retain their exact learned artifact and
-deterministic query-level prediction inventory. The current command still lacks
-the reviewed B20 candidate-to-production lifecycle transition, so this format
-validation is necessary but not sufficient for release.
+The promoted linker uses `incremental_linking_artifact_v5`. Its booster
+checksum and canonical digests bind the exact pairwise bundle and complete
+training target JSON. The complete bundle keeps that target at
+`reproducibility/incremental_linker_training_target.json`; finalization and
+loading reject a mismatch. Evaluation starts only after the serialized bundle
+has been reloaded.
 
 After a bundle passes those gates, reload it explicitly:
 
@@ -204,7 +197,9 @@ pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow_paths(
 ## Reference scripts
 
 - `scripts/production/model/train_pairwise.py`: pairwise production-bundle stage
-- `scripts/production/model/release_pairwise.py`: EPS calibration/finalization and sealed evaluation
-- `scripts/production/model/train_linker_and_finalize.py`: complete native-bundle finalization
+- `scripts/production/model/release_pairwise.py`: EPS calibration, measurement
+  components, and `evaluate-release` aggregation into one report
+- `scripts/production/model/train_linker_and_finalize.py`: one-fit
+  complete-bundle finalization, reload, and evaluation
 - `scripts/tutorial_for_predicting_with_the_prod_model.py`: released-model inference example
 - `scripts/README.md`: script catalog

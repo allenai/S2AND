@@ -5,9 +5,16 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from scripts._rust_suite import transfer_mini_cmd
+
+
+def test_normalize_hyperopt_trial_vals_converts_only_integral_floats() -> None:
+    assert transfer_mini_cmd._normalize_hyperopt_trial_vals(
+        {"choice": [2.0, np.float32(5), 2.5, 3, "4", True], "ignored": "not-a-list"}
+    ) == {"choice": [2, 5, 2.5, 3, "4", True]}
 
 
 def test_transfer_mini_resolve_ingest_auto_is_backend_specific() -> None:

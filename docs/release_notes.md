@@ -9,7 +9,7 @@ axis. This decision is release blocker B01.
 - **Unreleased migration state:** the artifact-independent canonical-v2 code
   and release hardening are implemented, but canonical name counts, canonical
   ORCID prefix counts, benchmark-name re-export, the v1.3 retrain, and
-  release-candidate quality/scale measurements are still pending. The legacy
+  release quality/scale measurements are still pending. The legacy
   v1.21/v1.0-v1.2 models are not packaged and are rejected by the canonical
   loader, so 0.60.0 is not yet a usable production release. See
   [1_3_release_todo.md](1_3_release_todo.md).
@@ -62,21 +62,23 @@ axis. This decision is release blocker B01.
 - Breaking: ORCID prefix counts now use one
   `first_k_letter_counts_from_orcid.manifest.json`; the former runtime metadata
   and producer-report sidecars are removed.
-- Breaking: pairwise `--datasets` runs are non-publishable smoke runs by
-  definition. The redundant `--smoke-only` and guessed disk-headroom flags are
-  removed.
-- Breaking: linker training now has explicit `preflight`, `materialize`,
-  `candidate`, and `publish` commands. Candidate runs retain the exact
-  evaluated model and measured report beside `candidate_target.json`; they
-  cannot approve a release. They also persist deterministic query-level
-  decisions and their digest inventory. The existing `publish` command is not a
-  v1.3 release authority: B20 still requires a thin no-training v5 assembly
-  wrapper, and the aggregate quality report alone decides release eligibility.
+- Breaking: pairwise production training is one release-only command. It
+  requires the digest-pinned training plan, external name-count index, local
+  matrix workspace, validation-pair size, and explicit full-run acknowledgement;
+  packaged tuple/ORCID artifacts are the remaining data authority.
+- Breaking: linker training is one direct entrypoint. It performs one fresh fit
+  against the final pairwise bundle, writes a complete v5 bundle with the
+  embedded replay target, reloads those exact bytes, and evaluates them.
 - Breaking: `NameTupleArtifact.identity` and
   `s2and_rust.read_name_tuple_artifact_identity` are removed. The Python loader
   validates each artifact once and retains only frozen alias pairs plus
   `data_sha256`; Python-driven Rust flows receive those explicit pairs rather
   than reopening the artifact in Rust.
+- The canonical alias artifact now contains 5,027 pairs. A manual review of all
+  2,266 legacy-only candidates restored 1,343 credible aliases, retained all
+  3,684 existing pairs, and excluded 906 rejects plus 17 unresolved pairs. The
+  complete adjudication ledger and rubric are retained under
+  `docs/release_evidence/`.
 - Promoted query-disallow resolution is request-global and deterministic:
   require-forced decisions first, then descending initial score, then signature
   ID. Conflicts rebuild and score a complete single-query plan with the winning
@@ -115,24 +117,23 @@ axis. This decision is release blocker B01.
   ORCID counts now use one direct JSON file plus one provenance manifest, with
   no pointer manifest, retry loop, or legacy fallback. The large name-count
   index belongs in the immutable external data release, not Python package
-  data. The code-only checkout declares neither ORCID file. The approved
+  data. The current pre-release tree declares neither ORCID file. The approved
   canonical JSON and manifest are added with both package-data declarations in
-  one Stage 1 promotion commit.
+  the final Stage 1 release commit.
 - Generated `within_block_random` pair sampling now uses exact seeded rank
   sampling. It preserves the legacy candidate order, selected pairs, and labels
   while memory scales with requested samples plus blocks instead of all
-  candidate pairs. Fixed-pair CSV datasets remain fully loaded and therefore
-  still require the bounded pre-sampled smoke root in B22.
+  candidate pairs. Fixed-pair CSV datasets remain fully loaded during the
+  release-only training run.
 - Fixed train/validation/test CSV inputs now reject any unordered pair that
   appears in more than one split. B11 still requires this schema, duplication,
   and overlap validation to run during preflight before expensive
   featurization.
-- Pairwise bundles and linker artifacts validate in sibling staging
-  directories and publish with one rename into a new path; finalization never
-  mutates the pairwise source in place. Metric promotion rejects
-  missing/nonfinite values, and diagnostic metric-drift overrides cannot
-  promote artifacts. Wheel/sdist validation rejects undeclared production
-  assets and, when a default is declared, requires exactly that bundle.
+- Pairwise and complete-model bundles validate in sibling staging directories
+  and publish with one rename into a new path; finalization never mutates the
+  pairwise source. The release evaluation report rejects missing or nonfinite
+  required metrics. Wheel/sdist validation rejects undeclared production assets
+  and, when a default is declared, requires exactly that bundle.
   Production training records the canonical name-tuple and ORCID prefix-count
   data SHA-256 values in the feature contract; bundle export and load require
   exact matches, and the linker binding covers both through its ordered
@@ -143,16 +144,12 @@ axis. This decision is release blocker B01.
   the stored threshold is stale. The current canonical loader has no legacy
   override, so a v1.21 baseline must use that compatible historical runtime.
   Newly tuned canonical bundles use their own `clusterer.json` value.
-- The release workflow can build and install Python and Rust wheel candidates
-  outside the source tree. A synthetic
-  `Clusterer.predict_incremental_from_arrow_paths` smoke has passed from the
-  installed wheels and itself carries the strict canonical Arrow manifest.
-  Rust-enabled CI fails hard on import/ABI drift, and Windows/macOS jobs execute
-  their built wheels. The Rust build-system floor and release action are aligned
-  at Maturin 1.14.1. The current publish controls are not authorized for v1.3:
-  B26 still requires one digest-pinned evidence archive, protected release gate,
-  and publication of the exact reviewed candidate bytes, and B16 requires a
-  real external v1.3 bundle smoke.
+- The release workflow builds and installs Python and Rust wheels outside the
+  source tree. Rust-enabled CI fails hard on import/ABI drift, and Windows/macOS
+  jobs execute their built wheels. The Rust build-system floor and release
+  action are aligned at Maturin 1.14.1. B26 still requires the five semantic
+  authorities, protected approval, and checksums over the exact staged bytes;
+  B16 requires a real external v1.3 bundle smoke.
 - Arrow training iterates record batches and avoids duplicate full-table
   materialization. Paper-author inputs reject duplicate positions, empty names,
   and dangling references consistently in Python and Rust. Python subblocking
@@ -183,6 +180,9 @@ axis. This decision is release blocker B01.
 - `s2and-rust>=0.50.0` is required for Rust-backed incremental linking.
 - Native extension load failures now surface as import errors instead of silently falling back to Python. Missing extension modules still use the Python fallback path.
 - Incremental linking uses the NumPy logistic link-or-abstain gate artifact format; legacy score/margin gate thresholds are not supported.
-- Production linker finalization trains the final booster on train plus weighted calibration splits, then calibrates the final logistic gate on the held-out test split.
+- Production linker finalization trains the final booster on train plus weighted
+  calibration splits and fits the logistic gate on the configured calibration
+  splits. The held-out test split is materialized and evaluated only after the
+  complete bundle is serialized and reloaded.
 - Incremental name compatibility now accepts joined and first-token aliases in addition to exact first-name tuples.
 - Artifact cache entries are keyed by validator type. Raw-ETag cache filenames are no longer probed.

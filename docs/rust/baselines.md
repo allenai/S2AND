@@ -14,7 +14,7 @@ evidence, not the accepted v1.3 performance baseline. For the release, use the
 commands here but write JSON, logs, environment, and hardware evidence to the
 durable reports root required by
 [../1_3_release_todo.md](../1_3_release_todo.md), then bind it into the
-immutable quality report. The release runbook owns acceptance and promotion.
+immutable evaluation report. The release runbook owns acceptance and promotion.
 
 ---
 

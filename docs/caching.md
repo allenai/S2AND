@@ -7,18 +7,16 @@ may manage their own output reuse, such as the epsilon-sweep distance files.
 
 ## Feature snapshot cache (training only)
 
-`train_pairwise.py --feature-cache-dir PATH` opts into snapshot reuse for
-repeated pairwise training experiments; there is no implicit default location.
-The training command constructs `ANDData` normally, then passes the cache an
-explicit source key. The cache stores the *output* of featurization, not
+Programmatic research callers can invoke
+`s2and.feature_cache.cached_featurize(..., cache_dir=PATH)` for repeated
+experiments on unchanged inputs. The release-only `train_pairwise.py` command
+does not expose this cache. The cache stores the *output* of featurization, not
 per-pair state:
 
 - One uncompressed NPZ file per train/val/test split at
   `<cache_dir>/<split>_<full-key>.npz`, holding the exact `X`, `y`,
   and (when configured) `nameless_X` matrices.
-- `train_pairwise.py` supplies exact signatures, papers, and SPECTER file
-  hashes, the opened name-count manifest hash, the canonical name-tuples
-  digest, and the normalization version. The cache adds its schema version,
+- The caller supplies the source identity. The cache adds its schema version,
   both featurizer configurations, `nan_value`, and the hash of each exact
   ordered pair list.
 - There is no invalidation logic: any input change produces a different key

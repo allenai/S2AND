@@ -239,16 +239,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--arrow-data-root",
+        type=Path,
         default=None,
-        help=(
-            "Arrow data root. Defaults to s2and/data/s2and_mini_arrow for --dataset mini and "
-            "s2and/data for --dataset full."
-        ),
+        help="Explicit Arrow data root for evaluation or Arrow/Rust training.",
     )
     parser.add_argument(
         "--json-data-root",
+        type=Path,
         default=None,
-        help="JSON/pickle dataset root for --train. Defaults to s2and/data-backup.",
+        help="Explicit JSON/pickle dataset root for evaluation or ANDData training.",
+    )
+    parser.add_argument(
+        "--name-counts-index-root",
+        type=Path,
+        default=None,
+        help="Explicit manifest-backed name-count index used by JSON/ANDData evaluation and training.",
+    )
+    parser.add_argument(
+        "--name-tuples-path",
+        type=Path,
+        default=None,
+        help="Explicit canonical name-tuple data file used by JSON/ANDData evaluation and training.",
     )
     parser.add_argument("--train-pairs-size", type=int, default=100000)
     parser.add_argument("--val-pairs-size", type=int, default=10000)
@@ -287,20 +298,6 @@ def _resolve_requested_specter_suffixes(default_suffixes: list[str], requested_s
     if not requested_suffixes:
         return list(default_suffixes)
     return [str(suffix) for suffix in requested_suffixes]
-
-
-def _default_arrow_data_root(project_root_path: str, dataset_label: str) -> str | None:
-    if dataset_label == "mini":
-        return os.path.join(project_root_path, "s2and", "data", "s2and_mini_arrow")
-    if dataset_label == "full":
-        return os.path.join(project_root_path, "s2and", "data")
-    return None
-
-
-def _default_json_data_root(project_root_path: str, dataset_label: str) -> str:
-    if dataset_label == "mini":
-        return os.path.join(project_root_path, "s2and", "data-backup", "s2and_mini")
-    return os.path.join(project_root_path, "s2and", "data-backup")
 
 
 def _resolve_requested_train_modes(
@@ -775,6 +772,8 @@ def build_eval_anddata(
     *,
     data_root: str,
     dataset_name: str,
+    name_counts_index_root: Path,
+    name_tuples: frozenset[tuple[str, str]],
     specter_suffix: str,
     n_jobs: int,
     random_seed: int,
@@ -782,7 +781,6 @@ def build_eval_anddata(
     val_pairs_size: int,
     test_pairs_size: int,
 ) -> Any:
-    from s2and.consts import NAME_COUNTS_INDEX_PATH
     from s2and.data import ANDData
 
     return ANDData(
@@ -804,10 +802,10 @@ def build_eval_anddata(
         val_pairs_size=val_pairs_size,
         test_pairs_size=test_pairs_size,
         n_jobs=n_jobs,
-        name_counts_index=NAME_COUNTS_INDEX_PATH,
+        name_counts_index=name_counts_index_root,
         preprocess=True,
         random_seed=random_seed,
-        name_tuples=None,
+        name_tuples=name_tuples,
     )
 
 
@@ -1137,7 +1135,7 @@ def apply_fixed_cluster_eps(clusterer: Any, fixed_cluster_eps: float | None) -> 
 
 
 def main() -> None:
-    from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, PROJECT_ROOT_PATH
+    from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION
     from s2and.eval import cluster_eval
     from s2and.featurizer import (
         DEFAULT_FEATURE_GROUPS,
@@ -1145,6 +1143,7 @@ def main() -> None:
         FeaturizationInfo,
         featurize,
     )
+    from s2and.name_tuple_artifact import load_name_tuple_artifact
     from s2and.production_model import load_production_model
 
     args = _build_parser().parse_args()
@@ -1161,24 +1160,19 @@ def main() -> None:
         else ["production"]
     )
 
+    data_original = None if args.json_data_root is None else str(args.json_data_root.resolve())
+    arrow_data_root = None if args.arrow_data_root is None else str(args.arrow_data_root.resolve())
     if args.dataset == "mini":
-        data_original = os.path.join(PROJECT_ROOT_PATH, "s2and", "data", "s2and_mini")
-        arrow_data_root = args.arrow_data_root or _default_arrow_data_root(PROJECT_ROOT_PATH, args.dataset)
         # aminer has too much variance; medline is pairwise only
         datasets = ["arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath"]
     elif args.dataset == "full":
-        data_original = os.path.join(PROJECT_ROOT_PATH, "s2and", "data")
-        arrow_data_root = args.arrow_data_root or _default_arrow_data_root(PROJECT_ROOT_PATH, args.dataset)
         datasets = ["arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath"]
     else:
-        data_original = os.path.join(PROJECT_ROOT_PATH, "s2and", "data")
-        arrow_data_root = args.arrow_data_root
         if args.use_arrow:
             raise ValueError("--use-arrow currently supports --dataset mini and --dataset full only")
         datasets = ["inventors_s2and"]
     datasets = _resolve_requested_datasets(datasets, args.datasets, args.dataset)
     if train_flag:
-        data_original = args.json_data_root or _default_json_data_root(PROJECT_ROOT_PATH, args.dataset)
         _validate_train_mode_scope(train_modes, datasets)
     active_specter_suffixes = _resolve_requested_specter_suffixes(specter_suffixes, args.specter_suffixes)
     if not train_flag and SPECTER1_SUFFIX in active_specter_suffixes:
@@ -1199,6 +1193,17 @@ def main() -> None:
                 "recorded data_random_seed so its test split is the trainer's held-out split"
             )
         random_seed = bundle_data_random_seed(cast(Path, args.specter2_model_path))
+    if train_flag:
+        if any(train_mode != TRAIN_MODE_ARROW_RUST for train_mode in train_modes) and data_original is None:
+            raise ValueError("ANDData training requires an explicit --json-data-root")
+        if TRAIN_MODE_ARROW_RUST in train_modes and arrow_data_root is None:
+            raise ValueError("Arrow/Rust training requires an explicit --arrow-data-root")
+    elif args.use_arrow and arrow_data_root is None:
+        raise ValueError("--use-arrow requires an explicit --arrow-data-root")
+    elif args.no_arrow and data_original is None:
+        raise ValueError("--no-arrow requires an explicit --json-data-root")
+    elif arrow_data_root is None and data_original is None:
+        raise ValueError("Production evaluation requires --arrow-data-root or --json-data-root")
     missing_arrow_error = (
         first_missing_arrow_dataset_error(arrow_data_root, datasets, active_specter_suffixes)
         if _supports_arrow_eval(args.dataset) and not train_flag
@@ -1211,6 +1216,22 @@ def main() -> None:
         force_arrow=bool(args.use_arrow),
         no_arrow=bool(args.no_arrow),
         arrow_available=bool(arrow_available),
+    )
+    if not use_arrow and not train_flag and data_original is None:
+        raise ValueError(
+            "Arrow artifacts are unavailable; pass an explicit --json-data-root or repair --arrow-data-root"
+        )
+    uses_json_anddata = (train_flag and any(mode != TRAIN_MODE_ARROW_RUST for mode in train_modes)) or (
+        not train_flag and not use_arrow
+    )
+    if uses_json_anddata and (args.name_counts_index_root is None or args.name_tuples_path is None):
+        raise ValueError(
+            "JSON/ANDData evaluation and training require explicit --name-counts-index-root and --name-tuples-path"
+        )
+    json_name_tuples = (
+        load_name_tuple_artifact(args.name_tuples_path).pairs
+        if uses_json_anddata and args.name_tuples_path is not None
+        else None
     )
 
     seed_source = "--train seed" if train_flag else "bundle data_random_seed"
@@ -1259,9 +1280,7 @@ def main() -> None:
                     if clusterer is None:
                         raise RuntimeError("Arrow evaluation requires a loaded production Clusterer")
                     if arrow_data_root is None:
-                        raise RuntimeError(
-                            "Arrow evaluation requires --arrow-data-root or a supported default dataset root"
-                        )
+                        raise RuntimeError("Arrow evaluation requires an explicit --arrow-data-root")
                     arrow_paths = resolve_arrow_dataset_paths(arrow_data_root, dataset_name, specter_suffix)
                     cluster_metrics, _b3_metrics_per_signature = cluster_eval_arrow(
                         arrow_paths,
@@ -1275,7 +1294,7 @@ def main() -> None:
 
                 if train_flag and train_mode == TRAIN_MODE_ARROW_RUST:
                     if arrow_data_root is None:
-                        raise RuntimeError("Arrow Rust training requires --arrow-data-root or a supported default root")
+                        raise RuntimeError("Arrow Rust training requires an explicit --arrow-data-root")
                     arrow_paths = resolve_arrow_dataset_paths(arrow_data_root, dataset_name, specter_suffix)
                     splits = pair_splits_from_arrow_paths(
                         arrow_paths,
@@ -1324,10 +1343,16 @@ def main() -> None:
                     continue
 
                 backend = _backend_for_train_mode(train_mode)
+                if data_original is None:
+                    raise RuntimeError("ANDData evaluation requires an explicit --json-data-root")
                 with _temporary_s2and_backend(backend):
+                    if args.name_counts_index_root is None or json_name_tuples is None:
+                        raise RuntimeError("ANDData evaluation requires explicit canonical artifact paths")
                     anddata = build_eval_anddata(
                         data_root=data_original,
                         dataset_name=dataset_name,
+                        name_counts_index_root=args.name_counts_index_root,
+                        name_tuples=json_name_tuples,
                         specter_suffix=specter_suffix,
                         n_jobs=n_jobs,
                         random_seed=random_seed,

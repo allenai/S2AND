@@ -53,7 +53,7 @@ def _write_manifest(index_dir: Path, manifest: dict[str, Any]) -> None:
 
 def _assert_native_validation_rejects(index_dir: Path, expected_field: str) -> None:
     with pytest.raises((OSError, RuntimeError, ValueError), match=expected_field):
-        ValidatedNameCountsManifest.load(index_dir, context="test native validation surface")
+        ValidatedNameCountsManifest.load(index_dir)
 
 
 def _remove_manifest_field(index_dir: Path, field: str) -> None:
@@ -67,7 +67,7 @@ def test_valid_manifest_has_identical_python_and_rust_identity(tmp_path: Path) -
         pytest.skip(f"Rust extension unavailable: {RUST_MODULE!r}")
     index_dir = _write_index(tmp_path)
 
-    python_manifest = ValidatedNameCountsManifest.load(index_dir, context="test valid manifest")
+    python_manifest = ValidatedNameCountsManifest.load(index_dir)
     rust_index = RUST_MODULE.NameCountsIndex.open(str(index_dir))
     manifest_sha256 = hashlib.sha256((index_dir / "manifest.json").read_bytes()).hexdigest()
 
@@ -94,7 +94,7 @@ def test_native_facts_preserve_optional_provenance(tmp_path: Path) -> None:
     }
     index_dir, _metrics = write_name_counts_index(tmp_path, tiny_name_counts_tuple(), provenance)
 
-    retained = ValidatedNameCountsManifest.load(index_dir, context="test optional provenance")
+    retained = ValidatedNameCountsManifest.load(index_dir)
 
     assert retained.source_provenance["generated_at"] == provenance["generated_at"]
     assert retained.source_provenance["cardinalities"] == provenance["cardinalities"]

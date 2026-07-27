@@ -92,10 +92,10 @@ Python preprocessing route.
    Many OpenMP runtimes read environment variables at first use / first load; setting them after importing `lightgbm`
    is not reliable.
 
-   For v1.3 release jobs, set this envelope in the parent process before every
-   preflight, smoke, and detached launch; require children to inherit it and
-   record the exact values in `release.json`/`launch.json`. See
-   [1_3_release_todo.md](1_3_release_todo.md#stage-0-make-the-repository-runnable).
+   For v1.3 jobs, set this envelope in the parent before detached launch,
+   require children to inherit it, and retain the values in the durable job
+   log. Operational logs are not release authorities. See
+   [1_3_release_todo.md](1_3_release_todo.md#stage-0-close-implementation-and-freeze-the-protocol).
 
 3. **Choose the env pattern that matches your deployment shape**:
 

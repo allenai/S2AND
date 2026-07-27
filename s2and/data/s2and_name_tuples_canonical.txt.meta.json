@@ -2,17 +2,17 @@
   "artifact_version": 3,
   "data": {
     "filename": "s2and_name_tuples_canonical.txt",
-    "pair_count": 3684,
-    "sha256": "a6eafc93ee5af6c883c6d9dfa8abc2c26c88427ef2428fa4b99a681b0eaefb5b",
-    "size_bytes": 57048
+    "pair_count": 5027,
+    "sha256": "b21638351149389c57eca547b0f79c80084e56ad273f31e778cb1db1866945a8",
+    "size_bytes": 80298
   },
-  "generated_at": "2026-07-19T04:03:33.421567+00:00",
+  "generated_at": "2026-07-26T21:38:37.734213+00:00",
   "generation_counts": {
-    "dropped_empty": 0,
     "dropped_duplicate_canonical": 3768,
+    "dropped_empty": 0,
     "dropped_identity": 1385,
     "dropped_prefix_compatible": 1088,
-    "input_pair_count": 9925
+    "input_pair_count": 11268
   },
   "normalization_version": "canonical_v2",
   "schema_version": "s2and_name_tuples_v3",
@@ -29,7 +29,7 @@
   },
   "source": {
     "filename": "s2and_unnormalized_filtered_name_tuples.txt",
-    "sha256": "68f0c70fcf138d08656eaa39e485ba0d513ce6da6ce1164a3cc8bb2c680430f2",
-    "size_bytes": 155960
+    "sha256": "d9ae444af7f06a482b110d4f5a0ad39a1b48ace6a2362cdbb62554061c57d4d5",
+    "size_bytes": 179210
   }
 }

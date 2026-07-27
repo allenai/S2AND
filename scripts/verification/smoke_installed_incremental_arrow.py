@@ -15,6 +15,7 @@ import numpy as np
 import pyarrow as pa
 
 from s2and.arrow_inputs import (
+    INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION,
     ValidatedArrowInputs,
     build_arrow_artifact_manifest,
     validate_arrow_prediction_artifacts,
@@ -32,7 +33,7 @@ from s2and.production_bundle import finalize_production_bundle, write_pairwise_p
 from s2and.production_model import canonical_artifact_hashes, load_production_model, pairwise_bundle_binding
 from s2and.runtime import build_runtime_context
 
-RELEASE_DATA_MANIFEST_SCHEMA = "inference_arrow_bundle_v1"
+RELEASE_DATA_MANIFEST_SCHEMA = INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION
 
 
 def _sha256_file(path: Path) -> str:
@@ -190,7 +191,6 @@ def _write_synthetic_bundle(root: Path) -> Path:
         clusterer,
         pairwise_bundle_dir,
         bundle_version="0.0",
-        source_model_version="0.0",
     )
 
     feature_count = len(promoted_linker_feature_columns())
@@ -218,9 +218,6 @@ def _write_synthetic_bundle(root: Path) -> Path:
         output_bundle_dir=bundle_dir,
         incremental_linker_artifact_dir=linker_dir,
         target_json=target_json,
-        bundle_version="0.0",
-        pairwise_model_version="0.0",
-        incremental_linker_version="0.0",
     )
     return bundle_dir
 

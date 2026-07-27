@@ -17,9 +17,10 @@ Policy:
   before consulting tuples, so such entries are dead weight.
 
 Usage:
-    uv run python scripts/production/generate_canonical_name_tuples.py [--output PATH]
+    uv run python scripts/production/generate_canonical_name_tuples.py
+        --source PATH --output PATH
 
-Default output is ``s2and/data/s2and_name_tuples_canonical.txt`` with a JSON
+Production input and output paths are explicit. The output receives a JSON
 provenance sidecar under the strict ``s2and_name_tuples_v3`` contract. Data is
 replaced first and the fsynced sidecar last as the generation commit marker.
 Ship both in the same release unit as the other canonical_v2 artifacts; the
@@ -39,12 +40,8 @@ import tempfile
 from pathlib import Path
 
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
-from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.name_tuple_artifact import build_name_tuple_artifact_metadata
 from s2and.text import canonical_name_tuple_pair, canonicalize_name_text, same_prefix_tokens
-
-SOURCE_FILENAME = "s2and_unnormalized_filtered_name_tuples.txt"
-DEFAULT_OUTPUT_FILENAME = "s2and_name_tuples_canonical.txt"
 
 
 def _write_fsynced_temp(destination: Path, payload: bytes) -> Path:
@@ -141,8 +138,8 @@ def regenerate(source_path: str, output_path: str) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--source", default=os.path.join(_PACKAGE_DATA_DIR, SOURCE_FILENAME))
-    parser.add_argument("--output", default=os.path.join(_PACKAGE_DATA_DIR, DEFAULT_OUTPUT_FILENAME))
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--output", required=True)
     args = parser.parse_args()
     metadata = regenerate(args.source, args.output)
     print(json.dumps(metadata, indent=2))

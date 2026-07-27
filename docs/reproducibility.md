@@ -39,23 +39,21 @@ The obsolete v1.0-v1.2 production pickles have been removed. Canonical-v2 also
 rejects the v1.21 source bundle because its normalization contract is legacy.
 No compatible model or default is distributed on this branch; current
 evaluation requires an explicit model bundle path. The v1.3 model is fixed as
-an immutable external bundle rather than a packaged default. B15 remains
-partial until the release-candidate distribution verifier enforces that policy.
+an immutable external bundle rather than a packaged default. The fixed
+distribution verifier enforces that policy; B15 remains partial until the
+actual release archives pass it.
 
 The v1.21 bundle includes the previous promoted incremental linker under
 `incremental_linker/`. Its replay target is tracked separately at
 `production_model_v1.21/reproducibility/incremental_linker_training_target.json`;
 replay scripts should not depend on machine-local analysis artifacts.
 
-Promoted-linker replay always materializes a fresh Arrow/Rust feature bundle
-from the source bundle, target JSON, and pairwise model. The destination must be
-new, so a replay cannot silently consume stale feature tables. A bounded
-`materialize --limit-rows N` smoke is necessary, but it does not authorize a full v1.3
-replay. Candidate runs retain the exact artifact and deterministic prediction
-inventory; B20 still requires a reviewed no-training v5 assembly wrapper around
-the existing finalizer. Follow
-[1_3_release_todo.md](1_3_release_todo.md) before any full command, and record
-all source identities, runtime, peak RSS, predictions, and bundle hashes in the
-named producer reports and durable job logs.
+Promoted-linker replay has one direct command. It materializes temporary
+Arrow/Rust features from the source bundle, target JSON, and pairwise model,
+fits once, and writes a complete v5 bundle containing
+`reproducibility/incremental_linker_training_target.json`. It reloads that exact
+bundle before evaluation. Follow
+[1_3_release_todo.md](1_3_release_todo.md) before a full command. Durable job
+logs supplement, but do not replace, the five semantic release authorities.
 
 See [production_inference.md](production_inference.md) for the current inference contract.

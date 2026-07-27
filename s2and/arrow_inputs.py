@@ -14,8 +14,11 @@ from pathlib import Path, PurePath
 from types import MappingProxyType
 from typing import Any
 
+from s2and._sha256 import is_lowercase_sha256
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_counts_manifest import ValidatedNameCountsManifest
+
+INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION = "inference_arrow_bundle_v1"
 
 
 @dataclass(frozen=True)
@@ -506,7 +509,7 @@ def _verified_arrow_artifact_manifest(
         expected_sha256 = entry.get("sha256")
         if not isinstance(expected_bytes, int) or expected_bytes < 0:
             raise ValueError(f"Arrow artifact generation files.{key}.byte_count is invalid")
-        if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+        if not is_lowercase_sha256(expected_sha256):
             raise ValueError(f"Arrow artifact generation files.{key}.sha256 is invalid")
         if artifact_path.stat().st_size != expected_bytes:
             raise ValueError(f"Arrow artifact generation files.{key}.byte_count mismatch: {artifact_path}")
@@ -530,7 +533,7 @@ def _name_counts_index_error(path: Path) -> str | None:
     if not manifest_path.is_file():
         return f"{manifest_path} (missing manifest.json)"
     try:
-        ValidatedNameCountsManifest.load(path, context="name-count index")
+        ValidatedNameCountsManifest.load(path)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         return str(exc)
     return None
@@ -788,10 +791,7 @@ def _open_validated_arrow_generation(
                 # error-reporting cycle.
                 from s2and.name_counts_index import NameCountsIndex
 
-                name_counts_index, name_counts_manifest = NameCountsIndex._open_with_manifest(
-                    index_path,
-                    context=f"{context} name_counts_index",
-                )
+                name_counts_index, name_counts_manifest = NameCountsIndex._open_generation(index_path)
             if name_counts_manifest.manifest_sha256 != generation_file.sha256:
                 raise ValueError("opened name-count manifest does not match the Arrow artifact generation")
         except (OSError, RuntimeError, TypeError, ValueError) as exc:

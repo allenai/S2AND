@@ -1,16 +1,14 @@
 """Train the pairwise half of a native production model bundle.
 
-This replaces the historical pickle dump flow. The output directory is a
-pairwise-only ``production_model_vX.Y`` bundle stage. Run
-``train_linker_and_finalize.py`` next with this stage as input to publish the
-complete model into a separate, previously nonexistent directory.
+The output directory is a pairwise-only ``production_model_vX.Y`` bundle stage.
+``train_linker_and_finalize.py`` then fits one fresh linker and writes, reloads,
+and evaluates the final complete bundle.
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
-import hashlib
 import json
 import logging
 import os
@@ -21,7 +19,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 from hyperopt import hp
@@ -31,38 +29,36 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from s2and.consts import _PACKAGE_DATA_DIR, FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH  # noqa: E402
+from s2and._sha256 import is_lowercase_sha256  # noqa: E402
+from s2and._sha256 import sha256_file as _sha256_file  # noqa: E402
+from s2and.consts import FEATURIZER_VERSION  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
-from s2and.eval import pairwise_probability_metrics  # noqa: E402
-from s2and.feature_cache import cached_featurize  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
     DEFAULT_NAMELESS_FEATURE_GROUPS,
     FeaturizationInfo,
     TupleOfArrays,
-    featurize,
     many_pairs_featurize,
     resolve_selection_pairs,
 )
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
-from s2and.name_counts_index import NameCountsIndex  # noqa: E402
-from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact  # noqa: E402
-from s2and.orcid_prefix_counts import load_canonical_orcid_prefix_counts  # noqa: E402
 from s2and.production_bundle import production_version_from_bundle_dir, write_pairwise_production_bundle  # noqa: E402
+from s2and.production_training_contract import (  # noqa: E402
+    PAIRWISE_TRAINING_PLAN_SCHEMA_VERSION,
+    ProductionArtifactAuthority,
+    load_packaged_artifact_authority,
+)
 
 logger = logging.getLogger("s2and")
 
-DEFAULT_SPECTER_SUFFIX = "_specter2.pkl"
-DEFAULT_SIGNATURES_SUFFIX = "_signatures.json"
 DEFAULT_SOURCE_DATASET_NAMES = ("aminer", "arnetminer", "inspire", "kisti", "orcid", "pubmed", "qian", "zbmath")
-PAIRWISE_ONLY_DATASETS = frozenset({"medline", "augmented"})
 DEFAULT_TRAIN_PAIRS_SIZE = 100_000
-DEFAULT_VAL_TEST_SIZE = 10_000
+DEFAULT_VALIDATION_PAIRS_SIZE = 10_000
 DEFAULT_N_ITER = 50
 DEFAULT_N_JOBS = 25
 DEFAULT_CHUNK_SIZE = 100
 DEFAULT_RANDOM_SEED = 1111
-TRAINING_PLAN_SCHEMA = "s2and_pairwise_training_plan_v1"
+TRAINING_PLAN_SCHEMA = PAIRWISE_TRAINING_PLAN_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -81,7 +77,6 @@ class PairwisePreflightPlan:
     output_dir: Path
     dataset_names: tuple[str, ...]
     datasets: Mapping[str, DatasetInputPlan]
-    feature_cache_dir: Path | None
     matrix_work_dir: Path
     matrix_work_free_bytes: int
     total_ram_bytes: int | None
@@ -89,39 +84,29 @@ class PairwisePreflightPlan:
     sealed_test_manifests: Mapping[str, Any]
 
 
-def _sha256_file(path: str | os.PathLike[str]) -> str:
-    with open(path, "rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
 def _hash_source_files(source_files: Mapping[str, Path]) -> dict[str, str]:
     return {role: _sha256_file(path) for role, path in source_files.items()}
 
 
-def _canonical_training_artifact_hashes(name_tuples_data_sha256: str) -> dict[str, str]:
+def _canonical_training_artifact_hashes(authority: ProductionArtifactAuthority) -> dict[str, str]:
     """Validate canonical count artifacts and return their immutable bindings."""
 
-    orcid_counts = load_canonical_orcid_prefix_counts(_PACKAGE_DATA_DIR)
+    orcid_counts = authority.orcid_prefix_counts
     if not orcid_counts.source_kind.startswith("redshift:"):
         raise RuntimeError(
             "production pairwise training requires warehouse-generated ORCID prefix counts; "
             f"observed source_kind={orcid_counts.source_kind!r}"
         )
-    if orcid_counts.name_tuples_sha256 != name_tuples_data_sha256:
+    if orcid_counts.name_tuples_sha256 != authority.name_tuples.data_sha256:
         raise RuntimeError("ORCID prefix counts were generated from a different canonical name-tuple artifact")
-    name_counts_index = NameCountsIndex.open(NAME_COUNTS_INDEX_PATH)
+    name_counts_index = authority.name_counts_index
     source_kind = name_counts_index.source_provenance.get("source_kind")
     if not isinstance(source_kind, str) or not source_kind.startswith("redshift:"):
         raise RuntimeError(
             "production pairwise training requires a warehouse-generated name-count index; "
             f"observed source_kind={source_kind!r}"
         )
-    return {
-        "name_tuples_data_sha256": name_tuples_data_sha256,
-        "name_counts_manifest_sha256": name_counts_index.manifest_sha256,
-        "orcid_prefix_counts_data_sha256": orcid_counts.data_sha256,
-        "orcid_prefix_counts_manifest_sha256": orcid_counts.manifest_sha256,
-    }
+    return authority.hashes
 
 
 def _search_space() -> dict[str, Any]:
@@ -131,72 +116,10 @@ def _search_space() -> dict[str, Any]:
     }
 
 
-def _resolve_dataset_file(data_dir: Path, dataset_name: str, *candidates: str) -> Path:
-    dataset_dir = data_dir / dataset_name
-    for candidate in candidates:
-        path = dataset_dir / candidate
-        if path.is_file():
-            return path.resolve()
-    joined = ", ".join(str(dataset_dir / candidate) for candidate in candidates)
-    raise FileNotFoundError(f"Could not find any dataset file for {dataset_name}: {joined}")
-
-
-def _optional_dataset_file(data_dir: Path, dataset_name: str, *candidates: str) -> Path | None:
-    dataset_dir = data_dir / dataset_name
-    for candidate in candidates:
-        path = dataset_dir / candidate
-        if path.is_file():
-            return path.resolve()
-    return None
-
-
-def _resolve_dataset_inputs(
-    *,
-    data_dir: Path,
-    dataset_name: str,
-    signatures_suffix: str,
-    specter_suffix: str,
-    include_test_pairs: bool,
-) -> DatasetInputPlan:
-    files = {
-        "signatures": _resolve_dataset_file(
-            data_dir,
-            dataset_name,
-            f"{dataset_name}{signatures_suffix}",
-            signatures_suffix.lstrip("_"),
-            "signatures.json",
-        ),
-        "papers": _resolve_dataset_file(data_dir, dataset_name, f"{dataset_name}_papers.json", "papers.json"),
-        "specter_embeddings": _resolve_dataset_file(
-            data_dir, dataset_name, f"{dataset_name}{specter_suffix}", specter_suffix.lstrip("_"), "specter.pickle"
-        ),
-    }
-    if dataset_name in PAIRWISE_ONLY_DATASETS:
-        files["train_pairs"] = _resolve_dataset_file(data_dir, dataset_name, "train_pairs.csv")
-        if include_test_pairs:
-            files["test_pairs"] = _resolve_dataset_file(data_dir, dataset_name, "test_pairs.csv")
-        val_pairs = _optional_dataset_file(data_dir, dataset_name, "val_pairs.csv")
-        if val_pairs is not None:
-            files["val_pairs"] = val_pairs
-    else:
-        files["clusters"] = _resolve_dataset_file(
-            data_dir, dataset_name, f"{dataset_name}_clusters.json", "clusters.json"
-        )
-    return DatasetInputPlan(
-        split_mode="fixed_pairs" if "train_pairs" in files else "random_blocks",
-        files=files,
-        sha256=_hash_source_files(files),
-    )
-
-
 def _sha256_digest(value: Any, *, label: str) -> str:
     """Return one lowercase SHA-256 digest."""
 
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
+    if not is_lowercase_sha256(value):
         raise SystemExit(f"{label} must be a lowercase SHA-256 digest")
     return value
 
@@ -325,9 +248,6 @@ def _preflight_matrix_work_dir(path: Path) -> int:
 def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     """Resolve and hash every launch input without loading artifacts or ANDData."""
 
-    if bool(args.run_full) and bool(args.preflight_only):
-        raise SystemExit("--run-full and --preflight-only are mutually exclusive")
-
     production_version = str(args.production_version)
     if not production_version or production_version != production_version.strip():
         raise SystemExit("--production-version must be nonempty and have no surrounding whitespace")
@@ -338,36 +258,15 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
         "n_jobs",
         "chunk_size",
         "train_pairs_size",
-        "val_test_size",
+        "validation_pairs_size",
     ):
         _positive_int_arg(args, numeric_arg)
     if int(args.random_seed) < 0:
         raise SystemExit(f"--random-seed must be non-negative, got {args.random_seed}")
 
-    selected_raw = args.datasets
-    if selected_raw is not None and len(selected_raw) == 0:
-        raise SystemExit("--datasets requires at least one dataset name")
-    selected = None if selected_raw is None else [str(value) for value in selected_raw]
-    if selected is not None:
-        if any(value != value.strip() or not value for value in selected):
-            raise SystemExit("--datasets values must be nonempty names without surrounding whitespace")
-        duplicates = sorted({value for value in selected if selected.count(value) > 1})
-        if duplicates:
-            raise SystemExit(f"--datasets contains duplicate names: {', '.join(duplicates)}")
-        known_datasets = set(DEFAULT_SOURCE_DATASET_NAMES) | PAIRWISE_ONLY_DATASETS
-        unknown = sorted(set(selected) - known_datasets)
-        if unknown:
-            raise SystemExit(f"--datasets contains unknown names: {', '.join(unknown)}")
-    if selected is not None and bool(args.run_full):
-        raise SystemExit("--run-full forbids --datasets; subset runs are non-publishable smoke tests")
-    if selected is None and not bool(args.run_full) and not bool(args.preflight_only):
-        raise SystemExit("full production training requires --run-full; smoke training requires --datasets")
-
-    dataset_names = tuple(selected if selected is not None else (*DEFAULT_SOURCE_DATASET_NAMES, "augmented"))
-    if len(dataset_names) == 0:
-        raise SystemExit("At least one dataset is required")
-    if all(name in PAIRWISE_ONLY_DATASETS for name in dataset_names):
-        raise SystemExit("At least one clustered dataset is required to fit the clusterer")
+    if not bool(args.run_full):
+        raise SystemExit("production training requires --run-full")
+    dataset_names = (*DEFAULT_SOURCE_DATASET_NAMES, "augmented")
 
     output_dir = Path(args.output_dir).resolve()
     if output_dir.exists():
@@ -384,57 +283,21 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     matrix_work_dir = Path(args.matrix_work_dir).resolve()
     matrix_work_free_bytes = _preflight_matrix_work_dir(matrix_work_dir)
 
-    feature_cache_dir = args.feature_cache_dir
-    if selected is None and feature_cache_dir is not None:
-        raise SystemExit("full release training does not use --feature-cache-dir")
-    if feature_cache_dir is not None:
-        cache_path = Path(feature_cache_dir).resolve()
-        if cache_path.exists() and not cache_path.is_dir():
-            raise SystemExit(f"--feature-cache-dir must name a directory: {cache_path}")
-        if not cache_path.exists() and not cache_path.parent.is_dir():
-            raise SystemExit(f"--feature-cache-dir parent must be an existing directory: {cache_path.parent}")
-    else:
-        cache_path = None
-    if cache_path == output_dir:
-        raise SystemExit("--feature-cache-dir must differ from --output-dir")
-
     requested_total_ram = args.total_ram_bytes
     if requested_total_ram is not None and int(requested_total_ram) <= 0:
         raise SystemExit(f"--total-ram-bytes must be positive, got {requested_total_ram}")
 
-    if selected is None:
-        if args.training_plan is None or args.expected_training_plan_sha256 is None:
-            raise SystemExit("full release training requires --training-plan and --expected-training-plan-sha256")
-        resolved, source_manifest_sha256, sealed_test_manifests = _verified_training_plan(
-            Path(args.training_plan).resolve(),
-            args.expected_training_plan_sha256,
-        )
-    else:
-        if args.training_plan is not None or args.expected_training_plan_sha256 is not None:
-            raise SystemExit("--training-plan is only valid for full release training")
-        if args.data_dir is None:
-            raise SystemExit("smoke training requires --data-dir")
-        data_dir = Path(args.data_dir).resolve()
-        if not data_dir.is_dir():
-            raise SystemExit(f"--data-dir must name an existing directory: {data_dir}")
-        resolved = {
-            dataset_name: _resolve_dataset_inputs(
-                data_dir=data_dir,
-                dataset_name=dataset_name,
-                signatures_suffix=str(args.signatures_suffix),
-                specter_suffix=str(args.specter_suffix),
-                include_test_pairs=True,
-            )
-            for dataset_name in dataset_names
-        }
-        source_manifest_sha256 = None
-        sealed_test_manifests = {}
+    if args.training_plan is None or args.expected_training_plan_sha256 is None:
+        raise SystemExit("production training requires --training-plan and --expected-training-plan-sha256")
+    resolved, source_manifest_sha256, sealed_test_manifests = _verified_training_plan(
+        Path(args.training_plan).resolve(),
+        args.expected_training_plan_sha256,
+    )
 
     return PairwisePreflightPlan(
         output_dir=output_dir,
         dataset_names=dataset_names,
         datasets=resolved,
-        feature_cache_dir=cache_path,
         matrix_work_dir=matrix_work_dir,
         matrix_work_free_bytes=matrix_work_free_bytes,
         total_ram_bytes=None if requested_total_ram is None else int(requested_total_ram),
@@ -464,7 +327,7 @@ def _training_config(
         },
         "features_to_use": list(DEFAULT_FEATURE_GROUPS),
         "featurizer_version": int(FEATURIZER_VERSION),
-        "training_scope": "smoke_subset" if args.datasets is not None else "production_full",
+        "training_scope": "production_full",
         "input_artifact_hashes": {str(key): str(value) for key, value in artifact_hashes.items()},
         "n_iter": int(args.n_iter),
         "n_jobs": int(args.n_jobs),
@@ -480,11 +343,9 @@ def _training_config(
             "measured_free_bytes": plan.matrix_work_free_bytes,
         },
         "source_dataset_names": list(plan.dataset_names),
-        "specter_suffix": str(args.specter_suffix),
-        "signatures_suffix": str(args.signatures_suffix),
         "train_pairs_size": int(args.train_pairs_size),
         "uses_monotone_constraints": True,
-        "val_test_size": int(args.val_test_size),
+        "validation_pairs_size": int(args.validation_pairs_size),
     }
 
 
@@ -514,15 +375,11 @@ def _stage_dataset_features(
     *,
     train: TupleOfArrays,
     val: TupleOfArrays,
-    test: TupleOfArrays | None = None,
 ) -> dict[str, Path]:
     dataset_root = root / dataset_name
     dataset_root.mkdir()
     arrays: dict[str, Path] = {}
-    splits: list[tuple[str, TupleOfArrays]] = [("train", train), ("val", val)]
-    if test is not None:
-        splits.append(("test", test))
-    for split_name, split in splits:
+    for split_name, split in (("train", train), ("val", val)):
         features, labels, nameless_features = split
         if nameless_features is None:
             raise RuntimeError(f"Expected nameless {split_name} features for dataset {dataset_name!r}")
@@ -623,28 +480,6 @@ def _fit_pairwise_model(
     return model
 
 
-def _smoke_pairwise_metrics(
-    *,
-    labels: np.ndarray,
-    main_probabilities: np.ndarray,
-    nameless_probabilities: np.ndarray,
-) -> dict[str, float | int]:
-    """Report smoke test metrics using the shared release metric contract.
-
-    This deliberately calls the same function as the sealed release evaluator so
-    that smoke evidence exercises the release report schema. ``average_precision``
-    is the only smoke-specific addition; it is diagnostic and is not a gate.
-    """
-
-    metrics, _ = pairwise_probability_metrics(
-        labels,
-        np.asarray(main_probabilities, dtype=np.float64)[:, 1],
-        np.asarray(nameless_probabilities, dtype=np.float64)[:, 1],
-        include_average_precision=True,
-    )
-    return metrics
-
-
 def _assert_sources_unchanged(plan: PairwisePreflightPlan) -> None:
     changed: list[str] = []
     for dataset_name in plan.dataset_names:
@@ -664,20 +499,10 @@ def _publish_result(
     training_config: Mapping[str, Any],
     training_summary: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if args.datasets is not None:
-        return {
-            "mode": "smoke",
-            "bundle_dir": None,
-            "bundle_status": "not_published",
-            "bundle_version": str(args.production_version),
-            "training_config": training_config,
-            "training_summary": training_summary,
-        }
     bundle = write_pairwise_production_bundle(
         clusterer,
         plan.output_dir,
         bundle_version=str(args.production_version),
-        source_model_version=str(args.production_version),
         pairwise_training_config=training_config,
         pairwise_training_summary=training_summary,
     )
@@ -694,22 +519,16 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     """Train pairwise models and write the pairwise production bundle stage."""
 
     plan = _preflight_pairwise(args)
-    canonical_name_tuples = load_packaged_name_tuple_artifact()
-    artifact_hashes = _canonical_training_artifact_hashes(canonical_name_tuples.data_sha256)
+    artifact_authority = load_packaged_artifact_authority(
+        name_counts_index_root=Path(args.name_counts_index_root),
+    )
+    canonical_name_tuples = artifact_authority.name_tuples
+    artifact_hashes = _canonical_training_artifact_hashes(artifact_authority)
     training_config = _training_config(
         args,
         plan,
         artifact_hashes=artifact_hashes,
     )
-    if bool(args.preflight_only):
-        result = {
-            "mode": "preflight",
-            "output_dir": str(plan.output_dir),
-            "training_config": training_config,
-        }
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return result
-
     os.environ["OMP_NUM_THREADS"] = str(int(args.n_jobs))
 
     featurizer_info = FeaturizationInfo(
@@ -735,7 +554,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             logger.info("processing dataset %s", dataset_name)
             dataset_input = plan.datasets[dataset_name]
             files = dataset_input.files
-            release_training = args.datasets is None
             anddata_kwargs: dict[str, Any] = {
                 "signatures": str(files["signatures"]),
                 "papers": str(files["papers"]),
@@ -745,85 +563,40 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 "clusters": str(files["clusters"]) if "clusters" in files else None,
                 "train_pairs": str(files["train_pairs"]) if "train_pairs" in files else None,
                 "val_pairs": str(files["val_pairs"]) if "val_pairs" in files else None,
-                "test_pairs": str(files["test_pairs"]) if "test_pairs" in files else None,
+                "test_pairs": None,
                 "train_pairs_size": int(args.train_pairs_size),
-                "val_pairs_size": int(args.val_test_size),
-                "test_pairs_size": int(args.val_test_size),
+                "val_pairs_size": int(args.validation_pairs_size),
                 "random_seed": int(args.random_seed),
-                "name_counts_index": NAME_COUNTS_INDEX_PATH,
+                "name_counts_index": Path(args.name_counts_index_root),
                 "n_jobs": int(args.n_jobs),
                 "preprocess": True,
+                "name_tuples": canonical_name_tuples.pairs,
             }
 
             anddata = ANDData(**anddata_kwargs)
             if anddata.name_tuples != canonical_name_tuples.pairs:
                 raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
 
-            if release_training:
-                train, val = _featurize_selection(
-                    anddata,
-                    featurizer_info,
-                    n_jobs=int(args.n_jobs),
-                    chunk_size=int(args.chunk_size),
-                    nameless_featurizer_info=nameless_featurizer_info,
-                    total_ram_bytes=plan.total_ram_bytes,
-                )
-                staged = _stage_dataset_features(
-                    matrix_work_dir,
-                    dataset_name,
-                    train=train,
-                    val=val,
-                )
-                del train, val
-            elif plan.feature_cache_dir is None:
-                train, val, test = cast(
-                    tuple[TupleOfArrays, TupleOfArrays, TupleOfArrays],
-                    featurize(
-                        anddata,
-                        featurizer_info,
-                        n_jobs=int(args.n_jobs),
-                        chunk_size=int(args.chunk_size),
-                        nameless_featurizer_info=nameless_featurizer_info,
-                        nan_value=np.nan,
-                        total_ram_bytes=plan.total_ram_bytes,
-                    ),
-                )
-            else:
-                name_counts_provenance = anddata.name_counts_provenance
-                if name_counts_provenance is None:
-                    raise RuntimeError(f"Production training dataset {dataset_name!r} has no name-count manifest")
-                source_key = {
-                    **{f"{role}_sha256": dataset_input.sha256[role] for role in ("signatures", "papers")},
-                    "specter_embeddings_sha256": dataset_input.sha256["specter_embeddings"],
-                    "name_tuples_data_sha256": canonical_name_tuples.data_sha256,
-                    "name_counts_manifest_sha256": name_counts_provenance["manifest_sha256"],
-                    "normalization_version": anddata.normalization_version,
-                }
-                train, val, test = cached_featurize(
-                    anddata,
-                    featurizer_info,
-                    source_key=source_key,
-                    cache_dir=plan.feature_cache_dir,
-                    n_jobs=int(args.n_jobs),
-                    chunk_size=int(args.chunk_size),
-                    nameless_featurizer_info=nameless_featurizer_info,
-                    nan_value=np.nan,
-                    total_ram_bytes=plan.total_ram_bytes,
-                )
-            if not release_training:
-                staged = _stage_dataset_features(
-                    matrix_work_dir,
-                    dataset_name,
-                    train=train,
-                    val=val,
-                    test=test,
-                )
-                del train, val, test
+            train, val = _featurize_selection(
+                anddata,
+                featurizer_info,
+                n_jobs=int(args.n_jobs),
+                chunk_size=int(args.chunk_size),
+                nameless_featurizer_info=nameless_featurizer_info,
+                total_ram_bytes=plan.total_ram_bytes,
+            )
+            staged = _stage_dataset_features(
+                matrix_work_dir,
+                dataset_name,
+                train=train,
+                val=val,
+            )
+            del train, val
             staged_datasets[dataset_name] = staged
-            if dataset_name not in PAIRWISE_ONLY_DATASETS:
+            if dataset_name != "augmented":
                 anddatas.append(anddata)
             del staged
-            if dataset_name in PAIRWISE_ONLY_DATASETS:
+            if dataset_name == "augmented":
                 del anddata
             gc.collect()
 
@@ -861,20 +634,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             monotone_constraints=nameless_monotone_constraints,
         )
 
-        pairwise_test_metrics: dict[str, dict[str, float | int]] = {}
-        if args.datasets is not None:
-            for dataset_name in plan.dataset_names:
-                staged = staged_datasets[dataset_name]
-                X_test = _load_staged_array(staged["X_test"])
-                y_test = _load_staged_array(staged["y_test"])
-                nameless_X_test = _load_staged_array(staged["nameless_X_test"])
-                pairwise_test_metrics[dataset_name] = _smoke_pairwise_metrics(
-                    labels=y_test,
-                    main_probabilities=union_classifier.predict_proba(X_test),
-                    nameless_probabilities=nameless_union_classifier.predict_proba(nameless_X_test),
-                )
-                del X_test, y_test, nameless_X_test
-
         logger.info("fitting clustering threshold")
         union_clusterer = Clusterer(
             featurizer_info,
@@ -902,9 +661,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             "nameless_train_rows": int(_load_staged_array(union_arrays["nameless_X_train"]).shape[0]),
             "nameless_val_rows": int(_load_staged_array(union_arrays["nameless_X_val"]).shape[0]),
         }
-        if pairwise_test_metrics:
-            training_summary["smoke_pairwise_test_metrics"] = pairwise_test_metrics
-
     result = _publish_result(
         args,
         plan,
@@ -920,24 +676,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--production-version", required=True, help="Version suffix for production_model_vX.Y.")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--data-dir", type=Path, help="Dataset root for non-publishable smoke runs.")
-    parser.add_argument("--specter-suffix", default=DEFAULT_SPECTER_SUFFIX)
-    parser.add_argument("--signatures-suffix", default=DEFAULT_SIGNATURES_SUFFIX)
+    parser.add_argument(
+        "--name-counts-index-root",
+        type=Path,
+        required=True,
+        help="Explicit manifest-backed name-count index directory.",
+    )
     parser.add_argument("--n-iter", type=int, default=DEFAULT_N_ITER)
     parser.add_argument("--cluster-n-iter", type=int, default=25)
     parser.add_argument("--n-jobs", type=int, default=DEFAULT_N_JOBS)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     parser.add_argument("--train-pairs-size", type=int, default=DEFAULT_TRAIN_PAIRS_SIZE)
-    parser.add_argument("--val-test-size", type=int, default=DEFAULT_VAL_TEST_SIZE)
+    parser.add_argument(
+        "--validation-pairs-size",
+        type=int,
+        default=DEFAULT_VALIDATION_PAIRS_SIZE,
+    )
     parser.add_argument("--random-seed", type=int, default=DEFAULT_RANDOM_SEED)
     parser.add_argument("--matrix-work-dir", type=Path, required=True)
     parser.add_argument(
         "--training-plan",
         type=Path,
+        required=True,
         help="Test-path-free plan emitted by release_pairwise.py preflight-training-inputs.",
     )
     parser.add_argument(
         "--expected-training-plan-sha256",
+        required=True,
         help="Expected SHA-256 of --training-plan.",
     )
     parser.add_argument(
@@ -947,25 +712,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional explicit RAM budget; autodetected RAM is safety-capped when omitted.",
     )
     parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=None,
-        help="Run a non-publishable smoke test on this explicit dataset subset.",
-    )
-    parser.add_argument(
-        "--feature-cache-dir",
-        type=Path,
-        default=None,
-        help="Optional featurized-split snapshot cache directory for repeated training experiments. "
-        "Prefer a local unsynced directory; snapshots are content-addressed NPZ files.",
-    )
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--preflight-only",
+        "--run-full",
         action="store_true",
-        help="Validate and hash all local inputs and canonical artifacts without creating output or training.",
+        required=True,
+        help="Acknowledge the full production training cost.",
     )
-    mode.add_argument("--run-full", action="store_true", help="Explicitly allow full production pairwise training.")
     return parser
 
 

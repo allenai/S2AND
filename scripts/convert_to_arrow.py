@@ -31,6 +31,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from s2and._atomic_io import exclusive_file_lock  # noqa: E402
 from s2and.arrow_inputs import (  # noqa: E402
+    INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION,
     build_arrow_artifact_manifest,
     require_name_counts_index_artifact,
     write_arrow_artifact_manifest,
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 BENCHMARK_DATASETS = ("aminer", "arnetminer", "inspire", "kisti", "medline", "pubmed", "qian", "zbmath")
-ROOT_MANIFEST_SCHEMA = "inference_arrow_bundle_v1"
+ROOT_MANIFEST_SCHEMA = INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION
 _ROOT_MANIFEST_LOCK_TIMEOUT_SECONDS = 5.0
 
 
@@ -1180,6 +1181,9 @@ def validate_arrow_dataset_manifest(
     validate_arrow_schema(paper_authors.schema, table_name="paper_authors")
     signature_ids = _required_string_values(signatures, "signature_id", label="signatures.signature_id")
     signature_paper_ids = _required_string_values(signatures, "paper_id", label="signatures.paper_id")
+    signature_author_positions = _table_values(signatures, "author_position")
+    if any(position is None for position in signature_author_positions):
+        raise ValueError("signatures.author_position contains null value")
     paper_ids = _required_string_values(papers, "paper_id", label="papers.paper_id")
     paper_author_paper_ids = _required_string_values(paper_authors, "paper_id", label="paper_authors.paper_id")
     _required_string_values(
@@ -1535,15 +1539,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     service = subparsers.add_parser("service-json", help="Convert one service-shaped inference JSON payload.")
     service.add_argument("--input-json", type=Path, required=True)
-    service.add_argument("--output-root", type=Path, default=Path("scratch/inference_arrow"))
+    service.add_argument("--output-root", type=Path, required=True)
     service.add_argument("--dataset-name", default=None)
     service.add_argument("--copy-source-json", action="store_true")
     _add_common_runtime_args(service, default_n_jobs=4)
     service.set_defaults(func=_run_service_json)
 
     benchmark = subparsers.add_parser("benchmark", help="Convert benchmark dataset JSON/pickle files.")
-    benchmark.add_argument("--source-root", type=Path, default=Path("s2and/data/s2and_mini"))
-    benchmark.add_argument("--output-root", type=Path, default=Path("s2and/data/s2and_mini_arrow"))
+    benchmark.add_argument("--source-root", type=Path, required=True)
+    benchmark.add_argument("--output-root", type=Path, required=True)
     _add_runtime_dataset_selection_args(benchmark)
     _add_common_runtime_args(benchmark, default_n_jobs=20)
     benchmark.set_defaults(func=_run_benchmark)

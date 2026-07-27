@@ -12,13 +12,14 @@ from pathlib import Path
 from typing import Any, cast
 
 from s2and.arrow_inputs import (
+    INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION,
     MissingArrowArtifactError,
     ValidatedArrowInputs,
     _validate_arrow_publication_artifacts_with_retained_name_counts,
     require_name_counts_index_artifact,
 )
 
-ROOT_MANIFEST_SCHEMA = "inference_arrow_bundle_v1"
+ROOT_MANIFEST_SCHEMA = INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION
 ROOT_HELPER_FILES = ("LICENSE.txt",)
 DECLARED_DIRECTORY_KEYS = frozenset({"name_counts_index"})
 _NameCountsGenerationKey = tuple[Path, str]

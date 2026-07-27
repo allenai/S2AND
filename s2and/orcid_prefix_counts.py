@@ -10,6 +10,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from s2and._sha256 import is_lowercase_sha256
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.text import same_prefix_tokens
 
@@ -58,11 +59,7 @@ def _is_canonical_prefix_token(value: object) -> bool:
 
 
 def _require_sha256(value: Any, *, field: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
+    if not is_lowercase_sha256(value):
         raise ValueError(f"ORCID prefix-count manifest {field} must be a lowercase SHA-256 digest")
     return value
 

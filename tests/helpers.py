@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import threading
+from argparse import Namespace
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,37 @@ from s2and.incremental_linking.query_adapter import ClusterSummary, QueryFeature
 from s2and.name_counts_index import NameCountsIndex
 from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 from s2and.runtime import load_s2and_rust_extension
+
+
+def pairwise_training_args(
+    tmp_path: Path,
+    *,
+    output_dir: Path | None = None,
+    **overrides: Any,
+) -> Namespace:
+    """Build pairwise release-training arguments for focused tests."""
+
+    matrix_work_dir = tmp_path / "matrix_work"
+    matrix_work_dir.mkdir(exist_ok=True)
+    values = {
+        "run_full": True,
+        "output_dir": output_dir or tmp_path / "production_model_v9.9",
+        "production_version": "9.9",
+        "n_iter": 1,
+        "cluster_n_iter": 1,
+        "n_jobs": 1,
+        "chunk_size": 8,
+        "train_pairs_size": 4,
+        "validation_pairs_size": 2,
+        "random_seed": 1111,
+        "matrix_work_dir": matrix_work_dir,
+        "total_ram_bytes": 1_000_000_000_000,
+        "training_plan": None,
+        "expected_training_plan_sha256": None,
+        "name_counts_index_root": tmp_path / "name_counts_index",
+    }
+    values.update(overrides)
+    return Namespace(**values)
 
 
 def write_test_arrow_artifact_manifest(bundle_dir: Any, paths: dict[str, str]) -> Path:

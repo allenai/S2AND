@@ -19,6 +19,7 @@ from typing import Any
 import orjson
 
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
+from s2and._sha256 import is_lowercase_sha256
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_tuple_artifact import NameTupleArtifact, load_name_tuple_artifact
 from s2and.orcid_prefix_counts import (
@@ -474,9 +475,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError("guardrail max_names_per_orcid must be at least 2")
 
     expected_name_tuples_sha256 = args.expected_name_tuples_sha256.strip()
-    if len(expected_name_tuples_sha256) != 64 or any(
-        character not in "0123456789abcdef" for character in expected_name_tuples_sha256
-    ):
+    if not is_lowercase_sha256(expected_name_tuples_sha256):
         raise ValueError("--expected-name-tuples-sha256 must be a lowercase SHA-256 digest")
     name_tuples = load_name_tuple_artifact(args.name_tuples_path.resolve())
     if name_tuples.data_sha256 != expected_name_tuples_sha256:

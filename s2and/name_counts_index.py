@@ -106,12 +106,13 @@ class NameCountsIndex:
         self.source_provenance = manifest.source_provenance
 
     @classmethod
-    def _open_resolved(
+    def _open_generation(
         cls,
-        resolved_path: str,
+        path: str | os.PathLike[str],
     ) -> tuple[NameCountsIndex, ValidatedNameCountsManifest]:
-        """Open one immutable path and retain facts from the native authority."""
+        """Open one immutable generation and retain its native-validated facts."""
 
+        resolved_path = str(Path(os.fspath(path)).resolve())
         with _OPEN_CACHE_LOCK:
             cached = _OPEN_CACHE.get(resolved_path)
             if cached is not None:
@@ -146,29 +147,6 @@ class NameCountsIndex:
 
         opened, _manifest = cls._open_generation(path)
         return opened
-
-    @classmethod
-    def _open_with_manifest(
-        cls,
-        path: str | os.PathLike[str],
-        *,
-        context: str,
-    ) -> tuple[NameCountsIndex, ValidatedNameCountsManifest]:
-        """Open native material and retain facts returned by the same handle."""
-
-        del context
-        opened, manifest = cls._open_generation(path)
-        return opened, manifest
-
-    @classmethod
-    def _open_generation(
-        cls,
-        path: str | os.PathLike[str],
-    ) -> tuple[NameCountsIndex, ValidatedNameCountsManifest]:
-        """Open the immutable index published at ``path``."""
-
-        resolved_path = str(Path(os.fspath(path)).resolve())
-        return cls._open_resolved(resolved_path)
 
     def lookup_many(
         self,

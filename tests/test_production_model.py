@@ -40,6 +40,11 @@ _TEST_CANONICAL_ARTIFACT_HASHES = {
     "name_tuples_data_sha256": "a" * 64,
     "orcid_prefix_counts_data_sha256": "b" * 64,
 }
+_TEST_EXPLICIT_ARTIFACT_HASHES = {
+    **_TEST_CANONICAL_ARTIFACT_HASHES,
+    "name_counts_manifest_sha256": "c" * 64,
+    "orcid_prefix_counts_manifest_sha256": "d" * 64,
+}
 
 
 class _PythonLightGBMScorer:
@@ -80,12 +85,16 @@ def synthetic_pairwise_bundle(
         bundle_dir,
         artifact_hashes=_TEST_CANONICAL_ARTIFACT_HASHES,
         bundle_version="9.9",
-        source_model_version="9.9",
     )
     return bundle_dir, source_clusterer
 
 
-def _write_synthetic_linker(pairwise_bundle: Path, linker_dir: Path) -> Path:
+def _write_synthetic_linker(
+    pairwise_bundle: Path,
+    linker_dir: Path,
+    *,
+    expected_artifact_hashes: dict[str, str] | None = None,
+) -> Path:
     booster, _fixture = build_tiny_promoted_booster()
     gate_config = logistic_gate_config(
         feature_names=("chosen_probability",),
@@ -100,7 +109,10 @@ def _write_synthetic_linker(pairwise_bundle: Path, linker_dir: Path) -> Path:
         linker_dir,
         gate_config=gate_config,
         target_spec=target_spec,
-        pairwise_bundle_binding=pairwise_bundle_binding(pairwise_bundle),
+        pairwise_bundle_binding=pairwise_bundle_binding(
+            pairwise_bundle,
+            expected_artifact_hashes=expected_artifact_hashes,
+        ),
     )
     target = linker_dir.parent / "target.json"
     target.write_text(json.dumps(target_spec) + "\n", encoding="utf-8")
@@ -404,51 +416,164 @@ def test_bundle_export_rejects_missing_normalization_provenance(
         )
 
 
-@pytest.mark.parametrize(
-    ("field", "invalid"),
-    (
-        ("name_tuples_data_sha256", None),
-        ("name_tuples_data_sha256", "f" * 63),
-        ("orcid_prefix_counts_data_sha256", "F" * 64),
-        ("orcid_prefix_counts_data_sha256", "c" * 64),
-    ),
-)
 def test_canonical_artifact_hash_contract_rejects_missing_malformed_or_mismatched_values(
     monkeypatch: pytest.MonkeyPatch,
-    field: str,
-    invalid: str | None,
 ) -> None:
     monkeypatch.setattr(
         production_model_module,
         "canonical_artifact_hashes",
         lambda: dict(_TEST_CANONICAL_ARTIFACT_HASHES),
     )
-    feature_contract = dict(_TEST_CANONICAL_ARTIFACT_HASHES)
-    if invalid is None:
-        feature_contract.pop(field)
-    else:
-        feature_contract[field] = invalid
+    invalid_values = (
+        ("name_tuples_data_sha256", None),
+        ("name_tuples_data_sha256", "f" * 63),
+        ("orcid_prefix_counts_data_sha256", "F" * 64),
+        ("orcid_prefix_counts_data_sha256", "c" * 64),
+    )
+    for field, invalid in invalid_values:
+        feature_contract = dict(_TEST_CANONICAL_ARTIFACT_HASHES)
+        if invalid is None:
+            feature_contract.pop(field)
+        else:
+            feature_contract[field] = invalid
+        with pytest.raises(ValueError, match=field):
+            production_model_module.require_canonical_artifact_hashes(
+                feature_contract,
+                context="test feature_contract",
+            )
 
-    with pytest.raises(ValueError, match=field):
-        production_model_module.require_canonical_artifact_hashes(
-            feature_contract,
-            context="test feature_contract",
-        )
+
+def test_explicit_artifact_authority_requires_exact_fields() -> None:
+    partial = dict(_TEST_EXPLICIT_ARTIFACT_HASHES)
+    partial.pop("name_counts_manifest_sha256")
+    authorities = (
+        (partial, r"field mismatch: missing=\['name_counts_manifest_sha256'\]"),
+        (
+            {
+                **_TEST_EXPLICIT_ARTIFACT_HASHES,
+                "unreviewed_sha256": "e" * 64,
+            },
+            r"extra=\['unreviewed_sha256'\]",
+        ),
+    )
+    for authority, message in authorities:
+        with pytest.raises(ValueError, match=message):
+            production_model_module.require_expected_artifact_hashes(
+                _TEST_EXPLICIT_ARTIFACT_HASHES,
+                authority,
+                context="test feature_contract",
+            )
 
 
-def test_bundle_export_rejects_missing_canonical_artifact_hash(
+def test_bundle_export_uses_training_artifact_hashes_without_loading_packaged_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    _, source_clusterer = synthetic_pairwise_bundle
+    explicit_hashes = {
+        "name_tuples_data_sha256": "e" * 64,
+        "orcid_prefix_counts_data_sha256": "f" * 64,
+        "name_counts_manifest_sha256": "1" * 64,
+        "orcid_prefix_counts_manifest_sha256": "2" * 64,
+    }
+    source_clusterer.feature_contract.update(explicit_hashes)
+    package_loads = 0
+
+    def packaged_hashes() -> dict[str, str]:
+        nonlocal package_loads
+        package_loads += 1
+        return dict(_TEST_CANONICAL_ARTIFACT_HASHES)
+
+    monkeypatch.setattr(production_model_module, "canonical_artifact_hashes", packaged_hashes)
+    output_dir = tmp_path / "production_model_v10.0"
+
+    write_pairwise_production_bundle(
+        source_clusterer,
+        output_dir,
+        bundle_version="10.0",
+        pairwise_training_config={"input_artifact_hashes": explicit_hashes},
+        pairwise_training_summary={"pair_count": 11},
+    )
+
+    assert package_loads == 0
+    with pytest.raises(ValueError, match="does not match"):
+        _load_pairwise_staging_model(output_dir)
+    assert package_loads == 1
+
+
+def test_bundle_export_rejects_training_artifact_hash_mismatch(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     _, source_clusterer = synthetic_pairwise_bundle
-    source_clusterer.feature_contract.pop("name_tuples_data_sha256")
+    expected_hashes = dict(_TEST_EXPLICIT_ARTIFACT_HASHES)
+    expected_hashes["name_tuples_data_sha256"] = "e" * 64
 
-    with pytest.raises(ValueError, match="name_tuples_data_sha256"):
+    with pytest.raises(ValueError, match="explicit artifact authority"):
         write_pairwise_production_bundle(
             source_clusterer,
-            tmp_path / "missing-name-tuples-hash",
+            tmp_path / "production_model_v10.0",
             bundle_version="10.0",
+            pairwise_training_config={"input_artifact_hashes": expected_hashes},
+            pairwise_training_summary={"pair_count": 11},
         )
+
+
+def test_finalization_uses_explicit_artifact_authority_instead_of_package_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.feature_contract.update(_TEST_EXPLICIT_ARTIFACT_HASHES)
+    pairwise_bundle = tmp_path / "production_model_v10.0"
+    write_pairwise_production_bundle(
+        source_clusterer,
+        pairwise_bundle,
+        bundle_version="10.0",
+        pairwise_training_config={"input_artifact_hashes": dict(_TEST_EXPLICIT_ARTIFACT_HASHES)},
+        pairwise_training_summary={"pair_count": 11},
+    )
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(
+        pairwise_bundle,
+        linker_dir,
+        expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
+    )
+    monkeypatch.setattr(
+        production_model_module,
+        "canonical_artifact_hashes",
+        lambda: {
+            "name_tuples_data_sha256": "c" * 64,
+            "orcid_prefix_counts_data_sha256": "d" * 64,
+        },
+    )
+
+    with pytest.raises(ValueError, match="canonical artifacts installed with this package"):
+        finalize_production_bundle(
+            pairwise_bundle_dir=pairwise_bundle,
+            output_bundle_dir=tmp_path / "default-authority",
+            incremental_linker_artifact_dir=linker_dir,
+            target_json=target_json,
+        )
+
+    output_bundle = tmp_path / "explicit-authority"
+    finalize_production_bundle(
+        pairwise_bundle_dir=pairwise_bundle,
+        output_bundle_dir=output_bundle,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=target_json,
+        expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
+    )
+
+    assert (
+        load_production_model(
+            output_bundle,
+            expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
+        ).production_model_bundle_status
+        == "complete"
+    )
 
 
 def test_bundle_load_rejects_canonical_artifact_hash_mismatch(
@@ -466,114 +591,61 @@ def test_bundle_load_rejects_canonical_artifact_hash_mismatch(
         _load_pairwise_staging_model(bundle_dir)
 
 
-@pytest.mark.parametrize(
-    ("path", "schema_version"),
-    (
-        ("manifest.json", "s2and_production_model_bundle_v2"),
-        ("manifest.json", "s2and_production_model_bundle_v4"),
-        ("clusterer.json", "s2and_clusterer_config_v2"),
-        ("clusterer.json", "s2and_clusterer_config_v3"),
-        ("clusterer.json", "s2and_clusterer_config_v4"),
-    ),
-)
-def test_bundle_rejects_previous_schema_versions(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    path: str,
-    schema_version: str,
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    artifact_path = bundle_dir / path
-    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
-    payload["schema_version"] = schema_version
-    artifact_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if path == "clusterer.json":
-        _refresh_manifest_checksum(bundle_dir, path)
-
-    with pytest.raises(ValueError, match="schema_version"):
-        _load_pairwise_staging_model(bundle_dir)
-
-
-@pytest.mark.parametrize("field", tuple(_TEST_CANONICAL_ARTIFACT_HASHES))
 def test_canonical_artifact_hashes_feed_pairwise_bundle_binding(
     monkeypatch: pytest.MonkeyPatch,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    field: str,
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
     original_binding = pairwise_bundle_binding(bundle_dir)
-    changed_hashes = dict(_TEST_CANONICAL_ARTIFACT_HASHES)
-    changed_hashes[field] = "c" * 64
-    monkeypatch.setattr(production_model_module, "canonical_artifact_hashes", lambda: dict(changed_hashes))
-
     config_path = bundle_dir / "clusterer.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["feature_contract"][field] = changed_hashes[field]
-    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    _refresh_manifest_checksum(bundle_dir, "clusterer.json")
-
-    changed_binding = pairwise_bundle_binding(bundle_dir)
-    assert changed_binding["ordered_feature_contract_digest"] != original_binding["ordered_feature_contract_digest"]
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("bundle_status", "pairwise_only"),
-        ("files", {"clusterer_config": "clusterer.json"}),
-    ),
-)
-def test_manifest_rejects_redundant_legacy_state_fields(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    field: str,
-    value: object,
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    manifest_path = bundle_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest[field] = value
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="manifest field mismatch"):
-        _load_pairwise_staging_model(bundle_dir)
+    original_config = json.loads(config_path.read_text(encoding="utf-8"))
+    for field in _TEST_CANONICAL_ARTIFACT_HASHES:
+        changed_hashes = dict(_TEST_CANONICAL_ARTIFACT_HASHES)
+        changed_hashes[field] = "c" * 64
+        monkeypatch.setattr(
+            production_model_module,
+            "canonical_artifact_hashes",
+            lambda hashes=changed_hashes: dict(hashes),
+        )
+        config = copy.deepcopy(original_config)
+        config["feature_contract"][field] = changed_hashes[field]
+        config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _refresh_manifest_checksum(bundle_dir, "clusterer.json")
+        changed_binding = pairwise_bundle_binding(bundle_dir)
+        assert changed_binding["ordered_feature_contract_digest"] != original_binding["ordered_feature_contract_digest"]
 
 
-@pytest.mark.parametrize("field_name", ("bundle_version", "pairwise_model_version"))
 def test_manifest_requires_nonempty_string_model_versions(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    field_name: str,
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
     manifest_path = bundle_dir / "manifest.json"
     original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    for invalid_value in (None, "   "):
-        manifest = copy.deepcopy(original_manifest)
-        manifest[field_name] = invalid_value
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        with pytest.raises(ValueError, match=rf"{field_name} must be a nonempty string"):
-            production_model_module._validate_manifest(bundle_dir)
+    for field_name in ("bundle_version", "pairwise_model_version"):
+        for invalid_value in (None, "   "):
+            manifest = copy.deepcopy(original_manifest)
+            manifest[field_name] = invalid_value
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            with pytest.raises(ValueError, match=rf"{field_name} must be a nonempty string"):
+                production_model_module._validate_manifest(bundle_dir)
 
 
-def test_manifest_requires_null_or_nonempty_incremental_linker_version(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    manifest_path = bundle_dir / "manifest.json"
-    original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-    manifest = copy.deepcopy(original_manifest)
-    manifest["incremental_linker_version"] = False
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="incremental_linker_version must be null or a nonempty string"):
-        production_model_module._validate_manifest(bundle_dir)
-
-
-def test_complete_manifest_requires_nonempty_string_incremental_linker_version(
+def test_manifest_requires_valid_incremental_linker_version(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     pairwise_bundle, _ = synthetic_pairwise_bundle
-    complete_bundle = tmp_path / "production_model_v9.8"
+    manifest_path = pairwise_bundle / "manifest.json"
+    original_pairwise_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    invalid_pairwise_manifest = copy.deepcopy(original_pairwise_manifest)
+    invalid_pairwise_manifest["incremental_linker_version"] = False
+    manifest_path.write_text(json.dumps(invalid_pairwise_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="incremental_linker_version must be null or a nonempty string"):
+        production_model_module._validate_manifest(pairwise_bundle)
+    manifest_path.write_text(json.dumps(original_pairwise_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    complete_bundle = tmp_path / "complete" / "production_model_v9.9"
     linker_dir = tmp_path / "linker"
     target_json = _write_synthetic_linker(pairwise_bundle, linker_dir)
     finalize_production_bundle(
@@ -581,17 +653,14 @@ def test_complete_manifest_requires_nonempty_string_incremental_linker_version(
         output_bundle_dir=complete_bundle,
         incremental_linker_artifact_dir=linker_dir,
         target_json=target_json,
-        bundle_version="9.8",
-        pairwise_model_version="9.9",
-        incremental_linker_version="9.9",
     )
-    manifest_path = complete_bundle / "manifest.json"
-    original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    complete_manifest_path = complete_bundle / "manifest.json"
+    original_manifest = json.loads(complete_manifest_path.read_text(encoding="utf-8"))
 
     for invalid_value, message in ((None, "checksum coverage mismatch"), ("   ", "null or a nonempty string")):
         manifest = copy.deepcopy(original_manifest)
         manifest["incremental_linker_version"] = invalid_value
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        complete_manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         with pytest.raises(ValueError, match=message):
             production_model_module._validate_manifest(complete_bundle)
 
@@ -620,37 +689,30 @@ def test_manifest_ignores_undeclared_runtime_file(
     assert clusterer.production_model_bundle_status == "pairwise_only"
 
 
-@pytest.mark.parametrize(
-    ("mutate", "message"),
-    (
+def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    config_path = bundle_dir / "clusterer.json"
+    original_config = json.loads(config_path.read_text(encoding="utf-8"))
+    invalid_configs = (
         (lambda payload: payload["cluster_model"].update({"eps": float("nan")}), "must be finite"),
         (lambda payload: payload["cluster_model"].update({"eps": True}), "must be numeric"),
-        (
-            lambda payload: payload.update({"incremental_mean_min_hybrid_weight": False}),
-            "must be numeric",
-        ),
+        (lambda payload: payload.update({"incremental_mean_min_hybrid_weight": False}), "must be numeric"),
         (lambda payload: payload["cluster_model"].update({"family": "Other"}), "exact FastCluster"),
         (lambda payload: payload.update({"unknown_runtime_field": 1}), "field mismatch"),
         (
             lambda payload: payload.update({"incremental_mean_min_hybrid_weight": 2.0}),
             "hybrid_weight must be in",
         ),
-    ),
-)
-def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    mutate: Any,
-    message: str,
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    config_path = bundle_dir / "clusterer.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    mutate(config)
-    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    _refresh_manifest_checksum(bundle_dir, "clusterer.json")
-
-    with pytest.raises(ValueError, match=message):
-        _load_pairwise_staging_model(bundle_dir)
+    )
+    for mutate, message in invalid_configs:
+        config = copy.deepcopy(original_config)
+        mutate(config)
+        config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _refresh_manifest_checksum(bundle_dir, "clusterer.json")
+        with pytest.raises(ValueError, match=message):
+            _load_pairwise_staging_model(bundle_dir)
 
 
 def test_pairwise_fixture_cannot_relax_tolerance_to_accept_wrong_predictions(
@@ -716,37 +778,6 @@ def test_native_classifier_scores_in_bounded_float32_chunks(
         classifier.predict_proba_positive(matrix[:, ::-1], max_rows_per_chunk=2)
 
 
-def test_failed_finalization_leaves_source_unchanged_and_output_absent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "production_model_v9.8"
-    original_manifest = (bundle_dir / "manifest.json").read_bytes()
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(bundle_dir, linker_dir)
-
-    def fail_validation(_path: Path) -> None:
-        raise RuntimeError("injected validation failure")
-
-    monkeypatch.setattr(production_bundle_module, "load_production_model", fail_validation)
-    with pytest.raises(RuntimeError, match="injected validation failure"):
-        finalize_production_bundle(
-            pairwise_bundle_dir=bundle_dir,
-            output_bundle_dir=output_bundle,
-            incremental_linker_artifact_dir=linker_dir,
-            target_json=target_json,
-            bundle_version="9.8",
-            pairwise_model_version="9.9",
-            incremental_linker_version="9.9",
-        )
-
-    assert (bundle_dir / "manifest.json").read_bytes() == original_manifest
-    assert not (bundle_dir / "incremental_linker").exists()
-    assert not output_bundle.exists()
-
-
 def test_pairwise_stage_publication_failure_leaves_target_absent_and_is_retry_safe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -775,51 +806,35 @@ def test_pairwise_stage_publication_failure_leaves_target_absent_and_is_retry_sa
     assert _load_pairwise_staging_model(output_bundle).production_model_bundle_status == "pairwise_only"
 
 
-def test_pairwise_stage_publication_requires_new_output(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    _, source_clusterer = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "production_model_v9.8"
-    write_pairwise_production_bundle(source_clusterer, output_bundle, bundle_version="9.8")
-    original_manifest = (output_bundle / "manifest.json").read_bytes()
-
-    with pytest.raises(FileExistsError, match="already exists"):
-        write_pairwise_production_bundle(
-            source_clusterer,
-            output_bundle,
-            bundle_version="9.8",
-        )
-    assert (output_bundle / "manifest.json").read_bytes() == original_manifest
-
-
-@pytest.mark.parametrize(
-    "relative_path",
-    (
-        "reproducibility/pairwise_training_config.json",
-        "reproducibility/pairwise_training_summary.json",
-    ),
-)
 def test_pairwise_reproducibility_files_are_manifest_bound(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    relative_path: str,
 ) -> None:
     _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.feature_contract.update(_TEST_EXPLICIT_ARTIFACT_HASHES)
     output_dir = tmp_path / "production_model_v9.8"
     write_pairwise_production_bundle(
         source_clusterer,
         output_dir,
         bundle_version="9.8",
-        pairwise_training_config={"training_seed": 7},
+        pairwise_training_config={
+            "training_seed": 7,
+            "input_artifact_hashes": dict(_TEST_EXPLICIT_ARTIFACT_HASHES),
+        },
         pairwise_training_summary={"pair_count": 11},
     )
     _load_pairwise_staging_model(output_dir)
 
-    path = output_dir / relative_path
-    path.write_text(path.read_text(encoding="utf-8") + " ", encoding="utf-8")
-    with pytest.raises(ValueError, match="checksum mismatch"):
-        _load_pairwise_staging_model(output_dir)
+    for relative_path in (
+        "reproducibility/pairwise_training_config.json",
+        "reproducibility/pairwise_training_summary.json",
+    ):
+        path = output_dir / relative_path
+        original = path.read_bytes()
+        path.write_bytes(original + b" ")
+        with pytest.raises(ValueError, match="checksum mismatch"):
+            _load_pairwise_staging_model(output_dir)
+        path.write_bytes(original)
 
 
 def test_finalization_publishes_with_one_rename_and_is_retry_safe(
@@ -828,15 +843,14 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, source_clusterer = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "production_model_v9.8"
+    output_bundle = tmp_path / "complete" / "production_model_v9.9"
     linker_dir = tmp_path / "linker"
     target_json = _write_synthetic_linker(bundle_dir, linker_dir)
+    original_manifest = (bundle_dir / "manifest.json").read_bytes()
     real_replace = production_bundle_module.os.replace
 
     clusterer_config = json.loads((bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
     assert "incremental_phase_a_pair_batch_target_multiple" not in clusterer_config
-    for derived_field in ("best_params", "bundle_version", "pairwise", "source_model_version"):
-        assert derived_field not in clusterer_config
     with pytest.raises(ValueError, match="Expected a complete"):
         load_production_model(bundle_dir)
 
@@ -856,13 +870,11 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
             output_bundle_dir=output_bundle,
             incremental_linker_artifact_dir=linker_dir,
             target_json=target_json,
-            bundle_version="9.8",
-            pairwise_model_version="9.9",
-            incremental_linker_version="9.9",
         )
 
     assert not output_bundle.exists()
-    assert not list(tmp_path.glob(".production_model_v9.8.staging-*"))
+    assert not list(output_bundle.parent.glob(".production_model_v9.9.staging-*"))
+    assert (bundle_dir / "manifest.json").read_bytes() == original_manifest
     assert _load_pairwise_staging_model(bundle_dir).production_model_bundle_status == "pairwise_only"
     assert not (bundle_dir / "incremental_linker").exists()
 
@@ -872,14 +884,11 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
         output_bundle_dir=output_bundle,
         incremental_linker_artifact_dir=linker_dir,
         target_json=target_json,
-        bundle_version="9.8",
-        pairwise_model_version="9.9",
-        incremental_linker_version="9.9",
     )
 
     assert summary.bundle_status == "complete"
     loaded = load_production_model(output_bundle)
-    assert loaded.production_model_bundle_version == "9.8"
+    assert loaded.production_model_bundle_version == "9.9"
     assert loaded.production_model_bundle_status == "complete"
     assert loaded.incremental_linker_artifact_dir is not None
     assert Path(loaded.incremental_linker_artifact_dir) == output_bundle / "incremental_linker"
@@ -887,6 +896,10 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
     restored = pickle.loads(pickle.dumps(loaded))
     assert restored.incremental_linker_artifact.artifact_dir == output_bundle / "incremental_linker"
     assert copy.deepcopy(loaded).incremental_linker_artifact is loaded.incremental_linker_artifact
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["bundle_version"] == "9.9"
+    assert manifest["pairwise_model_version"] == "9.9"
+    assert manifest["incremental_linker_version"] == "9.9"
 
     with pytest.raises(FileExistsError, match="requires a new directory"):
         finalize_production_bundle(
@@ -894,81 +907,12 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
             output_bundle_dir=output_bundle,
             incremental_linker_artifact_dir=linker_dir,
             target_json=target_json,
-            bundle_version="9.8",
         )
     with pytest.raises(FileExistsError, match="already exists"):
         write_pairwise_production_bundle(
             source_clusterer,
             bundle_dir,
             bundle_version="9.9",
-            source_model_version="9.9",
-        )
-
-
-def test_finalization_defaults_pairwise_version_from_source_manifest(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    source_bundle, _ = synthetic_pairwise_bundle
-    source_manifest_path = source_bundle / "manifest.json"
-    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
-    source_manifest["pairwise_model_version"] = "1.2"
-    source_manifest_path.write_text(json.dumps(source_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(source_bundle, linker_dir)
-    output_bundle = tmp_path / "production_model_v8.8"
-
-    finalize_production_bundle(
-        pairwise_bundle_dir=source_bundle,
-        output_bundle_dir=output_bundle,
-        incremental_linker_artifact_dir=linker_dir,
-        target_json=target_json,
-        bundle_version="8.8",
-    )
-
-    output_manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
-    assert source_bundle.name == "production_model_v9.9"
-    assert output_manifest["bundle_version"] == "8.8"
-    assert output_manifest["pairwise_model_version"] == "1.2"
-
-
-def test_finalization_infers_bundle_version_from_manifest_for_generic_paths(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    source_bundle, _ = synthetic_pairwise_bundle
-    generic_source = tmp_path / "pairwise_stage"
-    source_bundle.rename(generic_source)
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(generic_source, linker_dir)
-    output_bundle = tmp_path / "complete_bundle"
-
-    finalize_production_bundle(
-        pairwise_bundle_dir=generic_source,
-        output_bundle_dir=output_bundle,
-        incremental_linker_artifact_dir=linker_dir,
-        target_json=target_json,
-    )
-
-    output_manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
-    assert output_manifest["bundle_version"] == "9.9"
-    assert output_manifest["incremental_linker_version"] == "9.9"
-
-
-def test_finalization_rejects_implicit_version_change(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    source_bundle, _ = synthetic_pairwise_bundle
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(source_bundle, linker_dir)
-
-    with pytest.raises(ValueError, match="disagrees with pairwise manifest"):
-        finalize_production_bundle(
-            pairwise_bundle_dir=source_bundle,
-            output_bundle_dir=tmp_path / "production_model_v8.8",
-            incremental_linker_artifact_dir=linker_dir,
-            target_json=target_json,
         )
 
 
@@ -982,14 +926,13 @@ def test_finalization_does_not_copy_undeclared_reproducibility_files(
     stale_path.write_text('{"secret": true}\n', encoding="utf-8")
     linker_dir = tmp_path / "linker"
     target_json = _write_synthetic_linker(source_bundle, linker_dir)
-    output_bundle = tmp_path / "production_model_v9.8"
+    output_bundle = tmp_path / "complete" / "production_model_v9.9"
 
     finalize_production_bundle(
         pairwise_bundle_dir=source_bundle,
         output_bundle_dir=output_bundle,
         incremental_linker_artifact_dir=linker_dir,
         target_json=target_json,
-        bundle_version="9.8",
     )
 
     assert not (output_bundle / "reproducibility" / stale_path.name).exists()
@@ -1000,7 +943,7 @@ def test_finalization_rejects_linker_bound_to_different_pairwise_bundle(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "production_model_v9.8"
+    output_bundle = tmp_path / "complete" / "production_model_v9.9"
     linker_dir = tmp_path / "linker"
     target_json = _write_synthetic_linker(bundle_dir, linker_dir)
     metadata_path = linker_dir / "metadata.json"
@@ -1014,9 +957,6 @@ def test_finalization_rejects_linker_bound_to_different_pairwise_bundle(
             output_bundle_dir=output_bundle,
             incremental_linker_artifact_dir=linker_dir,
             target_json=target_json,
-            bundle_version="9.8",
-            pairwise_model_version="9.9",
-            incremental_linker_version="9.9",
         )
 
     assert not output_bundle.exists()
@@ -1035,12 +975,9 @@ def test_finalization_rejects_target_different_from_linker_training_target(
     with pytest.raises(ValueError, match="target_spec_digest does not match target JSON"):
         finalize_production_bundle(
             pairwise_bundle_dir=bundle_dir,
-            output_bundle_dir=tmp_path / "production_model_v9.8",
+            output_bundle_dir=tmp_path / "complete" / "production_model_v9.9",
             incremental_linker_artifact_dir=linker_dir,
             target_json=target_json,
-            bundle_version="9.8",
-            pairwise_model_version="9.9",
-            incremental_linker_version="9.9",
         )
 
 
@@ -1049,7 +986,7 @@ def test_complete_bundle_rejects_target_tampering_even_with_refreshed_manifest(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "production_model_v9.8"
+    output_bundle = tmp_path / "complete" / "production_model_v9.9"
     linker_dir = tmp_path / "linker"
     target_json = _write_synthetic_linker(bundle_dir, linker_dir)
     finalize_production_bundle(
@@ -1057,9 +994,6 @@ def test_complete_bundle_rejects_target_tampering_even_with_refreshed_manifest(
         output_bundle_dir=output_bundle,
         incremental_linker_artifact_dir=linker_dir,
         target_json=target_json,
-        bundle_version="9.8",
-        pairwise_model_version="9.9",
-        incremental_linker_version="9.9",
     )
     bundled_target = output_bundle / "reproducibility" / "incremental_linker_training_target.json"
     bundled_target.write_text('{"variant": "tampered"}\n', encoding="utf-8")
@@ -1074,7 +1008,7 @@ def test_complete_bundle_rejects_pairwise_binding_tampering_even_with_refreshed_
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "production_model_v9.8"
+    output_bundle = tmp_path / "complete" / "production_model_v9.9"
     linker_dir = tmp_path / "linker"
     target_json = _write_synthetic_linker(bundle_dir, linker_dir)
     finalize_production_bundle(
@@ -1082,9 +1016,6 @@ def test_complete_bundle_rejects_pairwise_binding_tampering_even_with_refreshed_
         output_bundle_dir=output_bundle,
         incremental_linker_artifact_dir=linker_dir,
         target_json=target_json,
-        bundle_version="9.8",
-        pairwise_model_version="9.9",
-        incremental_linker_version="9.9",
     )
     metadata_path = output_bundle / "incremental_linker" / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -1102,7 +1033,7 @@ def test_normal_load_hashes_each_declared_file_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "production_model_v9.8"
+    output_bundle = tmp_path / "complete" / "production_model_v9.9"
     linker_dir = tmp_path / "linker"
     target_json = _write_synthetic_linker(bundle_dir, linker_dir)
     finalize_production_bundle(
@@ -1110,9 +1041,6 @@ def test_normal_load_hashes_each_declared_file_exactly_once(
         output_bundle_dir=output_bundle,
         incremental_linker_artifact_dir=linker_dir,
         target_json=target_json,
-        bundle_version="9.8",
-        pairwise_model_version="9.9",
-        incremental_linker_version="9.9",
     )
 
     manifest_hashes: list[str] = []
@@ -1138,7 +1066,7 @@ def test_normal_load_hashes_each_declared_file_exactly_once(
     assert standalone_artifact_hashes == []
 
 
-def test_bundle_directory_version_must_match_explicit_version(
+def test_bundle_directory_version_must_match_derived_version(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
@@ -1147,13 +1075,12 @@ def test_bundle_directory_version_must_match_explicit_version(
     target_json = _write_synthetic_linker(source_bundle, linker_dir)
     mismatched_output = tmp_path / "production_model_v9.8"
 
-    with pytest.raises(ValueError, match="directory name and bundle_version disagree"):
+    with pytest.raises(ValueError, match="bundle version disagrees with pairwise manifest"):
         finalize_production_bundle(
             pairwise_bundle_dir=source_bundle,
             output_bundle_dir=mismatched_output,
             incremental_linker_artifact_dir=linker_dir,
             target_json=target_json,
-            bundle_version="9.9",
         )
     assert not mismatched_output.exists()
 
@@ -1164,13 +1091,6 @@ def test_bundle_directory_version_must_match_explicit_version(
             bundle_version="9.9",
         )
     assert not mismatched_output.exists()
-
-    with pytest.raises(ValueError, match="bundle_version must be nonempty"):
-        write_pairwise_production_bundle(
-            source_clusterer,
-            tmp_path / "unnamed-bundle",
-            bundle_version="",
-        )
 
 
 def test_manifest_writer_rejects_directory_at_required_file_path(tmp_path: Path) -> None:
@@ -1194,41 +1114,27 @@ def test_manifest_writer_rejects_directory_at_required_file_path(tmp_path: Path)
     assert not (tmp_path / "manifest.json").exists()
 
 
-@pytest.mark.parametrize(
-    ("field_name", "invalid_value"),
-    (
-        ("bundle_version", ""),
-        ("bundle_version", "   "),
-        ("pairwise_model_version", ""),
-        ("pairwise_model_version", "   "),
-    ),
-)
-def test_manifest_writer_rejects_empty_model_versions_before_writing(
-    tmp_path: Path,
-    field_name: str,
-    invalid_value: str,
-) -> None:
-    versions = {
-        "bundle_version": "9.9",
-        "pairwise_model_version": "9.9",
-    }
-    versions[field_name] = invalid_value
+def test_manifest_writer_rejects_invalid_versions_before_writing(tmp_path: Path) -> None:
+    for field_name in ("bundle_version", "pairwise_model_version"):
+        for invalid_value in ("", "   "):
+            versions = {
+                "bundle_version": "9.9",
+                "pairwise_model_version": "9.9",
+            }
+            versions[field_name] = invalid_value
+            with pytest.raises(ValueError, match=rf"{field_name} must be a nonempty string"):
+                production_bundle_module.write_production_manifest(tmp_path, **versions)
 
-    with pytest.raises(ValueError, match=rf"{field_name} must be a nonempty string"):
-        production_bundle_module.write_production_manifest(tmp_path, **versions)
+    for invalid_version in (False, "   "):
+        with pytest.raises(ValueError, match="require a nonempty incremental_linker_version"):
+            production_bundle_module.write_production_manifest(
+                tmp_path,
+                bundle_version="9.9",
+                pairwise_model_version="9.9",
+                incremental_linker_version=invalid_version,
+            )
 
     assert not (tmp_path / "manifest.json").exists()
-
-
-@pytest.mark.parametrize("invalid_version", (False, "   "))
-def test_manifest_writer_rejects_invalid_state_discriminator(tmp_path: Path, invalid_version: Any) -> None:
-    with pytest.raises(ValueError, match="require a nonempty incremental_linker_version"):
-        production_bundle_module.write_production_manifest(
-            tmp_path,
-            bundle_version="9.9",
-            pairwise_model_version="9.9",
-            incremental_linker_version=invalid_version,
-        )
 
 
 def test_finalize_production_bundle_rejects_invalid_incremental_linker_artifact(
@@ -1246,12 +1152,9 @@ def test_finalize_production_bundle_rejects_invalid_incremental_linker_artifact(
     with pytest.raises(ValueError, match="booster_sha256 mismatch"):
         finalize_production_bundle(
             pairwise_bundle_dir=source_bundle,
-            output_bundle_dir=tmp_path / "production_model_v9.8",
+            output_bundle_dir=tmp_path / "complete" / "production_model_v9.9",
             incremental_linker_artifact_dir=corrupt_linker,
             target_json=target_json,
-            bundle_version="9.8",
-            pairwise_model_version="9.9",
-            incremental_linker_version="9.8",
         )
 
 

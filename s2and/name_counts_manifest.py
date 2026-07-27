@@ -10,6 +10,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from s2and._sha256 import is_lowercase_sha256
 from s2and.consts import NORMALIZATION_VERSION
 
 NAME_COUNTS_INDEX_SCHEMA_VERSION = "name_counts_index_v2"
@@ -42,7 +43,7 @@ def _require_nonempty_string(value: Any, *, field: str, context: str) -> str:
 
 def _require_lowercase_sha256(value: Any, *, field: str, context: str) -> str:
     digest = _require_nonempty_string(value, field=field, context=context)
-    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+    if not is_lowercase_sha256(digest):
         raise ValueError(f"{context} requires lowercase SHA-256 {field}")
     return digest
 
@@ -127,14 +128,12 @@ class ValidatedNameCountsManifest:
     def load(
         cls,
         index_dir: str | os.PathLike[str],
-        *,
-        context: str,
     ) -> ValidatedNameCountsManifest:
         """Open one native-validated manifest generation."""
 
         from s2and.name_counts_index import NameCountsIndex
 
-        _index, manifest = NameCountsIndex._open_with_manifest(index_dir, context=context)
+        _index, manifest = NameCountsIndex._open_generation(index_dir)
         return manifest
 
     @classmethod

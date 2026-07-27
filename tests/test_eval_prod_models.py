@@ -691,7 +691,7 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
     assert captured["arrow_paths"] == {
         "dataset": "pubmed",
         "specter_suffix": "_specter2.pkl",
-        "root": "arrow-root",
+        "root": str(Path("arrow-root").resolve()),
     }
     assert captured["kwargs"]["n_jobs"] == 1
     assert captured["kwargs"]["random_seed"] == 1111
@@ -717,6 +717,44 @@ def test_eval_main_rejects_invalid_mode_combinations(monkeypatch: pytest.MonkeyP
         monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", *argv])
         with pytest.raises(ValueError, match=message):
             eval_prod_models.main()
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--train", "--dataset", "mini"], "requires an explicit --json-data-root"),
+        (
+            [
+                "--train",
+                "--dataset",
+                "mini",
+                "--datasets",
+                "qian",
+                "--train-modes",
+                eval_prod_models.TRAIN_MODE_ARROW_RUST,
+            ],
+            "requires an explicit --arrow-data-root",
+        ),
+        (
+            ["--dataset", "mini", "--specter2-model-path", "model"],
+            "requires --arrow-data-root or --json-data-root",
+        ),
+        (
+            ["--train", "--dataset", "mini", "--json-data-root", "json"],
+            "require explicit --name-counts-index-root and --name-tuples-path",
+        ),
+    ],
+)
+def test_eval_main_requires_explicit_data_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    message: str,
+) -> None:
+    monkeypatch.setattr(eval_prod_models, "bundle_data_random_seed", lambda _path: 42)
+    monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", *argv])
+
+    with pytest.raises(ValueError, match=message):
+        eval_prod_models.main()
 
 
 def test_construct_cluster_to_signatures_reports_missing_assignments() -> None:

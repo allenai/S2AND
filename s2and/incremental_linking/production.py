@@ -26,6 +26,7 @@ from s2and.incremental_linking.feature_block import (
 )
 from s2and.incremental_linking.policy import (
     clusterer_uses_name_count_features,
+    promoted_linker_orcid_force_link_enabled,
     request_cluster_seed_disallow_parts,
 )
 from s2and.incremental_linking.retrieval import RawArrowPlanBundle
@@ -943,7 +944,9 @@ def predict_incremental_promoted_linker_from_arrow_paths(
     component_size_summary = memory_budget.summarize_promoted_component_sizes(component_sizes)
     retrieval_top_k = int(artifact.retrieval_top_k)
     memory_layout = _promoted_incremental_memory_layout(clusterer, artifact)
-    orcid_enabled = not bool(getattr(clusterer, "suppress_orcid", False))
+    orcid_enabled = promoted_linker_orcid_force_link_enabled(
+        suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False))
+    )
     orcid_fanout_by_query = promoted_incremental_orcid_fanout_by_query(
         dataset,
         unassigned_signature_ids,

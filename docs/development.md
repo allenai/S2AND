@@ -55,9 +55,15 @@ If you want to skip Rust extension compilation while iterating, run only the sta
 ```bash
 uv sync --active --extra dev --frozen --no-install-package s2and-rust
 uv run --active --no-project ruff format --check s2and scripts/*.py
-uv run --active --no-project ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
-uv run --active --no-project ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute
+uv run --active --no-project ty check s2and --ignore unresolved-import --ignore unresolved-reference --ignore unresolved-attribute --ignore possibly-missing-attribute --ignore unused-type-ignore-comment
+uv run --active --no-project ty check scripts --exclude scripts/archive --ignore unresolved-import --ignore unresolved-reference --ignore unresolved-attribute --ignore possibly-missing-attribute --ignore unused-type-ignore-comment
 ```
+
+The scripts check covers active top-level and nested scripts but deliberately
+excludes retired reference code in `scripts/archive`. These ignores are limited
+to resolution/attribute diagnostics from optional and native modules omitted
+from the static-only environment. Type errors remain blocking; warnings remain
+visible.
 
 The full pytest suite requires the native name-count index. Build the extension first or use
 `uv run python scripts/run_ci_locally.py`.

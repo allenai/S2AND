@@ -53,7 +53,7 @@ After Stage 1 artifact promotion, the default merge-prior mapping is loaded lazi
 `first_k_letter_counts_from_orcid.json` and its required adjacent
 `.manifest.json`, then resolved at subblocking entry. The loader validates the
 complete canonical artifact and data digest; a missing or tampered file fails
-closed before partitioning. The code-only candidate intentionally contains
+closed before partitioning. The current pre-release tree contains
 neither file. These learned prefix-pair counts are considered
 only after exact-name and `same_prefix_tokens` merge candidates, so they do not
 override stronger compatibility evidence. A caller may supply an explicit

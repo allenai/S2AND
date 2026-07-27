@@ -223,18 +223,18 @@ def test_release_validation_checks_shared_name_counts_generation_once(
     native_opens = 0
     fallback_validations = 0
     original_manifest_load = arrow_inputs_module.ValidatedNameCountsManifest.load
-    original_native_open = name_counts_index_module.NameCountsIndex._open_with_manifest
+    original_native_open = name_counts_index_module.NameCountsIndex._open_generation
     original_fallback_validation = release_validation_module._validate_name_counts_index  # noqa: SLF001
 
-    def counted_manifest_load(cls, index_dir: str | Path, *, context: str):
+    def counted_manifest_load(cls, index_dir: str | Path):
         nonlocal manifest_loads
         manifest_loads += 1
-        return original_manifest_load(index_dir, context=context)
+        return original_manifest_load(index_dir)
 
-    def counted_native_open(cls, path: str | Path, *, context: str):
+    def counted_native_open(cls, path: str | Path):
         nonlocal native_opens
         native_opens += 1
-        return original_native_open(path, context=context)
+        return original_native_open(path)
 
     def counted_fallback_validation(path: Path, errors: list[str], *, label: str) -> None:
         nonlocal fallback_validations
@@ -248,7 +248,7 @@ def test_release_validation_checks_shared_name_counts_generation_once(
     )
     monkeypatch.setattr(
         name_counts_index_module.NameCountsIndex,
-        "_open_with_manifest",
+        "_open_generation",
         classmethod(counted_native_open),
     )
     monkeypatch.setattr(release_validation_module, "_validate_name_counts_index", counted_fallback_validation)

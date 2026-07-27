@@ -1,5 +1,7 @@
 import copy
 import pickle
+from collections import Counter
+from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -68,6 +70,32 @@ def test_altered_presplit_cache_does_not_make_clusterer_unserializable() -> None
     for restored in (copy.deepcopy(clusterer), pickle.loads(pickle.dumps(clusterer))):
         assert model_module._get_altered_presplit_cache_entry(restored, ("state",)) == (("s1", "s2"),)
         assert not hasattr(restored, "_s2and_altered_presplit_cache_lock")
+
+
+def test_classic_subblocking_allocates_collision_safe_keys_and_preserves_members(monkeypatch) -> None:
+    def fake_make_subblocks(signatures, _dataset, **_kwargs):
+        assert signatures == ["s1", "s2"]
+        return {"x": ["s1"], "y": ["s2"]}
+
+    monkeypatch.setattr(model_module, "make_subblocks", fake_make_subblocks)
+    clusterer = object.__new__(Clusterer)
+    input_blocks = {
+        "a": ["s1", "s2"],
+        "a|subblock=x": ["other"],
+    }
+
+    observed = clusterer._build_subblocked_block_dict(
+        input_blocks,
+        cast(ANDData, object()),
+        batching_threshold=1,
+    )
+
+    assert observed == {
+        "a|subblock=x|collision=0001": ["s1"],
+        "a|subblock=y": ["s2"],
+        "a|subblock=x": ["other"],
+    }
+    assert Counter(chain.from_iterable(observed.values())) == Counter(chain.from_iterable(input_blocks.values()))
 
 
 def _expected_upper_triangle_pairs_for_range(

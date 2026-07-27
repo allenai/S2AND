@@ -1958,23 +1958,10 @@ pub(crate) fn subdivide_helper_rust(
     let mut output = OrderedSubblocks::default();
     let mut output_cant_subdivide = OrderedSubblocks::default();
     let max_len = names.iter().map(|name| py_len(name)).max().unwrap_or(0);
-    let mut clean_break = false;
 
     for width in starting_k..=max_len {
         let counts = prefix_counts(&names, &signature_ids, width);
-        let good_size_counts: Vec<&PrefixCount> = counts
-            .iter()
-            .filter(|count| count.count <= maximum_size)
-            .collect();
-        if good_size_counts.is_empty() {
-            for count in counts.iter() {
-                output_cant_subdivide.insert(count.name.clone(), count.signature_ids.clone());
-            }
-            clean_break = true;
-            break;
-        }
-
-        for count in good_size_counts {
+        for count in counts.iter().filter(|count| count.count <= maximum_size) {
             output.insert(count.name.clone(), count.signature_ids.clone());
         }
 
@@ -1993,10 +1980,15 @@ pub(crate) fn subdivide_helper_rust(
         }
         names = next_names;
         signature_ids = next_signature_ids;
+        if names.is_empty() {
+            break;
+        }
     }
 
-    if !names.is_empty() && !clean_break {
-        output_cant_subdivide.insert("final".to_string(), signature_ids);
+    if !names.is_empty() {
+        for count in prefix_counts(&names, &signature_ids, max_len) {
+            output_cant_subdivide.insert(count.name, count.signature_ids);
+        }
     }
     (output, output_cant_subdivide)
 }
@@ -2149,6 +2141,113 @@ pub(crate) fn sorted_subblock_merge_candidates(
             .then_with(|| right.0 .1.cmp(&left.0 .1))
     });
     Ok(candidates)
+}
+
+#[cfg(test)]
+mod subdivision_tests {
+    use super::{sorted_subblock_merge_candidates, subdivide_helper_rust, OrderedSubblocks};
+    use std::collections::HashMap;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn subdivision_advances_past_oversized_shared_prefixes() {
+        let (output, dead_ends) = subdivide_helper_rust(
+            strings(&["anna", "anne", "anny"]),
+            strings(&["s1", "s2", "s3"]),
+            1,
+            2,
+        );
+
+        assert_eq!(
+            output.entries,
+            vec![
+                ("anna".to_string(), strings(&["s1"])),
+                ("anne".to_string(), strings(&["s2"])),
+                ("anny".to_string(), strings(&["s3"])),
+            ]
+        );
+        assert!(dead_ends.entries.is_empty());
+    }
+
+    #[test]
+    fn subdivision_groups_terminal_failures_by_exact_full_name() {
+        let (output, dead_ends) = subdivide_helper_rust(
+            strings(&["anna", "anna", "anne", "anne"]),
+            strings(&["s1", "s2", "s3", "s4"]),
+            1,
+            2,
+        );
+
+        assert!(output.entries.is_empty());
+        assert_eq!(
+            dead_ends.entries,
+            vec![
+                ("anna".to_string(), strings(&["s1", "s2"])),
+                ("anne".to_string(), strings(&["s3", "s4"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_name_does_not_overwrite_a_longer_prefix() {
+        let (output, dead_ends) = subdivide_helper_rust(
+            strings(&["ann", "ann", "anna"]),
+            strings(&["s1", "s2", "s3"]),
+            1,
+            2,
+        );
+
+        assert_eq!(output.entries, vec![("anna".to_string(), strings(&["s3"]))]);
+        assert_eq!(
+            dead_ends.entries,
+            vec![("ann".to_string(), strings(&["s1", "s2"]))]
+        );
+        let mut members: Vec<&str> = output
+            .entries
+            .iter()
+            .chain(dead_ends.entries.iter())
+            .flat_map(|(_key, values)| values.iter().map(String::as_str))
+            .collect();
+        members.sort_unstable();
+        assert_eq!(members, vec!["s1", "s2", "s3"]);
+    }
+
+    #[test]
+    fn subdivision_keeps_empty_and_repeated_terminal_names_separate() {
+        let (output, dead_ends) = subdivide_helper_rust(
+            strings(&["", "", "a", "a"]),
+            strings(&["s1", "s2", "s3", "s4"]),
+            1,
+            1,
+        );
+
+        assert!(output.entries.is_empty());
+        assert_eq!(
+            dead_ends.entries,
+            vec![
+                ("".to_string(), strings(&["s1", "s2"])),
+                ("a".to_string(), strings(&["s3", "s4"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_full_name_drives_merge_scoring() {
+        let mut output = OrderedSubblocks::default();
+        output.insert("chen|middle=w".to_string(), strings(&["s1"]));
+        output.insert("cheng".to_string(), strings(&["s2"]));
+
+        let candidates =
+            sorted_subblock_merge_candidates(&output, 2, &HashMap::new()).expect("valid keys");
+
+        assert_eq!(
+            candidates,
+            vec![(("chen|middle=w".to_string(), "cheng".to_string()), 100004.0)]
+        );
+    }
 }
 
 pub(crate) fn merge_small_subblocks(

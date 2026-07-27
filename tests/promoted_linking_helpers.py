@@ -52,7 +52,6 @@ def write_synthetic_pairwise_bundle(
     *,
     artifact_hashes: Mapping[str, str],
     bundle_version: str,
-    source_model_version: str | None = None,
 ) -> Clusterer:
     """Write a tiny native pairwise stage and return its source clusterer."""
 
@@ -76,7 +75,6 @@ def write_synthetic_pairwise_bundle(
         clusterer,
         bundle_dir,
         bundle_version=bundle_version,
-        source_model_version=source_model_version,
     )
     return clusterer
 

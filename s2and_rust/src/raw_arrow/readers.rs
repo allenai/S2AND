@@ -219,6 +219,13 @@ pub(crate) fn read_raw_arrow_signatures_from_batches(
                     let paper_id = paper_id_values
                         .required_value(row, "paper_id")?
                         .into_owned();
+                    let position = position_values
+                        .optional_value(row, "author_position")?
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "signatures Arrow author_position is null for signature_id {signature_id_value:?}"
+                            ))
+                        })?;
                     entry.insert(RawArrowSignature {
                         paper_id,
                         // These columns are legitimately empty for most rows
@@ -247,7 +254,11 @@ pub(crate) fn read_raw_arrow_signatures_from_batches(
                             .as_ref()
                             .and_then(|col| col.optional_owned(row))
                             .and_then(|value| normalize_orcid_owned(&value)),
-                        position: position_values.optional_value(row, "author_position")?,
+                        // Coauthor exclusion and local-window features cannot be
+                        // reconstructed without the focal author's position.  The
+                        // full Rust featurizer already rejects this corruption;
+                        // raw candidate planning must fail closed as well.
+                        position: Some(position),
                     });
                 }
             }

@@ -274,7 +274,10 @@ producers pass those paths through
 normalization, immutable-generation inventory, and publication format.
 Producer-specific metadata cannot override those canonical fields.
 `scripts/convert_to_arrow.py` is the reference producer for deployable
-dataset metadata and current batch-index sidecars.
+dataset metadata and current batch-index sidecars. Its `benchmark` command
+requires explicit `--source-root` and `--output-root`; `service-json` requires
+explicit `--input-json` and `--output-root`. Neither command discovers a
+production source or destination root.
 `scripts/verification/compare_full_predict_arrow_parity.py` is the reference
 bounded parity producer: it writes current batch-index sidecars, resolves a
 canonical name-count index, and publishes an artifact-generation manifest for
@@ -317,19 +320,18 @@ omitted; when present, they must have the listed type.
 | `author_suffix` | `string` | yes | Source author suffix field used as runtime preprocessing input |
 | `author_affiliations` | `list<string>` | yes | Author affiliations; prefer empty list over null |
 | `author_orcid` | `string` | yes | Optional column containing ORCID evidence when available |
-| `author_position` | `int64` | yes | Author position on the paper |
+| `author_position` | `int64` | no | Author position on the paper |
 | `author_block` | `string` | yes | S2 block key, needed for block reconstruction/eval |
 | `author_email` | `string` | yes | Author email |
 | `source_author_ids` | `list<string>` | yes | Upstream author ids |
 
 Name-count values are intentionally not part of the signature table.
 
-Migration warning: although this table currently permits null
-`author_position`, full Rust featurization rejects it and correct coauthor
-exclusion cannot be reconstructed without a focal position. The canonical
-target is a required/non-null field after intended release datasets are audited
-and repaired; see the
-[v1.3 benchmark regeneration stage](../1_3_release_todo.md#stage-4-regenerate-canonical-benchmark-and-linker-data).
+Both full Rust featurization and raw candidate planning reject null
+`author_position`: correct coauthor exclusion and local-window evidence cannot
+be reconstructed without the focal position. Release datasets must satisfy
+this required/non-null contract before training or evaluation; see the
+[v1.3 benchmark regeneration stage](../1_3_release_todo.md#21-canonical-benchmark-export).
 
 ### `papers.arrow`
 
@@ -744,6 +746,7 @@ uv run python scripts/convert_to_arrow.py validate `
 uv run python scripts/eval_prod_models.py `
   --dataset full `
   --use-arrow `
+  --arrow-data-root s2and/data `
   --datasets qian `
   --specter2-model-path path\to\production_model_bundle `
   --n_jobs 4
@@ -760,13 +763,19 @@ uv run python scripts/convert_to_arrow.py validate \
 uv run python scripts/eval_prod_models.py \
   --dataset full \
   --use-arrow \
+  --arrow-data-root s2and/data \
   --datasets qian \
   --specter2-model-path /path/to/production_model_bundle \
   --n_jobs 4
 ```
 
-The eval command should report `use_arrow=True` and `Arrow data root:
-s2and/data` after the public Arrow release has been synced locally.
+The eval command should report `use_arrow=True` and the resolved absolute
+`Arrow data root` corresponding to the explicit `s2and/data` argument after the
+public Arrow release has been synced locally. There is no implicit Arrow root.
+JSON/ANDData evaluation or training instead requires
+explicit `--json-data-root`, `--name-tuples-path`, and
+`--name-counts-index-root`; it does not discover those inputs from package
+defaults.
 Production-bundle evaluation rejects an explicit `--seed`; it reads the
 trainer's recorded `data_random_seed`. That reproduces a split only when input
 bytes and ordering are identical. The v1.3 release uses persisted, digested

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from s2and._sha256 import is_lowercase_sha256
 from s2and.name_counts_manifest import (
     NAME_COUNTS_MANIFEST_SHA256_FIELD,
     validated_name_counts_provenance,
@@ -22,7 +23,7 @@ def _nonempty_string(value: Any, *, field: str, context: str) -> str:
 
 def _sha256(value: Any, *, field: str, context: str) -> str:
     digest = _nonempty_string(value, field=field, context=context)
-    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+    if not is_lowercase_sha256(digest):
         raise ValueError(f"{context} requires lowercase SHA-256 {field}")
     return digest
 

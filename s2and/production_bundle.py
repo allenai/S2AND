@@ -34,6 +34,7 @@ from s2and.production_model import (
     load_production_model,
     pairwise_bundle_binding,
     require_canonical_artifact_hashes,
+    require_expected_artifact_hashes,
 )
 
 PAIRWISE_FIXTURE_SEED = 921
@@ -129,6 +130,7 @@ def _clusterer_config_payload(
     clusterer: Clusterer,
     *,
     nameless_featurizer_info: FeaturizationInfo,
+    expected_artifact_hashes: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     raw_feature_contract = getattr(clusterer, "feature_contract", None)
     if not isinstance(raw_feature_contract, Mapping):
@@ -145,7 +147,14 @@ def _clusterer_config_payload(
             "Production bundle normalization_version mismatch: "
             f"source={source_normalization_version!r} package={NORMALIZATION_VERSION!r}"
         )
-    require_canonical_artifact_hashes(feature_contract, context="Production bundle export feature_contract")
+    if expected_artifact_hashes is None:
+        require_canonical_artifact_hashes(feature_contract, context="Production bundle export feature_contract")
+    else:
+        require_expected_artifact_hashes(
+            feature_contract,
+            expected_artifact_hashes,
+            context="Production bundle export feature_contract",
+        )
     return {
         "batch_size": int(getattr(clusterer, "batch_size", 1_000_000)),
         "cluster_model": _cluster_model_payload(clusterer),
@@ -251,7 +260,6 @@ def _write_pairwise_production_bundle_stage(
     bundle_dir: Path,
     *,
     bundle_version: str,
-    source_model_version: str | None = None,
     pairwise_training_config: Mapping[str, Any] | None = None,
     pairwise_training_summary: Mapping[str, Any] | None = None,
 ) -> ProductionBundleSummary:
@@ -265,12 +273,20 @@ def _write_pairwise_production_bundle_stage(
 
     bundle_dir = Path(bundle_dir)
     pairwise_dir = bundle_dir / "pairwise"
-    source_version = str(source_model_version or bundle_version)
+    expected_artifact_hashes: Mapping[str, Any] | None = None
+    if pairwise_training_config is not None:
+        expected_artifact_hashes = pairwise_training_config.get("input_artifact_hashes")
+        if not isinstance(expected_artifact_hashes, Mapping) or not expected_artifact_hashes:
+            raise ValueError(
+                "Pairwise training config must contain nonempty input_artifact_hashes "
+                "when it is used to publish a production bundle"
+            )
     main_width = len(_selected_feature_indices(clusterer.featurizer_info))
     nameless_width = len(_selected_feature_indices(nameless_featurizer_info))
     clusterer_payload = _clusterer_config_payload(
         clusterer,
         nameless_featurizer_info=nameless_featurizer_info,
+        expected_artifact_hashes=expected_artifact_hashes,
     )
     _write_pairwise_model(clusterer.classifier, pairwise_dir / "main.lgb")
     _write_pairwise_model(clusterer.nameless_classifier, pairwise_dir / "nameless.lgb")
@@ -297,7 +313,7 @@ def _write_pairwise_production_bundle_stage(
     return write_production_manifest(
         bundle_dir,
         bundle_version=str(bundle_version),
-        pairwise_model_version=source_version,
+        pairwise_model_version=str(bundle_version),
     )
 
 
@@ -306,11 +322,10 @@ def write_pairwise_production_bundle(
     bundle_dir: Path,
     *,
     bundle_version: str,
-    source_model_version: str | None = None,
     pairwise_training_config: Mapping[str, Any] | None = None,
     pairwise_training_summary: Mapping[str, Any] | None = None,
 ) -> ProductionBundleSummary:
-    """Atomically publish the pairwise stage of a native production bundle."""
+    """Atomically publish one versioned pairwise stage."""
 
     bundle_dir = Path(bundle_dir)
     _validate_named_bundle_version(bundle_dir, str(bundle_version))
@@ -324,11 +339,16 @@ def write_pairwise_production_bundle(
             clusterer,
             staging_dir,
             bundle_version=str(bundle_version),
-            source_model_version=source_model_version,
             pairwise_training_config=pairwise_training_config,
             pairwise_training_summary=pairwise_training_summary,
         )
-        _load_pairwise_staging_model(staging_dir)
+        expected_artifact_hashes = (
+            pairwise_training_config.get("input_artifact_hashes") if pairwise_training_config is not None else None
+        )
+        _load_pairwise_staging_model(
+            staging_dir,
+            expected_artifact_hashes=expected_artifact_hashes,
+        )
         _publish_staged_bundle(staging_dir, bundle_dir)
     finally:
         if staging_dir.exists():
@@ -349,6 +369,7 @@ def finalize_pairwise_eps(
     expected_manifest_sha256: str,
     expected_old_eps: float,
     new_eps: float,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
 ) -> ProductionBundleSummary:
     """Write a fresh pairwise stage whose only semantic change is clustering EPS."""
 
@@ -366,7 +387,10 @@ def finalize_pairwise_eps(
     manifest = _read_json(manifest_path)
     if manifest.get("incremental_linker_version") is not None:
         raise ValueError("EPS finalization requires a pairwise-only bundle")
-    _load_pairwise_staging_model(source_bundle_dir)
+    _load_pairwise_staging_model(
+        source_bundle_dir,
+        expected_artifact_hashes=expected_artifact_hashes,
+    )
     config_path = source_bundle_dir / "clusterer.json"
     config = _read_json(config_path)
     observed_eps = float(config["cluster_model"]["eps"])
@@ -399,7 +423,10 @@ def finalize_pairwise_eps(
         for relpath in sorted(set(source_files) - {"clusterer.json", "manifest.json"}):
             if source_files[relpath].read_bytes() != staged_files[relpath].read_bytes():
                 raise RuntimeError(f"EPS finalization changed immutable file {relpath}")
-        _load_pairwise_staging_model(staging_dir)
+        _load_pairwise_staging_model(
+            staging_dir,
+            expected_artifact_hashes=expected_artifact_hashes,
+        )
         _publish_staged_bundle(staging_dir, output_bundle_dir)
     finally:
         if staging_dir.exists():
@@ -457,11 +484,9 @@ def finalize_production_bundle(
     output_bundle_dir: Path,
     incremental_linker_artifact_dir: Path,
     target_json: Path,
-    bundle_version: str | None = None,
-    pairwise_model_version: str | None = None,
-    incremental_linker_version: str | None = None,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
 ) -> ProductionBundleSummary:
-    """Assemble a complete production bundle from pairwise and linker artifacts."""
+    """Assemble a complete bundle using the pairwise manifest as version authority."""
 
     pairwise_bundle_dir = Path(pairwise_bundle_dir)
     output_bundle_dir = Path(output_bundle_dir)
@@ -481,25 +506,20 @@ def finalize_production_bundle(
         raise FileNotFoundError(f"Incremental linker target JSON does not exist: {target_json}")
 
     pairwise_manifest = _read_json(pairwise_bundle_dir / "manifest.json")
-    inferred_version = production_version_from_bundle_dir(output_bundle_dir)
-    if bundle_version is not None:
-        _validate_named_bundle_version(output_bundle_dir, str(bundle_version))
     pairwise_bundle_version = str(pairwise_manifest.get("bundle_version") or "").strip()
-    if (
-        bundle_version is None
-        and inferred_version is not None
-        and pairwise_bundle_version
-        and inferred_version != pairwise_bundle_version
-    ):
+    if not pairwise_bundle_version:
+        raise ValueError("Pairwise manifest bundle_version must be a nonempty string")
+    inferred_version = production_version_from_bundle_dir(output_bundle_dir)
+    if inferred_version is not None and inferred_version != pairwise_bundle_version:
         raise ValueError(
             "Output directory bundle version disagrees with pairwise manifest: "
             f"output={inferred_version!r}, pairwise={pairwise_bundle_version!r}"
         )
-    resolved_bundle_version = str(bundle_version or inferred_version or pairwise_bundle_version)
-    if not resolved_bundle_version:
-        raise ValueError("bundle_version is missing from both the output path and pairwise manifest")
 
-    pairwise_binding = pairwise_bundle_binding(pairwise_bundle_dir)
+    pairwise_binding = pairwise_bundle_binding(
+        pairwise_bundle_dir,
+        expected_artifact_hashes=expected_artifact_hashes,
+    )
     linker_metadata = _read_json(incremental_linker_artifact_dir / "metadata.json")
     if linker_metadata.get("pairwise_bundle_binding_digest") != canonical_json_digest(pairwise_binding):
         raise ValueError("Incremental linker pairwise_bundle_binding_digest does not match pairwise bundle")
@@ -520,15 +540,14 @@ def finalize_production_bundle(
         _copy_path(target_json, target_destination)
         staged_summary = write_production_manifest(
             staging_dir,
-            bundle_version=resolved_bundle_version,
-            pairwise_model_version=str(
-                pairwise_manifest["pairwise_model_version"]
-                if pairwise_model_version is None
-                else pairwise_model_version
-            ),
-            incremental_linker_version=str(incremental_linker_version or resolved_bundle_version),
+            bundle_version=pairwise_bundle_version,
+            pairwise_model_version=str(pairwise_manifest["pairwise_model_version"]),
+            incremental_linker_version=pairwise_bundle_version,
         )
-        load_production_model(staging_dir)
+        load_production_model(
+            staging_dir,
+            expected_artifact_hashes=expected_artifact_hashes,
+        )
         _publish_staged_bundle(staging_dir, output_bundle_dir)
     finally:
         if staging_dir.exists():

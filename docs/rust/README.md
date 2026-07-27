@@ -27,9 +27,9 @@ for the Rust integration.
 - **Point-in-time profiling evidence** belongs in `profiling/YYYY-MM-DD.md`, not inline in design docs.
 - **Release sequence** lives in `docs/1_3_release_todo.md`; the remediation
   backlog lives in `docs/work_plan.md`.
-- **Development artifacts** may live under `scratch/` (gitignored). Release
-  JSON/log evidence must instead be retained under the runbook's durable
-  reports root and bound by `quality_report.json` and `release.json`.
+- **Development artifacts** may live under `scratch/` (gitignored). Release job
+  logs are durable operational records; the runbook names the five semantic
+  release authorities.
 
 ---
 

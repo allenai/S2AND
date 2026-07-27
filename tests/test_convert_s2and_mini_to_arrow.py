@@ -131,6 +131,24 @@ def test_dataset_parsers_require_explicit_dataset_selection(tmp_path: Path) -> N
         assert excinfo.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["service-json", "--input-json", "payload.json"],
+        ["benchmark", "--datasets", "qian"],
+        ["benchmark", "--source-root", "source", "--datasets", "qian"],
+        ["benchmark", "--output-root", "output", "--datasets", "qian"],
+    ],
+)
+def test_conversion_parsers_require_explicit_roots(command: list[str]) -> None:
+    parser = convert_to_arrow._build_parser()
+
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(command)
+
+    assert excinfo.value.code == 2
+
+
 def test_run_full_discovers_datasets_only_when_explicit(
     tmp_path: Path,
     monkeypatch,
@@ -778,6 +796,45 @@ def test_validate_arrow_dataset_manifest_rejects_null_required_strings(
     _write_paper_authors_table(pa, paper_authors_path, ["p1"], [author_name])
 
     with pytest.raises(ValueError, match=message):
+        convert_to_arrow.validate_arrow_dataset_manifest(
+            {
+                "normalization_version": NORMALIZATION_VERSION,
+                "paths": {
+                    "signatures": str(signatures_path),
+                    "papers": str(papers_path),
+                    "paper_authors": str(paper_authors_path),
+                },
+            },
+            require_embeddings=False,
+            require_name_counts_index=False,
+        )
+
+
+def test_validate_arrow_dataset_manifest_rejects_null_author_position(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    signatures_path = tmp_path / "signatures.arrow"
+    papers_path = tmp_path / "papers.arrow"
+    paper_authors_path = tmp_path / "paper_authors.arrow"
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "signature_id": pa.array(["s1"], type=pa.string()),
+                "paper_id": pa.array(["p1"], type=pa.string()),
+                "author_first": pa.array(["Ada"], type=pa.string()),
+                "author_middle": pa.array([""], type=pa.string()),
+                "author_last": pa.array(["Lovelace"], type=pa.string()),
+                "author_suffix": pa.array([""], type=pa.string()),
+                "author_affiliations": pa.array([["Analytical Engine"]], type=pa.list_(pa.string())),
+                "author_orcid": pa.array([""], type=pa.string()),
+                "author_position": pa.array([None], type=pa.int64()),
+            }
+        ),
+        signatures_path,
+    )
+    _write_papers_table(pa, papers_path, ["p1"])
+    _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
+
+    with pytest.raises(ValueError, match="signatures.author_position contains null value"):
         convert_to_arrow.validate_arrow_dataset_manifest(
             {
                 "normalization_version": NORMALIZATION_VERSION,

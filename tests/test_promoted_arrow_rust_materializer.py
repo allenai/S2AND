@@ -58,6 +58,7 @@ def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path) -> No
     target_path.write_text(
         json.dumps(
             {
+                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": len(feature_columns),
                 "features": feature_columns,
                 "params": {"n_estimators": 10},
@@ -76,6 +77,7 @@ def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path) -> No
     target_path.write_text(
         json.dumps(
             {
+                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": len(reordered_features),
                 "features": reordered_features,
                 "params": {"n_estimators": 10},
@@ -95,6 +97,7 @@ def test_load_target_rejects_removed_promoted_features(tmp_path: Path) -> None:
     target_path.write_text(
         json.dumps(
             {
+                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": 1,
                 "features": ["pw_max_email_prefix_equal"],
                 "params": {"n_estimators": 10},
@@ -115,6 +118,7 @@ def test_load_target_rejects_invalid_params(tmp_path: Path, params: dict[str, An
     target_path.write_text(
         json.dumps(
             {
+                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": len(feature_columns),
                 "features": feature_columns,
                 "params": params,
@@ -134,6 +138,7 @@ def test_load_target_rejects_nonfinite_metrics(tmp_path: Path) -> None:
     target_path.write_text(
         json.dumps(
             {
+                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": len(feature_columns),
                 "features": feature_columns,
                 "params": {"n_estimators": 10},
@@ -167,6 +172,7 @@ def test_load_target_rejects_invalid_metric_schema(
     target_path.write_text(
         json.dumps(
             {
+                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": len(feature_columns),
                 "features": feature_columns,
                 "params": {"n_estimators": 10},
@@ -185,6 +191,7 @@ def test_load_target_rejects_duplicate_features(tmp_path) -> None:
     target_path.write_text(
         json.dumps(
             {
+                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": 2,
                 "features": ["min_distance", "min_distance"],
             }
@@ -240,8 +247,17 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
                 "query_group_id": "q1",
                 "query_signature_id": "q1",
                 "candidate_component_key": "candidate",
+                "retrieval_rank": 1,
                 "label": 0,
-            }
+            },
+            {
+                "dataset": "toy",
+                "query_group_id": "q1",
+                "query_signature_id": "q1",
+                "candidate_component_key": "unreachable",
+                "retrieval_rank": 30,
+                "label": 1,
+            },
         ]
     )
     labels.to_parquet(labels_path, index=False)
@@ -250,7 +266,7 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
         "assets": {
             "featureless_rows": {"files": {"train_path": "labels/train.parquet"}},
         },
-        "models": {"classic": {"feature_columns": [], "best_params": {}}},
+        "models": {"classic": {"feature_columns": [], "best_params": {}, "retrieval_top_k": 1}},
         "expected_metrics": {},
     }
     (source_root / "bundle.json").write_text(
@@ -289,25 +305,25 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
         lambda **_kwargs: cast(Any, SimpleNamespace()),
     )
     monkeypatch.setattr(promoted_train, "_release_arrow_rust_dataset_context", lambda _context: None)
-    monkeypatch.setattr(
-        promoted_train,
-        "_materialize_arrow_rust_dataset_rows",
-        lambda **_kwargs: (
+
+    def fake_materialize(**kwargs: Any) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+        assert kwargs["rows"]["candidate_component_key"].tolist() == ["candidate"]
+        return (
             {"min_distance": np.asarray([0.5], dtype=np.float32)},
             {"dataset": "toy", "rows": 1, "seconds": 0.0, "mode": "arrow-rust"},
-        ),
-    )
+        )
+
+    monkeypatch.setattr(promoted_train, "_materialize_arrow_rust_dataset_rows", fake_materialize)
 
     bundle, summaries = promoted_train._materialize_arrow_rust_feature_bundle(  # noqa: SLF001
         source_bundle=source_bundle,
         output_bundle_root=output_root,
         target=target,
+        name_tuples=frozenset(),
         clusterer=SimpleNamespace(),
         n_jobs=1,
         total_ram_bytes=1,
-        table_keys=None,
-        datasets=None,
-        limit_rows=None,
+        table_keys=("train_path",),
         max_exemplars=4,
         pairwise_model_nan_value=np.nan,
         pairwise_aggregate_nan_value=0.0,
@@ -318,6 +334,12 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
     assert bundle.root == output_root.resolve()
     assert output["min_distance"].tolist() == pytest.approx([0.5])
     assert summaries[0]["rows"] == 1
+    assert summaries[0]["label_filtering"]["retrieval_window"] == {
+        "retrieval_top_k": 1,
+        "rows_before": 2,
+        "rows_after": 1,
+        "rows_removed": 1,
+    }
     assert list(output_root.rglob("*.materialization.json")) == []
 
 

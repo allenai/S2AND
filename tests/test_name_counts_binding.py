@@ -26,7 +26,7 @@ def _runtime_state(tmp_path: Path):
         tiny_name_counts_tuple(),
         tiny_name_counts_provenance(),
     )
-    index, manifest = NameCountsIndex._open_with_manifest(index_path, context="test")
+    index, manifest = NameCountsIndex._open_generation(index_path)
     contract = {"name_counts_manifest_sha256": manifest.manifest_sha256}
     clusterer = SimpleNamespace(
         featurizer_info=SimpleNamespace(features_to_use=("name_counts",)),

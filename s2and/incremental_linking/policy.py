@@ -9,6 +9,18 @@ from s2and.arrow_inputs import ValidatedArrowInputs
 from s2and.incremental_linking.feature_block import normalize_cluster_seed_disallow_pairs
 from s2and.name_count_binding import NameCountsBinding
 
+PROMOTED_LINKER_MODEL_SUPPRESS_ORCID = True
+
+
+def promoted_linker_orcid_force_link_enabled(*, suppress_orcid: bool) -> bool:
+    """Return whether ORCID may force a runtime linker decision.
+
+    ORCID is deliberately excluded from learned pair-constraint features. When
+    enabled, it acts only through the explicit runtime force-link branch.
+    """
+
+    return not bool(suppress_orcid)
+
 
 def clusterer_uses_name_count_features(clusterer: Any) -> bool:
     """Return whether the clusterer requires global name-count features."""

@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from s2and._sha256 import is_lowercase_sha256
 from s2and.incremental_linking.contracts import (
     DEFAULT_RETRIEVAL_TOP_K,
     canonical_json_digest,
@@ -38,7 +39,7 @@ _METADATA_FIELDS = frozenset(
 
 
 def _require_sha256(value: Any, *, field_name: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+    if not is_lowercase_sha256(value):
         raise ValueError(f"Incremental linker artifact {field_name} is not a SHA-256")
     return value
 

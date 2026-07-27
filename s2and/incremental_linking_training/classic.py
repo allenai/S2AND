@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -17,6 +17,7 @@ from lightgbm import LGBMClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
+from s2and.incremental_linking.artifact import IncrementalLinkingArtifact
 from s2and.incremental_linking.contracts import DEFAULT_RETRIEVAL_TOP_K
 from s2and.incremental_linking.features import PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS
 from s2and.incremental_linking.gate_buckets import first_name_bucket_from_token_view, normalize_bucket_letters
@@ -26,6 +27,7 @@ from s2and.incremental_linking.logistic_gate import (
     LOGISTIC_GATE_FINAL_C,
     LOGISTIC_GATE_SELECTION_C,
     LOGISTIC_GATE_SELECTION_FEATURE_COUNT,
+    NumpyLogisticGate,
     build_logistic_gate_matrix,
     default_logistic_gate_feature_names,
     feature_values_from_candidate_frame,
@@ -64,13 +66,21 @@ class ClassicStratifiedEvalScores:
 
 
 @dataclass(frozen=True)
-class FittedClassicRun:
-    """Exact booster and gate evaluated by one classic pipeline run."""
+class CalibratedClassicModel:
+    """Fresh booster, calibrated gate, and pre-evaluation summaries."""
 
-    summary: dict[str, Any]
     model: LGBMClassifier
     gate_config: dict[str, Any]
     retrieval_top_k: int
+    training_summary: dict[str, Any]
+    abstain_rule_summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ClassicEvaluation:
+    """Evaluation written from one reloaded complete-bundle artifact."""
+
+    summary: dict[str, Any]
     query_predictions: dict[str, Any]
 
 
@@ -170,6 +180,31 @@ def _drop_unlabeled_singleton_orcid_rows(
         summary["positive_rows_removed"] = int((drop_mask & (labels == 1)).sum())
         summary["negative_rows_removed"] = int((drop_mask & (labels == 0)).sum())
     return cleaned, summary
+
+
+def _filter_candidate_rows_to_retrieval_top_k(
+    rows: pd.DataFrame,
+    *,
+    retrieval_top_k: int,
+    context: str,
+) -> pd.DataFrame:
+    """Return the exact candidate window available to the runtime linker."""
+
+    if retrieval_top_k <= 0:
+        raise ValueError(f"{context} retrieval_top_k must be positive")
+    if "retrieval_rank" not in rows.columns:
+        raise ValueError(f"{context} rows must contain retrieval_rank")
+    ranks = pd.to_numeric(rows["retrieval_rank"], errors="coerce")
+    invalid = ranks.isna() | ~np.isfinite(ranks) | ranks.lt(1) | ranks.mod(1).ne(0)
+    if bool(invalid.any()):
+        sample = rows.loc[invalid, "retrieval_rank"].head(5).tolist()
+        raise ValueError(
+            f"{context} retrieval_rank must contain positive integers: "
+            f"invalid_rows={int(invalid.sum())}, sample={sample}"
+        )
+    selected = rows.loc[ranks.le(retrieval_top_k)].copy()
+    selected["retrieval_rank"] = ranks.loc[selected.index].astype(np.int64)
+    return selected.reset_index(drop=True)
 
 
 def _resolve_path(bundle: OfficialBundle, path_like: str | Path) -> Path:
@@ -1062,11 +1097,10 @@ def _apply_promoted_logistic_gate_to_candidate_rows(
     candidate_rows: pd.DataFrame,
     choices: pd.DataFrame,
     probabilities: np.ndarray,
-    gate_config: Mapping[str, Any],
+    gate: NumpyLogisticGate,
 ) -> pd.DataFrame:
     """Apply a fitted logistic gate to raw candidate rows and scored choices."""
 
-    gate = load_logistic_gate_config(gate_config)
     matrix, query_rows = build_logistic_gate_matrix(
         gate.feature_names,
         query_indices=candidate_rows["query_group_id"].astype(str).to_numpy(),
@@ -1124,7 +1158,7 @@ def _apply_clean_hwang_overrides(predictions: pd.DataFrame, override_df: pd.Data
 def _evaluate_logistic_scored_windows(
     candidate_rows: pd.DataFrame,
     probabilities: np.ndarray,
-    gate_config: Mapping[str, Any],
+    gate: NumpyLogisticGate,
     *,
     override_df: pd.DataFrame | None = None,
     limits: tuple[int, ...] = (5, 25),
@@ -1148,7 +1182,7 @@ def _evaluate_logistic_scored_windows(
             limited,
             choices,
             limited_probabilities,
-            gate_config,
+            gate,
         )
         if override_df is not None:
             predictions = _apply_clean_hwang_overrides(predictions, override_df)
@@ -1156,10 +1190,18 @@ def _evaluate_logistic_scored_windows(
     return results
 
 
+def _evaluation_retrieval_limits(retrieval_top_k: int) -> tuple[int, ...]:
+    """Return the diagnostic windows that are reachable by one linker artifact."""
+
+    if retrieval_top_k <= 0:
+        raise ValueError("retrieval_top_k must be positive")
+    return tuple(sorted({limit for limit in (5, retrieval_top_k) if limit <= retrieval_top_k}))
+
+
 def _evaluate_logistic_manual_holdout(
     manual_holdout: pd.DataFrame,
     probabilities: np.ndarray,
-    gate_config: Mapping[str, Any],
+    gate: NumpyLogisticGate,
 ) -> dict[str, Any]:
     """Score and summarize manual holdout candidates with the logistic gate."""
 
@@ -1177,7 +1219,7 @@ def _evaluate_logistic_manual_holdout(
         candidate_rows,
         choices,
         probabilities,
-        gate_config,
+        gate,
     )
     return {
         "overall": _summarize_predictions(predictions),
@@ -1410,14 +1452,43 @@ def _load_classic_stratified_eval_rows(
     bundle: OfficialBundle,
     spec: dict[str, Any],
     split_spec: dict[str, Any],
+    *,
+    splits: Sequence[str],
+    include_calibration_source: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load source rows selected by the promoted query-level stratified split."""
+    """Load only the rows assigned to the requested lifecycle splits."""
 
     assignments = _read_csv(_resolve_path(bundle, str(split_spec["assignments_path"])))
     _validate_stratified_split_assignments(assignments)
+    requested_splits = {str(split) for split in splits}
+    assignments = assignments[assignments["split"].astype(str).isin(requested_splits)].copy()
+    if assignments.empty:
+        raise ValueError(f"Stratified assignments contain no rows for splits={sorted(requested_splits)}")
+    assigned_query_ids = set(assignments["query_group_id"].astype(str))
     source_frames: list[pd.DataFrame] = []
     for source_spec in _classic_stratified_eval_source_specs(spec):
-        rows = _read_csv(_resolve_path(bundle, source_spec["path"]), compression="gzip")
+        if source_spec["source_kind"] == "calibration_source":
+            if not include_calibration_source:
+                continue
+            source_query_ids = assigned_query_ids
+        else:
+            source_query_ids = set(
+                assignments.loc[
+                    assignments["source_key"].astype(str).eq(str(source_spec["source_key"])),
+                    "query_group_id",
+                ].astype(str)
+            )
+        if not source_query_ids:
+            continue
+        source_path = _resolve_path(bundle, source_spec["path"])
+        if source_path.suffix == ".parquet":
+            rows = pd.read_parquet(
+                source_path,
+                filters=[("query_group_id", "in", sorted(source_query_ids))],
+            )
+        else:
+            rows = _read_csv(source_path, compression="gzip")
+            rows = rows[rows["query_group_id"].astype(str).isin(source_query_ids)].copy()
         if str(source_spec["source_key"]) == "calibration_source":
             rows["source_key"] = (
                 rows["dataset"].astype(str).map(CALIBRATION_DATASET_SOURCE_KEY_BY_DATASET).fillna("s2and_eval")
@@ -1511,20 +1582,47 @@ def _breakdown_predictions(predictions: pd.DataFrame, column: str) -> dict[str, 
     }
 
 
-def _score_classic_stratified_eval_test(
+def _score_classic_stratified_rows(
     bundle: OfficialBundle,
     spec: dict[str, Any],
     split_spec: dict[str, Any],
-    model: LGBMClassifier,
+    predict_probabilities: Callable[[np.ndarray], np.ndarray],
     feature_columns: tuple[str, ...],
+    *,
+    splits: Sequence[str],
+    include_calibration_source: bool,
+    retrieval_top_k: int | None = None,
 ) -> ClassicStratifiedEvalScores:
-    """Load and score the promoted stratified calibration/test split once."""
+    """Load and score selected promoted stratified splits."""
 
-    split_rows, assignments = _load_classic_stratified_eval_rows(bundle, spec, split_spec)
-    probabilities = np.asarray(
-        model.predict_proba(_classic_feature_matrix(split_rows, feature_columns)),
-        dtype=np.float64,
-    )[:, 1]
+    split_rows, assignments = _load_classic_stratified_eval_rows(
+        bundle,
+        spec,
+        split_spec,
+        splits=splits,
+        include_calibration_source=include_calibration_source,
+    )
+    active_retrieval_top_k = int(
+        spec.get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K) if retrieval_top_k is None else retrieval_top_k
+    )
+    split_rows = _filter_candidate_rows_to_retrieval_top_k(
+        split_rows,
+        retrieval_top_k=active_retrieval_top_k,
+        context="classic_stratified_eval",
+    )
+    retained_query_ids = set(split_rows["query_group_id"].astype(str))
+    missing_query_ids = set(assignments["query_group_id"].astype(str)) - retained_query_ids
+    if missing_query_ids:
+        raise ValueError(
+            "classic_stratified_eval has assigned queries with no candidates inside "
+            f"retrieval_top_k={active_retrieval_top_k}: "
+            f"count={len(missing_query_ids)}, sample={sorted(missing_query_ids)[:5]}"
+        )
+    split_rows, assignments = _refresh_stratified_metadata_from_active_labels(split_rows, assignments)
+    matrix = np.ascontiguousarray(
+        _classic_feature_matrix(split_rows, feature_columns).to_numpy(dtype=np.float32),
+    )
+    probabilities = np.asarray(predict_probabilities(matrix), dtype=np.float64).reshape(-1)
     choices = _score_query_choices(
         split_rows,
         probabilities,
@@ -1614,8 +1712,8 @@ def _summarize_classic_stratified_predictions(
     }
 
 
-def _write_query_predictions(predictions: pd.DataFrame, path: Path) -> dict[str, Any]:
-    """Persist the exact query-level decisions in a deterministic CSV."""
+def _write_query_predictions(predictions: pd.DataFrame, path: Path | None = None) -> dict[str, Any]:
+    """Inventory exact query-level decisions, optionally writing their CSV."""
 
     required = {
         "base_group_id",
@@ -1642,17 +1740,19 @@ def _write_query_predictions(predictions: pd.DataFrame, path: Path) -> dict[str,
         ["split", "source_key", "base_group_id", "query_case_id"],
         kind="mergesort",
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(path, index=False, lineterminator="\n", float_format="%.17g")
-    with path.open("rb") as input_file:
-        digest = hashlib.file_digest(input_file, "sha256").hexdigest()
-    return {
-        "path": str(path),
-        "sha256": digest,
-        "bytes": path.stat().st_size,
+    payload = frame.to_csv(index=False, lineterminator="\n", float_format="%.17g").encode()
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    inventory = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
         "rows": len(frame),
         "columns": list(frame.columns),
     }
+    if path is not None:
+        inventory["path"] = str(path)
+    return inventory
 
 
 def _format_metric_float(value: Any) -> str:
@@ -1837,15 +1937,13 @@ def _score_eval_candidate_rows(
     return pd.concat(frames, ignore_index=True)
 
 
-def run_classic(
+def fit_classic(
     bundle: OfficialBundle,
-    output_dir: Path,
     *,
     n_jobs: int = DEFAULT_CLASSIC_N_JOBS,
-) -> FittedClassicRun:
-    """Fit, calibrate, and evaluate the official classic pipeline."""
+) -> CalibratedClassicModel:
+    """Fit the booster and gate without opening the frozen test split."""
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     spec = bundle.models["classic"]
     feature_columns = tuple(spec["feature_columns"])
     retrieval_top_k = int(spec.get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K))
@@ -1857,8 +1955,13 @@ def run_classic(
         train_df,
         context="classic_train",
     )
-    train_df["retrieval_rank"] = pd.to_numeric(train_df["retrieval_rank"], errors="coerce")
-    train_df = train_df[train_df["retrieval_rank"] <= retrieval_top_k].copy()
+    train_rows_before_retrieval_window = int(len(train_df))
+    train_df = _filter_candidate_rows_to_retrieval_top_k(
+        train_df,
+        retrieval_top_k=retrieval_top_k,
+        context="classic_train",
+    )
+    train_rows_after_retrieval_window = int(len(train_df))
     train_df["label"] = pd.to_numeric(train_df["label"], errors="coerce").fillna(0).astype(np.int8)
     holdout_query_group_ids, holdout_base_group_ids, holdout_sources = _read_classic_holdout_identity_sets(
         bundle,
@@ -1897,11 +2000,22 @@ def run_classic(
         gate_source_eval,
         context="classic_gate_source",
     )
+    gate_source_eval = _filter_candidate_rows_to_retrieval_top_k(
+        gate_source_eval,
+        retrieval_top_k=retrieval_top_k,
+        context="classic_gate_source",
+    )
     gate_source_probabilities = np.asarray(
         model.predict_proba(_classic_feature_matrix(gate_source_eval, feature_columns)),
         dtype=np.float64,
     )[:, 1]
-    calibration_limit = int(spec.get("classic_gate_calibration_retrieval_limit", 50))
+    configured_calibration_limit = int(spec.get("classic_gate_calibration_retrieval_limit", retrieval_top_k))
+    if configured_calibration_limit != retrieval_top_k:
+        raise ValueError(
+            "classic_gate_calibration_retrieval_limit must match classic.retrieval_top_k: "
+            f"{configured_calibration_limit} != {retrieval_top_k}"
+        )
+    calibration_limit = retrieval_top_k
     gate_source_query_choices = _score_eval_candidate_rows(
         gate_source_eval,
         gate_source_probabilities,
@@ -1926,14 +2040,17 @@ def run_classic(
         raise ValueError("classic.promoted_stratified_gate requires classic.stratified_eval_test_split")
 
     split_spec = dict(spec["stratified_eval_test_split"])
-    stratified_scores = _score_classic_stratified_eval_test(
+    calibration_splits = tuple(str(split) for split in promoted_gate_config["calibration_splits"])
+    stratified_scores = _score_classic_stratified_rows(
         bundle,
         spec,
         split_spec,
-        model,
+        lambda matrix: np.asarray(model.predict_proba(matrix), dtype=np.float64)[:, 1],
         feature_columns,
+        splits=calibration_splits,
+        include_calibration_source=True,
+        retrieval_top_k=retrieval_top_k,
     )
-    calibration_splits = tuple(str(split) for split in promoted_gate_config["calibration_splits"])
     calibration_split_label = "+".join(calibration_splits)
     selected_gate_result = _fit_promoted_logistic_gate(
         stratified_scores.rows,
@@ -1976,42 +2093,7 @@ def run_classic(
         "selected_feature_importance": list(selected_gate_result["selected_feature_importance"]),
     }
 
-    s2and_eval = _read_csv(_resolve_path(bundle, spec["s2and_eval_path"]), compression="gzip")
-    s2and_probabilities = np.asarray(
-        model.predict_proba(_classic_feature_matrix(s2and_eval, feature_columns)),
-        dtype=np.float64,
-    )[:, 1]
-    s2and_eval_summary = _evaluate_logistic_scored_windows(
-        s2and_eval,
-        s2and_probabilities,
-        logistic_gate_config,
-    )
-    hwang_eval = _read_csv(_resolve_path(bundle, spec["hwang_eval_path"]), compression="gzip")
-    hwang_probabilities = np.asarray(
-        model.predict_proba(_classic_feature_matrix(hwang_eval, feature_columns)),
-        dtype=np.float64,
-    )[:, 1]
-    optional_eval_summaries: dict[str, dict[str, dict[str, Any]]] = {}
-    for dataset_name, path_like in _iter_extra_eval_paths(spec):
-        eval_df = _read_csv(_resolve_path(bundle, path_like), compression="gzip")
-        eval_probabilities = np.asarray(
-            model.predict_proba(_classic_feature_matrix(eval_df, feature_columns)),
-            dtype=np.float64,
-        )[:, 1]
-        optional_eval_summaries[_summary_key_for_eval_dataset(dataset_name)] = _evaluate_logistic_scored_windows(
-            eval_df,
-            eval_probabilities,
-            logistic_gate_config,
-        )
-
-    override_path = spec.get("hwang_clean_override_path")
-    override_df = _read_csv(_resolve_path(bundle, str(override_path))) if override_path else None
-    hwang_eval_summary = _evaluate_logistic_scored_windows(
-        hwang_eval,
-        hwang_probabilities,
-        logistic_gate_config,
-        override_df=override_df,
-    )
+    gate = load_logistic_gate_config(logistic_gate_config)
     internal_eval_source_rows = gate_source_eval[
         gate_source_eval["base_group_id"].astype(str).isin(internal_eval_groups)
         & (pd.to_numeric(gate_source_eval["retrieval_rank"], errors="coerce") <= calibration_limit)
@@ -2025,15 +2107,134 @@ def run_classic(
             internal_eval_source_rows,
             internal_eval_choices,
             internal_eval_source_probabilities,
-            logistic_gate_config,
+            gate,
         )
     )
+    return CalibratedClassicModel(
+        model=model,
+        gate_config=logistic_gate_config,
+        retrieval_top_k=retrieval_top_k,
+        training_summary={
+            "rows": int(len(train_df)),
+            "queries": int(train_df["query_group_id"].astype(str).nunique()),
+            "positive_rows": int(train_df["label"].sum()),
+            "gate_bucket_query_counts": training_gate_bucket_summary["query_counts"],
+            "gate_bucket_row_counts": training_gate_bucket_summary["row_counts"],
+            "elapsed_seconds": train_seconds,
+            "retrieval_top_k": retrieval_top_k,
+            "rows_removed_above_retrieval_top_k": (
+                train_rows_before_retrieval_window - train_rows_after_retrieval_window
+            ),
+            "unlabeled_singleton_orcid_filter_summary": unlabeled_singleton_filter_summary,
+            "train_holdout_filter_summary": train_holdout_filter_summary,
+            "train_filter_summary": train_filter_summary,
+        },
+        abstain_rule_summary={
+            "calibration_mode": str(logistic_gate_config["calibration_mode"]),
+            "promoted_logistic_gate": promoted_gate_summary,
+            "logistic_gate_config": logistic_gate_config,
+            "logistic_gate_feature_count": int(len(logistic_gate_config["feature_names"])),
+            "calibration_retrieval_limit": calibration_limit,
+            "calibration_metrics": calibration_metrics,
+            "single_candidate_calibration_metrics": single_candidate_calibration_metrics,
+            "internal_eval_metrics": internal_eval_summary,
+        },
+    )
+
+
+def evaluate_classic(
+    bundle: OfficialBundle,
+    *,
+    calibrated: CalibratedClassicModel,
+    artifact: IncrementalLinkingArtifact,
+    n_jobs: int = DEFAULT_CLASSIC_N_JOBS,
+) -> ClassicEvaluation:
+    """Evaluate the exact linker artifact loaded from a complete bundle."""
+
+    if artifact.retrieval_top_k != calibrated.retrieval_top_k:
+        raise ValueError(
+            "Reloaded linker retrieval_top_k differs from the calibrated model: "
+            f"{artifact.retrieval_top_k} != {calibrated.retrieval_top_k}"
+        )
+    spec = bundle.models["classic"]
+    feature_columns = tuple(spec["feature_columns"])
+    retrieval_top_k = artifact.retrieval_top_k
+    gate = artifact.gate_model
+
+    def predict_rows(rows: pd.DataFrame) -> np.ndarray:
+        matrix = np.ascontiguousarray(
+            _classic_feature_matrix(rows, feature_columns).to_numpy(dtype=np.float32),
+        )
+        return artifact.predict_probabilities(matrix, num_threads=n_jobs)
+
+    promoted_gate_config = _promoted_stratified_gate_spec(spec)
+    if promoted_gate_config is None:
+        raise ValueError("classic.promoted_stratified_gate is required")
+    split_spec = dict(spec["stratified_eval_test_split"])
+    test_split = str(promoted_gate_config["test_split"])
+    stratified_scores = _score_classic_stratified_rows(
+        bundle,
+        spec,
+        split_spec,
+        lambda matrix: artifact.predict_probabilities(matrix, num_threads=n_jobs),
+        feature_columns,
+        splits=(test_split,),
+        include_calibration_source=False,
+        retrieval_top_k=retrieval_top_k,
+    )
+    test_predictions = _apply_promoted_logistic_gate_to_candidate_rows(
+        stratified_scores.rows,
+        stratified_scores.choices,
+        stratified_scores.probabilities,
+        gate,
+    )
     stratified_eval_test_summary = _summarize_classic_stratified_predictions(
-        selected_gate_result["predictions"],
+        test_predictions,
         stratified_scores.assignments,
         split_spec,
     )
 
+    evaluation_limits = _evaluation_retrieval_limits(retrieval_top_k)
+    s2and_eval = _filter_candidate_rows_to_retrieval_top_k(
+        _read_csv(_resolve_path(bundle, spec["s2and_eval_path"]), compression="gzip"),
+        retrieval_top_k=retrieval_top_k,
+        context="classic_s2and_eval",
+    )
+    s2and_eval_summary = _evaluate_logistic_scored_windows(
+        s2and_eval,
+        predict_rows(s2and_eval),
+        gate,
+        limits=evaluation_limits,
+    )
+    hwang_eval = _filter_candidate_rows_to_retrieval_top_k(
+        _read_csv(_resolve_path(bundle, spec["hwang_eval_path"]), compression="gzip"),
+        retrieval_top_k=retrieval_top_k,
+        context="classic_hwang_eval",
+    )
+    hwang_probabilities = predict_rows(hwang_eval)
+    optional_eval_summaries: dict[str, dict[str, dict[str, Any]]] = {}
+    for dataset_name, path_like in _iter_extra_eval_paths(spec):
+        eval_df = _filter_candidate_rows_to_retrieval_top_k(
+            _read_csv(_resolve_path(bundle, path_like), compression="gzip"),
+            retrieval_top_k=retrieval_top_k,
+            context=f"classic_extra_eval:{dataset_name}",
+        )
+        optional_eval_summaries[_summary_key_for_eval_dataset(dataset_name)] = _evaluate_logistic_scored_windows(
+            eval_df,
+            predict_rows(eval_df),
+            gate,
+            limits=evaluation_limits,
+        )
+
+    override_path = spec.get("hwang_clean_override_path")
+    override_df = _read_csv(_resolve_path(bundle, str(override_path))) if override_path else None
+    hwang_eval_summary = _evaluate_logistic_scored_windows(
+        hwang_eval,
+        hwang_probabilities,
+        gate,
+        override_df=override_df,
+        limits=evaluation_limits,
+    )
     hwang_cleaned_eval = {
         f"w{limit}": {
             "cleaned_balanced_accuracy": window_summary["overall"]["balanced_accuracy"],
@@ -2045,61 +2246,30 @@ def run_classic(
 
     summary = {
         "model": "classic",
-        "training_summary": {
-            "rows": int(len(train_df)),
-            "queries": int(train_df["query_group_id"].astype(str).nunique()),
-            "positive_rows": int(train_df["label"].sum()),
-            "gate_bucket_query_counts": training_gate_bucket_summary["query_counts"],
-            "gate_bucket_row_counts": training_gate_bucket_summary["row_counts"],
-            "elapsed_seconds": train_seconds,
-            "unlabeled_singleton_orcid_filter_summary": unlabeled_singleton_filter_summary,
-            "train_holdout_filter_summary": train_holdout_filter_summary,
-            "train_filter_summary": train_filter_summary,
-        },
-        "abstain_rule": {
-            "calibration_mode": str(logistic_gate_config["calibration_mode"]),
-            "promoted_logistic_gate": promoted_gate_summary,
-            "logistic_gate_config": logistic_gate_config,
-            "logistic_gate_feature_count": int(len(logistic_gate_config["feature_names"])),
-            "calibration_retrieval_limit": calibration_limit,
-            "calibration_metrics": calibration_metrics,
-            "single_candidate_calibration_metrics": single_candidate_calibration_metrics,
-            "internal_eval_metrics": internal_eval_summary,
-        },
+        "training_summary": calibrated.training_summary,
+        "abstain_rule": calibrated.abstain_rule_summary,
         "overall_s2and_eval": s2and_eval_summary,
         "hwang_cleaned_eval": hwang_cleaned_eval,
+        "stratified_eval_test_split": stratified_eval_test_summary,
     }
-    if stratified_eval_test_summary is not None:
-        summary["stratified_eval_test_split"] = stratified_eval_test_summary
     manual_holdout_path = spec.get("manual_holdout_candidates_path")
     if manual_holdout_path:
         manual_holdout = _read_csv(_resolve_path(bundle, manual_holdout_path), low_memory=False)
-        manual_probabilities = np.asarray(
-            model.predict_proba(_classic_feature_matrix(manual_holdout, feature_columns)),
-            dtype=np.float64,
-        )[:, 1]
+        manual_holdout = _filter_candidate_rows_to_retrieval_top_k(
+            manual_holdout,
+            retrieval_top_k=retrieval_top_k,
+            context="classic_manual_holdout",
+        )
         summary["manual_holdout"] = _evaluate_logistic_manual_holdout(
             manual_holdout,
-            manual_probabilities,
-            logistic_gate_config,
+            predict_rows(manual_holdout),
+            gate,
         )
     for summary_key, eval_summary in optional_eval_summaries.items():
         summary[summary_key] = eval_summary
-    selected_gate_tables = format_classic_selected_gate_tables(summary)
-    if selected_gate_tables:
-        selected_gate_tables_path = output_dir / "selected_gate_tables.md"
-        selected_gate_tables_path.write_text(selected_gate_tables, encoding="utf-8")
-        summary["selected_gate_tables_path"] = str(selected_gate_tables_path.relative_to(output_dir))
-    query_predictions = _write_query_predictions(
-        selected_gate_result["predictions"],
-        output_dir / "query_predictions.csv",
-    )
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    return FittedClassicRun(
+    query_predictions = _write_query_predictions(test_predictions)
+    return ClassicEvaluation(
         summary=summary,
-        model=model,
-        gate_config=logistic_gate_config,
-        retrieval_top_k=retrieval_top_k,
         query_predictions=query_predictions,
     )
 

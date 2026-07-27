@@ -6,20 +6,14 @@ Usage:
   uv run python scripts/sync_version.py
   uv run python scripts/sync_version.py --check
   uv run python scripts/sync_version.py --print-targets
-  uv run python scripts/sync_version.py --release-policy
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import re
-import subprocess
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION_FILE = ROOT / "VERSION"
@@ -33,28 +27,6 @@ class VersionTarget:
 
     def path(self, root: Path) -> Path:
         return root / self.relative_path
-
-
-@dataclass(frozen=True)
-class ReleaseDecisions:
-    """Final build, smoke, and publish decisions for one release event."""
-
-    build_s2and: bool
-    build_rust: bool
-    run_release_smoke: bool
-    publish_s2and: bool
-    publish_rust: bool
-
-    def github_outputs(self) -> dict[str, bool]:
-        """Return the exact booleans consumed by the release workflow."""
-
-        return {
-            "build_s2and": self.build_s2and,
-            "build_rust": self.build_rust,
-            "run_release_smoke": self.run_release_smoke,
-            "publish_s2and": self.publish_s2and,
-            "publish_rust": self.publish_rust,
-        }
 
 
 SEMVER_PATTERN = r"[0-9]+\.[0-9]+\.[0-9]+"
@@ -172,127 +144,6 @@ def verify_version(version: str, root: Path = ROOT) -> None:
         check_target(root, target, version)
 
 
-def release_decisions(
-    *,
-    event_name: str,
-    ref: str,
-    version_changed: bool,
-    force_build: bool,
-    publish_s2and_requested: bool,
-    publish_rust_requested: bool,
-) -> ReleaseDecisions:
-    """Resolve release policy once for all workflow jobs."""
-
-    on_main = ref == "refs/heads/main"
-    publish_s2and = on_main and event_name == "workflow_dispatch" and publish_s2and_requested
-    publish_rust = on_main and event_name == "workflow_dispatch" and publish_rust_requested
-    publish_requested = publish_s2and_requested or publish_rust_requested
-    build_s2and = version_changed or force_build or publish_requested
-    build_rust = version_changed or force_build or publish_requested
-    run_release_smoke = (
-        publish_s2and
-        or publish_rust
-        or (event_name == "push" and on_main and version_changed)
-        or (event_name == "pull_request" and force_build)
-        or (event_name == "workflow_dispatch" and on_main and force_build)
-    )
-    return ReleaseDecisions(
-        build_s2and=build_s2and,
-        build_rust=build_rust,
-        run_release_smoke=run_release_smoke,
-        publish_s2and=publish_s2and,
-        publish_rust=publish_rust,
-    )
-
-
-def _requested(value: Any) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _event_payload(path_value: str) -> dict[str, Any]:
-    if not path_value:
-        return {}
-    path = Path(path_value)
-    if not path.is_file():
-        return {}
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"GitHub event payload must be an object: {path}")
-    return payload
-
-
-def _version_at_revision(root: Path, revision: str) -> str | None:
-    if not revision:
-        return None
-    try:
-        value = subprocess.check_output(
-            ["git", "-C", str(root), "show", f"{revision}:VERSION"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-    except subprocess.CalledProcessError:
-        return None
-    if not re.fullmatch(SEMVER_PATTERN, value):
-        raise ValueError(f"VERSION at revision {revision!r} is not semver: {value!r}")
-    return value
-
-
-def release_decisions_from_environment(
-    *,
-    root: Path = ROOT,
-    environ: Mapping[str, str] | None = None,
-) -> tuple[ReleaseDecisions, str | None, str]:
-    """Read one GitHub event and return final release decisions."""
-
-    environment = os.environ if environ is None else environ
-    event_name = environment.get("GITHUB_EVENT_NAME", "")
-    event = _event_payload(environment.get("GITHUB_EVENT_PATH", ""))
-    ref = environment.get("GITHUB_REF", "")
-    inputs = event.get("inputs", {}) if event_name == "workflow_dispatch" else {}
-    if not isinstance(inputs, Mapping):
-        raise ValueError("GitHub workflow_dispatch inputs must be an object")
-    force_build = _requested(inputs.get("force_build"))
-    publish_s2and_requested = _requested(inputs.get("publish_s2and"))
-    publish_rust_requested = _requested(inputs.get("publish_rust"))
-    if event_name == "pull_request":
-        pull_request = event.get("pull_request", {})
-        if not isinstance(pull_request, Mapping):
-            raise ValueError("GitHub pull_request payload must be an object")
-        labels = pull_request.get("labels", [])
-        if not isinstance(labels, list):
-            raise ValueError("GitHub pull_request labels must be a list")
-        force_build = any(
-            isinstance(label, Mapping) and str(label.get("name", "")).lower() == "force-build" for label in labels
-        )
-        base = pull_request.get("base", {})
-        before = str(base.get("sha", "")) if isinstance(base, Mapping) else ""
-    elif event_name == "push":
-        before = environment.get("BEFORE_SHA", "")
-    else:
-        before = ""
-    if before.startswith("0000000"):
-        before = ""
-
-    current_version = read_version(root)
-    before_version = _version_at_revision(root, before)
-    version_changed = event_name in {"pull_request", "push"} and before_version != current_version
-    decisions = release_decisions(
-        event_name=event_name,
-        ref=ref,
-        version_changed=version_changed,
-        force_build=force_build,
-        publish_s2and_requested=publish_s2and_requested,
-        publish_rust_requested=publish_rust_requested,
-    )
-    return decisions, before_version, current_version
-
-
-def _write_github_outputs(path: Path, values: Mapping[str, bool]) -> None:
-    with path.open("a", encoding="utf-8", newline="\n") as output:
-        for key, value in values.items():
-            output.write(f"{key}={'true' if value else 'false'}\n")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
@@ -301,11 +152,6 @@ def main() -> None:
         "--print-targets",
         action="store_true",
         help="Print repository-relative files updated or regenerated by version sync.",
-    )
-    mode.add_argument(
-        "--release-policy",
-        action="store_true",
-        help="Write final GitHub release build/publish decisions to GITHUB_OUTPUT.",
     )
     args = parser.parse_args()
 
@@ -320,18 +166,6 @@ def main() -> None:
         verify_version(version)
         print(f"OK: versions and runtime guards match {version}")
         return
-    if args.release_policy:
-        verify_version(version)
-        output_path = os.environ.get("GITHUB_OUTPUT")
-        if not output_path:
-            raise SystemExit("GITHUB_OUTPUT is required with --release-policy")
-        decisions, before_version, current_version = release_decisions_from_environment()
-        _write_github_outputs(Path(output_path), decisions.github_outputs())
-        print(f"version: {before_version} -> {current_version}")
-        for key, value in decisions.github_outputs().items():
-            print(f"{key}: {value}")
-        return
-
     sync_version(version)
     verify_version(version)
     print(f"Updated versions and runtime guards to {version}")

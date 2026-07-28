@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import tempfile
 from collections.abc import Iterable
@@ -14,6 +13,7 @@ import lightgbm as lgb
 import numpy as np
 import pyarrow as pa
 
+from s2and._sha256 import sha256_file as _sha256_file
 from s2and.arrow_inputs import (
     INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION,
     ArrowDataset,
@@ -32,11 +32,6 @@ from s2and.production_model import canonical_artifact_hashes, load_production_mo
 from s2and.runtime import build_runtime_context
 
 RELEASE_DATA_MANIFEST_SCHEMA = INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION
-
-
-def _sha256_file(path: Path) -> str:
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def _require_sha256(path: Path, expected_sha256: str, *, label: str) -> None:
@@ -308,8 +303,8 @@ def run_release_candidate_smoke(
         _release_dataset_root(data_root, dataset),
         require_name_counts_index=True,
     ) as arrow_dataset:
-        bound_name_counts = arrow_dataset.name_counts_manifest
-        if bound_name_counts is None or Path(bound_name_counts.index_dir).resolve() != configured_name_counts_index:
+        bound_name_counts = arrow_dataset.name_counts_index
+        if bound_name_counts is None or Path(bound_name_counts.path).resolve() != configured_name_counts_index:
             raise ValueError(f"Release dataset {dataset!r} does not bind the configured name-count index")
         bulk_summary = _bulk_smoke_summary(
             clusterer,

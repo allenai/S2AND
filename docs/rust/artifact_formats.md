@@ -44,10 +44,11 @@ declared size and digest must match the file. Each path must equal `<kind>.bin`;
 subdirectories and alternate filenames are rejected.
 
 The native Rust opener is the runtime authority for manifest, file-digest, and
-record validation. Python retains the manifest SHA-256, normalization version,
-and resolved file facts returned by that native handle for orchestration and
-model binding; it does not run a second manifest-schema validator. Producer
-mode and output cardinalities are command metrics, not runtime manifest fields.
+record validation. Python's `NameCountsIndex` retains the index path, manifest
+SHA-256, and normalization version from that native handle for orchestration
+and model binding; it does not run a second manifest-schema validator.
+Producer mode and output cardinalities are command metrics, not runtime
+manifest fields.
 
 Writers require the final `name_counts_index/` target to be absent. They build
 the complete layout above in a temporary sibling directory, fsync it, and
@@ -86,6 +87,14 @@ old `name_counts_index_dir` alias.
 paths, normalization, immutable-generation inventory, serialization, and
 publication. Producer-specific metadata may be added, but cannot override
 `normalization_version`, `paths`, or `artifact_generation`.
+
+Artifact-generation schema v2 hashes semantic role, kind, byte count, and
+content SHA-256. It does not duplicate physical paths: `paths` is their sole
+authority, so a byte-identical filename change preserves `generation_id`.
+`ArrowDataset.open()` owns artifact-safety validation. The release-root
+validator separately requires every published dataset, including nested replay
+datasets, to resolve `paths.name_counts_index` to the publication root's
+`name_counts_index/`.
 
 `scripts/convert_to_arrow.py` is the reference deployable Arrow-bundle producer.
 It writes bounded Arrow IPC file-format tables, regenerates current raw-planner

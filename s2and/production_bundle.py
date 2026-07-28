@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
 import tempfile
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from s2and._sha256 import sha256_file as _sha256_file
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.contracts import canonical_json_digest
@@ -71,14 +72,6 @@ def _validate_named_bundle_version(bundle_dir: Path, bundle_version: str) -> Non
             "Production bundle directory name and bundle_version disagree: "
             f"directory={Path(bundle_dir).name!r} bundle_version={str(bundle_version)!r}"
         )
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -333,8 +326,7 @@ def write_pairwise_production_bundle(
         raise FileExistsError(f"Production bundle output already exists; choose a new directory: {bundle_dir}")
 
     bundle_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(tempfile.mkdtemp(prefix=f".{bundle_dir.name}.pairwise-staging-", dir=bundle_dir.parent))
-    try:
+    with _staged_production_bundle(bundle_dir) as staging_dir:
         staged_summary = _write_pairwise_production_bundle_stage(
             clusterer,
             staging_dir,
@@ -349,16 +341,10 @@ def write_pairwise_production_bundle(
             staging_dir,
             expected_artifact_hashes=expected_artifact_hashes,
         )
-        _publish_staged_bundle(staging_dir, bundle_dir)
-    finally:
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir)
-    return ProductionBundleSummary(
+    return replace(
+        staged_summary,
         bundle_dir=bundle_dir,
-        bundle_version=staged_summary.bundle_version,
-        bundle_status=staged_summary.bundle_status,
         manifest_path=bundle_dir / "manifest.json",
-        files=staged_summary.files,
     )
 
 
@@ -400,8 +386,7 @@ def finalize_pairwise_eps(
         raise ValueError(f"new_eps must be finite and in [0, 1], got {new_eps!r}")
 
     output_bundle_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_bundle_dir.name}.eps-staging-", dir=output_bundle_dir.parent))
-    try:
+    with _staged_production_bundle(output_bundle_dir) as staging_dir:
         _copy_path(source_bundle_dir, staging_dir)
         config["cluster_model"]["eps"] = float(new_eps)
         _write_json(staging_dir / "clusterer.json", config)
@@ -427,16 +412,10 @@ def finalize_pairwise_eps(
             staging_dir,
             expected_artifact_hashes=expected_artifact_hashes,
         )
-        _publish_staged_bundle(staging_dir, output_bundle_dir)
-    finally:
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir)
-    return ProductionBundleSummary(
+    return replace(
+        staged_summary,
         bundle_dir=output_bundle_dir,
-        bundle_version=staged_summary.bundle_version,
-        bundle_status=staged_summary.bundle_status,
         manifest_path=output_bundle_dir / "manifest.json",
-        files=staged_summary.files,
     )
 
 
@@ -476,6 +455,19 @@ def _publish_staged_bundle(staging_dir: Path, destination: Path) -> None:
                 f"Production bundle output already exists; choose a new directory: {destination}"
             ) from None
         raise
+
+
+@contextmanager
+def _staged_production_bundle(destination: Path) -> Iterator[Path]:
+    """Create, publish, and clean up one same-parent staging directory."""
+
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{destination.name}.staging-", dir=destination.parent))
+    try:
+        yield staging_dir
+        _publish_staged_bundle(staging_dir, destination)
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
 
 
 def finalize_production_bundle(
@@ -528,8 +520,7 @@ def finalize_production_bundle(
         raise ValueError("Incremental linker target_spec_digest does not match target JSON")
 
     output_bundle_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_bundle_dir.name}.staging-", dir=output_bundle_dir.parent))
-    try:
+    with _staged_production_bundle(output_bundle_dir) as staging_dir:
         _copy_pairwise_stage(pairwise_bundle_dir, staging_dir, pairwise_manifest)
         for filename in ("booster.lgb", "metadata.json"):
             _copy_path(
@@ -548,14 +539,8 @@ def finalize_production_bundle(
             staging_dir,
             expected_artifact_hashes=expected_artifact_hashes,
         )
-        _publish_staged_bundle(staging_dir, output_bundle_dir)
-    finally:
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir)
-    return ProductionBundleSummary(
+    return replace(
+        staged_summary,
         bundle_dir=output_bundle_dir,
-        bundle_version=staged_summary.bundle_version,
-        bundle_status=staged_summary.bundle_status,
         manifest_path=output_bundle_dir / "manifest.json",
-        files=staged_summary.files,
     )

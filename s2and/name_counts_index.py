@@ -11,13 +11,10 @@ from typing import Any
 
 import numpy as np
 
-from s2and.name_counts_manifest import (
-    ValidatedNameCountsManifest,
-)
-
+NAME_COUNTS_INDEX_SCHEMA_VERSION = "name_counts_index_v3"
 _OPEN_CACHE_MAX_PATHS = 4
 _OPEN_CACHE_LOCK = threading.Lock()
-_OPEN_CACHE: OrderedDict[str, tuple[NameCountsIndex, ValidatedNameCountsManifest]] = OrderedDict()
+_OPEN_CACHE: OrderedDict[str, NameCountsIndex] = OrderedDict()
 
 
 def _lookup_many_deduplicated(
@@ -96,19 +93,16 @@ class NameCountsIndex:
         self,
         *,
         native: Any,
-        manifest: ValidatedNameCountsManifest,
+        path: str,
     ) -> None:
         self._native = native
-        self.path = str(manifest.index_dir)
-        self.manifest_sha256 = manifest.manifest_sha256
-        self.normalization_version = manifest.normalization_version
+        self.path = path
+        self.manifest_sha256 = str(native.name_counts_manifest_sha256)
+        self.normalization_version = str(native.normalization_version)
 
     @classmethod
-    def _open_with_manifest(
-        cls,
-        path: str | os.PathLike[str],
-    ) -> tuple[NameCountsIndex, ValidatedNameCountsManifest]:
-        """Open one immutable index and retain its native-validated manifest."""
+    def open(cls, path: str | os.PathLike[str]) -> NameCountsIndex:
+        """Verify and share one immutable name-count index at ``path``."""
 
         resolved_path = str(Path(os.fspath(path)).resolve())
         with _OPEN_CACHE_LOCK:
@@ -120,14 +114,7 @@ class NameCountsIndex:
         from s2and.runtime import load_s2and_rust_extension
 
         native = load_s2and_rust_extension().NameCountsIndex.open(resolved_path)
-        manifest = ValidatedNameCountsManifest._from_native(native, index_dir=resolved_path)
-        opened = (
-            cls(
-                native=native,
-                manifest=manifest,
-            ),
-            manifest,
-        )
+        opened = cls(native=native, path=resolved_path)
         with _OPEN_CACHE_LOCK:
             cached = _OPEN_CACHE.get(resolved_path)
             if cached is not None:
@@ -137,13 +124,6 @@ class NameCountsIndex:
             _OPEN_CACHE.move_to_end(resolved_path)
             if len(_OPEN_CACHE) > _OPEN_CACHE_MAX_PATHS:
                 _OPEN_CACHE.popitem(last=False)
-        return opened
-
-    @classmethod
-    def open(cls, path: str | os.PathLike[str]) -> NameCountsIndex:
-        """Verify and share one immutable name-count index at ``path``."""
-
-        opened, _manifest = cls._open_with_manifest(path)
         return opened
 
     def lookup_many(

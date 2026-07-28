@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +10,6 @@ import pytest
 from s2and.arrow_inputs import MissingArrowArtifactError, require_name_counts_index_artifact
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_counts_index import NameCountsIndex
-from s2and.name_counts_manifest import ValidatedNameCountsManifest
 from tests.helpers import import_s2and_rust, tiny_name_counts_tuple
 
 HAS_RUST, RUST_MODULE = import_s2and_rust()
@@ -42,7 +40,7 @@ def _write_manifest(index_dir: Path, manifest: dict[str, Any]) -> None:
 
 def _assert_native_validation_rejects(index_dir: Path, expected_field: str) -> None:
     with pytest.raises((OSError, RuntimeError, ValueError), match=expected_field):
-        ValidatedNameCountsManifest.load(index_dir)
+        NameCountsIndex.open(index_dir)
 
 
 def _remove_manifest_field(index_dir: Path, field: str) -> None:
@@ -56,19 +54,15 @@ def test_valid_manifest_has_identical_python_and_rust_identity(tmp_path: Path) -
         pytest.skip(f"Rust extension unavailable: {RUST_MODULE!r}")
     index_dir = _write_index(tmp_path)
 
-    python_manifest = ValidatedNameCountsManifest.load(index_dir)
+    python_index = NameCountsIndex.open(index_dir)
     rust_index = RUST_MODULE.NameCountsIndex.open(str(index_dir))
     manifest_sha256 = hashlib.sha256((index_dir / "manifest.json").read_bytes()).hexdigest()
 
     assert set(_read_manifest(index_dir)) == set(_REQUIRED_MANIFEST_FIELDS)
-    assert python_manifest.normalization_version == rust_index.normalization_version
-    assert python_manifest.manifest_sha256 == manifest_sha256
+    assert python_index.normalization_version == rust_index.normalization_version
+    assert python_index.manifest_sha256 == manifest_sha256
     assert rust_index.name_counts_manifest_sha256 == manifest_sha256
-    for file_key, file_entry in _read_manifest(index_dir)["files"].items():
-        retained_file = python_manifest.files[file_key]
-        assert os.path.samefile(retained_file.path, index_dir / file_entry["path"])
-        assert retained_file.byte_count == file_entry["byte_count"]
-        assert retained_file.sha256 == file_entry["sha256"]
+    assert Path(python_index.path) == index_dir.resolve()
     assert not hasattr(rust_index, "lookup_many")
     assert callable(rust_index._lookup_many_unique)
 

@@ -8,6 +8,10 @@ public-data version `1.3`.
 [scripts/production/README.md](../scripts/production/README.md) is the command
 reference.
 
+One trusted owner operates the release. The commands validate scientific
+inputs and runtime compatibility; they do not create an independent provenance
+or attestation chain.
+
 | Version axis | Fixed release version |
 |---|---|
 | Python package (`s2and`) | `1.0.0` |

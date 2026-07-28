@@ -547,9 +547,15 @@ Required fields for every semantic Arrow manifest:
     "paper_authors": "paper_authors.arrow"
   },
   "artifact_generation": {
-    "schema_version": "s2and_arrow_artifact_generation_v1",
+    "schema_version": "s2and_arrow_artifact_generation_v2",
     "generation_id": "sha256-of-canonical-file-inventory",
-    "files": {}
+    "files": {
+      "signatures": {
+        "kind": "file",
+        "byte_count": 0,
+        "sha256": "lowercase-sha256"
+      }
+    }
   },
   "name_tuples": "default packaged canonical aliases"
 }
@@ -564,6 +570,15 @@ manifest validation.
 The canonical manifest builder supplies `normalization_version`, `paths`, and
 `artifact_generation`. Dataset producers supply fields such as `schema`,
 `dataset`, and row counts as metadata.
+
+Generation v2 identifies immutable artifacts by semantic role, kind, byte
+count, and content SHA-256. Physical filenames appear only in `paths`; renaming
+an artifact without changing its role or bytes therefore does not change
+`generation_id`. Generation v1 is rejected rather than upgraded at open.
+`ArrowDataset.open()` validates manifest-relative paths, retained bytes, Arrow
+schemas, and the native name-count index, but does not enforce where a shared
+index sits within a publication. The release-root validator owns that topology,
+including nested replay bundles.
 
 Conditional `paths` entries:
 

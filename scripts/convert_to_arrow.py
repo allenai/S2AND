@@ -7,7 +7,6 @@ current S2AND raw-planner batch-index sidecars (S2ABI002).
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -30,6 +29,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from s2and._atomic_io import exclusive_file_lock  # noqa: E402
+from s2and._sha256 import sha256_file as _file_sha256  # noqa: E402
 from s2and.arrow_inputs import (  # noqa: E402
     INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION,
     build_arrow_artifact_manifest,
@@ -105,14 +105,6 @@ def _manifest_relative_path(path_value: Any, manifest_dir: Path) -> str:
         return Path(os.path.relpath(str(path.resolve()), str(manifest_dir.resolve()))).as_posix()
     except ValueError:
         return path.as_posix()
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as infile:
-        for chunk in iter(lambda: infile.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _git_output(args: Sequence[str]) -> str | None:

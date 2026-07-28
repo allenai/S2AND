@@ -15,7 +15,6 @@ from s2and.incremental_linking.policy import (
     require_dataset_name_counts_binding_for_clusterer,
     require_rust_featurizer_name_counts_binding_for_clusterer,
 )
-from s2and.name_count_binding import NameCountsBinding
 from s2and.name_counts_index import NameCountsIndex
 from tests.helpers import (
     tiny_name_counts_tuple,
@@ -29,8 +28,8 @@ def _runtime_state(tmp_path: Path):
         tmp_path,
         tiny_name_counts_tuple(),
     )
-    index, manifest = NameCountsIndex._open_with_manifest(index_path)
-    contract = {"name_counts_manifest_sha256": manifest.manifest_sha256}
+    index = NameCountsIndex.open(index_path)
+    contract = {"name_counts_manifest_sha256": index.manifest_sha256}
     clusterer = SimpleNamespace(
         featurizer_info=SimpleNamespace(features_to_use=("name_counts",)),
         nameless_featurizer_info=None,
@@ -42,17 +41,6 @@ def _runtime_state(tmp_path: Path):
     paths["name_counts_index"] = str(Path(index_path).resolve())
     write_test_arrow_artifact_manifest(arrow_root, paths)
     return clusterer, dataset, arrow_root, index
-
-
-def test_feature_contract_contains_only_manifest_sha256(tmp_path: Path) -> None:
-    clusterer, _dataset, _arrow_root, index = _runtime_state(tmp_path)
-
-    binding = NameCountsBinding.from_manifest_sha256(index.manifest_sha256, context="test index")
-
-    assert binding.feature_contract_fields() == {
-        "name_counts_manifest_sha256": index.manifest_sha256,
-    }
-    assert clusterer.feature_contract == binding.feature_contract_fields()
 
 
 def test_exact_manifest_identity_is_accepted_at_every_runtime_boundary(tmp_path: Path) -> None:

@@ -20,7 +20,11 @@ from s2and.incremental_linking.artifact import save_incremental_linking_artifact
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
 from s2and.model import Clusterer, _ensure_lightgbm_fitted, _selected_feature_indices
 from s2and.model_pairwise import _validated_classifier_features
-from s2and.production_bundle import finalize_production_bundle, write_pairwise_production_bundle
+from s2and.production_bundle import (
+    finalize_pairwise_eps,
+    finalize_production_bundle,
+    write_pairwise_production_bundle,
+)
 from s2and.production_model import (
     NativeLightGBMBinaryClassifier,
     _config_choice,
@@ -827,6 +831,79 @@ def test_pairwise_stage_publication_failure_leaves_target_absent_and_is_retry_sa
     summary = write_pairwise_production_bundle(source_clusterer, output_bundle, bundle_version="9.8")
     assert summary.bundle_status == "pairwise_only"
     assert _load_pairwise_staging_model(output_bundle).production_model_bundle_status == "pairwise_only"
+
+
+def test_eps_finalization_failures_clean_stage_and_are_retry_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    source_bundle, _ = synthetic_pairwise_bundle
+    output_bundle = tmp_path / "eps" / "production_model_v9.9"
+    source_manifest = source_bundle / "manifest.json"
+    expected_manifest_sha256 = hashlib.sha256(source_manifest.read_bytes()).hexdigest()
+    source_config = json.loads((source_bundle / "clusterer.json").read_text(encoding="utf-8"))
+    expected_old_eps = float(source_config["cluster_model"]["eps"])
+    new_eps = 0.37
+    staging_pattern = f".{output_bundle.name}.staging-*"
+
+    real_load = production_bundle_module._load_pairwise_staging_model
+
+    def fail_staged_validation(bundle_dir: Path, **kwargs: Any) -> Any:
+        if Path(bundle_dir) != source_bundle:
+            raise ValueError("injected EPS validation failure")
+        return real_load(bundle_dir, **kwargs)
+
+    monkeypatch.setattr(production_bundle_module, "_load_pairwise_staging_model", fail_staged_validation)
+    with pytest.raises(ValueError, match="injected EPS validation failure"):
+        finalize_pairwise_eps(
+            source_bundle_dir=source_bundle,
+            output_bundle_dir=output_bundle,
+            expected_manifest_sha256=expected_manifest_sha256,
+            expected_old_eps=expected_old_eps,
+            new_eps=new_eps,
+        )
+    assert not output_bundle.exists()
+    assert not list(output_bundle.parent.glob(staging_pattern))
+
+    monkeypatch.setattr(production_bundle_module, "_load_pairwise_staging_model", real_load)
+    real_replace = production_bundle_module.os.replace
+
+    def fail_publication(source: str | Path, destination: str | Path) -> None:
+        if Path(destination) == output_bundle:
+            raise OSError("injected EPS publication failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(production_bundle_module.os, "replace", fail_publication)
+    with pytest.raises(OSError, match="injected EPS publication failure"):
+        finalize_pairwise_eps(
+            source_bundle_dir=source_bundle,
+            output_bundle_dir=output_bundle,
+            expected_manifest_sha256=expected_manifest_sha256,
+            expected_old_eps=expected_old_eps,
+            new_eps=new_eps,
+        )
+    assert not output_bundle.exists()
+    assert not list(output_bundle.parent.glob(staging_pattern))
+
+    monkeypatch.setattr(production_bundle_module.os, "replace", real_replace)
+    summary = finalize_pairwise_eps(
+        source_bundle_dir=source_bundle,
+        output_bundle_dir=output_bundle,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_old_eps=expected_old_eps,
+        new_eps=new_eps,
+    )
+
+    manifest = json.loads(summary.manifest_path.read_text(encoding="utf-8"))
+    assert summary.bundle_dir == output_bundle
+    assert summary.bundle_version == "9.9"
+    assert summary.bundle_status == "pairwise_only"
+    assert summary.manifest_path == output_bundle / "manifest.json"
+    assert summary.files == tuple(sorted(manifest["sha256"]))
+    assert not list(output_bundle.parent.glob(staging_pattern))
+    published_config = json.loads((output_bundle / "clusterer.json").read_text(encoding="utf-8"))
+    assert published_config["cluster_model"]["eps"] == new_eps
 
 
 def test_pairwise_reproducibility_files_are_manifest_bound(

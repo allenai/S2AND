@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
@@ -14,6 +13,7 @@ import lightgbm as lgb
 import numpy as np
 
 from s2and._sha256 import is_lowercase_sha256
+from s2and._sha256 import sha256_file as _sha256_file
 from s2and.arrow_inputs import require_normalization_version
 from s2and.consts import (
     FEATURIZER_VERSION,
@@ -25,6 +25,10 @@ from s2and.incremental_linking.artifact import (
     _load_incremental_linking_artifact_from_verified_booster,
 )
 from s2and.incremental_linking.contracts import canonical_json_digest
+from s2and.incremental_linking.policy import (
+    NAME_COUNTS_MANIFEST_SHA256_FIELD,
+    require_name_counts_manifest_sha256,
+)
 from s2and.model import (
     Clusterer,
     FastCluster,
@@ -32,7 +36,6 @@ from s2and.model import (
     IncrementalSeedScoreMode,
     _selected_feature_indices,
 )
-from s2and.name_count_binding import NameCountsBinding
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.production_bundle_contract import (
     CLUSTERER_CONFIG_SCHEMA_VERSION,
@@ -267,14 +270,6 @@ class NativeLightGBMBinaryClassifier:
         self.__dict__.update(state)
         self._scorer = None
         self._lazy_booster = None
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -640,8 +635,8 @@ def _load_bundle_clusterer(
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_featurizer_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
     if any("name_counts" in info.features_to_use for info in (featurizer_info, nameless_featurizer_info)):
-        NameCountsBinding.from_feature_contract(
-            feature_contract,
+        require_name_counts_manifest_sha256(
+            feature_contract.get(NAME_COUNTS_MANIFEST_SHA256_FIELD),
             context=f"Production bundle {bundle_dir} feature_contract",
         )
     _require_featurizer_version_match(

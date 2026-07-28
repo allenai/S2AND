@@ -135,6 +135,11 @@ def test_manifest_writer_owns_runtime_fields_and_publishes_atomically(tmp_path: 
 
     assert manifest["normalization_version"] == "canonical_v2"
     assert manifest["paths"] == {"signatures": "signatures.arrow"}
+    assert set(manifest["artifact_generation"]["files"]["signatures"]) == {
+        "kind",
+        "byte_count",
+        "sha256",
+    }
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
     with pytest.raises(ValueError, match="cannot override canonical fields"):
         build_arrow_artifact_manifest(
@@ -154,7 +159,7 @@ def test_manifest_writer_rejects_artifacts_outside_its_authority(tmp_path: Path)
         build_arrow_artifact_manifest({"signatures": outside}, root)
 
 
-def test_manifest_writer_allows_only_the_known_shared_name_counts_layout(tmp_path: Path) -> None:
+def test_manifest_writer_allows_relative_shared_name_counts_layouts(tmp_path: Path) -> None:
     release_root = tmp_path / "release"
     dataset_root = release_root / "replay" / "datasets" / "tiny"
     dataset_root.mkdir(parents=True)
@@ -179,8 +184,28 @@ def test_manifest_writer_allows_only_the_known_shared_name_counts_layout(tmp_pat
     other = release_root / "other"
     other.mkdir()
     (other / "manifest.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(ValueError, match="must remain within manifest directory"):
-        build_arrow_artifact_manifest({"name_counts_index": other}, dataset_root)
+    other_manifest = build_arrow_artifact_manifest({"name_counts_index": other}, dataset_root)
+    assert other_manifest["paths"]["name_counts_index"] == "../../../other"
+
+
+def test_generation_identity_uses_role_and_content_not_filename(tmp_path: Path) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    first = first_root / "specter2.arrow"
+    renamed = second_root / "renamed.arrow"
+    first.write_bytes(b"same-content")
+    renamed.write_bytes(b"same-content")
+
+    first_manifest = build_arrow_artifact_manifest({"specter": first}, first_root)
+    renamed_manifest = build_arrow_artifact_manifest({"specter": renamed}, second_root)
+
+    assert first_manifest["paths"]["specter"] != renamed_manifest["paths"]["specter"]
+    assert (
+        first_manifest["artifact_generation"]["generation_id"]
+        == renamed_manifest["artifact_generation"]["generation_id"]
+    )
 
 
 def test_arrow_dataset_open_retains_one_identity_without_mapping_behavior(tmp_path: Path) -> None:
@@ -386,20 +411,20 @@ def test_name_counts_state_is_retained_by_the_dataset(tmp_path: Path) -> None:
 
     dataset = ArrowDataset.open(tmp_path, require_name_counts_index=True)
 
-    assert dataset.name_counts_manifest is not None
+    assert dataset.name_counts_index is not None
     assert dataset.native_name_counts_index is not None
     assert dataset.native.name_counts_index is dataset.native_name_counts_index
     dataset.close()
 
 
-def test_manifest_generation_rejects_path_mismatch_and_sidecar_inventory(tmp_path: Path) -> None:
+def test_manifest_generation_rejects_legacy_path_field_and_sidecar_inventory(tmp_path: Path) -> None:
     _write_dataset(tmp_path)
 
-    def change_path(manifest):
+    def add_legacy_path(manifest):
         manifest["artifact_generation"]["files"]["signatures"]["path"] = "other.arrow"
 
-    _rewrite_manifest(tmp_path, change_path)
-    with pytest.raises(ValueError, match="does not match manifest paths"):
+    _rewrite_manifest(tmp_path, add_legacy_path)
+    with pytest.raises(ValueError, match=r"files\.signatures field mismatch.*extra=\['path'\]"):
         ArrowDataset.open(tmp_path)
 
     other = tmp_path / "other"
@@ -410,7 +435,6 @@ def test_manifest_generation_rejects_path_mismatch_and_sidecar_inventory(tmp_pat
     def add_sidecar(manifest):
         manifest["paths"]["cluster_seeds"] = "cluster_seeds.arrow"
         manifest["artifact_generation"]["files"]["cluster_seeds"] = {
-            "path": "cluster_seeds.arrow",
             "kind": "file",
             "byte_count": len(b"sidecar"),
             "sha256": hashlib.sha256(b"sidecar").hexdigest(),
@@ -419,6 +443,17 @@ def test_manifest_generation_rejects_path_mismatch_and_sidecar_inventory(tmp_pat
     _rewrite_manifest(other, add_sidecar)
     with pytest.raises(ValueError, match="unsupported immutable keys"):
         ArrowDataset.open(other)
+
+
+def test_manifest_generation_rejects_v1_schema(tmp_path: Path) -> None:
+    _write_dataset(tmp_path)
+
+    def use_v1_schema(manifest):
+        manifest["artifact_generation"]["schema_version"] = "s2and_arrow_artifact_generation_v1"
+
+    _rewrite_manifest(tmp_path, use_v1_schema)
+    with pytest.raises(ValueError, match="unsupported artifact_generation schema"):
+        ArrowDataset.open(tmp_path)
 
 
 def test_normalize_path_helper_remains_a_writer_boundary(
@@ -441,6 +476,7 @@ def test_normalize_path_helper_remains_a_writer_boundary(
         normalize_arrow_paths({"signatures": " "})
     with pytest.raises(ValueError, match="current directory"):
         normalize_arrow_paths({"signatures": "."})
+
 
 def test_require_name_counts_index_artifact_reports_invalid_manifest(tmp_path: Path) -> None:
     index_dir = tmp_path / "name_counts_index"

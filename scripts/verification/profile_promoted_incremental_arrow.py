@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import hashlib
 import json
 import os
 import platform
@@ -22,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from s2and._sha256 import sha256_file as _sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 
 REPORT_SCHEMA = "s2and_performance_evaluation_report_v1"
@@ -120,8 +120,6 @@ def _rust_extension_identity(require_release: bool) -> dict[str, Any]:
         raise RuntimeError(
             "Rust release build required; rebuild with `uv run maturin develop -m s2and_rust/Cargo.toml --release`"
         )
-    with module_path.open("rb") as binary:
-        sha256 = hashlib.file_digest(binary, "sha256").hexdigest()
     return {
         "available": True,
         "module_name": str(extension.__name__),
@@ -129,7 +127,7 @@ def _rust_extension_identity(require_release: bool) -> dict[str, Any]:
         "module_file": str(module_path),
         "binary": {
             "path": str(module_path),
-            "sha256": sha256,
+            "sha256": _sha256_file(module_path),
             "size_bytes": module_path.stat().st_size,
         },
         "build_info": build_info,

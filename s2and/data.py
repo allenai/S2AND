@@ -930,8 +930,8 @@ class ANDData:
 
         if self.name_counts_index is not None:
             return self.name_counts_index.manifest_sha256
-        if self.arrow_dataset is not None and self.arrow_dataset.name_counts_manifest is not None:
-            return self.arrow_dataset.name_counts_manifest.manifest_sha256
+        if self.arrow_dataset is not None and self.arrow_dataset.name_counts_index is not None:
+            return self.arrow_dataset.name_counts_index.manifest_sha256
         return None
 
     def _signature_name_count_keys(

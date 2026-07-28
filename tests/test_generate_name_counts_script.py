@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from s2and.consts import NORMALIZATION_VERSION
-from s2and.name_counts_manifest import NAME_COUNTS_INDEX_SCHEMA_VERSION
+from s2and.name_counts_index import NAME_COUNTS_INDEX_SCHEMA_VERSION
 from scripts.production.counts import generate_name_counts
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

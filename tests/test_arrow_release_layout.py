@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -282,6 +283,76 @@ def test_validate_release_root_reports_missing_canonical_specter_batch_index(tmp
         match=r"must contain both specter and specter_batch_index",
     ):
         validate_release_root(release_root, include_replay_bundles=False)
+
+
+def test_validate_release_root_owns_name_counts_topology(tmp_path: Path) -> None:
+    release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
+    alternate_root = release_root / "alternate"
+    alternate_index, _metrics = write_name_counts_index(alternate_root, tiny_name_counts_tuple())
+    dataset_manifest = json.loads((release_root / dataset_name / "manifest.json").read_text(encoding="utf-8"))
+    paths = dataset_manifest["paths"]
+    paths["name_counts_index"] = str(Path(alternate_index).resolve())
+    _rewrite_dataset_manifest_paths(release_root, dataset_name, paths)
+
+    with pytest.raises(ValueError, match="must resolve to the publication root index"):
+        validate_release_root(release_root, include_replay_bundles=False)
+
+
+def test_validate_release_root_threads_publication_root_into_replay_bundles(tmp_path: Path) -> None:
+    release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
+    source_dataset_root = release_root / dataset_name
+    replay_root = release_root / "replay"
+    replay_dataset_root = replay_root / "datasets" / "nested"
+    shutil.copytree(source_dataset_root, replay_dataset_root)
+
+    copied_manifest = json.loads((replay_dataset_root / "manifest.json").read_text(encoding="utf-8"))
+    metadata = {
+        key: value
+        for key, value in copied_manifest.items()
+        if key not in {"normalization_version", "paths", "artifact_generation"}
+    }
+    replay_paths = {
+        key: (
+            str(release_root / "name_counts_index")
+            if key == "name_counts_index"
+            else str(replay_dataset_root / Path(value).name)
+        )
+        for key, value in copied_manifest["paths"].items()
+    }
+    _touch_json(
+        replay_dataset_root / "manifest.json",
+        build_arrow_artifact_manifest(replay_paths, replay_dataset_root, metadata=metadata),
+    )
+    replay_dataset_manifest_bytes = (replay_dataset_root / "manifest.json").read_bytes()
+    _touch_json(
+        replay_root / "manifest.json",
+        {
+            "schema": "inference_arrow_bundle_v1",
+            "datasets": ["nested"],
+            "dataset_manifests": [
+                {
+                    "dataset": "nested",
+                    "dataset_dir": "datasets/nested",
+                    "manifest_path": "datasets/nested/manifest.json",
+                    "manifest_size_bytes": len(replay_dataset_manifest_bytes),
+                    "manifest_sha256": hashlib.sha256(replay_dataset_manifest_bytes).hexdigest(),
+                    "validation_requirements": {
+                        "require_embeddings": True,
+                        "require_name_counts_index": True,
+                    },
+                }
+            ],
+            "audit": {"dataset_count": 1, "total_signature_count": 1},
+        },
+    )
+    _write_root_manifest(
+        release_root,
+        dataset_name,
+        replay_bundles=[{"bundle": "mini-replay", "manifest_path": "replay/manifest.json"}],
+    )
+
+    metrics = validate_release_root(release_root, include_replay_bundles=True)
+    assert metrics["replay_dataset_manifest_count"] == 1
 
 
 def test_validate_release_root_reports_missing_replay_manifest_when_included(tmp_path: Path) -> None:

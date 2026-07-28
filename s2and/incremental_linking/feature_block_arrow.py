@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 
 from s2and._atomic_io import fsync_directory
+from s2and._sha256 import sha256_file as _sha256_file
 from s2and.arrow_inputs import (
     RAW_PLANNER_ARROW_BATCH_INDEX_KEYS,
     RAW_PLANNER_ARROW_KEY_COLUMNS,
@@ -27,7 +28,7 @@ from s2and.arrow_inputs import (
 from s2and.arrow_schema import validate_arrow_schema
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block_contract import normalize_cluster_seed_disallow_pairs
-from s2and.name_counts_manifest import NAME_COUNTS_INDEX_SCHEMA_VERSION
+from s2and.name_counts_index import NAME_COUNTS_INDEX_SCHEMA_VERSION
 from s2and.text import canonicalize_name_text
 
 ARROW_PHYSICAL_LAYOUT_SCHEMA_VERSION = "s2and_arrow_physical_v1"
@@ -1158,14 +1159,6 @@ def write_raw_planner_arrow_tables(
             )
         paths[name] = str(path)
     return paths
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _validated_name_count_entry(kind: str, raw_name: Any, raw_count: Any) -> tuple[str, float]:

@@ -3,59 +3,50 @@
   "dataset": "pubmed",
   "fixture": "pubmed_specter2",
   "artifact_generation": {
-    "schema_version": "s2and_arrow_artifact_generation_v1",
-    "generation_id": "3fd4ddd1af2defeda67b65690a34341604dfa683d3c7df4a019bdb024743fda3",
+    "schema_version": "s2and_arrow_artifact_generation_v2",
+    "generation_id": "e78b90750700aa16eea437ab44ce00735e24bda52a5a781ec9daa6927a3ce61c",
     "files": {
       "name_counts_index": {
-        "path": "name_counts_index",
         "kind": "directory_manifest",
         "byte_count": 775,
         "sha256": "ddd8cf82078d3b6b4b1dda9776e1d15c25d4b37fa917ae6ae39d1f460d3bb23b"
       },
       "paper_authors": {
-        "path": "paper_authors.arrow",
         "kind": "file",
         "byte_count": 453562,
         "sha256": "fff44fe401d0a7033052651c75294db965f5f757ff0d675ea1fbbcb779894268"
       },
       "paper_authors_batch_index": {
-        "path": "paper_authors.paper_authors_batch_index.bin",
         "kind": "file",
         "byte_count": 197816,
         "sha256": "b4605be404e33eb6b1eb34d0258061b106f1aa69609e4e5077c766b16a397b9f"
       },
       "papers": {
-        "path": "papers.arrow",
         "kind": "file",
         "byte_count": 623138,
         "sha256": "805a0f40ccbc7783eca1adcd9783fca48c0039bf5306c329e06092f5ed5c1142"
       },
       "papers_batch_index": {
-        "path": "papers.papers_batch_index.bin",
         "kind": "file",
         "byte_count": 45976,
         "sha256": "d0e14cc0f36953389322505fd7f896005d9baffd88398d9b6ae257035014a41d"
       },
       "signatures": {
-        "path": "signatures.arrow",
         "kind": "file",
         "byte_count": 631010,
         "sha256": "998f30bc25489003f9fcd76018106dcb011d9d39c509e55f753ccc70b42f8626"
       },
       "signatures_batch_index": {
-        "path": "signatures.signatures_batch_index.bin",
         "kind": "file",
         "byte_count": 45976,
         "sha256": "c63562cdc8c08e4974df319c34ebcb360a1b60e295ce7caf2556497f18f016ff"
       },
       "specter": {
-        "path": "specter2.arrow",
         "kind": "file",
         "byte_count": 8854682,
         "sha256": "4701311304dc69a61a6222098078a13035facbd6f2a99988924b967318a9360a"
       },
       "specter_batch_index": {
-        "path": "specter2.specter_batch_index.bin",
         "kind": "file",
         "byte_count": 45976,
         "sha256": "2542392ef36dc7261b6cbe22fdee43852805c7d060e2f9e3ee5df15d54c1451e"

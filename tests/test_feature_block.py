@@ -989,8 +989,8 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot(
         require_name_counts_index=True,
         expected_normalization_version=NORMALIZATION_VERSION,
     ) as arrow_dataset:
-        retained_manifest = arrow_dataset.name_counts_manifest
-        assert retained_manifest is not None
+        retained_index = arrow_dataset.name_counts_index
+        assert retained_index is not None
         retained_native = arrow_dataset.native_name_counts_index
         assert retained_native is not None
 
@@ -1023,7 +1023,7 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot(
         assert int(plan["row_count"]) > 0
         assert native_open_calls == 1
         assert planner.build_telemetry()["reused_name_counts_index"] is True
-        assert planner.name_counts_index().name_counts_manifest_sha256 == retained_manifest.manifest_sha256
+        assert planner.name_counts_index().name_counts_manifest_sha256 == retained_index.manifest_sha256
         featurizer = build_rust_featurizer_from_arrow_dataset(
             arrow_dataset,
             signature_ids=("s1",),

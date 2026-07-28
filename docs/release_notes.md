@@ -82,6 +82,18 @@ production model and public-data version is `1.3`, on a separate version axis.
   layout. The v1/v2 schemas and `generations/<generation>/` nesting are
   rejected; regenerate or repackage the index and rebuild or retrain Arrow and
   model artifacts bound to its manifest SHA-256.
+- Breaking: Arrow artifact generations require
+  `s2and_arrow_artifact_generation_v2`. A generation now identifies semantic
+  role plus kind, byte count, and content SHA-256; physical filenames live only
+  in `paths`, so a byte-identical rename intentionally preserves
+  `generation_id`. `ArrowDataset.open()` proves artifact safety, while the
+  release validator owns publication topology and requires root and nested
+  replay datasets to bind the publication-root `name_counts_index`.
+- Breaking: `ArrowDataset.name_counts_manifest`,
+  `ValidatedNameCountsManifest`, and `NameCountsBinding` are removed. Callers
+  use `ArrowDataset.name_counts_index` and `NameCountsIndex.path`,
+  `.manifest_sha256`, and `.normalization_version`; feature contracts continue
+  to bind the manifest digest directly.
 - Breaking: release orchestration uses one owner-authored `release.json` and
   two generated plans. `model_plan.json` exposes only training, validation,
   and EPS inputs; `evaluation_plan.json` owns held-out inputs, gates,

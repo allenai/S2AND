@@ -15,6 +15,7 @@ import pytest
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training import classic as classic_training
+from s2and.incremental_linking_training import source_bundle_preflight
 from scripts.production.model import train_linker_and_finalize as promoted_train
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, write_minimal_arrow_prediction_bundle
 
@@ -50,13 +51,13 @@ def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(
         promoted_train,
-        "_preflight_source_rows",
+        "preflight_source_rows",
         lambda *_args, **_kwargs: (4, {}),
     )
     monkeypatch.setattr(promoted_train, "pairwise_bundle_binding", lambda _path, **_kwargs: {"test": "binding"})
     monkeypatch.setattr(
         promoted_train,
-        "_validate_source_bundle_support_files",
+        "validate_source_bundle_support_files",
         lambda *_args, **_kwargs: ["test-support"],
     )
     monkeypatch.setattr(
@@ -172,11 +173,11 @@ def test_source_support_preflight_requires_declared_split_files(tmp_path: Path) 
     )
 
     with pytest.raises(ValueError, match="contains no files"):
-        promoted_train._validate_source_bundle_support_files(bundle)  # noqa: SLF001
+        source_bundle_preflight.validate_source_bundle_support_files(bundle)
 
     (tmp_path / "splits" / "placeholder.csv").write_text("unused\n", encoding="utf-8")
     with pytest.raises(ValueError, match="classic_gate_internal_eval_base_groups_path"):
-        promoted_train._validate_source_bundle_support_files(bundle)  # noqa: SLF001
+        source_bundle_preflight.validate_source_bundle_support_files(bundle)
 
 
 def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -> None:
@@ -209,7 +210,7 @@ def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -
     )
 
     with pytest.raises(ValueError, match="base_group_id values in multiple splits"):
-        promoted_train._validate_source_bundle_support_files(bundle)  # noqa: SLF001
+        source_bundle_preflight.validate_source_bundle_support_files(bundle)
 
     assignments = pd.read_csv(assignments_path)
     assignments.loc[1, "base_group_id"] = "b2"
@@ -219,11 +220,11 @@ def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -
         "calibration_check",
     ]
     with pytest.raises(ValueError, match="omit configured calibration/test splits"):
-        promoted_train._validate_source_bundle_support_files(bundle)  # noqa: SLF001
+        source_bundle_preflight.validate_source_bundle_support_files(bundle)
 
     classic["promoted_stratified_gate"]["calibration_splits"] = ["calibration_fit", "test"]
     with pytest.raises(ValueError, match="must not include test_split"):
-        promoted_train._validate_source_bundle_support_files(bundle)  # noqa: SLF001
+        source_bundle_preflight.validate_source_bundle_support_files(bundle)
 
 
 def test_release_table_plan_keeps_frozen_test_queries_out_of_training(tmp_path: Path) -> None:
@@ -329,7 +330,7 @@ def test_run_rejects_name_count_binding_before_materialization(
     with ArrowDataset.open(dataset_root) as arrow_dataset:
         monkeypatch.setattr(
             promoted_train,
-            "_preflight_source_rows",
+            "preflight_source_rows",
             lambda *_args, **_kwargs: (1, {"toy": arrow_dataset}),
         )
         with pytest.raises(ValueError, match="name-count generation mismatch"):

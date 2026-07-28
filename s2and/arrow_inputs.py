@@ -15,12 +15,13 @@ from types import MappingProxyType
 from typing import Any, BinaryIO
 
 from s2and._sha256 import is_lowercase_sha256
+from s2and._sha256 import sha256_file as _sha256_file
 from s2and.arrow_schema import validate_arrow_schema
 from s2and.consts import NORMALIZATION_VERSION
-from s2and.name_counts_manifest import ValidatedNameCountsManifest
+from s2and.name_counts_index import NameCountsIndex
 
 INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION = "inference_arrow_bundle_v1"
-ARROW_ARTIFACT_GENERATION_SCHEMA_VERSION = "s2and_arrow_artifact_generation_v1"
+ARROW_ARTIFACT_GENERATION_SCHEMA_VERSION = "s2and_arrow_artifact_generation_v2"
 
 
 @dataclass(frozen=True)
@@ -94,36 +95,6 @@ class _RetainedFile:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _shared_name_counts_relative_path(path: Path, manifest_root: Path, *, artifact_key: str) -> Path | None:
-    """Return an allowed relative path for a known shared name-count layout."""
-
-    if artifact_key != "name_counts_index":
-        return None
-    candidates = [(manifest_root.parent / "name_counts_index", Path("..") / "name_counts_index")]
-    if manifest_root.parent.name == "datasets":
-        candidates.extend(
-            [
-                (
-                    manifest_root.parent.parent / "name_counts_index",
-                    Path("..") / ".." / "name_counts_index",
-                ),
-                (
-                    manifest_root.parent.parent.parent / "name_counts_index",
-                    Path("..") / ".." / ".." / "name_counts_index",
-                ),
-            ]
-        )
-    return next((relative for candidate, relative in candidates if path == candidate), None)
-
-
 def _portable_manifest_path(path: PurePath) -> str:
     """Serialize a manifest path with platform-independent separators."""
 
@@ -136,18 +107,22 @@ def _manifest_relative_path(path_value: Any, manifest_dir: Path, *, artifact_key
     try:
         relative_path = path.relative_to(root)
     except ValueError as exc:
-        relative_path = _shared_name_counts_relative_path(path, root, artifact_key=artifact_key)
-        if relative_path is None:
+        if artifact_key != "name_counts_index":
             raise ValueError(
                 f"Arrow artifact path must remain within manifest directory: path={path} root={root}"
+            ) from exc
+        try:
+            relative_path = Path(os.path.relpath(path, root))
+        except ValueError:
+            raise ValueError(
+                f"Arrow name-count index must be serializable relative to manifest directory: path={path} root={root}"
             ) from exc
     return _portable_manifest_path(relative_path)
 
 
-def _build_arrow_artifact_generation(paths: Mapping[str, Any], manifest_dir: str | Path) -> dict[str, Any]:
+def _build_arrow_artifact_generation(paths: Mapping[str, Any]) -> dict[str, Any]:
     """Build the canonical content inventory used by Arrow bundle writers."""
 
-    root = Path(manifest_dir)
     files: dict[str, dict[str, Any]] = {}
     for key, raw_path in sorted((str(key), value) for key, value in paths.items()):
         if key not in _ARROW_IMMUTABLE_KEYS:
@@ -157,7 +132,6 @@ def _build_arrow_artifact_generation(paths: Mapping[str, Any], manifest_dir: str
         if not artifact_path.is_file():
             raise FileNotFoundError(f"cannot inventory Arrow artifact {key}={artifact_path}")
         files[key] = {
-            "path": _manifest_relative_path(declared_path, root, artifact_key=key),
             "kind": "directory_manifest" if declared_path.is_dir() else "file",
             "byte_count": artifact_path.stat().st_size,
             "sha256": _sha256_file(artifact_path),
@@ -191,7 +165,7 @@ def build_arrow_artifact_manifest(
             key: _manifest_relative_path(value, root, artifact_key=key)
             for key, value in sorted(canonical_paths.items())
         },
-        "artifact_generation": _build_arrow_artifact_generation(canonical_paths, root),
+        "artifact_generation": _build_arrow_artifact_generation(canonical_paths),
     }
 
 
@@ -332,7 +306,7 @@ def require_name_counts_index_artifact(
         error = f"{index_path} (expected directory)"
     else:
         try:
-            ValidatedNameCountsManifest.load(index_path)
+            NameCountsIndex.open(index_path)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             error = str(exc)
     if error is not None:
@@ -349,13 +323,13 @@ def require_name_counts_index_artifact(
 def _resolve_manifest_artifact_path(root: Path, raw_path: str, *, key: str) -> Path:
     relative = Path(raw_path)
     if relative.is_absolute():
-        raise ValueError(f"Arrow artifact generation files.{key}.path must be manifest-relative: {raw_path!r}")
+        raise ValueError(f"Arrow artifact manifest paths.{key} must be manifest-relative: {raw_path!r}")
     resolved = (root / relative).resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
-        if relative != _shared_name_counts_relative_path(resolved, root, artifact_key=key):
-            raise ValueError(f"Arrow artifact generation files.{key}.path escapes the manifest directory") from exc
+        if key != "name_counts_index":
+            raise ValueError(f"Arrow artifact manifest paths.{key} escapes the manifest directory") from exc
     return resolved
 
 
@@ -386,6 +360,12 @@ def _load_artifact_specs(root: Path) -> tuple[str, str, Mapping[str, _ArtifactSp
     invalid_keys = sorted(str(key) for key in files if str(key) not in _ARROW_IMMUTABLE_KEYS)
     if invalid_keys:
         raise ValueError(f"Arrow artifact generation contains unsupported immutable keys: {invalid_keys}")
+    file_keys = {str(key) for key in files}
+    declared_immutable_keys = {str(key) for key in paths if str(key) in _ARROW_IMMUTABLE_KEYS}
+    if file_keys != declared_immutable_keys:
+        missing = sorted(declared_immutable_keys - file_keys)
+        extra = sorted(file_keys - declared_immutable_keys)
+        raise ValueError(f"Arrow artifact generation and paths immutable key mismatch: missing={missing} extra={extra}")
     missing_base = sorted(_REQUIRED_RUNTIME_KEYS.difference(str(key) for key in files))
     if missing_base:
         raise MissingArrowArtifactError(
@@ -395,7 +375,6 @@ def _load_artifact_specs(root: Path) -> tuple[str, str, Mapping[str, _ArtifactSp
             missing_files={},
             producer_hint="generate a complete Arrow bundle with scripts/convert_to_arrow.py",
         )
-    file_keys = {str(key) for key in files}
     if ("specter" in file_keys) != ("specter_batch_index" in file_keys):
         raise ValueError("Arrow artifact generation must contain both specter and specter_batch_index or neither")
     declared_generation_id = generation.get("generation_id")
@@ -410,11 +389,17 @@ def _load_artifact_specs(root: Path) -> tuple[str, str, Mapping[str, _ArtifactSp
         key = str(raw_key)
         if not isinstance(raw_entry, Mapping):
             raise ValueError(f"Arrow artifact generation files.{key} must be an object")
-        raw_path = raw_entry.get("path")
+        expected_fields = {"kind", "byte_count", "sha256"}
+        entry_fields = {str(field) for field in raw_entry}
+        if entry_fields != expected_fields:
+            raise ValueError(
+                f"Arrow artifact generation files.{key} field mismatch: "
+                f"missing={sorted(expected_fields - entry_fields)} "
+                f"extra={sorted(entry_fields - expected_fields)}"
+            )
+        raw_path = paths.get(key)
         if not isinstance(raw_path, str) or not raw_path.strip():
-            raise ValueError(f"Arrow artifact generation files.{key}.path is invalid")
-        if paths.get(key) != raw_path:
-            raise ValueError(f"Arrow artifact generation files.{key}.path does not match manifest paths")
+            raise ValueError(f"Arrow artifact manifest paths.{key} is invalid")
         path = _resolve_manifest_artifact_path(root, raw_path, key=key)
         kind = raw_entry.get("kind")
         expected_kind = "directory_manifest" if key == "name_counts_index" else "file"
@@ -543,8 +528,7 @@ class ArrowDataset:
     _closed: bool
     _files: dict[str, _RetainedFile]
     _generation_id: str
-    _name_counts_index: Any | None
-    _name_counts_manifest: ValidatedNameCountsManifest | None
+    _name_counts_index: NameCountsIndex | None
     _native: Any | None
     _normalization_version: str
     _root: Path
@@ -556,7 +540,6 @@ class ArrowDataset:
         "_files",
         "_generation_id",
         "_name_counts_index",
-        "_name_counts_manifest",
         "_native",
         "_normalization_version",
         "_root",
@@ -618,17 +601,12 @@ class ArrowDataset:
                 if table_name in retained:
                     _validate_retained_arrow_schema(retained[table_name], table_name=table_name)
 
-            name_counts_index: Any | None = None
-            name_counts_manifest: ValidatedNameCountsManifest | None = None
+            name_counts_index: NameCountsIndex | None = None
             if "name_counts_index" in specs:
-                from s2and.name_counts_index import NameCountsIndex
-
-                name_counts_index, name_counts_manifest = NameCountsIndex._open_with_manifest(
-                    specs["name_counts_index"].path
-                )
-                if name_counts_manifest.manifest_sha256 != specs["name_counts_index"].sha256:
+                name_counts_index = NameCountsIndex.open(specs["name_counts_index"].path)
+                if name_counts_index.manifest_sha256 != specs["name_counts_index"].sha256:
                     raise ValueError("opened name-count manifest does not match the Arrow artifact generation")
-                if name_counts_manifest.normalization_version != normalization_version:
+                if name_counts_index.normalization_version != normalization_version:
                     raise ValueError("name-count index normalization_version does not match the Arrow dataset")
             native_name_counts = None if name_counts_index is None else name_counts_index._native
             native = _construct_native_arrow_dataset(retained, native_name_counts)
@@ -643,7 +621,6 @@ class ArrowDataset:
         dataset._normalization_version = normalization_version
         dataset._files = retained
         dataset._name_counts_index = name_counts_index
-        dataset._name_counts_manifest = name_counts_manifest
         dataset._native = native
         dataset._state_lock = threading.Lock()
         dataset._active_uses = 0
@@ -663,8 +640,8 @@ class ArrowDataset:
         return self._normalization_version
 
     @property
-    def name_counts_manifest(self) -> ValidatedNameCountsManifest | None:
-        return self._name_counts_manifest
+    def name_counts_index(self) -> NameCountsIndex | None:
+        return self._name_counts_index
 
     @property
     def closed(self) -> bool:

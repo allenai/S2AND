@@ -521,8 +521,7 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     assert arrow_dataset.name_counts_index is None
     assert arrow_dataset.arrow_dataset is training_bundle["arrow_source"]
     assert (
-        arrow_dataset.name_counts_manifest_sha256
-        == training_bundle["arrow_source"].name_counts_manifest.manifest_sha256
+        arrow_dataset.name_counts_manifest_sha256 == training_bundle["arrow_source"].name_counts_index.manifest_sha256
     )
     assert "arrow_paths" not in arrow_dataset.__dict__
     assert "arrow_artifact_generation" not in arrow_dataset.__dict__

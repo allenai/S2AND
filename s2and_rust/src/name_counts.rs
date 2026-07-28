@@ -61,7 +61,6 @@ pub(crate) struct RawNameCountIndex {
     last: RawNameCountIndexFile,
     first_last: RawNameCountIndexFile,
     last_first_initial: RawNameCountIndexFile,
-    manifest_files: Vec<(String, String, u64, String)>,
     normalization_version: String,
     identity: NameCountsIndexIdentity,
 }
@@ -115,7 +114,6 @@ struct RawNameCountIndexPaths {
 #[derive(Debug)]
 struct RawNameCountIndexFileSpec {
     path: PathBuf,
-    byte_count: u64,
     expected_sha256: String,
 }
 
@@ -128,22 +126,6 @@ impl RawNameCountIndex {
     /// Open and exhaustively validate every record at public artifact boundaries.
     pub(crate) fn open_fully_validated(path: &str) -> PyResult<Self> {
         let paths = resolve_name_counts_index_paths(path)?;
-        let manifest_files = [
-            ("first", &paths.first),
-            ("last", &paths.last),
-            ("first_last", &paths.first_last),
-            ("last_first_initial", &paths.last_first_initial),
-        ]
-        .into_iter()
-        .map(|(kind, spec)| {
-            (
-                kind.to_string(),
-                spec.path.to_string_lossy().into_owned(),
-                spec.byte_count,
-                spec.expected_sha256.clone(),
-            )
-        })
-        .collect();
         let ((first, last), (first_last, last_first_initial)) = rayon::join(
             || {
                 rayon::join(
@@ -187,7 +169,6 @@ impl RawNameCountIndex {
             last: last?,
             first_last: first_last?,
             last_first_initial: last_first_initial?,
-            manifest_files,
             normalization_version: paths.normalization_version,
             identity: paths.identity,
         })
@@ -299,11 +280,6 @@ impl NameCountsIndex {
     #[getter]
     fn name_counts_manifest_sha256(&self) -> &str {
         &self.index.identity.manifest_sha256
-    }
-
-    /// Return the native-validated resolved file facts.
-    fn _validated_manifest_files(&self) -> Vec<(String, String, u64, String)> {
-        self.index.manifest_files.clone()
     }
 
     /// Resolve four already-deduplicated aligned optional-key columns.
@@ -861,7 +837,6 @@ fn validated_name_counts_manifest_file(
     }
     Ok(RawNameCountIndexFileSpec {
         path: canonical_resolved,
-        byte_count: entry.byte_count,
         expected_sha256: entry.sha256,
     })
 }
@@ -969,10 +944,10 @@ fn name_counts_index_hashes(kind: RawNameCountKind, name_bytes: &[u8]) -> (u64, 
 #[cfg(test)]
 mod name_counts_tests {
     use super::{
-        is_lowercase_sha256, lookup_name_count_column, name_counts_index_hashes,
-        resolve_name_counts_index_paths, sha256_file, validate_lookup_column_lengths,
-        NameCountsIndex, RawNameCountIndex, RawNameCountIndexFile, RawNameCountKind,
-        RawNameCountMaps, NAME_COUNTS_INDEX_HEADER_LEN, NAME_COUNTS_INDEX_RECORD_LEN,
+        lookup_name_count_column, name_counts_index_hashes, resolve_name_counts_index_paths,
+        sha256_file, validate_lookup_column_lengths, NameCountsIndex, RawNameCountIndex,
+        RawNameCountIndexFile, RawNameCountKind, RawNameCountMaps, NAME_COUNTS_INDEX_HEADER_LEN,
+        NAME_COUNTS_INDEX_RECORD_LEN,
     };
     use std::io::{Seek, SeekFrom, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1436,15 +1411,6 @@ mod name_counts_tests {
 
         assert_eq!(index.normalization_version, "canonical_v2");
         assert_eq!(index.identity.manifest_sha256, expected_manifest_sha256);
-        assert_eq!(index.manifest_files.len(), 4);
-        assert!(index
-            .manifest_files
-            .iter()
-            .all(|(_kind, path, byte_count, sha256)| {
-                std::path::Path::new(path).is_file()
-                    && *byte_count > 0
-                    && is_lowercase_sha256(sha256)
-            }));
         drop(index);
         std::fs::remove_dir_all(&dir).expect("remove lookup artifact");
     }

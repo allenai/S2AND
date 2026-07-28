@@ -34,6 +34,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.ipc as ipc
 
+from s2and._sha256 import sha256_file as _hash_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training.classic import _drop_unlabeled_singleton_orcid_rows
 from scripts.eps_sweep.common import (
@@ -538,16 +539,6 @@ def _cache_metadata(
         "suppress_orcid_constraints": bool(args.suppress_orcid_constraints),
         "distance_source": "arrow-rust",
     }
-
-
-def _hash_file(path: Path) -> str:
-    """Return a SHA256 digest for one file."""
-
-    digest = hashlib.sha256()
-    with path.open("rb") as infile:
-        for chunk in iter(lambda: infile.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _path_stat_cache_key(path: Path) -> tuple[Any, ...]:

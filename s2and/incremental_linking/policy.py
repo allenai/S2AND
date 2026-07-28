@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
+from s2and._sha256 import is_lowercase_sha256
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block import normalize_cluster_seed_disallow_pairs
-from s2and.name_count_binding import NameCountsBinding
 
 PROMOTED_LINKER_MODEL_SUPPRESS_ORCID = True
+NAME_COUNTS_MANIFEST_SHA256_FIELD = "name_counts_manifest_sha256"
 
 
 def promoted_linker_orcid_force_link_enabled(*, suppress_orcid: bool) -> bool:
@@ -44,6 +45,38 @@ def clusterer_uses_embedding_features(clusterer: Any) -> bool:
     return False
 
 
+def require_name_counts_manifest_sha256(value: Any, *, context: str) -> str:
+    """Return one validated name-count manifest identity."""
+
+    if not is_lowercase_sha256(value):
+        raise ValueError(f"{context} requires {NAME_COUNTS_MANIFEST_SHA256_FIELD} as a lowercase SHA-256")
+    return value
+
+
+def _require_name_counts_binding(
+    clusterer: Any,
+    observed_value: Any,
+    *,
+    context: str,
+    source: str,
+) -> None:
+    feature_contract = getattr(clusterer, "feature_contract", None)
+    if not isinstance(feature_contract, Mapping):
+        raise ValueError(f"{context} model requires a feature_contract mapping with a name-count identity")
+    expected = require_name_counts_manifest_sha256(
+        feature_contract.get(NAME_COUNTS_MANIFEST_SHA256_FIELD),
+        context=f"{context} model feature_contract",
+    )
+    observed = require_name_counts_manifest_sha256(
+        observed_value,
+        context=f"{context} {source}",
+    )
+    if observed != expected:
+        raise ValueError(
+            f"{context} name-count binding mismatch for {source}: expected={expected!r} observed={observed!r}"
+        )
+
+
 def require_arrow_name_counts_index_for_clusterer(
     clusterer: Any,
     arrow_dataset: ArrowDataset,
@@ -59,21 +92,14 @@ def require_arrow_name_counts_index_for_clusterer(
             f"{context} with selected name_counts features requires name_counts_index. "
             "Open an Arrow release containing the S2AND name-count index."
         )
-    expected = NameCountsBinding.from_feature_contract(
-        getattr(clusterer, "feature_contract", None),
-        context=f"{context} model feature_contract",
-    )
-    manifest = arrow_dataset.name_counts_manifest
-    if manifest is None:  # pragma: no cover - validated-input invariant
-        raise RuntimeError("validated Arrow inputs lost the retained name-count manifest")
-    observed = NameCountsBinding.from_manifest_sha256(
-        manifest.manifest_sha256,
-        context=f"{context} Arrow name_counts_index manifest",
-    )
-    expected.require_matches(
-        observed,
+    index = arrow_dataset.name_counts_index
+    if index is None:  # pragma: no cover - validated-input invariant
+        raise RuntimeError("validated Arrow inputs lost the retained name-count index")
+    _require_name_counts_binding(
+        clusterer,
+        index.manifest_sha256,
         context=context,
-        source="ArrowDataset.name_counts_manifest",
+        source="ArrowDataset.name_counts_index",
     )
 
 
@@ -87,16 +113,9 @@ def require_dataset_name_counts_binding_for_clusterer(
 
     if not clusterer_uses_name_count_features(clusterer):
         return
-    expected = NameCountsBinding.from_feature_contract(
-        getattr(clusterer, "feature_contract", None),
-        context=f"{context} model feature_contract",
-    )
-    observed = NameCountsBinding.from_manifest_sha256(
+    _require_name_counts_binding(
+        clusterer,
         getattr(dataset, "name_counts_manifest_sha256", None),
-        context=f"{context} ANDData.name_counts_manifest_sha256",
-    )
-    expected.require_matches(
-        observed,
         context=context,
         source="ANDData.name_counts_manifest_sha256",
     )
@@ -112,16 +131,12 @@ def require_rust_featurizer_name_counts_binding_for_clusterer(
 
     if not clusterer_uses_name_count_features(clusterer):
         return
-    expected = NameCountsBinding.from_feature_contract(
-        getattr(clusterer, "feature_contract", None),
-        context=f"{context} model feature_contract",
-    )
-    observed = NameCountsBinding.from_rust_featurizer(
-        rust_featurizer,
-        context=f"{context} Rust featurizer",
-    )
-    expected.require_matches(
-        observed,
+    manifest_sha256 = getattr(rust_featurizer, "name_counts_manifest_sha256", None)
+    if manifest_sha256 is None:
+        raise ValueError(f"{context} requires a Rust featurizer with a verified name-count manifest")
+    _require_name_counts_binding(
+        clusterer,
+        manifest_sha256,
         context=context,
         source="RustFeaturizer.name_counts_manifest_sha256",
     )

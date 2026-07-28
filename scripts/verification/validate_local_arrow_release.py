@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
+from s2and._sha256 import sha256_file as _sha256
 from s2and.arrow_inputs import (
     INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION,
     ArrowDataset,
@@ -36,14 +36,6 @@ def _manifest_path(path_value: Any, base_dir: Path) -> Path:
     path_text = str(path_value).replace("\\", "/")
     path = Path(path_text)
     return path if path.is_absolute() else base_dir / path
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as infile:
-        for chunk in iter(lambda: infile.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _record_error(errors: list[str], message: str) -> None:
@@ -146,7 +138,8 @@ def _validate_entry_manifest_checksum(
 
 
 def _validate_dataset_manifest(
-    release_root: Path,
+    manifest_base: Path,
+    publication_root: Path,
     entry: Mapping[str, Any],
     errors: list[str],
     *,
@@ -158,7 +151,7 @@ def _validate_dataset_manifest(
     if manifest_path_value is None:
         _record_error(errors, f"{label} is missing manifest_path")
         return 0
-    manifest_path = _manifest_path(manifest_path_value, release_root)
+    manifest_path = _manifest_path(manifest_path_value, manifest_base)
     _require_file(manifest_path, errors, label=f"{label} manifest")
     if not manifest_path.is_file():
         return 0
@@ -169,6 +162,16 @@ def _validate_dataset_manifest(
     if not isinstance(paths, Mapping):
         _record_error(errors, f"{label} manifest is missing paths mapping: {manifest_path}")
         return 0
+    name_counts_path = paths.get("name_counts_index")
+    if name_counts_path is not None:
+        observed_name_counts = _manifest_path(name_counts_path, manifest_path.parent).resolve()
+        expected_name_counts = (publication_root / "name_counts_index").resolve()
+        if observed_name_counts != expected_name_counts:
+            _record_error(
+                errors,
+                f"{label} paths.name_counts_index must resolve to the publication root index: "
+                f"observed={observed_name_counts} expected={expected_name_counts}",
+            )
 
     requirements = entry.get("validation_requirements")
     require_name_counts_index = isinstance(requirements, Mapping) and bool(
@@ -222,6 +225,7 @@ def _validate_replay_bundles(
         for entry in _dataset_manifest_entries(nested_manifest, manifest_path):
             validated += _validate_dataset_manifest(
                 manifest_path.parent,
+                release_root,
                 entry,
                 errors,
                 label_prefix=f"replay bundle {bundle.get('bundle') or index}",
@@ -264,6 +268,7 @@ def validate_release_root(release_root: Path, *, include_replay_bundles: bool = 
     validated_datasets = 0
     for entry in entries:
         validated_datasets += _validate_dataset_manifest(
+            resolved_root,
             resolved_root,
             entry,
             errors,

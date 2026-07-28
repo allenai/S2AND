@@ -5,10 +5,6 @@ Status date: 2026-07-26
 This is a command reference. The dependency-ordered v1.3 sequence is
 [../../docs/release.md](../../docs/release.md).
 
-The release is operated by one trusted owner. These commands validate
-scientific inputs and runtime compatibility; they do not build an independent
-provenance or attestation chain.
-
 ## Pairwise model
 
 Start a fresh run directory containing only the reviewed `release.json`.
@@ -376,9 +372,9 @@ foreach ($Dataset in $BenchmarkDatasets) {
 }
 ```
 
-Now review `release.json`, create a fresh run directory containing only that
-file, and run [`prepare-run`](#pairwise-model). Only after it creates
-`stages/` should the Arrow conversion run:
+These conversion commands expect the reviewed inputs and the `stages/`
+directory established by
+[Stage 2 of the release runbook](../../docs/release.md#stage-2-build-training-and-evaluation-data):
 
 ```powershell
 $ReplayDatasets = @(
@@ -409,8 +405,8 @@ uv run python scripts/convert_to_arrow.py linker-replay `
   --n-jobs $NJobs
 ```
 
-Use fresh output paths and do not pass overwrite, skip, or discovery flags for
-the reviewed full set. The benchmark source is
+The commands require fresh output paths for the reviewed full set. The
+benchmark source is
 `<root>/<dataset>/<dataset>_signatures.json` plus its other benchmark files.
 Replay source is `<raw>/<dataset>/{signatures.json,papers.json}` plus
 `<embeddings>/<dataset>/specter2.pkl`. Copy the final index into each Arrow root
@@ -472,9 +468,9 @@ uv run python -m scripts.production.counts.generate_name_counts --help
 uv run python -m scripts.production.counts.generate_orcid_name_prefix_counts --help
 ```
 
-Always run bounded fixtures first. Full runs consume reviewed CSV exports,
-require guardrails, a reviewed resource/cost estimate, durable logs, and a
-fresh output directory. The repository has no warehouse client or credentials.
+Full runs consume reviewed CSV exports and follow the
+[release operating rules](../../docs/release.md#operating-rules). The
+repository has no warehouse client or credentials.
 
 Export name counts with this reviewed query, setting the limit to
 `max_source_rows + 1`:
@@ -673,8 +669,8 @@ Pop-Location
 
 Success reports `bulk_pair_count: 3`, `bulk_signature_count: 3`,
 `arrow_promoted_incremental: 1`, `query_view: raw_arrow`, and
-`signature_count: 3`. Verify the public packages in a second empty environment,
-then rerun the same script and arguments:
+`signature_count: 3`. To smoke the public packages instead of candidate
+wheels, use a second empty environment with the same script and arguments:
 
 ```powershell
 $PublicSmokeVenv = "$RunRoot\stages\public-smoke-venv"

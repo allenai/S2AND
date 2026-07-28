@@ -16,11 +16,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from s2and.incremental_linking_training.classic import load_bundle  # noqa: E402
-from scripts.convert_to_arrow import _write_root_manifest  # noqa: E402
-from scripts.production.model.train_linker_and_finalize import (  # noqa: E402
-    _preflight_source_rows,
-    _validate_source_bundle_support_files,
+from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
+    preflight_source_rows,
+    validate_source_bundle_support_files,
 )
+from scripts.convert_to_arrow import _write_root_manifest  # noqa: E402
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -68,9 +68,9 @@ def assemble_source_bundle(
     )
 
     bundle = load_bundle(output_source_bundle)
-    _validate_source_bundle_support_files(bundle)
+    validate_source_bundle_support_files(bundle)
     with ExitStack() as arrow_stack:
-        selected_source_rows, _arrow_datasets = _preflight_source_rows(
+        selected_source_rows, _arrow_datasets = preflight_source_rows(
             bundle,
             name_counts_index_root=None,
             arrow_stack=arrow_stack,

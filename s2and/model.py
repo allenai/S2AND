@@ -40,10 +40,12 @@ from s2and.incremental_linking.feature_block import (
     temporary_cluster_seed_sidecars,
 )
 from s2and.incremental_linking.policy import (
+    NAME_COUNTS_MANIFEST_SHA256_FIELD,
     clusterer_uses_embedding_features,
     clusterer_uses_name_count_features,
     request_cluster_seed_disallow_parts,
     require_dataset_name_counts_binding_for_clusterer,
+    require_name_counts_manifest_sha256,
     require_rust_featurizer_name_counts_binding_for_clusterer,
     resolve_load_name_counts_policy,
 )
@@ -56,7 +58,6 @@ from s2and.incremental_linking.production import (
 )
 from s2and.model_pairwise import FastCluster, intify, predict_pairwise_class0
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
-from s2and.name_count_binding import NameCountsBinding
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.runtime import (
     RuntimeContext,
@@ -3583,7 +3584,7 @@ class Clusterer:
         contract["normalization_version"] = training_normalization_version
         if clusterer_uses_name_count_features(self):
             count_bindings = {
-                NameCountsBinding.from_manifest_sha256(
+                require_name_counts_manifest_sha256(
                     getattr(dataset, "name_counts_manifest_sha256", None),
                     context=f"Clusterer.fit dataset={getattr(dataset, 'name', '<unnamed>')}",
                 )
@@ -3594,7 +3595,7 @@ class Clusterer:
                     "Clusterer.fit requires one verified name-count generation matching dataset normalization; "
                     f"observed={sorted(repr(binding) for binding in count_bindings)}"
                 )
-            contract.update(next(iter(count_bindings)).feature_contract_fields())
+            contract[NAME_COUNTS_MANIFEST_SHA256_FIELD] = next(iter(count_bindings))
         self.feature_contract = contract
 
         val_block_dict_list = []

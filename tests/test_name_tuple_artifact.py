@@ -4,7 +4,6 @@ import gzip
 import hashlib
 import json
 import os
-import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,25 +15,22 @@ from s2and.name_tuple_artifact import load_name_tuple_artifact
 from scripts.production import generate_canonical_name_tuples
 
 
-@pytest.mark.parametrize("argv", [[], ["--source", "source.txt"], ["--output", "output.txt"]])
-def test_canonical_name_tuple_generator_requires_explicit_paths(
-    monkeypatch: pytest.MonkeyPatch,
-    argv: list[str],
-) -> None:
-    monkeypatch.setattr(sys, "argv", ["generate_canonical_name_tuples.py", *argv])
-
-    with pytest.raises(SystemExit) as exc_info:
-        generate_canonical_name_tuples.main()
-
-    assert exc_info.value.code == 2
-
-
 def test_checked_in_canonical_name_tuples_load_directly() -> None:
     data_path = Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt"
     artifact = load_name_tuple_artifact(data_path)
 
     assert len(artifact.pairs) == 5027
     assert artifact.data_sha256 == hashlib.sha256(data_path.read_bytes()).hexdigest()
+
+
+def test_checked_in_source_reproduces_canonical_name_tuples_byte_exactly(tmp_path: Path) -> None:
+    source_path = Path(_PACKAGE_DATA_DIR) / "s2and_unnormalized_filtered_name_tuples.txt"
+    expected_path = Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt"
+    regenerated_path = tmp_path / expected_path.name
+
+    generate_canonical_name_tuples.regenerate(str(source_path), str(regenerated_path))
+
+    assert regenerated_path.read_bytes() == expected_path.read_bytes()
 
 
 def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
@@ -80,24 +76,26 @@ def test_loader_reads_data_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert reads == [artifact_path]
 
 
-@pytest.mark.parametrize(
-    ("payload", "message"),
-    [
-        (b"ally,alice\n", "name_a must be lexicographically less than name_b"),
-        (b"alice,ally\nalice,ally\n", "rows must be unique and sorted"),
-        (b"alice,alice\n", "identity"),
-        (b"ann,anna\n", "prefix-compatible"),
-        (b"Alice,ally\n", "noncanonical"),
-        (b"alice\n", "two nonempty fields"),
-        (b"\xff\n", "not valid UTF-8"),
-    ],
-)
-def test_loader_rejects_semantically_invalid_rows(tmp_path: Path, payload: bytes, message: str) -> None:
+def test_loader_rejects_semantically_invalid_rows(tmp_path: Path) -> None:
     artifact_path = tmp_path / "aliases.txt"
-    artifact_path.write_bytes(payload)
+    cases = (
+        ("reverse-order", b"ally,alice\n", "name_a must be lexicographically less than name_b"),
+        ("duplicate", b"alice,ally\nalice,ally\n", "rows must be unique and sorted"),
+        ("identity", b"alice,alice\n", "identity"),
+        ("prefix", b"ann,anna\n", "prefix-compatible"),
+        ("noncanonical", b"Alice,ally\n", "noncanonical"),
+        ("wrong-field-count", b"alice\n", "two nonempty fields"),
+        ("invalid-utf8", b"\xff\n", "not valid UTF-8"),
+    )
+    for case_id, payload, message in cases:
+        artifact_path.write_bytes(payload)
 
-    with pytest.raises(ValueError, match=message):
-        load_name_tuple_artifact(artifact_path)
+        try:
+            load_name_tuple_artifact(artifact_path)
+        except ValueError as error:
+            assert message in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: semantically invalid row was accepted")
 
 
 def test_generator_atomically_publishes_one_loadable_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

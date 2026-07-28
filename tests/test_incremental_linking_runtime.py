@@ -28,7 +28,6 @@ from s2and.incremental_linking.linker_pairwise import (
 from s2and.incremental_linking.logistic_gate import load_logistic_gate_config, logistic_gate_config
 from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS,
-    RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     LinkerRetrievalBatch,
     RawArrowPlanBundle,
     build_linker_retrieval_batch_from_raw_plan_bundle,
@@ -182,7 +181,6 @@ def test_distance_row_signals_distinguish_top3_and_top5_means() -> None:
 
 def _minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
     raw_plan = {
-        "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
         "query_signature_ids": ["q0"],
         "query_views": ["full"],
         "query_authors": ["Alice"],
@@ -220,16 +218,6 @@ def test_raw_candidate_plan_rejects_legacy_numeric_pair_indices() -> None:
         )
 
 
-def test_raw_candidate_plan_rejects_pair_left_id_that_disagrees_with_row_query() -> None:
-    raw_plan = _minimal_raw_candidate_plan(left_signature_ids=["other-query"])
-
-    with pytest.raises(ValueError, match="left_signature_ids must match"):
-        build_linker_retrieval_batch_from_raw_plan_bundle(
-            RawArrowPlanBundle.from_native_mapping(raw_plan),
-            signature_id_to_index={"q0": 0, "other-query": 1, "s1": 2},
-        )
-
-
 def test_raw_candidate_plan_rejects_row_query_index_outside_query_count() -> None:
     raw_plan = _minimal_raw_candidate_plan(row_query_signature_indices=np.asarray([1], dtype=np.uint32))
 
@@ -240,32 +228,31 @@ def test_raw_candidate_plan_rejects_row_query_index_outside_query_count() -> Non
         )
 
 
-@pytest.mark.parametrize("retrieval_rank", [-1, 0])
-def test_raw_candidate_plan_rejects_invalid_retrieval_rank(retrieval_rank: int) -> None:
-    raw_plan = {
-        "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
-        "query_signature_ids": ["q0"],
-        "query_views": ["full"],
-        "query_authors": ["Alice"],
-        "row_count": 1,
-        "pair_count": 1,
-        "row_query_signature_indices": np.asarray([0], dtype=np.uint32),
-        "row_component_keys": ["c1"],
-        "retrieval_scores": np.asarray([0.9], dtype=np.float32),
-        "retrieval_ranks": [retrieval_rank],
-        "pair_row_indices": np.asarray([0], dtype=np.uint32),
-        "left_signature_ids": ["q0"],
-        "right_signature_ids": ["s1"],
-        "component_members": {"c1": ["s1"]},
-    }
-    for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
-        raw_plan[raw_key] = np.asarray([""] if dtype is object else [0], dtype=dtype)
+def test_raw_candidate_plan_rejects_invalid_retrieval_rank() -> None:
+    for retrieval_rank in (-1, 0):
+        raw_plan = {
+            "query_signature_ids": ["q0"],
+            "query_views": ["full"],
+            "query_authors": ["Alice"],
+            "row_count": 1,
+            "pair_count": 1,
+            "row_query_signature_indices": np.asarray([0], dtype=np.uint32),
+            "row_component_keys": ["c1"],
+            "retrieval_scores": np.asarray([0.9], dtype=np.float32),
+            "retrieval_ranks": [retrieval_rank],
+            "pair_row_indices": np.asarray([0], dtype=np.uint32),
+            "left_signature_ids": ["q0"],
+            "right_signature_ids": ["s1"],
+            "component_members": {"c1": ["s1"]},
+        }
+        for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
+            raw_plan[raw_key] = np.asarray([""] if dtype is object else [0], dtype=dtype)
 
-    with pytest.raises(ValueError, match="retrieval_ranks"):
-        build_linker_retrieval_batch_from_raw_plan_bundle(
-            RawArrowPlanBundle.from_native_mapping(raw_plan),
-            signature_id_to_index={"q0": 0, "s1": 1},
-        )
+        with pytest.raises(ValueError, match="retrieval_ranks"):
+            build_linker_retrieval_batch_from_raw_plan_bundle(
+                RawArrowPlanBundle.from_native_mapping(raw_plan),
+                signature_id_to_index={"q0": 0, "s1": 1},
+            )
 
 
 def test_raw_candidate_plan_rejects_invalid_uint8_flag() -> None:

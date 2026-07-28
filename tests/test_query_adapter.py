@@ -78,37 +78,38 @@ def test_title_terms_preserve_identifying_digits() -> None:
     assert query.title_terms == frozenset({"part", "1", "co3o4"})
 
 
-@pytest.mark.parametrize(("year", "expected"), [(None, None), (0, None), (-1, None), (2020, 2020)])
-def test_classic_query_and_summary_match_arrow_year_missingness(
-    year: int | None,
-    expected: int | None,
-) -> None:
-    dataset = SimpleNamespace(
-        signatures={"q": _signature("pq"), "seed": _signature("ps")},
-        papers={
-            "pq": SimpleNamespace(title="", venue=None, journal_name=None, year=year, authors=[]),
-            "ps": SimpleNamespace(title="", venue=None, journal_name=None, year=year, authors=[]),
-        },
-        specter_embeddings=None,
-    )
+def test_classic_query_and_summary_match_arrow_year_missingness() -> None:
+    for case_id, year, expected in (
+        ("none", None, None),
+        ("zero", 0, None),
+        ("present", 2020, 2020),
+    ):
+        dataset = SimpleNamespace(
+            signatures={"q": _signature("pq"), "seed": _signature("ps")},
+            papers={
+                "pq": SimpleNamespace(title="", venue=None, journal_name=None, year=year, authors=[]),
+                "ps": SimpleNamespace(title="", venue=None, journal_name=None, year=year, authors=[]),
+            },
+            specter_embeddings=None,
+        )
 
-    query = extract_query_features(_dataset_arg(dataset), "q")
-    summary = build_cluster_summary(
-        _dataset_arg(dataset),
-        cluster_id="cluster",
-        component_key="component",
-        signature_ids=("seed",),
-        max_exemplars=0,
-        feature_cache={},
-        orcid_enabled=False,
-        block_key="block",
-    )
+        query = extract_query_features(_dataset_arg(dataset), "q")
+        summary = build_cluster_summary(
+            _dataset_arg(dataset),
+            cluster_id="cluster",
+            component_key="component",
+            signature_ids=("seed",),
+            max_exemplars=0,
+            feature_cache={},
+            orcid_enabled=False,
+            block_key="block",
+        )
 
-    assert query.year == expected
-    assert summary.year_values == ([] if expected is None else [expected])
-    assert summary.year_min == expected
-    assert summary.year_max == expected
-    assert summary.year_mean == expected
+        assert query.year == expected, case_id
+        assert summary.year_values == ([] if expected is None else [expected]), case_id
+        assert summary.year_min == expected, case_id
+        assert summary.year_max == expected, case_id
+        assert summary.year_mean == expected, case_id
 
 
 def test_signature_query_author_ignores_raw_full_name_and_uses_canonical_fields() -> None:

@@ -13,14 +13,13 @@ import lightgbm as lgb
 import numpy as np
 import pyarrow as pa
 
-from s2and._sha256 import sha256_file as _sha256_file
 from s2and.arrow_inputs import (
-    INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION,
     ArrowDataset,
     build_arrow_artifact_manifest,
+    read_arrow_collection_root,
     write_arrow_artifact_manifest,
 )
-from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION
+from s2and.consts import NAME_COUNTS_INDEX_PATH
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
 from s2and.incremental_linking.feature_block_arrow import write_raw_arrow_batch_lookup_indexes
@@ -28,46 +27,21 @@ from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
 from s2and.model import Clusterer, FastCluster
 from s2and.production_bundle import finalize_production_bundle, write_pairwise_production_bundle
+from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION
 from s2and.production_model import canonical_artifact_hashes, load_production_model, pairwise_bundle_binding
 from s2and.runtime import build_runtime_context
 
-RELEASE_DATA_MANIFEST_SCHEMA = INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION
+SMOKE_TOTAL_RAM_BYTES = 2_000_000_000
 
 
-def _require_sha256(path: Path, expected_sha256: str, *, label: str) -> None:
-    if not path.is_file():
-        raise FileNotFoundError(f"{label} is missing: {path}")
-    observed_sha256 = _sha256_file(path)
-    if observed_sha256 != expected_sha256:
-        raise ValueError(f"{label} SHA-256 mismatch: expected={expected_sha256} observed={observed_sha256}")
-
-
-def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"{label} must contain a JSON object: {path}")
-    return payload
-
-
-def _release_dataset_root(data_root: Path, dataset: str) -> Path:
-    root_manifest = _read_json_object(data_root / "manifest.json", label="Release data manifest")
-    if root_manifest.get("schema") != RELEASE_DATA_MANIFEST_SCHEMA:
-        raise ValueError(
-            "Release data manifest schema mismatch: "
-            f"expected={RELEASE_DATA_MANIFEST_SCHEMA!r} observed={root_manifest.get('schema')!r}"
-        )
-    entries = [entry for entry in root_manifest["dataset_manifests"] if str(entry["dataset"]) == dataset]
-    if len(entries) != 1:
-        raise ValueError(f"Release data manifest must contain exactly one dataset entry for {dataset!r}")
-
-    entry = entries[0]
-    dataset_manifest_path = (data_root / entry["manifest_path"]).resolve()
-    _require_sha256(
-        dataset_manifest_path,
-        str(entry["manifest_sha256"]),
-        label=f"Release dataset {dataset!r} manifest",
-    )
-    return dataset_manifest_path.parent
+def _release_dataset(data_root: Path, dataset: str) -> tuple[Path, str]:
+    entries, _replay_bundles, release_version = read_arrow_collection_root(data_root / "manifest.json")
+    if release_version is None:
+        raise ValueError("Release data root must be a published collection")
+    manifest_path = entries.get(dataset)
+    if manifest_path is None:
+        raise ValueError(f"Release data manifest is missing dataset {dataset!r}")
+    return manifest_path.parent, release_version
 
 
 def _fit_binary_classifier(width: int, *, seed: int) -> lgb.LGBMClassifier:
@@ -143,8 +117,8 @@ def _write_arrow_request(root: Path) -> dict[str, str]:
     return paths
 
 
-def _write_synthetic_bundle(root: Path) -> Path:
-    featurizer_info = FeaturizationInfo(["year_diff"], featurizer_version=FEATURIZER_VERSION)
+def _write_synthetic_bundle(root: Path, *, release_version: str = "1.3") -> Path:
+    featurizer_info = FeaturizationInfo(["year_diff"])
     clusterer = Clusterer(
         featurizer_info,
         _fit_binary_classifier(1, seed=101),
@@ -155,15 +129,15 @@ def _write_synthetic_bundle(root: Path) -> Path:
         batch_size=32,
     )
     clusterer.feature_contract = {
-        "normalization_version": NORMALIZATION_VERSION,
         **canonical_artifact_hashes(),
     }
     clusterer.best_params = {"eps": 0.5, "linkage": "average"}
-    pairwise_bundle_dir = root / "pairwise_stage" / "production_model_v0.0"
+    pairwise_bundle_dir = root / "pairwise_stage"
     write_pairwise_production_bundle(
         clusterer,
         pairwise_bundle_dir,
-        bundle_version="0.0",
+        release_version=release_version,
+        eps_calibration=CALIBRATED_EPS_CALIBRATION,
     )
 
     feature_count = len(promoted_linker_feature_columns())
@@ -185,7 +159,7 @@ def _write_synthetic_bundle(root: Path) -> Path:
     )
     target_json = root / "incremental_linker_training_target.json"
     target_json.write_text("{}\n", encoding="utf-8")
-    bundle_dir = root / "production_model_v0.0"
+    bundle_dir = root / "production_model"
     finalize_production_bundle(
         pairwise_bundle_dir=pairwise_bundle_dir,
         output_bundle_dir=bundle_dir,
@@ -215,7 +189,7 @@ def run_smoke(root: Path) -> dict[str, Any]:
             prevent_new_incompatibilities=False,
             batching_threshold=1,
             runtime_context=build_runtime_context("installed_incremental_arrow_smoke", backend="rust"),
-            total_ram_bytes=1_000_000_000,
+            total_ram_bytes=SMOKE_TOTAL_RAM_BYTES,
             name_tuples=set(),
             cluster_seeds_require={"s1": "c_match", "s2": "c_other"},
         )
@@ -233,7 +207,7 @@ def _bulk_smoke_summary(
         {"smoke": signature_ids},
         arrow_dataset,
         runtime_context=build_runtime_context(label, backend="rust"),
-        total_ram_bytes=1_000_000_000,
+        total_ram_bytes=SMOKE_TOTAL_RAM_BYTES,
     )
     clustered_ids = [str(signature_id) for members in clusters.values() for signature_id in members]
     if len(clustered_ids) != len(signature_ids) or set(clustered_ids) != set(signature_ids):
@@ -297,10 +271,16 @@ def run_release_candidate_smoke(
             f"configured={configured_name_counts_index} expected={expected_name_counts_index}"
         )
 
+    dataset_root, data_release_version = _release_dataset(data_root, dataset)
     clusterer = load_production_model(model_dir)
+    if clusterer.production_model_release_version != data_release_version:
+        raise ValueError(
+            "Release candidate model/data version mismatch: "
+            f"model={clusterer.production_model_release_version!r} data={data_release_version!r}"
+        )
     clusterer.n_jobs = 1
     with ArrowDataset.open(
-        _release_dataset_root(data_root, dataset),
+        dataset_root,
         require_name_counts_index=True,
     ) as arrow_dataset:
         bound_name_counts = arrow_dataset.name_counts_index
@@ -318,7 +298,7 @@ def run_release_candidate_smoke(
             prevent_new_incompatibilities=False,
             batching_threshold=1,
             runtime_context=build_runtime_context("installed_release_candidate_smoke", backend="rust"),
-            total_ram_bytes=1_000_000_000,
+            total_ram_bytes=SMOKE_TOTAL_RAM_BYTES,
             cluster_seeds_require={
                 selected_signature_ids[0]: "smoke-seed-1",
                 selected_signature_ids[1]: "smoke-seed-2",

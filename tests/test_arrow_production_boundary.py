@@ -44,29 +44,22 @@ def test_filtered_arrow_prediction_rejects_disabling_required_name_counts(tmp_pa
         )
 
 
-@pytest.mark.parametrize(
-    ("batching_threshold", "dists", "message"),
-    [
-        (0, None, "batching_threshold must be positive"),
-        (-1, None, "batching_threshold must be positive"),
-        (1, {"block": np.zeros((2, 2))}, "batching_threshold cannot be used with precomputed dists"),
-    ],
-)
-def test_filtered_arrow_prediction_rejects_invalid_subblocking_arguments(
-    tmp_path: Path,
-    batching_threshold: int,
-    dists: dict[str, np.ndarray] | None,
-    message: str,
-) -> None:
+def test_filtered_arrow_prediction_rejects_invalid_subblocking_arguments(tmp_path: Path) -> None:
     write_minimal_arrow_prediction_bundle(tmp_path)
     arrow_dataset = ArrowDataset.open(tmp_path)
-    with pytest.raises(ValueError, match=message):
-        _year_diff_clusterer().predict_from_arrow(
-            {"block": ["s0", "s1"]},
-            arrow_dataset,
-            dists=dists,
-            batching_threshold=batching_threshold,
-        )
+    cases = (
+        ("zero-threshold", 0, None, "batching_threshold must be positive"),
+        ("negative-threshold", -1, None, "batching_threshold must be positive"),
+        ("precomputed-dists", 1, {"block": np.zeros((2, 2))}, "cannot be used with precomputed dists"),
+    )
+    for _case_id, batching_threshold, dists, message in cases:
+        with pytest.raises(ValueError, match=message):
+            _year_diff_clusterer().predict_from_arrow(
+                {"block": ["s0", "s1"]},
+                arrow_dataset,
+                dists=dists,
+                batching_threshold=batching_threshold,
+            )
 
 
 def test_filtered_arrow_prediction_requires_specter_for_subblocking(tmp_path: Path) -> None:

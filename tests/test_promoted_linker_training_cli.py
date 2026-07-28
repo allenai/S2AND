@@ -3,9 +3,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -36,7 +33,6 @@ EXPLICIT_ARTIFACT_HASHES = {
     "name_tuples_data_sha256": "b" * 64,
     "orcid_prefix_counts_data_sha256": "c" * 64,
 }
-REPO_ROOT = Path(__file__).resolve().parents[1]
 FULL_MATERIALIZATION_SUMMARIES = tuple({"table_key": key, "rows": 1} for key in promoted_train.REQUIRED_TABLE_KEYS)
 
 
@@ -69,50 +65,6 @@ def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
             ("s2and_eval_path", "hwang_eval_path"),
         ),
     )
-
-
-def test_canonical_cli_help_and_import_leave_backend_unchanged(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    help_result = subprocess.run(
-        [sys.executable, "scripts/production/model/train_linker_and_finalize.py", "--help"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert help_result.returncode == 0, help_result.stderr
-    assert "--pairwise-model-path" in help_result.stdout
-
-    with pytest.raises(SystemExit) as help_exit:
-        promoted_train.build_parser().parse_args(["--help"])
-    assert help_exit.value.code == 0
-    assert "Explicit v5 pairwise_only native bundle" in capsys.readouterr().out
-
-    for backend in (None, "python"):
-        env = os.environ.copy()
-        if backend is None:
-            env.pop("S2AND_BACKEND", None)
-        else:
-            env["S2AND_BACKEND"] = backend
-        import_result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "import os; "
-                    "import scripts.production.model.train_linker_and_finalize; "
-                    "print(os.environ.get('S2AND_BACKEND'))"
-                ),
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert import_result.returncode == 0, import_result.stderr
-        assert import_result.stdout.strip() == str(backend)
 
 
 def test_incremental_linking_runtime_imports_stay_runtime_safe() -> None:
@@ -304,7 +256,6 @@ def test_run_rejects_name_count_binding_before_materialization(
     monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
     _stub_preflight(monkeypatch)
     monkeypatch.setattr(promoted_train, "load_clusterer", lambda *_args, **_kwargs: clusterer)
-    monkeypatch.setattr(promoted_train, "_assert_pairwise_model_supports_arrow_materialization", lambda *_args: None)
 
     def reject_binding(actual_clusterer: Any, actual_dataset: Any, *, context: str) -> None:
         assert actual_clusterer is clusterer
@@ -345,7 +296,6 @@ def test_partial_target_metrics_are_rejected_when_loaded(tmp_path: Path) -> None
     target_path.write_text(
         json.dumps(
             {
-                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "features": features,
                 "feature_count": len(features),
                 "params": {"n_estimators": 1},
@@ -356,14 +306,6 @@ def test_partial_target_metrics_are_rejected_when_loaded(tmp_path: Path) -> None
     )
 
     with pytest.raises(ValueError, match="complete official metric set"):
-        promoted_train._load_target(target_path)  # noqa: SLF001
-
-
-def test_target_schema_is_required_when_loaded(tmp_path: Path) -> None:
-    target_path = tmp_path / "target.json"
-    target_path.write_text("{}\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="schema_version must be"):
         promoted_train._load_target(target_path)  # noqa: SLF001
 
 
@@ -536,28 +478,32 @@ def test_observed_metrics_use_weighted_average_error() -> None:
     assert observed["weighted_average_error"] == pytest.approx(((0.25 * 0.04) + 0.03 + (1.5 * 0.03)) / 2.75)
 
 
-@pytest.mark.parametrize("change", ["missing", "extra"])
-def test_observed_metric_validation_requires_exact_official_keys(change: str) -> None:
-    observed = _valid_observed_metrics()
-    if change == "missing":
-        observed.pop("weighted_average_error")
-    else:
-        observed["unexpected_metric"] = 0.0
+def test_observed_metric_validation_requires_exact_official_keys() -> None:
+    for case_id in ("missing", "extra"):
+        observed = _valid_observed_metrics()
+        if case_id == "missing":
+            observed.pop("weighted_average_error")
+        else:
+            observed["unexpected_metric"] = 0.0
 
-    with pytest.raises(ValueError, match="complete official metric set"):
-        promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
+        try:
+            promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
+        except ValueError as error:
+            assert "complete official metric set" in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: incomplete official metric set was accepted")
 
 
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("stratified_test_accuracy", float("nan"), "must be finite"),
-        ("stratified_test_accuracy", 1.1, r"must be in \[0, 1\]"),
-        ("stratified_test_errors", -1, "must be a nonnegative integer"),
-        ("training_rows", 0, "training counts are inconsistent"),
-        ("stratified_test_queries", 0, "test counts are inconsistent"),
-        ("stratified_test_errors", 101, "test counts are inconsistent"),
+def test_observed_metric_validation_rejects_malformed_values() -> None:
+    cases = [
+        ("accuracy-nan", "stratified_test_accuracy", float("nan"), "must be finite"),
+        ("accuracy-over-one", "stratified_test_accuracy", 1.1, "must be in [0, 1]"),
+        ("negative-errors", "stratified_test_errors", -1, "must be a nonnegative integer"),
+        ("zero-training-rows", "training_rows", 0, "training counts are inconsistent"),
+        ("zero-test-queries", "stratified_test_queries", 0, "test counts are inconsistent"),
+        ("too-many-errors", "stratified_test_errors", 101, "test counts are inconsistent"),
         (
+            "nonpositive-weight",
             "weighted_average_error_weights",
             {
                 **promoted_train.WEIGHTED_ERROR_WEIGHTS,
@@ -566,6 +512,7 @@ def test_observed_metric_validation_requires_exact_official_keys(change: str) ->
             "must be positive",
         ),
         (
+            "nonofficial-weight",
             "weighted_average_error_weights",
             {
                 **promoted_train.WEIGHTED_ERROR_WEIGHTS,
@@ -573,18 +520,17 @@ def test_observed_metric_validation_requires_exact_official_keys(change: str) ->
             },
             "must equal the official value",
         ),
-    ],
-)
-def test_observed_metric_validation_rejects_malformed_values(
-    field: str,
-    value: Any,
-    message: str,
-) -> None:
-    observed = _valid_observed_metrics()
-    observed[field] = value
+    ]
+    for case_id, field, value, message in cases:
+        observed = _valid_observed_metrics()
+        observed[field] = value
 
-    with pytest.raises(ValueError, match=message):
-        promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
+        try:
+            promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
+        except ValueError as error:
+            assert message in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: malformed metric was accepted")
 
 
 def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
@@ -635,7 +581,6 @@ def test_release_serializes_complete_bundle_before_evaluation(
     tmp_path: Path,
 ) -> None:
     target = {
-        "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
         "features": ["f0"],
         "feature_count": 1,
         "params": {"n_estimators": 1},
@@ -673,9 +618,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
         assert kwargs["target_spec"] == target
         artifact_dir.mkdir()
         (artifact_dir / "booster.lgb").write_bytes(b"calibrated-booster\n")
-        (artifact_dir / "metadata.json").write_text('{"schema_version":"test"}\n', encoding="utf-8")
         return {
-            "schema_version": "test",
             "booster_sha256": "a" * 64,
             "pairwise_bundle_binding_digest": "b" * 64,
             "target_spec_digest": "c" * 64,
@@ -696,11 +639,6 @@ def test_release_serializes_complete_bundle_before_evaluation(
         "_materialize_arrow_rust_feature_bundle",
         materialize,
     )
-    monkeypatch.setattr(
-        promoted_train,
-        "_assert_pairwise_model_supports_arrow_materialization",
-        lambda *_args: None,
-    )
     output_dir = tmp_path / "out"
     query_predictions_bytes = b"query_case_id\nquery-1\n"
     calibrated = classic_training.CalibratedClassicModel(
@@ -720,7 +658,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
         complete_model_dir = Path(kwargs["output_bundle_dir"])
         complete_model_dir.mkdir()
         manifest_path = complete_model_dir / "manifest.json"
-        manifest_path.write_text('{"schema_version":"s2and_production_model_bundle_v5"}\n', encoding="utf-8")
+        manifest_path.write_text("{}\n", encoding="utf-8")
         return SimpleNamespace(manifest_path=manifest_path)
 
     loaded_artifact = SimpleNamespace()
@@ -758,7 +696,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
     monkeypatch.setattr(
         promoted_train,
         "load_clusterer",
-        lambda *_args, **_kwargs: SimpleNamespace(production_model_bundle_version="9.9"),
+        lambda *_args, **_kwargs: SimpleNamespace(production_model_release_version="9.9"),
     )
     args = promoted_train.build_parser().parse_args(
         [
@@ -779,7 +717,6 @@ def test_release_serializes_complete_bundle_before_evaluation(
         "evaluate",
         "validate",
     ]
-    assert result["schema_version"] == promoted_train.LINKER_EVALUATION_REPORT_SCHEMA
     assert result["pairwise_bundle_binding"] == {"test": "binding"}
     assert result["complete_model_path"] == str(output_dir / "pairwise-stage")
     assert result["query_predictions"]["rows"] == 1

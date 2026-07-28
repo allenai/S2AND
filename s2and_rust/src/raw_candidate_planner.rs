@@ -1684,7 +1684,6 @@ impl RawBlockQueryCandidatePlanner {
 
         let payload_start = Instant::now();
         let payload = PyDict::new(py);
-        payload.set_item("schema_version", "raw_arrow_candidate_plan_v2")?;
         payload.set_item("row_count", row_component_keys.len())?;
         payload.set_item("pair_count", left_signature_indices.len())?;
         payload.set_item("query_signature_ids", query_signature_ids)?;
@@ -1829,7 +1828,6 @@ fn raw_arrow_labeled_empty_plan(py: Python<'_>) -> PyResult<Py<PyDict>> {
     telemetry.set_item("timings", timings)?;
 
     let payload = PyDict::new(py);
-    payload.set_item("schema_version", "raw_arrow_labeled_candidate_plan_v1")?;
     payload.set_item("row_count", 0)?;
     payload.set_item("pair_count", 0)?;
     payload.set_item("signature_ids", Vec::<String>::new())?;
@@ -2750,7 +2748,6 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     telemetry.set_item("timings", &timings)?;
 
     let payload = PyDict::new(py);
-    payload.set_item("schema_version", "raw_arrow_labeled_candidate_plan_v1")?;
     payload.set_item("row_count", row_count)?;
     payload.set_item("pair_count", pair_count)?;
     payload.set_item("signature_ids", signature_ids_payload)?;

@@ -148,10 +148,8 @@ class PromotedComponentSizeSummary:
 @dataclass(frozen=True)
 class PredictionAccuracySummary:
     stage_name: str
-    prediction_contract_version: str
     predicted_peak_delta_bytes: int
     predicted_peak_rss_bytes: int
-    predicted_bytes: int
     rss_before_bytes: int
     rss_peak_bytes: int
     rss_after_bytes: int
@@ -189,7 +187,6 @@ def emit_memory_telemetry(record: Mapping[str, Any]) -> None:
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
-        "schema_version": 1,
         "event": "memory_telemetry",
     }
     for key, value in record.items():
@@ -970,17 +967,12 @@ def compute_promoted_phase_a_limits(
 def summarize_prediction_accuracy(
     *,
     stage_name: str,
-    predicted_peak_delta_bytes: int | None = None,
-    predicted_bytes: int | None = None,
+    predicted_peak_delta_bytes: int,
     rss_before_bytes: int,
     rss_peak_bytes: int,
     rss_after_bytes: int,
 ) -> PredictionAccuracySummary:
-    predicted_delta = predicted_peak_delta_bytes if predicted_peak_delta_bytes is not None else predicted_bytes
-    if predicted_delta is None:
-        raise ValueError("Either predicted_peak_delta_bytes or predicted_bytes must be provided.")
-
-    bounded_predicted_delta = max(1, predicted_delta)
+    bounded_predicted_delta = max(1, predicted_peak_delta_bytes)
     bounded_before = max(0, rss_before_bytes)
     bounded_peak = max(bounded_before, rss_peak_bytes)
     bounded_after = max(0, rss_after_bytes)
@@ -990,11 +982,8 @@ def summarize_prediction_accuracy(
     prediction_error_ratio = float(observed_peak_delta_bytes) / float(bounded_predicted_delta)
     return PredictionAccuracySummary(
         stage_name=stage_name,
-        prediction_contract_version="delta_v1",
         predicted_peak_delta_bytes=bounded_predicted_delta,
         predicted_peak_rss_bytes=predicted_peak_rss_bytes,
-        # Backward-compatible alias; prefer predicted_peak_delta_bytes.
-        predicted_bytes=bounded_predicted_delta,
         rss_before_bytes=bounded_before,
         rss_peak_bytes=bounded_peak,
         rss_after_bytes=bounded_after,

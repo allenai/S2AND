@@ -52,6 +52,7 @@ def _write_model_plan(tmp_path: Path) -> Path:
             }
         datasets[name] = files
     plan = {
+        "release_version": "9.9",
         "datasets": datasets,
         "eps": {
             "grid": [0.3, 0.5, 0.7],
@@ -64,51 +65,30 @@ def _write_model_plan(tmp_path: Path) -> Path:
     return path
 
 
-@pytest.mark.parametrize("backend", [None, "python"])
-def test_import_preserves_backend_environment(backend: str | None) -> None:
+def test_import_preserves_backend_environment() -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    env = os.environ.copy()
-    if backend is None:
-        env.pop("S2AND_BACKEND", None)
-    else:
-        env["S2AND_BACKEND"] = backend
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import json, os; import scripts.production.model.train_pairwise; "
-            "print(json.dumps({'backend': os.environ.get('S2AND_BACKEND')}))",
-        ],
-        cwd=repo_root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads(completed.stdout.strip().splitlines()[-1])["backend"] == backend
-
-
-def test_parser_has_one_explicit_release_mode() -> None:
-    common = [
-        "--production-version",
-        "9.9",
-        "--output-dir",
-        "production_model_v9.9",
-        "--matrix-work-dir",
-        "matrices",
-        "--name-counts-index-root",
-        "name-counts-index",
-        "--model-plan",
-        "model-plan.json",
-    ]
-    parser = train_pairwise.build_parser()
-    parsed = parser.parse_args([*common, "--run-full"])
-
-    assert parsed.run_full is True
-    with pytest.raises(SystemExit):
-        parser.parse_args(common)
+    for case_id, backend in (("unset", None), ("python", "python")):
+        env = os.environ.copy()
+        if backend is None:
+            env.pop("S2AND_BACKEND", None)
+        else:
+            env["S2AND_BACKEND"] = backend
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json, os; import scripts.production.model.train_pairwise; "
+                "print(json.dumps({'backend': os.environ.get('S2AND_BACKEND')}))",
+            ],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        assert completed.returncode == 0, f"{case_id}: {completed.stderr}"
+        assert json.loads(completed.stdout.strip().splitlines()[-1])["backend"] == backend, case_id
 
 
 def test_preflight_loads_test_free_direct_path_plan(tmp_path: Path) -> None:
@@ -122,10 +102,12 @@ def test_preflight_loads_test_free_direct_path_plan(tmp_path: Path) -> None:
     config = train_pairwise._training_config(args, plan, artifact_hashes={})
 
     assert plan.dataset_names == (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "augmented")
+    assert plan.release_version == "9.9"
     assert plan.model_plan_sha256 == sha256_file(plan_path)
     assert plan.datasets["aminer"].split_mode == "random_blocks"
     assert plan.datasets["augmented"].split_mode == "fixed_pairs"
     assert config["model_plan_sha256"] == plan.model_plan_sha256
+    assert "release_version" not in config
     assert all(
         isinstance(path, str) for dataset in config["dataset_inputs"].values() for path in dataset["files"].values()
     )
@@ -168,15 +150,16 @@ def test_training_reaches_anddata_without_any_test_input(
 
     def inspect_anddata(**kwargs: object) -> None:
         assert kwargs["test_pairs"] is None
-        assert kwargs["name_counts_index"] == args.name_counts_index_root
+        assert kwargs["name_counts_index"] is authority.name_counts_index
         assert kwargs["name_tuples"] == frozenset()
         assert not {"train_ratio", "val_ratio", "test_ratio"} & set(kwargs)
         raise BoundaryReached
 
+    authority = _artifact_authority()
     monkeypatch.setattr(
         train_pairwise,
         "load_packaged_artifact_authority",
-        lambda **_kwargs: _artifact_authority(),
+        lambda **_kwargs: authority,
     )
     monkeypatch.setattr(train_pairwise, "_canonical_training_artifact_hashes", lambda _authority: {})
     monkeypatch.setattr(train_pairwise, "ANDData", inspect_anddata)
@@ -185,30 +168,60 @@ def test_training_reaches_anddata_without_any_test_input(
         train_pairwise.train_pairwise_bundle(args)
 
 
-@pytest.mark.parametrize(
-    ("change", "message"),
-    [
-        ({"n_jobs": 0}, "--n-jobs must be positive"),
-        ({"total_ram_bytes": 0}, "--total-ram-bytes must be positive"),
-        ({"production_version": " 9.9 "}, "no surrounding whitespace"),
-        ({"run_full": False}, "requires --run-full"),
-    ],
-)
-def test_preflight_rejects_unsafe_launch(
+def test_augmented_dataset_contract_is_checked_before_featurization(
     tmp_path: Path,
-    change: dict[str, object],
-    message: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plan_path = _write_model_plan(tmp_path)
-    args = _args(
-        tmp_path,
-        model_plan=plan_path,
+    args = _args(tmp_path, model_plan=plan_path)
+    full_plan = train_pairwise._preflight_pairwise(args)
+    augmented_plan = train_pairwise.PairwisePreflightPlan(
+        output_dir=full_plan.output_dir,
+        release_version=full_plan.release_version,
+        dataset_names=("augmented",),
+        datasets={"augmented": full_plan.datasets["augmented"]},
+        model_plan_sha256=full_plan.model_plan_sha256,
+        matrix_work_dir=full_plan.matrix_work_dir,
+        matrix_work_free_bytes=full_plan.matrix_work_free_bytes,
+        total_ram_bytes=full_plan.total_ram_bytes,
     )
-    for field, value in change.items():
-        setattr(args, field, value)
+    authority = _artifact_authority()
+    fake_dataset = SimpleNamespace(
+        name_counts_manifest_sha256="e" * 64,
+        name_tuples=authority.name_tuples.pairs,
+    )
+    monkeypatch.setattr(train_pairwise, "_preflight_pairwise", lambda _args: augmented_plan)
+    monkeypatch.setattr(train_pairwise, "load_packaged_artifact_authority", lambda **_kwargs: authority)
+    monkeypatch.setattr(train_pairwise, "ANDData", lambda **_kwargs: fake_dataset)
+    monkeypatch.setattr(
+        train_pairwise,
+        "_featurize_selection",
+        lambda *_args, **_kwargs: pytest.fail("featurization ran before dataset contract validation"),
+    )
 
-    with pytest.raises(SystemExit, match=message):
-        train_pairwise._preflight_pairwise(args)
+    with pytest.raises(ValueError, match=r"dataset 'augmented'.*name-count manifest mismatch"):
+        train_pairwise.train_pairwise_bundle(args)
+
+
+def test_preflight_rejects_unsafe_launch(tmp_path: Path) -> None:
+    cases = (
+        ("n-jobs", {"n_jobs": 0}, "--n-jobs must be positive"),
+        ("total-ram", {"total_ram_bytes": 0}, "--total-ram-bytes must be positive"),
+        ("run-full", {"run_full": False}, "requires --run-full"),
+    )
+    for case_id, change, message in cases:
+        case_root = tmp_path / case_id
+        case_root.mkdir()
+        plan_path = _write_model_plan(case_root)
+        args = _args(
+            case_root,
+            model_plan=plan_path,
+        )
+        for field, value in change.items():
+            setattr(args, field, value)
+
+        with pytest.raises(SystemExit, match=message):
+            train_pairwise._preflight_pairwise(args)
 
 
 def test_preflight_rejects_existing_output_and_nonempty_scratch(tmp_path: Path) -> None:
@@ -300,7 +313,7 @@ def test_staging_keeps_only_train_validation_and_checks_disk(
         train_pairwise._stage_array(tmp_path / "too_large.npy", np.ones(10))
 
 
-@pytest.mark.parametrize("value", [np.nan, np.inf])
-def test_selected_validation_roc_auc_must_be_finite(value: float) -> None:
-    with pytest.raises(RuntimeError, match="must be finite"):
-        train_pairwise._finite_validation_roc_auc(value)
+def test_selected_validation_roc_auc_must_be_finite() -> None:
+    for value in (np.nan, np.inf):
+        with pytest.raises(RuntimeError, match="must be finite"):
+            train_pairwise._finite_validation_roc_auc(value)

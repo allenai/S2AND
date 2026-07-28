@@ -1,17 +1,14 @@
 # Production Inference
 
-Status date: 2026-07-24.
+Status date: 2026-07-27.
 
-S2AND is in the canonical-v2 cutover. This branch deliberately distributes no
+S2AND is in the `1.0.0` cutover. This branch deliberately distributes no
 production model and declares no default. `load_production_model()` without a
 path therefore raises; callers must pass an explicit compatible bundle.
 
-The removed `production_model_v1.0.pickle` through
-`production_model_v1.2.pickle` files are not package assets. The checked-in
-`production_model_v1.21/` directory is only an explicit historical source and
-parity artifact. It is not packaged, is rejected by canonical-v2, and must not
-be used for inference with this branch. Use the previous compatible S2AND
-release when reproducing v1.21 behavior.
+The removed production-model pickles and previous v1.21 bundle are not package
+assets. Use the previous compatible S2AND release when reproducing v1.21
+behavior; current instructions never use its deleted repository path.
 
 The component behavior in this document is implemented, but a releasable v1.3
 bundle does not yet exist. Use [release.md](release.md) for
@@ -30,8 +27,8 @@ clusterer = load_production_model("/path/to/production_model_v1.3")
 
 A complete bundle contains the pairwise boosters, clusterer configuration,
 promoted incremental linker, reproducibility target, and a manifest that binds
-their schemas, versions, checksums, and normalization provenance. The important
-runtime layout is:
+its release, exact generating runtime, EPS lifecycle, and checksums. The
+important runtime layout is:
 
 ```text
 production_model_vX.Y/
@@ -49,13 +46,17 @@ production_model_vX.Y/
     incremental_linker_training_target.json
 ```
 
-The v5 manifest uses `incremental_linker_version` as its sole bundle-state
-discriminator: `null` means a pairwise-only staging bundle and a nonempty
-string means a complete bundle. Runtime paths are fixed by the schema rather
-than serialized again. The pairwise training config and summary may also
-appear, but only together as a reproducibility pair. The loader requires exact
-checksum coverage for the derived paths, hashes every declared file once, and
-ignores unrelated files that are not part of the runtime contract.
+The root manifest has exactly `kind: "s2and_model"`, `release_version`,
+`generated_by_runtime`, `eps_calibration`, and `sha256`.
+`generated_by_runtime` must exactly equal the installed `s2and` and
+`s2and-rust` version. The checksum inventory determines whether the bundle is
+pairwise-only or complete; `bundle_kind` is not serialized. Pairwise-only
+bundles may be `pending` or `calibrated`, while complete bundles must be
+`calibrated`. Runtime paths are fixed by the contract rather than serialized
+again. The pairwise training config and summary may also appear, but only
+together as a reproducibility pair. The loader requires exact checksum
+coverage for the derived paths, hashes every declared file once, and ignores
+unrelated files that are not part of the runtime contract.
 
 `load_production_model(path)` rejects legacy pickles, incomplete directories,
 and `pairwise_only` manifests. A pairwise-only bundle is an internal training
@@ -66,14 +67,17 @@ round trips revalidate and reload it from the recorded bundle path.
 
 `clusterer.json` is inference-only. It contains the pairwise feature contracts,
 runtime controls, and only the clustering algorithm fields consumed by
-prediction (`eps` and `linkage`). Training/search controls such as
-`cluster_n_iter` live in
-`reproducibility/pairwise_training_config.json`; they are not duplicated in the
-runtime schema. Canonical-v2 has no v1.21 compatibility branch.
+prediction (`eps` and `linkage`). Stage 3 records placeholder EPS `0.5`; the
+manifest marks that value as pending until validation-only calibration writes
+a calibrated sibling bundle. It has no independent schema, normalization, or
+featurizer version counter.
 
 ### Staged publication
 
-Pairwise training writes an immutable pairwise-only source. Finalization does
+Pairwise training writes an immutable pairwise-only, EPS-pending source.
+Calibration changes only `clusterer.json` and `manifest.json` in a fresh
+pairwise-only sibling. Linker training and finalization accept only the
+calibrated sibling. Finalization does
 not add a linker to that directory and does not transition its manifest in
 place. It assembles a complete sibling staging directory, copies the verified
 pairwise files and newly trained linker into it, validates the complete staged
@@ -87,7 +91,7 @@ error; a changed release gets a new path.
 
 Production training first writes an immutable pairwise-only stage. After
 validation-only EPS selection, the linker release command rematerializes
-pairwise-derived features, performs one fresh linker fit, writes a complete v5
+pairwise-derived features, performs one fresh linker fit, writes a complete
 bundle in a new directory, reloads it, and evaluates through that exact
 serialized artifact. The embedded
 `reproducibility/incremental_linker_training_target.json` remains part of the
@@ -121,7 +125,7 @@ Classic `ANDData` prediction remains useful for Python training, fixtures, and
 reference checks over the canonical S2 partition. `author_info.block` is its
 sole grouping authority. The legacy `block_type` selector,
 `author_info.given_block`, `get_original_blocks()`, and `get_s2_blocks()` are
-not part of the canonical-v2 API; preserve any historical/original partition
+not part of the current API; preserve any historical/original partition
 outside `ANDData` if it is still needed.
 
 ```python
@@ -140,9 +144,10 @@ Incremental APIs always return their structured result. There is no
 ## Immutable Arrow contract
 
 Production Arrow input is one manifest-backed immutable root. Open it once with
-`ArrowDataset.open(root)`: opening validates normalization, the content
-inventory, checksums, table schemas, and batch indexes, then retains the exact
-files for the handle's lifetime.
+`ArrowDataset.open(root)`: opening requires `kind: "s2and_arrow_dataset"` and
+public `format_version: 1`, validates the flat content inventory, checksums,
+table schemas, and batch indexes, then retains the exact files for the handle's
+lifetime.
 
 Never edit an open root in place. Publish changed content at a new path and open
 a new handle. Request-local seed constraints are explicit prediction arguments,
@@ -168,12 +173,10 @@ train-mode `ANDData` that retains that handle.
 ```python
 from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_training import build_training_anddata_from_arrow
-from s2and.consts import NORMALIZATION_VERSION
 
 arrow_dataset = ArrowDataset.open(
     "/path/to/arrow_dataset",
     require_name_counts_index=True,
-    expected_normalization_version=NORMALIZATION_VERSION,
 )
 dataset = build_training_anddata_from_arrow(
     arrow_dataset,
@@ -246,18 +249,19 @@ allocations. If a changed limit shrinks the batch, its unscored remainder is
 queued and the safe prefix is replanned before scoring. Planning uses the loaded
 model’s actual final, pairwise, and aggregate feature widths.
 
-## Name-count and cache boundaries
+## Name-count and reuse boundaries
 
-Canonical-v2 uses one binary `NameCountsIndex` in Python and Rust. Classic
+The current runtime uses one binary `NameCountsIndex` in Python and Rust. Classic
 `ANDData` defaults to the canonical configured index and also accepts a
 verified alternate path, a shared open index handle, or explicit `None` when
 count features are intentionally absent. Arrow routes retain the manifest-bound
 index inside `ArrowDataset`. Runtime code does not open the
 historical source pickle, and the generator no longer publishes one. Models
 bind directly to the native index's single `manifest_sha256`. The manifest
-contains only its schema and normalization versions plus the four binary-file
-facts; producer mode and output-count metrics are reported by the producer
-instead of entering the runtime identity. Python deduplicates each
+contains exactly `kind: "s2and_name_counts"`, public `format_version: 1`, and
+byte count plus SHA-256 for the four fixed binary roles. Paths are derived as
+`<role>.bin`; producer mode and output-count metrics are reported by the
+producer instead of entering the runtime identity. Python deduplicates each
 2,048-signature batch before
 unique keys cross the native boundary, scatters the four result columns back
 onto signatures, and discards all temporary key maps with the batch.
@@ -279,13 +283,15 @@ copy the approved pair before distribution verification can pass.
 
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key
-otherwise. Production feature contracts bind canonical-v2 normalization, the
-exact name-count manifest, the ORCID and name-tuple data hashes, and the
-linker. Legacy artifacts are rejected rather than adapted.
+otherwise. Production feature contracts bind the exact name-count manifest,
+the ORCID and name-tuple data hashes, and the linker. The model root's exact
+generating-runtime match owns behavioral compatibility; legacy artifacts are
+rejected rather than adapted.
 
-Production inference has no persistent cache. Direct Arrow/Rust prediction
-reuses already validated immutable native state in-process only. See
-[caching.md](caching.md) for details.
+Production inference has no persistent feature-snapshot or artifact cache.
+Direct Arrow/Rust prediction reuses already validated immutable native state
+in-process; the bounded altered-profile presplit memo is likewise a private
+same-process optimization, not a persisted format.
 
 ## Verification
 

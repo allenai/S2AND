@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
@@ -12,9 +11,9 @@ from pathlib import Path
 from s2and.text import canonical_name_count_keys, canonicalize_name_parts
 
 from ._run_support import (
+    emit_jsonl,
     load_guardrails,
-    require_positive,
-    validate_fixture_path,
+    validate_input_file,
     validate_output_container,
 )
 
@@ -39,12 +38,8 @@ NameCountMappings = tuple[
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--input-csv", type=Path, help="Reviewed full warehouse export")
-    source.add_argument("--fixture-input", type=Path, help="Local JSON row fixture")
-    parser.add_argument("--limit", type=int, help="Fixture-only row limit")
-    parser.add_argument("--guardrails-json", type=Path, help="Reviewed full-run bounds")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--input-csv", type=Path, required=True, help="Reviewed warehouse export")
+    parser.add_argument("--guardrails-json", type=Path, required=True, help="Reviewed run bounds")
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser
 
@@ -63,25 +58,6 @@ def _reviewed_csv_rows(path: Path) -> Iterator[NameCountRow]:
             if count < 1:
                 raise ValueError(f"reviewed export row {row_number} count must be a positive integer")
             yield row["first_name"], row["last_name"], count
-
-
-def _fixture_rows(path: Path, limit: int | None) -> Iterator[NameCountRow]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise ValueError("fixture input must contain a JSON list")
-    for row_index, row in enumerate(payload):
-        if limit is not None and row_index >= limit:
-            return
-        if not isinstance(row, dict):
-            raise ValueError(f"fixture row {row_index} must be an object")
-        first = row.get("first_name", "")
-        last = row.get("last_name", "")
-        count = row.get("count")
-        if not isinstance(first, str) or not isinstance(last, str):
-            raise ValueError(f"fixture row {row_index} names must be strings")
-        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-            raise ValueError(f"fixture row {row_index} count must be a positive integer")
-        yield first, last, count
 
 
 def build_name_count_dicts(
@@ -134,46 +110,30 @@ def build_name_count_dicts(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    limit = require_positive(args.limit, option="--limit")
-    full_input = args.input_csv.resolve() if args.input_csv is not None else None
-    if full_input is not None and limit is not None:
-        raise ValueError("--limit is fixture-only; it does not bound a reviewed export")
-
+    source = validate_input_file(args.input_csv, option="--input-csv")
     publication = args.output_dir / "name_counts_index"
     output_dir = validate_output_container(args.output_dir, publication_path=publication)
-    fixture = validate_fixture_path(args.fixture_input) if args.fixture_input is not None else None
-    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS) if full_input is not None else None
-    if guardrails is not None:
-        if guardrails["min_source_rows"] > guardrails["max_source_rows"]:
-            raise ValueError("guardrail min_source_rows must not exceed max_source_rows")
-        if guardrails["min_keys_per_mapping"] > guardrails["max_keys_per_mapping"]:
-            raise ValueError("guardrail min_keys_per_mapping must not exceed max_keys_per_mapping")
+    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS)
+    if guardrails["min_source_rows"] > guardrails["max_source_rows"]:
+        raise ValueError("guardrail min_source_rows must not exceed max_source_rows")
+    if guardrails["min_keys_per_mapping"] > guardrails["max_keys_per_mapping"]:
+        raise ValueError("guardrail min_keys_per_mapping must not exceed max_keys_per_mapping")
 
     plan = {
-        "mode": "full" if full_input is not None else "fixture",
-        "source": str(full_input or fixture),
+        "source": str(source),
         "output_dir": str(output_dir),
         "guardrails": guardrails,
-        "limit": limit,
-        "dry_run": bool(args.dry_run),
     }
-    print(json.dumps({"plan": plan}, indent=2, sort_keys=True))
-    if args.dry_run:
-        return 0
-
-    if full_input is not None:
-        rows = _reviewed_csv_rows(full_input)
-    else:
-        assert fixture is not None
-        rows = _fixture_rows(fixture, limit)
+    emit_jsonl({"event": "name_counts_plan", "plan": plan})
+    rows = _reviewed_csv_rows(source)
 
     def report_progress(metrics: dict[str, int]) -> None:
-        print(json.dumps({"event": "name_counts_progress", **metrics}, sort_keys=True))
+        emit_jsonl({"event": "name_counts_progress", **metrics})
 
     mappings, row_metrics = build_name_count_dicts(
         rows,
-        max_source_rows=None if guardrails is None else guardrails["max_source_rows"],
-        max_keys_per_mapping=None if guardrails is None else guardrails["max_keys_per_mapping"],
+        max_source_rows=guardrails["max_source_rows"],
+        max_keys_per_mapping=guardrails["max_keys_per_mapping"],
         progress_callback=report_progress,
     )
     cardinalities = dict(
@@ -188,17 +148,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("name-count generation selected zero source rows")
     if sum(cardinalities.values()) == 0:
         raise RuntimeError("name-count generation produced zero retained canonical keys")
-    if guardrails is not None:
-        if source_row_count < guardrails["min_source_rows"]:
-            raise RuntimeError(
-                f"source rows {source_row_count} are below guardrail min_source_rows={guardrails['min_source_rows']}"
-            )
-        below_floor = {key: count for key, count in cardinalities.items() if count < guardrails["min_keys_per_mapping"]}
-        if below_floor:
-            raise RuntimeError(
-                "mapping cardinalities are below guardrail "
-                f"min_keys_per_mapping={guardrails['min_keys_per_mapping']}: {below_floor}"
-            )
+    if source_row_count < guardrails["min_source_rows"]:
+        raise RuntimeError(
+            f"source rows {source_row_count} are below guardrail min_source_rows={guardrails['min_source_rows']}"
+        )
+    below_floor = {key: count for key, count in cardinalities.items() if count < guardrails["min_keys_per_mapping"]}
+    if below_floor:
+        raise RuntimeError(
+            "mapping cardinalities are below guardrail "
+            f"min_keys_per_mapping={guardrails['min_keys_per_mapping']}: {below_floor}"
+        )
 
     result = {
         "cardinalities": cardinalities,
@@ -207,12 +166,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 
     index_path, index_metrics = write_name_counts_index(output_dir, mappings)
-    print(
-        json.dumps(
-            {"result": result, "name_counts_index": index_path, "name_counts_index_metrics": index_metrics},
-            indent=2,
-            sort_keys=True,
-        )
+    emit_jsonl(
+        {
+            "event": "name_counts_result",
+            "result": result,
+            "name_counts_index": index_path,
+            "name_counts_index_metrics": index_metrics,
+        }
     )
     return 0
 

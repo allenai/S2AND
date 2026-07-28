@@ -18,7 +18,7 @@ from typing import Any
 import orjson
 
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
-from s2and.name_tuple_artifact import NameTupleArtifact, load_name_tuple_artifact
+from s2and.name_tuple_artifact import NameTupleArtifact, load_packaged_name_tuple_artifact
 from s2and.orcid_prefix_counts import (
     ORCID_PREFIX_DATA_FILENAME,
     ORCID_PREFIX_MANIFEST_FILENAME,
@@ -29,16 +29,16 @@ from s2and.orcid_prefix_counts import (
 from s2and.text import canonicalize_name_parts, normalize_orcid, same_prefix_tokens
 
 from ._run_support import (
+    emit_jsonl,
     load_guardrails,
-    require_positive,
-    validate_fixture_path,
+    validate_input_file,
     validate_output_container,
 )
 
 K_VALUES = (2, 3, 4, 5)
 MIN_ORCID_COUNT = 10
 MIN_ALIAS_COUNT = 2
-FIXTURE_MAX_NAMES_PER_ORCID = 100
+DEFAULT_MAX_NAMES_PER_ORCID = 100
 PROGRESS_EVERY = 100_000
 GUARDRAIL_FIELDS = frozenset(
     {
@@ -142,7 +142,7 @@ def build_prefix_counts_from_sorted_rows(
     *,
     min_orcid_count: int = MIN_ORCID_COUNT,
     min_alias_count: int = MIN_ALIAS_COUNT,
-    max_names_per_orcid: int = FIXTURE_MAX_NAMES_PER_ORCID,
+    max_names_per_orcid: int = DEFAULT_MAX_NAMES_PER_ORCID,
     max_source_rows: int | None = None,
     max_pair_keys: int | None = None,
     progress_callback: Callable[[dict[str, int]], None] | None = None,
@@ -169,6 +169,10 @@ def build_prefix_counts_from_sorted_rows(
         metrics["max_unique_names_per_orcid"] = max(metrics["max_unique_names_per_orcid"], unique_name_count)
         sorted_names = sorted(current_names)
         metrics["selected_canonical_rows"] += unique_name_count
+        # Keep the existing event-count semantics until release policy explicitly
+        # decides otherwise: one ORCID may contribute the same prefix pair through
+        # multiple distinct name combinations. These counts affect merge ordering
+        # as well as thresholding, so changing them is not a producer-only cleanup.
         for first_name, second_name in combinations(sorted_names, 2):
             orcid_counts.update(prefix_pairs_for_names(first_name, second_name))
         if max_pair_keys is not None and len(orcid_counts) > max_pair_keys:
@@ -305,20 +309,6 @@ def write_publication(
     )
 
 
-def _load_fixture_rows(path: Path, limit: int | None) -> list[Mapping[str, Any]]:
-    rows = json.loads(path.read_bytes())
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        raise ValueError("--input-json must contain a JSON list of row objects")
-    rows.sort(
-        key=lambda row: (
-            _canonical_source_orcid(row.get("orcid")) or "",
-            "" if row.get("first_name") is None else str(row.get("first_name")),
-            "" if row.get("middle") is None else str(row.get("middle")),
-        )
-    )
-    return rows[:limit]
-
-
 def _load_reviewed_csv_rows(path: Path) -> Iterator[Mapping[str, Any]]:
     """Stream one reviewed, query-ordered warehouse export."""
 
@@ -336,14 +326,9 @@ def _load_reviewed_csv_rows(path: Path) -> Iterator[Mapping[str, Any]]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--input-json", type=Path, help="Bounded local row fixture")
-    source.add_argument("--input-csv", type=Path, help="Reviewed full warehouse export")
-    parser.add_argument("--limit", type=int, help="Fixture-only row limit")
-    parser.add_argument("--guardrails-json", type=Path, help="Reviewed full-run bounds")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--input-csv", type=Path, required=True, help="Reviewed query-ordered warehouse export")
+    parser.add_argument("--guardrails-json", type=Path, required=True, help="Reviewed run bounds")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--name-tuples-path", type=Path, required=True)
     return parser
 
 
@@ -351,56 +336,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the guarded producer."""
 
     args = _parser().parse_args(argv)
-    limit = require_positive(args.limit, option="--limit")
-    full_input = args.input_csv.resolve() if args.input_csv is not None else None
-    if full_input is not None and limit is not None:
-        raise ValueError("--limit is fixture-only; it does not bound warehouse scan cost")
+    source = validate_input_file(args.input_csv, option="--input-csv")
     output_dir = validate_output_container(args.output_dir, publication_path=args.output_dir)
-    fixture = validate_fixture_path(args.input_json) if args.input_json is not None else None
-    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS) if full_input is not None else None
-    if guardrails is not None:
-        if guardrails["min_source_rows"] > guardrails["max_source_rows"]:
-            raise ValueError("guardrail min_source_rows must not exceed max_source_rows")
-        if guardrails["min_orcid_pair_keys"] > guardrails["max_pair_keys"]:
-            raise ValueError("guardrail min_orcid_pair_keys must not exceed max_pair_keys")
-        if guardrails["max_names_per_orcid"] < 2:
-            raise ValueError("guardrail max_names_per_orcid must be at least 2")
+    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS)
+    if guardrails["min_source_rows"] > guardrails["max_source_rows"]:
+        raise ValueError("guardrail min_source_rows must not exceed max_source_rows")
+    if guardrails["min_orcid_pair_keys"] > guardrails["max_pair_keys"]:
+        raise ValueError("guardrail min_orcid_pair_keys must not exceed max_pair_keys")
+    if guardrails["max_names_per_orcid"] < 2:
+        raise ValueError("guardrail max_names_per_orcid must be at least 2")
 
-    name_tuples = load_name_tuple_artifact(args.name_tuples_path.resolve())
+    name_tuples = load_packaged_name_tuple_artifact()
 
-    if full_input is not None:
-        max_names_per_orcid = guardrails["max_names_per_orcid"]
-    else:
-        assert fixture is not None
-        max_names_per_orcid = FIXTURE_MAX_NAMES_PER_ORCID
     plan = {
-        "mode": "full" if full_input is not None else "fixture",
-        "source": str(full_input or fixture),
+        "source": str(source),
         "output_dir": str(output_dir),
         "guardrails": guardrails,
-        "limit": limit,
         "name_tuples_sha256": name_tuples.data_sha256,
-        "dry_run": bool(args.dry_run),
     }
-    print(json.dumps({"plan": plan}, indent=2, sort_keys=True))
-    if args.dry_run:
-        return 0
-
-    if full_input is not None:
-        rows = _load_reviewed_csv_rows(full_input)
-    else:
-        assert fixture is not None
-        rows = _load_fixture_rows(fixture, limit)
+    emit_jsonl({"event": "orcid_prefix_plan", "plan": plan})
+    rows = _load_reviewed_csv_rows(source)
 
     def report_progress(metrics: dict[str, int]) -> None:
-        print(json.dumps({"event": "orcid_prefix_progress", **metrics}, sort_keys=True))
+        emit_jsonl({"event": "orcid_prefix_progress", **metrics})
 
     counts, metrics = build_prefix_counts_from_sorted_rows(
         rows,
         name_tuples.pairs,
-        max_names_per_orcid=max_names_per_orcid,
-        max_source_rows=None if guardrails is None else guardrails["max_source_rows"],
-        max_pair_keys=None if guardrails is None else guardrails["max_pair_keys"],
+        max_names_per_orcid=guardrails["max_names_per_orcid"],
+        max_source_rows=guardrails["max_source_rows"],
+        max_pair_keys=guardrails["max_pair_keys"],
         progress_callback=report_progress,
     )
     if int(metrics.get("source_rows", 0)) == 0:
@@ -409,34 +374,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("ORCID prefix-count generation selected no usable ORCID/name groups")
     if int(metrics.get("output_pair_keys", 0)) == 0:
         raise RuntimeError("ORCID prefix-count generation produced zero output pair keys")
-    if guardrails is not None:
-        source_rows = int(metrics["source_rows"])
-        orcid_pair_keys = int(metrics["orcid_pair_keys_after_threshold"])
-        if source_rows < guardrails["min_source_rows"]:
-            raise RuntimeError(
-                f"source rows {source_rows} are below guardrail min_source_rows={guardrails['min_source_rows']}"
-            )
-        if orcid_pair_keys < guardrails["min_orcid_pair_keys"]:
-            raise RuntimeError(
-                "ORCID-derived pair keys "
-                f"{orcid_pair_keys} are below guardrail min_orcid_pair_keys={guardrails['min_orcid_pair_keys']}"
-            )
+    source_rows = int(metrics["source_rows"])
+    orcid_pair_keys = int(metrics["orcid_pair_keys_after_threshold"])
+    if source_rows < guardrails["min_source_rows"]:
+        raise RuntimeError(
+            f"source rows {source_rows} are below guardrail min_source_rows={guardrails['min_source_rows']}"
+        )
+    if orcid_pair_keys < guardrails["min_orcid_pair_keys"]:
+        raise RuntimeError(
+            "ORCID-derived pair keys "
+            f"{orcid_pair_keys} are below guardrail min_orcid_pair_keys={guardrails['min_orcid_pair_keys']}"
+        )
 
     write_publication(
         counts,
         output_dir=output_dir,
         name_tuples=name_tuples,
     )
-    print(
-        json.dumps(
-            {
-                "data": str(output_dir / ORCID_PREFIX_DATA_FILENAME),
-                "manifest": str(output_dir / ORCID_PREFIX_MANIFEST_FILENAME),
-                "metrics": metrics,
-            },
-            indent=2,
-            sort_keys=True,
-        )
+    emit_jsonl(
+        {
+            "event": "orcid_prefix_result",
+            "data": str(output_dir / ORCID_PREFIX_DATA_FILENAME),
+            "manifest": str(output_dir / ORCID_PREFIX_MANIFEST_FILENAME),
+            "metrics": metrics,
+        }
     )
     return 0
 

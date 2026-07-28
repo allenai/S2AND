@@ -760,14 +760,16 @@ def _open_subblocking_arrow_dataset(paths: dict[str, str], tmp_path: Path) -> Ar
     return ArrowDataset.open(tmp_path, require_specter="specter" in paths)
 
 
-@pytest.mark.parametrize(
-    ("rows", "expected"),
-    [
+def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:
+    _require_rust_arrow_subblocking()
+    cases = (
         (
+            "first-prefix",
             [("s1", "anna", ""), ("s2", "anne", ""), ("s3", "anny", "")],
             {"anna": ["s1"], "anne": ["s2"], "anny": ["s3"]},
         ),
         (
+            "middle-prefix",
             [("s1", "h", "will"), ("s2", "h", "william"), ("s3", "h", "wim")],
             {
                 "h|middle=will": ["s1"],
@@ -776,6 +778,7 @@ def _open_subblocking_arrow_dataset(paths: dict[str, str], tmp_path: Path) -> Ar
             },
         ),
         (
+            "first-and-middle-prefix",
             [("s1", "anna", "w"), ("s2", "anna", "x"), ("s3", "anne", "y"), ("s4", "anne", "z")],
             {
                 "anna|middle=w": ["s1"],
@@ -784,42 +787,39 @@ def _open_subblocking_arrow_dataset(paths: dict[str, str], tmp_path: Path) -> Ar
                 "anne|middle=z": ["s4"],
             },
         ),
-    ],
-)
-def test_rust_arrow_prefix_subdivision_matches_python(
-    tmp_path,
-    rows: list[tuple[str, str, str]],
-    expected: dict[str, list[str]],
-) -> None:
-    _require_rust_arrow_subblocking()
-    signatures_path = tmp_path / "signatures.arrow"
-    _write_signatures_arrow(signatures_path, [(*row, None) for row in rows])
-    signature_ids = [row[0] for row in rows]
-    dataset = SimpleNamespace(
-        signatures={
-            signature_id: _signature(signature_id, first=first, middle=middle) for signature_id, first, middle in rows
-        },
-        random_seed=0,
     )
+    for case_id, rows, expected in cases:
+        case_root = tmp_path / case_id
+        case_root.mkdir()
+        signatures_path = case_root / "signatures.arrow"
+        _write_signatures_arrow(signatures_path, [(*row, None) for row in rows])
+        signature_ids = [row[0] for row in rows]
+        dataset = SimpleNamespace(
+            signatures={
+                signature_id: _signature(signature_id, first=first, middle=middle)
+                for signature_id, first, middle in rows
+            },
+            random_seed=0,
+        )
 
-    python_subblocks, _python_telemetry = subblocking.make_subblocks_with_telemetry(
-        signature_ids,
-        dataset,
-        maximum_size=1,
-        first_k_letter_counts_sorted={},
-    )
-    arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path)
-    rust_subblocks, _rust_telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
-        arrow_dataset,
-        signature_ids,
-        maximum_size=1,
-        first_k_letter_counts_sorted={},
-        graph_subblocking_config=subblocking.GraphSubblockingConfig(),
-    )
+        python_subblocks, _python_telemetry = subblocking.make_subblocks_with_telemetry(
+            signature_ids,
+            dataset,
+            maximum_size=1,
+            first_k_letter_counts_sorted={},
+        )
+        arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, case_root)
+        rust_subblocks, _rust_telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
+            arrow_dataset,
+            signature_ids,
+            maximum_size=1,
+            first_k_letter_counts_sorted={},
+            graph_subblocking_config=subblocking.GraphSubblockingConfig(),
+        )
 
-    assert {key: sorted(values) for key, values in python_subblocks.items()} == expected
-    assert {key: sorted(values) for key, values in rust_subblocks.items()} == expected
-    arrow_dataset.close()
+        assert {key: sorted(values) for key, values in python_subblocks.items()} == expected, case_id
+        assert {key: sorted(values) for key, values in rust_subblocks.items()} == expected, case_id
+        arrow_dataset.close()
 
 
 def test_rust_arrow_make_subblocks_matches_python_orcid_repair(tmp_path):

@@ -11,7 +11,6 @@ from typing import Any
 
 import numpy as np
 
-NAME_COUNTS_INDEX_SCHEMA_VERSION = "name_counts_index_v3"
 _OPEN_CACHE_MAX_PATHS = 4
 _OPEN_CACHE_LOCK = threading.Lock()
 _OPEN_CACHE: OrderedDict[str, NameCountsIndex] = OrderedDict()
@@ -85,7 +84,6 @@ class NameCountsIndex:
         "__weakref__",
         "_native",
         "manifest_sha256",
-        "normalization_version",
         "path",
     )
 
@@ -98,7 +96,6 @@ class NameCountsIndex:
         self._native = native
         self.path = path
         self.manifest_sha256 = str(native.name_counts_manifest_sha256)
-        self.normalization_version = str(native.normalization_version)
 
     @classmethod
     def open(cls, path: str | os.PathLike[str]) -> NameCountsIndex:

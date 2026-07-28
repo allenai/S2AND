@@ -13,9 +13,10 @@ import numpy as np
 import pytest
 
 import s2and.incremental_linking.artifact as artifact_module
+from s2and import __version__
 from s2and.incremental_linking.artifact import (
-    ARTIFACT_SCHEMA_VERSION,
     BOOSTER_FILENAME,
+    INCREMENTAL_LINKER_KIND,
     METADATA_FILENAME,
     load_incremental_linking_artifact,
     save_incremental_linking_artifact,
@@ -46,11 +47,12 @@ def _logistic_gate_config(link: bool = True) -> dict[str, object]:
 
 def _valid_metadata_payload() -> dict[str, Any]:
     return {
-        "schema_version": ARTIFACT_SCHEMA_VERSION,
         "booster_sha256": "a" * 64,
-        "retrieval_top_k": 25,
         "gate_config": _logistic_gate_config(),
+        "generated_by_runtime": __version__,
+        "kind": INCREMENTAL_LINKER_KIND,
         "pairwise_bundle_binding_digest": canonical_json_digest(synthetic_pairwise_bundle_binding()),
+        "retrieval_top_k": 25,
         "target_spec_digest": canonical_json_digest(_TEST_TARGET_SPEC),
     }
 
@@ -99,14 +101,16 @@ def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -
     )
 
     assert set(metadata) == {
-        "schema_version",
         "booster_sha256",
-        "retrieval_top_k",
         "gate_config",
+        "generated_by_runtime",
+        "kind",
         "pairwise_bundle_binding_digest",
+        "retrieval_top_k",
         "target_spec_digest",
     }
-    assert metadata["schema_version"] == ARTIFACT_SCHEMA_VERSION
+    assert metadata["kind"] == INCREMENTAL_LINKER_KIND
+    assert metadata["generated_by_runtime"] == __version__
     assert metadata["pairwise_bundle_binding_digest"] == canonical_json_digest(binding)
     assert metadata["target_spec_digest"] == canonical_json_digest(_TEST_TARGET_SPEC)
 
@@ -221,29 +225,22 @@ def test_concurrent_conflicting_artifact_publication_has_one_immutable_winner(tm
     assert (artifact_dir / "payload").read_bytes() in payloads
 
 
-@pytest.mark.parametrize("field_name", ("booster_sha256", "pairwise_bundle_binding_digest", "target_spec_digest"))
-@pytest.mark.parametrize("invalid_value", ("A" * 64, "a" * 63, "not-a-digest"))
-def test_metadata_rejects_invalid_digest(field_name: str, invalid_value: str) -> None:
-    payload = _valid_metadata_payload()
-    payload[field_name] = invalid_value
+def test_metadata_rejects_invalid_fields() -> None:
+    for field_name in ("booster_sha256", "pairwise_bundle_binding_digest", "target_spec_digest"):
+        payload = _valid_metadata_payload()
+        payload[field_name] = "invalid"
+        with pytest.raises(ValueError, match=f"{field_name} is not a SHA-256"):
+            artifact_module._validated_metadata(payload)
 
-    with pytest.raises(ValueError, match=f"{field_name} is not a SHA-256"):
-        artifact_module._validated_metadata(payload)
+    for invalid_value in (0, 1.5, True):
+        payload = _valid_metadata_payload()
+        payload["retrieval_top_k"] = invalid_value
+        with pytest.raises(ValueError, match="retrieval_top_k must be a positive integer"):
+            artifact_module._validated_metadata(payload)
 
-
-@pytest.mark.parametrize("invalid_value", (0, -1, 1.5, True, "25"))
-def test_metadata_rejects_invalid_retrieval_top_k(invalid_value: object) -> None:
-    payload = _valid_metadata_payload()
-    payload["retrieval_top_k"] = invalid_value
-
-    with pytest.raises(ValueError, match="retrieval_top_k must be a positive integer"):
-        artifact_module._validated_metadata(payload)
-
-
-def test_metadata_rejects_missing_and_unknown_fields() -> None:
     missing = _valid_metadata_payload()
     del missing["booster_sha256"]
-    with pytest.raises(ValueError, match="fields do not match the v5 schema.*booster_sha256"):
+    with pytest.raises(ValueError, match="fields do not match the current contract.*booster_sha256"):
         artifact_module._validated_metadata(missing)
 
     unknown = _valid_metadata_payload()
@@ -251,21 +248,35 @@ def test_metadata_rejects_missing_and_unknown_fields() -> None:
     with pytest.raises(ValueError, match="unknown=.*future_implicit_default"):
         artifact_module._validated_metadata(unknown)
 
-
-def test_metadata_rejects_previous_schema() -> None:
-    payload = _valid_metadata_payload()
-    payload["schema_version"] = "incremental_linking_artifact_v4"
-
-    with pytest.raises(ValueError, match="Unsupported incremental linker artifact schema_version"):
-        artifact_module._validated_metadata(payload)
-
-
-def test_metadata_rejects_invalid_gate() -> None:
     payload = _valid_metadata_payload()
     payload["gate_config"] = {}
-
     with pytest.raises(ValueError, match="gate_config must be a nonempty object"):
         artifact_module._validated_metadata(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("kind", "not-a-linker", "kind must be"),
+        ("generated_by_runtime", "0.0.0", "runtime mismatch"),
+    ),
+    ids=("wrong-kind", "runtime-mismatch"),
+)
+def test_load_rejects_wrong_identity_before_booster_io(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    artifact_dir = _write_fake_artifact(tmp_path / "artifact")
+    metadata_path = artifact_dir / METADATA_FILENAME
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload[field] = value
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    (artifact_dir / BOOSTER_FILENAME).unlink()
+
+    with pytest.raises(ValueError, match=message):
+        load_incremental_linking_artifact(artifact_dir)
 
 
 def test_load_always_verifies_booster_hash_before_loading_scorer(

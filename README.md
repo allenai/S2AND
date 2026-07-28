@@ -3,11 +3,12 @@
 S2AND provides the S2AND author-name-disambiguation benchmark datasets and the reference model described in the paper [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421) by Shivashankar Subramanian, Daniel King, Doug Downey, and Sergey Feldman.
 
 > **Release status (2026-07-27):** this development branch contains the
-> canonical-v2 code migration, but it is not yet a complete production release.
+> simplified `1.0.0` runtime, but it is not yet a complete production release.
 > Canonical artifacts and the model bundle `production_model_v1.3` still need to
 > be generated, retrained, evaluated, and published. The coordinated Python and
 > Rust package version is fixed at `1.0.0`; the production model and public-data
-> version remains `1.3`. Release operators must use
+> release version remains `1.3`, and independently readable Arrow/name-count
+> data uses public format `1`. Release operators must use
 > [docs/release.md](docs/release.md).
 
 As of this version, S2AND requires the `s2and-rust` extension at install time.
@@ -46,10 +47,10 @@ uv pip install s2and
 
 That command installs the latest package available from the configured index;
 it does not install this unreleased worktree. Use the repo-checkout flow below
-when validating canonical-v2 before publication.
+when validating `1.0.0` before publication.
 
 The base install includes the exactly matched `s2and-rust` runtime. During the
-canonical-v2 cutover, no default production model is packaged; inference callers
+`1.0.0` cutover, no default production model is packaged; inference callers
 must provide an explicit compatible bundle.
 
 Repo checkout:
@@ -72,8 +73,8 @@ commands, WSL notes, and install variants, see [docs/install.md](docs/install.md
 
 ## Download Data or Model
 
-> **Canonical-v2 migration status (2026-07-24):** this branch contains the
-> canonical-v2 code cutover but does not yet contain a compatible production
+> **1.0.0 migration status (2026-07-24):** this branch contains the runtime
+> cutover but does not yet contain a compatible production
 > model or canonical count artifacts. No default model is distributed by this
 > branch. Use the previous published S2AND release for working v1.21 inference
 > until canonical v1.3 is trained, validated, and packaged. See
@@ -89,8 +90,8 @@ uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2an
 ```
 
 Expected size is about `10.1 GiB`; use a narrower S3 prefix when only one
-dataset is needed. The checked-in v1.21 directory remains an explicit historical
-source artifact only. It is not packaged or loadable on this branch.
+dataset is needed. The prior v1.21 model is available only from its compatible
+release and Git history; it is not packaged or loadable on this branch.
 
 ## Configuration
 
@@ -126,7 +127,7 @@ Full inference and bundle publication details are in
 The example below is a small research/API example, not the production release
 protocol: it materializes test features and permits immediate evaluation.
 During the v1.3 release, test identities and scores remain sealed until the
-one-shot gates in Stages 7 and 8 of the
+one-shot evaluation gate in Stage 5 of the
 [release runbook](docs/release.md).
 
 Minimal training flow:
@@ -139,7 +140,6 @@ from hyperopt import hp
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_training import build_training_anddata_from_arrow
-from s2and.consts import NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
@@ -150,7 +150,6 @@ with ArrowDataset.open(
     bundle_dir,
     require_specter=True,
     require_name_counts_index=True,
-    expected_normalization_version=NORMALIZATION_VERSION,
 ) as arrow_dataset:
     dataset = build_training_anddata_from_arrow(
         arrow_dataset,
@@ -186,7 +185,7 @@ with ArrowDataset.open(
 
 Point `bundle_dir` at a manifest-backed canonical Arrow dataset root.
 `ArrowDataset.open(...)` validates its tables, batch indexes, checksums,
-normalization version, and name-count index once and retains the opened files
+public format, and name-count index once and retains the opened files
 for the handle's lifetime. This migration branch does not bundle a full
 training root.
 
@@ -199,19 +198,21 @@ Runtime controls:
 
 - Unset `S2AND_BACKEND` means Python; the only accepted values are `python` and
   `rust`.
-- Rust mode requires the exact `s2and-rust` version pinned by the project
-  metadata and fails explicitly if it is missing or different.
+- Rust mode requires `s2and-rust` to have exactly the installed Python package
+  version and fails explicitly if it is missing or different.
 - Public prediction routes are method-based: `ANDData` methods use Python and
   `predict_from_arrow(..., arrow_dataset)` and
   `predict_incremental_from_arrow(..., arrow_dataset)` use Rust.
 
-Cache behavior:
+Reuse behavior:
 
-- Production inference has no persistent cache; Rust featurizers are not
-  serialized to disk, and same-process Rust featurizer reuse is the only
-  inference-time reuse mechanism.
-- Repeated training experiments can opt into the featurized-split snapshot
-  cache (`train_pairwise.py --feature-cache-dir`). See `docs/caching.md`.
+- Production inference has no persistent feature-snapshot or artifact cache;
+  Rust featurizers are not serialized to disk. Same-process Rust-featurizer
+  reuse and the bounded altered-profile presplit memo are private runtime
+  optimizations, not persisted artifact formats.
+- Production training featurizes the frozen model plan directly. Repeated
+  research experiments retain their ordinary inputs and rerun featurization
+  rather than depending on a second artifact format.
 
 Large blocks:
 
@@ -230,7 +231,6 @@ Concurrency:
 Details:
 
 - Runtime contract: [docs/rust/runtime.md](docs/rust/runtime.md)
-- Cache semantics: [docs/caching.md](docs/caching.md)
 - Threading guidance: [docs/threading.md](docs/threading.md)
 - Subblocking and memory tradeoffs: [docs/subblocking.md](docs/subblocking.md)
 - Environment variables: [docs/environment.md](docs/environment.md)
@@ -254,7 +254,7 @@ Canonical commands:
 uv run pytest -q
 uv run ruff check .
 uv run ruff format .
-uv run ty check s2and
+uv run ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
 ```
 
 To run the entire CI suite mimicking the GH Actions:

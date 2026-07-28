@@ -14,7 +14,6 @@ from tqdm import tqdm
 from s2and import feature_port, memory_budget
 from s2and.consts import (
     DEFAULT_CHUNK_SIZE,
-    FEATURIZER_VERSION,
     LARGE_INTEGER,
     NUMPY_NAN,
 )
@@ -367,16 +366,11 @@ class FeaturizationInfo:
     Inputs:
         features_to_use: List[str]
             list of feature types to use
-        featurizer_version: int
-            What version of the featurizer we are on. This should be
-            incremented when changing how features are computed; it is part of
-            the persisted model contract and feature-snapshot identity.
     """
 
     def __init__(
         self,
         features_to_use: list[str] | None = None,
-        featurizer_version: int = FEATURIZER_VERSION,
     ):
         if features_to_use is None:
             features_to_use = list(DEFAULT_FEATURE_GROUPS)
@@ -437,21 +431,6 @@ class FeaturizationInfo:
                 for feature_category, constraints in lightgbm_monotone_constraints.items()
                 if feature_category in features_to_use and feature_category not in NAME_DEPENDENT_FEATURE_GROUPS
             ]
-        )
-
-        # NOTE: Increment this anytime a change is made to the featurization logic
-        self.featurizer_version = featurizer_version
-
-    def __setstate__(self, state: dict) -> None:
-        # Derived state (feature_group_to_index, number_of_features, monotone
-        # constraints) must reflect the current feature layout, not the layout
-        # at pickle time. Old pickles carry index maps for removed feature
-        # groups (e.g. reference_features), so rebuild everything from
-        # features_to_use. featurizer_version stays artifact-pinned, matching
-        # how native bundles reconstruct FeaturizationInfo from metadata.
-        self.__init__(
-            features_to_use=list(state["features_to_use"]),
-            featurizer_version=int(state.get("featurizer_version", FEATURIZER_VERSION)),
         )
 
     def selected_feature_indices(self) -> list[int]:
@@ -1402,18 +1381,16 @@ def many_pairs_featurize(
             rss_after_bytes=rss_after_bytes,
         )
         logger.info(
-            "Telemetry: pair_featurization_memory stage=%s prediction_contract_version=%s "
-            "predicted_peak_delta_bytes=%d predicted_peak_rss_bytes=%d predicted_bytes=%d "
+            "Telemetry: pair_featurization_memory stage=%s "
+            "predicted_peak_delta_bytes=%d predicted_peak_rss_bytes=%d "
             "total_rows=%d selected_feature_count=%d nameless_feature_count=%d "
             "predicted_features_matrix_bytes=%d predicted_labels_bytes=%d predicted_chunk_bytes=%d "
             "predicted_persistent_row_overhead_bytes=%d predicted_fixed_overhead_bytes=%d "
             "rss_before_bytes=%d rss_peak_bytes=%d rss_after_bytes=%d observed_peak_delta_bytes=%d "
             "prediction_error_ratio=%.3f underpredicted=%s adaptive_halvings=%d rss_source=%s",
             rust_batch_prediction.stage_name,
-            str(rust_batch_prediction.prediction_contract_version),
             int(rust_batch_prediction.predicted_peak_delta_bytes),
             int(rust_batch_prediction.predicted_peak_rss_bytes),
-            int(rust_batch_prediction.predicted_bytes),
             int(rust_batch_plan.total_rows),
             int(rust_batch_plan.selected_feature_count),
             int(rust_batch_plan.nameless_feature_count),
@@ -1434,10 +1411,8 @@ def many_pairs_featurize(
         memory_budget.emit_memory_telemetry(
             {
                 "stage": rust_batch_prediction.stage_name,
-                "prediction_contract_version": rust_batch_prediction.prediction_contract_version,
                 "predicted_peak_delta_bytes": rust_batch_prediction.predicted_peak_delta_bytes,
                 "predicted_peak_rss_bytes": rust_batch_prediction.predicted_peak_rss_bytes,
-                "predicted_bytes": rust_batch_prediction.predicted_bytes,
                 "total_rows": rust_batch_plan.total_rows,
                 "selected_feature_count": rust_batch_plan.selected_feature_count,
                 "nameless_feature_count": rust_batch_plan.nameless_feature_count,
@@ -1523,10 +1498,6 @@ def resolve_training_pairs(
     list[tuple[str, str, int | float]],
 ]:
     """Resolve the train/val/test signature pairs for a training dataset.
-
-    This is the single source of pair-list truth shared by ``featurize`` and
-    the training-time feature snapshot cache: both hash and featurize exactly
-    the lists returned here.
 
     Args:
         dataset: A ``mode='train'`` dataset.

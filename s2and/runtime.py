@@ -7,8 +7,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from s2and import __version__
+
 Backend = Literal["python", "rust"]
-REQUIRED_RUST_EXTENSION_VERSION = "1.0.0"
 
 
 @dataclass(frozen=True)
@@ -29,15 +30,13 @@ def load_s2and_rust_extension(*, import_module: Callable[[str], Any] | None = No
     except ModuleNotFoundError as exc:
         if not (exc.name or "").startswith("s2and_rust"):
             raise
-        raise RuntimeError(
-            f"Rust was requested, but s2and-rust=={REQUIRED_RUST_EXTENSION_VERSION} is not importable"
-        ) from exc
+        raise RuntimeError(f"Rust was requested, but s2and-rust=={__version__} is not importable") from exc
 
     found_version = getattr(module, "__version__", None)
-    if found_version != REQUIRED_RUST_EXTENSION_VERSION:
+    if found_version != __version__:
         raise RuntimeError(
             "Rust was requested, but the installed extension version does not match the pinned dependency: "
-            f"required={REQUIRED_RUST_EXTENSION_VERSION!r} found={found_version!r}"
+            f"required={__version__!r} found={found_version!r}"
         )
     return module
 

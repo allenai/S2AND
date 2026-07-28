@@ -16,8 +16,6 @@ from s2and.name_counts_index import NameCountsIndex
 from s2and.name_tuple_artifact import NameTupleArtifact, load_packaged_name_tuple_artifact
 from s2and.orcid_prefix_counts import LoadedOrcidPrefixCounts, load_canonical_orcid_prefix_counts
 
-LINKER_TARGET_SCHEMA = "incremental_linker_training_target_v1"
-LINKER_EVALUATION_REPORT_SCHEMA = "s2and_linker_evaluation_report_v1"
 REQUIRED_LINKER_TABLE_KEYS = (
     "train_path",
     "classic_gate_source_path",
@@ -85,6 +83,7 @@ class ModelDataset:
 class ModelPlan:
     """One verified model-development plan and its byte identity."""
 
+    release_version: str
     datasets: Mapping[str, ModelDataset]
     eps: EpsPolicy
     sha256: str
@@ -104,8 +103,11 @@ def load_model_plan(path: Path) -> ModelPlan:
 
     contents = Path(path).read_bytes()
     payload = json.loads(contents)
-    if not isinstance(payload, dict) or set(payload) != {"datasets", "eps"}:
+    if not isinstance(payload, dict) or set(payload) != {"release_version", "datasets", "eps"}:
         raise ValueError("invalid model plan")
+    release_version = payload["release_version"]
+    if not isinstance(release_version, str) or not release_version or release_version.strip() != release_version:
+        raise ValueError("invalid release version")
 
     raw_eps = payload["eps"]
     if not isinstance(raw_eps, dict) or set(raw_eps) != {
@@ -157,6 +159,7 @@ def load_model_plan(path: Path) -> ModelPlan:
             files[role] = file_path
         datasets[name] = ModelDataset(files=files)
     return ModelPlan(
+        release_version=release_version,
         datasets=datasets,
         eps=eps,
         sha256=hashlib.sha256(contents).hexdigest(),

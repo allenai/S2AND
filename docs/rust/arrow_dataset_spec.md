@@ -221,7 +221,8 @@ writers instead of open-coding the table or sidecar formats:
   `write_raw_planner_arrow_tables(...)` for semantic Arrow IPC tables.
 - `write_raw_arrow_batch_lookup_indexes(...)` after the final table write for
   raw-planner sidecars.
-- `raw_planner_arrow_physical_layout(...)` for manifest/report layout metrics.
+- `raw_planner_arrow_physical_layout(...)` for transient inspection of the
+  final bytes when validation or reporting needs batch metrics.
 
 Recommended sidecar filenames are stem-qualified:
 
@@ -274,16 +275,15 @@ That writer returns table paths and does not write `manifest.json`. All in-repo
 producers pass those paths through
 `s2and.arrow_inputs.build_arrow_artifact_manifest(...)` and
 `write_arrow_artifact_manifest(...)`, which own the portable paths,
-normalization, immutable-generation inventory, and publication format.
-Producer-specific metadata cannot override those canonical fields.
+public-format identity, flat content inventory, and publication format.
 `scripts/convert_to_arrow.py` is the reference producer for deployable
-dataset metadata and current batch-index sidecars. Its `benchmark` command
+dataset manifests and current batch-index sidecars. Its `benchmark` command
 requires explicit `--source-root` and `--output-root`; `service-json` requires
 explicit `--input-json` and `--output-root`. Neither command discovers a
 production source or destination root.
 `scripts/verification/compare_full_predict_arrow_parity.py` is the reference
 bounded parity producer: it writes current batch-index sidecars, resolves a
-canonical name-count index, and publishes an artifact-generation manifest for
+canonical name-count index, and publishes a public-format-1 manifest for
 its temporary Arrow bundle before validation. An independent assembly pipeline is fine, but
 production producers should send source/raw text and name inputs plus the same
 manifest contract as this document. Parity is measured after Rust preprocessing,
@@ -498,16 +498,57 @@ Production prediction does not need this file.
 
 Manifest expectations from this spec:
 
-1. Provide a shared/global `name_counts_index/` sidecar referenced from
-   manifests via the `name_counts_index` path key when the selected model uses
-   name-count features.
+1. Provide one `name_counts_index/` per self-contained published root,
+   referenced from every benchmark and replay dataset manifest via the
+   `name_counts_index` path key when the selected model uses name-count
+   features.
 2. Do not build a request-time pipeline that loads legacy name-count artifacts
    into Python dicts/lists. That defeats the purpose of this contract.
 
-The on-disk layout, manifest schema (`schema_version: "name_counts_index_v3"`),
-binary record format, and atomic publication contract are owned by
-[`artifact_formats.md` -- Name Counts](artifact_formats.md#name-counts). New
-writers must publish through that contract.
+The directory has exactly these fixed-role files:
+
+```text
+name_counts_index/
+  manifest.json
+  first.bin
+  last.bin
+  first_last.bin
+  last_first_initial.bin
+```
+
+Its manifest has exactly this shape:
+
+```json
+{
+  "kind": "s2and_name_counts",
+  "format_version": 1,
+  "files": {
+    "first": {"byte_count": 0, "sha256": "lowercase-sha256"},
+    "last": {"byte_count": 0, "sha256": "lowercase-sha256"},
+    "first_last": {"byte_count": 0, "sha256": "lowercase-sha256"},
+    "last_first_initial": {"byte_count": 0, "sha256": "lowercase-sha256"}
+  }
+}
+```
+
+Paths are not serialized; each role resolves to `<role>.bin`. The Rust opener
+validates the manifest, declared sizes and digests, fixed filenames, contained
+paths, and every record. Python retains only the opened handle's path and exact
+manifest SHA-256 for orchestration and model binding.
+
+Each binary file starts with private magic `S2NCI001` and stores:
+
+```text
+header: magic:8, record_count:u64, blob_offset:u64, blob_len:u64
+record: hash1:u64, hash2:u64, name_offset:u64, name_len:u32, reserved:u32, count:f64
+blob: concatenated UTF-8 name bytes
+```
+
+Two FNV-64 hashes narrow lookup and exact UTF-8 comparison prevents hash
+collisions from producing false hits. Writers assemble the complete directory
+in a temporary sibling and rename it once into an absent
+`name_counts_index/` target. Publish changed counts under a new parent/root
+rather than mutating an open index.
 
 ---
 
@@ -532,53 +573,47 @@ duplicate it into every dataset or hide it in Arrow path bundles.
 Each dataset directory must contain `manifest.json`. The manifest is not the hot
 path source of truth, but it is required for auditability and validation.
 
-Required fields for every semantic Arrow manifest:
+Every dataset manifest requires stable kind `s2and_arrow_dataset`, public
+format `1`, portable paths, and a flat content inventory. A shortened example
+is:
 
 ```json
 {
-  "schema": "feature_block_arrow_v2",
-  "normalization_version": "canonical_v2",
-  "dataset": "dataset_name",
-  "signature_count": 0,
-  "paper_count": 0,
+  "kind": "s2and_arrow_dataset",
+  "format_version": 1,
   "paths": {
     "signatures": "signatures.arrow",
+    "signatures_batch_index": "signatures.signatures_batch_index.bin",
     "papers": "papers.arrow",
-    "paper_authors": "paper_authors.arrow"
+    "papers_batch_index": "papers.papers_batch_index.bin",
+    "paper_authors": "paper_authors.arrow",
+    "paper_authors_batch_index": "paper_authors.paper_authors_batch_index.bin"
   },
-  "artifact_generation": {
-    "schema_version": "s2and_arrow_artifact_generation_v2",
-    "generation_id": "sha256-of-canonical-file-inventory",
-    "files": {
-      "signatures": {
-        "kind": "file",
-        "byte_count": 0,
-        "sha256": "lowercase-sha256"
-      }
-    }
-  },
-  "name_tuples": "default packaged canonical aliases"
+  "files": {
+    "signatures": {"byte_count": 0, "sha256": "lowercase-sha256"},
+    "signatures_batch_index": {"byte_count": 0, "sha256": "lowercase-sha256"},
+    "papers": {"byte_count": 0, "sha256": "lowercase-sha256"},
+    "papers_batch_index": {"byte_count": 0, "sha256": "lowercase-sha256"},
+    "paper_authors": {"byte_count": 0, "sha256": "lowercase-sha256"},
+    "paper_authors_batch_index": {"byte_count": 0, "sha256": "lowercase-sha256"}
+  }
 }
 ```
 
-The manifest `schema` value is the on-disk Arrow manifest schema. In Python it
-is exposed as
-`s2and.incremental_linking.feature_block.FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION`.
-Do not use the signature-order `FEATURE_BLOCK_SCHEMA_VERSION` constant for
-manifest validation.
+Optional immutable roles such as `specter`, `specter_batch_index`, and
+`name_counts_index` appear in both `paths` and `files`. A name-count file entry
+describes the referenced index's `manifest.json`; its path points to the index
+directory. Physical paths are serialized only in `paths`; file/directory kind
+labels and derived generation IDs are not persisted.
 
-The canonical manifest builder supplies `normalization_version`, `paths`, and
-`artifact_generation`. Dataset producers supply fields such as `schema`,
-`dataset`, and row counts as metadata.
-
-Generation v2 identifies immutable artifacts by semantic role, kind, byte
-count, and content SHA-256. Physical filenames appear only in `paths`; renaming
-an artifact without changing its role or bytes therefore does not change
-`generation_id`. Generation v1 is rejected rather than upgraded at open.
-`ArrowDataset.open()` validates manifest-relative paths, retained bytes, Arrow
-schemas, and the native name-count index, but does not enforce where a shared
-index sits within a publication. The release-root validator owns that topology,
-including nested replay bundles.
+The canonical manifest builder supplies exactly `kind`, `format_version`,
+`paths`, and `files`. The collection root owns dataset names. Dataset manifests
+accept no open-ended metadata and no second schema, normalization, generation,
+or physical-layout authority.
+`ArrowDataset.open()` validates format before opening payloads, then validates
+manifest-relative paths, retained bytes, Arrow table schemas, batch-index
+bytes, and the native name-count index. The release-root validator separately
+owns shared-index topology, including datasets in declared replay collections.
 
 Conditional `paths` entries:
 
@@ -595,91 +630,37 @@ Conditional `paths` entries:
 - `name_counts_index` is required when the selected model uses name-count
   features.
 - `paths.name_pairs` or `paths.name_tuples` must not be present in manifests.
-  Top-level `name_tuples` metadata is allowed to describe how the artifact was
-  produced.
 
-Large-block optimized artifacts should also include:
+A generic multi-dataset conversion root uses:
 
 ```json
 {
-  "paths": {
-    "specter": "specter2.arrow",
-    "signatures_batch_index": "signatures.signatures_batch_index.bin",
-    "papers_batch_index": "papers.papers_batch_index.bin",
-    "paper_authors_batch_index": "paper_authors.paper_authors_batch_index.bin",
-    "specter_batch_index": "specter2.specter_batch_index.bin"
-  },
-  "physical_layout": {
-    "schema": "s2and_arrow_physical_v1",
-    "optimized_for": "incremental_raw_candidate_planning",
-    "tables": {
-      "signatures": {
-        "key": "signature_id",
-        "max_record_batch_rows": 16384,
-        "row_count": 0,
-        "record_batch_count": 0,
-        "actual_max_batch_rows": 0,
-        "batch_index_path_key": "signatures_batch_index",
-        "batch_index_present": true
-      },
-      "papers": {
-        "key": "paper_id",
-        "max_record_batch_rows": 16384,
-        "row_count": 0,
-        "record_batch_count": 0,
-        "actual_max_batch_rows": 0,
-        "batch_index_path_key": "papers_batch_index",
-        "batch_index_present": true
-      },
-      "paper_authors": {
-        "key": "paper_id",
-        "max_record_batch_rows": 16384,
-        "row_count": 0,
-        "record_batch_count": 0,
-        "actual_max_batch_rows": 0,
-        "batch_index_path_key": "paper_authors_batch_index",
-        "batch_index_present": true
-      },
-      "specter": {
-        "key": "paper_id",
-        "max_record_batch_rows": 2048,
-        "row_count": 0,
-        "record_batch_count": 0,
-        "actual_max_batch_rows": 0,
-        "batch_index_path_key": "specter_batch_index",
-        "batch_index_present": true
-      }
+  "kind": "s2and_arrow_collection",
+  "format_version": 1,
+  "dataset_manifests": {
+    "pubmed": {
+      "path": "pubmed/manifest.json",
+      "sha256": "lowercase-sha256"
     }
   }
 }
 ```
 
-Repeat the `physical_layout.tables` entry for every large lookup table shipped
-for indexed raw planning. Inventory the bundle's one selected embedding layout
-under `specter`.
+`replay_bundles`, when present, uses the same name-to-`{path, sha256}` shape
+and points at one level of generic collection manifests. Those replay
+collections cannot declare further `replay_bundles`. Only a final
+self-contained publication may declare replay collections; it uses
+`s2and_public_data` and adds the single
+owner-selected `release_version`, for example `"1.3"`. Generic conversion
+roots omit it. Every published benchmark and replay dataset resolves
+`paths.name_counts_index` to that publication root's one shared
+`name_counts_index/`.
 
-Recommended additional fields:
-
-- `cluster_count` for eval datasets.
-- `source_dir` or source snapshot identifier.
-- `generated_at`.
-- `generator_version` or git commit.
-- `specter` metadata with `row_count`, `dimension`, and source artifact id for
-  the selected embedding file.
-- `name_counts_index` metadata with the shared index path and schema version.
-- `physical_layout.tables.<table>` entries for every large lookup table:
-  `row_count`, `record_batch_count`, `actual_max_batch_rows`,
-  `max_record_batch_rows`, lookup `key`, and batch-index presence.
-- `raw_planner_batch_indexes` metrics when S2AND-generated sidecars are present.
-- `validation` summary with row counts, duplicate counts, missing reference
-  counts, physical-layout checks, and parity-check command/output location.
-
-Root-level `manifest.json` should use schema `inference_arrow_bundle_v1` and
-list dataset directories and their manifest paths in `dataset_manifests` when an
-artifact bundle contains multiple datasets. Keep per-input `source_path` values
-in dataset manifests; do not write a root-level `source_path`. Existing root
-manifests without `schema: "inference_arrow_bundle_v1"` are rejected instead of
-migrated in place.
+Public format `1` covers persisted meaning as well as JSON framing. A change to
+name canonicalization, count-key construction, missing-count semantics, Arrow
+column interpretation, or a public sidecar encoding requires a format bump and
+regenerated public data. Private binary magic remains an independent
+corruption/layout guard.
 
 ---
 
@@ -730,12 +711,8 @@ Required physical-layout checks for large-block optimized artifacts:
 - `signatures.arrow`, `papers.arrow`, `paper_authors.arrow`, and the selected
   embedding file are bounded as specified in
   [Large-Block Physical Layout](#large-block-physical-layout).
-- `physical_layout.schema` is `s2and_arrow_physical_v1`.
-- `physical_layout.tables.<table>.actual_max_batch_rows` is less than or equal
-  to `physical_layout.tables.<table>.max_record_batch_rows`.
-- One-batch lookup tables have
-  `row_count <= max_record_batch_rows`; otherwise they should be rejected as
-  unoptimized for indexed raw planning.
+- Inspect actual IPC record batches; reject any batch above its table's
+  maximum. This fact is not copied into a second manifest authority.
 - Canonical production/eval roots contain batch indexes for signatures,
   papers, paper authors, and the selected embedding; they were generated from
   the final Arrow files and the manifest path keys point to them. Reduced

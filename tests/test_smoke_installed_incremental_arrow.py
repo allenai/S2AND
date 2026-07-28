@@ -8,7 +8,8 @@ import pytest
 
 from s2and import memory_budget
 from s2and import production_model as production_model_module
-from s2and.arrow_inputs import build_arrow_artifact_manifest, write_arrow_artifact_manifest
+from s2and.arrow_inputs import PUBLIC_DATA_KIND, build_arrow_artifact_manifest, write_arrow_artifact_manifest
+from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from scripts.verification import smoke_installed_incremental_arrow as smoke_module
 from tests.helpers import tiny_name_counts_tuple
@@ -39,15 +40,15 @@ def _write_release_data_root(root: Path, *, dataset: str) -> None:
     dataset_manifest = build_arrow_artifact_manifest(paths, dataset_root)
     dataset_manifest_path = write_arrow_artifact_manifest(dataset_manifest, dataset_root)
     root_manifest = {
-        "schema": smoke_module.RELEASE_DATA_MANIFEST_SCHEMA,
-        "datasets": [dataset],
-        "dataset_manifests": [
-            {
-                "dataset": dataset,
-                "manifest_path": f"{dataset}/manifest.json",
-                "manifest_sha256": _sha256(dataset_manifest_path),
+        "kind": PUBLIC_DATA_KIND,
+        "release_version": "1.3",
+        "format_version": PUBLIC_DATA_FORMAT_VERSION,
+        "dataset_manifests": {
+            dataset: {
+                "path": f"{dataset}/manifest.json",
+                "sha256": _sha256(dataset_manifest_path),
             }
-        ],
+        },
     }
     root_manifest_path = root / "manifest.json"
     root_manifest_path.write_text(json.dumps(root_manifest, sort_keys=True) + "\n", encoding="utf-8")
@@ -63,7 +64,10 @@ def _write_release_smoke_inputs(
     }
     monkeypatch.setattr(smoke_module, "canonical_artifact_hashes", lambda: dict(artifact_hashes))
     monkeypatch.setattr(production_model_module, "canonical_artifact_hashes", lambda: dict(artifact_hashes))
-    model_dir = smoke_module._write_synthetic_bundle(tmp_path / "model-inputs")  # noqa: SLF001
+    model_dir = smoke_module._write_synthetic_bundle(  # noqa: SLF001
+        tmp_path / "model-inputs",
+        release_version="1.3",
+    )
     data_root = tmp_path / "data"
     _write_release_data_root(data_root, dataset="smoke")
     monkeypatch.setattr(smoke_module, "NAME_COUNTS_INDEX_PATH", data_root / "name_counts_index")
@@ -160,7 +164,21 @@ def test_release_candidate_smoke_rejects_modified_nested_dataset_manifest(
     manifest_path = data_root / "smoke" / "manifest.json"
     manifest_path.write_bytes(manifest_path.read_bytes() + b" ")
 
-    with pytest.raises(ValueError, match="Release dataset 'smoke' manifest SHA-256 mismatch"):
+    with pytest.raises(ValueError, match=r"dataset_manifests\.smoke\.sha256 mismatch"):
+        _run_release_candidate(model_dir, data_root)
+
+
+def test_release_candidate_smoke_rejects_model_data_release_version_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir, data_root = _write_release_smoke_inputs(tmp_path, monkeypatch)
+    root_manifest_path = data_root / "manifest.json"
+    root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))
+    root_manifest["release_version"] = "different"
+    root_manifest_path.write_text(json.dumps(root_manifest, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="model/data version mismatch"):
         _run_release_candidate(model_dir, data_root)
 
 
@@ -171,7 +189,7 @@ def test_release_candidate_smoke_rejects_modified_name_count_material(
     model_dir, data_root = _write_release_smoke_inputs(tmp_path, monkeypatch)
     index_root = data_root / "name_counts_index"
     manifest = json.loads((index_root / "manifest.json").read_text(encoding="utf-8"))
-    material_path = index_root / next(iter(manifest["files"].values()))["path"]
+    material_path = index_root / f"{next(iter(manifest['files']))}.bin"
     material_path.write_bytes(material_path.read_bytes() + b"\0")
 
     with pytest.raises(ValueError, match="mismatch"):
@@ -204,10 +222,13 @@ def test_release_candidate_smoke_rejects_dataset_bound_to_other_name_counts(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     paths = {key: (dataset_root / value).resolve() for key, value in manifest["paths"].items()}
     paths["name_counts_index"] = alternate_name_counts
-    write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, dataset_root), dataset_root)
+    write_arrow_artifact_manifest(
+        build_arrow_artifact_manifest(paths, dataset_root),
+        dataset_root,
+    )
     root_manifest_path = data_root / "manifest.json"
     root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))
-    root_manifest["dataset_manifests"][0]["manifest_sha256"] = _sha256(manifest_path)
+    root_manifest["dataset_manifests"]["smoke"]["sha256"] = _sha256(manifest_path)
     root_manifest_path.write_text(json.dumps(root_manifest, sort_keys=True) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="does not bind the configured name-count index"):

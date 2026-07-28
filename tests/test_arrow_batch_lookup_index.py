@@ -123,17 +123,19 @@ def test_write_uses_bounded_sorted_runs_and_preserves_v1_bytes(
     assert not list(tmp_path.glob(f".{index_path.name}.*"))
 
 
-@pytest.mark.parametrize("mutation", ["truncated", "trailing"])
-def test_validation_rejects_inexact_batch_index_body_length(tmp_path: Path, mutation: str) -> None:
-    path, index_path = _write_tiny_index(tmp_path)
-    payload = index_path.read_bytes()
-    if mutation == "truncated":
-        index_path.write_bytes(payload[:-1])
-    else:
-        index_path.write_bytes(payload + b"\x00")
+def test_validation_rejects_inexact_batch_index_body_length(tmp_path: Path) -> None:
+    for mutation in ("truncated", "trailing"):
+        case_root = tmp_path / mutation
+        case_root.mkdir()
+        path, index_path = _write_tiny_index(case_root)
+        payload = index_path.read_bytes()
+        if mutation == "truncated":
+            index_path.write_bytes(payload[:-1])
+        else:
+            index_path.write_bytes(payload + b"\x00")
 
-    with pytest.raises(ValueError, match="does not match expected length"):
-        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+        with pytest.raises(ValueError, match="does not match expected length"):
+            validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
 
 
 def test_validation_rejects_decreasing_batch_index_hashes(tmp_path: Path) -> None:

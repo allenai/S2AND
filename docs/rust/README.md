@@ -2,8 +2,8 @@
 
 The `s2and_rust` extension accelerates S2AND's most expensive stages (featurization,
 preprocessing, constraint lookups) by replacing Python hot paths with Rust via PyO3.
-This folder documents the runtime contract, benchmark evidence, and migration plans
-for the Rust integration.
+This folder documents the runtime contract, public artifact specifications,
+and benchmark evidence for the Rust integration.
 
 ---
 
@@ -13,8 +13,7 @@ for the Rust integration.
 |---|---|
 | [baselines.md](baselines.md) | Current promoted incremental performance-report command; use the v1.3 runbook for release acceptance. |
 | [runtime.md](runtime.md) | Runtime contract: explicit Python/Rust routes, exact native-version loading, failure semantics, Arrow validation, and verification commands. |
-| [artifact_formats.md](artifact_formats.md) | Current artifact-format choices and rejected alternatives. |
-| [arrow_dataset_spec.md](arrow_dataset_spec.md) | Required Arrow dataset layout, schemas, manifests, and validation checks for direct Rust predict and predict_incremental inputs. |
+| [arrow_dataset_spec.md](arrow_dataset_spec.md) | Public Arrow/name-count formats, required dataset layout, table schemas, and validation checks for direct Rust predict and predict_incremental inputs. |
 | [profiling/2026-05-28-promoted-incremental-arrow.md](profiling/2026-05-28-promoted-incremental-arrow.md) | Retained release-build comparison for the active memory-mapped name-count index. Historical evidence, not an active gate. |
 
 ---

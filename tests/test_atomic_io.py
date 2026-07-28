@@ -159,27 +159,21 @@ def test_exclusive_file_lock_zero_timeout_still_attempts_available_lock(tmp_path
         assert lock_path.exists()
 
 
-@pytest.mark.parametrize(
-    ("timeout_seconds", "poll_interval_seconds"),
-    [
-        (-1.0, 0.05),
-        (float("inf"), 0.05),
-        (1.0, 0.0),
-        (1.0, float("nan")),
-    ],
-)
-def test_exclusive_file_lock_rejects_unbounded_timing_values(
-    tmp_path: Path,
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-) -> None:
-    with pytest.raises(ValueError, match="must be finite"):
-        with exclusive_file_lock(
-            tmp_path / "publication.lock",
-            timeout_seconds=timeout_seconds,
-            poll_interval_seconds=poll_interval_seconds,
-        ):
-            pass
+def test_exclusive_file_lock_rejects_unbounded_timing_values(tmp_path: Path) -> None:
+    cases = (
+        ("negative-timeout", -1.0, 0.05),
+        ("infinite-timeout", float("inf"), 0.05),
+        ("zero-poll", 1.0, 0.0),
+        ("nan-poll", 1.0, float("nan")),
+    )
+    for _case_id, timeout_seconds, poll_interval_seconds in cases:
+        with pytest.raises(ValueError, match="must be finite"):
+            with exclusive_file_lock(
+                tmp_path / "publication.lock",
+                timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+            ):
+                pass
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows CRT locking regression")

@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ _MISSING = object()
 
 
 class _MutationTrackedDict(dict[Any, Any]):
-    """A compact dict that records built-in content mutations."""
+    """A compact dict that invalidates native state before mutation attempts."""
 
     __slots__ = ("_identity_token", "_mutation_version")
 
@@ -59,57 +59,41 @@ class _MutationTrackedDict(dict[Any, Any]):
             self._mutation_version += 1
 
     def __setitem__(self, key: Any, value: Any) -> None:
-        if key in self and dict.__getitem__(self, key) == value:
-            return
         self._touch()
         dict.__setitem__(self, key, value)
 
     def __delitem__(self, key: Any) -> None:
-        dict.__delitem__(self, key)
         self._touch()
+        dict.__delitem__(self, key)
 
     def __ior__(self, other: Any) -> "_MutationTrackedDict":
-        if not other:
-            return self
         self._touch()
         dict.__ior__(self, other)
         return self
 
     def clear(self) -> None:
-        if not self:
-            return
         self._touch()
         dict.clear(self)
 
     def pop(self, key: Any, default: Any = _MISSING) -> Any:
-        if key not in self:
-            if default is _MISSING:
-                return dict.pop(self, key)
-            return default
         self._touch()
-        return dict.pop(self, key)
+        return dict.pop(self, key) if default is _MISSING else dict.pop(self, key, default)
 
     def popitem(self) -> tuple[Any, Any]:
         self._touch()
         return dict.popitem(self)
 
     def setdefault(self, key: Any, default: Any = None) -> Any:
-        if key in self:
-            return dict.__getitem__(self, key)
         self._touch()
         return dict.setdefault(self, key, default)
 
     def update(self, *args: Any, **kwargs: Any) -> None:
-        if not args and not kwargs:
-            return
-        if len(args) == 1 and not kwargs and isinstance(args[0], Mapping) and not args[0]:
-            return
         self._touch()
         dict.update(self, *args, **kwargs)
 
 
 class _MutationTrackedSet(set[tuple[Any, Any]]):
-    """A compact set that records built-in content mutations."""
+    """A compact set that invalidates native state before mutation attempts."""
 
     __slots__ = ("_identity_token", "_mutation_version")
 
@@ -137,81 +121,58 @@ class _MutationTrackedSet(set[tuple[Any, Any]]):
             self._mutation_version += 1
 
     def __iand__(self, other: Any) -> "_MutationTrackedSet":
-        if not self or other is self:
-            return self
         self._touch()
         set.__iand__(self, other)
         return self
 
     def __ior__(self, other: Any) -> "_MutationTrackedSet":
-        if not other or other is self:
-            return self
         self._touch()
         set.__ior__(self, other)
         return self
 
     def __isub__(self, other: Any) -> "_MutationTrackedSet":
-        if not self or not other:
-            return self
         self._touch()
         set.__isub__(self, other)
         return self
 
     def __ixor__(self, other: Any) -> "_MutationTrackedSet":
-        if not other:
-            return self
         self._touch()
         set.__ixor__(self, other)
         return self
 
     def add(self, element: tuple[Any, Any]) -> None:
-        if element in self:
-            return
         self._touch()
         set.add(self, element)
 
     def clear(self) -> None:
-        if not self:
-            return
         self._touch()
         set.clear(self)
 
     def difference_update(self, *others: Any) -> None:
-        if not self or not others or all(not other for other in others):
-            return
         self._touch()
         set.difference_update(self, *others)
 
     def discard(self, element: object) -> None:
-        if element not in self:
-            return
         self._touch()
         set.discard(self, element)
 
     def intersection_update(self, *others: Any) -> None:
-        if not self or not others:
-            return
         self._touch()
         set.intersection_update(self, *others)
 
     def pop(self) -> Any:
-        value = set.pop(self)
         self._touch()
-        return value
+        return set.pop(self)
 
     def remove(self, element: tuple[Any, Any]) -> None:
-        set.remove(self, element)
         self._touch()
+        set.remove(self, element)
 
     def symmetric_difference_update(self, other: Any) -> None:
-        if not other:
-            return
         self._touch()
         set.symmetric_difference_update(self, other)
 
     def update(self, *others: Any) -> None:
-        if not others or all(not other for other in others):
-            return
         self._touch()
         set.update(self, *others)
 

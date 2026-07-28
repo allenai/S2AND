@@ -15,8 +15,8 @@ use crate::{
     FNV_OFFSET,
 };
 
-const NAME_COUNTS_INDEX_SCHEMA_VERSION: &str = "name_counts_index_v3";
-const NAME_COUNTS_NORMALIZATION_VERSION: &str = "canonical_v2";
+pub(crate) const PUBLIC_DATA_FORMAT_VERSION: u32 = 1;
+const NAME_COUNTS_KIND: &str = "s2and_name_counts";
 
 #[derive(Clone)]
 pub(crate) struct NameCountsData {
@@ -61,7 +61,6 @@ pub(crate) struct RawNameCountIndex {
     last: RawNameCountIndexFile,
     first_last: RawNameCountIndexFile,
     last_first_initial: RawNameCountIndexFile,
-    normalization_version: String,
     identity: NameCountsIndexIdentity,
 }
 
@@ -80,8 +79,8 @@ struct NameCountsIndexIdentity {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NameCountsManifest {
-    schema_version: String,
-    normalization_version: String,
+    kind: String,
+    format_version: u32,
     files: NameCountsManifestFiles,
 }
 
@@ -97,7 +96,6 @@ struct NameCountsManifestFiles {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NameCountsManifestFile {
-    path: String,
     byte_count: u64,
     sha256: String,
 }
@@ -107,7 +105,6 @@ struct RawNameCountIndexPaths {
     last: RawNameCountIndexFileSpec,
     first_last: RawNameCountIndexFileSpec,
     last_first_initial: RawNameCountIndexFileSpec,
-    normalization_version: String,
     identity: NameCountsIndexIdentity,
 }
 
@@ -169,7 +166,6 @@ impl RawNameCountIndex {
             last: last?,
             first_last: first_last?,
             last_first_initial: last_first_initial?,
-            normalization_version: paths.normalization_version,
             identity: paths.identity,
         })
     }
@@ -261,7 +257,7 @@ impl NameCountsIndex {
 #[pymethods]
 impl NameCountsIndex {
     /// Open a manifest-backed name-count index after independently verifying
-    /// its schema, paths, byte counts, and file digests.
+    /// its kind, format, byte counts, and file digests.
     #[staticmethod]
     #[pyo3(name = "open")]
     fn open_py(py: Python<'_>, path: &str) -> PyResult<Self> {
@@ -269,11 +265,6 @@ impl NameCountsIndex {
         Ok(Self {
             index: Arc::new(index),
         })
-    }
-
-    #[getter]
-    fn normalization_version(&self) -> &str {
-        &self.index.normalization_version
     }
 
     /// Return the digest of the exact manifest snapshot this handle opened.
@@ -781,23 +772,16 @@ fn validated_name_counts_manifest_file(
     kind: &str,
 ) -> PyResult<RawNameCountIndexFileSpec> {
     let manifest_path = index_dir.join("manifest.json");
-    let expected_path = format!("{kind}.bin");
-    if entry.path != expected_path {
-        return Err(manifest_value_error(
-            &manifest_path,
-            format!("files.{kind}.path must equal {kind}.bin"),
-        ));
-    }
     if !is_lowercase_sha256(&entry.sha256) {
         return Err(manifest_value_error(
             &manifest_path,
             format!("requires lowercase SHA-256 files.{kind}.sha256"),
         ));
     }
-    let resolved = index_dir.join(&entry.path);
+    let resolved = index_dir.join(format!("{kind}.bin"));
     let canonical_resolved = fs::canonicalize(&resolved).map_err(|err| {
         pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-            "name-count index manifest {} points to missing files.{} target {}: {}",
+            "name-count index manifest {} requires missing files.{} target {}: {}",
             manifest_path.display(),
             kind,
             resolved.display(),
@@ -806,7 +790,7 @@ fn validated_name_counts_manifest_file(
     })?;
     if !canonical_resolved.starts_with(canonical_index_dir) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "name-count index manifest {} files.{}.path escapes the name_counts_index directory: {}",
+            "name-count index manifest {} fixed files.{} target escapes the name_counts_index directory: {}",
             manifest_path.display(),
             kind,
             canonical_resolved.display()
@@ -821,7 +805,7 @@ fn validated_name_counts_manifest_file(
     })?;
     if !metadata.is_file() {
         return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-            "name-count index manifest {} files.{}.path target is not a file: {}",
+            "name-count index manifest {} fixed files.{} target is not a file: {}",
             manifest_path.display(),
             kind,
             canonical_resolved.display()
@@ -848,21 +832,21 @@ impl NameCountsManifest {
         manifest_sha256: String,
     ) -> PyResult<RawNameCountIndexPaths> {
         let manifest_path = index_dir.join("manifest.json");
-        if self.schema_version != NAME_COUNTS_INDEX_SCHEMA_VERSION {
+        if self.kind != NAME_COUNTS_KIND {
             return Err(manifest_value_error(
                 &manifest_path,
                 format!(
-                    "has unsupported schema_version {:?}; expected {:?}",
-                    self.schema_version, NAME_COUNTS_INDEX_SCHEMA_VERSION
+                    "has unsupported kind {:?}; expected {:?}",
+                    self.kind, NAME_COUNTS_KIND
                 ),
             ));
         }
-        if self.normalization_version != NAME_COUNTS_NORMALIZATION_VERSION {
+        if self.format_version != PUBLIC_DATA_FORMAT_VERSION {
             return Err(manifest_value_error(
                 &manifest_path,
                 format!(
-                    "has unsupported normalization_version {:?}; expected {:?}",
-                    self.normalization_version, NAME_COUNTS_NORMALIZATION_VERSION
+                    "has unsupported format_version {:?}; expected {:?}",
+                    self.format_version, PUBLIC_DATA_FORMAT_VERSION
                 ),
             ));
         }
@@ -894,7 +878,6 @@ impl NameCountsManifest {
             last,
             first_last,
             last_first_initial,
-            normalization_version: self.normalization_version,
             identity: NameCountsIndexIdentity { manifest_sha256 },
         })
     }
@@ -981,7 +964,6 @@ mod name_counts_tests {
     fn manifest_file_entry(index_dir: &std::path::Path, kind: &str) -> serde_json::Value {
         let path = index_file_path(index_dir, kind);
         serde_json::json!({
-            "path": format!("{kind}.bin"),
             "byte_count": path.metadata().expect("file metadata").len(),
             "sha256": sha256_file(&path).expect("hash fixture"),
         })
@@ -999,7 +981,10 @@ mod name_counts_tests {
         );
     }
 
-    fn write_artifact(normalization_version_json: Option<&str>) -> std::path::PathBuf {
+    fn write_artifact(
+        kind_json: Option<&str>,
+        format_version_json: Option<&str>,
+    ) -> std::path::PathBuf {
         let dir = unique_temp_dir("s2and_nc_version");
         let mut files = serde_json::Map::new();
         for name in ["first", "last", "first_last", "last_first_initial"] {
@@ -1010,12 +995,12 @@ mod name_counts_tests {
             drop(file);
             files.insert(name.to_string(), manifest_file_entry(&dir, name));
         }
-        let mut manifest = serde_json::json!({
-            "schema_version": "name_counts_index_v3",
-            "files": files,
-        });
-        if let Some(value) = normalization_version_json {
-            manifest["normalization_version"] =
+        let mut manifest = serde_json::json!({"files": files});
+        if let Some(value) = kind_json {
+            manifest["kind"] = serde_json::from_str(value).expect("valid test JSON value");
+        }
+        if let Some(value) = format_version_json {
+            manifest["format_version"] =
                 serde_json::from_str(value).expect("valid test JSON value");
         }
         std::fs::write(
@@ -1082,8 +1067,8 @@ mod name_counts_tests {
             &[("smith a", 9.0)],
         );
         let manifest = serde_json::json!({
-            "schema_version": "name_counts_index_v3",
-            "normalization_version": "canonical_v2",
+            "kind": "s2and_name_counts",
+            "format_version": 1,
             "files": {
                 "first": manifest_file_entry(&dir, "first"),
                 "last": manifest_file_entry(&dir, "last"),
@@ -1114,11 +1099,9 @@ mod name_counts_tests {
         .expect("write checksum-consistent manifest");
     }
 
-    fn read_version(dir: &std::path::Path) -> pyo3::PyResult<String> {
-        Ok(
-            RawNameCountIndex::open_fully_validated(dir.to_str().expect("utf-8 temp path"))?
-                .normalization_version,
-        )
+    fn open_artifact(dir: &std::path::Path) -> pyo3::PyResult<()> {
+        RawNameCountIndex::open_fully_validated(dir.to_str().expect("utf-8 temp path"))?;
+        Ok(())
     }
 
     fn py_err_message(err: pyo3::PyErr) -> String {
@@ -1317,7 +1300,7 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn manifest_rejects_generation_file_path() {
+    fn manifest_rejects_declared_file_path() {
         let dir = write_lookup_artifact();
         let manifest_path = dir.join("manifest.json");
         let mut manifest: serde_json::Value =
@@ -1336,10 +1319,7 @@ mod name_counts_tests {
             Err(error) => error,
         };
         let message = py_err_message(error);
-        assert!(
-            message.contains("files.first.path must equal first.bin"),
-            "{message}"
-        );
+        assert!(message.contains("unknown field `path`"), "{message}");
         std::fs::remove_dir_all(&dir).expect("remove artifact");
     }
 
@@ -1402,14 +1382,13 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn open_retains_manifest_normalization_and_sha256() {
+    fn open_retains_manifest_sha256() {
         let dir = write_lookup_artifact();
         let expected_manifest_sha256 =
             sha256_file(&dir.join("manifest.json")).expect("hash manifest");
         let index = RawNameCountIndex::open(dir.to_str().expect("utf-8 temp path"))
             .expect("open lookup index");
 
-        assert_eq!(index.normalization_version, "canonical_v2");
         assert_eq!(index.identity.manifest_sha256, expected_manifest_sha256);
         drop(index);
         std::fs::remove_dir_all(&dir).expect("remove lookup artifact");
@@ -1445,56 +1424,71 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn absent_normalization_version_is_rejected() {
-        let dir = write_artifact(None);
-        let error = read_version(&dir).expect_err("manifest without version must fail");
+    fn absent_kind_is_rejected() {
+        let dir = write_artifact(None, Some("1"));
+        let error = open_artifact(&dir).expect_err("manifest without kind must fail");
         let _ = std::fs::remove_dir_all(&dir);
         let message = py_err_message(error);
         assert!(message.contains("missing field"), "{message}");
-        assert!(message.contains("normalization_version"), "{message}");
+        assert!(message.contains("kind"), "{message}");
     }
 
     #[test]
-    fn canonical_v2_normalization_version_is_accepted_and_exposed() {
-        let dir = write_artifact(Some(r#""canonical_v2""#));
-        let version = read_version(&dir).expect("canonical_v2 is a supported version");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(version, "canonical_v2");
-    }
-
-    #[test]
-    fn legacy_compat_normalization_version_is_rejected() {
-        let dir = write_artifact(Some(r#""legacy_compat""#));
-        let error = read_version(&dir).expect_err("legacy compatibility mode must fail");
+    fn absent_format_version_is_rejected() {
+        let dir = write_artifact(Some(r#""s2and_name_counts""#), None);
+        let error = open_artifact(&dir).expect_err("manifest without format_version must fail");
         let _ = std::fs::remove_dir_all(&dir);
         let message = py_err_message(error);
-        assert!(
-            message.contains("unsupported normalization_version"),
-            "{message}"
-        );
-        assert!(message.contains("legacy_compat"), "{message}");
+        assert!(message.contains("missing field"), "{message}");
+        assert!(message.contains("format_version"), "{message}");
     }
 
     #[test]
-    fn unknown_normalization_version_fails_like_the_schema_gate() {
-        let dir = write_artifact(Some(r#""canonical_v3""#));
-        let error = read_version(&dir).expect_err("unknown version must be rejected");
+    fn current_kind_and_format_are_accepted() {
+        let dir = write_artifact(Some(r#""s2and_name_counts""#), Some("1"));
+        open_artifact(&dir).expect("current public-data format is supported");
         let _ = std::fs::remove_dir_all(&dir);
-        let message = py_err_message(error);
-        assert!(
-            message.contains("unsupported normalization_version"),
-            "{message}"
-        );
-        assert!(message.contains("canonical_v3"), "{message}");
     }
 
     #[test]
-    fn non_string_normalization_version_is_rejected() {
-        let dir = write_artifact(Some("7"));
-        let error = read_version(&dir).expect_err("non-string version must be rejected");
+    fn wrong_kind_is_rejected() {
+        let dir = write_artifact(Some(r#""other""#), Some("1"));
+        let error = open_artifact(&dir).expect_err("wrong kind must fail");
         let _ = std::fs::remove_dir_all(&dir);
         let message = py_err_message(error);
-        assert!(message.contains("expected a string"), "{message}");
+        assert!(message.contains("unsupported kind"), "{message}");
+        assert!(message.contains("other"), "{message}");
+    }
+
+    #[test]
+    fn unknown_format_version_is_rejected() {
+        let dir = write_artifact(Some(r#""s2and_name_counts""#), Some("2"));
+        let error = open_artifact(&dir).expect_err("unknown format must fail");
+        let _ = std::fs::remove_dir_all(&dir);
+        let message = py_err_message(error);
+        assert!(message.contains("unsupported format_version"), "{message}");
+        assert!(message.contains('2'), "{message}");
+    }
+
+    #[test]
+    fn unknown_format_is_rejected_before_payload_resolution() {
+        let dir = write_artifact(Some(r#""s2and_name_counts""#), Some("2"));
+        std::fs::remove_file(index_file_path(&dir, "first")).expect("remove payload");
+
+        let error = open_artifact(&dir).expect_err("unknown format must fail first");
+        let _ = std::fs::remove_dir_all(&dir);
+        let message = py_err_message(error);
+        assert!(message.contains("unsupported format_version"), "{message}");
+        assert!(!message.contains("missing files.first target"), "{message}");
+    }
+
+    #[test]
+    fn non_integer_format_version_is_rejected() {
+        let dir = write_artifact(Some(r#""s2and_name_counts""#), Some(r#""1""#));
+        let error = open_artifact(&dir).expect_err("non-integer format must fail");
+        let _ = std::fs::remove_dir_all(&dir);
+        let message = py_err_message(error);
+        assert!(message.contains("expected u32"), "{message}");
     }
 }
 

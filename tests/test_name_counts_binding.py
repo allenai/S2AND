@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from s2and.arrow_inputs import ArrowDataset
-from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.incremental_linking.policy import (
     require_arrow_name_counts_index_for_clusterer,
@@ -67,7 +66,7 @@ def test_manifest_mismatch_is_rejected_at_every_runtime_boundary(tmp_path: Path)
 
 def test_missing_manifest_identity_is_rejected(tmp_path: Path) -> None:
     clusterer, dataset, _arrow_root, _index = _runtime_state(tmp_path)
-    clusterer.feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+    clusterer.feature_contract = {}
 
     with pytest.raises(ValueError, match="name_counts_manifest_sha256"):
         require_dataset_name_counts_binding_for_clusterer(clusterer, dataset, context="dataset")

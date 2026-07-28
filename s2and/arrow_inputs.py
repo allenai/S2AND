@@ -17,11 +17,12 @@ from typing import Any, BinaryIO
 from s2and._sha256 import is_lowercase_sha256
 from s2and._sha256 import sha256_file as _sha256_file
 from s2and.arrow_schema import validate_arrow_schema
-from s2and.consts import NORMALIZATION_VERSION
+from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.name_counts_index import NameCountsIndex
 
-INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION = "inference_arrow_bundle_v1"
-ARROW_ARTIFACT_GENERATION_SCHEMA_VERSION = "s2and_arrow_artifact_generation_v2"
+ARROW_DATASET_KIND = "s2and_arrow_dataset"
+ARROW_COLLECTION_KIND = "s2and_arrow_collection"
+PUBLIC_DATA_KIND = "s2and_public_data"
 
 
 @dataclass(frozen=True)
@@ -51,9 +52,10 @@ RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS = {
 }
 _ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS = frozenset(
     {
-        "normalization_version",
+        "kind",
+        "format_version",
         "paths",
-        "artifact_generation",
+        "files",
     }
 )
 _ARROW_IMMUTABLE_ARTIFACT_FILE_KEYS = frozenset(
@@ -120,7 +122,7 @@ def _manifest_relative_path(path_value: Any, manifest_dir: Path, *, artifact_key
     return _portable_manifest_path(relative_path)
 
 
-def _build_arrow_artifact_generation(paths: Mapping[str, Any]) -> dict[str, Any]:
+def _build_arrow_artifact_files(paths: Mapping[str, Any]) -> dict[str, Any]:
     """Build the canonical content inventory used by Arrow bundle writers."""
 
     files: dict[str, dict[str, Any]] = {}
@@ -132,40 +134,28 @@ def _build_arrow_artifact_generation(paths: Mapping[str, Any]) -> dict[str, Any]
         if not artifact_path.is_file():
             raise FileNotFoundError(f"cannot inventory Arrow artifact {key}={artifact_path}")
         files[key] = {
-            "kind": "directory_manifest" if declared_path.is_dir() else "file",
             "byte_count": artifact_path.stat().st_size,
             "sha256": _sha256_file(artifact_path),
         }
-    encoded_files = json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return {
-        "schema_version": ARROW_ARTIFACT_GENERATION_SCHEMA_VERSION,
-        "generation_id": hashlib.sha256(encoded_files).hexdigest(),
-        "files": files,
-    }
+    return files
 
 
 def build_arrow_artifact_manifest(
     paths: Mapping[str, Any],
     manifest_dir: str | Path,
-    *,
-    metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one canonical, portable Arrow artifact manifest."""
 
     root = Path(manifest_dir)
     canonical_paths = {str(key): value for key, value in paths.items() if str(key) != "manifest"}
-    extra = {} if metadata is None else dict(metadata)
-    conflicting_fields = sorted(_ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS.intersection(extra))
-    if conflicting_fields:
-        raise ValueError(f"Arrow artifact manifest metadata cannot override canonical fields: {conflicting_fields}")
     return {
-        **extra,
-        "normalization_version": NORMALIZATION_VERSION,
+        "kind": ARROW_DATASET_KIND,
+        "format_version": PUBLIC_DATA_FORMAT_VERSION,
         "paths": {
             key: _manifest_relative_path(value, root, artifact_key=key)
             for key, value in sorted(canonical_paths.items())
         },
-        "artifact_generation": _build_arrow_artifact_generation(canonical_paths),
+        "files": _build_arrow_artifact_files(canonical_paths),
     }
 
 
@@ -178,9 +168,16 @@ def write_arrow_artifact_manifest(
     root = Path(manifest_dir)
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "manifest.json"
-    missing_fields = sorted(_ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS.difference(manifest))
-    if missing_fields:
-        raise ValueError(f"Arrow artifact manifest is missing canonical fields: {missing_fields}")
+    if set(manifest) != _ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS:
+        raise ValueError(
+            "Arrow artifact manifest fields mismatch: "
+            f"missing={sorted(_ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS - set(manifest))} "
+            f"extra={sorted(set(manifest) - _ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS)}"
+        )
+    if manifest["kind"] != ARROW_DATASET_KIND:
+        raise ValueError(f"Arrow artifact manifest kind must be {ARROW_DATASET_KIND!r}")
+    if type(manifest["format_version"]) is not int or manifest["format_version"] != PUBLIC_DATA_FORMAT_VERSION:
+        raise ValueError(f"Arrow artifact manifest format_version must be {PUBLIC_DATA_FORMAT_VERSION}")
     encoded = json.dumps(dict(manifest), indent=2, sort_keys=True) + "\n"
     temporary_path: Path | None = None
     try:
@@ -200,6 +197,106 @@ def write_arrow_artifact_manifest(
             temporary_path.unlink(missing_ok=True)
         raise
     return manifest_path
+
+
+def _collection_manifest_bindings(
+    root_manifest: Mapping[str, Any],
+    manifest_path: Path,
+    field: str,
+    *,
+    ignore_name: str | None = None,
+) -> dict[str, Path]:
+    raw_bindings = root_manifest.get(field)
+    if not isinstance(raw_bindings, Mapping) or not raw_bindings:
+        raise ValueError(f"{manifest_path} {field} must be a nonempty object")
+
+    root = manifest_path.parent.resolve()
+    bindings: dict[str, Path] = {}
+    for raw_name, raw_binding in raw_bindings.items():
+        if not isinstance(raw_name, str) or not raw_name:
+            raise ValueError(f"{manifest_path} {field} keys must be nonempty strings")
+        if not isinstance(raw_binding, Mapping) or set(raw_binding) != {"path", "sha256"}:
+            raise ValueError(f"{manifest_path} {field}.{raw_name} must contain exactly path and sha256")
+        raw_path = raw_binding["path"]
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ValueError(f"{manifest_path} {field}.{raw_name}.path must be a nonempty string")
+        relative_path = Path(raw_path.replace("\\", "/"))
+        if relative_path.is_absolute():
+            raise ValueError(f"{manifest_path} {field}.{raw_name}.path must be relative to its root")
+        child_manifest = (root / relative_path).resolve()
+        try:
+            child_manifest.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"{manifest_path} {field}.{raw_name}.path escapes its root") from exc
+        if not child_manifest.is_file():
+            raise ValueError(f"{manifest_path} {field}.{raw_name} manifest does not exist: {child_manifest}")
+
+        expected_sha256 = raw_binding["sha256"]
+        if not is_lowercase_sha256(expected_sha256):
+            raise ValueError(f"{manifest_path} {field}.{raw_name}.sha256 must be a lowercase SHA-256")
+        if raw_name != ignore_name:
+            observed_sha256 = _sha256_file(child_manifest)
+            if observed_sha256 != expected_sha256:
+                raise ValueError(
+                    f"{manifest_path} {field}.{raw_name}.sha256 mismatch: "
+                    f"expected={expected_sha256} observed={observed_sha256}"
+                )
+        bindings[raw_name] = child_manifest
+    return bindings
+
+
+def read_arrow_collection_root(
+    manifest_path: str | Path,
+    *,
+    ignore_dataset: str | None = None,
+) -> tuple[dict[str, Path], dict[str, Path], str | None]:
+    """Validate one collection root and return its bound child manifests."""
+
+    resolved_manifest_path = Path(manifest_path).resolve()
+    try:
+        with resolved_manifest_path.open(encoding="utf-8") as source:
+            root_manifest = json.load(source)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"root manifest is invalid JSON: {resolved_manifest_path}") from exc
+    if not isinstance(root_manifest, Mapping):
+        raise TypeError(f"root manifest must contain an object: {resolved_manifest_path}")
+
+    kind = root_manifest.get("kind")
+    release_version: str | None
+    if kind == ARROW_COLLECTION_KIND:
+        release_version = None
+        expected_fields = {"kind", "format_version", "dataset_manifests"}
+    elif kind == PUBLIC_DATA_KIND:
+        release_version = root_manifest.get("release_version")
+        if not isinstance(release_version, str) or not release_version or release_version.strip() != release_version:
+            raise ValueError(f"{resolved_manifest_path} release_version must be a nonempty trimmed string")
+        expected_fields = {"kind", "release_version", "format_version", "dataset_manifests"}
+    else:
+        raise ValueError(f"{resolved_manifest_path} kind must be {ARROW_COLLECTION_KIND!r} or {PUBLIC_DATA_KIND!r}")
+    if kind == PUBLIC_DATA_KIND and "replay_bundles" in root_manifest:
+        expected_fields.add("replay_bundles")
+    if set(root_manifest) != expected_fields:
+        raise ValueError(
+            f"{resolved_manifest_path} fields mismatch: "
+            f"missing={sorted(expected_fields - set(root_manifest))} "
+            f"extra={sorted(set(root_manifest) - expected_fields)}"
+        )
+    format_version = root_manifest["format_version"]
+    if type(format_version) is not int or format_version != PUBLIC_DATA_FORMAT_VERSION:
+        raise ValueError(f"{resolved_manifest_path} format_version must be {PUBLIC_DATA_FORMAT_VERSION}")
+
+    dataset_manifests = _collection_manifest_bindings(
+        root_manifest,
+        resolved_manifest_path,
+        "dataset_manifests",
+        ignore_name=ignore_dataset,
+    )
+    replay_bundles = (
+        _collection_manifest_bindings(root_manifest, resolved_manifest_path, "replay_bundles")
+        if kind == PUBLIC_DATA_KIND and "replay_bundles" in root_manifest
+        else {}
+    )
+    return dataset_manifests, replay_bundles, release_version
 
 
 class MissingArrowArtifactError(ValueError):
@@ -269,26 +366,6 @@ def normalize_arrow_paths(paths: Mapping[Any, Any], *, omit_none: bool = False) 
     return normalized
 
 
-def require_normalization_version(value: Any, *, context: str) -> str:
-    """Return the explicitly declared canonical normalization version."""
-
-    if value != NORMALIZATION_VERSION:
-        raise ValueError(f"{context} requires normalization_version={NORMALIZATION_VERSION!r}, got {value!r}")
-    return NORMALIZATION_VERSION
-
-
-def require_feature_contract_normalization_version(owner: Any, *, context: str) -> str:
-    """Return the explicit normalization version from an owning feature contract."""
-
-    contract = getattr(owner, "feature_contract", None)
-    if not isinstance(contract, Mapping):
-        raise ValueError(f"{context} requires a feature_contract mapping")
-    return require_normalization_version(
-        contract.get("normalization_version"),
-        context=f"{context} feature_contract",
-    )
-
-
 def require_name_counts_index_artifact(
     path: Any,
     *,
@@ -333,7 +410,7 @@ def _resolve_manifest_artifact_path(root: Path, raw_path: str, *, key: str) -> P
     return resolved
 
 
-def _load_artifact_specs(root: Path) -> tuple[str, str, Mapping[str, _ArtifactSpec]]:
+def _load_artifact_specs(root: Path) -> tuple[str, Mapping[str, _ArtifactSpec]]:
     manifest_path = root / "manifest.json"
     try:
         with manifest_path.open("rb") as source:
@@ -342,30 +419,38 @@ def _load_artifact_specs(root: Path) -> tuple[str, str, Mapping[str, _ArtifactSp
         raise ValueError(f"invalid Arrow artifact manifest {manifest_path}: {exc}") from exc
     if not isinstance(manifest, Mapping):
         raise ValueError(f"Arrow artifact manifest must be a JSON object: {manifest_path}")
-    normalization_version = require_normalization_version(
-        manifest.get("normalization_version"),
-        context=f"Arrow artifact manifest {manifest_path}",
-    )
+    if set(manifest) != _ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS:
+        raise ValueError(
+            f"Arrow artifact manifest {manifest_path} fields mismatch: "
+            f"missing={sorted(_ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS - set(manifest))} "
+            f"extra={sorted(set(manifest) - _ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS)}"
+        )
+    if manifest.get("kind") != ARROW_DATASET_KIND:
+        raise ValueError(
+            f"Arrow artifact manifest {manifest_path} requires kind={ARROW_DATASET_KIND!r}, "
+            f"got {manifest.get('kind')!r}"
+        )
+    format_version = manifest.get("format_version")
+    if type(format_version) is not int or format_version != PUBLIC_DATA_FORMAT_VERSION:
+        raise ValueError(
+            f"Arrow artifact manifest {manifest_path} requires "
+            f"format_version={PUBLIC_DATA_FORMAT_VERSION}, got {format_version!r}"
+        )
     paths = manifest.get("paths")
-    generation = manifest.get("artifact_generation")
+    files = manifest.get("files")
     if not isinstance(paths, Mapping):
         raise ValueError(f"Arrow artifact manifest is missing paths: {manifest_path}")
-    if not isinstance(generation, Mapping):
-        raise ValueError(f"Arrow artifact manifest is missing artifact_generation: {manifest_path}")
-    if generation.get("schema_version") != ARROW_ARTIFACT_GENERATION_SCHEMA_VERSION:
-        raise ValueError(f"Arrow artifact manifest has unsupported artifact_generation schema: {manifest_path}")
-    files = generation.get("files")
     if not isinstance(files, Mapping):
-        raise ValueError(f"Arrow artifact manifest artifact_generation is missing files: {manifest_path}")
+        raise ValueError(f"Arrow artifact manifest is missing files: {manifest_path}")
     invalid_keys = sorted(str(key) for key in files if str(key) not in _ARROW_IMMUTABLE_KEYS)
     if invalid_keys:
-        raise ValueError(f"Arrow artifact generation contains unsupported immutable keys: {invalid_keys}")
+        raise ValueError(f"Arrow artifact manifest contains unsupported immutable file keys: {invalid_keys}")
     file_keys = {str(key) for key in files}
     declared_immutable_keys = {str(key) for key in paths if str(key) in _ARROW_IMMUTABLE_KEYS}
     if file_keys != declared_immutable_keys:
         missing = sorted(declared_immutable_keys - file_keys)
         extra = sorted(file_keys - declared_immutable_keys)
-        raise ValueError(f"Arrow artifact generation and paths immutable key mismatch: missing={missing} extra={extra}")
+        raise ValueError(f"Arrow artifact files and paths immutable key mismatch: missing={missing} extra={extra}")
     missing_base = sorted(_REQUIRED_RUNTIME_KEYS.difference(str(key) for key in files))
     if missing_base:
         raise MissingArrowArtifactError(
@@ -376,24 +461,21 @@ def _load_artifact_specs(root: Path) -> tuple[str, str, Mapping[str, _ArtifactSp
             producer_hint="generate a complete Arrow bundle with scripts/convert_to_arrow.py",
         )
     if ("specter" in file_keys) != ("specter_batch_index" in file_keys):
-        raise ValueError("Arrow artifact generation must contain both specter and specter_batch_index or neither")
-    declared_generation_id = generation.get("generation_id")
+        raise ValueError("Arrow artifact files must contain both specter and specter_batch_index or neither")
     computed_generation_id = hashlib.sha256(
         json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    if declared_generation_id != computed_generation_id:
-        raise ValueError(f"Arrow artifact manifest generation_id mismatch: {manifest_path}")
 
     specs: dict[str, _ArtifactSpec] = {}
     for raw_key, raw_entry in files.items():
         key = str(raw_key)
         if not isinstance(raw_entry, Mapping):
-            raise ValueError(f"Arrow artifact generation files.{key} must be an object")
-        expected_fields = {"kind", "byte_count", "sha256"}
+            raise ValueError(f"Arrow artifact manifest files.{key} must be an object")
+        expected_fields = {"byte_count", "sha256"}
         entry_fields = {str(field) for field in raw_entry}
         if entry_fields != expected_fields:
             raise ValueError(
-                f"Arrow artifact generation files.{key} field mismatch: "
+                f"Arrow artifact manifest files.{key} field mismatch: "
                 f"missing={sorted(expected_fields - entry_fields)} "
                 f"extra={sorted(entry_fields - expected_fields)}"
             )
@@ -401,23 +483,19 @@ def _load_artifact_specs(root: Path) -> tuple[str, str, Mapping[str, _ArtifactSp
         if not isinstance(raw_path, str) or not raw_path.strip():
             raise ValueError(f"Arrow artifact manifest paths.{key} is invalid")
         path = _resolve_manifest_artifact_path(root, raw_path, key=key)
-        kind = raw_entry.get("kind")
-        expected_kind = "directory_manifest" if key == "name_counts_index" else "file"
-        if kind != expected_kind:
-            raise ValueError(f"Arrow artifact generation files.{key}.kind must be {expected_kind!r}")
         byte_count = raw_entry.get("byte_count")
         sha256 = raw_entry.get("sha256")
         if not isinstance(byte_count, int) or byte_count < 0:
-            raise ValueError(f"Arrow artifact generation files.{key}.byte_count is invalid")
+            raise ValueError(f"Arrow artifact manifest files.{key}.byte_count is invalid")
         if not is_lowercase_sha256(sha256):
-            raise ValueError(f"Arrow artifact generation files.{key}.sha256 is invalid")
+            raise ValueError(f"Arrow artifact manifest files.{key}.sha256 is invalid")
         specs[key] = _ArtifactSpec(
             path=path,
             content_path=path / "manifest.json" if key == "name_counts_index" else path,
             byte_count=byte_count,
             sha256=sha256,
         )
-    return computed_generation_id, normalization_version, MappingProxyType(specs)
+    return computed_generation_id, MappingProxyType(specs)
 
 
 def _hash_retained_file(retained: _RetainedFile) -> tuple[int, str]:
@@ -465,7 +543,9 @@ def _open_retained_path(path: Path) -> BinaryIO:
         None,
     )
     if handle == wintypes.HANDLE(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error(), filename=str(path))
+        error = ctypes.WinError(ctypes.get_last_error())
+        error.filename = str(path)
+        raise error
     try:
         descriptor = msvcrt.open_osfhandle(int(handle), os.O_RDONLY | os.O_BINARY)
     except Exception:
@@ -530,7 +610,6 @@ class ArrowDataset:
     _generation_id: str
     _name_counts_index: NameCountsIndex | None
     _native: Any | None
-    _normalization_version: str
     _root: Path
     _state_lock: Any
 
@@ -541,7 +620,6 @@ class ArrowDataset:
         "_generation_id",
         "_name_counts_index",
         "_native",
-        "_normalization_version",
         "_root",
         "_state_lock",
     )
@@ -556,14 +634,13 @@ class ArrowDataset:
         *,
         require_specter: bool = False,
         require_name_counts_index: bool = False,
-        expected_normalization_version: str | None = None,
     ) -> ArrowDataset:
         """Open, validate, and retain one exact immutable Arrow generation."""
 
         resolved_root = Path(root).expanduser().resolve()
         if not resolved_root.is_dir():
             raise FileNotFoundError(f"Arrow dataset root is not a directory: {resolved_root}")
-        generation_id, normalization_version, specs = _load_artifact_specs(resolved_root)
+        generation_id, specs = _load_artifact_specs(resolved_root)
         keys = set(specs)
         if require_specter and "specter" not in keys:
             raise MissingArrowArtifactError(
@@ -581,11 +658,6 @@ class ArrowDataset:
                 missing_files={},
                 producer_hint="generate and bind a manifest-backed name-count index",
             )
-        if expected_normalization_version is not None:
-            require_normalization_version(
-                expected_normalization_version,
-                context="ArrowDataset.open expected feature contract",
-            )
 
         retained: dict[str, _RetainedFile] = {}
         try:
@@ -594,9 +666,9 @@ class ArrowDataset:
             for key, spec in specs.items():
                 byte_count, sha256 = _hash_retained_file(retained[key])
                 if byte_count != spec.byte_count:
-                    raise ValueError(f"Arrow artifact generation files.{key}.byte_count mismatch: {spec.content_path}")
+                    raise ValueError(f"Arrow artifact manifest files.{key}.byte_count mismatch: {spec.content_path}")
                 if sha256 != spec.sha256:
-                    raise ValueError(f"Arrow artifact generation files.{key} checksum mismatch: {spec.content_path}")
+                    raise ValueError(f"Arrow artifact manifest files.{key} checksum mismatch: {spec.content_path}")
             for table_name in ("signatures", "papers", "paper_authors", "specter"):
                 if table_name in retained:
                     _validate_retained_arrow_schema(retained[table_name], table_name=table_name)
@@ -605,9 +677,7 @@ class ArrowDataset:
             if "name_counts_index" in specs:
                 name_counts_index = NameCountsIndex.open(specs["name_counts_index"].path)
                 if name_counts_index.manifest_sha256 != specs["name_counts_index"].sha256:
-                    raise ValueError("opened name-count manifest does not match the Arrow artifact generation")
-                if name_counts_index.normalization_version != normalization_version:
-                    raise ValueError("name-count index normalization_version does not match the Arrow dataset")
+                    raise ValueError("opened name-count manifest does not match the Arrow artifact manifest")
             native_name_counts = None if name_counts_index is None else name_counts_index._native
             native = _construct_native_arrow_dataset(retained, native_name_counts)
         except Exception:
@@ -618,7 +688,6 @@ class ArrowDataset:
         dataset = object.__new__(cls)
         dataset._root = resolved_root
         dataset._generation_id = generation_id
-        dataset._normalization_version = normalization_version
         dataset._files = retained
         dataset._name_counts_index = name_counts_index
         dataset._native = native
@@ -634,10 +703,6 @@ class ArrowDataset:
     @property
     def generation_id(self) -> str:
         return self._generation_id
-
-    @property
-    def normalization_version(self) -> str:
-        return self._normalization_version
 
     @property
     def name_counts_index(self) -> NameCountsIndex | None:
@@ -675,7 +740,6 @@ class ArrowDataset:
         *,
         require_specter: bool,
         require_name_counts_index: bool,
-        expected_normalization_version: str | None,
     ) -> None:
         missing: list[str] = []
         if require_specter:
@@ -690,18 +754,12 @@ class ArrowDataset:
                 missing_files={},
                 producer_hint="open a complete dataset root for this model",
             )
-        if expected_normalization_version is not None and expected_normalization_version != self._normalization_version:
-            raise ValueError(
-                "ArrowDataset normalization_version mismatch: "
-                f"dataset={self._normalization_version!r} expected={expected_normalization_version!r}"
-            )
 
     def use(
         self,
         *,
         require_specter: bool = False,
         require_name_counts_index: bool = False,
-        expected_normalization_version: str | None = None,
     ) -> _ArrowDatasetUse:
         """Create one concurrency-safe use lease."""
 
@@ -711,7 +769,6 @@ class ArrowDataset:
             self,
             require_specter=require_specter,
             require_name_counts_index=require_name_counts_index,
-            expected_normalization_version=expected_normalization_version,
         )
 
     def _acquire(
@@ -719,14 +776,12 @@ class ArrowDataset:
         *,
         require_specter: bool,
         require_name_counts_index: bool,
-        expected_normalization_version: str | None,
     ) -> None:
         with self._state_lock:
             self._ensure_open()
             self._require_profile(
                 require_specter=require_specter,
                 require_name_counts_index=require_name_counts_index,
-                expected_normalization_version=expected_normalization_version,
             )
             self._active_uses += 1
 
@@ -788,7 +843,6 @@ class _ArrowDatasetUse:
     __slots__ = (
         "_dataset",
         "_entered",
-        "_expected_normalization_version",
         "_require_name_counts_index",
         "_require_specter",
     )
@@ -799,12 +853,10 @@ class _ArrowDatasetUse:
         *,
         require_specter: bool,
         require_name_counts_index: bool,
-        expected_normalization_version: str | None,
     ) -> None:
         self._dataset = dataset
         self._require_specter = require_specter
         self._require_name_counts_index = require_name_counts_index
-        self._expected_normalization_version = expected_normalization_version
         self._entered = False
 
     def __enter__(self) -> _ArrowDatasetUse:
@@ -813,7 +865,6 @@ class _ArrowDatasetUse:
         self._dataset._acquire(
             require_specter=self._require_specter,
             require_name_counts_index=self._require_name_counts_index,
-            expected_normalization_version=self._expected_normalization_version,
         )
         self._entered = True
         return self

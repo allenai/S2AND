@@ -353,56 +353,27 @@ def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibrati
     assert assignment["positive_rank_bucket"] == "positive_first"
 
 
-def test_promoted_stratified_gate_spec_rejects_removed_threshold_calibration() -> None:
-    """Promoted gate config should not silently preserve old threshold calibration settings."""
-
-    with pytest.raises(ValueError, match="no longer supports threshold calibration keys"):
-        _promoted_stratified_gate_spec(
-            {
-                "stratified_eval_test_split": {"test_split": "test"},
-                "promoted_stratified_gate": {
-                    "mode": "promoted_logistic_topk_multiclass_l2",
-                    "calibration_splits": ["calibration_fit"],
-                    "test_split": "test",
-                    "fixed_grid_step": 0.1,
-                },
-            }
-        )
-
-    with pytest.raises(ValueError, match="mode must be"):
-        _promoted_stratified_gate_spec(
-            {
-                "promoted_stratified_gate": {
-                    "mode": "full_calibration_fixed_grid_4score_2margin",
-                    "calibration_splits": ["calibration_fit"],
+def test_promoted_stratified_gate_spec_rejects_ambiguous_or_leaky_splits() -> None:
+    cases = (
+        ("leaky-test", ["calibration_fit", "test"], "test", "must not include test_split"),
+        ("duplicate", ["calibration_fit", "calibration_fit"], "test", "must not contain duplicates"),
+        ("empty-calibration", [""], "test", "must contain nonempty names"),
+        ("empty-test", ["calibration_fit"], "", "test_split must be nonempty"),
+    )
+    for case_id, calibration_splits, test_split, message in cases:
+        try:
+            _promoted_stratified_gate_spec(
+                {
+                    "promoted_stratified_gate": {
+                        "calibration_splits": calibration_splits,
+                        "test_split": test_split,
+                    }
                 }
-            }
-        )
-
-
-@pytest.mark.parametrize(
-    ("calibration_splits", "test_split", "message"),
-    [
-        (["calibration_fit", "test"], "test", "must not include test_split"),
-        (["calibration_fit", "calibration_fit"], "test", "must not contain duplicates"),
-        ([""], "test", "must contain nonempty names"),
-        (["calibration_fit"], "", "test_split must be nonempty"),
-    ],
-)
-def test_promoted_stratified_gate_spec_rejects_ambiguous_or_leaky_splits(
-    calibration_splits: list[str],
-    test_split: str,
-    message: str,
-) -> None:
-    with pytest.raises(ValueError, match=message):
-        _promoted_stratified_gate_spec(
-            {
-                "promoted_stratified_gate": {
-                    "calibration_splits": calibration_splits,
-                    "test_split": test_split,
-                }
-            }
-        )
+            )
+        except ValueError as error:
+            assert message in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: ambiguous/leaky split was accepted")
 
 
 def test_apply_classic_train_row_cap_preserves_positive_queries() -> None:

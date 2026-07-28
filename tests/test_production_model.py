@@ -15,6 +15,7 @@ import s2and.incremental_linking.artifact as incremental_artifact_module
 import s2and.production_bundle as production_bundle_module
 import s2and.production_model as production_model_module
 import s2and.subblocking as subblocking_module
+from s2and import __version__
 from s2and.data import ANDData
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
@@ -23,15 +24,25 @@ from s2and.model_pairwise import _validated_classifier_features
 from s2and.production_bundle import (
     finalize_pairwise_eps,
     finalize_production_bundle,
-    write_pairwise_production_bundle,
+)
+from s2and.production_bundle import (
+    write_pairwise_production_bundle as _write_pairwise_production_bundle,
+)
+from s2and.production_bundle_contract import (
+    CALIBRATED_EPS_CALIBRATION,
+    PAIRWISE_ONLY_BUNDLE_KIND,
+    PENDING_EPS_CALIBRATION,
+    PRODUCTION_MODEL_KIND,
+    EpsCalibration,
 )
 from s2and.production_model import (
     NativeLightGBMBinaryClassifier,
     _config_choice,
-    _load_pairwise_staging_model,
-    _require_featurizer_version_match,
     load_production_model,
     pairwise_bundle_binding,
+)
+from s2and.production_model import (
+    _load_pairwise_staging_model as _load_pairwise_staging_model_with_state,
 )
 from tests.helpers import tiny_name_counts_index
 from tests.promoted_linking_helpers import (
@@ -48,6 +59,40 @@ _TEST_EXPLICIT_ARTIFACT_HASHES = {
     **_TEST_CANONICAL_ARTIFACT_HASHES,
     "name_counts_manifest_sha256": "c" * 64,
 }
+
+
+def write_pairwise_production_bundle(
+    clusterer: Clusterer,
+    bundle_dir: Path,
+    *,
+    release_version: str,
+    eps_calibration: EpsCalibration = CALIBRATED_EPS_CALIBRATION,
+    **kwargs: Any,
+) -> Any:
+    """Write the calibrated pairwise fixture used by most bundle tests."""
+
+    return _write_pairwise_production_bundle(
+        clusterer,
+        bundle_dir,
+        release_version=release_version,
+        eps_calibration=eps_calibration,
+        **kwargs,
+    )
+
+
+def _load_pairwise_staging_model(
+    bundle_dir: Path,
+    *,
+    expected_eps_calibration: EpsCalibration = CALIBRATED_EPS_CALIBRATION,
+    **kwargs: Any,
+) -> Clusterer:
+    """Load the calibrated pairwise fixture used by most bundle tests."""
+
+    return _load_pairwise_staging_model_with_state(
+        bundle_dir,
+        expected_eps_calibration=expected_eps_calibration,
+        **kwargs,
+    )
 
 
 class _PythonLightGBMScorer:
@@ -87,7 +132,7 @@ def synthetic_pairwise_bundle(
     source_clusterer = write_synthetic_pairwise_bundle(
         bundle_dir,
         artifact_hashes=_TEST_CANONICAL_ARTIFACT_HASHES,
-        bundle_version="9.9",
+        release_version="9.9",
     )
     return bundle_dir, source_clusterer
 
@@ -165,31 +210,6 @@ def test_production_model_requires_explicit_complete_bundle_path() -> None:
         load_production_model()
 
 
-def test_clusterer_config_contains_only_inference_state(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    config = json.loads((bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
-
-    assert set(config) == {
-        "batch_size",
-        "cluster_model",
-        "dont_merge_cluster_seeds",
-        "feature_contract",
-        "featurizer_info",
-        "incremental_mean_min_hybrid_weight",
-        "incremental_precluster_broadcast_mode",
-        "incremental_seed_score_mode",
-        "n_jobs",
-        "nameless_featurizer_info",
-        "random_state",
-        "schema_version",
-        "suppress_orcid",
-        "use_default_constraints_as_supervision",
-    }
-    assert set(config["cluster_model"]) == {"eps", "linkage"}
-
-
 def test_native_production_bundle_loads_as_mutable_clusterer(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
@@ -199,7 +219,7 @@ def test_native_production_bundle_loads_as_mutable_clusterer(
     assert isinstance(clusterer.classifier, NativeLightGBMBinaryClassifier)
     assert isinstance(clusterer.nameless_classifier, NativeLightGBMBinaryClassifier)
     assert clusterer.incremental_linker_artifact_dir is None
-    assert clusterer.production_model_bundle_version == "9.9"
+    assert clusterer.production_model_release_version == "9.9"
 
     clusterer.n_jobs = 7
     clusterer.cluster_model.eps = 0.5
@@ -372,16 +392,11 @@ def test_synthetic_native_clusterer_runtime_config_round_trips(
     assert native_clusterer.cluster_model.linkage == source_clusterer.cluster_model.linkage
     assert native_clusterer.cluster_model.eps == source_clusterer.cluster_model.eps
     assert native_clusterer.featurizer_info.features_to_use == source_clusterer.featurizer_info.features_to_use
-    assert native_clusterer.featurizer_info.featurizer_version == source_clusterer.featurizer_info.featurizer_version
     assert native_clusterer.nameless_featurizer_info is not None
     assert source_clusterer.nameless_featurizer_info is not None
     assert (
         native_clusterer.nameless_featurizer_info.features_to_use
         == source_clusterer.nameless_featurizer_info.features_to_use
-    )
-    assert (
-        native_clusterer.nameless_featurizer_info.featurizer_version
-        == source_clusterer.nameless_featurizer_info.featurizer_version
     )
     assert native_clusterer.best_params == source_clusterer.best_params
     assert native_clusterer.batch_size == source_clusterer.batch_size
@@ -394,29 +409,6 @@ def test_synthetic_native_clusterer_runtime_config_round_trips(
 
     assert getattr(native_clusterer, "suppress_orcid", False) == getattr(source_clusterer, "suppress_orcid", False)
     assert native_clusterer._incremental_experiment_config() == source_clusterer._incremental_experiment_config()
-
-
-def test_featurizer_version_mismatch_fails(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="FEATURIZER_VERSION"):
-        _require_featurizer_version_match(
-            tmp_path / "production_model_vtest",
-            {"featurizer_info": -1, "nameless_featurizer_info": -1},
-        )
-
-
-def test_bundle_export_rejects_missing_normalization_provenance(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    _, source_clusterer = synthetic_pairwise_bundle
-    source_clusterer.feature_contract.pop("normalization_version")
-
-    with pytest.raises(ValueError, match="missing provenance"):
-        write_pairwise_production_bundle(
-            source_clusterer,
-            tmp_path / "missing-provenance",
-            bundle_version="10.0",
-        )
 
 
 def test_canonical_artifact_hash_contract_rejects_missing_malformed_or_mismatched_values(
@@ -444,6 +436,11 @@ def test_canonical_artifact_hash_contract_rejects_missing_malformed_or_mismatche
                 feature_contract,
                 context="test feature_contract",
             )
+    with pytest.raises(ValueError, match=r"extra=\['retired_sha256'\]"):
+        production_model_module.require_canonical_artifact_hashes(
+            {**_TEST_CANONICAL_ARTIFACT_HASHES, "retired_sha256": "f" * 64},
+            context="test feature_contract",
+        )
 
 
 def test_explicit_artifact_authority_requires_exact_fields() -> None:
@@ -466,29 +463,10 @@ def test_explicit_artifact_authority_requires_exact_fields() -> None:
                 authority,
                 context="test feature_contract",
             )
-
-
-def test_retired_orcid_manifest_hash_is_serialized_data_not_explicit_authority() -> None:
-    retired_field = "orcid_prefix_counts_manifest_sha256"
-    feature_contract = {
-        **_TEST_EXPLICIT_ARTIFACT_HASHES,
-        retired_field: "d" * 64,
-    }
-
-    production_model_module.require_expected_artifact_hashes(
-        feature_contract,
-        _TEST_EXPLICIT_ARTIFACT_HASHES,
-        context="test feature_contract",
-    )
-
-    old_four_field_authority = {
-        **_TEST_EXPLICIT_ARTIFACT_HASHES,
-        retired_field: "d" * 64,
-    }
-    with pytest.raises(ValueError, match=rf"extra=\['{retired_field}'\]"):
+    with pytest.raises(ValueError, match=r"artifact hash field mismatch.*extra=\['retired_sha256'\]"):
         production_model_module.require_expected_artifact_hashes(
-            feature_contract,
-            old_four_field_authority,
+            {**_TEST_EXPLICIT_ARTIFACT_HASHES, "retired_sha256": "f" * 64},
+            _TEST_EXPLICIT_ARTIFACT_HASHES,
             context="test feature_contract",
         )
 
@@ -518,7 +496,7 @@ def test_bundle_export_uses_training_artifact_hashes_without_loading_packaged_ar
     write_pairwise_production_bundle(
         source_clusterer,
         output_dir,
-        bundle_version="10.0",
+        release_version="10.0",
         pairwise_training_config={"input_artifact_hashes": explicit_hashes},
         pairwise_training_summary={"pair_count": 11},
     )
@@ -534,6 +512,7 @@ def test_bundle_export_rejects_training_artifact_hash_mismatch(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.feature_contract.update(_TEST_EXPLICIT_ARTIFACT_HASHES)
     expected_hashes = dict(_TEST_EXPLICIT_ARTIFACT_HASHES)
     expected_hashes["name_tuples_data_sha256"] = "e" * 64
 
@@ -541,7 +520,7 @@ def test_bundle_export_rejects_training_artifact_hash_mismatch(
         write_pairwise_production_bundle(
             source_clusterer,
             tmp_path / "production_model_v10.0",
-            bundle_version="10.0",
+            release_version="10.0",
             pairwise_training_config={"input_artifact_hashes": expected_hashes},
             pairwise_training_summary={"pair_count": 11},
         )
@@ -558,7 +537,7 @@ def test_finalization_uses_explicit_artifact_authority_instead_of_package_defaul
     write_pairwise_production_bundle(
         source_clusterer,
         pairwise_bundle,
-        bundle_version="10.0",
+        release_version="10.0",
         pairwise_training_config={"input_artifact_hashes": dict(_TEST_EXPLICIT_ARTIFACT_HASHES)},
         pairwise_training_summary={"pair_count": 11},
     )
@@ -594,13 +573,11 @@ def test_finalization_uses_explicit_artifact_authority_instead_of_package_defaul
         expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
     )
 
-    assert (
-        load_production_model(
-            output_bundle,
-            expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
-        ).production_model_bundle_status
-        == "complete"
+    loaded = load_production_model(
+        output_bundle,
+        expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
     )
+    assert loaded.incremental_linker_artifact is not None
 
 
 def test_bundle_load_rejects_canonical_artifact_hash_mismatch(
@@ -624,6 +601,11 @@ def test_canonical_artifact_hashes_feed_pairwise_bundle_binding(
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
     original_binding = pairwise_bundle_binding(bundle_dir)
+    assert set(original_binding) == {
+        "main_booster_sha256",
+        "nameless_booster_sha256",
+        "ordered_feature_contract_digest",
+    }
     config_path = bundle_dir / "clusterer.json"
     original_config = json.loads(config_path.read_text(encoding="utf-8"))
     for field in _TEST_CANONICAL_ARTIFACT_HASHES:
@@ -642,54 +624,96 @@ def test_canonical_artifact_hashes_feed_pairwise_bundle_binding(
         assert changed_binding["ordered_feature_contract_digest"] != original_binding["ordered_feature_contract_digest"]
 
 
-def test_manifest_requires_nonempty_string_model_versions(
+def test_manifest_has_exact_shape_and_identity(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
     manifest_path = bundle_dir / "manifest.json"
     original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert set(original_manifest) == {
+        "eps_calibration",
+        "generated_by_runtime",
+        "kind",
+        "release_version",
+        "sha256",
+    }
+    assert original_manifest["kind"] == PRODUCTION_MODEL_KIND
+    assert original_manifest["generated_by_runtime"] == __version__
+    assert original_manifest["release_version"] == "9.9"
 
-    for field_name in ("bundle_version", "pairwise_model_version"):
-        for invalid_value in (None, "   "):
-            manifest = copy.deepcopy(original_manifest)
-            manifest[field_name] = invalid_value
-            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            with pytest.raises(ValueError, match=rf"{field_name} must be a nonempty string"):
-                production_model_module._validate_manifest(bundle_dir)
+    for invalid_value in (None, "   "):
+        manifest = copy.deepcopy(original_manifest)
+        manifest["release_version"] = invalid_value
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="release_version must be a nonempty trimmed string"):
+            production_model_module._validate_manifest(
+                bundle_dir,
+                expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+                expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
+            )
+
+    manifest = copy.deepcopy(original_manifest)
+    manifest["kind"] = "not-a-model"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="bundle kind must be"):
+        production_model_module._validate_manifest(
+            bundle_dir,
+            expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+            expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
+        )
+
+    manifest = copy.deepcopy(original_manifest)
+    manifest["retired_field"] = None
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest field mismatch"):
+        production_model_module._validate_manifest(
+            bundle_dir,
+            expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+            expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
+        )
+
+    manifest = copy.deepcopy(original_manifest)
+    manifest["generated_by_runtime"] = "0.0.0"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (bundle_dir / "pairwise" / "main.lgb").unlink()
+    with pytest.raises(ValueError, match="runtime mismatch"):
+        production_model_module._validate_manifest(
+            bundle_dir,
+            expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+            expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
+        )
 
 
-def test_manifest_requires_valid_incremental_linker_version(
-    tmp_path: Path,
+@pytest.mark.parametrize("eps_calibration", ("unknown", None), ids=("unknown", "null"))
+def test_manifest_rejects_invalid_lifecycle_states(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
+    eps_calibration: object,
 ) -> None:
     pairwise_bundle, _ = synthetic_pairwise_bundle
     manifest_path = pairwise_bundle / "manifest.json"
-    original_pairwise_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    invalid_pairwise_manifest = copy.deepcopy(original_pairwise_manifest)
-    invalid_pairwise_manifest["incremental_linker_version"] = False
-    manifest_path.write_text(json.dumps(invalid_pairwise_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="incremental_linker_version must be null or a nonempty string"):
-        production_model_module._validate_manifest(pairwise_bundle)
-    manifest_path.write_text(json.dumps(original_pairwise_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["eps_calibration"] = eps_calibration
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    complete_bundle = tmp_path / "complete" / "production_model_v9.9"
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(pairwise_bundle, linker_dir)
-    finalize_production_bundle(
-        pairwise_bundle_dir=pairwise_bundle,
-        output_bundle_dir=complete_bundle,
-        incremental_linker_artifact_dir=linker_dir,
-        target_json=target_json,
-    )
-    complete_manifest_path = complete_bundle / "manifest.json"
-    original_manifest = json.loads(complete_manifest_path.read_text(encoding="utf-8"))
+    with pytest.raises(ValueError, match="Unsupported production bundle lifecycle state"):
+        production_model_module._validate_manifest(
+            pairwise_bundle,
+            expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+            expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
+        )
 
-    for invalid_value, message in ((None, "checksum coverage mismatch"), ("   ", "null or a nonempty string")):
-        manifest = copy.deepcopy(original_manifest)
-        manifest["incremental_linker_version"] = invalid_value
-        complete_manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        with pytest.raises(ValueError, match=message):
-            production_model_module._validate_manifest(complete_bundle)
+
+def test_manifest_loader_requires_expected_lifecycle(
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    pairwise_bundle, _ = synthetic_pairwise_bundle
+
+    with pytest.raises(ValueError, match="lifecycle mismatch"):
+        production_model_module._validate_manifest(
+            pairwise_bundle,
+            expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+            expected_eps_calibration=PENDING_EPS_CALIBRATION,
+        )
 
 
 def test_manifest_requires_complete_checksum_coverage(
@@ -701,7 +725,7 @@ def test_manifest_requires_complete_checksum_coverage(
     del manifest["sha256"]["pairwise/main.lgb"]
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="checksum coverage mismatch"):
+    with pytest.raises(ValueError, match="checksum inventory is neither"):
         _load_pairwise_staging_model(bundle_dir)
 
 
@@ -713,7 +737,7 @@ def test_manifest_ignores_undeclared_runtime_file(
 
     clusterer = _load_pairwise_staging_model(bundle_dir)
 
-    assert clusterer.production_model_bundle_status == "pairwise_only"
+    assert clusterer.production_model_release_version == "9.9"
 
 
 def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
@@ -824,13 +848,13 @@ def test_pairwise_stage_publication_failure_leaves_target_absent_and_is_retry_sa
 
     monkeypatch.setattr(production_bundle_module.os, "replace", fail_publish_once)
     with pytest.raises(OSError, match="injected pairwise publication failure"):
-        write_pairwise_production_bundle(source_clusterer, output_bundle, bundle_version="9.8")
+        write_pairwise_production_bundle(source_clusterer, output_bundle, release_version="9.8")
     assert not output_bundle.exists()
 
     monkeypatch.setattr(production_bundle_module.os, "replace", real_replace)
-    summary = write_pairwise_production_bundle(source_clusterer, output_bundle, bundle_version="9.8")
-    assert summary.bundle_status == "pairwise_only"
-    assert _load_pairwise_staging_model(output_bundle).production_model_bundle_status == "pairwise_only"
+    summary = write_pairwise_production_bundle(source_clusterer, output_bundle, release_version="9.8")
+    assert summary.bundle_dir == output_bundle
+    assert _load_pairwise_staging_model(output_bundle).production_model_release_version == "9.8"
 
 
 def test_eps_finalization_failures_clean_stage_and_are_retry_safe(
@@ -838,12 +862,17 @@ def test_eps_finalization_failures_clean_stage_and_are_retry_safe(
     monkeypatch: pytest.MonkeyPatch,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
-    source_bundle, _ = synthetic_pairwise_bundle
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_bundle = tmp_path / "pending" / "production_model_v9.9"
+    write_pairwise_production_bundle(
+        source_clusterer,
+        source_bundle,
+        release_version="9.9",
+        eps_calibration=PENDING_EPS_CALIBRATION,
+    )
     output_bundle = tmp_path / "eps" / "production_model_v9.9"
     source_manifest = source_bundle / "manifest.json"
     expected_manifest_sha256 = hashlib.sha256(source_manifest.read_bytes()).hexdigest()
-    source_config = json.loads((source_bundle / "clusterer.json").read_text(encoding="utf-8"))
-    expected_old_eps = float(source_config["cluster_model"]["eps"])
     new_eps = 0.37
     staging_pattern = f".{output_bundle.name}.staging-*"
 
@@ -860,7 +889,6 @@ def test_eps_finalization_failures_clean_stage_and_are_retry_safe(
             source_bundle_dir=source_bundle,
             output_bundle_dir=output_bundle,
             expected_manifest_sha256=expected_manifest_sha256,
-            expected_old_eps=expected_old_eps,
             new_eps=new_eps,
         )
     assert not output_bundle.exists()
@@ -880,7 +908,6 @@ def test_eps_finalization_failures_clean_stage_and_are_retry_safe(
             source_bundle_dir=source_bundle,
             output_bundle_dir=output_bundle,
             expected_manifest_sha256=expected_manifest_sha256,
-            expected_old_eps=expected_old_eps,
             new_eps=new_eps,
         )
     assert not output_bundle.exists()
@@ -891,19 +918,58 @@ def test_eps_finalization_failures_clean_stage_and_are_retry_safe(
         source_bundle_dir=source_bundle,
         output_bundle_dir=output_bundle,
         expected_manifest_sha256=expected_manifest_sha256,
-        expected_old_eps=expected_old_eps,
         new_eps=new_eps,
     )
 
     manifest = json.loads(summary.manifest_path.read_text(encoding="utf-8"))
     assert summary.bundle_dir == output_bundle
-    assert summary.bundle_version == "9.9"
-    assert summary.bundle_status == "pairwise_only"
+    assert summary.release_version == "9.9"
+    assert summary.eps_calibration == CALIBRATED_EPS_CALIBRATION
     assert summary.manifest_path == output_bundle / "manifest.json"
-    assert summary.files == tuple(sorted(manifest["sha256"]))
     assert not list(output_bundle.parent.glob(staging_pattern))
     published_config = json.loads((output_bundle / "clusterer.json").read_text(encoding="utf-8"))
     assert published_config["cluster_model"]["eps"] == new_eps
+    assert manifest["eps_calibration"] == CALIBRATED_EPS_CALIBRATION
+    with pytest.raises(ValueError, match="lifecycle mismatch"):
+        finalize_pairwise_eps(
+            source_bundle_dir=output_bundle,
+            output_bundle_dir=tmp_path / "double-calibrated" / "production_model_v9.9",
+            expected_manifest_sha256=hashlib.sha256((output_bundle / "manifest.json").read_bytes()).hexdigest(),
+            new_eps=0.41,
+        )
+
+
+def test_pending_pairwise_loader_requires_placeholder_eps(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    _, source_clusterer = synthetic_pairwise_bundle
+    pending_bundle = tmp_path / "pending-eps" / "production_model_v9.9"
+    write_pairwise_production_bundle(
+        source_clusterer,
+        pending_bundle,
+        release_version="9.9",
+        eps_calibration=PENDING_EPS_CALIBRATION,
+    )
+    pending_clusterer = _load_pairwise_staging_model(
+        pending_bundle,
+        expected_eps_calibration=PENDING_EPS_CALIBRATION,
+    )
+    assert pending_clusterer.best_params is None
+    with pytest.raises(ValueError, match="lifecycle mismatch"):
+        pairwise_bundle_binding(pending_bundle)
+
+    config_path = pending_bundle / "clusterer.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["cluster_model"]["eps"] = 0.4
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _refresh_manifest_checksum(pending_bundle, "clusterer.json")
+
+    with pytest.raises(ValueError, match="Pending pairwise bundle EPS must be 0.5"):
+        _load_pairwise_staging_model(
+            pending_bundle,
+            expected_eps_calibration=PENDING_EPS_CALIBRATION,
+        )
 
 
 def test_pairwise_reproducibility_files_are_manifest_bound(
@@ -916,7 +982,7 @@ def test_pairwise_reproducibility_files_are_manifest_bound(
     write_pairwise_production_bundle(
         source_clusterer,
         output_dir,
-        bundle_version="9.8",
+        release_version="9.8",
         pairwise_training_config={
             "training_seed": 7,
             "input_artifact_hashes": dict(_TEST_EXPLICIT_ARTIFACT_HASHES),
@@ -951,7 +1017,7 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
 
     clusterer_config = json.loads((bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
     assert "incremental_phase_a_pair_batch_target_multiple" not in clusterer_config
-    with pytest.raises(ValueError, match="Expected a complete"):
+    with pytest.raises(ValueError, match="lifecycle mismatch"):
         load_production_model(bundle_dir)
 
     failed = False
@@ -975,7 +1041,7 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
     assert not output_bundle.exists()
     assert not list(output_bundle.parent.glob(".production_model_v9.9.staging-*"))
     assert (bundle_dir / "manifest.json").read_bytes() == original_manifest
-    assert _load_pairwise_staging_model(bundle_dir).production_model_bundle_status == "pairwise_only"
+    _load_pairwise_staging_model(bundle_dir)
     assert not (bundle_dir / "incremental_linker").exists()
 
     monkeypatch.setattr(production_bundle_module.os, "replace", real_replace)
@@ -986,10 +1052,9 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
         target_json=target_json,
     )
 
-    assert summary.bundle_status == "complete"
+    assert summary.bundle_dir == output_bundle
     loaded = load_production_model(output_bundle)
-    assert loaded.production_model_bundle_version == "9.9"
-    assert loaded.production_model_bundle_status == "complete"
+    assert loaded.production_model_release_version == "9.9"
     assert loaded.incremental_linker_artifact_dir is not None
     assert Path(loaded.incremental_linker_artifact_dir) == output_bundle / "incremental_linker"
     assert loaded.incremental_linker_artifact.artifact_dir == output_bundle / "incremental_linker"
@@ -997,9 +1062,13 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
     assert restored.incremental_linker_artifact.artifact_dir == output_bundle / "incremental_linker"
     assert copy.deepcopy(loaded).incremental_linker_artifact is loaded.incremental_linker_artifact
     manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["bundle_version"] == "9.9"
-    assert manifest["pairwise_model_version"] == "9.9"
-    assert manifest["incremental_linker_version"] == "9.9"
+    assert manifest == {
+        "eps_calibration": CALIBRATED_EPS_CALIBRATION,
+        "generated_by_runtime": __version__,
+        "kind": PRODUCTION_MODEL_KIND,
+        "release_version": "9.9",
+        "sha256": manifest["sha256"],
+    }
 
     with pytest.raises(FileExistsError, match="requires a new directory"):
         finalize_production_bundle(
@@ -1012,7 +1081,7 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
         write_pairwise_production_bundle(
             source_clusterer,
             bundle_dir,
-            bundle_version="9.9",
+            release_version="9.9",
         )
 
 
@@ -1060,7 +1129,7 @@ def test_finalization_rejects_linker_bound_to_different_pairwise_bundle(
         )
 
     assert not output_bundle.exists()
-    assert _load_pairwise_staging_model(bundle_dir).production_model_bundle_status == "pairwise_only"
+    _load_pairwise_staging_model(bundle_dir)
 
 
 def test_finalization_rejects_target_different_from_linker_training_target(
@@ -1166,36 +1235,9 @@ def test_normal_load_hashes_each_declared_file_exactly_once(
     assert standalone_artifact_hashes == []
 
 
-def test_bundle_directory_version_must_match_derived_version(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    source_bundle, source_clusterer = synthetic_pairwise_bundle
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(source_bundle, linker_dir)
-    mismatched_output = tmp_path / "production_model_v9.8"
-
-    with pytest.raises(ValueError, match="bundle version disagrees with pairwise manifest"):
-        finalize_production_bundle(
-            pairwise_bundle_dir=source_bundle,
-            output_bundle_dir=mismatched_output,
-            incremental_linker_artifact_dir=linker_dir,
-            target_json=target_json,
-        )
-    assert not mismatched_output.exists()
-
-    with pytest.raises(ValueError, match="directory name and bundle_version disagree"):
-        write_pairwise_production_bundle(
-            source_clusterer,
-            mismatched_output,
-            bundle_version="9.9",
-        )
-    assert not mismatched_output.exists()
-
-
 def test_manifest_writer_rejects_directory_at_required_file_path(tmp_path: Path) -> None:
     files = production_bundle_module.production_manifest_files(
-        incremental_linker_version=None,
+        bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
         include_pairwise_reproducibility=False,
     )
     for relpath in files.values():
@@ -1208,30 +1250,34 @@ def test_manifest_writer_rejects_directory_at_required_file_path(tmp_path: Path)
     with pytest.raises(FileNotFoundError, match="missing or not a regular file"):
         production_bundle_module.write_production_manifest(
             tmp_path,
-            bundle_version="9.9",
-            pairwise_model_version="9.9",
+            release_version="9.9",
+            bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+            eps_calibration=CALIBRATED_EPS_CALIBRATION,
         )
     assert not (tmp_path / "manifest.json").exists()
 
 
-def test_manifest_writer_rejects_invalid_versions_before_writing(tmp_path: Path) -> None:
-    for field_name in ("bundle_version", "pairwise_model_version"):
-        for invalid_value in ("", "   "):
-            versions = {
-                "bundle_version": "9.9",
-                "pairwise_model_version": "9.9",
-            }
-            versions[field_name] = invalid_value
-            with pytest.raises(ValueError, match=rf"{field_name} must be a nonempty string"):
-                production_bundle_module.write_production_manifest(tmp_path, **versions)
-
-    for invalid_version in (False, "   "):
-        with pytest.raises(ValueError, match="require a nonempty incremental_linker_version"):
+def test_manifest_writer_rejects_invalid_release_or_lifecycle_before_writing(tmp_path: Path) -> None:
+    for invalid_value in ("", "   "):
+        with pytest.raises(ValueError, match="release_version must be a nonempty trimmed string"):
             production_bundle_module.write_production_manifest(
                 tmp_path,
-                bundle_version="9.9",
-                pairwise_model_version="9.9",
-                incremental_linker_version=invalid_version,
+                release_version=invalid_value,
+                bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+                eps_calibration=CALIBRATED_EPS_CALIBRATION,
+            )
+
+    for bundle_kind, eps_calibration in (
+        ("complete", "pending"),
+        ("pairwise_only", "unknown"),
+        ("unknown", "calibrated"),
+    ):
+        with pytest.raises(ValueError, match="Unsupported production bundle lifecycle state"):
+            production_bundle_module.write_production_manifest(
+                tmp_path,
+                release_version="9.9",
+                bundle_kind=bundle_kind,
+                eps_calibration=eps_calibration,
             )
 
     assert not (tmp_path / "manifest.json").exists()

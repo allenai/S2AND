@@ -1,5 +1,4 @@
 {
-  "schema_version": "s2and_arrow_schema_contract_v1",
   "tables": {
     "altered_cluster_signatures": [
       {"name": "signature_id", "datatype": "string", "required": true}

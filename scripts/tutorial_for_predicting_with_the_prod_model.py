@@ -214,7 +214,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
+    from s2and.consts import NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
     from s2and.data import ANDData
     from s2and.featurizer import DEFAULT_FEATURE_GROUPS, DEFAULT_NAMELESS_FEATURE_GROUPS, FeaturizationInfo
     from s2and.production_model import load_production_model
@@ -247,11 +247,9 @@ def main() -> None:
     # note: we don't need these objects in this script, but they are useful for documentation purposes
     featurization_info = FeaturizationInfo(
         features_to_use=list(DEFAULT_FEATURE_GROUPS),
-        featurizer_version=FEATURIZER_VERSION,
     )
     nameless_featurization_info = FeaturizationInfo(
         features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS),
-        featurizer_version=FEATURIZER_VERSION,
     )
     _ = (featurization_info, nameless_featurization_info)
 

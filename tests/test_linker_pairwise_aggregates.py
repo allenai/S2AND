@@ -77,23 +77,25 @@ def test_candidate_batch_rejects_uint32_wraparound_indices() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "retrieval_ranks",
-    (
-        np.asarray([0], dtype=np.uint16),
-        np.asarray([-1], dtype=np.int64),
-        np.asarray([int(np.iinfo(np.uint16).max) + 1], dtype=np.int64),
-    ),
-)
-def test_candidate_batch_rejects_invalid_retrieval_ranks(retrieval_ranks: np.ndarray) -> None:
-    with pytest.raises(ValueError, match="retrieval_ranks"):
-        linker_pairwise.LinkerCandidateBatch(
-            row_count=1,
-            left_signature_indices=np.asarray([0], dtype=np.uint32),
-            right_signature_indices=np.asarray([1], dtype=np.uint32),
-            pair_row_indices=np.asarray([0], dtype=np.uint32),
-            retrieval_ranks=retrieval_ranks,
-        )
+def test_candidate_batch_rejects_invalid_retrieval_ranks() -> None:
+    cases = (
+        ("zero", np.asarray([0], dtype=np.uint16)),
+        ("negative", np.asarray([-1], dtype=np.int64)),
+        ("overflow", np.asarray([int(np.iinfo(np.uint16).max) + 1], dtype=np.int64)),
+    )
+    for case_id, retrieval_ranks in cases:
+        try:
+            linker_pairwise.LinkerCandidateBatch(
+                row_count=1,
+                left_signature_indices=np.asarray([0], dtype=np.uint32),
+                right_signature_indices=np.asarray([1], dtype=np.uint32),
+                pair_row_indices=np.asarray([0], dtype=np.uint32),
+                retrieval_ranks=retrieval_ranks,
+            )
+        except ValueError as error:
+            assert "retrieval_ranks" in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: invalid retrieval rank was accepted")
 
 
 def test_pairwise_featurizer_resolver_prefers_explicit_featurizer() -> None:

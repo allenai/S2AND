@@ -583,9 +583,6 @@ def pairwise_eval(
     return metrics
 
 
-PAIRWISE_METRIC_CONTRACT_VERSION = "s2and_pairwise_probability_metrics_v1"
-
-
 def pairwise_probability_metrics(
     labels: np.ndarray,
     main_positive: np.ndarray,
@@ -1150,19 +1147,15 @@ def claims_eval(
 
     if directory_for_caching is not None:
         logger.info("Writing predictions to disk")
-        suffix: int | str
-        if optional_name is None:
-            suffix = clusterer.featurizer_info.featurizer_version
-        else:
-            suffix = optional_name
-        with open(join(directory_for_caching, f"preds_{suffix}.json"), "w") as _json_file:
+        suffix = f"_{optional_name}" if optional_name is not None else ""
+        with open(join(directory_for_caching, f"preds{suffix}.json"), "w") as _json_file:
             json.dump(output_to_write, _json_file)
 
         if dists is None:
             logger.info("Skipping distance matrix dump because clusterer.predict returned dists=None")
         else:
             logger.info("Writing dists to disk")
-            with open(join(directory_for_caching, f"dists_{suffix}.pkl"), "wb") as _pkl_file:
+            with open(join(directory_for_caching, f"dists{suffix}.pkl"), "wb") as _pkl_file:
                 pickle.dump(dists, _pkl_file)
         logger.info("Done dumping")
 

@@ -107,10 +107,6 @@ def _rewrite_manifest(root: Path, transform) -> None:
     path = root / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
     transform(manifest)
-    files = manifest["artifact_generation"]["files"]
-    manifest["artifact_generation"]["generation_id"] = hashlib.sha256(
-        json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
     path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
@@ -129,24 +125,15 @@ def test_manifest_writer_owns_runtime_fields_and_publishes_atomically(tmp_path: 
     manifest = build_arrow_artifact_manifest(
         {"signatures": signatures_path},
         tmp_path,
-        metadata={"dataset": "tiny"},
     )
     manifest_path = write_arrow_artifact_manifest(manifest, tmp_path)
 
-    assert manifest["normalization_version"] == "canonical_v2"
+    assert manifest["kind"] == "s2and_arrow_dataset"
+    assert manifest["format_version"] == 1
     assert manifest["paths"] == {"signatures": "signatures.arrow"}
-    assert set(manifest["artifact_generation"]["files"]["signatures"]) == {
-        "kind",
-        "byte_count",
-        "sha256",
-    }
+    assert set(manifest["files"]["signatures"]) == {"byte_count", "sha256"}
+    assert set(manifest) == {"kind", "format_version", "paths", "files"}
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
-    with pytest.raises(ValueError, match="cannot override canonical fields"):
-        build_arrow_artifact_manifest(
-            {"signatures": signatures_path},
-            tmp_path,
-            metadata={"paths": {}},
-        )
 
 
 def test_manifest_writer_rejects_artifacts_outside_its_authority(tmp_path: Path) -> None:
@@ -188,6 +175,66 @@ def test_manifest_writer_allows_relative_shared_name_counts_layouts(tmp_path: Pa
     assert other_manifest["paths"]["name_counts_index"] == "../../../other"
 
 
+def test_collection_root_requires_nonempty_confined_child_bindings(tmp_path: Path) -> None:
+    root = tmp_path / "collection"
+    child_manifest = root / "dataset" / "manifest.json"
+    child_manifest.parent.mkdir(parents=True)
+    child_manifest.write_text("{}\n", encoding="utf-8")
+    digest = hashlib.sha256(child_manifest.read_bytes()).hexdigest()
+
+    for child_path, message in (
+        (str(child_manifest.resolve()), "must be relative"),
+        ("../outside.json", "escapes its root"),
+    ):
+        (root / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "kind": arrow_inputs.ARROW_COLLECTION_KIND,
+                    "format_version": 1,
+                    "dataset_manifests": {"dataset": {"path": child_path, "sha256": digest}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=message):
+            arrow_inputs.read_arrow_collection_root(root / "manifest.json")
+
+    valid_dataset_binding = {
+        "dataset": {
+            "path": "dataset/manifest.json",
+            "sha256": digest,
+        }
+    }
+    for kind, release_fields, replay_bundles, message in (
+        (
+            arrow_inputs.ARROW_COLLECTION_KIND,
+            {},
+            valid_dataset_binding,
+            r"fields mismatch.*extra=\['replay_bundles'\]",
+        ),
+        (
+            arrow_inputs.PUBLIC_DATA_KIND,
+            {"release_version": "1.3"},
+            {},
+            "replay_bundles must be a nonempty object",
+        ),
+    ):
+        (root / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "kind": kind,
+                    **release_fields,
+                    "format_version": 1,
+                    "dataset_manifests": valid_dataset_binding,
+                    "replay_bundles": replay_bundles,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=message):
+            arrow_inputs.read_arrow_collection_root(root / "manifest.json")
+
+
 def test_generation_identity_uses_role_and_content_not_filename(tmp_path: Path) -> None:
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
@@ -202,10 +249,7 @@ def test_generation_identity_uses_role_and_content_not_filename(tmp_path: Path) 
     renamed_manifest = build_arrow_artifact_manifest({"specter": renamed}, second_root)
 
     assert first_manifest["paths"]["specter"] != renamed_manifest["paths"]["specter"]
-    assert (
-        first_manifest["artifact_generation"]["generation_id"]
-        == renamed_manifest["artifact_generation"]["generation_id"]
-    )
+    assert first_manifest["files"] == renamed_manifest["files"]
 
 
 def test_arrow_dataset_open_retains_one_identity_without_mapping_behavior(tmp_path: Path) -> None:
@@ -215,7 +259,6 @@ def test_arrow_dataset_open_retains_one_identity_without_mapping_behavior(tmp_pa
 
     assert dataset.root == tmp_path.resolve()
     assert len(dataset.generation_id) == 64
-    assert dataset.normalization_version == "canonical_v2"
     assert dataset.has("signatures")
     assert dataset.has("specter")
     assert dataset.native.keys.issuperset({"signatures", "specter"})
@@ -304,6 +347,10 @@ def test_concurrent_use_leases_block_close(tmp_path: Path) -> None:
 
 def test_close_is_deterministic_and_use_after_close_is_rejected(tmp_path: Path) -> None:
     _write_dataset(tmp_path)
+    with ArrowDataset.open(tmp_path) as managed_dataset:
+        assert not managed_dataset.closed
+    assert managed_dataset.closed
+
     dataset = ArrowDataset.open(tmp_path)
     descriptors = [retained.handle.fileno() for retained in dataset._files.values()]  # noqa: SLF001
 
@@ -318,15 +365,6 @@ def test_close_is_deterministic_and_use_after_close_is_rejected(tmp_path: Path) 
         dataset.use()
     with pytest.raises(RuntimeError, match="closed"):
         _ = dataset.native
-
-
-def test_context_manager_closes_dataset(tmp_path: Path) -> None:
-    _write_dataset(tmp_path)
-
-    with ArrowDataset.open(tmp_path) as dataset:
-        assert not dataset.closed
-
-    assert dataset.closed
 
 
 def test_retained_reader_survives_path_replacement(tmp_path: Path) -> None:
@@ -380,7 +418,7 @@ def test_open_requires_the_fixed_base_shape_and_paired_specter(tmp_path: Path) -
 
     def remove_papers(manifest):
         manifest["paths"].pop("papers")
-        manifest["artifact_generation"]["files"].pop("papers")
+        manifest["files"].pop("papers")
 
     _rewrite_manifest(tmp_path, remove_papers)
     with pytest.raises(MissingArrowArtifactError, match="papers"):
@@ -390,7 +428,7 @@ def test_open_requires_the_fixed_base_shape_and_paired_specter(tmp_path: Path) -
 
     def remove_specter_index(manifest):
         manifest["paths"].pop("specter_batch_index")
-        manifest["artifact_generation"]["files"].pop("specter_batch_index")
+        manifest["files"].pop("specter_batch_index")
 
     _rewrite_manifest(tmp_path / "other", remove_specter_index)
     with pytest.raises(ValueError, match="both specter and specter_batch_index"):
@@ -417,11 +455,11 @@ def test_name_counts_state_is_retained_by_the_dataset(tmp_path: Path) -> None:
     dataset.close()
 
 
-def test_manifest_generation_rejects_legacy_path_field_and_sidecar_inventory(tmp_path: Path) -> None:
+def test_manifest_rejects_declared_file_path_and_sidecar_inventory(tmp_path: Path) -> None:
     _write_dataset(tmp_path)
 
     def add_legacy_path(manifest):
-        manifest["artifact_generation"]["files"]["signatures"]["path"] = "other.arrow"
+        manifest["files"]["signatures"]["path"] = "other.arrow"
 
     _rewrite_manifest(tmp_path, add_legacy_path)
     with pytest.raises(ValueError, match=r"files\.signatures field mismatch.*extra=\['path'\]"):
@@ -434,26 +472,45 @@ def test_manifest_generation_rejects_legacy_path_field_and_sidecar_inventory(tmp
 
     def add_sidecar(manifest):
         manifest["paths"]["cluster_seeds"] = "cluster_seeds.arrow"
-        manifest["artifact_generation"]["files"]["cluster_seeds"] = {
-            "kind": "file",
+        manifest["files"]["cluster_seeds"] = {
             "byte_count": len(b"sidecar"),
             "sha256": hashlib.sha256(b"sidecar").hexdigest(),
         }
 
     _rewrite_manifest(other, add_sidecar)
-    with pytest.raises(ValueError, match="unsupported immutable keys"):
+    with pytest.raises(ValueError, match="unsupported immutable file keys"):
         ArrowDataset.open(other)
 
 
-def test_manifest_generation_rejects_v1_schema(tmp_path: Path) -> None:
-    _write_dataset(tmp_path)
+def test_manifest_rejects_wrong_kind_or_format_before_opening_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        arrow_inputs,
+        "_open_retained_path",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("payload opened before format validation")),
+    )
+    cases = (
+        ("wrong-kind", "kind", "other"),
+        ("unsupported-format", "format_version", 2),
+        ("boolean-format", "format_version", True),
+        ("string-format", "format_version", "1"),
+    )
+    for case_id, field, value in cases:
+        case_root = tmp_path / case_id
+        _write_dataset(case_root)
 
-    def use_v1_schema(manifest):
-        manifest["artifact_generation"]["schema_version"] = "s2and_arrow_artifact_generation_v1"
+        def mutate_contract(manifest, field=field, value=value):
+            manifest[field] = value
 
-    _rewrite_manifest(tmp_path, use_v1_schema)
-    with pytest.raises(ValueError, match="unsupported artifact_generation schema"):
-        ArrowDataset.open(tmp_path)
+        _rewrite_manifest(case_root, mutate_contract)
+        try:
+            ArrowDataset.open(case_root)
+        except ValueError as error:
+            assert field in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: wrong manifest identity was accepted")
 
 
 def test_normalize_path_helper_remains_a_writer_boundary(

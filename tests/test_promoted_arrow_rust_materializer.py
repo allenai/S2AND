@@ -32,7 +32,6 @@ def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path) -> No
     target_path.write_text(
         json.dumps(
             {
-                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": len(feature_columns),
                 "features": feature_columns,
                 "params": {"n_estimators": 10},
@@ -51,7 +50,6 @@ def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path) -> No
     target_path.write_text(
         json.dumps(
             {
-                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": len(reordered_features),
                 "features": reordered_features,
                 "params": {"n_estimators": 10},
@@ -65,15 +63,14 @@ def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path) -> No
         _load_target(target_path)
 
 
-def test_load_target_rejects_removed_promoted_features(tmp_path: Path) -> None:
+def test_load_target_rejects_unknown_features(tmp_path: Path) -> None:
     target_path = tmp_path / "target.json"
 
     target_path.write_text(
         json.dumps(
             {
-                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": 1,
-                "features": ["pw_max_email_prefix_equal"],
+                "features": ["not_a_promoted_feature"],
                 "params": {"n_estimators": 10},
                 "metrics": {},
             }
@@ -85,25 +82,34 @@ def test_load_target_rejects_removed_promoted_features(tmp_path: Path) -> None:
         _load_target(target_path)
 
 
-@pytest.mark.parametrize("params", [{}, {"n_estimators": True}, {"n_estimators": 0}, {"n_estimators": 1.5}])
-def test_load_target_rejects_invalid_params(tmp_path: Path, params: dict[str, Any]) -> None:
+def test_load_target_rejects_invalid_params(tmp_path: Path) -> None:
     feature_columns = list(promoted_train.promoted_linker_feature_columns())
     target_path = tmp_path / "target.json"
-    target_path.write_text(
-        json.dumps(
-            {
-                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
-                "feature_count": len(feature_columns),
-                "features": feature_columns,
-                "params": params,
-                "metrics": {},
-            }
-        ),
-        encoding="utf-8",
+    cases = (
+        ("empty", {}),
+        ("boolean-estimators", {"n_estimators": True}),
+        ("zero-estimators", {"n_estimators": 0}),
+        ("fractional-estimators", {"n_estimators": 1.5}),
     )
+    for case_id, params in cases:
+        target_path.write_text(
+            json.dumps(
+                {
+                    "feature_count": len(feature_columns),
+                    "features": feature_columns,
+                    "params": params,
+                    "metrics": {},
+                }
+            ),
+            encoding="utf-8",
+        )
 
-    with pytest.raises(ValueError, match="params"):
-        _load_target(target_path)
+        try:
+            _load_target(target_path)
+        except ValueError as error:
+            assert "params" in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: invalid params were accepted")
 
 
 def test_load_target_rejects_nonfinite_metrics(tmp_path: Path) -> None:
@@ -112,7 +118,6 @@ def test_load_target_rejects_nonfinite_metrics(tmp_path: Path) -> None:
     target_path.write_text(
         json.dumps(
             {
-                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": len(feature_columns),
                 "features": feature_columns,
                 "params": {"n_estimators": 10},
@@ -126,38 +131,35 @@ def test_load_target_rejects_nonfinite_metrics(tmp_path: Path) -> None:
         _load_target(target_path)
 
 
-@pytest.mark.parametrize(
-    ("metrics", "message"),
-    [
-        ({"score": 1.0}, "unknown metric keys"),
-        ({"stratified_test_accuracy": None}, "must be numeric"),
-        ({"stratified_test_accuracy": True}, "must be numeric"),
-        ({"stratified_test_errors": 1.5}, "nonnegative integer"),
-        ({"weighted_average_error_weights": {"wrong": 1.0}}, "must equal"),
-    ],
-)
-def test_load_target_rejects_invalid_metric_schema(
-    tmp_path: Path,
-    metrics: dict[str, Any],
-    message: str,
-) -> None:
+def test_load_target_rejects_invalid_metric_schema(tmp_path: Path) -> None:
     feature_columns = list(promoted_train.promoted_linker_feature_columns())
     target_path = tmp_path / "target.json"
-    target_path.write_text(
-        json.dumps(
-            {
-                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
-                "feature_count": len(feature_columns),
-                "features": feature_columns,
-                "params": {"n_estimators": 10},
-                "metrics": metrics,
-            }
-        ),
-        encoding="utf-8",
+    cases = (
+        ("unknown-key", {"score": 1.0}, "unknown metric keys"),
+        ("null-accuracy", {"stratified_test_accuracy": None}, "must be numeric"),
+        ("boolean-accuracy", {"stratified_test_accuracy": True}, "must be numeric"),
+        ("fractional-errors", {"stratified_test_errors": 1.5}, "nonnegative integer"),
+        ("wrong-weight-keys", {"weighted_average_error_weights": {"wrong": 1.0}}, "must equal"),
     )
+    for case_id, metrics, message in cases:
+        target_path.write_text(
+            json.dumps(
+                {
+                    "feature_count": len(feature_columns),
+                    "features": feature_columns,
+                    "params": {"n_estimators": 10},
+                    "metrics": metrics,
+                }
+            ),
+            encoding="utf-8",
+        )
 
-    with pytest.raises(ValueError, match=message):
-        _load_target(target_path)
+        try:
+            _load_target(target_path)
+        except ValueError as error:
+            assert message in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: invalid metric schema was accepted")
 
 
 def test_load_target_rejects_duplicate_features(tmp_path) -> None:
@@ -165,7 +167,6 @@ def test_load_target_rejects_duplicate_features(tmp_path) -> None:
     target_path.write_text(
         json.dumps(
             {
-                "schema_version": promoted_train.LINKER_TARGET_SCHEMA,
                 "feature_count": 2,
                 "features": ["min_distance", "min_distance"],
             }

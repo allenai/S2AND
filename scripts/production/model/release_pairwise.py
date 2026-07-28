@@ -11,7 +11,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,11 +23,13 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and._atomic_io import fsync_directory  # noqa: E402
 from s2and._sha256 import sha256_file as _sha256_file  # noqa: E402
+from s2and.arrow_inputs import read_arrow_collection_root  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.eval import b3_precision_recall_fscore, pairwise_probability_metrics  # noqa: E402
 from s2and.featurizer import many_pairs_featurize  # noqa: E402
 from s2and.name_counts_index import NameCountsIndex  # noqa: E402
 from s2and.production_bundle import finalize_pairwise_eps  # noqa: E402
+from s2and.production_bundle_contract import PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES  # noqa: E402
 from s2and.production_model import _load_pairwise_staging_model, load_production_model  # noqa: E402
 from s2and.production_training_contract import (  # noqa: E402
     ModelPlan,
@@ -35,21 +37,57 @@ from s2and.production_training_contract import (  # noqa: E402
     load_model_plan,
     load_packaged_artifact_authority,
 )
+from s2and.subblocking import GraphSubblockingConfig  # noqa: E402
+from scripts.production.model.run_binding import (  # noqa: E402
+    build_run_binding_identity,
+    build_run_binding_payload,
+    load_run_binding,
+    require_run_binding_matches,
+)
+from scripts.verification.validate_local_arrow_release import validate_release_root  # noqa: E402
 
-EPS_CALIBRATION_REPORT_SCHEMA = "s2and_eps_calibration_report_v1"
-EVALUATION_REPORT_SCHEMA = "s2and_release_evaluation_report_v1"
+_BASELINE_METRIC_CONTRACT = {
+    "cluster_b3_aggregation": "signature_count_weighted",
+    "pairwise_macro_f1_threshold": {"operator": ">", "value": 0.5},
+    "pairwise_probability_combination": "arithmetic_mean_main_nameless",
+    "performance_statistic": "predict_seconds_p50",
+}
 
 _COMMON_MODEL_ROLES = frozenset({"signatures", "papers", "specter_embeddings"})
 _RANDOM_MODEL_ROLES = _COMMON_MODEL_ROLES | {"clusters"}
 _FIXED_MODEL_ROLES = _COMMON_MODEL_ROLES | {"train_pairs", "val_pairs"}
 _PAIR_ROLES = frozenset({"signatures", "papers", "specter_embeddings", "pairs"})
 _CLUSTER_ROLES = frozenset({"signatures", "papers", "specter_embeddings", "clusters", "blocks"})
+_PARITY_WORKLOAD_KEYS = frozenset(
+    {
+        "block_size",
+        "compare_features",
+        "include_specter",
+        "n_jobs",
+        "total_ram_bytes",
+        "use_cluster_seeds",
+    }
+)
+_SUBBLOCKING_WORKLOAD_KEYS = frozenset(
+    {
+        "allow_full",
+        "comparison_mode",
+        "graph_config",
+        "limit",
+        "maximum_size",
+        "orcid_subblocking",
+        "python_source",
+        "sample_mode",
+        "seed",
+        "top_diff_subblocks",
+    }
+)
 _RELEASE_GATE_INPUTS = {
-    "cluster_evaluation_report": ("cluster_evaluation_report.json", "s2and_cluster_evaluation_report_v1"),
-    "pairwise_evaluation_report": ("pairwise_evaluation_report.json", "s2and_pairwise_evaluation_report_v1"),
-    "parity_evaluation_report": ("parity_evaluation_report.json", "s2and_parity_evaluation_report_v1"),
-    "performance_evaluation_report": ("performance_evaluation_report.json", "s2and_performance_evaluation_report_v1"),
-    "subblocking_evaluation_report": ("subblocking_evaluation_report.json", "s2and_subblocking_evaluation_report_v1"),
+    "cluster_evaluation_report": "cluster_evaluation_report.json",
+    "pairwise_evaluation_report": "pairwise_evaluation_report.json",
+    "parity_evaluation_report": "parity_evaluation_report.json",
+    "performance_evaluation_report": "performance_evaluation_report.json",
+    "subblocking_evaluation_report": "subblocking_evaluation_report.json",
 }
 _NORMATIVE_GATE_MAXIMA = {
     "cluster_signature_weighted_b3_f1_max_drop": 0.005,
@@ -69,6 +107,8 @@ class EvaluationPlan:
     cluster: Mapping[str, Mapping[str, tuple[Path, str]]]
     arrow_root: Path
     workload: Mapping[str, Any]
+    parity: Mapping[str, Any]
+    subblocking: Mapping[str, Any]
     baselines: Mapping[str, Any]
     gates: Mapping[str, Any]
 
@@ -184,6 +224,184 @@ def _snapshot_dataset(
     }
     snapshots = {role: {"path": str(path), "sha256": _sha256_file(path)} for role, path in sorted(paths.items())}
     return paths, snapshots
+
+
+def _positive_integer_value(value: Any, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{label} must be a positive integer")
+    return value
+
+
+def _validate_parity_workload(value: Any) -> dict[str, Any]:
+    workload = _object(value, label="evaluation.parity.workload", keys=set(_PARITY_WORKLOAD_KEYS))
+    for field in ("compare_features", "include_specter", "use_cluster_seeds"):
+        if not isinstance(workload[field], bool):
+            raise ValueError(f"evaluation.parity.workload.{field} must be boolean")
+    if workload["compare_features"] is not True:
+        raise ValueError("evaluation.parity.workload.compare_features must be true for release acceptance")
+    return {
+        "block_size": _positive_integer_value(
+            workload["block_size"],
+            label="evaluation.parity.workload.block_size",
+        ),
+        "compare_features": True,
+        "include_specter": bool(workload["include_specter"]),
+        "n_jobs": _positive_integer_value(
+            workload["n_jobs"],
+            label="evaluation.parity.workload.n_jobs",
+        ),
+        "total_ram_bytes": _positive_integer_value(
+            workload["total_ram_bytes"],
+            label="evaluation.parity.workload.total_ram_bytes",
+        ),
+        "use_cluster_seeds": bool(workload["use_cluster_seeds"]),
+    }
+
+
+def _prepare_parity_plan(value: Any, *, base: Path) -> dict[str, Any]:
+    parity = _object(
+        value,
+        label="evaluation.parity",
+        keys={"fixture_dir", "workload"},
+    )
+    fixture_dir = _resolve_path(
+        parity["fixture_dir"],
+        base=base,
+        label="evaluation.parity.fixture_dir",
+    )
+    if not fixture_dir.is_dir():
+        raise ValueError(f"evaluation.parity.fixture_dir must be a directory: {fixture_dir}")
+    meta = _object(
+        _read_json(fixture_dir / "meta.json"),
+        label="evaluation.parity meta.json",
+        keys={"block", "dataset", "paths"},
+    )
+    dataset = meta["dataset"]
+    block = meta["block"]
+    if (
+        not isinstance(dataset, str)
+        or not dataset
+        or dataset.strip() != dataset
+        or not isinstance(block, str)
+        or not block
+    ):
+        raise ValueError("evaluation.parity meta dataset and block must be nonempty strings")
+    workload = _validate_parity_workload(parity["workload"])
+    expected_roles = {"papers", "signatures"}
+    if workload["include_specter"]:
+        expected_roles.add("specter")
+    if workload["use_cluster_seeds"]:
+        expected_roles.add("cluster_seeds_require")
+    _paths, snapshots = _snapshot_dataset(
+        meta["paths"],
+        base=fixture_dir,
+        label="evaluation.parity meta paths",
+        allowed_roles=(frozenset(expected_roles),),
+    )
+    return {
+        "block": block,
+        "dataset": dataset,
+        "files": snapshots,
+        "fixture_dir": str(fixture_dir),
+        "workload": workload,
+    }
+
+
+def _normalize_graph_config(value: Any) -> dict[str, Any]:
+    defaults = asdict(GraphSubblockingConfig())
+    graph_config = _object(
+        value,
+        label="evaluation.subblocking.workload.graph_config",
+        keys=set(defaults),
+    )
+    normalized: dict[str, Any] = {}
+    for field, default in defaults.items():
+        raw_value = graph_config[field]
+        label = f"evaluation.subblocking.workload.graph_config.{field}"
+        if isinstance(default, bool):
+            if not isinstance(raw_value, bool):
+                raise ValueError(f"{label} must be boolean")
+            normalized[field] = raw_value
+        elif isinstance(default, int):
+            if field == "local_move_passes":
+                if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value < 0:
+                    raise ValueError(f"{label} must be a nonnegative integer")
+                normalized[field] = raw_value
+            else:
+                normalized[field] = _positive_integer_value(raw_value, label=label)
+        elif isinstance(default, float):
+            normalized[field] = _number(raw_value, label=label)
+        elif isinstance(default, str):
+            if not isinstance(raw_value, str) or not raw_value:
+                raise ValueError(f"{label} must be a nonempty string")
+            normalized[field] = raw_value
+        else:
+            raise TypeError(f"Unsupported graph config field {field!r}")
+    return normalized
+
+
+def _validate_subblocking_workload(value: Any) -> dict[str, Any]:
+    workload = _object(
+        value,
+        label="evaluation.subblocking.workload",
+        keys=set(_SUBBLOCKING_WORKLOAD_KEYS),
+    )
+    if workload["comparison_mode"] != "python-vs-rust" or workload["python_source"] != "arrow":
+        raise ValueError("release subblocking must compare Python-vs-Rust from the same Arrow input")
+    if workload["limit"] is not None or workload["allow_full"] is not True:
+        raise ValueError("release subblocking must use the full frozen population")
+    if workload["sample_mode"] not in {"first", "random"}:
+        raise ValueError("evaluation.subblocking.workload.sample_mode is invalid")
+    for field in ("allow_full", "orcid_subblocking"):
+        if not isinstance(workload[field], bool):
+            raise ValueError(f"evaluation.subblocking.workload.{field} must be boolean")
+    seed = workload["seed"]
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("evaluation.subblocking.workload.seed must be an integer")
+    return {
+        "allow_full": True,
+        "comparison_mode": "python-vs-rust",
+        "graph_config": _normalize_graph_config(workload["graph_config"]),
+        "limit": None,
+        "maximum_size": _positive_integer_value(
+            workload["maximum_size"],
+            label="evaluation.subblocking.workload.maximum_size",
+        ),
+        "orcid_subblocking": bool(workload["orcid_subblocking"]),
+        "python_source": "arrow",
+        "sample_mode": str(workload["sample_mode"]),
+        "seed": seed,
+        "top_diff_subblocks": _positive_integer_value(
+            workload["top_diff_subblocks"],
+            label="evaluation.subblocking.workload.top_diff_subblocks",
+        ),
+    }
+
+
+def _prepare_subblocking_plan(value: Any, *, base: Path) -> dict[str, Any]:
+    subblocking = _object(
+        value,
+        label="evaluation.subblocking",
+        keys={"component_members_parquet", "dataset", "workload"},
+    )
+    dataset = subblocking["dataset"]
+    if not isinstance(dataset, str) or not dataset or dataset.strip() != dataset:
+        raise ValueError("evaluation.subblocking.dataset must be a nonempty trimmed string")
+    component_path = _resolve_path(
+        subblocking["component_members_parquet"],
+        base=base,
+        label="evaluation.subblocking.component_members_parquet",
+    )
+    if not component_path.is_file():
+        raise FileNotFoundError(component_path)
+    return {
+        "component_members": {
+            "path": str(component_path),
+            "sha256": _sha256_file(component_path),
+        },
+        "dataset": dataset,
+        "workload": _validate_subblocking_workload(subblocking["workload"]),
+    }
 
 
 def _signature_id(value: Any, *, context: str) -> str:
@@ -317,6 +535,102 @@ def _validate_baselines(value: Any, *, pairwise_names: set[str]) -> dict[str, An
     }
 
 
+def _lowercase_sha256(value: Any, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _snapshot_content_identities(datasets: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, str]]:
+    """Project prepared dataset snapshots to their location-independent identities."""
+
+    return {
+        name: {
+            role: _lowercase_sha256(spec["sha256"], label=f"{name}.{role}.sha256")
+            for role, spec in sorted(files.items())
+        }
+        for name, files in sorted(datasets.items())
+    }
+
+
+def _validate_baseline_provenance(value: Any) -> None:
+    provenance = _object(
+        value,
+        label="baseline record provenance",
+        keys={"commands", "data", "environment", "model", "source_commit"},
+    )
+    source_commit = provenance["source_commit"]
+    if (
+        not isinstance(source_commit, str)
+        or len(source_commit) != 40
+        or any(character not in "0123456789abcdef" for character in source_commit)
+    ):
+        raise ValueError("baseline record provenance.source_commit must be a full lowercase Git commit")
+    for field in ("model", "data", "environment"):
+        if not isinstance(provenance[field], Mapping) or not provenance[field]:
+            raise ValueError(f"baseline record provenance.{field} must be a nonempty object")
+    commands = provenance["commands"]
+    if (
+        not isinstance(commands, list)
+        or not commands
+        or any(not isinstance(command, str) or not command.strip() for command in commands)
+    ):
+        raise ValueError("baseline record provenance.commands must be a nonempty list of command strings")
+
+
+def _load_reviewed_baseline(
+    value: Any,
+    *,
+    base: Path,
+    pairwise: Mapping[str, Mapping[str, Any]],
+    cluster: Mapping[str, Mapping[str, Any]],
+    arrow_root_manifest_sha256: str,
+    workload: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Verify one reviewed baseline record against the frozen evaluation identity."""
+
+    reference = _object(value, label="evaluation.baseline", keys={"path", "sha256"})
+    path = _resolve_path(reference["path"], base=base, label="evaluation.baseline.path")
+    expected_digest = _lowercase_sha256(reference["sha256"], label="evaluation.baseline.sha256")
+    observed_digest = _sha256_file(path)
+    if observed_digest != expected_digest:
+        raise ValueError(f"evaluation.baseline SHA-256 mismatch: expected={expected_digest} observed={observed_digest}")
+    record = _object(
+        _read_json(path),
+        label="baseline record",
+        keys={"metric_contract", "metrics", "performance", "populations", "provenance"},
+    )
+    if record["metric_contract"] != _BASELINE_METRIC_CONTRACT:
+        raise ValueError("baseline record metric_contract does not match the release metric contract")
+    populations = _object(
+        record["populations"],
+        label="baseline record populations",
+        keys={"cluster", "pairwise"},
+    )
+    expected_pairwise = _snapshot_content_identities(pairwise)
+    expected_cluster = _snapshot_content_identities(cluster)
+    if populations["pairwise"] != expected_pairwise:
+        raise ValueError("baseline record pairwise populations do not match the frozen evaluation plan")
+    if populations["cluster"] != expected_cluster:
+        raise ValueError("baseline record cluster populations do not match the frozen evaluation plan")
+    performance = _object(
+        record["performance"],
+        label="baseline record performance",
+        keys={"arrow_root_manifest_sha256", "workload"},
+    )
+    if performance["arrow_root_manifest_sha256"] != arrow_root_manifest_sha256:
+        raise ValueError("baseline record performance root does not match the frozen evaluation plan")
+    if performance["workload"] != workload:
+        raise ValueError("baseline record performance workload does not match the frozen evaluation plan")
+    _validate_baseline_provenance(record["provenance"])
+    _reject_nonfinite_json(record, label="baseline record")
+    return _validate_baselines(record["metrics"], pairwise_names=set(pairwise)), expected_digest
+
+
 def _validate_gates(value: Any) -> dict[str, Any]:
     keys = {*_NORMATIVE_GATE_MAXIMA, "peak_rss_absolute_max_gb", "subblocking_maximum_size"}
     gates = _object(value, label="evaluation.gates", keys=keys)
@@ -397,7 +711,14 @@ def prepare_run(args: argparse.Namespace) -> dict[str, str]:
     if {path.name for path in run_dir.iterdir()} != {"release.json"}:
         raise ValueError("A release run directory must initially contain only release.json")
 
-    source = _object(_read_json(release_path), label="release", keys={"model", "evaluation"})
+    source = _object(
+        _read_json(release_path),
+        label="release",
+        keys={"release_version", "model", "evaluation"},
+    )
+    release_version = source["release_version"]
+    if not isinstance(release_version, str) or not release_version or release_version.strip() != release_version:
+        raise ValueError("release.release_version must be a nonempty string without surrounding whitespace")
     model = _object(source["model"], label="model", keys={"datasets", "eps"})
     model_paths: dict[str, dict[str, Path]] = {}
     model_datasets: dict[str, Any] = {}
@@ -410,12 +731,16 @@ def prepare_run(args: argparse.Namespace) -> dict[str, str]:
         )
         model_paths[name] = paths
         model_datasets[name] = snapshots
-    model_plan = {"datasets": model_datasets, "eps": _eps_payload(model["eps"])}
+    model_plan = {
+        "release_version": release_version,
+        "datasets": model_datasets,
+        "eps": _eps_payload(model["eps"]),
+    }
 
     evaluation = _object(
         source["evaluation"],
         label="evaluation",
-        keys={"pairwise", "cluster", "performance", "baselines", "gates"},
+        keys={"pairwise", "cluster", "performance", "parity", "subblocking", "baseline", "gates"},
     )
     evaluation_paths: dict[str, dict[str, dict[str, Path]]] = {"pairwise": {}, "cluster": {}}
     evaluation_datasets: dict[str, dict[str, Any]] = {"pairwise": {}, "cluster": {}}
@@ -436,19 +761,42 @@ def prepare_run(args: argparse.Namespace) -> dict[str, str]:
     )
     if not isinstance(performance["workload"], Mapping) or not performance["workload"]:
         raise ValueError("evaluation.performance.workload must be a nonempty object")
+    arrow_root = _resolve_path(
+        performance["arrow_root"],
+        base=run_dir,
+        label="evaluation.performance.arrow_root",
+    )
+    if not arrow_root.is_dir():
+        raise ValueError(f"evaluation.performance.arrow_root must be a directory: {arrow_root}")
+    arrow_root_manifest = arrow_root / "manifest.json"
+    if not arrow_root_manifest.is_file():
+        raise ValueError(f"evaluation.performance.arrow_root is missing manifest.json: {arrow_root}")
+    arrow_root_manifest_sha256 = _sha256_file(arrow_root_manifest)
+    baselines, baseline_record_sha256 = _load_reviewed_baseline(
+        evaluation["baseline"],
+        base=run_dir,
+        pairwise=evaluation_datasets["pairwise"],
+        cluster=evaluation_datasets["cluster"],
+        arrow_root_manifest_sha256=arrow_root_manifest_sha256,
+        workload=cast(Mapping[str, Any], performance["workload"]),
+    )
+    gates = _validate_gates(evaluation["gates"])
+    parity_plan = _prepare_parity_plan(evaluation["parity"], base=run_dir)
+    subblocking_plan = _prepare_subblocking_plan(evaluation["subblocking"], base=run_dir)
+    if subblocking_plan["workload"]["maximum_size"] != gates["subblocking_maximum_size"]:
+        raise ValueError("evaluation.subblocking maximum_size must equal gates.subblocking_maximum_size")
     evaluation_plan = {
         **evaluation_datasets,
+        "parity": parity_plan,
         "performance": {
-            "arrow_root": str(
-                _resolve_path(performance["arrow_root"], base=run_dir, label="evaluation.performance.arrow_root")
-            ),
+            "arrow_root": str(arrow_root),
+            "arrow_root_manifest_sha256": arrow_root_manifest_sha256,
             "workload": dict(performance["workload"]),
         },
-        "baselines": _validate_baselines(
-            evaluation["baselines"],
-            pairwise_names=set(evaluation_datasets["pairwise"]),
-        ),
-        "gates": _validate_gates(evaluation["gates"]),
+        "subblocking": subblocking_plan,
+        "baseline_record_sha256": baseline_record_sha256,
+        "baselines": baselines,
+        "gates": gates,
     }
     _reject_nonfinite_json(evaluation_plan, label="evaluation")
     _check_release_leakage(
@@ -466,6 +814,70 @@ def prepare_run(args: argparse.Namespace) -> dict[str, str]:
     return {
         "model_plan": str(model_plan_path),
         "evaluation_plan": str(evaluation_plan_path),
+    }
+
+
+def bind_candidate(args: argparse.Namespace) -> dict[str, str]:
+    """Bind one finalized candidate and public-data root to the prepared run."""
+
+    run_root = Path(args.run_root).resolve()
+    model_plan_path = run_root / "model_plan.json"
+    evaluation_plan_path = run_root / "evaluation_plan.json"
+    output_path = run_root / "run_binding.json"
+    if output_path.exists():
+        raise FileExistsError(f"Run binding output already exists: {output_path}")
+    model_plan = load_model_plan(model_plan_path)
+    _load_evaluation_plan(evaluation_plan_path)
+
+    candidate_model = Path(args.candidate_model).resolve()
+    public_data_root = Path(args.public_data_root).resolve()
+    public_manifest = public_data_root / "manifest.json"
+    if not public_manifest.is_file():
+        raise FileNotFoundError(f"Public-data root manifest does not exist: {public_manifest}")
+    _datasets, _replay_bundles, public_release_version = read_arrow_collection_root(public_manifest)
+    if public_release_version != model_plan.release_version:
+        raise ValueError("Public-data release_version does not match the model plan")
+    validate_release_root(public_data_root)
+    artifact_authority = load_packaged_artifact_authority(
+        name_counts_index_root=public_data_root / "name_counts_index",
+    )
+
+    candidate_manifest = _read_json(candidate_model / "manifest.json")
+    manifest_hashes = candidate_manifest.get("sha256") if isinstance(candidate_manifest, Mapping) else None
+    required_provenance = set(PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES.values())
+    if not isinstance(manifest_hashes, Mapping) or not required_provenance.issubset(manifest_hashes):
+        raise ValueError("Candidate model manifest must bind both pairwise training reproducibility files")
+    training_config_path = candidate_model / "reproducibility" / "pairwise_training_config.json"
+    expected_training_config_sha256 = manifest_hashes[
+        PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES["pairwise_training_config"]
+    ]
+    if _sha256_file(training_config_path) != expected_training_config_sha256:
+        raise ValueError("Candidate pairwise training config checksum does not match its manifest")
+    training_config = _read_json(training_config_path)
+    if not isinstance(training_config, Mapping) or not training_config:
+        raise ValueError("candidate pairwise training config must be a nonempty object")
+    if training_config.get("input_artifact_hashes") != artifact_authority.hashes:
+        raise ValueError("Candidate model was trained from a different artifact authority")
+    if training_config["model_plan_sha256"] != model_plan.sha256:
+        raise ValueError("Candidate model was trained from a different model plan")
+    clusterer = load_production_model(
+        candidate_model,
+        expected_artifact_hashes=artifact_authority.hashes,
+    )
+    if clusterer.production_model_release_version != model_plan.release_version:
+        raise ValueError("Candidate model release_version does not match the model plan")
+
+    identity = build_run_binding_identity(
+        model_plan=model_plan_path,
+        evaluation_plan=evaluation_plan_path,
+        candidate_model_dir=candidate_model,
+        public_data_root=public_data_root,
+    )
+    payload = build_run_binding_payload(identity)
+    _write_fresh_json(output_path, payload)
+    return {
+        "run_binding": str(output_path),
+        "run_binding_sha256": payload["run_binding_sha256"],
     }
 
 
@@ -497,28 +909,115 @@ def _load_plan_datasets(
     return datasets
 
 
+def _load_parity_plan(value: Any) -> dict[str, Any]:
+    parity = _object(
+        value,
+        label="parity",
+        keys={"block", "dataset", "files", "fixture_dir", "workload"},
+    )
+    fixture_dir = parity["fixture_dir"]
+    if not isinstance(fixture_dir, str) or not Path(fixture_dir).is_absolute():
+        raise ValueError("parity.fixture_dir must be absolute")
+    dataset = parity["dataset"]
+    block = parity["block"]
+    if (
+        not isinstance(dataset, str)
+        or not dataset
+        or dataset.strip() != dataset
+        or not isinstance(block, str)
+        or not block
+    ):
+        raise ValueError("parity dataset and block must be nonempty strings")
+    workload = _validate_parity_workload(parity["workload"])
+    expected_roles = {"papers", "signatures"}
+    if workload["include_specter"]:
+        expected_roles.add("specter")
+    if workload["use_cluster_seeds"]:
+        expected_roles.add("cluster_seeds_require")
+    files = parity["files"]
+    if not isinstance(files, Mapping) or set(files) != expected_roles:
+        raise ValueError(f"parity.files must contain exactly {sorted(expected_roles)}")
+    return {
+        "block": block,
+        "dataset": dataset,
+        "files": {role: _plan_file_spec(spec, label=f"parity.files.{role}") for role, spec in files.items()},
+        "fixture_dir": Path(fixture_dir),
+        "workload": workload,
+    }
+
+
+def _load_subblocking_plan(value: Any) -> dict[str, Any]:
+    subblocking = _object(
+        value,
+        label="subblocking",
+        keys={"component_members", "dataset", "workload"},
+    )
+    dataset = subblocking["dataset"]
+    if not isinstance(dataset, str) or not dataset or dataset.strip() != dataset:
+        raise ValueError("subblocking.dataset must be a nonempty trimmed string")
+    return {
+        "component_members": _plan_file_spec(
+            subblocking["component_members"],
+            label="subblocking.component_members",
+        ),
+        "dataset": dataset,
+        "workload": _validate_subblocking_workload(subblocking["workload"]),
+    }
+
+
 def _load_evaluation_plan(path: Path) -> EvaluationPlan:
     payload = _object(
         _read_json(path),
         label="evaluation plan",
-        keys={"pairwise", "cluster", "performance", "baselines", "gates"},
+        keys={
+            "baseline_record_sha256",
+            "baselines",
+            "cluster",
+            "gates",
+            "parity",
+            "pairwise",
+            "performance",
+            "subblocking",
+        },
     )
     pairwise = _load_plan_datasets(payload["pairwise"], label="pairwise", roles=_PAIR_ROLES)
     cluster = _load_plan_datasets(payload["cluster"], label="cluster", roles=_CLUSTER_ROLES)
-    performance = _object(payload["performance"], label="performance", keys={"arrow_root", "workload"})
+    parity = _load_parity_plan(payload["parity"])
+    subblocking = _load_subblocking_plan(payload["subblocking"])
+    performance = _object(
+        payload["performance"],
+        label="performance",
+        keys={"arrow_root", "arrow_root_manifest_sha256", "workload"},
+    )
     raw_arrow_root = performance["arrow_root"]
     if not isinstance(raw_arrow_root, str) or not Path(raw_arrow_root).is_absolute():
         raise ValueError("performance.arrow_root must be absolute")
+    arrow_root_manifest_sha256 = _lowercase_sha256(
+        performance["arrow_root_manifest_sha256"],
+        label="performance.arrow_root_manifest_sha256",
+    )
+    observed_root_manifest_sha256 = _sha256_file(Path(raw_arrow_root) / "manifest.json")
+    if observed_root_manifest_sha256 != arrow_root_manifest_sha256:
+        raise ValueError("performance Arrow root manifest changed after release preparation")
+    _lowercase_sha256(
+        payload["baseline_record_sha256"],
+        label="baseline_record_sha256",
+    )
     if not isinstance(performance["workload"], Mapping) or not performance["workload"]:
         raise ValueError("performance.workload must be a nonempty object")
+    gates = _validate_gates(payload["gates"])
+    if subblocking["workload"]["maximum_size"] != gates["subblocking_maximum_size"]:
+        raise ValueError("subblocking maximum_size must equal gates.subblocking_maximum_size")
     _reject_nonfinite_json(payload, label="evaluation plan")
     return EvaluationPlan(
         pairwise=pairwise,
         cluster=cluster,
         arrow_root=Path(raw_arrow_root),
         workload=cast(Mapping[str, Any], performance["workload"]),
+        parity=parity,
+        subblocking=subblocking,
         baselines=_validate_baselines(payload["baselines"], pairwise_names=set(pairwise)),
-        gates=_validate_gates(payload["gates"]),
+        gates=gates,
     )
 
 
@@ -600,8 +1099,13 @@ def _labeled_pairs(path: Path, *, name: str) -> list[tuple[str, str, int]]:
     for row_number, row in enumerate(rows, start=1):
         if not isinstance(row, Mapping) or set(row) != {"signature_id_1", "signature_id_2", "label"}:
             raise ValueError(f"Pair row {row_number} for {name!r} has invalid fields")
-        identity = _pair_identity(row["signature_id_1"], row["signature_id_2"], context=f"{name} row {row_number}")
-        label = row["label"]
+        typed_row = cast(Mapping[str, Any], row)
+        identity = _pair_identity(
+            typed_row["signature_id_1"],
+            typed_row["signature_id_2"],
+            context=f"{name} row {row_number}",
+        )
+        label = typed_row["label"]
         if isinstance(label, bool) or not isinstance(label, int) or label not in (0, 1):
             raise ValueError(f"Pair label for {name!r} must be the JSON integer 0 or 1")
         if identity in identities:
@@ -612,13 +1116,13 @@ def _labeled_pairs(path: Path, *, name: str) -> list[tuple[str, str, int]]:
 
 
 def _pairwise_predictions(
-    pairs: list[tuple[str, str, int | float]],
+    pairs: Sequence[tuple[str, str, int | float]],
     dataset: ANDData,
     clusterer: Any,
     args: argparse.Namespace,
 ) -> tuple[dict[str, float | int], np.ndarray, np.ndarray, np.ndarray]:
     features, labels, nameless_features = many_pairs_featurize(
-        pairs,
+        list(pairs),
         dataset,
         clusterer.featurizer_info,
         n_jobs=int(args.n_jobs),
@@ -649,8 +1153,15 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
     output_path = Path(args.output_report).resolve()
     if output_path.exists():
         raise FileExistsError(f"Evaluation output already exists: {output_path}")
+    binding = load_run_binding(Path(args.run_binding).resolve())
     artifacts, clusterer = _evaluation_model(args)
-    plan = _load_evaluation_plan(Path(args.evaluation_plan).resolve())
+    evaluation_plan_path = Path(args.evaluation_plan).resolve()
+    plan = _load_evaluation_plan(evaluation_plan_path)
+    require_run_binding_matches(
+        binding,
+        evaluation_plan=evaluation_plan_path,
+        candidate_model_dir=Path(args.model).resolve(),
+    )
     prepared = [
         (name, files, _labeled_pairs(files["pairs"], name=name))
         for name, specs in plan.pairwise.items()
@@ -680,10 +1191,10 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
         np.concatenate(all_nameless),
     )
     report = {
-        "schema_version": "s2and_pairwise_evaluation_report_v1",
         "aggregation": "all_pairs",
         "aggregate": aggregate,
         "datasets": dataset_reports,
+        "run_binding_sha256": binding["run_binding_sha256"],
     }
     _write_fresh_json(output_path, report)
     return report
@@ -753,8 +1264,15 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
     output_path = Path(args.output_report).resolve()
     if output_path.exists():
         raise FileExistsError(f"Evaluation output already exists: {output_path}")
+    binding = load_run_binding(Path(args.run_binding).resolve())
     artifacts, clusterer = _evaluation_model(args)
-    plan = _load_evaluation_plan(Path(args.evaluation_plan).resolve())
+    evaluation_plan_path = Path(args.evaluation_plan).resolve()
+    plan = _load_evaluation_plan(evaluation_plan_path)
+    require_run_binding_matches(
+        binding,
+        evaluation_plan=evaluation_plan_path,
+        candidate_model_dir=Path(args.model).resolve(),
+    )
     clusterer.n_jobs = args.n_jobs
     dataset_reports: dict[str, Any] = {}
     metrics: dict[str, Any] = {}
@@ -773,8 +1291,8 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
         metrics[name] = _b3_report(true_clusters, predicted)
         dataset_reports[name] = {"metrics": metrics[name]}
     report = {
-        "schema_version": "s2and_cluster_evaluation_report_v1",
         "datasets": dataset_reports,
+        "run_binding_sha256": binding["run_binding_sha256"],
         **_aggregate_b3(metrics),
     }
     _write_fresh_json(output_path, report)
@@ -824,7 +1342,11 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
 
     source_bundle, output_bundle, output_report, plan, config, manifest_sha256 = _calibration_preflight(args)
     artifacts = _load_release_artifacts(args)
-    clusterer = _load_pairwise_staging_model(source_bundle, expected_artifact_hashes=artifacts.hashes)
+    clusterer = _load_pairwise_staging_model(
+        source_bundle,
+        expected_eps_calibration="pending",
+        expected_artifact_hashes=artifacts.hashes,
+    )
     clusterer.n_jobs = args.n_jobs
     datasets = [
         (name, dataset) for name, dataset in sorted(plan.datasets.items()) if dataset.split_mode == "random_blocks"
@@ -871,7 +1393,7 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         clusterer.cluster_model.eps = original_eps
 
-    trials = [
+    trials: list[dict[str, Any]] = [
         {"eps": eps, "datasets": metrics_by_eps[eps], **_aggregate_b3(metrics_by_eps[eps])} for eps in plan.eps.grid
     ]
     eligible = [
@@ -883,19 +1405,22 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
     if not eligible:
         raise RuntimeError("No EPS calibration trial met all quality floors")
     selected = max(eligible, key=lambda trial: (trial["signature_weighted"]["f1"], -trial["eps"]))
+    selected_eps = float(selected["eps"])
     finalize_pairwise_eps(
         source_bundle_dir=source_bundle,
         output_bundle_dir=output_bundle,
         expected_manifest_sha256=manifest_sha256,
-        expected_old_eps=original_eps,
-        new_eps=selected["eps"],
+        new_eps=selected_eps,
         expected_artifact_hashes=artifacts.hashes,
     )
+    output_manifest_sha256 = _sha256_file(output_bundle / "manifest.json")
     report = {
-        "schema_version": EPS_CALIBRATION_REPORT_SCHEMA,
+        "input_artifact_hashes": dict(artifacts.hashes),
         "model_plan_sha256": plan.sha256,
+        "output_bundle_manifest_sha256": output_manifest_sha256,
+        "source_bundle_manifest_sha256": manifest_sha256,
         "source_eps": original_eps,
-        "selected_eps": selected["eps"],
+        "selected_eps": selected_eps,
         "validation_identities": identities,
         "trials": trials,
     }
@@ -903,12 +1428,14 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
-def _load_release_gate_inputs(report_dir: Path) -> dict[str, Any]:
+def _load_release_gate_inputs(report_dir: Path, *, run_binding_sha256: str) -> dict[str, Any]:
     reports: dict[str, Any] = {}
-    for role, (filename, expected_schema) in _RELEASE_GATE_INPUTS.items():
+    for role, filename in _RELEASE_GATE_INPUTS.items():
         payload = _read_json(report_dir / filename)
-        if not isinstance(payload, dict) or payload.get("schema_version") != expected_schema:
-            raise ValueError(f"Release report {role!r} has the wrong schema")
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"Release report {role!r} must be a JSON object")
+        if payload.get("run_binding_sha256") != run_binding_sha256:
+            raise ValueError(f"Release report {role!r} has the wrong run binding")
         _reject_nonfinite_json(payload, label=f"Release report {role}")
         reports[role] = payload
     return reports
@@ -1081,13 +1608,19 @@ def build_evaluation_report(args: argparse.Namespace) -> dict[str, Any]:
     output_path = Path(args.output_report).resolve()
     if output_path.exists():
         raise FileExistsError(f"Evaluation report output already exists: {output_path}")
-    plan = _load_evaluation_plan(Path(args.evaluation_plan).resolve())
-    reports = _load_release_gate_inputs(Path(args.report_dir).resolve())
+    binding = load_run_binding(Path(args.run_binding).resolve())
+    evaluation_plan_path = Path(args.evaluation_plan).resolve()
+    plan = _load_evaluation_plan(evaluation_plan_path)
+    require_run_binding_matches(binding, evaluation_plan=evaluation_plan_path)
+    reports = _load_release_gate_inputs(
+        Path(args.report_dir).resolve(),
+        run_binding_sha256=binding["run_binding_sha256"],
+    )
     checks = _release_checks(plan, reports)
     report = {
-        "schema_version": EVALUATION_REPORT_SCHEMA,
         "checks": checks,
         "passed": all(check["passed"] for check in checks),
+        "run_binding_sha256": binding["run_binding_sha256"],
     }
     _write_fresh_json(output_path, report)
     return report
@@ -1108,8 +1641,18 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--release", type=Path, required=True)
     prepare.set_defaults(handler=prepare_run)
 
+    bind = commands.add_parser(
+        "bind-candidate",
+        help="Bind a finalized candidate model and public-data root to the prepared run.",
+    )
+    bind.add_argument("--run-root", type=Path, required=True)
+    bind.add_argument("--candidate-model", type=Path, required=True)
+    bind.add_argument("--public-data-root", type=Path, required=True)
+    bind.set_defaults(handler=bind_candidate)
+
     release = commands.add_parser("evaluate-release", help="Apply release gates to the five component reports.")
     release.add_argument("--evaluation-plan", type=Path, required=True)
+    release.add_argument("--run-binding", type=Path, required=True)
     release.add_argument("--report-dir", type=Path, required=True)
     release.add_argument("--output-report", type=Path, required=True)
     release.set_defaults(handler=build_evaluation_report)
@@ -1133,6 +1676,7 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         evaluator.add_argument("--model", type=Path, required=True)
         evaluator.add_argument("--evaluation-plan", type=Path, required=True)
+        evaluator.add_argument("--run-binding", type=Path, required=True)
         evaluator.add_argument("--name-counts-index-root", type=Path, required=True)
         evaluator.add_argument("--output-report", type=Path, required=True)
         evaluator.add_argument("--n-jobs", type=_positive_int, default=1)

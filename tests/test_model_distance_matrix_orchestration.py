@@ -290,25 +290,23 @@ def test_predict_from_rust_featurizer_skips_setup_for_only_trivial_blocks(
     assert telemetry["make_dists_pair_count"] == 0
 
 
-@pytest.mark.parametrize("seed_mode", ["explicit_disallow", "explicit_require", "native_require"])
-def test_predict_from_rust_featurizer_rejects_seeds_with_precomputed_dists(
-    seed_mode: str,
-) -> None:
-    native_seeds = [("0", "c0"), ("1", "c1")] if seed_mode == "native_require" else []
-    featurizer = SimpleNamespace(cluster_seeds_require=lambda: native_seeds)
-    kwargs: dict[str, Any] = {}
-    if seed_mode == "explicit_disallow":
-        kwargs = {"cluster_seeds_require": {}, "cluster_seeds_disallow": {("0", "1")}}
-    elif seed_mode == "explicit_require":
-        kwargs = {"cluster_seeds_require": {"0": "c0", "1": "c0"}}
+def test_predict_from_rust_featurizer_rejects_seeds_with_precomputed_dists() -> None:
+    for seed_mode in ("explicit_disallow", "explicit_require", "native_require"):
+        native_seeds = [("0", "c0"), ("1", "c1")] if seed_mode == "native_require" else []
+        featurizer = SimpleNamespace(cluster_seeds_require=lambda _seeds=native_seeds: _seeds)
+        kwargs: dict[str, Any] = {}
+        if seed_mode == "explicit_disallow":
+            kwargs = {"cluster_seeds_require": {}, "cluster_seeds_disallow": {("0", "1")}}
+        elif seed_mode == "explicit_require":
+            kwargs = {"cluster_seeds_require": {"0": "c0", "1": "c0"}}
 
-    with pytest.raises(ValueError, match="precomputed dists"):
-        _clusterer(cluster_model=None).predict_from_rust_featurizer(
-            {"block": ["0", "1"]},
-            featurizer,
-            dists={"block": np.zeros((2, 2), dtype=np.float64)},
-            **kwargs,
-        )
+        with pytest.raises(ValueError, match="precomputed dists"):
+            _clusterer(cluster_model=None).predict_from_rust_featurizer(
+                {"block": ["0", "1"]},
+                featurizer,
+                dists={"block": np.zeros((2, 2), dtype=np.float64)},
+                **kwargs,
+            )
 
 
 def test_seed_overrides_preserve_existing_pairs_and_add_missing_constraints() -> None:

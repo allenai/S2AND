@@ -14,6 +14,7 @@ from s2and.consts import NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.incremental_linking_training.name_counts import LoadNameCountsMode, resolve_load_name_counts
 from s2and.model import _ensure_lightgbm_fitted
+from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION
 from s2and.production_model import _load_pairwise_staging_model
 from s2and.thread_config import resolve_n_jobs
 
@@ -213,6 +214,7 @@ def load_clusterer(
 
     clusterer = _load_pairwise_staging_model(
         model_path,
+        expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
         expected_artifact_hashes=expected_artifact_hashes,
     )
     _ensure_lightgbm_fitted(clusterer.classifier)

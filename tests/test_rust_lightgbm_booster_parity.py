@@ -41,19 +41,16 @@ if not HAS_RUST:
 assert s2and_rust is not None and not isinstance(s2and_rust, Exception)
 RustLightGBMBooster: Any = s2and_rust.RustLightGBMBooster
 
-SOURCE_BUNDLE_DIR = Path(__file__).resolve().parents[1] / "s2and" / "data" / "production_model_v1.21"
-SOURCE_BUNDLE_BOOSTER_RELPATHS = [
-    "pairwise/main.lgb",
-    "pairwise/nameless.lgb",
-    "incremental_linker/booster.lgb",
-]
+REALISTIC_FIXTURE_DIR = Path(__file__).with_name("fixtures") / "rust_lightgbm"
+REALISTIC_MODEL_PATH = REALISTIC_FIXTURE_DIR / "production_main.lgb"
+REALISTIC_PROBABILITY_FIXTURE_PATH = REALISTIC_FIXTURE_DIR / "production_main_prediction_fixture.json"
 
 # LightGBM's kZeroThreshold is the float literal 1e-35f widened to double.
 K_ZERO_THRESHOLD = float(np.float32(1e-35))
 
 PROBA_ATOL = 1e-12
 PARITY_NUM_THREADS = 4
-SOURCE_BUNDLE_MAX_ROWS = 4096
+REALISTIC_FIXTURE_MAX_ROWS = 4096
 
 ONE_SPLIT_INTERIOR_ZERO_MODEL = """\
 tree
@@ -368,18 +365,24 @@ def _adversarial_matrix(
     return np.vstack((matrix, np.stack(deterministic_rows)))
 
 
-def _assert_parity(lgb_booster: lgb.Booster, rust_booster: Any, features: np.ndarray) -> None:
+def _assert_parity(
+    lgb_booster: lgb.Booster,
+    rust_booster: Any,
+    features: np.ndarray,
+    *,
+    case_id: str = "",
+) -> None:
     features = np.ascontiguousarray(features, dtype=np.float64)
-    assert rust_booster.num_features() == lgb_booster.num_feature()
+    assert rust_booster.num_features() == lgb_booster.num_feature(), case_id
 
     raw_python = np.asarray(
         lgb_booster.predict(features, raw_score=True, num_threads=PARITY_NUM_THREADS),
         dtype=np.float64,
     )
     raw_rust = np.asarray(rust_booster.predict_raw(features, num_threads=PARITY_NUM_THREADS), dtype=np.float64)
-    assert raw_python.shape == raw_rust.shape
+    assert raw_python.shape == raw_rust.shape, case_id
     assert raw_python.tobytes() == raw_rust.tobytes(), (
-        f"raw scores not bit-exact: max abs diff {np.max(np.abs(raw_python - raw_rust))}"
+        f"{case_id}: raw scores not bit-exact: max abs diff {np.max(np.abs(raw_python - raw_rust))}"
     )
 
     proba_python = np.asarray(lgb_booster.predict(features, num_threads=PARITY_NUM_THREADS), dtype=np.float64)
@@ -387,7 +390,7 @@ def _assert_parity(lgb_booster: lgb.Booster, rust_booster: Any, features: np.nda
         rust_booster.predict_proba_positive(features, num_threads=PARITY_NUM_THREADS),
         dtype=np.float64,
     )
-    np.testing.assert_allclose(proba_rust, proba_python, rtol=0.0, atol=PROBA_ATOL)
+    np.testing.assert_allclose(proba_rust, proba_python, rtol=0.0, atol=PROBA_ATOL, err_msg=case_id)
 
 
 def _assert_float32_matches_prior_widening(rust_booster: Any, features: np.ndarray) -> None:
@@ -454,45 +457,36 @@ def _rust_from_booster(lgb_booster: lgb.Booster) -> Any:
     return RustLightGBMBooster.from_string(lgb_booster.model_to_string())
 
 
-@pytest.mark.parametrize(
-    ("filename", "params", "inject_nans", "inject_zeros", "missing_key"),
-    [
-        ("main.lgb", {}, True, False, "missing_nan"),
-        ("nameless.lgb", {"zero_as_missing": True}, True, True, "missing_zero"),
-    ],
-)
-def test_written_pairwise_boosters_reload_with_python_rust_parity(
-    tmp_path: Path,
-    filename: str,
-    params: dict[str, Any],
-    inject_nans: bool,
-    inject_zeros: bool,
-    missing_key: str,
-) -> None:
+def test_written_pairwise_boosters_reload_with_python_rust_parity(tmp_path: Path) -> None:
     """Synthetic main and nameless boosters retain missing/default behavior after reload."""
 
-    rng = np.random.default_rng(20260726)
-    trained = _train_booster(
-        rng,
-        params=params,
-        inject_nans=inject_nans,
-        inject_zeros=inject_zeros,
+    cases = (
+        ("main", "main.lgb", {}, True, False, "missing_nan"),
+        ("nameless", "nameless.lgb", {"zero_as_missing": True}, True, True, "missing_zero"),
     )
-    model_path = tmp_path / filename
-    trained.save_model(model_path)
+    for case_id, filename, params, inject_nans, inject_zeros, missing_key in cases:
+        rng = np.random.default_rng(20260726)
+        trained = _train_booster(
+            rng,
+            params=params,
+            inject_nans=inject_nans,
+            inject_zeros=inject_zeros,
+        )
+        model_path = tmp_path / filename
+        trained.save_model(model_path)
 
-    python_booster = lgb.Booster(model_file=str(model_path))
-    rust_booster = RustLightGBMBooster(str(model_path))
-    summary = rust_booster.decision_type_summary()
-    assert summary[missing_key] > 0
-    assert 0 < summary["default_left"] < summary["num_splits"]
+        python_booster = lgb.Booster(model_file=str(model_path))
+        rust_booster = RustLightGBMBooster(str(model_path))
+        summary = rust_booster.decision_type_summary()
+        assert summary[missing_key] > 0, case_id
+        assert 0 < summary["default_left"] < summary["num_splits"], case_id
 
-    features = _adversarial_matrix(
-        python_booster,
-        python_booster.num_feature(),
-        rng,
-    )
-    _assert_parity(python_booster, rust_booster, features)
+        features = _adversarial_matrix(
+            python_booster,
+            python_booster.num_feature(),
+            rng,
+        )
+        _assert_parity(python_booster, rust_booster, features, case_id=case_id)
 
 
 def test_negative_zero_sentinel_split_matches_lightgbm() -> None:
@@ -525,16 +519,9 @@ def test_negative_zero_sentinel_split_matches_lightgbm() -> None:
     assert raw_python_f32.tobytes() == raw_rust_f32.tobytes()
 
 
-@pytest.mark.parametrize("decision_type", [0, 2, 4, 6, 8, 10])
-def test_dense_zero_window_precedes_one_split_missing_semantics(decision_type: int) -> None:
+def test_dense_zero_window_precedes_one_split_missing_semantics() -> None:
     """Dense values inside LightGBM's zero window become zero for every missing type."""
 
-    model_text = ONE_SPLIT_INTERIOR_ZERO_MODEL.replace(
-        "decision_type=2",
-        f"decision_type={decision_type}",
-    )
-    python_booster = lgb.Booster(model_str=model_text)
-    rust_booster = RustLightGBMBooster.from_string(model_text)
     features = np.asarray(
         [
             [np.nextafter(-K_ZERO_THRESHOLD, -np.inf)],
@@ -548,26 +535,31 @@ def test_dense_zero_window_precedes_one_split_missing_semantics(decision_type: i
         ],
         dtype=np.float64,
     )
-    _assert_parity(python_booster, rust_booster, features)
-
     features_f32 = np.ascontiguousarray(features, dtype=np.float32)
-    raw_python_f32 = np.asarray(python_booster.predict(features_f32, raw_score=True), dtype=np.float64)
-    raw_rust_f32 = np.asarray(rust_booster.predict_raw_f32(features_f32), dtype=np.float64)
-    assert raw_python_f32.tobytes() == raw_rust_f32.tobytes()
+    for decision_type in (0, 2, 4, 6, 8, 10):
+        case_id = f"decision-type-{decision_type}"
+        model_text = ONE_SPLIT_INTERIOR_ZERO_MODEL.replace(
+            "decision_type=2",
+            f"decision_type={decision_type}",
+        )
+        python_booster = lgb.Booster(model_str=model_text)
+        rust_booster = RustLightGBMBooster.from_string(model_text)
+        _assert_parity(python_booster, rust_booster, features, case_id=case_id)
+
+        raw_python_f32 = np.asarray(python_booster.predict(features_f32, raw_score=True), dtype=np.float64)
+        raw_rust_f32 = np.asarray(rust_booster.predict_raw_f32(features_f32), dtype=np.float64)
+        assert raw_python_f32.tobytes() == raw_rust_f32.tobytes(), case_id
 
 
 # ---------------------------------------------------------------------------
-# Explicit historical source-bundle boosters: bit-exact raw scores, fixture agreement
+# One realistic production-shaped booster: bit-exact raw scores and fixture agreement
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("relpath", SOURCE_BUNDLE_BOOSTER_RELPATHS)
-def test_source_bundle_booster_bit_exact_parity(relpath: str) -> None:
-    model_path = SOURCE_BUNDLE_DIR / relpath
-    if not model_path.exists():
-        raise pytest.skip.Exception(f"source bundle booster missing: {model_path}")
-    lgb_booster = lgb.Booster(model_file=str(model_path))
-    rust_booster = RustLightGBMBooster(str(model_path))
+def test_realistic_booster_bit_exact_parity() -> None:
+    assert REALISTIC_MODEL_PATH.is_file()
+    lgb_booster = lgb.Booster(model_file=str(REALISTIC_MODEL_PATH))
+    rust_booster = RustLightGBMBooster(str(REALISTIC_MODEL_PATH))
     assert rust_booster.num_trees() == lgb_booster.num_trees()
     assert rust_booster.objective_name() == "binary"
 
@@ -578,46 +570,35 @@ def test_source_bundle_booster_bit_exact_parity(relpath: str) -> None:
         rng,
         max_split_boundaries=512,
     )
-    assert features.shape[0] <= SOURCE_BUNDLE_MAX_ROWS
+    assert features.shape[0] <= REALISTIC_FIXTURE_MAX_ROWS
     _assert_parity(lgb_booster, rust_booster, features)
     _assert_float32_matches_prior_widening(rust_booster, features)
 
 
-@pytest.mark.parametrize(
-    "model_relpath, fixture_relpath",
-    [
-        ("pairwise/main.lgb", "pairwise/main_prediction_fixture.json"),
-        ("pairwise/nameless.lgb", "pairwise/nameless_prediction_fixture.json"),
-    ],
-)
-def test_source_bundle_fixture_probabilities(model_relpath: str, fixture_relpath: str) -> None:
+def test_realistic_booster_fixture_probabilities() -> None:
     import json
 
-    model_path = SOURCE_BUNDLE_DIR / model_relpath
-    fixture_path = SOURCE_BUNDLE_DIR / fixture_relpath
-    if not model_path.exists() or not fixture_path.exists():
-        raise pytest.skip.Exception(f"source bundle artifacts missing under {SOURCE_BUNDLE_DIR}")
-    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert REALISTIC_MODEL_PATH.is_file()
+    assert REALISTIC_PROBABILITY_FIXTURE_PATH.is_file()
+    fixture = json.loads(REALISTIC_PROBABILITY_FIXTURE_PATH.read_text(encoding="utf-8"))
     features = np.ascontiguousarray(fixture["features"], dtype=np.float64)
     expected = np.asarray(fixture["expected_probabilities"], dtype=np.float64)
 
-    rust_booster = RustLightGBMBooster(str(model_path))
+    rust_booster = RustLightGBMBooster(str(REALISTIC_MODEL_PATH))
     positive = np.asarray(rust_booster.predict_proba_positive(features), dtype=np.float64)
     observed = np.column_stack((1.0 - positive, positive))
     rtol = float(fixture.get("rtol", 1e-10))
     atol = float(fixture.get("atol", 1e-10))
     np.testing.assert_allclose(observed, expected, rtol=rtol, atol=atol)
 
-    _assert_parity(lgb.Booster(model_file=str(model_path)), rust_booster, features)
+    _assert_parity(lgb.Booster(model_file=str(REALISTIC_MODEL_PATH)), rust_booster, features)
 
 
-def test_source_bundle_decision_type_coverage() -> None:
-    """The source bundle models must exercise both default directions and
-    more than one missing type, so the parity tests above are non-vacuous."""
-    model_path = SOURCE_BUNDLE_DIR / "pairwise/main.lgb"
-    if not model_path.exists():
-        raise pytest.skip.Exception(f"source bundle booster missing: {model_path}")
-    summary = RustLightGBMBooster(str(model_path)).decision_type_summary()
+def test_realistic_booster_decision_type_coverage() -> None:
+    """The fixture covers both default directions and two missing types."""
+
+    assert REALISTIC_MODEL_PATH.is_file()
+    summary = RustLightGBMBooster(str(REALISTIC_MODEL_PATH)).decision_type_summary()
     assert summary["num_splits"] > 0
     assert 0 < summary["default_left"] < summary["num_splits"]
     assert summary["missing_none"] > 0

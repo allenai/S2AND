@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
@@ -10,23 +11,9 @@ from typing import Any, cast
 import pytest
 
 import scripts.eval_prod_models as eval_prod_models
-from s2and.arrow_inputs import ArrowDataset
-from s2and.consts import NORMALIZATION_VERSION
+from s2and.arrow_inputs import ARROW_COLLECTION_KIND, ArrowDataset
+from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from tests.helpers import write_minimal_arrow_prediction_bundle
-
-
-def test_specter2_is_default_and_specter1_is_train_only() -> None:
-    parser = eval_prod_models._build_parser()
-
-    assert eval_prod_models.specter_suffixes == [eval_prod_models.SPECTER2_SUFFIX]
-    assert eval_prod_models._resolve_requested_specter_suffixes(eval_prod_models.specter_suffixes, None) == [
-        eval_prod_models.SPECTER2_SUFFIX
-    ]
-    training_args = parser.parse_args(["--train", "--specter-suffixes", eval_prod_models.SPECTER1_SUFFIX])
-    assert training_args.train
-    assert training_args.specter_suffixes == [eval_prod_models.SPECTER1_SUFFIX]
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--specter1-model-path", "legacy-model"])
 
 
 def _open_minimal_arrow_dataset(
@@ -45,7 +32,7 @@ def _open_minimal_arrow_dataset(
             ),
             encoding="utf-8",
         )
-    return ArrowDataset.open(root, expected_normalization_version=NORMALIZATION_VERSION)
+    return ArrowDataset.open(root)
 
 
 def test_train_mode_validation_rejects_conflicting_request_or_wrong_dataset() -> None:
@@ -249,33 +236,30 @@ def test_arrow_training_feature_splits_uses_open_dataset(
     assert captured["kwargs"] == {"name_tuples": None, "num_threads": 1}
 
 
-@pytest.mark.parametrize("block_count", [1, 2, 4])
-def test_split_blocks_like_anddata_rejects_tiny_smoke_datasets_like_anddata(block_count: int) -> None:
-    blocks = {f"b{index}": [f"s{index}"] for index in range(block_count)}
+def test_split_blocks_like_anddata_matches_anddata_and_rejects_tiny_inputs() -> None:
+    for block_count in (1, 2, 4):
+        blocks = {f"b{index}": [f"s{index}"] for index in range(block_count)}
+        with pytest.raises(ValueError):
+            eval_prod_models.split_blocks_like_anddata(blocks, random_seed=1)
 
-    with pytest.raises(ValueError):
-        eval_prod_models.split_blocks_like_anddata(blocks, random_seed=1)
-
-
-@pytest.mark.parametrize("seed", [42, 1111])
-def test_split_blocks_like_anddata_matches_anddata_split_blocks_helper(seed: int) -> None:
     from s2and.data import ANDData
 
     blocks = {
         f"block {index}": [f"s{index}_{position}" for position in range((index * 7) % 13 + 1)] for index in range(40)
     }
-    fake_anddata = SimpleNamespace(
-        num_clusters_for_block_size=1,
-        random_seed=seed,
-        train_ratio=0.8,
-        val_ratio=0.1,
-        test_ratio=0.1,
-    )
+    for seed in (42, 1111):
+        fake_anddata = SimpleNamespace(
+            num_clusters_for_block_size=1,
+            random_seed=seed,
+            train_ratio=0.8,
+            val_ratio=0.1,
+            test_ratio=0.1,
+        )
 
-    expected = ANDData.split_blocks_helper(cast(Any, fake_anddata), blocks)
-    actual = eval_prod_models.split_blocks_like_anddata(blocks, random_seed=seed)
+        expected = ANDData.split_blocks_helper(cast(Any, fake_anddata), blocks)
+        actual = eval_prod_models.split_blocks_like_anddata(blocks, random_seed=seed)
 
-    assert actual == expected
+        assert actual == expected, f"seed-{seed}"
 
 
 def _write_bundle_training_config(bundle_dir: Path, payload: Mapping[str, Any]) -> None:
@@ -284,38 +268,63 @@ def _write_bundle_training_config(bundle_dir: Path, payload: Mapping[str, Any]) 
     (reproducibility_dir / "pairwise_training_config.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_bundle_data_random_seed_reads_recorded_seed(tmp_path: Path) -> None:
+def test_bundle_data_random_seed_requires_a_recorded_integer(tmp_path: Path) -> None:
     _write_bundle_training_config(tmp_path, {"data_random_seed": 1111})
-
     assert eval_prod_models.bundle_data_random_seed(tmp_path) == 1111
 
-
-def test_bundle_data_random_seed_fails_closed_without_training_config(tmp_path: Path) -> None:
+    missing_root = tmp_path / "missing"
     with pytest.raises(FileNotFoundError, match="records no training split seed"):
-        eval_prod_models.bundle_data_random_seed(tmp_path)
+        eval_prod_models.bundle_data_random_seed(missing_root)
+
+    for case_id, bad_seed in (
+        ("none", None),
+        ("string", "1111"),
+        ("boolean", True),
+        ("float", 1111.0),
+    ):
+        invalid_root = tmp_path / case_id
+        _write_bundle_training_config(invalid_root, {"data_random_seed": bad_seed})
+        with pytest.raises(ValueError, match="integer data_random_seed"):
+            eval_prod_models.bundle_data_random_seed(invalid_root)
 
 
-@pytest.mark.parametrize("bad_seed", [None, "1111", True, 1111.0])
-def test_bundle_data_random_seed_rejects_non_integer_seed(tmp_path: Path, bad_seed: Any) -> None:
-    _write_bundle_training_config(tmp_path, {"data_random_seed": bad_seed})
+def test_resolve_arrow_dataset_root_requires_explicit_collection_root(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "arrow" / "dummy"
+    dataset_root.mkdir(parents=True)
+    (dataset_root / "manifest.json").write_text("{}\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="integer data_random_seed"):
-        eval_prod_models.bundle_data_random_seed(tmp_path)
-
-
-def test_resolve_arrow_dataset_root_rejects_ambiguous_release_parent(tmp_path: Path) -> None:
-    for release_name in ("release_20260525", "release_20260526"):
-        release_root = tmp_path / "arrow" / release_name
-        dataset_root = release_root / "datasets" / "dummy"
-        dataset_root.mkdir(parents=True)
-        (release_root / "manifest.json").write_text(
-            json.dumps({"dataset_manifests": [{"manifest_path": "datasets/dummy/manifest.json"}]}),
-            encoding="utf-8",
-        )
-        (dataset_root / "manifest.json").write_text("{}", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="Ambiguous Arrow release parent"):
+    with pytest.raises(FileNotFoundError, match="Arrow root manifest does not exist"):
         eval_prod_models.resolve_arrow_dataset_root(str(tmp_path / "arrow"), "dummy")
+
+
+def test_resolve_arrow_dataset_root_does_not_bypass_its_manifest(tmp_path: Path) -> None:
+    root = tmp_path / "arrow"
+    declared = root / "declared"
+    undeclared = root / "undeclared"
+    declared.mkdir(parents=True)
+    undeclared.mkdir()
+    declared_manifest = declared / "manifest.json"
+    declared_manifest.write_text("{}\n", encoding="utf-8")
+    (undeclared / "manifest.json").write_text("{}\n", encoding="utf-8")
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "kind": ARROW_COLLECTION_KIND,
+                "format_version": PUBLIC_DATA_FORMAT_VERSION,
+                "dataset_manifests": {
+                    "declared": {
+                        "path": "declared/manifest.json",
+                        "sha256": hashlib.sha256(declared_manifest.read_bytes()).hexdigest(),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert eval_prod_models.resolve_arrow_dataset_root(str(root), "declared") == str(declared.resolve())
+    with pytest.raises(FileNotFoundError, match="does not declare dataset 'undeclared'"):
+        eval_prod_models.resolve_arrow_dataset_root(str(root), "undeclared")
 
 
 def test_cluster_eval_arrow_passes_open_dataset(
@@ -443,11 +452,11 @@ def test_eval_main_rejects_invalid_mode_combinations(monkeypatch: pytest.MonkeyP
             eval_prod_models.main()
 
 
-@pytest.mark.parametrize(
-    ("argv", "message"),
-    [
-        (["--train", "--dataset", "mini"], "requires an explicit --json-data-root"),
+def test_eval_main_requires_explicit_data_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = (
+        ("json-training-root", ["--train", "--dataset", "mini"], "requires an explicit --json-data-root"),
         (
+            "arrow-training-root",
             [
                 "--train",
                 "--dataset",
@@ -460,25 +469,26 @@ def test_eval_main_rejects_invalid_mode_combinations(monkeypatch: pytest.MonkeyP
             "requires an explicit --arrow-data-root",
         ),
         (
+            "evaluation-data-root",
             ["--dataset", "mini", "--specter2-model-path", "model"],
             "requires --arrow-data-root or --json-data-root",
         ),
         (
+            "name-assets",
             ["--train", "--dataset", "mini", "--json-data-root", "json"],
             "require explicit --name-counts-index-root and --name-tuples-path",
         ),
-    ],
-)
-def test_eval_main_requires_explicit_data_roots(
-    monkeypatch: pytest.MonkeyPatch,
-    argv: list[str],
-    message: str,
-) -> None:
+    )
     monkeypatch.setattr(eval_prod_models, "bundle_data_random_seed", lambda _path: 42)
-    monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", *argv])
+    for case_id, argv, message in cases:
+        monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", *argv])
 
-    with pytest.raises(ValueError, match=message):
-        eval_prod_models.main()
+        try:
+            eval_prod_models.main()
+        except ValueError as error:
+            assert message in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: incomplete data roots were accepted")
 
 
 def test_construct_cluster_to_signatures_reports_missing_assignments() -> None:

@@ -42,7 +42,7 @@ def _row_feature_fixture(row_count: int) -> dict[str, np.ndarray]:
 
 
 def test_promoted_linker_feature_columns_match_promoted_target_file() -> None:
-    target_path = Path("s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json")
+    target_path = Path("tests/fixtures/incremental_linker_training_target.json")
     target = json.loads(target_path.read_text(encoding="utf-8"))
 
     promoted = features.promoted_linker_feature_columns()
@@ -123,7 +123,7 @@ def test_assemble_linker_feature_matrix_rejects_pairwise_infinities() -> None:
 
 
 def test_assemble_linker_feature_matrix_matches_tracked_target_order() -> None:
-    target_path = Path("s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json")
+    target_path = Path("tests/fixtures/incremental_linker_training_target.json")
     target_columns = tuple(json.loads(target_path.read_text(encoding="utf-8"))["features"])
     row_count = 4
     pairwise_columns = promoted_pairwise_aggregate_columns()

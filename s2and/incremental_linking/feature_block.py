@@ -6,9 +6,6 @@ Implementation is split across compact contracts and Arrow IO helpers.
 from __future__ import annotations
 
 from s2and.incremental_linking.feature_block_arrow import (
-    ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
-    ARROW_PHYSICAL_LAYOUT_SCHEMA_VERSION,
-    NAME_COUNTS_INDEX_SCHEMA_VERSION,
     RAW_PLANNER_ARROW_BATCH_INDEX_KEYS,
     RAW_PLANNER_ARROW_KEY_COLUMNS,
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
@@ -33,18 +30,11 @@ from s2and.incremental_linking.feature_block_arrow import (
     write_raw_planner_arrow_tables,
 )
 from s2and.incremental_linking.feature_block_contract import (
-    FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
-    FEATURE_BLOCK_SCHEMA_VERSION,
     FeatureBlockSignatureOrder,
     normalize_cluster_seed_disallow_pairs,
 )
 
 __all__ = [
-    "ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION",
-    "ARROW_PHYSICAL_LAYOUT_SCHEMA_VERSION",
-    "FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION",
-    "FEATURE_BLOCK_SCHEMA_VERSION",
-    "NAME_COUNTS_INDEX_SCHEMA_VERSION",
     "RAW_PLANNER_ARROW_BATCH_INDEX_KEYS",
     "RAW_PLANNER_ARROW_KEY_COLUMNS",
     "RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS",

@@ -39,12 +39,12 @@ incremental pass so initial-only signatures can attach back to established clust
 
 ## Dash normalization
 
-Canonical-v2 handles every dash-like given-name separator uniformly. Dash-bound compounds stay together in the first
+Current normalization handles every dash-like given-name separator uniformly. Dash-bound compounds stay together in the first
 name for subblocking regardless of the dash code point: both `Sang-Min` and `Sang<U+2010>Min` normalize to
 `first="sang min", middle=""`.
 
 The Python implementation uses precomputed canonical first/middle fields when available and reconstructs them with the
-same canonicalizer when Rust preprocessing deferred those fields. The Rust Arrow path applies the same canonical-v2
+same canonicalizer when Rust preprocessing deferred those fields. The Rust Arrow path applies the same
 normalization while reading raw name columns.
 
 ## ORCID policy

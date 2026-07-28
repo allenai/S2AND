@@ -456,10 +456,6 @@ mod tests {
             std::fs::read_to_string(&fixture_path).expect("read canonical_name_examples.json");
         let fixture: serde_json::Value =
             serde_json::from_str(&fixture_text).expect("parse canonical_name_examples.json");
-        assert_eq!(
-            fixture["normalization_version"].as_str(),
-            Some("canonical_v2")
-        );
         let cases = fixture["cases"].as_array().expect("fixture cases array");
         assert!(!cases.is_empty(), "fixture has no cases");
 

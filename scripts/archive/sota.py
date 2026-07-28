@@ -28,7 +28,7 @@ from hyperopt import hp
 from sklearn.cluster import DBSCAN
 from tqdm import tqdm
 
-from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH
+from s2and.consts import DEFAULT_CHUNK_SIZE, NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.eval import cluster_eval, pairwise_eval
 from s2and.featurizer import FeaturizationInfo, featurize
@@ -66,10 +66,8 @@ NAMELESS_FEATURES_TO_USE = [
     if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
 ]
 
-FEATURIZER_INFO = FeaturizationInfo(features_to_use=FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION)
-NAMELESS_FEATURIZER_INFO = FeaturizationInfo(
-    features_to_use=NAMELESS_FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION
-)
+FEATURIZER_INFO = FeaturizationInfo(features_to_use=FEATURES_TO_USE)
+NAMELESS_FEATURIZER_INFO = FeaturizationInfo(features_to_use=NAMELESS_FEATURES_TO_USE)
 
 PAIRWISE_ONLY_DATASETS = {"medline"}
 N_TRAIN_PAIRS_SIZE = 100000

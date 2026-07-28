@@ -1,8 +1,8 @@
 """Train the pairwise half of a native production model bundle.
 
-The output directory is a pairwise-only ``production_model_vX.Y`` bundle stage.
-``train_linker_and_finalize.py`` then fits one fresh linker and writes, reloads,
-and evaluates the final complete bundle.
+The output directory is a pairwise-only ``production_model_vX.Y`` bundle with
+pending placeholder EPS. Validation-only calibration writes the calibrated
+pairwise sibling consumed by ``train_linker_and_finalize.py``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from hyperopt import hp
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
@@ -30,7 +29,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from s2and.consts import FEATURIZER_VERSION  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
@@ -41,7 +39,8 @@ from s2and.featurizer import (  # noqa: E402
     resolve_selection_pairs,
 )
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
-from s2and.production_bundle import production_version_from_bundle_dir, write_pairwise_production_bundle  # noqa: E402
+from s2and.production_bundle import write_pairwise_production_bundle  # noqa: E402
+from s2and.production_bundle_contract import PENDING_EPS_CALIBRATION, PENDING_PAIRWISE_EPS  # noqa: E402
 from s2and.production_training_contract import (  # noqa: E402
     ModelDataset,
     ProductionArtifactAuthority,
@@ -65,6 +64,7 @@ class PairwisePreflightPlan:
     """Validated, read-only launch plan created before artifact or dataset loading."""
 
     output_dir: Path
+    release_version: str
     dataset_names: tuple[str, ...]
     datasets: Mapping[str, ModelDataset]
     model_plan_sha256: str
@@ -80,13 +80,6 @@ def _canonical_training_artifact_hashes(authority: ProductionArtifactAuthority) 
     if orcid_counts.name_tuples_sha256 != authority.name_tuples.data_sha256:
         raise RuntimeError("ORCID prefix counts were generated from a different canonical name-tuple artifact")
     return authority.hashes
-
-
-def _search_space() -> dict[str, Any]:
-    return {
-        "eps": hp.uniform("eps", 0, 1),
-        "linkage": hp.choice("linkage", ["average"]),
-    }
 
 
 def _positive_int_arg(args: argparse.Namespace, name: str) -> int:
@@ -118,13 +111,8 @@ def _preflight_matrix_work_dir(path: Path) -> int:
 def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     """Resolve every launch input without loading artifacts or ANDData."""
 
-    production_version = str(args.production_version)
-    if not production_version or production_version != production_version.strip():
-        raise SystemExit("--production-version must be nonempty and have no surrounding whitespace")
-
     for numeric_arg in (
         "n_iter",
-        "cluster_n_iter",
         "n_jobs",
         "chunk_size",
         "train_pairs_size",
@@ -143,13 +131,6 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
         raise SystemExit(f"--output-dir must name a new directory: {output_dir}")
     if output_dir.parent.exists() and not output_dir.parent.is_dir():
         raise SystemExit(f"--output-dir parent must be a directory: {output_dir.parent}")
-    inferred_version = production_version_from_bundle_dir(output_dir)
-    if inferred_version is not None and inferred_version != production_version:
-        raise SystemExit(
-            "--output-dir basename and --production-version disagree: "
-            f"directory={output_dir.name!r} production_version={production_version!r}"
-        )
-
     matrix_work_dir = Path(args.matrix_work_dir).resolve()
     matrix_work_free_bytes = _preflight_matrix_work_dir(matrix_work_dir)
 
@@ -170,6 +151,7 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
 
     return PairwisePreflightPlan(
         output_dir=output_dir,
+        release_version=model_plan.release_version,
         dataset_names=dataset_names,
         datasets=model_plan.datasets,
         model_plan_sha256=model_plan.sha256,
@@ -187,7 +169,6 @@ def _training_config(
 ) -> dict[str, Any]:
     return {
         "chunk_size": int(args.chunk_size),
-        "cluster_n_iter": int(args.cluster_n_iter),
         "dataset_inputs": {
             name: {
                 "files": {role: str(path) for role, path in plan.datasets[name].files.items()},
@@ -196,14 +177,12 @@ def _training_config(
             for name in plan.dataset_names
         },
         "features_to_use": list(DEFAULT_FEATURE_GROUPS),
-        "featurizer_version": int(FEATURIZER_VERSION),
         "training_scope": "production_full",
         "input_artifact_hashes": {str(key): str(value) for key, value in artifact_hashes.items()},
         "n_iter": int(args.n_iter),
         "n_jobs": int(args.n_jobs),
         "nan_policy": "preserve_nan",
         "nameless_features_to_use": list(DEFAULT_NAMELESS_FEATURE_GROUPS),
-        "production_version": str(args.production_version),
         "model_plan_sha256": plan.model_plan_sha256,
         "data_random_seed": int(args.random_seed),
         "model_random_seed": 42,
@@ -297,7 +276,7 @@ def _load_staged_array(path: Path) -> np.ndarray:
     return np.load(path, allow_pickle=False, mmap_mode="r")
 
 
-def _finite_validation_roc_auc(value: object) -> float:
+def _finite_validation_roc_auc(value: Any) -> float:
     metric = float(value)
     if not np.isfinite(metric):
         raise RuntimeError("selected validation ROC AUC must be finite")
@@ -362,14 +341,15 @@ def _publish_result(
     bundle = write_pairwise_production_bundle(
         clusterer,
         plan.output_dir,
-        bundle_version=str(args.production_version),
+        release_version=plan.release_version,
+        eps_calibration=PENDING_EPS_CALIBRATION,
         pairwise_training_config=training_config,
         pairwise_training_summary=training_summary,
     )
     return {
         "bundle_dir": str(bundle.bundle_dir),
-        "bundle_status": bundle.bundle_status,
-        "bundle_version": bundle.bundle_version,
+        "release_version": bundle.release_version,
+        "eps_calibration": bundle.eps_calibration,
         "manifest_path": str(bundle.manifest_path),
         "training_summary": training_summary,
     }
@@ -398,25 +378,18 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         plan.total_ram_bytes,
     )
 
-    featurizer_info = FeaturizationInfo(
-        features_to_use=list(DEFAULT_FEATURE_GROUPS),
-        featurizer_version=FEATURIZER_VERSION,
-    )
-    nameless_featurizer_info = FeaturizationInfo(
-        features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS),
-        featurizer_version=FEATURIZER_VERSION,
-    )
+    featurizer_info = FeaturizationInfo(features_to_use=list(DEFAULT_FEATURE_GROUPS))
+    nameless_featurizer_info = FeaturizationInfo(features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS))
     monotone_constraints = featurizer_info.lightgbm_monotone_constraints
     nameless_monotone_constraints = nameless_featurizer_info.lightgbm_monotone_constraints
 
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(
-        prefix=f".pairwise_v{args.production_version}_",
+        prefix=f".pairwise_v{plan.release_version}_",
         dir=plan.matrix_work_dir,
     ) as matrix_work_dir_raw:
         matrix_work_dir = Path(matrix_work_dir_raw)
         staged_datasets: dict[str, dict[str, Path]] = {}
-        anddatas: list[ANDData] = []
         for dataset_name in tqdm(plan.dataset_names, desc="Loading and featurizing datasets"):
             logger.info("processing dataset %s", dataset_name)
             dataset_input = plan.datasets[dataset_name]
@@ -434,13 +407,20 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 "train_pairs_size": int(args.train_pairs_size),
                 "val_pairs_size": int(args.validation_pairs_size),
                 "random_seed": int(args.random_seed),
-                "name_counts_index": Path(args.name_counts_index_root),
+                "name_counts_index": artifact_authority.name_counts_index,
                 "n_jobs": int(args.n_jobs),
                 "preprocess": True,
                 "name_tuples": canonical_name_tuples.pairs,
             }
 
             anddata = ANDData(**anddata_kwargs)
+            observed_name_counts = anddata.name_counts_manifest_sha256
+            expected_name_counts = artifact_hashes["name_counts_manifest_sha256"]
+            if observed_name_counts != expected_name_counts:
+                raise ValueError(
+                    f"Production training dataset {dataset_name!r} name-count manifest mismatch: "
+                    f"expected={expected_name_counts!r} observed={observed_name_counts!r}"
+                )
             if anddata.name_tuples != canonical_name_tuples.pairs:
                 raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
 
@@ -460,11 +440,8 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             )
             del train, val
             staged_datasets[dataset_name] = staged
-            if dataset_name != "augmented":
-                anddatas.append(anddata)
             del staged
-            if dataset_name == "augmented":
-                del anddata
+            del anddata
             gc.collect()
 
         validation_dataset_names = tuple(name for name in plan.dataset_names if name != "augmented")
@@ -500,25 +477,18 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             monotone_constraints=nameless_monotone_constraints,
         )
 
-        logger.info("fitting clustering threshold")
+        logger.info("building uncalibrated pairwise bundle")
         union_clusterer = Clusterer(
             featurizer_info,
             union_classifier.classifier,
-            cluster_model=FastCluster(),
-            search_space=_search_space(),
-            n_iter=int(args.cluster_n_iter),
+            cluster_model=FastCluster(linkage="average", eps=PENDING_PAIRWISE_EPS),
             n_jobs=int(args.n_jobs),
             nameless_classifier=nameless_union_classifier.classifier,
             nameless_featurizer_info=nameless_featurizer_info,
         )
         union_clusterer.feature_contract.update(artifact_hashes)
-        union_clusterer.fit(anddatas)
-        best_params = union_clusterer.best_params
-        if best_params is None:
-            raise RuntimeError("Clusterer fitting did not produce best clustering parameters.")
 
         training_summary: dict[str, Any] = {
-            "best_clustering_params": dict(best_params),
             "main_pairwise_best_params": dict(union_classifier.best_params or {}),
             "main_train_rows": int(_load_staged_array(union_arrays["X_train"]).shape[0]),
             "main_val_rows": int(_load_staged_array(union_arrays["X_val"]).shape[0]),
@@ -542,7 +512,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--production-version", required=True, help="Version suffix for production_model_vX.Y.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--name-counts-index-root",
@@ -551,7 +520,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit manifest-backed name-count index directory.",
     )
     parser.add_argument("--n-iter", type=int, default=DEFAULT_N_ITER)
-    parser.add_argument("--cluster-n-iter", type=int, default=25)
     parser.add_argument("--n-jobs", type=int, default=DEFAULT_N_JOBS)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     parser.add_argument("--train-pairs-size", type=int, default=DEFAULT_TRAIN_PAIRS_SIZE)

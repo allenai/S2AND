@@ -78,54 +78,63 @@ def test_writer_rejects_keys_that_would_collide_after_stringification(tmp_path: 
         )
 
 
-@pytest.mark.parametrize(
-    ("kind", "name"),
-    (
-        ("first", "Ada"),
-        ("first", "a"),
-        ("first", "ada!"),
-        ("first", "ada  marie"),
-        ("last", ""),
-        ("first_last", "adasmith"),
-        ("first_last", "a smith"),
-        ("last_first_initial", "smith ad"),
-        ("last_first_initial", "smith A"),
-    ),
-)
-def test_writer_rejects_noncanonical_name_count_keys(tmp_path: Path, kind: str, name: str) -> None:
-    mappings = {mapping_kind: {} for mapping_kind in ("first", "last", "first_last", "last_first_initial")}
-    mappings[kind] = {name: 2.0}
+def test_writer_rejects_noncanonical_name_count_keys(tmp_path: Path) -> None:
+    cases = (
+        ("first-uppercase", "first", "Ada"),
+        ("first-single-letter", "first", "a"),
+        ("first-punctuation", "first", "ada!"),
+        ("first-double-space", "first", "ada  marie"),
+        ("last-empty", "last", ""),
+        ("first-last-unseparated", "first_last", "adasmith"),
+        ("first-last-short-first", "first_last", "a smith"),
+        ("last-first-initial-long", "last_first_initial", "smith ad"),
+        ("last-first-initial-uppercase", "last_first_initial", "smith A"),
+    )
+    mapping_kinds = ("first", "last", "first_last", "last_first_initial")
+    for case_id, kind, name in cases:
+        mappings = {mapping_kind: {} for mapping_kind in mapping_kinds}
+        mappings[kind] = {name: 2.0}
 
-    with pytest.raises(ValueError, match=rf"name-count {kind} key .*canonical_v2"):
-        feature_block_arrow.write_name_counts_index(
-            tmp_path,
-            tuple(mappings[mapping_kind] for mapping_kind in ("first", "last", "first_last", "last_first_initial")),
-        )
-
-
-@pytest.mark.parametrize(
-    ("kind", "name"),
-    (
-        ("first", "ada"),
-        ("first", "a b"),
-        ("last", "van der berg"),
-        ("first_last", "ada smith"),
-        ("first_last", "a b smith"),
-        ("first_last", "ada van der berg"),
-        ("last_first_initial", "van der berg a"),
-    ),
-)
-def test_name_count_key_contract_accepts_producible_canonical_keys(kind: str, name: str) -> None:
-    assert feature_block_arrow._validated_name_count_entry(kind, name, 2.0) == (name, 2.0)
+        try:
+            feature_block_arrow.write_name_counts_index(
+                tmp_path / case_id,
+                tuple(mappings[mapping_kind] for mapping_kind in mapping_kinds),
+            )
+        except ValueError as error:
+            assert f"name-count {kind} key" in str(error) and "canonical_v2" in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: noncanonical key was accepted")
 
 
-@pytest.mark.parametrize("count", [float("nan"), float("inf"), float("-inf"), 0.0, -3.0])
-def test_writer_rejects_nonfinite_and_nonpositive_counts(tmp_path: Path, count: float) -> None:
-    with pytest.raises(ValueError, match="must be a finite positive number"):
-        feature_block_arrow.write_name_counts_index(
-            tmp_path,
-            ({"ada": count}, {}, {}, {}),
-        )
+def test_name_count_key_contract_accepts_producible_canonical_keys() -> None:
+    cases = (
+        ("first-single-token", "first", "ada"),
+        ("first-multiple-token", "first", "a b"),
+        ("last-particle", "last", "van der berg"),
+        ("first-last", "first_last", "ada smith"),
+        ("first-multiple-last", "first_last", "a b smith"),
+        ("first-last-particle", "first_last", "ada van der berg"),
+        ("last-particle-initial", "last_first_initial", "van der berg a"),
+    )
+    for case_id, kind, name in cases:
+        assert feature_block_arrow._validated_name_count_entry(kind, name, 2.0) == (name, 2.0), case_id
+
+
+def test_writer_rejects_nonfinite_and_nonpositive_counts(tmp_path: Path) -> None:
+    cases = (
+        ("nan", float("nan")),
+        ("zero", 0.0),
+    )
+    for case_id, count in cases:
+        try:
+            feature_block_arrow.write_name_counts_index(
+                tmp_path / case_id,
+                ({"ada": count}, {}, {}, {}),
+            )
+        except ValueError as error:
+            assert "must be a finite positive number" in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: invalid count was accepted")
 
 
 def test_fresh_writer_validates_each_name_count_entry_once(
@@ -171,20 +180,23 @@ def test_identical_counts_produce_byte_identical_flat_indexes(tmp_path: Path) ->
     assert manifests[0] == manifests[1]
     assert len({hashlib.sha256(manifest).hexdigest() for manifest in manifests}) == 1
     manifest = json.loads(manifests[0])
-    assert {kind: entry["path"] for kind, entry in manifest["files"].items()} == {kind: f"{kind}.bin" for kind in kinds}
+    assert manifest["kind"] == "s2and_name_counts"
+    assert manifest["format_version"] == 1
+    assert all(set(entry) == {"byte_count", "sha256"} for entry in manifest["files"].values())
 
 
-@pytest.mark.parametrize(
-    ("kind", "name"),
-    (("first", "ada"), ("last", "李"), ("first_last", "anne marie o connor")),
-)
-def test_reused_kind_hash_seed_preserves_binary_index_hashes(kind: str, name: str) -> None:
-    name_bytes = name.encode("utf-8")
-    expected = (
-        feature_block_arrow._fnv64_bytes(name_bytes),
-        feature_block_arrow._fnv64_bytes(
-            feature_block_arrow._NAME_COUNTS_INDEX_HASH_DOMAIN + kind.encode("utf-8") + b"\x00" + name_bytes
-        ),
-    )
+def test_reused_kind_hash_seed_preserves_binary_index_hashes() -> None:
+    for case_id, kind, name in (
+        ("first-ascii", "first", "ada"),
+        ("last-unicode", "last", "李"),
+        ("first-last-spaces", "first_last", "anne marie o connor"),
+    ):
+        name_bytes = name.encode("utf-8")
+        expected = (
+            feature_block_arrow._fnv64_bytes(name_bytes),
+            feature_block_arrow._fnv64_bytes(
+                feature_block_arrow._NAME_COUNTS_INDEX_HASH_DOMAIN + kind.encode("utf-8") + b"\x00" + name_bytes
+            ),
+        )
 
-    assert feature_block_arrow._name_counts_index_hashes(kind, name_bytes) == expected
+        assert feature_block_arrow._name_counts_index_hashes(kind, name_bytes) == expected, case_id

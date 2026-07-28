@@ -37,7 +37,7 @@ import pandas as pd
 from hyperopt import hp
 from tqdm import tqdm
 
-from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH
+from s2and.consts import NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.eval import claims_eval
 from s2and.featurizer import FeaturizationInfo, featurize
@@ -108,10 +108,8 @@ def main(
         if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
     ]
 
-    FEATURIZER_INFO = FeaturizationInfo(features_to_use=features_to_use, featurizer_version=FEATURIZER_VERSION)
-    NAMELESS_FEATURIZER_INFO = FeaturizationInfo(
-        features_to_use=NAMELESS_FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION
-    )
+    FEATURIZER_INFO = FeaturizationInfo(features_to_use=features_to_use)
+    NAMELESS_FEATURIZER_INFO = FeaturizationInfo(features_to_use=NAMELESS_FEATURES_TO_USE)
 
     MONOTONE_CONSTRAINTS = FEATURIZER_INFO.lightgbm_monotone_constraints
     NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints

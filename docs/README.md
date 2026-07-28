@@ -2,7 +2,7 @@
 
 This directory holds both user-facing guides and internal engineering notes.
 
-Documentation status: reviewed against the canonical-v2 worktree on
+Documentation status: reviewed against the simplified `1.0.0` worktree on
 2026-07-27. Current-behavior docs do not imply that canonical artifacts or a
 v1.3 model have already been published.
 
@@ -31,15 +31,16 @@ command reference. Canonical-name rules live in [data.md](data.md).
 - Rust documentation index and scope: [rust/README.md](rust/README.md)
 - Rust runtime contract and verification commands: [rust/runtime.md](rust/runtime.md)
 - Environment variables: [environment.md](environment.md)
-- Cache semantics and layout: [caching.md](caching.md)
 - Threading and parallelism: [threading.md](threading.md)
 - Subblocking for large blocks: [subblocking.md](subblocking.md)
 - Promoted incremental performance report: [rust/baselines.md](rust/baselines.md)
-- Rust artifact formats: [rust/artifact_formats.md](rust/artifact_formats.md)
-- Direct Rust Arrow dataset schema: [rust/arrow_dataset_spec.md](rust/arrow_dataset_spec.md)
+- Public Arrow/name-count formats and direct Rust dataset schema:
+  [rust/arrow_dataset_spec.md](rust/arrow_dataset_spec.md)
 
 ## Deep dives and engineering notes
 
+- Version-authority rationale and implementation record:
+  [../version_simplification.md](../version_simplification.md)
 - Release notes: [release_notes.md](release_notes.md)
 - Retained historical Rust profiling evidence:
   [rust/profiling/2026-05-28-promoted-incremental-arrow.md](rust/profiling/2026-05-28-promoted-incremental-arrow.md)

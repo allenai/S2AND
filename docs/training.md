@@ -26,7 +26,6 @@ from pathlib import Path
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_training import build_training_anddata_from_arrow
-from s2and.consts import NORMALIZATION_VERSION
 
 bundle_dir = Path("/path/to/canonical_arrow_training_bundle/pubmed")
 manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -34,7 +33,6 @@ manifest_paths = manifest["paths"]
 arrow_dataset = ArrowDataset.open(
     bundle_dir,
     require_name_counts_index=True,
-    expected_normalization_version=NORMALIZATION_VERSION,
 )
 
 dataset = build_training_anddata_from_arrow(
@@ -49,8 +47,8 @@ dataset = build_training_anddata_from_arrow(
 ```
 
 Set `bundle_dir` to a canonical training root. Opening the handle validates
-required tables, raw-planner batch indexes, checksums, normalization provenance,
-and the name-count index before any pairs are sampled. Keep `arrow_dataset`
+required tables, raw-planner batch indexes, checksums, public format `1`, and
+the name-count index before any pairs are sampled. Keep `arrow_dataset`
 open while the returned dataset is used, then close it. The constructor always
 selects the Rust training runtime and pins canonical preprocessing, regardless
 of `S2AND_BACKEND`. The requested pair counts are upper bounds when a split
@@ -84,9 +82,9 @@ pairwise_model.fit(X_train, y_train, X_val, y_val)
 ```
 
 The production `train_pairwise.py` command always featurizes from its frozen
-`model_plan.json` and has no cache or smoke mode. Programmatic research callers can
-use `s2and.feature_cache.cached_featurize`; see
-[caching.md](caching.md) for its exact semantics.
+`model_plan.json` and has no cache or smoke mode. Programmatic research callers
+use `featurize(...)` directly; there is no second persistent feature-snapshot
+format to coordinate with the runtime.
 
 ## Evaluate the pairwise classifier
 
@@ -142,9 +140,14 @@ print(metrics)
 
 ## Publish and reload a trained model
 
-Do not publish a pickle. The public loader accepts one complete canonical native
-bundle containing pairwise boosters, clusterer configuration, promoted linker,
-embedded replay target, and checksummed manifest. After EPS is frozen,
+Do not publish a pickle. The public loader accepts one complete native bundle
+containing pairwise boosters, clusterer configuration, promoted linker,
+embedded replay target, and checksummed manifest. Its root manifest records
+`kind: "s2and_model"`, the plan-derived `release_version`, the exact
+`generated_by_runtime`, EPS calibration state, and the file checksum
+inventory. Pairwise training writes EPS
+`0.5` with calibration state `pending`; validation-only calibration writes a
+fresh `calibrated` pairwise sibling. After EPS is frozen,
 `train_linker_and_finalize.py` fits the linker once, atomically writes
 the complete bundle, reloads those exact bytes, and evaluates them. See the
 [v1.3 release runbook](release.md).
@@ -157,9 +160,10 @@ data hashes with the canonical package artifacts; the exact name-count
 manifest and complete ordered feature contract are also bound into model and
 linker provenance.
 
-The promoted linker uses `incremental_linking_artifact_v5`. Its booster
-checksum and canonical digests bind the exact pairwise bundle and complete
-training target JSON. The complete bundle keeps that target at
+The promoted linker's fixed-role metadata records
+`kind: "s2and_incremental_linker"`, the exact generating runtime, its booster
+checksum, and digests binding the pairwise bundle and complete training target
+JSON. The complete bundle keeps that target at
 `reproducibility/incremental_linker_training_target.json`; finalization and
 loading reject a mismatch. Evaluation starts only after the serialized bundle
 has been reloaded.

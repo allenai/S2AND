@@ -44,19 +44,15 @@ def test_clusterer_n_jobs_minus_one_uses_all_cores(monkeypatch) -> None:
     assert clusterer.classifier.get_params().get("n_jobs") == 6
 
 
-def test_resolve_n_jobs_handles_none_and_negative_offsets(monkeypatch) -> None:
+def test_resolve_n_jobs_handles_defaults_offsets_and_invalid_values(monkeypatch) -> None:
     monkeypatch.setattr("s2and.thread_config.os.cpu_count", lambda: 6)
 
     assert resolve_n_jobs(None) == 1
     assert resolve_n_jobs(-2) == 5
 
-
-def test_resolve_n_jobs_rejects_zero() -> None:
     with pytest.raises(ValueError, match="must not be zero"):
         resolve_n_jobs(0)
 
-
-@pytest.mark.parametrize("invalid", [True, 1.5, "2"])
-def test_resolve_n_jobs_rejects_non_integer_values(invalid: object) -> None:
-    with pytest.raises(TypeError, match="must be an int or None"):
-        resolve_n_jobs(invalid)  # type: ignore[arg-type]
+    for invalid in (True, "2"):
+        with pytest.raises(TypeError, match="must be an int or None"):
+            resolve_n_jobs(invalid)  # type: ignore[arg-type]

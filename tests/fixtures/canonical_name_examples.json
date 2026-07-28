@@ -1,6 +1,5 @@
 {
-  "description": "Canonical-v2 name-normalization examples. canonical values are the reviewed policy; equivalence_group identifies cases that must share canonical fields, and decisions reference the migration decision registry.",
-  "normalization_version": "canonical_v2",
+  "description": "Canonical name-normalization examples. canonical values are the reviewed policy; equivalence_group identifies cases that must share canonical fields, and decisions reference the migration decision registry.",
   "decisions": {
     "D1": {
       "status": "decided",

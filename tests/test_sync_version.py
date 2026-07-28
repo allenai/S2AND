@@ -45,7 +45,6 @@ def test_pre_commit_target_loop_strips_windows_crlf() -> None:
 
 
 def _write_version_fixture(root: Path) -> None:
-    (root / "s2and").mkdir()
     (root / "s2and_rust").mkdir()
     (root / "VERSION").write_text("0.50.0\n", encoding="utf-8")
     (root / "pyproject.toml").write_text(
@@ -82,10 +81,6 @@ def _write_version_fixture(root: Path) -> None:
         ),
         encoding="utf-8",
     )
-    (root / "s2and" / "runtime.py").write_text(
-        'REQUIRED_RUST_EXTENSION_VERSION = "0.49.0"\n',
-        encoding="utf-8",
-    )
     (root / "s2and_rust" / "Cargo.lock").write_text(
         "\n".join(
             [
@@ -110,7 +105,7 @@ def _write_version_fixture(root: Path) -> None:
     )
 
 
-def test_sync_version_updates_rust_manifests_runtime_guard_and_lockfiles(tmp_path: Path) -> None:
+def test_sync_version_updates_rust_manifests_and_lockfiles(tmp_path: Path) -> None:
     _write_version_fixture(tmp_path)
 
     with pytest.raises(SystemExit, match="Version mismatch"):
@@ -122,23 +117,14 @@ def test_sync_version_updates_rust_manifests_runtime_guard_and_lockfiles(tmp_pat
     assert '"s2and-rust==0.50.0"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "Cargo.toml").read_text(encoding="utf-8")
-    assert 'REQUIRED_RUST_EXTENSION_VERSION = "0.50.0"' in (tmp_path / "s2and" / "runtime.py").read_text(
-        encoding="utf-8"
-    )
     assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "Cargo.lock").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "uv.lock").read_text(encoding="utf-8")
 
 
 def test_sync_version_rejects_ambiguous_targets(tmp_path: Path) -> None:
     _write_version_fixture(tmp_path)
-    (tmp_path / "s2and" / "runtime.py").write_text(
-        "\n".join(
-            [
-                'REQUIRED_RUST_EXTENSION_VERSION = "0.50.0"',
-                'REQUIRED_RUST_EXTENSION_VERSION = "0.50.0"',
-                "",
-            ]
-        ),
+    (tmp_path / "s2and_rust" / "Cargo.toml").write_text(
+        '[package]\nname = "s2and_rust"\nversion = "0.49.0"\nversion = "0.49.0"\n',
         encoding="utf-8",
     )
 

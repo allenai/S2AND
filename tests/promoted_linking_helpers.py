@@ -6,19 +6,17 @@ from pathlib import Path
 import lightgbm as lgb
 import numpy as np
 
-from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.model import Clusterer, FastCluster, _selected_feature_indices
 from s2and.production_bundle import write_pairwise_production_bundle
+from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION, EpsCalibration
 
 
 def synthetic_pairwise_bundle_binding() -> dict[str, object]:
     """Return a structurally valid pairwise binding for isolated linker tests."""
 
     return {
-        "normalization_version": NORMALIZATION_VERSION,
-        "featurizer_version": FEATURIZER_VERSION,
         "ordered_feature_contract_digest": "1" * 64,
         "main_booster_sha256": "2" * 64,
         "nameless_booster_sha256": "3" * 64,
@@ -51,12 +49,13 @@ def write_synthetic_pairwise_bundle(
     bundle_dir: Path,
     *,
     artifact_hashes: Mapping[str, str],
-    bundle_version: str,
+    release_version: str,
+    eps_calibration: EpsCalibration = CALIBRATED_EPS_CALIBRATION,
 ) -> Clusterer:
     """Write a tiny native pairwise stage and return its source clusterer."""
 
-    main_info = FeaturizationInfo(["name_similarity"], featurizer_version=FEATURIZER_VERSION)
-    nameless_info = FeaturizationInfo(["year_diff"], featurizer_version=FEATURIZER_VERSION)
+    main_info = FeaturizationInfo(["name_similarity"])
+    nameless_info = FeaturizationInfo(["year_diff"])
     clusterer = Clusterer(
         main_info,
         tiny_binary_booster(len(_selected_feature_indices(main_info)), seed=101),
@@ -66,15 +65,13 @@ def write_synthetic_pairwise_bundle(
         nameless_featurizer_info=nameless_info,
         batch_size=100,
     )
-    clusterer.feature_contract = {
-        "normalization_version": NORMALIZATION_VERSION,
-        **artifact_hashes,
-    }
+    clusterer.feature_contract = dict(artifact_hashes)
     clusterer.best_params = {"eps": 0.5, "linkage": "average"}
     write_pairwise_production_bundle(
         clusterer,
         bundle_dir,
-        bundle_version=bundle_version,
+        release_version=release_version,
+        eps_calibration=eps_calibration,
     )
     return clusterer
 

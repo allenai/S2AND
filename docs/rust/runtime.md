@@ -50,9 +50,9 @@ The `predict_from_arrow(...)` and `predict_incremental_from_arrow(...)` methods
 take the same open handle and construct the Rust featurizer directly. Missing
 model-required artifacts, invalid Arrow schemas, or native execution errors are
 surfaced to the caller.
-Models and artifacts must explicitly declare the package's
-`canonical_v2` normalization contract. Missing or legacy declarations are not
-executable runtime modes.
+Model roots must record `generated_by_runtime` equal to the installed package
+version. Arrow and name-count manifests must declare public format `1`.
+Missing or legacy declarations are not executable runtime modes.
 
 An open Arrow root is immutable. Reuse its validated owning handle across
 requests; publish changed content at a new root and open a new handle rather

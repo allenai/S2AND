@@ -1,11 +1,11 @@
 # Release Notes
 
-## Unreleased 1.0.0 canonical-v2 migration
+## Unreleased 1.0.0 simplification
 
 The coordinated `s2and` and `s2and-rust` package version is `1.0.0`. The
 production model and public-data version is `1.3`, on a separate version axis.
 
-- **Unreleased migration state:** the artifact-independent canonical-v2 code
+- **Unreleased migration state:** the artifact-independent `1.0.0` code
   and release hardening are implemented. The reviewed canonical benchmark-name
   and ORCID source exports are still needed; production artifact generation,
   the v1.3 retrain, and release quality/scale measurements follow them. The legacy
@@ -18,22 +18,21 @@ production model and public-data version is `1.3`, on a separate version axis.
   per-version platform wheels. CI runs typecheck-and-test on all three
   interpreters, and the release workflow smokes the installed artifacts and
   compiles the `s2and-rust` sdist on each of them.
-- Simplification: release policy now has one runbook, three write-once plans,
-  and one reusable `ArrowDataset` handle. Completed Rust migration comparisons,
+- Simplification: release policy now has one runbook, two prepared plans, one
+  final run binding, and one reusable `ArrowDataset` handle. Completed Rust migration comparisons,
   stress tools, memory calibrators, duplicated artifact protocols, their
   dispatchers, and tool-only tests are retired. One bounded
   `scripts/verification/profile_promoted_incremental_arrow.py` command remains
-  to produce the release performance report. The accidentally unbounded
-  booster-parity matrix is now deterministically budgeted without excluding
-  parity from the default suite; the measured full suite fell from 793.62 s
-  (1,490 passed, 3 skipped) to 100.03 s (1,391 passed, 1 skipped) during the
-  simplification.
-- Breaking: Python and Rust now share one `canonical_v2` name contract and one
-  versioned feature contract. `FEATURIZER_VERSION` is 10. Titles retain letters
-  and digits, CLD2 runs in explicit plain-text mode, malformed email is missing
-  evidence, query-author text uses canonical fields only, and incremental
-  six-decimal values use ties-to-even rounding. Deterministic parity is pinned
-  at `1e-6` (exact for discrete/count/boolean features).
+  to produce the release performance report. Obsolete cache and retired-format
+  tests are removed, repeated cases are curated, and the accidentally
+  unbounded booster-parity matrix is deterministically budgeted without
+  excluding parity from the default suite.
+- Breaking: Python and Rust now ship one `canonical_v2` name/feature behavior
+  under an exactly matched package runtime. Titles retain letters and digits,
+  CLD2 runs in explicit plain-text mode, malformed email is missing evidence,
+  query-author text uses canonical fields only, and incremental six-decimal
+  values use ties-to-even rounding. Deterministic parity is pinned at `1e-6`
+  (exact for discrete/count/boolean features).
 - Breaking: runtime legacy-normalization shims, Sinonym rewriting, fastText,
   and reference features are removed. `s2and-rust` is a required runtime
   dependency. Production Rust featurization and ingest enter through validated
@@ -77,32 +76,38 @@ production model and public-data version is `1.3`, on a separate version axis.
 - Breaking: ORCID prefix counts use one validated JSON file plus a minimal
   tuple-dependency manifest. Producer provenance, schema, and metrics sidecars
   are removed.
-- Breaking: name-count indexes require `name_counts_index_v3` and the flat
+- Breaking: name-count indexes use public format `1` and the flat
   `name_counts_index/{manifest.json,first.bin,last.bin,first_last.bin,last_first_initial.bin}`
-  layout. The v1/v2 schemas and `generations/<generation>/` nesting are
-  rejected; regenerate or repackage the index and rebuild or retrain Arrow and
-  model artifacts bound to its manifest SHA-256.
-- Breaking: Arrow artifact generations require
-  `s2and_arrow_artifact_generation_v2`. A generation now identifies semantic
-  role plus kind, byte count, and content SHA-256; physical filenames live only
-  in `paths`, so a byte-identical rename intentionally preserves
-  `generation_id`. `ArrowDataset.open()` proves artifact safety, while the
+  layout. The manifest contains a stable kind, format `1`, and byte count plus
+  SHA-256 for four fixed binary roles; filenames are derived as `<role>.bin`.
+  Older layouts are rejected, so rebuild Arrow and model artifacts bound to
+  the manifest SHA-256.
+- Breaking: Arrow dataset manifests use `kind: "s2and_arrow_dataset"`, public
+  format `1`, portable `paths`, and a flat semantic-role content inventory.
+  Serialized generation IDs, file/directory kind labels, and nested generation
+  objects are removed. `ArrowDataset.open()` proves artifact safety, while the
   release validator owns publication topology and requires root and nested
   replay datasets to bind the publication-root `name_counts_index`.
 - Breaking: `ArrowDataset.name_counts_manifest`,
   `ValidatedNameCountsManifest`, and `NameCountsBinding` are removed. Callers
   use `ArrowDataset.name_counts_index` and `NameCountsIndex.path`,
-  `.manifest_sha256`, and `.normalization_version`; feature contracts continue
-  to bind the manifest digest directly.
+  plus `.manifest_sha256`; feature contracts bind that digest directly.
 - Breaking: release orchestration uses one owner-authored `release.json` and
-  two generated plans. `model_plan.json` exposes only training, validation,
-  and EPS inputs; `evaluation_plan.json` owns held-out inputs, gates,
-  baselines, and the performance Arrow root and workload. The six unreleased
-  manifest/spec formats and their compatibility-free CLI flags are removed.
+  two generated plans. `release.json.release_version` is the one human-owned
+  model/data release choice; `model_plan.json` carries it with training,
+  validation, and EPS inputs, and final public-data assembly reads that plan.
+  `evaluation_plan.json` owns held-out inputs, gates,
+  the reviewed baseline identity, performance inputs, and exact parity and
+  subblocking content/workload identities. A post-finalization
+  `run_binding.json` binds both path-independent plans, the complete candidate,
+  and the public-data root; all five component reports and the aggregate
+  decision carry that binding. Unreleased manifest/spec formats and their
+  compatibility-free CLI flags are removed.
+  Fixed-role plans and reports no longer carry decorative schema labels.
   Pairwise training still requires the external name-count index, local matrix
   workspace, validation-pair size, and explicit full-run acknowledgement.
 - Breaking: linker training is one direct entrypoint. It performs one fresh fit
-  against the final pairwise bundle, writes a complete v5 bundle with the
+  against the final pairwise bundle, writes a complete bundle with the
   embedded replay target, reloads those exact bytes, and evaluates them.
 - Breaking: `NameTupleArtifact.identity` and
   `s2and_rust.read_name_tuple_artifact_identity` are removed. The Python loader
@@ -162,17 +167,15 @@ production model and public-data version is `1.3`, on a separate version axis.
   and publish with one rename into a new path; finalization never mutates the
   pairwise source. The release evaluation report rejects missing or nonfinite
   required metrics. Wheel/sdist validation rejects undeclared production assets
-  and, when a default is declared, requires exactly that bundle.
+  and any packaged production-model/default path.
   Production training records the canonical name-tuple and ORCID prefix-count
-  data SHA-256 values in the feature contract; bundle export and load require
-  exact matches, and the linker binding covers both through its ordered
-  feature-contract digest. The production-bundle schema is version 5 and the
-  clusterer-config schema is version 5; older bundles are rejected rather than
-  adapted. Version 5 is intentionally retained because no canonical-v2 v5
-  bundle was released. The former four-field explicit artifact authority,
-  including `orcid_prefix_counts_manifest_sha256`, is unsupported; the linker
-  is retrained against the final three-field authority rather than adapting an
-  old bundle. Historical commit `e54c6ba` documents the published v1.21
+  data SHA-256 values plus the exact name-count manifest SHA-256 in the feature
+  contract; bundle export and load require exact matches, and the linker
+  binding covers all three through its ordered feature-contract digest. Model
+  roots use one fixed-role manifest with release version, exact generating
+  runtime, EPS lifecycle, and checksum inventory. Clusterer configuration and
+  scorer fixtures have no independent schema/version counters. Historical
+  commit `e54c6ba` documents the published v1.21
   loader's explicit clustering-threshold override to `0.65` for versions
   `1.2`/`1.21`; the stored threshold is stale. The current canonical loader has
   no legacy override, so a v1.21 baseline must use that compatible historical
@@ -188,7 +191,7 @@ production model and public-data version is `1.3`, on a separate version axis.
   materialization. Paper-author inputs reject duplicate positions, empty names,
   and dangling references consistently in Python and Rust. Python subblocking
   rejects duplicate IDs with explicit runtime invariants.
-- Canonical-v2 removes legacy pickle/count-dictionary loading and redundant
+- The `1.0.0` runtime removes legacy pickle/count-dictionary loading and redundant
   artifact plumbing. Bounded native name-count lookups, optimized float32
   scoring, and deterministic component publication reduce resource use and
   preserve artifact identities. Release-grade v1.3 memory and throughput gates

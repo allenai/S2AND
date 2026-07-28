@@ -1,10 +1,11 @@
 # Data and Models
 
-This document covers dataset download, checked-in model artifacts, and `path_config.json`.
+This document covers dataset download, public artifact layout, and
+`path_config.json`.
 
-> **Canonical-v2 release status (2026-07-27):** the published Arrow release,
-> shared name counts, and checked-in v1.21 model are legacy inputs. They are not
-> a compatible production release unit for this branch. See the
+> **1.0.0 release status (2026-07-27):** the currently published Arrow
+> release and shared name counts predate public format `1`. They are not a
+> compatible production release unit for this branch. See the
 > [v1.3 release runbook](release.md).
 
 ## Canonical name contract
@@ -37,29 +38,29 @@ is missing evidence. Alias tuples are unordered. Canonical last names retain
 spaces; only documented count/block projections compact them, while
 `canonical_lasts_equivalent` treats dash/space variants as equivalent.
 
-The live authorities are `s2and.text`, `s2and.consts.NORMALIZATION_VERSION`,
-and [the frozen examples](../tests/fixtures/canonical_name_examples.json).
+The live authorities are `s2and.text`, its Rust implementation, and
+[the frozen examples](../tests/fixtures/canonical_name_examples.json).
 Tuple and ORCID runtime rules live in
 [production_inference.md](production_inference.md); Arrow and name-count
-formats live in [rust/arrow_dataset_spec.md](rust/arrow_dataset_spec.md) and
-[rust/artifact_formats.md](rust/artifact_formats.md). The retained manual
+formats live in [rust/arrow_dataset_spec.md](rust/arrow_dataset_spec.md).
+The retained manual
 tuple review is [release_evidence/name_tuple_legacy_adjudication_v1.md](release_evidence/name_tuple_legacy_adjudication_v1.md).
 
 ## Dataset download
 
-Download the Arrow-native production runtime release into `s2and/data/` for
-Rust/Arrow prediction and evaluation:
+Download the currently published historical Arrow release into `s2and/data/`
+only for migration, research, or source-data work:
 
 ```bash
 uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
 ```
 
-Expected size is about `10.1 GiB`. The currently published release root contains
-benchmark dataset directories, the legacy shared `name_counts_index/`, the
-legacy `production_model_v1.21/`, and the promoted-linker replay bundle.
+Expected size is about `10.1 GiB`. Its manifests predate public format `1`, so
+current runtime/release validation deliberately rejects it. A v1.3 production
+root must be regenerated through the release runbook.
 
 Download the legacy JSON/pickle S2AND release only when you need paper-era
-JSON/pickle inputs for canonical S2-block `ANDData` workflows. Canonical-v2
+JSON/pickle inputs for canonical S2-block `ANDData` workflows. The current API
 does not restore the release's original/given-block partition inside
 `ANDData`:
 
@@ -77,7 +78,7 @@ uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2an
 
 `s2and/data/s2and_and_big_blocks_linker_dataset_20260525` is the conventional
 local name for the previously published replay subbundle. Its manifests predate
-the canonical generation contract, so it is now a legacy historical input and
+public format `1`, so it is now a legacy historical input and
 is rejected by strict v1.3 validation. Regenerate the replay bundle before
 linker training as required by the
 [v1.3 runbook](release.md#stage-2-build-training-and-evaluation-data).
@@ -89,59 +90,39 @@ rows as Arrow IPC files. It intentionally does not duplicate legacy `raw/`,
 Both Arrow/Rust inference and Python `ANDData` consume the shared
 `name_counts_index/`. Python callers pass `NAME_COUNTS_INDEX_PATH` or an open
 `NameCountsIndex` handle. The SHA-256 of the validated native manifest is the
-publication and model identity. The v3 manifest contains only its schema and
-normalization versions plus the four validated binary-file facts.
+publication and model identity. Its manifest contains exactly
+`kind: "s2and_name_counts"`, `format_version: 1`, and the byte count plus
+SHA-256 for each fixed binary role. One self-contained published root contains
+one index; its benchmark and replay dataset manifests reference that shared
+directory.
 
-The previous production model source bundle is checked into this repo under
-`s2and/data/production_model_v1.21/`. Canonical-v2 rejects it; it is retained
-only as an explicitly named migration and historical validation input until
-v1.3 replaces it.
+## Production model bundles
 
-## Previous production model bundle
+The obsolete production pickles and previous v1.21 repository bundle have been
+removed. Their history remains available from the compatible prior release and
+Git history, but no current command accepts their former paths.
 
-The previous production model is a native bundle directory:
-
-- `s2and/data/production_model_v1.21/manifest.json`
-- `s2and/data/production_model_v1.21/clusterer.json`
-- `s2and/data/production_model_v1.21/pairwise/main.lgb`
-- `s2and/data/production_model_v1.21/pairwise/nameless.lgb`
-- `s2and/data/production_model_v1.21/pairwise/metadata.json` (legacy v1 only)
-- `s2and/data/production_model_v1.21/pairwise/main_prediction_fixture.json`
-- `s2and/data/production_model_v1.21/pairwise/nameless_prediction_fixture.json`
-- `s2and/data/production_model_v1.21/incremental_linker/booster.lgb`
-- `s2and/data/production_model_v1.21/incremental_linker/metadata.json`
-- `s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json`
-
-See [production_inference.md](production_inference.md) for what each file is
-for.
-
-The source bundle is excluded from package data, the obsolete v1.0-v1.2 model
-pickles have been removed, and no default production model declaration is
-distributed during cutover. Evaluation and validation tools must receive an
-explicit model bundle path. The v1.3 model is an explicit external bundle, not
-a packaged default. The final tuple and ORCID assets must be generated before
-the real wheel and sdist pass the distribution verifier.
+No default production model declaration is distributed during cutover.
+Evaluation and validation tools must receive an explicit model bundle path.
+The v1.3 model is an external bundle, not package data. Its manifest records
+`kind: "s2and_model"`, `release_version: "1.3"`, exact
+`generated_by_runtime`, EPS calibration state, and the runtime-file checksum
+inventory.
 
 New production releases use fresh native bundle directories. The component
 entry points are `scripts/production/model/train_pairwise.py` and
 `scripts/production/model/train_linker_and_finalize.py`, with release-only
 calibration/evaluation in `scripts/production/model/release_pairwise.py`.
-The v1.3 sequence trains the final pairwise boosters, materializes their linker
-inputs, selects EPS on validation data, fits one fresh linker, reloads the
+The v1.3 sequence trains the final pairwise boosters, selects EPS on validation
+data, materializes the calibrated linker inputs, fits one fresh linker, reloads the
 complete bundle, and evaluates it as described in
 [release.md](release.md). Do not create new production
 pickles.
 
-The replay target for rebuilding/auditing the promoted incremental linker lives
-at:
-
-```text
-s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json
-```
-
-Prediction logic does not consume it, but bundle load validation includes its
-manifest checksum. It records feature order and training params for the replay
-script.
+The reviewed 53-feature linker target is retained as
+`tests/fixtures/incremental_linker_training_target.json`. Prediction logic does
+not consume it, but finalization embeds the reviewed target in the complete
+bundle and the model manifest binds its checksum.
 
 The previous promoted-linker replay data is published under the Arrow release
 prefix. Use the standalone download only to audit historical inputs; do not use
@@ -188,12 +169,12 @@ Arrow production/eval workflows use each dataset's `manifest.json` to resolve:
 - shared `name_counts_index/`
 - eval-only clusters JSON when metrics are requested
 
-Production manifests must declare `canonical_v2` and include the canonical
-content-addressed `artifact_generation` inventory for every immutable table,
-batch index, and count-index manifest. Request-time query/seed sidecars are not
-part of that generation. Older local Arrow directories without this inventory
-are intentionally rejected and must be reconverted; relabeling their manifests
-is not sufficient.
+Dataset manifests require `kind: "s2and_arrow_dataset"`,
+`format_version: 1`, portable `paths`, and a flat `files` inventory mapping
+each immutable semantic role to `byte_count` and lowercase `sha256`.
+Request-time query/seed sidecars are not part of that inventory. Older local
+Arrow directories without this contract must be reconverted; relabeling their
+manifests is not sufficient.
 
 Legacy-input workflows use the standard S2AND JSON files below, but current
 `ANDData` always groups them by `author_info.block`; it ignores any

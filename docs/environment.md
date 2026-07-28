@@ -19,9 +19,9 @@ Centralized reference for supported S2AND environment variables.
 |----------|--------|---------|-------------|
 | `S2AND_PATH_CONFIG` | `<path>` | `s2and/data/path_config.json` | Path to the JSON data-path config. Use when data lives outside the package default path. |
 
-Normalization version is an artifact/model contract, not an environment
-override. Canonical-v2 consumers reject missing or mismatched provenance rather
-than allowing process configuration to relabel an artifact.
+Artifact compatibility is not configurable through the environment. Model
+bundles record the exact generating runtime, and independently readable Arrow
+and name-count data declares public format `1`.
 
 ## Threading & Parallelism
 

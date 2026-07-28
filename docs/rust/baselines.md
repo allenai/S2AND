@@ -11,6 +11,7 @@ Run a bounded profile first:
 uv run --with psutil python scripts/verification/profile_promoted_incremental_arrow.py `
   --evaluation-plan path/to/run/evaluation_plan.json `
   --model-path path/to/production_model_vX.Y `
+  --run-binding path/to/run/run_binding.json `
   --require-rust-release `
   --write-json path/to/run/reports/performance_evaluation_report.json
 ```
@@ -23,7 +24,7 @@ The command records the exact workload, Rust extension identity, per-run
 timing and process-tree RSS, and summary statistics. Release evaluation
 consumes:
 
-- `schema_version = s2and_performance_evaluation_report_v1`;
+- the prepared run's `run_binding_sha256`;
 - the exact reviewed `workload`;
 - `summary.predict_seconds.p50`; and
 - `summary.peak_rss_gb.max`.

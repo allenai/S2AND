@@ -48,11 +48,7 @@ def _open_graph_dataset(paths: dict[str, Any], tmp_path) -> ArrowDataset:
     signatures_path = tmp_path / "signatures.complete.arrow"
     write_arrow_ipc_table(signatures, signatures_path)
     paths["signatures"] = signatures_path
-    paper_ids = {
-        str(value)
-        for value in signatures["paper_id"].to_pylist()
-        if value is not None and str(value)
-    }
+    paper_ids = {str(value) for value in signatures["paper_id"].to_pylist() if value is not None and str(value)}
     papers_path = tmp_path / "papers.arrow"
     write_arrow_ipc_table(
         pa.table(

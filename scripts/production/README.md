@@ -1,6 +1,6 @@
 # Production commands
 
-Status date: 2026-07-26
+Status date: 2026-07-27
 
 This is a command reference. The dependency-ordered v1.3 sequence is
 [../../docs/release.md](../../docs/release.md).
@@ -23,17 +23,20 @@ The run then contains:
 release.json
 model_plan.json
 evaluation_plan.json
+run_binding.json  # added only after bind-candidate
 stages/
 reports/
 final/
 ```
 
-This is the smallest random-split `release.json` shape. Paths are resolved
-relative to the run directory. The numbers are examples, not reviewed release
-values:
+This is the smallest random-split `release.json` shape accepted by
+`prepare-run`; it demonstrates the schema and path binding only. Paths are
+resolved relative to the run directory. The numbers are examples, not reviewed
+release values:
 
 ```json
 {
+  "release_version": "1.3",
   "model": {
     "datasets": {
       "random": {
@@ -82,13 +85,61 @@ values:
         "synthetic_seeds_when_clusters_missing": false
       }
     },
-    "baselines": {
-      "cluster_signature_weighted_b3_f1": 0.804,
-      "pairwise_aggregate": {"auroc": 0.9005, "macro_f1": 0.804},
-      "pairwise_datasets": {
-        "random": {"auroc": 0.9005, "macro_f1": 0.804}
-      },
-      "predict_seconds_p50": 10.0
+    "parity": {
+      "fixture_dir": "../inputs/parity_fixture",
+      "workload": {
+        "block_size": 100,
+        "compare_features": true,
+        "include_specter": true,
+        "n_jobs": 4,
+        "total_ram_bytes": 1000000000,
+        "use_cluster_seeds": false
+      }
+    },
+    "subblocking": {
+      "component_members_parquet": "../inputs/candidate_components.parquet",
+      "dataset": "pubmed",
+      "workload": {
+        "allow_full": true,
+        "comparison_mode": "python-vs-rust",
+        "graph_config": {
+          "neighbor_mode": "projection",
+          "neighbors": 16,
+          "min_edge_score": 0.3,
+          "specter_weight": 1.0,
+          "coauthor_weight": 0.35,
+          "affiliation_weight": 0.2,
+          "max_exact_knn_group_size": 25000,
+          "projection_count": 12,
+          "projection_window": 12,
+          "max_candidate_edges": 5000000,
+          "pack_components": true,
+          "component_pack_strategy": "edge-greedy",
+          "sparse_evidence_edges": true,
+          "sparse_evidence_max_posting_size": 8,
+          "sparse_evidence_neighbors": 1,
+          "sparse_evidence_min_weight": 0.4,
+          "sparse_evidence_include_coauthors": true,
+          "sparse_evidence_include_affiliations": false,
+          "component_pack_top_k": 8,
+          "local_move_passes": 0,
+          "adaptive_projection": false,
+          "adaptive_projection_max_group_size": 5000,
+          "adaptive_projection_count": 24,
+          "adaptive_projection_window": 24
+        },
+        "limit": null,
+        "maximum_size": 100,
+        "orcid_subblocking": true,
+        "python_source": "arrow",
+        "sample_mode": "random",
+        "seed": 42,
+        "top_diff_subblocks": 30
+      }
+    },
+    "baseline": {
+      "path": "../inputs/reviewed_v1.21_baseline.json",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     },
     "gates": {
       "cluster_signature_weighted_b3_f1_max_drop": 0.005,
@@ -104,6 +155,70 @@ values:
 }
 ```
 
+The referenced baseline record also has an exact shape. It contains no
+authoritative paths: population and performance identities are content hashes,
+and its workload must equal the `release.json` workload:
+
+```json
+{
+  "metric_contract": {
+    "cluster_b3_aggregation": "signature_count_weighted",
+    "pairwise_macro_f1_threshold": {"operator": ">", "value": 0.5},
+    "pairwise_probability_combination": "arithmetic_mean_main_nameless",
+    "performance_statistic": "predict_seconds_p50"
+  },
+  "metrics": {
+    "cluster_signature_weighted_b3_f1": 0.804,
+    "pairwise_aggregate": {"auroc": 0.9005, "macro_f1": 0.804},
+    "pairwise_datasets": {
+      "random": {"auroc": 0.9005, "macro_f1": 0.804}
+    },
+    "predict_seconds_p50": 10.0
+  },
+  "performance": {
+    "arrow_root_manifest_sha256": "<lowercase SHA-256>",
+    "workload": {
+      "dataset": "random",
+      "target_block": "",
+      "query_limit": 400,
+      "max_seed_clusters": 400,
+      "seed_source": "clusters",
+      "runs": 5,
+      "n_jobs": 4,
+      "batching_threshold": null,
+      "total_ram_bytes": null,
+      "synthetic_seeds_when_clusters_missing": false
+    }
+  },
+  "populations": {
+    "pairwise": {
+      "random": {
+        "signatures": "<lowercase SHA-256>",
+        "papers": "<lowercase SHA-256>",
+        "specter_embeddings": "<lowercase SHA-256>",
+        "pairs": "<lowercase SHA-256>"
+      }
+    },
+    "cluster": {
+      "random": {
+        "signatures": "<lowercase SHA-256>",
+        "papers": "<lowercase SHA-256>",
+        "specter_embeddings": "<lowercase SHA-256>",
+        "clusters": "<lowercase SHA-256>",
+        "blocks": "<lowercase SHA-256>"
+      }
+    }
+  },
+  "provenance": {
+    "source_commit": "e54c6ba9c0e3ca4c2b5a40dcaa9a55c2c771d87d",
+    "model": {"version": "1.21", "eps": 0.65},
+    "data": {"identity": "<reviewed data identity>"},
+    "environment": {"identity": "<reviewed environment identity>"},
+    "commands": ["<exact historical baseline command>"]
+  }
+}
+```
+
 Every object has an exact key set; extra keys fail. A random-split model
 dataset uses `signatures`, `papers`, `specter_embeddings`, and `clusters`, and
 has same-named pairwise and cluster evaluation datasets. A fixed-pair model
@@ -111,16 +226,26 @@ dataset replaces `clusters` with `train_pairs` and `val_pairs` and has a
 same-named pairwise evaluation dataset. Model and evaluation identities must
 be disjoint.
 
-`model_plan.json` has training and validation inputs plus EPS policy, but no
-held-out path. `evaluation_plan.json` has held-out inputs, gates, baselines,
-and the reviewed performance Arrow root and workload. Both contain resolved
-input identities; changing an input starts a new run.
+The production trainer intentionally accepts only the full release population:
+`aminer`, `arnetminer`, `inspire`, `kisti`, `orcid`, `pubmed`, `qian`, and
+`zbmath` in random-block mode, plus `augmented` in fixed-pair mode. Replace the
+single `random` example with exactly those nine reviewed entries before running
+the trainer below.
+
+`model_plan.json` has the single owner-selected `release_version`, training and
+validation inputs, and EPS policy, but no held-out path.
+`evaluation_plan.json` has held-out inputs, gates, baseline
+scalars derived from the verified record, that record's SHA-256, the reviewed
+performance Arrow-root identity/workload, and exact parity and subblocking
+content/workload identities. Operational paths are retained for execution but
+excluded from the canonical run digest. Changing content, a selected
+subblocking dataset name declared by the public root, or a measured workload
+starts a new run.
 
 Then run the release trainer:
 
 ```powershell
 uv run python scripts/production/model/train_pairwise.py `
-  --production-version X.Y `
   --model-plan path/to/run/model_plan.json `
   --name-counts-index-root path/to/name_counts_index `
   --matrix-work-dir D:/local-unsynced/s2and-matrix-work `
@@ -129,8 +254,14 @@ uv run python scripts/production/model/train_pairwise.py `
   --run-full
 ```
 
-The output is a pairwise-only v5 bundle. It is loadable by training and
-finalization code but is not a complete runtime production model.
+The output is a pairwise-only bundle whose manifest records
+`kind: "s2and_model"`, the model plan's `release_version`, the exact
+`generated_by_runtime`, `eps_calibration: "pending"`, and its checksum
+inventory. It uses placeholder EPS `0.5`. Calibration writes a fresh
+pairwise-only sibling with
+`eps_calibration: "calibrated"`. Only that calibrated sibling is accepted by
+linker training and finalization; neither pairwise-only state is a complete
+runtime production model.
 
 The trainer has one full-release mode. It requires an external name-count
 index, an empty local matrix workspace, finite validation metrics, and explicit
@@ -163,15 +294,20 @@ bundle and public data root:
 
 ```powershell
 uv run python scripts/production/model/linker_source_bundle.py `
+  --model-plan path/to/run/model_plan.json `
   --source-root path/to/reviewed_linker_source `
   --benchmark-arrow-root path/to/benchmark_arrow `
   --replay-arrow-root path/to/replay_arrow `
+  --name-counts-index path/to/name_counts_index `
   --output-source-bundle path/to/linker_source_bundle `
   --output-data-root path/to/public_data_root
 ```
 
 Assembly refuses existing output directories, loads the assembled bundle, and
-preflights the selected rows. There is no separate source-manifest validator or
+preflights the selected rows. The final public-data manifest takes
+`release_version` from the prepared model plan and records
+`kind: "s2and_public_data"` plus public `format_version: 1`; the operator does
+not enter the version again. There is no separate source-manifest validator or
 digest inventory.
 
 ## Complete model and linker evaluation
@@ -182,7 +318,7 @@ against the final calibrated pairwise bundle:
 ```powershell
 uv run python scripts/production/model/train_linker_and_finalize.py `
   --source-bundle-root path/to/run/stages/linker_source_bundle `
-  --target-json s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json `
+  --target-json tests/fixtures/incremental_linker_training_target.json `
   --pairwise-model-path path/to/run/stages/calibrated/production_model_vX.Y `
   --name-counts-index-root path/to/name_counts_index `
   --output-dir path/to/run/stages/linker_release `
@@ -191,16 +327,36 @@ uv run python scripts/production/model/train_linker_and_finalize.py `
 ```
 
 The retained 53-feature target has SHA-256
-`6b2c47963b10f2187478483f406021df4b8d3e58eded4e83b3c205b54c9f78f3`.
+`00e842566e339c2a8df4384f923d78aef0f51f01840c265bba5d27d0e45dbc04`.
 Changing it is a new target-selection decision and requires a new fit.
 
-The command materializes features, fits once, writes the complete v5 bundle,
+The command materializes features, fits once, writes the complete bundle,
 reloads it, and then evaluates held-out linker data through the reloaded model.
 For version `X.Y`, the complete model is
 `stages/linker_release/production_model_vX.Y` and the retained report is
 `stages/linker_release/linker_evaluation_report.json`. The linker retains its
 runtime binding to the pairwise feature contract and both boosters; that check
 prevents a silent wrong-answer model mismatch.
+
+After the complete candidate and public-data root are final, bind them to the
+prepared plans before producing acceptance reports:
+
+```powershell
+uv run python scripts/production/model/release_pairwise.py `
+  bind-candidate `
+  --run-root path/to/run `
+  --candidate-model path/to/run/stages/linker_release/production_model_vX.Y `
+  --public-data-root path/to/run/stages/public_data_root
+```
+
+This writes fresh `run_binding.json`. Its `run_binding_sha256` canonically
+binds the location-independent model/evaluation plan identities, reviewed
+baseline-record SHA-256, complete candidate manifest, and public-data root
+manifest. Candidate binding first validates the complete public-data release,
+then verifies that the candidate training configuration and model feature
+contract use the same name-count authority as that release and the packaged
+tuple/ORCID artifacts, and that the model was trained from this run's model
+plan.
 
 Runtime callers load only a complete bundle and always supply its path:
 
@@ -262,6 +418,7 @@ Produce all five reports:
 uv run python scripts/production/model/release_pairwise.py evaluate-pairs `
   --model path/to/production_model_vX.Y `
   --evaluation-plan path/to/run/evaluation_plan.json `
+  --run-binding path/to/run/run_binding.json `
   --name-counts-index-root path/to/name_counts_index `
   --output-report path/to/run/reports/pairwise_evaluation_report.json `
   --n-jobs REVIEWED_N_JOBS `
@@ -270,12 +427,16 @@ uv run python scripts/production/model/release_pairwise.py evaluate-pairs `
 uv run python scripts/production/model/release_pairwise.py evaluate-clusters `
   --model path/to/production_model_vX.Y `
   --evaluation-plan path/to/run/evaluation_plan.json `
+  --run-binding path/to/run/run_binding.json `
   --name-counts-index-root path/to/name_counts_index `
   --output-report path/to/run/reports/cluster_evaluation_report.json `
   --n-jobs REVIEWED_N_JOBS
 
 uv run python scripts/verification/compare_graph_subblocking_arrow_quality.py `
-  --arrow-root path/to/reviewed_arrow_root `
+  --public-data-root path/to/run/stages/public_data_root `
+  --arrow-root path/to/run/stages/public_data_root/REVIEWED_DATASET `
+  --evaluation-plan path/to/run/evaluation_plan.json `
+  --run-binding path/to/run/run_binding.json `
   --output-dir path/to/run/reports `
   --python-source arrow `
   --comparison-mode python-vs-rust `
@@ -286,10 +447,12 @@ uv run python scripts/verification/compare_graph_subblocking_arrow_quality.py `
 
 uv run python scripts/verification/compare_full_predict_arrow_parity.py `
   --fixture-dir path/to/reviewed_parity_fixture `
+  --evaluation-plan path/to/run/evaluation_plan.json `
   --output-dir path/to/fresh/parity_work `
   --output-json path/to/run/reports/parity_evaluation_report.json `
   --name-counts-index path/to/name_counts_index `
   --model-path path/to/production_model_vX.Y `
+  --run-binding path/to/run/run_binding.json `
   --block-size REVIEWED_BLOCK_SIZE `
   --n-jobs REVIEWED_N_JOBS `
   --total-ram-bytes REVIEWED_TOTAL_RAM_BYTES
@@ -297,14 +460,19 @@ uv run python scripts/verification/compare_full_predict_arrow_parity.py `
 uv run --with psutil python scripts/verification/profile_promoted_incremental_arrow.py `
   --evaluation-plan path/to/run/evaluation_plan.json `
   --model-path path/to/production_model_vX.Y `
+  --run-binding path/to/run/run_binding.json `
   --require-rust-release `
   --write-json path/to/run/reports/performance_evaluation_report.json `
   --full-run
 ```
 
 The performance Arrow root and complete workload come from the frozen
-evaluation plan. The other explicit paths and parameters are frozen before
-held-out prediction.
+evaluation plan. The parity command verifies every fixture file and all
+behavior-affecting options against that plan. Subblocking verifies the bound
+public-data root, resolves the frozen dataset name through that root's
+manifest, and verifies the component-members file and full
+workload/configuration. No component report can stamp the run binding on an
+alternate population or workload.
 
 Apply the gates directly:
 
@@ -312,12 +480,15 @@ Apply the gates directly:
 uv run python scripts/production/model/release_pairwise.py `
   evaluate-release `
   --evaluation-plan path/to/run/evaluation_plan.json `
+  --run-binding path/to/run/run_binding.json `
   --report-dir path/to/run/reports `
   --output-report path/to/run/reports/evaluation_report.json
 ```
 
-The command validates required numeric fields, writes the sorted checks and
-top-level decision, and exits nonzero on a failed gate.
+Every component report must carry the same `run_binding_sha256`. The command
+rejects a missing or mixed binding, validates required numeric fields, writes
+the sorted checks and top-level decision with that binding, and exits nonzero
+on a failed gate.
 
 ## Canonical benchmark names
 
@@ -383,25 +554,24 @@ $ReplayDatasets = @(
 )
 $BenchmarkArrowRoot = "$RunRoot\stages\benchmark_arrow"
 $ReplayArrowRoot = "$RunRoot\stages\replay_arrow"
-New-Item -ItemType Directory -Path $BenchmarkArrowRoot | Out-Null
-Copy-Item -LiteralPath $NameCountsIndex `
-  -Destination "$BenchmarkArrowRoot\name_counts_index" -Recurse
+$NameCountsIndexRoot = Split-Path -Parent $NameCountsIndex
+$ReviewedDatasetLicense = "REVIEWED_DATASET_LICENSE_PATH"
 uv run python scripts/convert_to_arrow.py benchmark `
   --source-root $CanonicalBenchmarkRoot `
   --output-root $BenchmarkArrowRoot `
   --datasets $BenchmarkDatasets `
-  --name-counts-index-root $BenchmarkArrowRoot `
+  --name-counts-index-root $NameCountsIndexRoot `
   --n-jobs $NJobs
 
-New-Item -ItemType Directory -Path $ReplayArrowRoot | Out-Null
-Copy-Item -LiteralPath $NameCountsIndex `
-  -Destination "$ReplayArrowRoot\name_counts_index" -Recurse
+Copy-Item -LiteralPath $ReviewedDatasetLicense `
+  -Destination (Join-Path $BenchmarkArrowRoot 'LICENSE.txt')
+
 uv run python scripts/convert_to_arrow.py linker-replay `
   --raw-root $ReviewedReplayRawRoot `
   --embeddings-root $ReviewedReplayEmbeddingsRoot `
   --output-root $ReplayArrowRoot `
   --datasets $ReplayDatasets `
-  --name-counts-index-root $ReplayArrowRoot `
+  --name-counts-index-root $NameCountsIndexRoot `
   --n-jobs $NJobs
 ```
 
@@ -409,9 +579,14 @@ The commands require fresh output paths for the reviewed full set. The
 benchmark source is
 `<root>/<dataset>/<dataset>_signatures.json` plus its other benchmark files.
 Replay source is `<raw>/<dataset>/{signatures.json,papers.json}` plus
-`<embeddings>/<dataset>/specter2.pkl`. Copy the final index into each Arrow root
-first: these converter commands take the parent containing
-`name_counts_index`, while model commands take the index directory itself.
+`<embeddings>/<dataset>/specter2.pkl`. Both conversions reference the same
+reviewed external authority root containing `name_counts_index`; they do not
+copy it into each intermediate Arrow root. The assembler below copies it once
+into each final self-contained publication root. Converter commands take the
+parent containing `name_counts_index`, while model and assembler commands take
+the index directory itself. The reviewed `LICENSE.txt` is copied once into the
+benchmark root because that root becomes the base of the final public-data
+publication.
 
 Run the bounded `ANDData -> Arrow -> Rust` feature-parity fixture before this
 full export.
@@ -440,26 +615,28 @@ Verify those hashes, then assemble and preflight once:
 
 ```powershell
 uv run python scripts/production/model/linker_source_bundle.py `
+  --model-plan "$RunRoot\model_plan.json" `
   --source-root "$RunRoot\stages\linker_support" `
   --benchmark-arrow-root "$RunRoot\stages\benchmark_arrow" `
   --replay-arrow-root "$RunRoot\stages\replay_arrow" `
+  --name-counts-index $NameCountsIndex `
   --output-source-bundle "$RunRoot\stages\linker_source_bundle" `
   --output-data-root "$RunRoot\stages\public_data_root"
 ```
 
 The command refuses existing outputs, loads all referenced data, checks
 base-group split disjointness, and reports selected rows. A failure starts a
-fresh attempt; there is no repair or compatibility mode.
+fresh attempt; there is no repair or compatibility mode. The data root contains
+one shared `name_counts_index/`; benchmark and replay dataset manifests point
+to it rather than carrying per-dataset copies.
 
 ## Count artifacts
 
-Regenerate the canonical tuple text directly from its reviewed source:
-
-```powershell
-uv run python scripts/production/generate_canonical_name_tuples.py `
-  --source s2and/data/s2and_unnormalized_filtered_name_tuples.txt `
-  --output path/to/fresh/s2and_name_tuples_canonical.txt
-```
+The checked-in reviewed source deterministically reproduces the checked-in
+canonical tuple artifact byte-for-byte; CI enforces that invariant. Ordinary
+releases use `s2and/data/s2and_name_tuples_canonical.txt` directly. Run
+`generate_canonical_name_tuples.py` only when intentionally changing its
+reviewed source or canonicalization policy.
 
 The count producers are module entry points:
 
@@ -556,7 +733,6 @@ run:
 uv run python -m scripts.production.counts.generate_orcid_name_prefix_counts `
   --input-csv path/to/reviewed_orcid_names.csv `
   --guardrails-json path/to/orcid_guardrails.json `
-  --name-tuples-path path/to/fresh/s2and_name_tuples_canonical.txt `
   --output-dir path/to/fresh/orcid_counts
 ```
 
@@ -578,19 +754,19 @@ It requires `min_source_rows <= max_source_rows`,
 `min_orcid_pair_keys <= max_pair_keys`.
 
 The large name-count index remains a manifest-backed native binary directory.
-Its file layout, normalization contract, and model binding prevent using
-incompatible count features at runtime. Its v3 manifest contains only the
-schema and normalization versions plus the four binary file facts.
+Its private binary layout, public format, and model binding prevent using
+incompatible count features at runtime. Its manifest contains exactly
+`kind: "s2and_name_counts"`, `format_version: 1`, and byte count plus SHA-256
+for the four fixed binary roles; each filename is derived as `<role>.bin`.
 
-Canonical tuple generation writes one text file. ORCID generation writes one
-JSON file plus a minimal name-tuple dependency manifest. Both are loaded and
-semantically validated directly.
+ORCID generation uses the packaged canonical tuple and writes one JSON file
+plus a minimal tuple-dependency manifest. Both are loaded and semantically
+validated directly.
 
 Copy the reviewed outputs to these exact package paths:
 
 | Output | Package path |
 |---|---|
-| Fresh canonical tuple | `s2and/data/s2and_name_tuples_canonical.txt` |
 | ORCID JSON | `s2and/data/first_k_letter_counts_from_orcid.json` |
 | ORCID manifest | `s2and/data/first_k_letter_counts_from_orcid.manifest.json` |
 
@@ -675,6 +851,7 @@ wheels, use a second empty environment with the same script and arguments:
 ```powershell
 $PublicSmokeVenv = "$RunRoot\stages\public-smoke-venv"
 $PublicSmokePython = "$PublicSmokeVenv\Scripts\python.exe"
+$Version = (Get-Content -Raw (Join-Path $Repo 'VERSION')).Trim()
 uv venv --python 3.11 $PublicSmokeVenv
 uv pip install --python $PublicSmokePython `
   --refresh `

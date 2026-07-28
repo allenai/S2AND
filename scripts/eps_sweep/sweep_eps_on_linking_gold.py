@@ -38,9 +38,7 @@ from s2and._sha256 import sha256_file as _hash_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training.classic import _drop_unlabeled_singleton_orcid_rows
 from scripts.eps_sweep.common import (
-    DEFAULT_ARROW_ROOT,
     DEFAULT_GOLD_ROOT,
-    DEFAULT_LINKER_BUNDLE_ROOT,
     DEFAULT_OUTPUT_ROOT,
     arrow_dataset_dir,
     sha1_text,
@@ -86,8 +84,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description="Cache Arrow/Rust pairwise distances, sweep EPS, and score linker-derived pair gold."
     )
     parser.add_argument("--dataset", required=True)
-    parser.add_argument("--bundle-root", type=Path, default=DEFAULT_LINKER_BUNDLE_ROOT)
-    parser.add_argument("--arrow-root", type=Path, default=DEFAULT_ARROW_ROOT)
+    parser.add_argument("--arrow-root", type=Path, required=True)
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--gold-path", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -1090,7 +1087,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         plan["eps_values"] = _eps_values(args, model_eps)
         plan["gold_path"] = str(_gold_path(args).resolve())
         plan["model_path"] = str(args.model_path.resolve())
-        plan["bundle_root"] = str(args.bundle_root.resolve())
         plan["arrow_root"] = str(args.arrow_root.resolve())
         plan["arrow_manifest"] = str(dataset_root / "manifest.json")
         plan["arrow_generation_id"] = arrow_dataset.generation_id

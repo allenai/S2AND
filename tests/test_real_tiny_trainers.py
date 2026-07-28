@@ -312,6 +312,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         "_preflight_pairwise",
         lambda _args: train_pairwise.PairwisePreflightPlan(
             output_dir=args.output_dir,
+            release_version="9.9",
             dataset_names=("qian",),
             datasets={"qian": ModelDataset(files=dataset_files)},
             model_plan_sha256="0" * 64,
@@ -320,18 +321,27 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
             total_ram_bytes=args.total_ram_bytes,
         ),
     )
+    monkeypatch.setattr(
+        train_pairwise.Clusterer,
+        "fit",
+        lambda *_args, **_kwargs: pytest.fail("Stage 3 must not run clustering calibration"),
+    )
 
     result = train_pairwise.train_pairwise_bundle(args)
 
     summary = result["training_summary"]
-    assert result["bundle_status"] == "pairwise_only"
     assert summary["main_train_rows"] == 24
     assert summary["main_val_rows"] == 6
     assert summary["nameless_train_rows"] == 24
     assert summary["main_pairwise_best_params"]
     assert summary["nameless_pairwise_best_params"]
-    assert set(summary["best_clustering_params"]) == {"eps", "linkage"}
+    assert "best_clustering_params" not in summary
     assert 0.0 <= summary["main_validation_roc_auc"] <= 1.0
     assert 0.0 <= summary["nameless_validation_roc_auc"] <= 1.0
+    assert result["eps_calibration"] == "pending"
+    manifest = json.loads((args.output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["eps_calibration"] == "pending"
+    config = json.loads((args.output_dir / "clusterer.json").read_text(encoding="utf-8"))
+    assert config["cluster_model"] == {"eps": 0.5, "linkage": "average"}
     assert list(matrix_work_dir.iterdir()) == []
     assert args.output_dir.is_dir()

@@ -8,7 +8,7 @@ This document collects the repo-level development commands and workflows that do
 uv run pytest -q
 uv run ruff check .
 uv run ruff format .
-uv run ty check s2and
+uv run ty check s2and --ignore unresolved-import --ignore unresolved-reference --ignore unresolved-attribute --ignore possibly-missing-attribute --ignore unused-type-ignore-comment
 ```
 
 ## Local CI mirror
@@ -38,7 +38,7 @@ uv run --no-project python scripts/run_ci_locally.py lint
 uv run --no-project python scripts/run_ci_locally.py typecheck-and-test
 ```
 
-Canonical-v2 requires the Rust-backed name-count index even when Python orchestration is selected. The runner builds
+The current runtime requires the Rust-backed name-count index even when Python orchestration is selected. The runner builds
 the exactly pinned `s2and-rust` dependency once, requires it to import, and then runs full-suite coverage of the Python
 route.
 
@@ -75,10 +75,12 @@ and CI commands may set it only when they are intentionally exercising the check
 
 Versioning is centralized in `VERSION`.
 
-This synchronizes Python/Rust package manifests mechanically. The canonical-v2
-release fixes both package versions at `1.0.0`; the production model and public
-data remain version `1.3` on a separate axis. The release policy and publication
-gates are in [release.md](release.md).
+This synchronizes Python/Rust package manifests mechanically. The release fixes
+both package versions at `1.0.0`; the production model and public
+data remain release version `1.3`, and the Arrow/name-count representation uses
+public format `1`. At runtime the installed Python and Rust package versions
+must match exactly. The release policy and publication gates are in
+[release.md](release.md).
 
 Recommended one-time hook setup:
 

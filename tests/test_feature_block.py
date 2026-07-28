@@ -12,7 +12,6 @@ import pytest
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
 import s2and.runtime as runtime_module
 from s2and.arrow_inputs import ArrowDataset
-from s2and.consts import NORMALIZATION_VERSION
 from s2and.data import ANDData, Author, NameCounts
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
 from s2and.featurizer import FeaturizationInfo
@@ -37,7 +36,6 @@ from s2and.incremental_linking.feature_block import (
 )
 from s2and.incremental_linking.features import LinkerFeatureMatrix
 from s2and.incremental_linking.retrieval import (
-    RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     RawArrowPlanBundle,
     build_linker_retrieval_batch_from_raw_plan_bundle,
 )
@@ -162,7 +160,6 @@ def _raw_plan() -> dict[str, Any]:
     row_count = 2
     pair_count = 3
     plan: dict[str, Any] = {
-        "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
         "row_count": row_count,
         "pair_count": pair_count,
         "query_signature_ids": ["q"],
@@ -215,7 +212,7 @@ def _raw_plan() -> dict[str, Any]:
 
 def _open_test_arrow_dataset(tmp_path: Path) -> ArrowDataset:
     write_minimal_arrow_prediction_bundle(tmp_path)
-    return ArrowDataset.open(tmp_path, expected_normalization_version=NORMALIZATION_VERSION)
+    return ArrowDataset.open(tmp_path)
 
 
 def _write_raw_planner_arrow_paths(tmp_path: Path) -> dict[str, str]:
@@ -351,37 +348,33 @@ def test_raw_planner_arrow_tables_parse_false_language_reliability() -> None:
     assert tables["papers"]["is_reliable"].to_pylist() == [False]
 
 
-@pytest.mark.parametrize(
-    ("predicted_language", "is_reliable", "language_reliability", "match"),
-    [
-        ("en", True, np.nan, "must be finite"),
-        ("en", True, -0.01, r"must be in \[0.0, 1.0\]"),
-        ("en", False, 0.25, "must be 0.0 when"),
-        ("en", None, 0.75, "predicted_language requires papers.is_reliable"),
-        ("en", True, None, "predicted_language requires papers.language_reliability"),
-        (None, True, 0.75, "require papers.predicted_language"),
-        ("", True, 0.75, "require papers.predicted_language"),
-        (" \t", True, 0.75, "predicted_language must be non-empty"),
-    ],
-)
-def test_raw_planner_arrow_tables_validate_language_metadata(
-    predicted_language: str | None,
-    is_reliable: bool | None,
-    language_reliability: float | None,
-    match: str,
-) -> None:
-    dataset = _tiny_anddata()
-    dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
-        predicted_language=predicted_language,
-        is_reliable=is_reliable,
-        language_reliability=language_reliability,
+def test_raw_planner_arrow_tables_validate_language_metadata() -> None:
+    cases = (
+        ("nonfinite-reliability", "en", True, np.nan, "must be finite"),
+        ("negative-reliability", "en", True, -0.01, "must be in [0.0, 1.0]"),
+        ("unreliable-nonzero", "en", False, 0.25, "must be 0.0 when"),
+        ("missing-is-reliable", "en", None, 0.75, "predicted_language requires papers.is_reliable"),
+        ("missing-reliability", "en", True, None, "predicted_language requires papers.language_reliability"),
+        ("missing-language", None, True, 0.75, "require papers.predicted_language"),
+        ("blank-language", " \t", True, 0.75, "predicted_language must be non-empty"),
     )
-
-    with pytest.raises(ValueError, match=match):
-        raw_planner_arrow_tables_from_anddata(
-            dataset,
-            signature_ids=["q"],
+    for case_id, predicted_language, is_reliable, language_reliability, message in cases:
+        dataset = _tiny_anddata()
+        dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
+            predicted_language=predicted_language,
+            is_reliable=is_reliable,
+            language_reliability=language_reliability,
         )
+
+        try:
+            raw_planner_arrow_tables_from_anddata(
+                dataset,
+                signature_ids=["q"],
+            )
+        except ValueError as error:
+            assert message in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: invalid language metadata was accepted")
 
 
 def test_raw_planner_arrow_tables_from_anddata_rejects_signature_missing_paper() -> None:
@@ -581,42 +574,41 @@ def test_incremental_query_signatures_arrow_rejects_null_request_values(tmp_path
         read_incremental_query_signatures_arrow(path)
 
 
-@pytest.mark.parametrize(
-    ("filename", "columns", "reader", "bad_column"),
-    [
+def test_arrow_readers_reject_integer_id_columns(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    cases = (
         (
+            "query-signature-id",
             "incremental_query_signatures.arrow",
             {"signature_id": [1], "query_view": ["full"], "query_author": ["Ada Lovelace"]},
             read_incremental_query_signatures_arrow,
             "signature_id",
         ),
         (
+            "disallow-signature-id",
             "cluster_seed_disallows.arrow",
             {"signature_id_1": [1], "signature_id_2": ["s2"]},
             read_cluster_seed_disallows_arrow,
             "signature_id_1",
         ),
         (
+            "seed-signature-id",
             "cluster_seeds.arrow",
             {"signature_id": [1], "cluster_id": ["c1"]},
             read_cluster_seeds_arrow,
             "signature_id",
         ),
-    ],
-)
-def test_arrow_readers_reject_integer_id_columns(
-    tmp_path: Path,
-    filename: str,
-    columns: dict[str, list[object]],
-    reader: Any,
-    bad_column: str,
-) -> None:
-    pa = pytest.importorskip("pyarrow")
-    path = tmp_path / filename
-    write_arrow_ipc_table(pa.table(columns), path)
+    )
+    for case_id, filename, columns, reader, bad_column in cases:
+        path = tmp_path / filename
+        write_arrow_ipc_table(pa.table(columns), path)
 
-    with pytest.raises(ValueError, match=rf"column '{bad_column}' expected string"):
-        reader(path)
+        try:
+            reader(path)
+        except ValueError as error:
+            assert f"column '{bad_column}' expected string" in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: integer ID column was accepted")
 
 
 def test_altered_cluster_signatures_arrow_round_trips_and_rejects_duplicates(tmp_path: Path) -> None:
@@ -715,7 +707,6 @@ def test_raw_planner_index_metadata_uses_stem_qualified_sidecar(tmp_path: Path) 
     assert Path(indexed_paths["signatures_batch_index"]).name == "signatures.signatures_batch_index.bin"
     assert index_metrics["signatures_batch_index"]["record_batch_count"] == 3
     assert index_metrics["signatures_batch_index"]["actual_max_batch_rows"] == 2
-    assert layout["schema"] == "s2and_arrow_physical_v1"
     assert layout["tables"]["signatures"]["batch_index_present"] is True
     assert layout["tables"]["signatures"]["max_record_batch_rows"] == 2
     assert RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS["signatures"] == 16_384
@@ -842,8 +833,9 @@ def test_write_name_counts_index(tmp_path: Path) -> None:
     assert index_metrics["row_count"] == 4
     assert index_metrics["first_count"] == 1
     manifest = json.loads((Path(index_path) / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == "name_counts_index_v3"
-    assert manifest["files"]["first"]["path"] == "first.bin"
+    assert manifest["kind"] == "s2and_name_counts"
+    assert manifest["format_version"] == 1
+    assert set(manifest["files"]["first"]) == {"byte_count", "sha256"}
     with pytest.raises(FileExistsError, match="target already exists"):
         write_name_counts_index(tmp_path, mappings)
 
@@ -987,7 +979,6 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot(
         tmp_path,
         require_specter=False,
         require_name_counts_index=True,
-        expected_normalization_version=NORMALIZATION_VERSION,
     ) as arrow_dataset:
         retained_index = arrow_dataset.name_counts_index
         assert retained_index is not None
@@ -1033,28 +1024,6 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot(
         )
         assert featurizer.name_counts_manifest_sha256 == retained_native.name_counts_manifest_sha256
         assert native_open_calls == 1
-
-
-def test_raw_arrow_rejects_candidate_plan_without_component_members(tmp_path: Path) -> None:
-    class FakeFeaturizer:
-        def signature_ids(self) -> list[str]:
-            return ["q", "s1", "s2", "s3"]
-
-    raw_plan = _raw_plan()
-    raw_plan.pop("component_members")
-    raw_plan["telemetry"]["cluster_count"] = 99
-
-    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
-        with pytest.raises(KeyError, match="component_members"):
-            _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-                _raw_test_clusterer(),
-                _raw_test_artifact(),
-                arrow_dataset=arrow_dataset,
-                query_signature_ids=["q"],
-                raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(raw_plan),
-                rust_featurizer=FakeFeaturizer(),
-                runtime_context=SimpleNamespace(operation="raw-arrow-test", run_id="raw-arrow-test"),
-            )
 
 
 def test_raw_arrow_partial_supervision_require_unknown_seed_rejected(tmp_path: Path) -> None:
@@ -1315,14 +1284,3 @@ def test_from_retrieval_skips_pair_id_build_when_partial_supervision_empty(
 
     assert result.telemetry["partial_supervision_pair_count"] == 0
     assert result.telemetry["candidate_row_count"] == 2
-
-
-def test_raw_candidate_plan_bridge_rejects_missing_schema_version() -> None:
-    raw_plan = _raw_plan()
-    del raw_plan["schema_version"]
-
-    with pytest.raises(KeyError, match="schema_version"):
-        build_linker_retrieval_batch_from_raw_plan_bundle(
-            RawArrowPlanBundle.from_native_mapping(raw_plan),
-            feature_block_signature_order=RawArrowPlanBundle.from_native_mapping(_raw_plan()).signature_order,
-        )

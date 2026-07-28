@@ -95,7 +95,7 @@ route.
    For v1.3 jobs, set this envelope in the parent before detached launch,
    require children to inherit it, and retain the values in the durable job
    log. Operational logs are not release authorities. See
-   [release.md](release.md#stage-0-freeze-inputs-and-source).
+   [release.md](release.md#stage-0-freeze-external-choices-and-source).
 
 3. **Choose the env pattern that matches your deployment shape**:
 

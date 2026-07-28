@@ -26,7 +26,6 @@ from s2and.consts import (
     DEFAULT_CHUNK_SIZE,
     LARGE_DISTANCE,
     LARGE_INTEGER,
-    NORMALIZATION_VERSION,
 )
 from s2and.data import ANDData
 from s2and.eval import b3_precision_recall_fscore
@@ -950,18 +949,6 @@ def _propagate_n_jobs(estimator: Any, n_jobs: int) -> None:
             raise
 
 
-def _resolve_clusterer_normalization_version(clusterer: Any) -> str:
-    """Require the package's canonical normalization policy on a model."""
-
-    contract = getattr(clusterer, "feature_contract", None)
-    value = contract.get("normalization_version") if isinstance(contract, Mapping) else None
-    if value != NORMALIZATION_VERSION:
-        raise ValueError(
-            f"Clusterer feature_contract requires normalization_version={NORMALIZATION_VERSION!r}, got {value!r}"
-        )
-    return NORMALIZATION_VERSION
-
-
 def _predict_class0_with_runtime(
     classifier: Any,
     features: np.ndarray,
@@ -1595,10 +1582,7 @@ class Clusterer:
         else:
             self.search_space = search_space
 
-        # A freshly constructed clusterer is born from this package, so it
-        # inherits the package's normalization policy. Loaded bundles carry
-        # their own recorded value instead.
-        self.feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        self.feature_contract: dict[str, str] = {}
         self.hyperopt_trials_store: Trials | list[Trials] | None = None
         self.best_params: dict[Any, Any] | None = None
         self.batch_size = batch_size
@@ -1608,8 +1592,7 @@ class Clusterer:
         self.incremental_linker_artifact_dir: Path | None = None
         self.incremental_linker_artifact: Any | None = None
         self.production_model_bundle_dir: Path | None = None
-        self.production_model_bundle_version: str | None = None
-        self.production_model_bundle_status: str | None = None
+        self.production_model_release_version: str | None = None
         self.subblocking_graph_config = GraphSubblockingConfig()
 
     @property
@@ -3416,7 +3399,6 @@ class Clusterer:
         with arrow_dataset.use(
             require_specter=clusterer_uses_embedding_features(self) or needs_subblocking,
             require_name_counts_index=resolved_load_name_counts,
-            expected_normalization_version=_resolve_clusterer_normalization_version(self),
         ) as arrow_lease:
             _require_arrow_name_counts_index_for_clusterer(self, arrow_dataset, context="Arrow prediction")
             signature_ids = list(
@@ -3566,22 +3548,9 @@ class Clusterer:
         if len(datasets) == 0:
             raise ValueError("Clusterer.fit requires at least one dataset")
 
-        dataset_normalization_versions = {getattr(dataset, "normalization_version", None) for dataset in datasets}
-        if len(dataset_normalization_versions) != 1:
-            raise ValueError(
-                "Clusterer.fit requires one dataset normalization version; "
-                f"observed={sorted(repr(value) for value in dataset_normalization_versions)}"
-            )
-        training_normalization_version = next(iter(dataset_normalization_versions))
-        if training_normalization_version != NORMALIZATION_VERSION:
-            raise ValueError(
-                f"Clusterer.fit requires dataset normalization_version={NORMALIZATION_VERSION!r}; "
-                f"observed={training_normalization_version!r}"
-            )
         contract = getattr(self, "feature_contract", None)
         if not isinstance(contract, dict):
             contract = {}
-        contract["normalization_version"] = training_normalization_version
         if clusterer_uses_name_count_features(self):
             count_bindings = {
                 require_name_counts_manifest_sha256(
@@ -3592,7 +3561,7 @@ class Clusterer:
             }
             if len(count_bindings) != 1:
                 raise ValueError(
-                    "Clusterer.fit requires one verified name-count generation matching dataset normalization; "
+                    "Clusterer.fit requires one verified name-count generation; "
                     f"observed={sorted(repr(binding) for binding in count_bindings)}"
                 )
             contract[NAME_COUNTS_MANIFEST_SHA256_FIELD] = next(iter(count_bindings))
@@ -3623,17 +3592,7 @@ class Clusterer:
 
             # distance matrix
             if val_dists_precomputed is None:
-                make_dists_start = time.perf_counter()
                 val_dists = self.make_distance_matrices(val_block_dict, dataset)
-                # Recorded to decide whether fit-stage featurization ever
-                # warrants its own snapshot cache (see docs/caching.md).
-                logger.info(
-                    "Telemetry stage: stage=fit_val_dists dataset=%s blocks=%d pairs=%d seconds=%.3f",
-                    getattr(dataset, "name", "<unnamed>"),
-                    len(val_block_dict),
-                    sum(len(sigs) * (len(sigs) - 1) // 2 for sigs in val_block_dict.values()),
-                    time.perf_counter() - make_dists_start,
-                )
             else:
                 val_dists = val_dists_precomputed[dataset.name]
             val_dists_list.append(val_dists)
@@ -4993,7 +4952,6 @@ class Clusterer:
         with arrow_dataset.use(
             require_specter=clusterer_uses_embedding_features(self),
             require_name_counts_index=require_name_counts_index,
-            expected_normalization_version=_resolve_clusterer_normalization_version(self),
         ) as arrow_lease:
             _require_arrow_name_counts_index_for_clusterer(
                 self,

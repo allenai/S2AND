@@ -191,28 +191,31 @@ def test_concurrent_python_featurization_uses_each_request_dataset(monkeypatch: 
     assert second_future.result() == 20.0
 
 
-@pytest.mark.parametrize("zero_embedding", [[0.0, 0.0], np.asarray([0.0, 0.0])])
-def test_zero_specter_embedding_is_missing_for_lists_and_arrays(zero_embedding) -> None:
-    dataset = _dummy_dataset("dummy_zero_specter")
-    paper_id_0 = str(dataset.signatures["0"].paper_id)
-    paper_id_1 = str(dataset.signatures["1"].paper_id)
-    dataset.specter_embeddings = {
-        paper_id_0: zero_embedding,
-        paper_id_1: [1.0, 0.0],
-    }
-    featurizer = FeaturizationInfo(features_to_use=["embedding_similarity"])
+def test_zero_specter_embedding_is_missing_for_lists_and_arrays() -> None:
+    for case_id, zero_embedding in (
+        ("list", [0.0, 0.0]),
+        ("array", np.asarray([0.0, 0.0])),
+    ):
+        dataset = _dummy_dataset("dummy_zero_specter")
+        paper_id_0 = str(dataset.signatures["0"].paper_id)
+        paper_id_1 = str(dataset.signatures["1"].paper_id)
+        dataset.specter_embeddings = {
+            paper_id_0: zero_embedding,
+            paper_id_1: [1.0, 0.0],
+        }
+        featurizer = FeaturizationInfo(features_to_use=["embedding_similarity"])
 
-    features, _labels, _ = many_pairs_featurize(
-        [("0", "1", 0)],
-        dataset,
-        featurizer,
-        n_jobs=1,
-        chunk_size=1,
-        nan_value=np.nan,
-    )
+        features, _labels, _ = many_pairs_featurize(
+            [("0", "1", 0)],
+            dataset,
+            featurizer,
+            n_jobs=1,
+            chunk_size=1,
+            nan_value=np.nan,
+        )
 
-    assert features.shape == (1, 1)
-    assert np.isnan(features[0, 0])
+        assert features.shape == (1, 1), case_id
+        assert np.isnan(features[0, 0]), case_id
 
 
 def test_specter_embedding_must_be_one_dimensional() -> None:

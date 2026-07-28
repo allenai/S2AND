@@ -725,15 +725,14 @@ mod name_counts_empty_surname_tests {
             files.insert(
                 name.to_string(),
                 serde_json::json!({
-                    "path": format!("{name}.bin"),
                     "byte_count": path.metadata().expect("file metadata").len(),
                     "sha256": sha256_file(&path).expect("hash fixture"),
                 }),
             );
         }
         let manifest = serde_json::json!({
-            "schema_version": "name_counts_index_v3",
-            "normalization_version": "canonical_v2",
+            "kind": "s2and_name_counts",
+            "format_version": 1,
             "files": files,
         });
         std::fs::write(

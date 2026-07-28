@@ -16,7 +16,7 @@ from sklearn.neighbors import KNeighborsClassifier
 import s2and.incremental_linking.production as production_module
 import s2and.model as model_module
 from s2and.arrow_inputs import ArrowDataset
-from s2and.consts import LARGE_DISTANCE, NORMALIZATION_VERSION
+from s2and.consts import LARGE_DISTANCE
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
@@ -29,7 +29,6 @@ from s2and.incremental_linking.feature_block import (
 )
 from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS,
-    RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     RawArrowPlanBundle,
 )
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
@@ -164,7 +163,6 @@ def _patch_fake_raw_arrow_planner(
                 captured.setdefault("planner_plans", []).append(query_ids)
                 captured.setdefault("planner_plan_disallows", []).append(set(additional_cluster_seed_disallows or ()))
             plan: dict[str, Any] = {
-                "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
                 "query_signature_ids": query_ids,
                 "query_views": ["full"] * len(query_ids),
                 "query_authors": [""] * len(query_ids),
@@ -196,7 +194,6 @@ def _patch_fake_raw_arrow_planner(
 
 def test_raw_plan_contiguous_query_slice_rebases_rows_and_pairs() -> None:
     plan: dict[str, Any] = {
-        "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
         "query_signature_ids": ["q0", "q1", "q2"],
         "query_views": ["full", "full", "full"],
         "query_authors": ["A", "B", "C"],
@@ -1054,7 +1051,7 @@ def test_promoted_linker_adds_partial_query_seed_disallows_to_planner_sidecar(
         n_jobs = 1
         suppress_orcid = True
         featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        feature_contract = {}
         _last_incremental_seed_setup_telemetry: dict[str, Any] = {}
 
         def _build_incremental_seed_setup(self, *_args: object, **kwargs: object):
@@ -1132,7 +1129,7 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
         n_jobs = 1
         suppress_orcid = False
         featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        feature_contract = {}
         _last_incremental_seed_setup_telemetry: dict[str, Any] = {}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
@@ -1189,7 +1186,7 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
         n_jobs = 1
         suppress_orcid = True
         featurizer_info = FeaturizationInfo(features_to_use=["name_counts"])
-        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        feature_contract = {}
         _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
@@ -1339,7 +1336,7 @@ def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
         n_jobs = 1
         suppress_orcid = True
         featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        feature_contract = {}
         _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
@@ -1486,7 +1483,7 @@ def test_promoted_linker_reuses_one_plan_and_featurizer_for_four_scoring_batches
         n_jobs = 1
         suppress_orcid = True
         featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        feature_contract = {}
         _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
@@ -1567,7 +1564,7 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
         n_jobs = 1
         suppress_orcid = True
         featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        feature_contract = {}
         _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):

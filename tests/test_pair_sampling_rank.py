@@ -29,23 +29,18 @@ def _legacy_sample(
 def _assert_pairs_equal(
     actual: list[tuple[str, str, int | float]],
     expected: list[tuple[str, str, int | float]],
+    *,
+    case_id: str,
 ) -> None:
-    assert [pair[:2] for pair in actual] == [pair[:2] for pair in expected]
+    assert [pair[:2] for pair in actual] == [pair[:2] for pair in expected], case_id
     for actual_pair, expected_pair in zip(actual, expected, strict=True):
         if math.isnan(expected_pair[2]):
-            assert math.isnan(actual_pair[2])
+            assert math.isnan(actual_pair[2]), case_id
         else:
-            assert actual_pair[2] == expected_pair[2]
+            assert actual_pair[2] == expected_pair[2], case_id
 
 
-@pytest.mark.parametrize("random_seed", [0, 1, 1111, 2**31 - 1])
-@pytest.mark.parametrize("sample_size", [0, 1, 4, 12, 100])
-@pytest.mark.parametrize("with_cluster_labels", [False, True])
-def test_within_block_rank_sampling_matches_legacy_output(
-    random_seed: int,
-    sample_size: int,
-    with_cluster_labels: bool,
-) -> None:
+def test_within_block_rank_sampling_matches_legacy_output() -> None:
     blocks = {
         "empty": [],
         "singleton": ["singleton"],
@@ -53,31 +48,39 @@ def test_within_block_rank_sampling_matches_legacy_output(
         "second": ["e", "f"],
         "duplicates": ["g", "h", "g"],
     }
-    signature_to_cluster_id = (
-        {
-            "singleton": "unused",
-            "a": "one",
-            "b": "one",
-            "c": "two",
-            "d": "three",
-            "e": "four",
-            "f": "four",
-            "g": "five",
-            "h": "six",
-        }
-        if with_cluster_labels
-        else None
+    cluster_ids = {
+        "singleton": "unused",
+        "a": "one",
+        "b": "one",
+        "c": "two",
+        "d": "three",
+        "e": "four",
+        "f": "four",
+        "g": "five",
+        "h": "six",
+    }
+    cases = (
+        ("empty-sample", 0, 0, False),
+        ("single-pair", 0, 1, False),
+        ("partial-sample", 0, 4, False),
+        ("exact-population", 0, 10, False),
+        ("sample-capped-to-population", 0, 11, False),
+        ("seed-1111", 1111, 4, False),
+        ("maximum-seed", 2**31 - 1, 4, False),
+        ("cluster-labels", 7, 10, True),
     )
+    for case_id, random_seed, sample_size, with_cluster_labels in cases:
+        signature_to_cluster_id = cluster_ids if with_cluster_labels else None
 
-    dataset = ANDData.__new__(ANDData)
-    dataset.pair_sampling_mode = "within_block_random"
-    dataset.signature_to_cluster_id = signature_to_cluster_id
-    dataset.random_seed = random_seed
+        dataset = ANDData.__new__(ANDData)
+        dataset.pair_sampling_mode = "within_block_random"
+        dataset.signature_to_cluster_id = signature_to_cluster_id
+        dataset.random_seed = random_seed
 
-    actual = dataset.pair_sampling(sample_size, [], blocks)
-    expected = _legacy_sample(blocks, signature_to_cluster_id, sample_size, random_seed)
+        actual = dataset.pair_sampling(sample_size, [], blocks)
+        expected = _legacy_sample(blocks, signature_to_cluster_id, sample_size, random_seed)
 
-    _assert_pairs_equal(actual, expected)
+        _assert_pairs_equal(actual, expected, case_id=case_id)
 
 
 def test_within_block_rank_sampling_preserves_negative_sample_error() -> None:

@@ -144,7 +144,7 @@ from typing import Any, cast
 
 import numpy as np
 
-from s2and.arrow_inputs import ArrowDataset
+from s2and.arrow_inputs import ArrowDataset, read_arrow_collection_root
 
 TRAIN_MODE_ANDDATA_CURRENT = "anddata-current"
 TRAIN_MODE_ANDDATA_PYTHON = "anddata-python"
@@ -410,59 +410,17 @@ def resolve_dataset_file(data_root: str, dataset_name: str, preferred_name: str,
 
 
 def resolve_arrow_dataset_root(arrow_root: str, dataset_name: str) -> str:
-    """Resolve a dataset directory under a direct Arrow root or release parent."""
+    """Resolve a dataset declared by one explicit Arrow collection root."""
 
-    direct_candidates = [
-        os.path.join(arrow_root, dataset_name),
-        os.path.join(arrow_root, "datasets", dataset_name),
-    ]
-    for candidate in direct_candidates:
-        if os.path.exists(os.path.join(candidate, "manifest.json")):
-            return candidate
-
-    release_candidates: list[str] = []
-    if os.path.isdir(arrow_root):
-        for child_name in sorted(os.listdir(arrow_root), reverse=True):
-            child_root = os.path.join(arrow_root, child_name)
-            child_manifest_path = os.path.join(child_root, "manifest.json")
-            if not os.path.isdir(child_root) or not os.path.exists(child_manifest_path):
-                continue
-            with open(child_manifest_path, encoding="utf-8") as manifest_file:
-                try:
-                    child_manifest = json.load(manifest_file)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"Arrow release manifest is not valid JSON: {child_manifest_path}") from exc
-            advertised_manifests = {
-                os.path.normpath(str(entry.get("manifest_path", "")))
-                for entry in child_manifest.get("dataset_manifests", [])
-                if isinstance(entry, Mapping)
-            }
-            for candidate in (
-                os.path.join(child_root, dataset_name),
-                os.path.join(child_root, "datasets", dataset_name),
-            ):
-                manifest_path = os.path.join(candidate, "manifest.json")
-                relative_manifest = os.path.normpath(os.path.relpath(manifest_path, child_root))
-                if relative_manifest in advertised_manifests and os.path.exists(manifest_path):
-                    release_candidates.append(candidate)
-    if len(release_candidates) == 1:
-        return release_candidates[0]
-    if len(release_candidates) > 1:
-        formatted = ", ".join(release_candidates)
-        raise ValueError(
-            f"Ambiguous Arrow release parent for dataset {dataset_name!r}; pass one release root explicitly. "
-            f"Matches: {formatted}"
-        )
-
-    for candidate in direct_candidates:
-        if os.path.isdir(candidate):
-            return candidate
-    formatted = ", ".join(
-        [os.path.join(candidate, "manifest.json") for candidate in direct_candidates]
-        + [os.path.join(arrow_root, "*", dataset_name, "manifest.json")]
-        + [os.path.join(arrow_root, "*", "datasets", dataset_name, "manifest.json")]
-    )
-    raise FileNotFoundError(f"Missing Arrow manifest for dataset {dataset_name!r}; checked {formatted}")
+    root = Path(arrow_root)
+    root_manifest = root / "manifest.json"
+    if not root_manifest.is_file():
+        raise FileNotFoundError(f"Arrow root manifest does not exist: {root_manifest}")
+    dataset_manifests, _replay_bundles, _release_version = read_arrow_collection_root(root_manifest)
+    manifest_path = dataset_manifests.get(dataset_name)
+    if manifest_path is None:
+        raise FileNotFoundError(f"Arrow root manifest does not declare dataset {dataset_name!r}: {root_manifest}")
+    return str(manifest_path.parent)
 
 
 def bundle_data_random_seed(model_path: Path) -> int:
@@ -1069,7 +1027,7 @@ def apply_fixed_cluster_eps(clusterer: Any, fixed_cluster_eps: float | None) -> 
 
 
 def main() -> None:
-    from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION
+    from s2and.consts import DEFAULT_CHUNK_SIZE
     from s2and.eval import cluster_eval
     from s2and.featurizer import (
         DEFAULT_FEATURE_GROUPS,
@@ -1186,11 +1144,9 @@ def main() -> None:
 
     featurization_info = FeaturizationInfo(
         features_to_use=list(DEFAULT_FEATURE_GROUPS),
-        featurizer_version=FEATURIZER_VERSION,
     )
     nameless_featurization_info = FeaturizationInfo(
         features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS),
-        featurizer_version=FEATURIZER_VERSION,
     )
 
     results: dict[tuple[str, str], list[dict[str, tuple]]] = {}

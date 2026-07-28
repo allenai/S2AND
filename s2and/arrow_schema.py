@@ -64,7 +64,10 @@ def validate_arrow_schema(
     for raw_spec in raw_specs:
         if not isinstance(raw_spec, Mapping):
             raise ValueError(f"Arrow schema contract has invalid column metadata for {table_name!r}")
-        specs[str(raw_spec["name"])] = raw_spec
+        column_name = str(raw_spec["name"])
+        if column_name in specs:
+            raise ValueError(f"Arrow schema contract table {table_name!r} repeats column {column_name!r}")
+        specs[column_name] = raw_spec
 
     requested = None if columns is None else tuple(dict.fromkeys(str(column) for column in columns))
     if requested is not None:

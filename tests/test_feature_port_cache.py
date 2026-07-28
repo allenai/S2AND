@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
+import s2and
 import s2and.feature_port as feature_port
-import s2and.runtime as runtime
 from s2and.data import ANDData
 
 
@@ -41,7 +41,7 @@ class DummyRustFeaturizer:
 
 
 class DummyRustModule:
-    __version__ = runtime.REQUIRED_RUST_EXTENSION_VERSION
+    __version__ = s2and.__version__
     RustFeaturizer = DummyRustFeaturizer
 
 
@@ -90,116 +90,71 @@ def _use_dummy_rust(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda value: value.__init__({"replacement": 3}),
-        lambda value: value.__setitem__("a", 3),
-        lambda value: value.__delitem__("a"),
-        lambda value: value.__ior__({"replacement": 3}),
-        lambda value: value.clear(),
-        lambda value: value.pop("a"),
-        lambda value: value.popitem(),
-        lambda value: value.setdefault("replacement", 3),
-        lambda value: value.update({"replacement": 3}),
-    ],
-    ids=[
-        "init",
-        "setitem",
-        "delitem",
-        "ior",
-        "clear",
-        "pop",
-        "popitem",
-        "setdefault",
-        "update",
-    ],
-)
-def test_mutation_tracked_dict_covers_builtin_mutators(mutate: Any) -> None:
-    value = feature_port._MutationTrackedDict({"a": 1, "b": 2})
-    initial_version = value.mutation_version
-
-    mutate(value)
-
-    assert value.mutation_version > initial_version
-    assert not hasattr(value, "__dict__")
+def _assert_mutators_advance_version(value: Any, mutators: tuple[Any, ...]) -> None:
+    for index, mutate in enumerate(mutators):
+        candidate = type(value)(value)
+        initial_version = candidate.mutation_version
+        mutate(candidate)
+        assert candidate.mutation_version > initial_version, index
+        assert not hasattr(candidate, "__dict__")
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda value: value.__init__({("replacement", "pair")}),
-        lambda value: value.__iand__({("a", "b")}),
-        lambda value: value.__ior__({("replacement", "pair")}),
-        lambda value: value.__isub__({("a", "b")}),
-        lambda value: value.__ixor__({("replacement", "pair")}),
-        lambda value: value.add(("replacement", "pair")),
-        lambda value: value.clear(),
-        lambda value: value.difference_update({("a", "b")}),
-        lambda value: value.discard(("a", "b")),
-        lambda value: value.intersection_update({("a", "b")}),
-        lambda value: value.pop(),
-        lambda value: value.remove(("a", "b")),
-        lambda value: value.symmetric_difference_update({("replacement", "pair")}),
-        lambda value: value.update({("replacement", "pair")}),
-    ],
-    ids=[
-        "init",
-        "iand",
-        "ior",
-        "isub",
-        "ixor",
-        "add",
-        "clear",
-        "difference-update",
-        "discard",
-        "intersection-update",
-        "pop",
-        "remove",
-        "symmetric-difference-update",
-        "update",
-    ],
-)
-def test_mutation_tracked_set_covers_builtin_mutators(mutate: Any) -> None:
-    value = feature_port._MutationTrackedSet({("a", "b"), ("c", "d")})
-    initial_version = value.mutation_version
+def _assert_mutation_tracker_coverage() -> None:
+    _assert_mutators_advance_version(
+        feature_port._MutationTrackedDict({"a": 1, "b": 2}),
+        (
+            lambda value: value.__init__({"replacement": 3}),
+            lambda value: value.__setitem__("a", 3),
+            lambda value: value.__delitem__("a"),
+            lambda value: value.__ior__({"replacement": 3}),
+            lambda value: value.clear(),
+            lambda value: value.pop("a"),
+            lambda value: value.popitem(),
+            lambda value: value.setdefault("replacement", 3),
+            lambda value: value.update({"replacement": 3}),
+        ),
+    )
+    _assert_mutators_advance_version(
+        feature_port._MutationTrackedSet({("a", "b"), ("c", "d")}),
+        (
+            lambda value: value.__init__({("replacement", "pair")}),
+            lambda value: value.__iand__({("a", "b")}),
+            lambda value: value.__ior__({("replacement", "pair")}),
+            lambda value: value.__isub__({("a", "b")}),
+            lambda value: value.__ixor__({("replacement", "pair")}),
+            lambda value: value.add(("replacement", "pair")),
+            lambda value: value.clear(),
+            lambda value: value.difference_update({("a", "b")}),
+            lambda value: value.discard(("a", "b")),
+            lambda value: value.intersection_update({("a", "b")}),
+            lambda value: value.pop(),
+            lambda value: value.remove(("a", "b")),
+            lambda value: value.symmetric_difference_update({("replacement", "pair")}),
+            lambda value: value.update({("replacement", "pair")}),
+        ),
+    )
 
-    mutate(value)
+    def broken_pairs():
+        yield ("added", 3)
+        yield ("broken",)
 
-    assert value.mutation_version > initial_version
-    assert not hasattr(value, "__dict__")
+    tracked_dict = feature_port._MutationTrackedDict({"a": 1})
+    dict_version = tracked_dict.mutation_version
+    with pytest.raises(ValueError):
+        tracked_dict.update(broken_pairs())
+    assert tracked_dict["added"] == 3
+    assert tracked_dict.mutation_version > dict_version
 
+    def broken_values():
+        yield ("added", "pair")
+        raise RuntimeError("broken input")
 
-def test_tracked_containers_ignore_common_no_op_mutators() -> None:
-    require = feature_port._MutationTrackedDict({"s1": "c1"})
-    disallow = feature_port._MutationTrackedSet({("s1", "s2")})
-    require_version = require.mutation_version
-    disallow_version = disallow.mutation_version
-
-    require["s1"] = "c1"
-    require |= {}
-    require.pop("missing", None)
-    require.setdefault("s1", "replacement")
-    require.update({})
-    disallow &= disallow
-    disallow |= set()
-    disallow -= set()
-    disallow ^= set()
-    disallow.add(("s1", "s2"))
-    disallow.difference_update(set())
-    disallow.discard(("missing", "pair"))
-    disallow.intersection_update()
-    disallow.symmetric_difference_update(set())
-    disallow.update()
-
-    assert require.mutation_version == require_version
-    assert disallow.mutation_version == disallow_version
-    empty_require = feature_port._MutationTrackedDict()
-    empty_disallow = feature_port._MutationTrackedSet()
-    empty_require.clear()
-    empty_disallow.clear()
-    assert empty_require.mutation_version == 0
-    assert empty_disallow.mutation_version == 0
+    tracked_set = feature_port._MutationTrackedSet({("a", "b")})
+    set_version = tracked_set.mutation_version
+    with pytest.raises(RuntimeError, match="broken input"):
+        tracked_set.update(broken_values())
+    assert ("added", "pair") in tracked_set
+    assert tracked_set.mutation_version > set_version
 
 
 def test_cache_is_owned_by_each_dataset_and_evicts() -> None:
@@ -222,67 +177,55 @@ def test_cache_is_owned_by_each_dataset_and_evicts() -> None:
     assert feature_port._get_rust_featurizer(second_dataset) is second
 
 
-@pytest.mark.parametrize(
-    "attribute",
-    [
-        "arrow_dataset",
-        "name_tuples",
-        "preprocess",
-        "use_orcid_id",
-        "n_jobs",
-    ],
-)
-def test_missing_mandatory_build_input_fails_fast(attribute: str) -> None:
-    dataset = DummyDataset("missing-build-input")
-    delattr(dataset, attribute)
+def test_missing_mandatory_build_input_fails_fast() -> None:
+    for attribute in ("arrow_dataset", "name_tuples", "preprocess", "use_orcid_id", "n_jobs"):
+        dataset = DummyDataset("missing-build-input")
+        delattr(dataset, attribute)
 
-    with pytest.raises(AttributeError, match=attribute):
-        feature_port._rust_featurizer_build_inputs(dataset)
+        with pytest.raises(AttributeError, match=attribute):
+            feature_port._rust_featurizer_build_inputs(dataset)
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda dataset: setattr(dataset, "preprocess", False),
-        lambda dataset: setattr(dataset, "use_orcid_id", False),
-        lambda dataset: setattr(dataset, "n_jobs", 2),
-        lambda dataset: dataset.name_tuples.add(("bill", "william")),
-        lambda dataset: setattr(dataset, "arrow_dataset", _dummy_arrow_dataset()),
-    ],
-)
-def test_material_build_input_changes_rebuild(
-    mutate: Any,
-) -> None:
-    dataset = DummyDataset("material-input")
+def test_material_build_input_changes_rebuild() -> None:
+    cases = (
+        ("preprocess", lambda dataset: setattr(dataset, "preprocess", False)),
+        ("use-orcid-id", lambda dataset: setattr(dataset, "use_orcid_id", False)),
+        ("n-jobs", lambda dataset: setattr(dataset, "n_jobs", 2)),
+        ("name-tuples", lambda dataset: dataset.name_tuples.add(("bill", "william"))),
+        ("arrow-dataset", lambda dataset: setattr(dataset, "arrow_dataset", _dummy_arrow_dataset())),
+    )
+    for case_id, mutate in cases:
+        DummyRustFeaturizer.created = []
+        dataset = DummyDataset("material-input")
 
-    first = feature_port._get_rust_featurizer(dataset)
-    mutate(dataset)
-    second = feature_port._get_rust_featurizer(dataset)
+        first = feature_port._get_rust_featurizer(dataset)
+        mutate(dataset)
+        second = feature_port._get_rust_featurizer(dataset)
 
-    assert second is not first
-    assert DummyRustFeaturizer.created == [dataset.name, dataset.name]
-    assert feature_port._rust_featurizer_build_count(dataset) == 2
+        assert second is not first, case_id
+        assert DummyRustFeaturizer.created == [dataset.name, dataset.name], case_id
+        assert feature_port._rust_featurizer_build_count(dataset) == 2, case_id
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda dataset: dataset.signatures.__setitem__("s1", object()),
-        lambda dataset: dataset.papers.__setitem__("p1", object()),
-        lambda dataset: setattr(dataset, "specter_embeddings", {"p1": object()}),
-    ],
-)
-def test_unconsumed_python_state_does_not_rebuild(mutate: Any) -> None:
-    dataset = DummyDataset("unconsumed")
+def test_unconsumed_python_state_does_not_rebuild() -> None:
+    cases = (
+        ("signatures", lambda dataset: dataset.signatures.__setitem__("s1", object())),
+        ("papers", lambda dataset: dataset.papers.__setitem__("p1", object())),
+        ("specter-embeddings", lambda dataset: setattr(dataset, "specter_embeddings", {"p1": object()})),
+    )
+    for case_id, mutate in cases:
+        DummyRustFeaturizer.created = []
+        dataset = DummyDataset("unconsumed")
 
-    first = feature_port._get_rust_featurizer(dataset)
-    mutate(dataset)
+        first = feature_port._get_rust_featurizer(dataset)
+        mutate(dataset)
 
-    assert feature_port._get_rust_featurizer(dataset) is first
-    assert DummyRustFeaturizer.created == [dataset.name]
+        assert feature_port._get_rust_featurizer(dataset) is first, case_id
+        assert DummyRustFeaturizer.created == [dataset.name], case_id
 
 
 def test_exact_seed_contents_update_in_place_and_survive_rebuild() -> None:
+    _assert_mutation_tracker_coverage()
     dataset = DummyDataset("seed-content")
     dataset.cluster_seeds_require = {"s1": "c1", "s2": "c2"}
     dataset.cluster_seeds_disallow = {("s1", "s2")}

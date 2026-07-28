@@ -2,9 +2,8 @@
 
 This test module enforces ``tests/fixtures/canonical_name_examples.json`` and
 the ``docs/data.md`` canonical-name contract in four layers. The live pipeline
-and the fixture both use canonical_v2. The pure
-contracts remain parametrized for useful case IDs, while the live pipeline is
-batched once to exercise the production vectorized path:
+and the fixture both use canonical_v2. The pure contract and live pipeline are
+each batched once, with case IDs in assertion messages:
 
 - Canonical contract: the fixture's ``canonical`` values are asserted against
   ``s2and.text.canonicalize_name_parts`` and
@@ -19,7 +18,9 @@ batched once to exercise the production vectorized path:
 - Table coherence: equivalence groups, decision references, and
   normalized-form invariants of the ``canonical`` values.
 
-The JSON fixture is the frozen source of truth; decided values must not be
+The pure contract checks every frozen row in one batch, with case IDs in each
+assertion, to avoid per-example pytest collection overhead. The JSON fixture is
+the frozen source of truth; decided values must not be
 regenerated silently. Add new cases by hand-writing them into the fixture.
 """
 
@@ -42,7 +43,6 @@ from s2and.text import canonical_name_count_keys, canonicalize_name_parts, same_
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "canonical_name_examples.json"
 FIXTURE = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 CASES = FIXTURE["cases"]
-CASE_PARAMS = [pytest.param(case, id=case["id"]) for case in CASES]
 CASES_BY_ID = {case["id"]: case for case in CASES}
 
 
@@ -202,23 +202,27 @@ def test_decision_references_are_wellformed():
     assert not unreferenced, f"decisions never exercised by any case: {sorted(unreferenced)}"
 
 
-@pytest.mark.parametrize("case", CASE_PARAMS)
-def test_canonical_pure_contract(case):
-    raw = case["input"]
-    canonical = case["canonical"]
-    for field in ("first", "middle", "last"):
-        value = canonical[field]
-        assert value == " ".join(value.split()), f"{field} not whitespace-normalized: {value!r}"
-        assert all(ch.islower() or ch == " " for ch in value), f"{field} has non [a-z ] chars: {value!r}"
-    for key_name, key_value in canonical["count_keys"].items():
-        if key_value is not None:
-            assert key_value == " ".join(key_value.split()), f"count key {key_name} malformed: {key_value!r}"
-            assert key_value != "", f"count key {key_name} must be null instead of empty"
+def test_canonical_pure_contract():
+    for case in CASES:
+        case_id = case["id"]
+        raw = case["input"]
+        canonical = case["canonical"]
+        for field in ("first", "middle", "last"):
+            value = canonical[field]
+            assert value == " ".join(value.split()), f"{case_id}: {field} not whitespace-normalized: {value!r}"
+            assert all(ch.islower() or ch == " " for ch in value), f"{case_id}: {field} has non [a-z ] chars: {value!r}"
+        for key_name, key_value in canonical["count_keys"].items():
+            if key_value is not None:
+                assert key_value == " ".join(key_value.split()), (
+                    f"{case_id}: count key {key_name} malformed: {key_value!r}"
+                )
+                assert key_value != "", f"{case_id}: count key {key_name} must be null instead of empty"
 
-    parts = canonicalize_name_parts(raw["first"], raw["middle"], raw["last"])
-    assert (parts.first, parts.middle, parts.last) == (
-        canonical["first"],
-        canonical["middle"],
-        canonical["last"],
-    )
-    assert canonical_name_count_keys(parts) == canonical["count_keys"]
+        parts = canonicalize_name_parts(raw["first"], raw["middle"], raw["last"])
+        actual_parts = (parts.first, parts.middle, parts.last)
+        expected_parts = (canonical["first"], canonical["middle"], canonical["last"])
+        assert actual_parts == expected_parts, f"{case_id}: canonical parts {actual_parts!r} != {expected_parts!r}"
+        actual_keys = canonical_name_count_keys(parts)
+        assert actual_keys == canonical["count_keys"], (
+            f"{case_id}: canonical count keys {actual_keys!r} != {canonical['count_keys']!r}"
+        )

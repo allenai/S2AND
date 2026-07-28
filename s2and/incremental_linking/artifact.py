@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from s2and import __version__
 from s2and._sha256 import is_lowercase_sha256
 from s2and._sha256 import sha256_file as _sha256_file
 from s2and.incremental_linking.contracts import (
@@ -25,14 +26,15 @@ from s2and.model_pairwise import lightgbm_booster
 
 BOOSTER_FILENAME = "booster.lgb"
 METADATA_FILENAME = "metadata.json"
-ARTIFACT_SCHEMA_VERSION = "incremental_linking_artifact_v5"
+INCREMENTAL_LINKER_KIND = "s2and_incremental_linker"
 _METADATA_FIELDS = frozenset(
     {
         "booster_sha256",
         "gate_config",
+        "generated_by_runtime",
+        "kind",
         "pairwise_bundle_binding_digest",
         "retrieval_top_k",
-        "schema_version",
         "target_spec_digest",
     }
 )
@@ -52,11 +54,16 @@ def _validated_metadata(payload: Any) -> tuple[dict[str, Any], NumpyLogisticGate
         missing = sorted(_METADATA_FIELDS - observed_fields)
         unknown = sorted(observed_fields - _METADATA_FIELDS)
         raise ValueError(
-            "Incremental linker artifact metadata fields do not match the v5 schema: "
+            "Incremental linker artifact metadata fields do not match the current contract: "
             f"missing={missing} unknown={unknown}"
         )
-    if payload["schema_version"] != ARTIFACT_SCHEMA_VERSION:
-        raise ValueError(f"Unsupported incremental linker artifact schema_version: {payload['schema_version']!r}")
+    if payload["kind"] != INCREMENTAL_LINKER_KIND:
+        raise ValueError(f"Incremental linker artifact kind must be {INCREMENTAL_LINKER_KIND!r}")
+    if payload["generated_by_runtime"] != __version__:
+        raise ValueError(
+            "Incremental linker artifact runtime mismatch: "
+            f"generated={payload['generated_by_runtime']!r} installed={__version__!r}"
+        )
 
     retrieval_top_k = payload["retrieval_top_k"]
     if isinstance(retrieval_top_k, bool) or not isinstance(retrieval_top_k, int) or retrieval_top_k <= 0:
@@ -191,11 +198,12 @@ def save_incremental_linking_artifact(
         booster_path = staging_dir / BOOSTER_FILENAME
         booster.save_model(str(booster_path))
         metadata: dict[str, Any] = {
-            "schema_version": ARTIFACT_SCHEMA_VERSION,
             "booster_sha256": _sha256_file(booster_path),
-            "retrieval_top_k": retrieval_top_k,
             "gate_config": dict(gate_config),
+            "generated_by_runtime": __version__,
+            "kind": INCREMENTAL_LINKER_KIND,
             "pairwise_bundle_binding_digest": canonical_json_digest(pairwise_binding),
+            "retrieval_top_k": retrieval_top_k,
             "target_spec_digest": canonical_json_digest(dict(target_spec)),
         }
         _validated_metadata(metadata)

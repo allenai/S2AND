@@ -124,32 +124,24 @@ def _expected_upper_triangle_pairs_for_range(
     return pairs
 
 
-@pytest.mark.parametrize(
-    ("block_size", "start_offset", "max_pairs"),
-    [
-        (6, 0, 4),
-        (6, 1, 4),
-        (6, 14, 4),
-        (6, 15, 4),
-        (2000, 0, 7),
-        (2000, 1998, 7),
-        (2000, 1999, 7),
-        (2000, 999_500, 7),
-        (2000, 1_998_995, 7),
-        (2000, 1_999_000, 7),
-    ],
-)
-def test_upper_triangle_indices_for_range_matches_row_major_order(
-    block_size: int,
-    start_offset: int,
-    max_pairs: int | None,
-):
-    left, right = model_module._upper_triangle_indices_for_range(block_size, start_offset, max_pairs)
-    assert list(zip(left.tolist(), right.tolist(), strict=True)) == _expected_upper_triangle_pairs_for_range(
-        block_size,
-        start_offset,
-        max_pairs,
+def test_upper_triangle_indices_for_range_matches_row_major_order():
+    cases = (
+        ("small-first", 6, 0, 4),
+        ("small-interior", 6, 1, 4),
+        ("small-last", 6, 14, 4),
+        ("small-end", 6, 15, 4),
+        ("large-first", 2000, 0, 7),
+        ("large-row-end", 2000, 1998, 7),
+        ("large-next-row", 2000, 1999, 7),
+        ("large-middle", 2000, 999_500, 7),
+        ("large-last-window", 2000, 1_998_995, 7),
+        ("large-end", 2000, 1_999_000, 7),
     )
+    for case_id, block_size, start_offset, max_pairs in cases:
+        left, right = model_module._upper_triangle_indices_for_range(block_size, start_offset, max_pairs)
+        actual = list(zip(left.tolist(), right.tolist(), strict=True))
+        expected = _expected_upper_triangle_pairs_for_range(block_size, start_offset, max_pairs)
+        assert actual == expected, case_id
 
 
 def test_python_predicted_batches_use_effective_pair_chunk_size(monkeypatch):

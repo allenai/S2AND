@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import subprocess
 import sys
@@ -9,43 +10,41 @@ from pathlib import Path
 
 import pytest
 
-from s2and.consts import NORMALIZATION_VERSION
-from s2and.name_counts_index import NAME_COUNTS_INDEX_SCHEMA_VERSION
+from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from scripts.production.counts import generate_name_counts
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_module_entrypoint_help() -> None:
-    completed = subprocess.run(
-        [sys.executable, "-m", "scripts.production.counts.generate_name_counts", "--help"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert "--fixture-input" in completed.stdout
-    assert "--input-csv" in completed.stdout
-
-
-def _write_rows(path: Path, rows: object) -> Path:
-    path.write_text(json.dumps(rows), encoding="utf-8")
+def _write_rows(path: Path, rows: list[dict[str, object]]) -> Path:
+    with path.open("w", encoding="utf-8", newline="") as output:
+        writer = csv.DictWriter(output, fieldnames=["first_name", "last_name", "count"])
+        writer.writeheader()
+        writer.writerows(rows)
     return path
 
 
-def _fixture_args(tmp_path: Path, rows: object) -> list[str]:
+def _csv_args(tmp_path: Path, rows: list[dict[str, object]]) -> list[str]:
+    guardrails = _write_guardrails(tmp_path / "guardrails.json")
     return [
-        "--fixture-input",
-        str(_write_rows(tmp_path / "rows.json", rows)),
+        "--input-csv",
+        str(_write_rows(tmp_path / "rows.csv", rows)),
+        "--guardrails-json",
+        str(guardrails),
         "--output-dir",
         str(tmp_path),
     ]
 
 
-def test_module_entrypoint_publishes_fixture(tmp_path: Path) -> None:
-    args = _fixture_args(tmp_path, [{"first_name": "Alice", "last_name": "Smith", "count": 2}])
+def test_module_entrypoint_publishes_tiny_csv(tmp_path: Path) -> None:
+    args = _csv_args(
+        tmp_path,
+        [
+            {"first_name": "Abd-al", "last_name": "Sattar", "count": 4},
+            {"first_name": "Abd al", "last_name": "Sattar", "count": 3},
+            {"first_name": "", "last_name": "", "count": 2},
+        ],
+    )
     completed = subprocess.run(
         [sys.executable, "-m", "scripts.production.counts.generate_name_counts", *args],
         cwd=REPO_ROOT,
@@ -55,7 +54,15 @@ def test_module_entrypoint_publishes_fixture(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert (tmp_path / "name_counts_index" / "manifest.json").is_file()
+    manifest = json.loads((tmp_path / "name_counts_index" / "manifest.json").read_text(encoding="utf-8"))
+    records = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert manifest["kind"] == "s2and_name_counts"
+    assert manifest["format_version"] == PUBLIC_DATA_FORMAT_VERSION
+    assert set(manifest["files"]) == {"first", "last", "first_last", "last_first_initial"}
+    assert records[0]["event"] == "name_counts_plan"
+    assert records[-1]["event"] == "name_counts_result"
+    assert records[-1]["result"]["source_row_count"] == 3
+    assert records[-1]["result"]["rejected_row_count"] == 1
 
 
 def _write_guardrails(path: Path, **changes: int) -> Path:
@@ -70,49 +77,16 @@ def _write_guardrails(path: Path, **changes: int) -> Path:
     return path
 
 
-def test_fixture_publishes_verified_native_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    rows = [
-        {"first_name": "Abd-al", "last_name": "Sattar", "count": 4},
-        {"first_name": "Abd al", "last_name": "Sattar", "count": 3},
-        {"first_name": "", "last_name": "", "count": 2},
-    ]
-
-    assert generate_name_counts.main(_fixture_args(tmp_path, rows)) == 0
-
-    manifest = json.loads((tmp_path / "name_counts_index" / "manifest.json").read_text(encoding="utf-8"))
-    output = capsys.readouterr().out
-    assert set(manifest) == {"schema_version", "normalization_version", "files"}
-    assert manifest["schema_version"] == NAME_COUNTS_INDEX_SCHEMA_VERSION
-    assert manifest["normalization_version"] == NORMALIZATION_VERSION
-    assert '"source_row_count": 3' in output
-    assert '"rejected_row_count": 1' in output
-    assert set(manifest["files"]) == {"first", "last", "first_last", "last_first_initial"}
-
-
-def test_fixture_limit_changes_selected_content(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    rows = [
-        {"first_name": "Alice", "last_name": "Smith", "count": 2},
-        {"first_name": "Amy", "last_name": "Jones", "count": 2},
-    ]
-
-    assert generate_name_counts.main([*_fixture_args(tmp_path, rows), "--limit", "1"]) == 0
-
-    output = capsys.readouterr().out
-    assert '"source_row_count": 1' in output
-    for key in ("first", "last", "first_last", "last_first_initial"):
-        assert f'"{key}": 1' in output
-
-
 def test_empty_or_existing_publication_is_rejected(tmp_path: Path) -> None:
     empty_root = tmp_path / "empty"
     empty_root.mkdir()
     with pytest.raises(RuntimeError, match="zero source rows"):
-        generate_name_counts.main(_fixture_args(empty_root, []))
+        generate_name_counts.main(_csv_args(empty_root, []))
     assert not (empty_root / "name_counts_index").exists()
 
     populated_root = tmp_path / "populated"
     populated_root.mkdir()
-    args = _fixture_args(populated_root, [{"first_name": "Alice", "last_name": "Smith", "count": 2}])
+    args = _csv_args(populated_root, [{"first_name": "Alice", "last_name": "Smith", "count": 2}])
     assert generate_name_counts.main(args) == 0
     with pytest.raises(FileExistsError, match="already exists"):
         generate_name_counts.main(args)
@@ -135,7 +109,7 @@ def test_full_reviewed_csv_requires_guardrails_and_publishes(tmp_path: Path) -> 
         "--output-dir",
         str(tmp_path / "output"),
     ]
-    with pytest.raises(ValueError, match="--guardrails-json"):
+    with pytest.raises(SystemExit):
         generate_name_counts.main(args)
 
     guardrails = _write_guardrails(tmp_path / "guardrails.json", max_source_rows=17)
@@ -147,9 +121,8 @@ def test_full_reviewed_csv_requires_guardrails_and_publishes(tmp_path: Path) -> 
         list(generate_name_counts._reviewed_csv_rows(source))
 
 
-@pytest.mark.parametrize(
-    "values",
-    [
+def test_invalid_guardrail_authority_fails_before_execution(tmp_path: Path) -> None:
+    cases = [
         {"max_source_rows": 1},
         {
             "min_source_rows": 2,
@@ -157,20 +130,20 @@ def test_full_reviewed_csv_requires_guardrails_and_publishes(tmp_path: Path) -> 
             "min_keys_per_mapping": 1,
             "max_keys_per_mapping": 2,
         },
-    ],
-)
-def test_invalid_guardrail_authority_fails_before_execution(tmp_path: Path, values: dict[str, int]) -> None:
-    path = tmp_path / "guardrails.json"
-    path.write_text(json.dumps(values), encoding="utf-8")
-    with pytest.raises(ValueError, match="guardrail"):
-        generate_name_counts.main(
-            [
-                "--input-csv",
-                str(path),
-                "--output-dir",
-                str(tmp_path / "output"),
-                "--guardrails-json",
-                str(path),
-                "--dry-run",
-            ]
-        )
+    ]
+    for index, values in enumerate(cases):
+        case_root = tmp_path / str(index)
+        case_root.mkdir()
+        path = case_root / "guardrails.json"
+        path.write_text(json.dumps(values), encoding="utf-8")
+        with pytest.raises(ValueError, match="guardrail"):
+            generate_name_counts.main(
+                [
+                    "--input-csv",
+                    str(path),
+                    "--output-dir",
+                    str(case_root / "output"),
+                    "--guardrails-json",
+                    str(path),
+                ]
+            )

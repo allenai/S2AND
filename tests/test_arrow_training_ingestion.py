@@ -33,7 +33,6 @@ from s2and.arrow_training import (  # noqa: E402
     load_papers_from_arrow,
     load_signatures_from_arrow,
 )
-from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION  # noqa: E402
 from s2and.data import ANDData, Author, Signature  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
@@ -189,14 +188,14 @@ def test_arrow_training_rejects_null_and_duplicate_signature_ids(tmp_path: Path)
         load_signatures_from_arrow(signatures_path)
 
 
-@pytest.mark.parametrize("author_block", [None, ""])
-def test_arrow_training_rejects_missing_author_block(tmp_path: Path, author_block: str | None) -> None:
+def test_arrow_training_rejects_missing_author_block(tmp_path: Path) -> None:
     signatures_path = tmp_path / "signatures.arrow"
-    _write_minimal_signatures_table(signatures_path, ["s1"])
-    _replace_arrow_column(signatures_path, "author_block", pa.array([author_block], type=pa.string()))
+    for _case_id, author_block in (("null", None), ("empty", "")):
+        _write_minimal_signatures_table(signatures_path, ["s1"])
+        _replace_arrow_column(signatures_path, "author_block", pa.array([author_block], type=pa.string()))
 
-    with pytest.raises(ValueError, match="(null|empty) author_block"):
-        load_signatures_from_arrow(signatures_path)
+        with pytest.raises(ValueError, match="(null|empty) author_block"):
+            load_signatures_from_arrow(signatures_path)
 
 
 def test_arrow_training_rejects_absent_author_block_column(tmp_path: Path) -> None:
@@ -302,25 +301,25 @@ def test_arrow_training_rejects_duplicate_paper_author_positions(tmp_path: Path)
         load_papers_from_arrow(papers_path, authors_path)
 
 
-@pytest.mark.parametrize("author_name", ["", "   "])
-def test_arrow_training_preserves_blank_paper_author_names(tmp_path: Path, author_name: str) -> None:
+def test_arrow_training_preserves_blank_paper_author_names(tmp_path: Path) -> None:
     papers_path = tmp_path / "papers.arrow"
     authors_path = tmp_path / "paper_authors.arrow"
     _write_minimal_papers_table(papers_path, ["p1"])
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "position": pa.array([0], type=pa.int64()),
-                "author_name": pa.array([author_name], type=pa.string()),
-            }
-        ),
-        authors_path,
-    )
+    for case_id, author_name in (("empty", ""), ("blank", "   ")):
+        write_arrow_ipc_table(
+            pa.table(
+                {
+                    "paper_id": pa.array(["p1"], type=pa.string()),
+                    "position": pa.array([0], type=pa.int64()),
+                    "author_name": pa.array([author_name], type=pa.string()),
+                }
+            ),
+            authors_path,
+        )
 
-    papers = load_papers_from_arrow(papers_path, authors_path)
+        papers = load_papers_from_arrow(papers_path, authors_path)
 
-    assert papers["p1"].authors == [Author(author_name=author_name, position=0)]
+        assert papers["p1"].authors == [Author(author_name=author_name, position=0)], case_id
 
 
 def test_arrow_training_rejects_null_paper_author_name(tmp_path: Path) -> None:
@@ -409,7 +408,6 @@ def training_bundle(tmp_path_factory: pytest.TempPathFactory) -> Any:
             bundle_dir,
             require_specter=True,
             require_name_counts_index=True,
-            expected_normalization_version=NORMALIZATION_VERSION,
         ) as arrow_source:
             arrow_dataset = build_training_anddata_from_arrow(
                 arrow_source,
@@ -523,8 +521,6 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     assert (
         arrow_dataset.name_counts_manifest_sha256 == training_bundle["arrow_source"].name_counts_index.manifest_sha256
     )
-    assert "arrow_paths" not in arrow_dataset.__dict__
-    assert "arrow_artifact_generation" not in arrow_dataset.__dict__
     assert isinstance(arrow_dataset.name_tuples, frozenset)
     assert "papers" not in arrow_dataset.__dict__
 
@@ -655,11 +651,9 @@ def test_featurize_end_to_end_with_fixed_pairs(
 
     featurizer_info = FeaturizationInfo(
         features_to_use=list(DEFAULT_FEATURE_GROUPS),
-        featurizer_version=FEATURIZER_VERSION,
     )
     nameless_info = FeaturizationInfo(
         features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS),
-        featurizer_version=FEATURIZER_VERSION,
     )
 
     results = {}

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import pickle
 from types import SimpleNamespace
 from typing import Any, cast
@@ -8,7 +10,19 @@ import pandas as pd
 import pytest
 
 import s2and.subblocking as subblocking
-from scripts.eps_sweep import sweep_eps_on_linking_gold
+from scripts.eps_sweep import common, sweep_eps_on_linking_gold
+
+
+def _cli(*extra: str) -> list[str]:
+    return [
+        "--dataset",
+        "dummy",
+        "--arrow-root",
+        "arrow",
+        "--model-path",
+        "model",
+        *extra,
+    ]
 
 
 def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
@@ -66,10 +80,8 @@ def test_eps_sweep_runtime_environment_sets_backend_and_threads(monkeypatch: pyt
 
 
 def test_eps_sweep_cli_has_one_real_orcid_constraint_switch() -> None:
-    default_args = sweep_eps_on_linking_gold.parse_args(["--dataset", "dummy", "--model-path", "model"])
-    enabled_args = sweep_eps_on_linking_gold.parse_args(
-        ["--dataset", "dummy", "--model-path", "model", "--use-orcid-constraints"]
-    )
+    default_args = sweep_eps_on_linking_gold.parse_args(_cli())
+    enabled_args = sweep_eps_on_linking_gold.parse_args(_cli("--use-orcid-constraints"))
 
     assert default_args.suppress_orcid_constraints is True
     assert enabled_args.suppress_orcid_constraints is False
@@ -175,8 +187,8 @@ def test_distance_cache_metadata_rejects_different_arrow_generation(tmp_path) ->
         sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected_metadata)
 
 
-def test_model_fingerprint_accepts_directory_model_path(tmp_path) -> None:
-    model_path = tmp_path / "production_model_v1.21"
+def test_eps_sweep_resolves_bound_model_and_arrow_inputs(tmp_path) -> None:
+    model_path = tmp_path / "production_model_v9.9"
     (model_path / "pairwise").mkdir(parents=True)
     (model_path / "manifest.json").write_text("{}", encoding="utf-8")
     (model_path / "pairwise" / "main.lgb").write_bytes(b"model")
@@ -189,40 +201,52 @@ def test_model_fingerprint_accepts_directory_model_path(tmp_path) -> None:
     assert isinstance(fingerprint["model_sha256"], str)
     assert len(fingerprint["model_sha256"]) == 64
 
+    arrow_root = tmp_path / "arrow"
+    dataset_manifest = arrow_root / "dummy" / "manifest.json"
+    dataset_manifest.parent.mkdir(parents=True)
+    dataset_manifest.write_text("{}", encoding="utf-8")
+    digest = hashlib.sha256(dataset_manifest.read_bytes()).hexdigest()
+    (arrow_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "kind": "s2and_arrow_collection",
+                "format_version": 1,
+                "dataset_manifests": {
+                    "dummy": {
+                        "path": "dummy/manifest.json",
+                        "sha256": digest,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert common.arrow_dataset_dir(arrow_root, "dummy") == dataset_manifest.parent.resolve()
+    with pytest.raises(ValueError, match="does not declare"):
+        common.arrow_dataset_dir(arrow_root, "other")
+
+    undeclared_root = tmp_path / "undeclared"
+    (undeclared_root / "dummy").mkdir(parents=True)
+    (undeclared_root / "dummy" / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
+        common.arrow_dataset_dir(undeclared_root, "dummy")
+
 
 def test_validate_args_requires_limit_or_full_run_for_compute_missing() -> None:
-    args = sweep_eps_on_linking_gold.parse_args(
-        ["--dataset", "dummy", "--model-path", "model", "--compute-missing-dists"]
-    )
+    args = sweep_eps_on_linking_gold.parse_args(_cli("--compute-missing-dists"))
 
     with pytest.raises(ValueError, match="--max-subblocks"):
         sweep_eps_on_linking_gold._validate_args(args)  # noqa: SLF001
 
-    limited_args = sweep_eps_on_linking_gold.parse_args(
-        ["--dataset", "dummy", "--model-path", "model", "--compute-missing-dists", "--max-subblocks", "1"]
-    )
+    limited_args = sweep_eps_on_linking_gold.parse_args(_cli("--compute-missing-dists", "--max-subblocks", "1"))
     sweep_eps_on_linking_gold._validate_args(limited_args)  # noqa: SLF001
 
-    full_run_args = sweep_eps_on_linking_gold.parse_args(
-        ["--dataset", "dummy", "--model-path", "model", "--compute-missing-dists", "--allow-full-run"]
-    )
+    full_run_args = sweep_eps_on_linking_gold.parse_args(_cli("--compute-missing-dists", "--allow-full-run"))
     sweep_eps_on_linking_gold._validate_args(full_run_args)  # noqa: SLF001
 
 
-@pytest.mark.parametrize(
-    ("raw_config", "expected_neighbors", "expect_same_instance"),
-    [
-        (None, 16, False),
-        ({"neighbors": 7}, 7, False),
-        (subblocking.GraphSubblockingConfig(neighbors=5), 5, True),
-    ],
-)
-def test_eps_sweep_uses_strict_shared_graph_config_resolver(
-    monkeypatch,
-    raw_config: object,
-    expected_neighbors: int,
-    expect_same_instance: bool,
-) -> None:
+def test_eps_sweep_uses_strict_shared_graph_config_resolver(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     def fake_factory(
@@ -236,17 +260,23 @@ def test_eps_sweep_uses_strict_shared_graph_config_resolver(
         return object()
 
     monkeypatch.setattr(subblocking, "make_arrow_graph_subblocking_cluster_fn", fake_factory)
-    clusterer = SimpleNamespace(subblocking_graph_config=raw_config, random_state=3)
-
-    sweep_eps_on_linking_gold._make_arrow_specter_cluster_fn(
-        clusterer,
-        object(),
+    cases = (
+        ("default", None, 16, False),
+        ("mapping", {"neighbors": 7}, 7, False),
+        ("instance", subblocking.GraphSubblockingConfig(neighbors=5), 5, True),
     )
+    for case_id, raw_config, expected_neighbors, expect_same_instance in cases:
+        clusterer = SimpleNamespace(subblocking_graph_config=raw_config, random_state=3)
 
-    config = captured["config"]
-    assert config.neighbors == expected_neighbors
-    if expect_same_instance:
-        assert config is raw_config
+        sweep_eps_on_linking_gold._make_arrow_specter_cluster_fn(
+            clusterer,
+            object(),
+        )
+
+        config = captured["config"]
+        assert config.neighbors == expected_neighbors, case_id
+        if expect_same_instance:
+            assert config is raw_config, case_id
 
 
 def test_eps_sweep_rejects_invalid_graph_config_type() -> None:

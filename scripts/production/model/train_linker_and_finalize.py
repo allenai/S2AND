@@ -1,4 +1,4 @@
-"""Train the linker once, publish a complete v5 bundle, reload, and evaluate."""
+"""Train the linker once, publish a complete bundle, reload, and evaluate."""
 
 from __future__ import annotations
 
@@ -76,8 +76,6 @@ from s2and.production_model import load_production_model, pairwise_bundle_bindin
 from s2and.production_training_contract import (  # noqa: E402
     FLOAT_OFFICIAL_METRIC_KEYS,
     INTEGER_OFFICIAL_METRIC_KEYS,
-    LINKER_EVALUATION_REPORT_SCHEMA,
-    LINKER_TARGET_SCHEMA,
     REQUIRED_LINKER_TABLE_KEYS,
     SUPPORTED_OFFICIAL_METRIC_KEYS,
     load_packaged_artifact_authority,
@@ -166,8 +164,6 @@ def _load_target(path: Path) -> dict[str, Any]:
     target = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(target, dict):
         raise ValueError(f"Promoted target must be a JSON object in {path}")
-    if target.get("schema_version") != LINKER_TARGET_SCHEMA:
-        raise ValueError(f"Promoted target schema_version must be {LINKER_TARGET_SCHEMA!r} in {path}")
     raw_features = target.get("features")
     if not isinstance(raw_features, list) or any(
         not isinstance(feature, str) or not feature for feature in raw_features
@@ -720,17 +716,6 @@ def _resolve_arrow_rust_pair_labels(
         "constraint_seconds": round(float(time.perf_counter() - started), 3),
         "constraint_api_mode": "rust_index_arrays",
     }
-
-
-def _assert_pairwise_model_supports_arrow_materialization(clusterer: Any, model_path: Path) -> None:
-    for attr_name in ("featurizer_info", "nameless_featurizer_info"):
-        featurizer_info = getattr(clusterer, attr_name, None)
-        features_to_use = tuple(str(value) for value in getattr(featurizer_info, "features_to_use", ()) or ())
-        if "reference_features" in features_to_use:
-            raise ValueError(
-                f"Pairwise model {model_path} uses reference_features in {attr_name}; "
-                "Arrow feature materialization does not support reference features."
-            )
 
 
 def _feature_nan_policy_summary() -> dict[str, str]:
@@ -1693,7 +1678,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             n_jobs=int(args.n_jobs),
             expected_artifact_hashes=artifact_hashes,
         )
-        _assert_pairwise_model_supports_arrow_materialization(clusterer, args.pairwise_model_path)
         for dataset_name, arrow_dataset in arrow_datasets.items():
             require_arrow_name_counts_index_for_clusterer(
                 clusterer,
@@ -1780,7 +1764,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     _validate_observed_official_metrics(observed)
     artifact_summary = dict(artifact_metadata)
     result = {
-        "schema_version": LINKER_EVALUATION_REPORT_SCHEMA,
         "mode": "arrow-rust",
         "complete_model_path": str(complete_model_dir),
         "model_manifest_path": str(finalized.manifest_path),
@@ -1818,7 +1801,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--pairwise-model-path",
         type=Path,
         required=True,
-        help="Explicit v5 pairwise_only native bundle produced by train_pairwise.py.",
+        help="Calibrated pairwise-only bundle produced by the release workflow.",
     )
     parser.add_argument("--name-counts-index-root", type=Path, required=True)
     parser.add_argument("--n-jobs", type=_positive_int, default=20)

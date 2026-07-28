@@ -7,7 +7,7 @@ Date: 2026-05-28 UTC
 > `--model-path` and v1.3 uses an explicit regenerated `--arrow-root`; do not
 > rerun these commands as a current release gate. See
 > [../baselines.md](../baselines.md) and
-> [../../1_3_release_todo.md](../../1_3_release_todo.md).
+> [../../release.md](../../release.md).
 
 ## Scope
 

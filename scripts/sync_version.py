@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sync versions from VERSION into package manifests and runtime guards.
+Sync versions from VERSION into package manifests and lockfiles.
 
 Usage:
   uv run python scripts/sync_version.py
@@ -48,12 +48,6 @@ def version_targets() -> tuple[VersionTarget, ...]:
             name="cargo_toml",
             relative_path=Path("s2and_rust") / "Cargo.toml",
             pattern=rf'(?m)^(?P<prefix>version = ")(?P<version>{SEMVER_PATTERN})(?P<suffix>"\s*)$',
-        ),
-        VersionTarget(
-            name="runtime_required",
-            relative_path=Path("s2and") / "runtime.py",
-            pattern=rf'(?m)^(?P<prefix>REQUIRED_RUST_EXTENSION_VERSION = ")'
-            rf'(?P<version>{SEMVER_PATTERN})(?P<suffix>"\r?)$',
         ),
         VersionTarget(
             name="cargo_lock",
@@ -164,11 +158,11 @@ def main() -> None:
     version = read_version()
     if args.check:
         verify_version(version)
-        print(f"OK: versions and runtime guards match {version}")
+        print(f"OK: package versions match {version}")
         return
     sync_version(version)
     verify_version(version)
-    print(f"Updated versions and runtime guards to {version}")
+    print(f"Updated package versions to {version}")
     print(
         "Next: run `uv sync --extra dev` and "
         "`uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml`."

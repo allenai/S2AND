@@ -29,30 +29,25 @@ with a `clusterer` key rather than a bare clusterer object. The current branch
 does not distribute or load production-model pickles; use the paper-era branch
 and its released artifacts when reproducing those runs.
 
-## Previous release and canonical migration branch
+## Previous release and current branch
 
-The checked-in native v1.21 bundle was the previous release default:
+The native v1.21 bundle was the previous release default. It and the obsolete
+v1.0-v1.2 production pickles have been removed from the current tree. Use the
+compatible prior release or Git history for historical reproduction; no live
+instruction depends on the deleted repository path.
 
-- `production_model_v1.21/`
-
-The obsolete v1.0-v1.2 production pickles have been removed. Canonical-v2 also
-rejects the v1.21 source bundle because its normalization contract is legacy.
 No compatible model or default is distributed on this branch; current
-evaluation requires an explicit model bundle path. The v1.3 model is fixed as
-an immutable external bundle rather than a packaged default. The fixed
-distribution verifier enforces that policy; the release remains incomplete
-until the actual archives pass it.
-
-The v1.21 bundle includes the previous promoted incremental linker under
-`incremental_linker/`. Its replay target is tracked separately at
-`production_model_v1.21/reproducibility/incremental_linker_training_target.json`;
-replay scripts should not depend on machine-local analysis artifacts.
+evaluation requires an explicit model bundle path. The v1.3 model is an
+immutable external bundle rather than a packaged default. Its manifest requires
+the exact generating runtime, so prior models are rejected without a
+legacy compatibility layer.
 
 Promoted-linker replay has one direct command. It materializes temporary
-Arrow/Rust features from the source bundle, target JSON, and pairwise model,
-fits once, and writes a complete v5 bundle containing
+Arrow/Rust features from the source bundle, reviewed target JSON, and final
+pairwise model, fits once, and writes a complete bundle containing
 `reproducibility/incremental_linker_training_target.json`. It reloads that exact
-bundle before evaluation. Follow
+bundle before evaluation. The reviewed current target is
+`tests/fixtures/incremental_linker_training_target.json`. Follow
 [release.md](release.md) before a full command. Durable job
 logs record the command and outcome; no separate evidence-transport protocol is
 required for the trusted-owner release.

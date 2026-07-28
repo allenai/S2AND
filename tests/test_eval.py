@@ -62,55 +62,62 @@ class TestB3AndF1(unittest.TestCase):
         self.assertAlmostEqual(f1_score(0.5, 0.5), 0.5)
 
 
-@pytest.mark.parametrize(
-    "metric",
-    (
-        b3_precision_recall_fscore,
-        cluster_precision_recall_fscore,
-        lambda true_clus, pred_clus: pairwise_precision_recall_fscore(
-            true_clus,
-            pred_clus,
-            {"block": ["s1", "s2"]},
+def test_cluster_metrics_reject_non_partition_memberships() -> None:
+    cases = (
+        (
+            "b3-truth-within",
+            b3_precision_recall_fscore,
+            {"t1": ["s1", "s1"], "t2": ["s2"]},
+            {"p1": ["s1"], "p2": ["s2"]},
+            "Ground-truth",
         ),
-    ),
-    ids=("b3", "cluster", "pairwise"),
-)
-@pytest.mark.parametrize(
-    ("true_clus", "pred_clus", "label"),
-    (
-        ({"t1": ["s1", "s1"], "t2": ["s2"]}, {"p1": ["s1"], "p2": ["s2"]}, "Ground-truth"),
-        ({"t1": ["s1"], "t2": ["s1", "s2"]}, {"p1": ["s1"], "p2": ["s2"]}, "Ground-truth"),
-        ({"t1": ["s1"], "t2": ["s2"]}, {"p1": ["s1", "s1"], "p2": ["s2"]}, "Predicted"),
-        ({"t1": ["s1"], "t2": ["s2"]}, {"p1": ["s1"], "p2": ["s1", "s2"]}, "Predicted"),
-    ),
-    ids=("truth-within", "truth-across", "prediction-within", "prediction-across"),
-)
-def test_cluster_metrics_reject_non_partition_memberships(
-    metric: Any,
-    true_clus: dict[str, list[str]],
-    pred_clus: dict[str, list[str]],
-    label: str,
-) -> None:
-    with pytest.raises(ValueError, match=rf"{label} clustering must be a partition"):
-        metric(true_clus, pred_clus)
+        (
+            "cluster-truth-across",
+            cluster_precision_recall_fscore,
+            {"t1": ["s1"], "t2": ["s1", "s2"]},
+            {"p1": ["s1"], "p2": ["s2"]},
+            "Ground-truth",
+        ),
+        (
+            "pairwise-prediction-within",
+            lambda true_clus, pred_clus: pairwise_precision_recall_fscore(
+                true_clus,
+                pred_clus,
+                {"block": ["s1", "s2"]},
+            ),
+            {"t1": ["s1"], "t2": ["s2"]},
+            {"p1": ["s1", "s1"], "p2": ["s2"]},
+            "Predicted",
+        ),
+        (
+            "b3-prediction-across",
+            b3_precision_recall_fscore,
+            {"t1": ["s1"], "t2": ["s2"]},
+            {"p1": ["s1"], "p2": ["s1", "s2"]},
+            "Predicted",
+        ),
+    )
+    for _case_id, metric, true_clus, pred_clus, label in cases:
+        with pytest.raises(ValueError, match=f"{label} clustering must be a partition"):
+            metric(true_clus, pred_clus)
 
 
-@pytest.mark.parametrize(
-    "metric",
-    (
-        b3_precision_recall_fscore,
-        cluster_precision_recall_fscore,
-        lambda true_clus, pred_clus: pairwise_precision_recall_fscore(
-            true_clus,
-            pred_clus,
-            {"block": ["s1"]},
+def test_cluster_metrics_reject_unequal_coverage() -> None:
+    metrics = (
+        ("b3", b3_precision_recall_fscore),
+        ("cluster", cluster_precision_recall_fscore),
+        (
+            "pairwise",
+            lambda true_clus, pred_clus: pairwise_precision_recall_fscore(
+                true_clus,
+                pred_clus,
+                {"block": ["s1"]},
+            ),
         ),
-    ),
-    ids=("b3", "cluster", "pairwise"),
-)
-def test_cluster_metrics_reject_unequal_coverage(metric: Any) -> None:
-    with pytest.raises(ValueError, match="Predictions do not cover all the signatures"):
-        metric({"t1": ["s1"]}, {"p1": ["s2"]})
+    )
+    for _case_id, metric in metrics:
+        with pytest.raises(ValueError, match="Predictions do not cover all the signatures"):
+            metric({"t1": ["s1"]}, {"p1": ["s2"]})
 
 
 def test_facet_eval_includes_zero_homonymity_and_synonymity_buckets() -> None:

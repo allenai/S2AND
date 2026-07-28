@@ -4,22 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from s2and.arrow_inputs import read_arrow_collection_root
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_LINKER_BUNDLE_ROOT = PROJECT_ROOT / "s2and" / "data" / "s2and_and_big_blocks_linker_dataset_20260513"
-DEFAULT_ARROW_ROOT = PROJECT_ROOT / "s2and" / "data" / "s2and_and_big_blocks_linker_dataset_20260525"
 DEFAULT_GOLD_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_gold"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_sweeps_arrow"
-
-
-def read_json(path: Path) -> Any:
-    """Read a JSON file."""
-
-    with path.open(encoding="utf-8") as infile:
-        return json.load(infile)
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -35,21 +27,11 @@ def sha1_text(value: str) -> str:
     return hashlib.sha1(value.encode("utf-8")).hexdigest()
 
 
-def json_digest(payload: Mapping[str, Any]) -> str:
-    """Return a stable digest for a JSON-serializable mapping."""
-
-    return sha1_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-
-
 def arrow_dataset_dir(arrow_root: Path, dataset: str) -> Path:
-    """Return the dataset directory for either supported Arrow root layout."""
+    """Return a dataset directory declared by a validated Arrow root."""
 
-    candidates = [
-        arrow_root / "datasets" / dataset,
-        arrow_root / dataset,
-    ]
-    for candidate in candidates:
-        if (candidate / "manifest.json").exists():
-            return candidate.resolve()
-    formatted = ", ".join(str(path / "manifest.json") for path in candidates)
-    raise FileNotFoundError(f"No Arrow manifest found for dataset={dataset!r}; checked {formatted}")
+    dataset_manifests, _replay_bundles, _release_version = read_arrow_collection_root(arrow_root / "manifest.json")
+    manifest_path = dataset_manifests.get(dataset)
+    if manifest_path is None:
+        raise ValueError(f"Arrow root does not declare dataset={dataset!r}")
+    return manifest_path.parent

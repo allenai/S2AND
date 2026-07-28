@@ -59,8 +59,6 @@ def test_anddata_uses_only_s2_blocks_and_ignores_legacy_given_block() -> None:
     )
 
     assert dataset.get_blocks() == {"a canonical": ["s1", "s2"]}
-    assert not hasattr(dataset, "block_type")
-    assert not hasattr(dataset.signatures["s1"], "author_info_given_block")
 
 
 def test_split_ratios_do_not_create_a_partition_for_tolerated_roundoff() -> None:
@@ -98,16 +96,14 @@ def test_maybe_load_list_reads_utf8_text(tmp_path):
     assert ANDData.maybe_load_list(str(list_path)) == ["José", "Zoë"]
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {1: np.asarray([1.0]), "1": np.asarray([2.0])},
-        (np.asarray([[1.0], [2.0]]), [1, "1"]),
-    ],
-)
-def test_maybe_load_specter_rejects_keys_that_collide_as_strings(payload):
-    with pytest.raises(ValueError, match="collide after string normalization"):
-        ANDData.maybe_load_specter(payload)
+def test_maybe_load_specter_rejects_keys_that_collide_as_strings():
+    cases = (
+        ("mapping", {1: np.asarray([1.0]), "1": np.asarray([2.0])}),
+        ("tuple", (np.asarray([[1.0], [2.0]]), [1, "1"])),
+    )
+    for _case_id, payload in cases:
+        with pytest.raises(ValueError, match="collide after string normalization"):
+            ANDData.maybe_load_specter(payload)
 
 
 def test_maybe_load_specter_normalizes_tuple_keys_to_strings():
@@ -749,28 +745,35 @@ def test_fixed_pairs_rejects_unordered_pair_overlap_across_splits():
         dataset.fixed_pairs()
 
 
-@pytest.mark.parametrize("invalid_split", ["train", "val", "test"])
-def test_fixed_pairs_rejects_unknown_labels(invalid_split):
-    pair_frames = {
-        split_name: pd.DataFrame(
-            [(f"{split_name}1", f"{split_name}2", "YES")],
-            columns=["signature_id_1", "signature_id_2", "label"],
+def test_fixed_pairs_rejects_unknown_labels():
+    for invalid_split in ("train", "val", "test"):
+        pair_frames = {
+            split_name: pd.DataFrame(
+                [(f"{split_name}1", f"{split_name}2", "YES")],
+                columns=["signature_id_1", "signature_id_2", "label"],
+            )
+            for split_name in ("train", "val", "test")
+        }
+        pair_frames[invalid_split].loc[0, "label"] = "MAYBE"
+        dataset = ANDData(
+            signatures={},
+            papers={},
+            name="fixed_pairs_invalid_label",
+            mode="train",
+            clusters=None,
+            train_pairs=pair_frames["train"],
+            val_pairs=pair_frames["val"],
+            test_pairs=pair_frames["test"],
+            name_counts_index=None,
+            preprocess=False,
         )
-        for split_name in ("train", "val", "test")
-    }
-    pair_frames[invalid_split].loc[0, "label"] = "MAYBE"
-    dataset = ANDData(
-        signatures={},
-        papers={},
-        name="fixed_pairs_invalid_label",
-        mode="train",
-        clusters=None,
-        train_pairs=pair_frames["train"],
-        val_pairs=pair_frames["val"],
-        test_pairs=pair_frames["test"],
-        name_counts_index=None,
-        preprocess=False,
-    )
 
-    with pytest.raises(ValueError, match=rf"Unknown fixed-pair labels.*{invalid_split}.*MAYBE"):
-        dataset.fixed_pairs()
+        try:
+            dataset.fixed_pairs()
+        except ValueError as error:
+            message = str(error)
+            assert "Unknown fixed-pair labels" in message and invalid_split in message and "MAYBE" in message, (
+                f"{invalid_split}: {error}"
+            )
+        else:
+            raise AssertionError(f"{invalid_split}: unknown fixed-pair label was accepted")

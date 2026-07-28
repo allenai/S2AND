@@ -22,9 +22,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from s2and._sha256 import sha256_file as _sha256_file  # noqa: E402
-from s2and.arrow_inputs import ArrowDataset  # noqa: E402
+from s2and.arrow_inputs import ArrowDataset, read_arrow_collection_root  # noqa: E402
+from scripts.production.model.run_binding import load_run_binding, require_run_binding_matches  # noqa: E402
 
-REPORT_SCHEMA = "s2and_performance_evaluation_report_v1"
 RUNNER = "promoted_incremental_arrow_profile"
 MAX_BOUNDED_QUERIES = 400
 MAX_BOUNDED_SEED_CLUSTERS = 400
@@ -169,10 +169,11 @@ def _write_fresh_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _resolve_dataset_root(arrow_root: Path, dataset: str) -> Path:
-    for candidate in (arrow_root / dataset, arrow_root / "datasets" / dataset):
-        if (candidate / "manifest.json").exists():
-            return candidate
-    raise FileNotFoundError(f"Missing Arrow manifest for dataset={dataset!r} under {arrow_root}")
+    dataset_manifests, _replay_bundles, _release_version = read_arrow_collection_root(arrow_root / "manifest.json")
+    manifest_path = dataset_manifests.get(dataset)
+    if manifest_path is None:
+        raise ValueError(f"Arrow root manifest does not declare dataset={dataset!r}")
+    return manifest_path.parent
 
 
 def read_signature_blocks(source_file: BinaryIO) -> dict[str, list[str]]:
@@ -270,18 +271,28 @@ def _performance_args(args: argparse.Namespace) -> tuple[argparse.Namespace, dic
     if not isinstance(payload, Mapping) or set(payload) != {
         "pairwise",
         "cluster",
+        "parity",
         "performance",
+        "subblocking",
+        "baseline_record_sha256",
         "baselines",
         "gates",
     }:
         raise ValueError("Invalid evaluation plan")
     performance = payload["performance"]
-    if not isinstance(performance, Mapping) or set(performance) != {"arrow_root", "workload"}:
+    if not isinstance(performance, Mapping) or set(performance) != {
+        "arrow_root",
+        "arrow_root_manifest_sha256",
+        "workload",
+    }:
         raise ValueError("Invalid evaluation performance plan")
     arrow_root = performance["arrow_root"]
+    arrow_root_manifest_sha256 = performance["arrow_root_manifest_sha256"]
     workload = performance["workload"]
     if not isinstance(arrow_root, str) or not Path(arrow_root).is_absolute():
         raise ValueError("Evaluation performance arrow_root must be absolute")
+    if _sha256_file(Path(arrow_root) / "manifest.json") != arrow_root_manifest_sha256:
+        raise ValueError("Evaluation performance Arrow root manifest changed after release preparation")
     if not isinstance(workload, Mapping) or set(workload) != _WORKLOAD_KEYS:
         raise ValueError(f"Evaluation performance workload must contain exactly {sorted(_WORKLOAD_KEYS)}")
 
@@ -331,7 +342,15 @@ def _validate_args(args: argparse.Namespace) -> None:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     """Run the profile and return its release-report payload."""
 
+    evaluation_plan_path = Path(args.evaluation_plan).resolve()
+    model_path = Path(args.model_path).resolve()
+    binding = load_run_binding(Path(args.run_binding).resolve())
     args, planned_workload = _performance_args(args)
+    require_run_binding_matches(
+        binding,
+        evaluation_plan=evaluation_plan_path,
+        candidate_model_dir=model_path,
+    )
     _validate_args(args)
     psutil_module = _require_psutil()
     rust_extension = _rust_extension_identity(bool(args.require_rust_release))
@@ -429,7 +448,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if workload_report != planned_workload:
         raise RuntimeError("Observed performance workload does not match the evaluation plan")
     return {
-        "schema_version": REPORT_SCHEMA,
         "runner": RUNNER,
         "workload": workload_report,
         "arrow_root": str(arrow_root),
@@ -444,12 +462,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "summary": _summarize_runs(profile_runs),
         "rust_extension": rust_extension,
         "run_metadata": _run_metadata(),
+        "run_binding_sha256": binding["run_binding_sha256"],
     }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evaluation-plan", type=Path, required=True)
+    parser.add_argument("--run-binding", type=Path, required=True)
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--write-json", type=Path, required=True)
     parser.add_argument("--require-rust-release", action="store_true")

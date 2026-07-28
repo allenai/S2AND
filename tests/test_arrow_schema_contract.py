@@ -1,60 +1,14 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
+import s2and.arrow_schema as arrow_schema
 from s2and.arrow_schema import validate_arrow_schema
 
-CONTRACT_PATH = Path("s2and/arrow_schema_contract.json")
 
-
-EXPECTED_REQUIRED_COLUMNS = {
-    "altered_cluster_signatures": {"signature_id"},
-    "cluster_seed_disallows": {"signature_id_1", "signature_id_2"},
-    "cluster_seeds": {"signature_id", "cluster_id"},
-    "incremental_query_signatures": {"signature_id", "query_view", "query_author"},
-    "paper_authors": {"paper_id", "position", "author_name"},
-    "papers": {"paper_id", "title", "venue", "journal_name"},
-    "signatures": {
-        "signature_id",
-        "paper_id",
-        "author_first",
-        "author_middle",
-        "author_last",
-        "author_suffix",
-        "author_affiliations",
-        "author_position",
-    },
-    "specter": {"paper_id", "embedding"},
-}
-
-
-def test_arrow_schema_contract_required_columns_are_pinned() -> None:
-    """Require an explicit contract-version decision when required columns change."""
-
-    payload = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-
-    assert payload["schema_version"] == "s2and_arrow_schema_contract_v1"
-    required_by_table = {
-        table_name: {column["name"] for column in columns if column["required"]}
-        for table_name, columns in payload["tables"].items()
-    }
-
-    assert required_by_table == EXPECTED_REQUIRED_COLUMNS
-
-
-def test_arrow_schema_contract_has_no_duplicate_columns() -> None:
-    payload = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "s2and_arrow_schema_contract_v1"
-
-    for table_name, columns in payload["tables"].items():
-        column_names = [column["name"] for column in columns]
-        assert len(column_names) == len(set(column_names)), table_name
-
-
-def test_full_schema_validation_allows_missing_optional_columns_and_checks_present_ones() -> None:
+def test_full_schema_validation_allows_missing_optional_columns_and_checks_present_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pa = pytest.importorskip("pyarrow")
     required_only = pa.schema(
         [
@@ -74,6 +28,11 @@ def test_full_schema_validation_allows_missing_optional_columns_and_checks_prese
     malformed_optional = required_only.append(pa.field("year", pa.int32()))
     with pytest.raises(ValueError, match="papers column 'year' expected int64"):
         validate_arrow_schema(malformed_optional, table_name="papers")
+
+    duplicate = {"name": "paper_id", "datatype": "string", "required": True}
+    monkeypatch.setattr(arrow_schema, "_contract_tables", lambda: {"papers": [duplicate, duplicate]})
+    with pytest.raises(ValueError, match="repeats column 'paper_id'"):
+        validate_arrow_schema(required_only, table_name="papers")
 
 
 def test_subset_schema_validation_uses_exact_contract_physical_types() -> None:

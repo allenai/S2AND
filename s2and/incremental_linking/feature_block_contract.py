@@ -6,9 +6,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-FEATURE_BLOCK_SCHEMA_VERSION = "feature_block_v2"
-FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION = "feature_block_arrow_v2"
-
 
 def normalize_cluster_seed_disallow_pairs(
     pairs: Iterable[tuple[Any, Any]],
@@ -62,7 +59,6 @@ class FeatureBlockSignatureOrder:
 
     signature_ids: tuple[str, ...]
     query_signature_ids: tuple[str, ...] = ()
-    schema_version: str = FEATURE_BLOCK_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         signature_ids = tuple(str(value) for value in self.signature_ids)

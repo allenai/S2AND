@@ -26,13 +26,10 @@ from s2and.arrow_inputs import (
     normalize_arrow_paths,
 )
 from s2and.arrow_schema import validate_arrow_schema
-from s2and.consts import NORMALIZATION_VERSION
+from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.feature_block_contract import normalize_cluster_seed_disallow_pairs
-from s2and.name_counts_index import NAME_COUNTS_INDEX_SCHEMA_VERSION
 from s2and.text import canonicalize_name_text
 
-ARROW_PHYSICAL_LAYOUT_SCHEMA_VERSION = "s2and_arrow_physical_v1"
-ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION = "arrow_batch_lookup_index"
 INCREMENTAL_QUERY_SIGNATURE_VIEWS = frozenset({"auto", "full", "initial_only"})
 _NAME_COUNTS_INDEX_MAGIC = b"S2NCI001"
 _ARROW_BATCH_LOOKUP_INDEX_MAGIC = b"S2ABI002"
@@ -795,7 +792,6 @@ def _validate_arrow_batch_lookup_index(
     if source_size != int(source_stat.st_size) or source_mtime_ns != int(source_stat.st_mtime_ns):
         _raise_arrow_source_changed(arrow_path, context=context)
     return {
-        "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
         "magic": str(header["magic"]),
         "record_count": record_count,
         "source_size": int(header["source_size"]),
@@ -973,7 +969,6 @@ def write_arrow_batch_lookup_index(
         )
         return str(output_path), {
             "reused": True,
-            "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
             **layout,
             "magic": index_metrics["magic"],
             "record_count": index_metrics["record_count"],
@@ -1044,7 +1039,6 @@ def write_arrow_batch_lookup_index(
             raise
     return str(output_path), {
         "reused": False,
-        "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
         "magic": _ARROW_BATCH_LOOKUP_INDEX_MAGIC.decode("ascii"),
         "row_count": records.row_count,
         "record_count": records.row_count,
@@ -1099,7 +1093,7 @@ def raw_planner_arrow_physical_layout(
     *,
     max_record_batch_rows: Mapping[str, int] | int | None = RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
 ) -> dict[str, Any]:
-    """Build manifest-ready physical-layout metadata for raw-planner Arrow inputs."""
+    """Inspect the physical layout of raw-planner Arrow inputs."""
 
     tables: dict[str, dict[str, int | str | bool]] = {}
     for table_name in RAW_PLANNER_ARROW_KEY_COLUMNS:
@@ -1125,7 +1119,6 @@ def raw_planner_arrow_physical_layout(
             **layout,
         }
     return {
-        "schema": ARROW_PHYSICAL_LAYOUT_SCHEMA_VERSION,
         "optimized_for": "incremental_raw_candidate_planning",
         "tables": tables,
     }
@@ -1523,7 +1516,6 @@ def write_name_counts_index(
             total_records += record_count
             total_bytes += byte_count
             manifest_files[kind] = {
-                "path": filename,
                 "byte_count": byte_count,
                 "sha256": _sha256_file(index_file),
             }
@@ -1532,8 +1524,8 @@ def write_name_counts_index(
             metrics[f"{kind}_temporary_bytes"] = file_metrics["temporary_byte_count"]
 
         manifest = {
-            "schema_version": NAME_COUNTS_INDEX_SCHEMA_VERSION,
-            "normalization_version": NORMALIZATION_VERSION,
+            "kind": "s2and_name_counts",
+            "format_version": PUBLIC_DATA_FORMAT_VERSION,
             "files": manifest_files,
         }
         manifest_path = temporary_index_dir / "manifest.json"

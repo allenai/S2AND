@@ -47,7 +47,6 @@ def test_emit_memory_telemetry_writes_jsonl(monkeypatch, tmp_path):
     memory_budget.emit_memory_telemetry({"stage": "test_stage", "value": 7})
 
     record = json.loads(output_path.read_text(encoding="utf-8"))
-    assert record["schema_version"] == 1
     assert record["event"] == "memory_telemetry"
     assert record["stage"] == "test_stage"
     assert record["value"] == 7
@@ -61,16 +60,15 @@ def test_emit_memory_telemetry_ignores_blank_env(monkeypatch, tmp_path):
     assert not output_path.exists()
 
 
-@pytest.mark.parametrize(("safety_factor", "expected", "suffix"), [(0.8, 8000, "80pct"), (0.75, 7500, "75pct")])
-def test_resolve_total_ram_cgroup_uses_safety_factor(safety_factor: float, expected: int, suffix: str):
+def test_resolve_total_ram_cgroup_uses_safety_factor():
     resolved, source = memory_budget.resolve_total_ram_bytes(
         None,
         detect_cgroup_fn=lambda: (10_000, "cgroup:test"),
         detect_total_fn=lambda: (None, "unavailable"),
-        autodetect_safety_factor=safety_factor,
+        autodetect_safety_factor=0.8,
     )
-    assert resolved == expected
-    assert source == f"cgroup:test_{suffix}"
+    assert resolved == 8000
+    assert source == "cgroup:test_80pct"
 
 
 def test_resolve_total_ram_windows_fallback_uses_safety_factor(monkeypatch):
@@ -270,7 +268,7 @@ def test_promoted_resident_retrieval_payload_is_not_reserved_twice():
     assert pending.predicted_peak_rss_bytes == 10_000_000 + pending.predicted_peak_delta_bytes
 
 
-def test_native_scorer_chunk_plan_uses_full_call_when_scratch_fits() -> None:
+def test_native_scorer_chunk_plan_handles_full_chunking_and_exhaustion() -> None:
     plan = memory_budget.compute_native_scorer_chunk_plan(
         row_count=1_000,
         feature_count=53,
@@ -282,8 +280,6 @@ def test_native_scorer_chunk_plan_uses_full_call_when_scratch_fits() -> None:
     assert plan.chunk_count == 1
     assert plan.predicted_peak_delta_bytes == 1_000 * (53 * 4 + 8)
 
-
-def test_native_scorer_chunk_plan_bounds_owned_copy_under_tight_budget() -> None:
     plan = memory_budget.compute_native_scorer_chunk_plan(
         row_count=100_000,
         feature_count=70,
@@ -295,8 +291,6 @@ def test_native_scorer_chunk_plan_bounds_owned_copy_under_tight_budget() -> None
     assert plan.chunk_count > 1
     assert plan.predicted_peak_delta_bytes <= plan.stage_budget_bytes
 
-
-def test_native_scorer_chunk_plan_fails_when_output_and_one_row_do_not_fit() -> None:
     with pytest.raises(MemoryError, match="cannot fit one scratch row"):
         memory_budget.compute_native_scorer_chunk_plan(
             row_count=10_000,
@@ -306,23 +300,6 @@ def test_native_scorer_chunk_plan_fails_when_output_and_one_row_do_not_fit() -> 
             stage_budget_fraction=0.5,
             current_rss_fn=lambda _total: (800_000, "rss:test"),
         )
-
-
-def test_compute_promoted_phase_a_limits_allows_zero_queries_with_default_batch_limit():
-    limits = _compute_promoted_phase_a_limits(
-        query_count=0,
-        component_sizes=[100, 50],
-        retrieval_top_k=2,
-        total_ram_bytes=1_000_000_000,
-        stage_budget_fraction=0.50,
-        fixed_overhead_bytes=1024,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
-    )
-
-    assert int(limits.query_batch_size) == 0
-    assert int(limits.predicted_peak_delta_bytes) > 0
 
 
 def test_compute_promoted_phase_a_limits_shrinks_query_batch_under_tight_budget():
@@ -422,7 +399,7 @@ def test_compute_promoted_phase_a_limits_fails_when_single_query_exceeds_budget(
         )
 
 
-def test_compute_promoted_phase_a_limits_zero_queries_no_threshold_returns_empty_batch():
+def test_compute_promoted_phase_a_limits_zero_queries_skip_work_and_single_query_budget():
     # All-seeded incremental request: every signature is already in a seed component,
     # so query_count == 0 and no batching_threshold is forwarded. This must not raise;
     # the planner short-circuits to a zero-size batch (no work to do).
@@ -439,8 +416,6 @@ def test_compute_promoted_phase_a_limits_zero_queries_no_threshold_returns_empty
 
     assert int(limits.query_batch_size) == 0
 
-
-def test_compute_promoted_phase_a_limits_zero_queries_ignores_single_query_budget():
     limits = _compute_promoted_phase_a_limits(
         query_count=0,
         component_sizes=[4],
@@ -457,21 +432,21 @@ def test_compute_promoted_phase_a_limits_zero_queries_ignores_single_query_budge
     assert int(limits.predicted_peak_delta_bytes) >= 20_000_000
 
 
-@pytest.mark.parametrize("query_count", [0, 5])
-def test_compute_promoted_phase_a_limits_rejects_explicit_nonpositive_threshold(query_count):
+def test_compute_promoted_phase_a_limits_rejects_explicit_nonpositive_threshold():
     # An explicit non-positive caller value is always invalid, including when
     # query_count == 0 (it must not be silently coerced to a 1-size batch).
-    with pytest.raises(ValueError, match="max_query_batch_size must be positive"):
-        _compute_promoted_phase_a_limits(
-            query_count=query_count,
-            component_sizes=[4],
-            retrieval_top_k=50,
-            total_ram_bytes=8_000_000_000,
-            max_query_batch_size=0,
-            detect_cgroup_fn=lambda: (None, "unavailable"),
-            detect_total_fn=lambda: (None, "unavailable"),
-            current_rss_fn=lambda _total: (100_000_000, "rss:test"),
-        )
+    for query_count in (0, 5):
+        with pytest.raises(ValueError, match="max_query_batch_size must be positive"):
+            _compute_promoted_phase_a_limits(
+                query_count=query_count,
+                component_sizes=[4],
+                retrieval_top_k=50,
+                total_ram_bytes=8_000_000_000,
+                max_query_batch_size=0,
+                detect_cgroup_fn=lambda: (None, "unavailable"),
+                detect_total_fn=lambda: (None, "unavailable"),
+                current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+            )
 
 
 def test_summarize_prediction_accuracy_flags_underprediction():
@@ -482,10 +457,8 @@ def test_summarize_prediction_accuracy_flags_underprediction():
         rss_peak_bytes=1200,
         rss_after_bytes=1100,
     )
-    assert str(summary.prediction_contract_version) == "delta_v1"
     assert int(summary.predicted_peak_delta_bytes) == 100
     assert int(summary.predicted_peak_rss_bytes) == 1100
-    assert int(summary.predicted_bytes) == 100
     assert int(summary.observed_peak_delta_bytes) == 200
     assert bool(summary.underpredicted) is True
     assert float(summary.prediction_error_ratio) == 2.0

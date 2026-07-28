@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gc
-import json
 import weakref
 from pathlib import Path
 
@@ -43,8 +42,7 @@ def test_open_cache_retains_only_four_paths(tmp_path: Path) -> None:
 
 def test_corrupt_published_material_is_rejected_on_open(tmp_path: Path) -> None:
     path = _write_index(tmp_path)
-    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
-    first_path = path / manifest["files"]["first"]["path"]
+    first_path = path / "first.bin"
     first_path.write_bytes(first_path.read_bytes() + b"corrupt")
 
     with pytest.raises((OSError, RuntimeError, ValueError), match="byte_count|SHA-256"):

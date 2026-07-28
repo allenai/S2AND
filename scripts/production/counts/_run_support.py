@@ -6,29 +6,20 @@ import json
 from collections.abc import Collection
 from pathlib import Path
 
-MAX_FIXTURE_BYTES = 64 * 1024**2
 
+def validate_input_file(path: Path, *, option: str) -> Path:
+    """Resolve one required input file before announcing a run plan."""
 
-def require_positive(value: int | None, *, option: str) -> int | None:
-    """Validate one optional positive integer."""
-
-    if value is not None and value < 1:
-        raise ValueError(f"{option} must be positive")
-    return value
-
-
-def validate_fixture_path(path: Path | None) -> Path:
-    """Resolve one existing, reasonably sized fixture."""
-
-    if path is None:
-        raise ValueError("fixture input is required")
     resolved = path.resolve()
     if not resolved.is_file():
-        raise FileNotFoundError(f"fixture input does not exist or is not a file: {resolved}")
-    size = resolved.stat().st_size
-    if size > MAX_FIXTURE_BYTES:
-        raise ValueError(f"fixture input is {size} bytes; limit is {MAX_FIXTURE_BYTES}")
+        raise FileNotFoundError(f"{option} does not exist or is not a file: {resolved}")
     return resolved
+
+
+def emit_jsonl(payload: object) -> None:
+    """Write and flush one machine-readable progress record."""
+
+    print(json.dumps(payload, sort_keys=True), flush=True)
 
 
 def validate_output_container(output_dir: Path, *, publication_path: Path) -> Path:
@@ -52,7 +43,7 @@ def load_guardrails(path: Path | None, *, fields: Collection[str]) -> dict[str, 
     """Load one strict positive-integer guardrail object."""
 
     if path is None:
-        raise ValueError("--guardrails-json is required for a full input")
+        raise ValueError("--guardrails-json is required")
     resolved = path.resolve()
     if not resolved.is_file():
         raise FileNotFoundError(f"guardrail file does not exist or is not a file: {resolved}")

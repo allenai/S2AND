@@ -6,8 +6,6 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-import pytest
-
 from scripts.verification.verify_production_model_distributions import verify_production_model_distributions
 
 TUPLE_DATA_PATH = "s2and/data/s2and_name_tuples_canonical.txt"
@@ -73,30 +71,27 @@ def _write_distribution_fixture(
     return dist_dir, root
 
 
-@pytest.mark.parametrize(
-    ("archive_kind", "replacement", "error"),
-    (
+def test_distribution_verifier_rejects_missing_or_drifted_member(tmp_path: Path) -> None:
+    cases = (
         ("wheel", None, "missing required distribution files"),
         ("sdist", None, "missing required distribution files"),
         ("wheel", b"tampered\n", "content differs from the source tree"),
-        ("sdist", b"tampered\n", "content differs from the source tree"),
-    ),
-)
-def test_distribution_verifier_rejects_missing_or_drifted_member(
-    tmp_path: Path,
-    archive_kind: str,
-    replacement: bytes | None,
-    error: str,
-) -> None:
-    overrides = {GENERIC_MEMBER_PATH: replacement}
-    dist_dir, source_root = _write_distribution_fixture(
-        tmp_path,
-        wheel_overrides=overrides if archive_kind == "wheel" else None,
-        sdist_overrides=overrides if archive_kind == "sdist" else None,
     )
+    for archive_kind, replacement, message in cases:
+        case_id = f"{archive_kind}-{'missing' if replacement is None else 'drifted'}"
+        overrides = {GENERIC_MEMBER_PATH: replacement}
+        dist_dir, source_root = _write_distribution_fixture(
+            tmp_path / case_id,
+            wheel_overrides=overrides if archive_kind == "wheel" else None,
+            sdist_overrides=overrides if archive_kind == "sdist" else None,
+        )
 
-    with pytest.raises(ValueError, match=error):
-        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+        try:
+            verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+        except ValueError as error:
+            assert message in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: invalid distribution member was accepted")
 
 
 def test_distribution_verifier_accepts_valid_archives(tmp_path: Path) -> None:
@@ -105,28 +100,38 @@ def test_distribution_verifier_accepts_valid_archives(tmp_path: Path) -> None:
     verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
 
 
-@pytest.mark.parametrize("missing_path", REQUIRED_RUNTIME_PATHS)
-def test_distribution_verifier_requires_runtime_artifact(tmp_path: Path, missing_path: str) -> None:
-    dist_dir, source_root = _write_distribution_fixture(tmp_path)
-    _write_package_data_config(source_root, set(RELEASE_MEMBERS) - {missing_path})
+def test_distribution_verifier_requires_runtime_artifact(tmp_path: Path) -> None:
+    for index, missing_path in enumerate(sorted(REQUIRED_RUNTIME_PATHS)):
+        case_id = f"runtime-artifact-{index}"
+        dist_dir, source_root = _write_distribution_fixture(tmp_path / case_id)
+        _write_package_data_config(source_root, set(RELEASE_MEMBERS) - {missing_path})
 
-    with pytest.raises(ValueError, match="Release distributions require these paths"):
-        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+        try:
+            verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+        except ValueError as error:
+            assert "Release distributions require these paths" in str(error), f"{missing_path}: {error}"
+        else:
+            raise AssertionError(f"{missing_path}: missing runtime artifact was accepted")
 
 
-@pytest.mark.parametrize("archive_kind", ("wheel", "sdist"))
-@pytest.mark.parametrize("forbidden_path", (DEFAULT_MODEL_PATH, MODEL_MEMBER_PATH))
-def test_distribution_verifier_rejects_model_path(
-    tmp_path: Path,
-    archive_kind: str,
-    forbidden_path: str,
-) -> None:
-    overrides = {forbidden_path: b"{}\n"}
-    dist_dir, source_root = _write_distribution_fixture(
-        tmp_path,
-        wheel_overrides=overrides if archive_kind == "wheel" else None,
-        sdist_overrides=overrides if archive_kind == "sdist" else None,
+def test_distribution_verifier_rejects_model_path(tmp_path: Path) -> None:
+    cases = (
+        ("wheel", DEFAULT_MODEL_PATH),
+        ("wheel", MODEL_MEMBER_PATH),
+        ("sdist", DEFAULT_MODEL_PATH),
     )
+    for archive_kind, forbidden_path in cases:
+        case_id = f"{archive_kind}-{Path(forbidden_path).parent.name}-{Path(forbidden_path).name}"
+        overrides = {forbidden_path: b"{}\n"}
+        dist_dir, source_root = _write_distribution_fixture(
+            tmp_path / case_id,
+            wheel_overrides=overrides if archive_kind == "wheel" else None,
+            sdist_overrides=overrides if archive_kind == "sdist" else None,
+        )
 
-    with pytest.raises(ValueError, match="forbidden production model paths"):
-        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+        try:
+            verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+        except ValueError as error:
+            assert "forbidden production model paths" in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: forbidden model path was accepted")

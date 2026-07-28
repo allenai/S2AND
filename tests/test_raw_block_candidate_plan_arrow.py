@@ -20,7 +20,6 @@ from s2and.incremental_linking.feature_block import (
 )
 from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS,
-    RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     RawArrowPlanBundle,
     build_linker_retrieval_batch_from_raw_plan_bundle,
 )
@@ -51,7 +50,6 @@ def _minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
     row_count = int(overrides.pop("row_count", 0))
     pair_count = int(overrides.pop("pair_count", 0))
     plan: dict[str, Any] = {
-        "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
         "query_signature_ids": query_signature_ids,
         "query_views": ["full"] * len(query_signature_ids),
         "query_authors": ["Alice"] * len(query_signature_ids),
@@ -255,12 +253,7 @@ def _refresh_name_count_file_manifest(index_root: str | Path, kind: str, record_
 
 
 def _name_count_record_path(index_root: str | Path, kind: str) -> Path:
-    index_path = Path(index_root)
-    manifest = json.loads((index_path / "manifest.json").read_text(encoding="utf-8"))
-    record_path = Path(manifest["files"][kind]["path"])
-    if not record_path.is_absolute():
-        record_path = index_path / record_path
-    return record_path
+    return Path(index_root) / f"{kind}.bin"
 
 
 def _base_arrow_paths(
@@ -1738,7 +1731,6 @@ def test_raw_arrow_plan_bundle_derives_signature_order_from_rust_plan(tmp_path: 
         num_threads=1,
     )
     assert tuple(raw_plan) == (
-        "schema_version",
         "row_count",
         "pair_count",
         "query_signature_ids",
@@ -1903,7 +1895,6 @@ def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_see
         num_threads=1,
     )
 
-    assert raw_plan["schema_version"] == "raw_arrow_labeled_candidate_plan_v1"
     assert raw_plan["row_component_keys"] == ["c_other", "c_match"]
     assert raw_plan["left_signature_ids"] == ["q1", "q1"]
     assert raw_plan["right_signature_ids"] == ["s2", "s1"]
@@ -2167,21 +2158,6 @@ def test_rust_featurizer_rejects_unsorted_name_counts_index(
     _swap_first_two_name_count_records(paths["name_counts_index"], "first")
 
     with pytest.raises(ValueError, match="not sorted"):
-        _native_featurizer(paths, ["q1", "s1", "s2"], set())
-
-
-def test_rust_featurizer_rejects_wrong_name_counts_index_schema_version(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    paths = _base_arrow_paths(tmp_path)
-    paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact", monkeypatch)
-    manifest_path = Path(paths["name_counts_index"]) / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["schema_version"] = "unexpected"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="schema_version"):
         _native_featurizer(paths, ["q1", "s1", "s2"], set())
 
 

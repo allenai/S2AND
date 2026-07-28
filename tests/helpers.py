@@ -30,9 +30,7 @@ def pairwise_training_args(
     values = {
         "run_full": True,
         "output_dir": output_dir or tmp_path / "production_model_v9.9",
-        "production_version": "9.9",
         "n_iter": 1,
-        "cluster_n_iter": 1,
         "n_jobs": 1,
         "chunk_size": 8,
         "train_pairs_size": 4,
@@ -236,7 +234,6 @@ def build_arrow_training_dataset(
 
     from s2and.arrow_inputs import ArrowDataset
     from s2and.arrow_training import build_training_anddata_from_arrow
-    from s2and.consts import NORMALIZATION_VERSION
     from s2and.incremental_linking.feature_block_arrow import (
         write_name_counts_index,
         write_raw_arrow_batch_lookup_indexes,
@@ -283,7 +280,6 @@ def build_arrow_training_dataset(
         bundle_dir,
         require_specter=include_specter,
         require_name_counts_index=True,
-        expected_normalization_version=NORMALIZATION_VERSION,
     )
     return build_training_anddata_from_arrow(
         arrow_dataset,

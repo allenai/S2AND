@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
+from hashlib import sha256
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -31,12 +33,16 @@ def _parity_argv(
         "compare_full_predict_arrow_parity.py",
         "--fixture-dir",
         str(fixture_dir or tmp_path),
+        "--evaluation-plan",
+        str(tmp_path / "evaluation_plan.json"),
         "--output-dir",
         str(tmp_path / "out"),
         "--output-json",
         str(tmp_path / "report.json"),
         "--model-path",
         str(model_dir or tmp_path / "model"),
+        "--run-binding",
+        str(tmp_path / "run_binding.json"),
         "--block-size",
         "2",
     ]
@@ -137,7 +143,6 @@ def test_parity_main_rejects_mismatch_without_report(tmp_path, monkeypatch) -> N
 
 def test_parity_main_writes_fresh_report_on_success(tmp_path, monkeypatch) -> None:
     report = {
-        "schema_version": parity_module.REPORT_SCHEMA,
         "distance_comparison": {},
         "clusters_exact_match": True,
     }
@@ -162,6 +167,60 @@ def test_parity_fixture_meta_paths_resolve_relative_to_fixture_dir(tmp_path) -> 
 
     assert _fixture_meta_path(meta, tmp_path, "signatures") == tmp_path / "signatures.json"
     assert _load_cluster_seeds_require(meta, tmp_path, ["s1"], enabled=True) == {"s1": "c1"}
+
+
+def test_release_parity_inputs_are_content_and_workload_bound(tmp_path) -> None:
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    signatures = fixture_dir / "signatures.json"
+    papers = fixture_dir / "papers.json"
+    signatures.write_text('{"s1": {}}\n', encoding="utf-8")
+    papers.write_text("{}\n", encoding="utf-8")
+    (fixture_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "block": "reviewed",
+                "dataset": "dummy",
+                "paths": {
+                    "papers": papers.name,
+                    "signatures": signatures.name,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    workload = {
+        "block_size": 2,
+        "compare_features": True,
+        "include_specter": False,
+        "n_jobs": 1,
+        "total_ram_bytes": 1_000_000,
+        "use_cluster_seeds": False,
+    }
+    plan = {
+        "block": "reviewed",
+        "dataset": "dummy",
+        "files": {
+            "papers": (papers.resolve(), sha256(papers.read_bytes()).hexdigest()),
+            "signatures": (signatures.resolve(), sha256(signatures.read_bytes()).hexdigest()),
+        },
+        "fixture_dir": fixture_dir.resolve(),
+        "workload": workload,
+    }
+    args = SimpleNamespace(
+        block_size=2,
+        compare_features=True,
+        fixture_dir=fixture_dir,
+        n_jobs=1,
+        no_specter=True,
+        total_ram_bytes=1_000_000,
+        use_cluster_seeds=False,
+    )
+
+    assert parity_module._validated_release_parity_inputs(args, plan)["dataset"] == "dummy"
+    signatures.write_text('{"changed": {}}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="signatures"):
+        parity_module._validated_release_parity_inputs(args, plan)
 
 
 def _write_ipc(path, table) -> str:
@@ -194,19 +253,13 @@ def test_parity_arrow_writer_adds_current_raw_planner_indexes(tmp_path) -> None:
     indexed_paths, index_metrics, physical_layout = _write_raw_planner_indexes_and_layout(arrow_paths, tmp_path)
 
     assert indexed_paths["signatures_batch_index"].endswith("signatures.signatures_batch_index.bin")
-    assert index_metrics["signatures_batch_index"]["schema_version"] == "arrow_batch_lookup_index"
     assert index_metrics["signatures_batch_index"]["magic"] == "S2ABI002"
-    assert physical_layout["schema"] == "s2and_arrow_physical_v1"
+    assert physical_layout["tables"]["signatures"]["batch_index_present"] is True
 
 
 def test_parity_arrow_writer_publishes_validator_compatible_manifest(tmp_path) -> None:
-    from s2and.consts import NORMALIZATION_VERSION
     from tests.helpers import write_minimal_arrow_prediction_bundle
 
     write_minimal_arrow_prediction_bundle(tmp_path)
-    with ArrowDataset.open(
-        tmp_path,
-        expected_normalization_version=NORMALIZATION_VERSION,
-    ) as dataset:
-        assert dataset.generation_id
-        assert dataset.normalization_version == NORMALIZATION_VERSION
+    with ArrowDataset.open(tmp_path) as dataset:
+        assert dataset.root == tmp_path.resolve()

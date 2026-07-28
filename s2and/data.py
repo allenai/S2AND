@@ -24,7 +24,6 @@ from s2and.consts import (
     CLUSTER_SEEDS_LOOKUP,
     LARGE_DISTANCE,
     NAME_COUNTS_INDEX_PATH,
-    NORMALIZATION_VERSION,
     NUMPY_NAN,
 )
 from s2and.mp import UniversalPool
@@ -844,7 +843,6 @@ class ANDData:
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
-        self.normalization_version = NORMALIZATION_VERSION
         self.name_counts_index: NameCountsIndex | None = None
         if name_counts_index is not None:
             logger.info("opening name-count index (manifest-cached)")

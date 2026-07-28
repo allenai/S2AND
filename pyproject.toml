@@ -85,9 +85,6 @@ version = { file = "VERSION" }
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
-markers = [
-    "requires_lfs: tests that require Git LFS artifacts to be materialized",
-]
 
 [tool.coverage.run]
 # pytest-cov 7 delegates subprocess measurement to coverage.py.

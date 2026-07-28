@@ -18,7 +18,6 @@ from s2and.incremental_linking.gate_buckets import (
 )
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 
-RAW_CANDIDATE_PLAN_SCHEMA_VERSION = "raw_arrow_candidate_plan_v2"
 RAW_CANDIDATE_PLAN_BATCH_ROW_KEYS: tuple[str, ...] = (
     "row_query_signature_indices",
     "row_component_keys",
@@ -261,12 +260,6 @@ class RawArrowPlanBundle:
         arrays are made read-only before the caller can observe the bundle.
         """
 
-        schema_version = _required_raw_plan_value(plan, "schema_version")
-        if schema_version != RAW_CANDIDATE_PLAN_SCHEMA_VERSION:
-            raise ValueError(
-                "raw candidate plan schema_version must be "
-                f"{RAW_CANDIDATE_PLAN_SCHEMA_VERSION!r}, got {schema_version!r}"
-            )
         row_count = _raw_plan_nonnegative_count(plan, "row_count")
         pair_count = _raw_plan_nonnegative_count(plan, "pair_count")
         missing = sorted(

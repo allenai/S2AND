@@ -19,7 +19,7 @@ from s2and.incremental_linking.feature_block import (
 )
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from scripts.convert_to_arrow import RuntimeDatasetSources
-from tests.helpers import tiny_name_counts_tuple
+from tests.helpers import tiny_name_counts_tuple, write_test_arrow_artifact_manifest
 
 
 def _fake_sources(tmp_path: Path, dataset: str) -> RuntimeDatasetSources:
@@ -482,6 +482,14 @@ def test_validate_manifest_require_embeddings_reports_missing_specter_rows(tmp_p
     assert metrics["missing_specter_paper_count"] == 1
     assert metrics["missing_specter_paper_examples"] == ["p2"]
 
+    with pytest.raises(ValueError, match="require_complete_embeddings=True.*p2"):
+        convert_to_arrow.validate_arrow_dataset_manifest(
+            {"paths": paths},
+            require_embeddings=True,
+            require_name_counts_index=False,
+            require_complete_embeddings=True,
+        )
+
 
 def test_validate_arrow_dataset_manifest_rejects_malformed_optional_column(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
@@ -618,46 +626,6 @@ def test_validate_arrow_dataset_manifest_accepts_blank_paper_author_names(tmp_pa
         assert metrics["paper_author_count"] == 1, case_id
 
 
-def test_validate_manifest_can_require_complete_specter_rows(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    signatures_path = tmp_path / "signatures.arrow"
-    papers_path = tmp_path / "papers.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter_path = tmp_path / "specter.arrow"
-    _write_signatures_table(pa, signatures_path, ["s1", "s2"], ["p1", "p2"])
-    _write_papers_table(pa, papers_path, ["p1", "p2"])
-    _write_paper_authors_table(pa, paper_authors_path, ["p1", "p2"], ["Ada Lovelace", "Bob Smith"])
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([0.1, 0.2], type=pa.float32()), 2),
-            }
-        ),
-        specter_path,
-    )
-
-    manifest = {
-        "paths": {
-            "signatures": str(signatures_path),
-            "papers": str(papers_path),
-            "paper_authors": str(paper_authors_path),
-            "specter": str(specter_path),
-        },
-        "signature_count": 2,
-        "paper_count": 2,
-    }
-
-    with pytest.raises(ValueError, match="require_complete_embeddings=True.*p2"):
-        convert_to_arrow.validate_arrow_dataset_manifest(
-            manifest,
-            require_embeddings=True,
-            require_name_counts_index=False,
-            require_complete_embeddings=True,
-        )
-
-
 def test_write_specter_arrow_reports_zero_size_vectors(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     pytest.importorskip("pyarrow")
     source_path = tmp_path / "specter.pkl"
@@ -685,17 +653,47 @@ def test_write_specter_arrow_reports_zero_size_vectors(tmp_path: Path, caplog: p
     assert "zero-size vectors" in caplog.text
 
 
-def test_validate_arrow_dataset_dir_resolves_relative_manifest_paths() -> None:
-    pytest.importorskip("pyarrow")
-    fixture = Path("tests/fixtures/arrow/pubmed_specter2/pubmed")
+def test_validate_arrow_dataset_dir_resolves_relative_manifest_paths(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    signatures_path = tmp_path / "signatures.arrow"
+    papers_path = tmp_path / "papers.arrow"
+    paper_authors_path = tmp_path / "paper_authors.arrow"
+    specter_path = tmp_path / "specter.arrow"
+    _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
+    _write_papers_table(pa, papers_path, ["p1"])
+    _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(["p1"], type=pa.string()),
+                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([0.1, 0.2], type=pa.float32()), 2),
+            }
+        ),
+        specter_path,
+    )
+    paths, _metrics = write_raw_arrow_batch_lookup_indexes(
+        {
+            "signatures": str(signatures_path),
+            "papers": str(papers_path),
+            "paper_authors": str(paper_authors_path),
+            "specter": str(specter_path),
+        },
+        tmp_path,
+    )
+    name_counts_index, _metrics = write_name_counts_index(
+        tmp_path / "name_counts_index",
+        tiny_name_counts_tuple(),
+    )
+    paths["name_counts_index"] = name_counts_index
+    write_test_arrow_artifact_manifest(tmp_path, paths)
 
     metrics = convert_to_arrow.validate_arrow_dataset_dir(
-        fixture,
+        tmp_path,
         require_embeddings=True,
         require_name_counts_index=True,
     )
 
-    assert metrics["signature_count"] == 2871
+    assert metrics["signature_count"] == 1
     assert metrics["name_counts_index_present"] is True
 
 

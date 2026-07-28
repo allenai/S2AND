@@ -63,137 +63,9 @@ def _minimal_service_payload(signature_id: str = "s1", paper_id: int = 1) -> dic
     }
 
 
-def test_convert_service_json_to_arrow_rejects_altered_without_seed(tmp_path: Path) -> None:
-    payload = _minimal_service_payload()
-    payload["altered_cluster_signatures"] = ["s1"]
+def _convert_service_payload(tmp_path: Path, payload: dict[str, Any]) -> tuple[dict[str, Any], Path]:
     input_json = tmp_path / "service_payload.json"
     input_json.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="Altered cluster signature s1 not in cluster_seeds_require"):
-        convert_service_json_to_arrow(
-            input_json=input_json,
-            output_root=tmp_path / "arrow",
-            dataset_name="service_payload",
-            name_counts_index_root=tmp_path,
-            n_jobs=1,
-            overwrite=True,
-            skip_name_counts_index=True,
-        )
-
-
-def test_convert_service_json_to_arrow_preserves_author_rows_that_normalize_empty(tmp_path: Path) -> None:
-    for case_id, source_author_name in (("empty", ""), ("blank", "   "), ("digits", "24")):
-        case_root = tmp_path / case_id
-        case_root.mkdir()
-        payload = _minimal_service_payload()
-        payload["papers"][0]["authors"][0]["author_name"] = source_author_name
-        input_json = case_root / "service_payload.json"
-        input_json.write_text(json.dumps(payload), encoding="utf-8")
-
-        manifest = convert_service_json_to_arrow(
-            input_json=input_json,
-            output_root=case_root / "arrow",
-            dataset_name="service_payload",
-            name_counts_index_root=case_root,
-            n_jobs=1,
-            overwrite=True,
-            skip_name_counts_index=True,
-        )
-
-        dataset_dir = case_root / "arrow" / "service_payload"
-        paper_authors = _read_table(str(_manifest_path(manifest, dataset_dir, "paper_authors")))
-        assert paper_authors.to_pylist() == [{"paper_id": "1", "position": 0, "author_name": ""}], case_id
-        assert manifest["validation"]["paper_author_count"] == 1, case_id
-
-
-def test_convert_service_json_to_arrow_preserves_seed_and_altered_tables(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    payload = {
-        "signatures": [
-            {
-                "signature_id": "s1",
-                "paper_id": 1,
-                "author_info": {
-                    "position": 0,
-                    "block": "a smith",
-                    "first": "Alice",
-                    "middle": None,
-                    "last": "Smith",
-                    "suffix": None,
-                    "email": None,
-                    "affiliations": [],
-                    "source_ids": [],
-                },
-            },
-            {
-                "signature_id": "s2",
-                "paper_id": 2,
-                "author_info": {
-                    "position": 0,
-                    "block": "a smith",
-                    "first": "Alice",
-                    "middle": None,
-                    "last": "Smith",
-                    "suffix": None,
-                    "email": None,
-                    "affiliations": [],
-                    "source_ids": [],
-                },
-            },
-            {
-                "signature_id": "q",
-                "paper_id": 3,
-                "author_info": {
-                    "position": 0,
-                    "block": "a smith",
-                    "first": "Alex",
-                    "middle": None,
-                    "last": "Smith",
-                    "suffix": None,
-                    "email": None,
-                    "affiliations": [],
-                    "source_ids": [],
-                },
-            },
-        ],
-        "papers": [
-            {
-                "paper_id": 1,
-                "title": "One",
-                "abstract": "Has Abstract",
-                "journal_name": "",
-                "venue": "",
-                "year": 2020,
-                "authors": [{"position": 0, "author_name": "Alice Smith"}],
-            },
-            {
-                "paper_id": 2,
-                "title": "Two",
-                "abstract": "Has Abstract",
-                "journal_name": "",
-                "venue": "",
-                "year": 2021,
-                "authors": [{"position": 0, "author_name": "Alice Smith"}],
-            },
-            {
-                "paper_id": 3,
-                "title": "Three",
-                "abstract": "",
-                "journal_name": "",
-                "venue": "",
-                "year": 2022,
-                "authors": [{"position": 0, "author_name": "Alex Smith"}],
-            },
-        ],
-        "paper_embeddings": {"1": [0.1, 0.2], "2": [0.2, 0.3], "3": [0.3, 0.4]},
-        "cluster_seeds": {"s1": {"s2": "require", "q": "disallow"}},
-        "altered_cluster_signatures": ["s1"],
-    }
-    input_json = tmp_path / "service_payload.json"
-    input_json.write_text(json.dumps(payload), encoding="utf-8")
-
     manifest = convert_service_json_to_arrow(
         input_json=input_json,
         output_root=tmp_path / "arrow",
@@ -203,11 +75,67 @@ def test_convert_service_json_to_arrow_preserves_seed_and_altered_tables(
         overwrite=True,
         skip_name_counts_index=True,
     )
+    return manifest, tmp_path / "arrow" / "service_payload"
+
+
+def test_convert_service_json_to_arrow_rejects_altered_without_seed(tmp_path: Path) -> None:
+    payload = _minimal_service_payload()
+    payload["altered_cluster_signatures"] = ["s1"]
+
+    with pytest.raises(ValueError, match="Altered cluster signature s1 not in cluster_seeds_require"):
+        _convert_service_payload(tmp_path, payload)
+
+
+def test_convert_service_json_to_arrow_preserves_author_rows_that_normalize_empty(tmp_path: Path) -> None:
+    for case_id, source_author_name in (("empty", ""), ("blank", "   "), ("digits", "24")):
+        case_root = tmp_path / case_id
+        case_root.mkdir()
+        payload = _minimal_service_payload()
+        payload["papers"][0]["authors"][0]["author_name"] = source_author_name
+
+        manifest, dataset_dir = _convert_service_payload(case_root, payload)
+
+        paper_authors = _read_table(str(_manifest_path(manifest, dataset_dir, "paper_authors")))
+        assert paper_authors.to_pylist() == [{"paper_id": "1", "position": 0, "author_name": ""}], case_id
+        assert manifest["validation"]["paper_author_count"] == 1, case_id
+
+
+def test_convert_service_json_to_arrow_preserves_seed_and_altered_tables(tmp_path: Path) -> None:
+    payload = _minimal_service_payload()
+    first_signature = payload["signatures"][0]
+    first_paper = payload["papers"][0]
+    first_paper["abstract"] = "Has Abstract"
+    payload["signatures"] = [
+        first_signature,
+        {**first_signature, "signature_id": "s2", "paper_id": 2},
+        {
+            **first_signature,
+            "signature_id": "q",
+            "paper_id": 3,
+            "author_info": {**first_signature["author_info"], "first": "Alex"},
+        },
+    ]
+    payload["papers"] = [
+        first_paper,
+        {**first_paper, "paper_id": 2, "title": "Two", "year": 2021},
+        {
+            **first_paper,
+            "paper_id": 3,
+            "title": "Three",
+            "abstract": "",
+            "year": 2022,
+            "authors": [{"position": 0, "author_name": "Alex Smith"}],
+        },
+    ]
+    payload["paper_embeddings"] = {"1": [0.1, 0.2], "2": [0.2, 0.3], "3": [0.3, 0.4]}
+    payload["cluster_seeds"] = {"s1": {"s2": "require", "q": "disallow"}}
+    payload["altered_cluster_signatures"] = ["s1"]
+
+    manifest, dataset_dir = _convert_service_payload(tmp_path, payload)
 
     assert manifest["signature_count"] == 3
     assert manifest["paper_count"] == 3
 
-    dataset_dir = tmp_path / "arrow" / "service_payload"
     persisted_manifest = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8"))
     assert persisted_manifest["kind"] == ARROW_DATASET_KIND
     assert persisted_manifest["format_version"] == PUBLIC_DATA_FORMAT_VERSION
@@ -233,10 +161,7 @@ def test_convert_service_json_to_arrow_preserves_seed_and_altered_tables(
     assert not (_manifest_path(manifest, dataset_dir, "signatures").parent / "signatures.json").exists()
 
 
-def test_convert_service_json_to_arrow_accepts_service_shaped_cluster_seeds(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_convert_service_json_to_arrow_accepts_service_shaped_cluster_seeds(tmp_path: Path) -> None:
     payload = _minimal_service_payload("s1", 1)
     payload["signatures"] = [
         payload["signatures"][0],
@@ -260,63 +185,26 @@ def test_convert_service_json_to_arrow_accepts_service_shaped_cluster_seeds(
         "require": {"c0": ["s1", "s2"]},
         "disallow": [["q", "s1"]],
     }
-    input_json = tmp_path / "service_payload.json"
-    input_json.write_text(json.dumps(payload), encoding="utf-8")
+    manifest, dataset_dir = _convert_service_payload(tmp_path, payload)
 
-    manifest = convert_service_json_to_arrow(
-        input_json=input_json,
-        output_root=tmp_path / "arrow",
-        dataset_name="service_payload",
-        name_counts_index_root=tmp_path,
-        n_jobs=1,
-        overwrite=True,
-        skip_name_counts_index=True,
-    )
-
-    dataset_dir = tmp_path / "arrow" / "service_payload"
     assert _read_table(str(_manifest_path(manifest, dataset_dir, "cluster_seeds"))).num_rows == 2
     assert _read_table(str(_manifest_path(manifest, dataset_dir, "cluster_seed_disallows"))).num_rows == 1
 
 
-def test_convert_service_json_to_arrow_falls_back_from_explicit_null_paper_embeddings(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_convert_service_json_to_arrow_falls_back_from_explicit_null_paper_embeddings(tmp_path: Path) -> None:
     payload = _minimal_service_payload()
     payload["paper_embeddings"] = None
     payload["specter_embeddings"] = {"1": [0.1, 0.2]}
-    input_json = tmp_path / "service_payload.json"
-    input_json.write_text(json.dumps(payload), encoding="utf-8")
+    manifest, dataset_dir = _convert_service_payload(tmp_path, payload)
 
-    manifest = convert_service_json_to_arrow(
-        input_json=input_json,
-        output_root=tmp_path / "arrow",
-        dataset_name="service_payload",
-        name_counts_index_root=tmp_path,
-        n_jobs=1,
-        overwrite=True,
-        skip_name_counts_index=True,
-    )
-
-    assert _read_table(str(_manifest_path(manifest, tmp_path / "arrow" / "service_payload", "specter"))).num_rows == 1
+    assert _read_table(str(_manifest_path(manifest, dataset_dir, "specter"))).num_rows == 1
 
 
 def test_convert_service_json_to_arrow_emits_empty_specter_for_empty_embeddings(tmp_path: Path) -> None:
     payload = _minimal_service_payload("s1", 1)
     payload["paper_embeddings"] = {}
-    input_json = tmp_path / "service_payload.json"
-    input_json.write_text(json.dumps(payload), encoding="utf-8")
 
-    manifest = convert_service_json_to_arrow(
-        input_json=input_json,
-        output_root=tmp_path / "arrow",
-        dataset_name="service_payload",
-        name_counts_index_root=tmp_path,
-        n_jobs=1,
-        overwrite=True,
-        skip_name_counts_index=True,
-    )
-    dataset_dir = tmp_path / "arrow" / "service_payload"
+    manifest, dataset_dir = _convert_service_payload(tmp_path, payload)
     resolved_paths = {key: str(_manifest_path(manifest, dataset_dir, key)) for key in manifest["paths"]}
 
     specter = _read_table(resolved_paths["specter"])
@@ -378,47 +266,23 @@ def test_convert_service_json_to_arrow_reports_missing_specter_embeddings(
     )
     payload["papers"].append({**payload["papers"][0], "paper_id": 2, "title": "Two"})
     payload["paper_embeddings"] = {"1": [0.1, 0.2]}
-    input_json = tmp_path / "service_payload.json"
-    input_json.write_text(json.dumps(payload), encoding="utf-8")
 
-    manifest = convert_service_json_to_arrow(
-        input_json=input_json,
-        output_root=tmp_path / "arrow",
-        dataset_name="service_payload",
-        name_counts_index_root=tmp_path,
-        n_jobs=1,
-        overwrite=True,
-        skip_name_counts_index=True,
-    )
+    manifest, _dataset_dir = _convert_service_payload(tmp_path, payload)
 
     assert manifest["validation"]["missing_specter_paper_count"] == 1
     assert manifest["validation"]["missing_specter_paper_examples"] == ["2"]
 
 
-def test_convert_service_json_to_arrow_rejects_ambiguous_service_shaped_cluster_seeds(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_convert_service_json_to_arrow_rejects_ambiguous_service_shaped_cluster_seeds(tmp_path: Path) -> None:
     payload = _minimal_service_payload()
     payload["cluster_seeds"] = {"require": {"c0": ["s1"]}, "disallow": [], "unexpected": []}
-    input_json = tmp_path / "service_payload.json"
-    input_json.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="unsupported keys"):
-        convert_service_json_to_arrow(
-            input_json=input_json,
-            output_root=tmp_path / "arrow",
-            dataset_name="service_payload",
-            name_counts_index_root=tmp_path,
-            n_jobs=1,
-            overwrite=True,
-            skip_name_counts_index=True,
-        )
+        _convert_service_payload(tmp_path, payload)
 
 
 def test_convert_service_json_to_arrow_source_json_is_opt_in(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     input_json = tmp_path / "service_payload.json"
     input_json.write_text(json.dumps(_minimal_service_payload()), encoding="utf-8")
@@ -533,7 +397,6 @@ def test_service_json_main_dispatches_bounded_cli_args(
 
 def test_convert_service_json_to_arrow_overwrite_preserves_other_root_manifest_entries(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     input_json = tmp_path / "service_payload.json"
     input_json.write_text(json.dumps(_minimal_service_payload()), encoding="utf-8")
@@ -620,7 +483,6 @@ def test_convert_service_json_to_arrow_rejects_missing_referenced_manifest(
 
 def test_convert_service_json_to_arrow_rejects_malformed_root_manifest_before_dataset_manifest(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     input_json = tmp_path / "service_payload.json"
     input_json.write_text(json.dumps(_minimal_service_payload()), encoding="utf-8")

@@ -562,6 +562,11 @@ def test_realistic_booster_bit_exact_parity() -> None:
     rust_booster = RustLightGBMBooster(str(REALISTIC_MODEL_PATH))
     assert rust_booster.num_trees() == lgb_booster.num_trees()
     assert rust_booster.objective_name() == "binary"
+    summary = rust_booster.decision_type_summary()
+    assert summary["num_splits"] > 0
+    assert 0 < summary["default_left"] < summary["num_splits"]
+    assert summary["missing_none"] > 0
+    assert summary["missing_nan"] > 0
 
     rng = np.random.default_rng(20260707)
     features = _adversarial_matrix(
@@ -594,17 +599,6 @@ def test_realistic_booster_fixture_probabilities() -> None:
     _assert_parity(lgb.Booster(model_file=str(REALISTIC_MODEL_PATH)), rust_booster, features)
 
 
-def test_realistic_booster_decision_type_coverage() -> None:
-    """The fixture covers both default directions and two missing types."""
-
-    assert REALISTIC_MODEL_PATH.is_file()
-    summary = RustLightGBMBooster(str(REALISTIC_MODEL_PATH)).decision_type_summary()
-    assert summary["num_splits"] > 0
-    assert 0 < summary["default_left"] < summary["num_splits"]
-    assert summary["missing_none"] > 0
-    assert summary["missing_nan"] > 0
-
-
 # ---------------------------------------------------------------------------
 # Synthetic boosters: one per missing-type semantics, plus sigmoid variant
 # ---------------------------------------------------------------------------
@@ -616,6 +610,7 @@ def test_missing_type_nan_semantics() -> None:
     rust_booster = _rust_from_booster(lgb_booster)
     summary = rust_booster.decision_type_summary()
     assert summary["missing_nan"] > 0, "model must contain NaN-missing splits for coverage"
+    assert 0 < summary["default_left"] < summary["num_splits"]
 
     features = _adversarial_matrix(lgb_booster, lgb_booster.num_feature(), rng)
     _assert_parity(lgb_booster, rust_booster, features)
@@ -656,6 +651,7 @@ def test_missing_type_zero_semantics() -> None:
     rust_booster = _rust_from_booster(lgb_booster)
     summary = rust_booster.decision_type_summary()
     assert summary["missing_zero"] > 0, "model must contain Zero-missing splits for coverage"
+    assert 0 < summary["default_left"] < summary["num_splits"]
 
     features = _adversarial_matrix(
         lgb_booster,
@@ -664,28 +660,6 @@ def test_missing_type_zero_semantics() -> None:
     )
     _assert_parity(lgb_booster, rust_booster, features)
     _assert_float32_matches_prior_widening(rust_booster, features)
-
-
-def test_default_direction_coverage_across_synthetic_models() -> None:
-    """Both default_left directions must appear somewhere in the synthetic set."""
-    rng = np.random.default_rng(4)
-    totals = {"default_left": 0, "num_splits": 0}
-    for seed, params, inject_nans, inject_zeros in [
-        (10, None, True, False),
-        (11, {"zero_as_missing": True}, False, True),
-        (12, {"use_missing": False}, False, False),
-    ]:
-        booster = _train_booster(
-            np.random.default_rng(seed),
-            params=params,
-            inject_nans=inject_nans,
-            inject_zeros=inject_zeros,
-        )
-        summary = _rust_from_booster(booster).decision_type_summary()
-        totals["default_left"] += summary["default_left"]
-        totals["num_splits"] += summary["num_splits"]
-    assert 0 < totals["default_left"] < totals["num_splits"]
-    del rng
 
 
 def test_non_default_sigmoid_parameter() -> None:

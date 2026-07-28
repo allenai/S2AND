@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -35,6 +38,29 @@ def test_runtime_backend_routing_contract(monkeypatch: pytest.MonkeyPatch) -> No
 
     with pytest.raises(ValueError, match="expected 'python' or 'rust'"):
         runtime.build_runtime_context("unit_test", backend="auto")  # type: ignore[arg-type]
+
+
+def test_importing_model_with_python_backend_does_not_load_rust_extension() -> None:
+    script = """
+import s2and.runtime as runtime
+
+def fail():
+    raise AssertionError("Python model import must not load the Rust extension")
+
+runtime.load_s2and_rust_extension = fail
+import s2and.model
+"""
+    env = os.environ.copy()
+    env["S2AND_BACKEND"] = "python"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_load_rust_extension_validates_package_and_version() -> None:

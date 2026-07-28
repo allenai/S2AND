@@ -340,22 +340,20 @@ def test_prepare_run_writes_three_simple_authorities_without_reading_heldout_ans
     assert evaluation["baseline_record_sha256"] == _sha256(fixture.baseline_record)
 
 
-def test_prepare_run_rejects_leakage_before_writes(tmp_path: Path) -> None:
-    cases = (
-        ("pair-overlap", {"fixed_test_pair": ("f2", "f1")}, "train/test unordered pairs overlap"),
-        ("signature-overlap", {"random_test_pair": ("r1", "rt2")}, "contains test signatures"),
-    )
-    for case_id, fixture_kwargs, message in cases:
-        fixture = _release_fixture(tmp_path / case_id, **fixture_kwargs)
+@pytest.mark.parametrize(
+    ("fixture_kwargs", "message"),
+    (
+        ({"fixed_test_pair": ("f2", "f1")}, "train/test unordered pairs overlap"),
+        ({"random_test_pair": ("r1", "rt2")}, "contains test signatures"),
+    ),
+)
+def test_prepare_run_rejects_leakage_before_writes(tmp_path, fixture_kwargs, message) -> None:
+    fixture = _release_fixture(tmp_path, **fixture_kwargs)
 
-        try:
-            release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
-        except ValueError as error:
-            assert message in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: leakage was accepted")
+    with pytest.raises(ValueError, match=message):
+        release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
 
-        assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}, case_id
+    assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}
 
 
 def test_prepare_run_requires_a_fresh_directory_and_code_owned_gate_maxima(tmp_path: Path) -> None:
@@ -378,38 +376,33 @@ def test_prepare_run_verifies_the_reviewed_baseline_file_digest(tmp_path: Path) 
         release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
 
 
-def test_prepare_run_rejects_a_baseline_for_a_different_contract(tmp_path: Path) -> None:
-    cases = (
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
         (
-            "pairwise-populations",
             lambda record: record["populations"]["pairwise"]["fixed"].__setitem__("pairs", "f" * 64),
             "pairwise populations",
         ),
         (
-            "performance-workload",
             lambda record: record["performance"].__setitem__("workload", {"different": True}),
             "performance workload",
         ),
         (
-            "metric-contract",
             lambda record: record["metric_contract"].__setitem__("performance_statistic", "mean"),
             "metric_contract",
         ),
-    )
-    for case_id, mutation, message in cases:
-        fixture = _release_fixture(tmp_path / case_id)
-        record = json.loads(fixture.baseline_record.read_text(encoding="utf-8"))
-        mutation(record)
-        _write_json(fixture.baseline_record, record)
-        fixture.payload["evaluation"]["baseline"]["sha256"] = _sha256(fixture.baseline_record)
-        _write_json(fixture.release, fixture.payload)
+    ),
+)
+def test_prepare_run_rejects_a_baseline_for_a_different_contract(tmp_path, mutation, message) -> None:
+    fixture = _release_fixture(tmp_path)
+    record = json.loads(fixture.baseline_record.read_text(encoding="utf-8"))
+    mutation(record)
+    _write_json(fixture.baseline_record, record)
+    fixture.payload["evaluation"]["baseline"]["sha256"] = _sha256(fixture.baseline_record)
+    _write_json(fixture.release, fixture.payload)
 
-        try:
-            release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
-        except ValueError as error:
-            assert message in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: mismatched baseline contract was accepted")
+    with pytest.raises(ValueError, match=message):
+        release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
 
 
 def test_bind_candidate_writes_one_content_based_run_identity(

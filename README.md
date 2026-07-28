@@ -57,15 +57,15 @@ Repo checkout:
 
 ```bash
 git lfs install
-git lfs pull --include "tests/fixtures/arrow/pubmed_specter2/**"
+git lfs pull
 uv venv --python 3.11
 # activate the environment, then:
 uv sync --active --extra dev
 uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 ```
 
-Source checkouts use Git LFS for Arrow test fixtures. Run `git lfs pull` after
-cloning and after switching branches that change those fixtures.
+Source checkouts use Git LFS for the realistic LightGBM parity fixture. Run
+`git lfs pull` after cloning and after switching branches that change it.
 
 The Rust build step is required for source checkouts unless you are using an
 already-built compatible `s2and-rust` wheel. For OS prerequisites, activation

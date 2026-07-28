@@ -76,16 +76,20 @@ class FakeIndexedRustFeaturizer:
         *,
         call_sizes: list[int] | None = None,
         selected_indices_seen: list[list[int] | None] | None = None,
+        indexed_pairs_seen: list[tuple[int, int]] | None = None,
     ) -> None:
         self._signature_ids = list(signature_ids)
         self.call_sizes = call_sizes
         self.selected_indices_seen = selected_indices_seen
+        self.indexed_pairs_seen = indexed_pairs_seen
 
     def signature_ids(self) -> list[str]:
         return list(self._signature_ids)
 
     def featurize_pairs_matrix_indexed(self, pairs, selected_indices, num_threads, nan_value):
         del num_threads, nan_value
+        if self.indexed_pairs_seen is not None:
+            self.indexed_pairs_seen.extend((int(left), int(right)) for left, right in pairs)
         if self.call_sizes is not None:
             self.call_sizes.append(len(pairs))
         if self.selected_indices_seen is not None:
@@ -151,19 +155,10 @@ def test_rust_batch_indexed_api_normalizes_integer_signature_ids(monkeypatch):
     dataset = build_dummy_dataset("dummy_rust_chunking_indexed_int_ids", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     indexed_pairs_seen: list[tuple[int, int]] = []
-
-    class FakeRustFeaturizer:
-        def signature_ids(self):
-            return sorted(dataset.signatures.keys())
-
-        def featurize_pairs_matrix_indexed(self, pairs, selected_indices, num_threads, nan_value):
-            del num_threads, nan_value
-            indexed_pairs_seen.extend((int(left), int(right)) for left, right in pairs)
-            if selected_indices is None:
-                return np.zeros((len(pairs), featurizer_mod.NUM_FEATURES), dtype=np.float64)
-            return np.zeros((len(pairs), len(selected_indices)), dtype=np.float64)
-
-    fake_rust_featurizer = FakeRustFeaturizer()
+    fake_rust_featurizer = FakeIndexedRustFeaturizer(
+        sorted(dataset.signatures.keys()),
+        indexed_pairs_seen=indexed_pairs_seen,
+    )
     string_pairs = _build_pairs(5)
     pairs = [(int(left), int(right), label) for left, right, label in string_pairs]
 

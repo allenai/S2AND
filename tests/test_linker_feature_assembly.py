@@ -189,36 +189,6 @@ def test_feature_values_from_runtime_reuses_assembled_pairwise_columns() -> None
     )
 
 
-def test_feature_values_from_runtime_keeps_pairwise_columns_over_row_signals() -> None:
-    row_count = 2
-    candidate_batch = LinkerCandidateBatch(
-        row_count=row_count,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
-    )
-    pairwise_columns = promoted_pairwise_aggregate_columns()
-    pairwise_matrix = np.arange(row_count * len(pairwise_columns), dtype=np.float32).reshape(
-        row_count, len(pairwise_columns)
-    )
-    pairwise_stats = StaticPairwiseStats(pairwise_matrix, pairwise_columns)
-    assembled = features.assemble_linker_feature_matrix(
-        candidate_batch,
-        _row_feature_fixture(row_count),
-        pairwise_stats=cast(Any, pairwise_stats),
-    )
-
-    values = feature_values_from_runtime(
-        assembled,
-        {"pw_mean_first_names_equal": np.asarray([999.0, 999.0], dtype=np.float32)},
-    )
-
-    np.testing.assert_array_equal(
-        values["pw_mean_first_names_equal"],
-        assembled.matrix[:, assembled.feature_columns.index("pw_mean_first_names_equal")],
-    )
-
-
 def test_feature_values_from_runtime_precedence_three_way_overlap() -> None:
     """Lock the column-precedence contract when matrix, row_signals, and pairwise_stats all
     carry the same column name.

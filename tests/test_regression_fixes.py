@@ -49,10 +49,6 @@ def test_ordered_coauthors_rejects_missing_author_position() -> None:
         _ordered_coauthors_for_signature(cast(Any, signature), {"p1": cast(Any, paper)})
 
 
-VALID_ORCID_1 = "0000-0001-2345-6789"
-VALID_ORCID_2 = "0000-0001-2345-679X"
-
-
 def test_cacheable_value_preserves_list_order_but_sorts_sets():
     assert model_module._cacheable_value(["year_diff", "name_counts"]) != model_module._cacheable_value(
         ["name_counts", "year_diff"]

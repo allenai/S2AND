@@ -3,7 +3,6 @@ import math
 import os
 import random
 from collections import defaultdict
-from contextlib import contextmanager
 
 import numpy as np
 import pytest
@@ -24,7 +23,6 @@ from tests.helpers import build_arrow_training_dataset, equalish, import_s2and_r
 
 HAS_RUST, _rust_import_payload = import_s2and_rust()
 _RUST_IMPORT_ERROR = None if HAS_RUST else _rust_import_payload
-print("s2and_rust import OK" if HAS_RUST else f"s2and_rust import FAILED: {_RUST_IMPORT_ERROR}")
 if not HAS_RUST:
     raise pytest.skip.Exception(
         f"s2and_rust extension not built/installed: {_RUST_IMPORT_ERROR}",
@@ -90,6 +88,30 @@ def _load_dataset_from_dir(data_dir, name, *, signatures=None):
     return ds
 
 
+def _build_two_signature_dataset(signatures, papers, name, *, name_tuples=None):
+    return ANDData(
+        signatures=signatures,
+        papers=papers,
+        name=name,
+        mode="train",
+        specter_embeddings=None,
+        clusters={"c1": {"cluster_id": "c1", "signature_ids": ["s1", "s2"], "model_version": -1}},
+        cluster_seeds=None,
+        train_pairs=None,
+        val_pairs=None,
+        test_pairs=None,
+        train_pairs_size=10,
+        val_pairs_size=10,
+        test_pairs_size=10,
+        n_jobs=1,
+        name_counts_index=None,
+        preprocess=True,
+        random_seed=42,
+        name_tuples=name_tuples,
+        use_orcid_id=True,
+    )
+
+
 def _attach_fake_specter_embeddings(ds, max_papers=2, dim=8):
     rng = np.random.RandomState(123)
     if ds.specter_embeddings is None:
@@ -113,21 +135,6 @@ def _reset_featurizer_env_caches():
     featurizer_mod.__dict__["_RUST_BATCH_MAX_CHUNK_MB_CACHE"] = None
 
 
-@contextmanager
-def _temporary_env(**values):
-    original = {name: os.environ.get(name) for name in values}
-    try:
-        for name, value in values.items():
-            os.environ[name] = value
-        yield
-    finally:
-        for name, value in original.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-
 def _build_labeled_pairs(sig_ids, count=20, seed=123):
     rng = random.Random(seed)
     pairs = []
@@ -142,7 +149,8 @@ def _build_labeled_pairs(sig_ids, count=20, seed=123):
 
 @pytest.fixture(scope="session")
 def source_dataset():
-    with _temporary_env(S2AND_BACKEND="python"):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("S2AND_BACKEND", "python")
         # Avoid reusing stale process-level env caches between parity fixtures.
         _reset_featurizer_env_caches()
 
@@ -344,31 +352,7 @@ def test_rust_featurizer_supports_string_paper_ids(tmp_path):
             "references": [],
         },
     }
-    clusters = {
-        "c1": {"cluster_id": "c1", "signature_ids": ["s1", "s2"], "model_version": -1},
-    }
-
-    ds = ANDData(
-        signatures=signatures,
-        papers=papers,
-        name="rust_string_id_regression",
-        mode="train",
-        specter_embeddings=None,
-        clusters=clusters,
-        cluster_seeds=None,
-        train_pairs=None,
-        val_pairs=None,
-        test_pairs=None,
-        train_pairs_size=10,
-        val_pairs_size=10,
-        test_pairs_size=10,
-        n_jobs=1,
-        name_counts_index=None,
-        preprocess=True,
-        random_seed=42,
-        name_tuples=None,
-        use_orcid_id=True,
-    )
+    ds = _build_two_signature_dataset(signatures, papers, "rust_string_id_regression")
 
     ds = build_arrow_training_dataset(ds, tmp_path, name_counts="empty")
     features = _featurize_pair_indexed_rust(ds, "s1", "s2")
@@ -433,27 +417,7 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
             "references": [],
         },
     }
-    ds = ANDData(
-        signatures=signatures,
-        papers=papers,
-        name="single_initial_name_text_parity",
-        mode="train",
-        specter_embeddings=None,
-        clusters={"c1": {"cluster_id": "c1", "signature_ids": ["s1", "s2"], "model_version": -1}},
-        cluster_seeds=None,
-        train_pairs=None,
-        val_pairs=None,
-        test_pairs=None,
-        train_pairs_size=10,
-        val_pairs_size=10,
-        test_pairs_size=10,
-        n_jobs=1,
-        name_counts_index=None,
-        preprocess=True,
-        random_seed=42,
-        name_tuples=None,
-        use_orcid_id=True,
-    )
+    ds = _build_two_signature_dataset(signatures, papers, "single_initial_name_text_parity")
     arrow_dataset = build_arrow_training_dataset(ds, tmp_path, name_counts="empty")
     ref_features, _ = _single_pair_featurize(("s1", "s2"), dataset=ds)
     rust_features = _featurize_pair_indexed_rust(arrow_dataset, "s1", "s2")
@@ -696,26 +660,11 @@ def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases(tmp_path):
             "references": [],
         },
     }
-    ds = ANDData(
-        signatures=signatures,
-        papers=papers,
-        name="name_tuple_alias_constraint_parity",
-        mode="train",
-        specter_embeddings=None,
-        clusters={"c1": {"cluster_id": "c1", "signature_ids": ["s1", "s2"], "model_version": -1}},
-        cluster_seeds=None,
-        train_pairs=None,
-        val_pairs=None,
-        test_pairs=None,
-        train_pairs_size=10,
-        val_pairs_size=10,
-        test_pairs_size=10,
-        n_jobs=1,
-        name_counts_index=None,
-        preprocess=True,
-        random_seed=42,
+    ds = _build_two_signature_dataset(
+        signatures,
+        papers,
+        "name_tuple_alias_constraint_parity",
         name_tuples={("yu", "yi")},
-        use_orcid_id=True,
     )
 
     assert ds.get_constraint("s1", "s2") is None

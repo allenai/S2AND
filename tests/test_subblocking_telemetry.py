@@ -931,7 +931,7 @@ def test_rust_arrow_orcid_repair_does_not_extract_from_oversized_whole_merge(tmp
     arrow_dataset.close()
 
 
-def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_without_python_callback(tmp_path):
+def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_telemetry(tmp_path):
     _require_rust_arrow_subblocking()
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
@@ -1007,9 +1007,6 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_without_python_
         ),
     }
 
-    def fail_python_callback(*_args, **_kwargs):
-        raise AssertionError("native graph Arrow subblocking should not call Python fallback")
-
     arrow_dataset = _open_subblocking_arrow_dataset(paths, tmp_path)
     subblocks, telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
         arrow_dataset,
@@ -1023,8 +1020,6 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_without_python_
         ),
         graph_subblocking_random_seed=7,
     )
-    assert callable(fail_python_callback)
-
     assert {frozenset(values) for values in subblocks.values()} == {frozenset({"s1", "s2"}), frozenset({"s3", "s4"})}
     assert telemetry["specter_invocation_count"] == 1
     assert telemetry["graph_fallback_native"] is True

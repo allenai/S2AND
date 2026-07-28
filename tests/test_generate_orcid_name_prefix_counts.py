@@ -20,7 +20,6 @@ from s2and.orcid_prefix_counts import (
 from scripts.production.counts import generate_orcid_name_prefix_counts as generator
 
 ORCID_1 = "0000-0000-0000-0001"
-ORCID_2 = "0000-0000-0000-0002"
 NAME_TUPLES_PATH = Path(PROJECT_ROOT_PATH) / "s2and" / "data" / "s2and_name_tuples_canonical.txt"
 NAME_TUPLES_SHA256 = hashlib.sha256(NAME_TUPLES_PATH.read_bytes()).hexdigest()
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -194,21 +193,20 @@ def test_reviewed_csv_uses_full_guardrails_without_internal_warehouse_client(
     assert (tmp_path / "output" / ORCID_PREFIX_DATA_FILENAME).is_file()
 
 
-def test_reviewed_csv_rejects_ambiguous_columns(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "payload",
+    (
+        "raw_orcid,orcid,orcid,first_name,middle\n",
+        "raw_orcid,orcid,first_name,middle,source\n",
+        f"raw_orcid,orcid,first_name,middle\n{ORCID_1},{ORCID_1},Alice,,extra\n",
+    ),
+)
+def test_reviewed_csv_rejects_ambiguous_columns(tmp_path: Path, payload: str) -> None:
     export = tmp_path / "orcid-export.csv"
-    cases = (
-        ("duplicate-header", "raw_orcid,orcid,orcid,first_name,middle\n"),
-        ("extra-header", "raw_orcid,orcid,first_name,middle,source\n"),
-        ("extra-value", f"raw_orcid,orcid,first_name,middle\n{ORCID_1},{ORCID_1},Alice,,extra\n"),
-    )
-    for case_id, payload in cases:
-        export.write_text(payload, encoding="utf-8")
-        try:
-            list(generator._load_reviewed_csv_rows(export))
-        except ValueError as error:
-            assert "exact header" in str(error) or "more values than columns" in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: ambiguous CSV columns were accepted")
+    export.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exact header|more values than columns"):
+        list(generator._load_reviewed_csv_rows(export))
 
 
 def test_builder_deduplicates_rows() -> None:
@@ -233,25 +231,24 @@ def test_builder_deduplicates_rows() -> None:
     assert metrics["orcid_pair_keys_after_threshold"] > 0
 
 
-def test_builder_enforces_only_live_expansion_bounds() -> None:
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    (
+        ({"max_names_per_orcid": 1}, "at least 2"),
+        ({"max_names_per_orcid": 2}, "more than max_names_per_orcid=2"),
+        ({"max_source_rows": 1}, "max_source_rows=1"),
+        ({"max_pair_keys": 1}, "max_pair_keys=1"),
+    ),
+)
+def test_builder_enforces_only_live_expansion_bounds(kwargs: dict[str, int], message: str) -> None:
     rows = [
         {"orcid": ORCID_1, "first_name": "Alice", "middle": None},
         {"orcid": ORCID_1, "first_name": "Amy", "middle": None},
         {"orcid": ORCID_1, "first_name": "Ava", "middle": None},
     ]
-    cases = (
-        ("invalid-max-names", {"max_names_per_orcid": 1}, "at least 2"),
-        ("exceeded-max-names", {"max_names_per_orcid": 2}, "more than max_names_per_orcid=2"),
-        ("max-source-rows", {"max_source_rows": 1}, "max_source_rows=1"),
-        ("max-pair-keys", {"max_pair_keys": 1}, "max_pair_keys=1"),
-    )
-    for case_id, kwargs, message in cases:
-        try:
-            generator.build_prefix_counts_from_sorted_rows(rows, [], min_orcid_count=1, **kwargs)
-        except ValueError as error:
-            assert message in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: invalid expansion bounds were accepted")
+
+    with pytest.raises(ValueError, match=message):
+        generator.build_prefix_counts_from_sorted_rows(rows, [], min_orcid_count=1, **kwargs)
 
 
 def test_canonical_loader_rejects_semantically_invalid_counts(tmp_path: Path) -> None:
@@ -267,25 +264,24 @@ def test_canonical_loader_rejects_semantically_invalid_counts(tmp_path: Path) ->
         load_canonical_orcid_prefix_counts(output_dir)
 
 
-def test_canonical_loader_requires_exact_minimal_tuple_dependency(tmp_path: Path) -> None:
-    cases = (
-        ("missing", {}),
-        ("uppercase", {"name_tuples_sha256": NAME_TUPLES_SHA256.upper()}),
-        ("extra-field", {"name_tuples_sha256": NAME_TUPLES_SHA256, "source": "extra"}),
-    )
-    for case_id, manifest in cases:
-        case_root = tmp_path / case_id
-        case_root.mkdir()
-        output_dir = _publish_tiny_csv(case_root)
-        manifest_path = output_dir / ORCID_PREFIX_MANIFEST_FILENAME
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+@pytest.mark.parametrize(
+    "manifest",
+    (
+        {},
+        {"name_tuples_sha256": NAME_TUPLES_SHA256.upper()},
+        {"name_tuples_sha256": NAME_TUPLES_SHA256, "source": "extra"},
+    ),
+)
+def test_canonical_loader_requires_exact_minimal_tuple_dependency(
+    tmp_path: Path,
+    manifest: dict[str, str],
+) -> None:
+    output_dir = _publish_tiny_csv(tmp_path)
+    manifest_path = output_dir / ORCID_PREFIX_MANIFEST_FILENAME
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-        try:
-            load_canonical_orcid_prefix_counts(output_dir)
-        except ValueError as error:
-            assert "lowercase name_tuples_sha256" in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: invalid tuple dependency was accepted")
+    with pytest.raises(ValueError, match="lowercase name_tuples_sha256"):
+        load_canonical_orcid_prefix_counts(output_dir)
 
 
 def test_prefix_pair_lookup_is_order_independent() -> None:

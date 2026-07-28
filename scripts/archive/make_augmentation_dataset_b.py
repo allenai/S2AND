@@ -102,7 +102,7 @@ def main(
             mode="inference",
             specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
             n_jobs=25,
-            load_name_counts=False,
+            name_counts_index=None,
             preprocess=False,
         )
         logger.info(f"dataset {dataset_name} loaded")

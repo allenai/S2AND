@@ -50,12 +50,12 @@ not the unreleased `1.0.0` worktree. That worktree targets coordinated
 
 ## Repo checkout
 
-Hydrate the LFS-managed Arrow fixtures after cloning and after switching to a
-branch that changes them:
+Hydrate the LFS-managed realistic LightGBM parity fixture after cloning and
+after switching to a branch that changes it:
 
 ```bash
 git lfs install
-git lfs pull --include "tests/fixtures/arrow/pubmed_specter2/**"
+git lfs pull
 ```
 
 Create and activate a supported Python environment (3.11, 3.12, or 3.13):

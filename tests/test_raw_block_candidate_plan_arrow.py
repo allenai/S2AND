@@ -208,7 +208,7 @@ def _assert_raw_candidate_plans_equal(left: dict[str, Any], right: dict[str, Any
             assert left_value == right_value, key
 
 
-def _write_tiny_name_counts_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+def _write_tiny_name_counts_index(tmp_path: Path) -> str:
     mappings = (
         {"alice": 10.0, "bob": 30.0},
         {"wang": 20.0, "jones": 40.0},
@@ -436,17 +436,6 @@ def _raw_candidate_planner_from_query_signatures(
             num_threads=num_threads,
             max_exemplars=max_exemplars,
         )
-
-
-def _raw_plan_for_base_paths(paths: dict[str, str]) -> dict[str, Any]:
-    return _raw_candidate_plan_arrow(
-        paths,
-        ["q1"],
-        top_k=2,
-        query_view="full",
-        orcid_enabled=False,
-        num_threads=1,
-    )
 
 
 def test_raw_arrow_candidate_planner_rejects_out_of_range_seed_year(tmp_path: Path) -> None:
@@ -2055,10 +2044,9 @@ def test_raw_arrow_labeled_candidate_plan_drops_component_with_only_foreign_memb
 
 def test_raw_arrow_candidate_plan_emits_native_row_signals_from_name_counts_index(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths = _base_arrow_paths(tmp_path)
-    paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index", monkeypatch)
+    paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index")
 
     raw_plan = _raw_candidate_plan_arrow(
         paths,
@@ -2134,7 +2122,6 @@ def test_rust_featurizer_from_arrow_dataset_applies_cluster_seed_disallows(tmp_p
 
 def test_rust_featurizer_missing_name_counts_presence_is_consistent(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths = _base_arrow_paths(tmp_path)
     signature_ids = ["q1", "s1", "s2"]
@@ -2144,17 +2131,16 @@ def test_rust_featurizer_missing_name_counts_presence_is_consistent(
     assert from_arrow.signature_name_counts_present() == [("q1", False), ("s1", False), ("s2", False)]
 
     paths_with_index = dict(paths)
-    paths_with_index["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact", monkeypatch)
+    paths_with_index["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact")
     with_name_counts = _native_featurizer(paths_with_index, signature_ids, set())
     assert with_name_counts.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
 
 
 def test_rust_featurizer_rejects_unsorted_name_counts_index(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths = _base_arrow_paths(tmp_path)
-    paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact", monkeypatch)
+    paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact")
     _swap_first_two_name_count_records(paths["name_counts_index"], "first")
 
     with pytest.raises(ValueError, match="not sorted"):
@@ -2163,10 +2149,9 @@ def test_rust_featurizer_rejects_unsorted_name_counts_index(
 
 def test_rust_featurizer_rejects_out_of_bounds_name_counts_index_record(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths = _base_arrow_paths(tmp_path)
-    paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact", monkeypatch)
+    paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact")
     _corrupt_first_name_count_record_name_range(paths["name_counts_index"], "first")
 
     with pytest.raises(ValueError, match="outside blob length"):

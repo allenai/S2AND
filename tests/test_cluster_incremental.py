@@ -526,16 +526,6 @@ def test_predict_from_rust_featurizer_skips_unused_signature_rule_metadata() -> 
     assert proxy_dataset.signatures == {}
 
 
-def _seeds_preserved(clusters: dict[str, list[str]], seed_groups: list[list[str]]) -> bool:
-    """Each seed group must be entirely contained in one predicted cluster."""
-    cluster_sets = [set(sigs) for sigs in clusters.values() if sigs]
-    for group in seed_groups:
-        group_set = set(group)
-        if not any(group_set.issubset(cluster_set) for cluster_set in cluster_sets):
-            return False
-    return True
-
-
 def _build_dummy_clusterer_and_dataset(*, name: str = "dummy_chunked") -> tuple[Clusterer, ANDData]:
     dataset = ANDData(
         "tests/dummy/signatures.json",

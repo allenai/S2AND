@@ -78,32 +78,43 @@ def test_writer_rejects_keys_that_would_collide_after_stringification(tmp_path: 
         )
 
 
-def test_writer_rejects_noncanonical_name_count_keys(tmp_path: Path) -> None:
-    cases = (
-        ("first-uppercase", "first", "Ada"),
-        ("first-single-letter", "first", "a"),
-        ("first-punctuation", "first", "ada!"),
-        ("first-double-space", "first", "ada  marie"),
-        ("last-empty", "last", ""),
-        ("first-last-unseparated", "first_last", "adasmith"),
-        ("first-last-short-first", "first_last", "a smith"),
-        ("last-first-initial-long", "last_first_initial", "smith ad"),
-        ("last-first-initial-uppercase", "last_first_initial", "smith A"),
-    )
+@pytest.mark.parametrize(
+    ("kind", "name"),
+    (
+        ("first", "Ada"),
+        ("first", "a"),
+        ("first", "ada!"),
+        ("first", "ada  marie"),
+        ("last", ""),
+        ("first_last", "adasmith"),
+        ("first_last", "a smith"),
+        ("last_first_initial", "smith ad"),
+        ("last_first_initial", "smith A"),
+    ),
+    ids=(
+        "first-uppercase",
+        "first-single-letter",
+        "first-punctuation",
+        "first-double-space",
+        "last-empty",
+        "first-last-unseparated",
+        "first-last-short-first",
+        "last-first-initial-long",
+        "last-first-initial-uppercase",
+    ),
+)
+def test_writer_rejects_noncanonical_name_count_keys(tmp_path: Path, kind: str, name: str) -> None:
     mapping_kinds = ("first", "last", "first_last", "last_first_initial")
-    for case_id, kind, name in cases:
-        mappings = {mapping_kind: {} for mapping_kind in mapping_kinds}
-        mappings[kind] = {name: 2.0}
+    mappings = {mapping_kind: {} for mapping_kind in mapping_kinds}
+    mappings[kind] = {name: 2.0}
 
-        try:
-            feature_block_arrow.write_name_counts_index(
-                tmp_path / case_id,
-                tuple(mappings[mapping_kind] for mapping_kind in mapping_kinds),
-            )
-        except ValueError as error:
-            assert f"name-count {kind} key" in str(error) and "canonical_v2" in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: noncanonical key was accepted")
+    with pytest.raises(ValueError) as exc_info:
+        feature_block_arrow.write_name_counts_index(
+            tmp_path,
+            tuple(mappings[mapping_kind] for mapping_kind in mapping_kinds),
+        )
+    assert f"name-count {kind} key" in str(exc_info.value)
+    assert "canonical_v2" in str(exc_info.value)
 
 
 def test_name_count_key_contract_accepts_producible_canonical_keys() -> None:
@@ -120,21 +131,13 @@ def test_name_count_key_contract_accepts_producible_canonical_keys() -> None:
         assert feature_block_arrow._validated_name_count_entry(kind, name, 2.0) == (name, 2.0), case_id
 
 
-def test_writer_rejects_nonfinite_and_nonpositive_counts(tmp_path: Path) -> None:
-    cases = (
-        ("nan", float("nan")),
-        ("zero", 0.0),
-    )
-    for case_id, count in cases:
-        try:
-            feature_block_arrow.write_name_counts_index(
-                tmp_path / case_id,
-                ({"ada": count}, {}, {}, {}),
-            )
-        except ValueError as error:
-            assert "must be a finite positive number" in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: invalid count was accepted")
+@pytest.mark.parametrize("count", (float("nan"), 0.0), ids=("nan", "zero"))
+def test_writer_rejects_nonfinite_and_nonpositive_counts(tmp_path: Path, count: float) -> None:
+    with pytest.raises(ValueError, match="must be a finite positive number"):
+        feature_block_arrow.write_name_counts_index(
+            tmp_path,
+            ({"ada": count}, {}, {}, {}),
+        )
 
 
 def test_fresh_writer_validates_each_name_count_entry_once(

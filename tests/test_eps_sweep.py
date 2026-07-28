@@ -120,41 +120,20 @@ def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path
     assert clusterer.batch_size == 99
 
 
-def test_distance_cache_metadata_rejects_overwritten_model_path(tmp_path) -> None:
-    model_path = tmp_path / "model.pkl"
-    model_path.write_bytes(b"first model")
-    args = SimpleNamespace(
-        arrow_root=tmp_path / "arrow",
-        batching_threshold=10,
-        dataset="dummy",
-        model_path=model_path,
-        pair_chunk_size=3,
-        suppress_orcid_constraints=False,
-        use_orcid_subblocking=False,
-    )
-    metadata = sweep_eps_on_linking_gold._cache_metadata(
-        cast(Any, args),
-        "block",
-        ["s1", "s2"],
-        "arrow-digest",
-    )
-    cache_path = tmp_path / "cache.pkl"
-    with cache_path.open("wb") as outfile:
-        pickle.dump({"metadata": metadata, "dist": [0.25]}, outfile)
-
-    model_path.write_bytes(b"second model with different contents")
-    expected_metadata = sweep_eps_on_linking_gold._cache_metadata(
-        cast(Any, args),
-        "block",
-        ["s1", "s2"],
-        "arrow-digest",
-    )
-
-    with pytest.raises(ValueError, match="model_"):
-        sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected_metadata)
-
-
-def test_distance_cache_metadata_rejects_different_arrow_generation(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("replacement_model", "expected_generation", "message"),
+    (
+        (b"second model with different contents", "first-generation", "model_"),
+        (None, "second-generation", "arrow_generation_id"),
+    ),
+    ids=("model-content", "arrow-generation"),
+)
+def test_distance_cache_metadata_rejects_changed_inputs(
+    tmp_path,
+    replacement_model: bytes | None,
+    expected_generation: str,
+    message: str,
+) -> None:
     model_path = tmp_path / "model.pkl"
     model_path.write_bytes(b"model")
     args = SimpleNamespace(
@@ -176,14 +155,16 @@ def test_distance_cache_metadata_rejects_different_arrow_generation(tmp_path) ->
     with cache_path.open("wb") as outfile:
         pickle.dump({"metadata": metadata, "dist": [0.25]}, outfile)
 
+    if replacement_model is not None:
+        model_path.write_bytes(replacement_model)
     expected_metadata = sweep_eps_on_linking_gold._cache_metadata(
         cast(Any, args),
         "block",
         ["s1", "s2"],
-        "second-generation",
+        expected_generation,
     )
 
-    with pytest.raises(ValueError, match="arrow_generation_id"):
+    with pytest.raises(ValueError, match=message):
         sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected_metadata)
 
 

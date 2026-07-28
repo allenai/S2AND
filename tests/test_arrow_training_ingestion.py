@@ -131,25 +131,18 @@ def _replace_arrow_column(path: Path, column_name: str, values: Any) -> None:
     write_arrow_ipc_table(pa.Table.from_arrays(arrays, names=column_names), path)
 
 
-@pytest.mark.parametrize(
-    ("column_name", "values", "expected_type"),
-    [
-        ("author_affiliations", pa.array(["Institute"], type=pa.string()), r"list<string>"),
-    ],
-)
-def test_arrow_training_rejects_noncanonical_signature_physical_types(
-    tmp_path: Path,
-    column_name: str,
-    values: Any,
-    expected_type: str,
-) -> None:
+def test_arrow_training_rejects_noncanonical_signature_affiliations_type(tmp_path: Path) -> None:
     signatures_path = tmp_path / "signatures.arrow"
     _write_minimal_signatures_table(signatures_path, ["s1"])
-    _replace_arrow_column(signatures_path, column_name, values)
+    _replace_arrow_column(
+        signatures_path,
+        "author_affiliations",
+        pa.array(["Institute"], type=pa.string()),
+    )
 
     with pytest.raises(
         ValueError,
-        match=rf"signatures column '{column_name}' expected {expected_type}",
+        match=r"signatures column 'author_affiliations' expected list<string>",
     ):
         load_signatures_from_arrow(signatures_path)
 

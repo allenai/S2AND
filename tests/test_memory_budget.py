@@ -3,18 +3,21 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pytest
 
 from s2and import memory_budget
 
 
-def _compute_promoted_phase_a_limits(**kwargs):
+def _compute_promoted_phase_a_limits(*, current_rss_bytes: int, **kwargs: Any):
     return memory_budget.compute_promoted_phase_a_limits(
         final_matrix_feature_count=53,
         pairwise_matrix_feature_count=35,
         aggregate_feature_count=18,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (current_rss_bytes, "rss:test"),
         **kwargs,
     )
 
@@ -196,9 +199,7 @@ def test_compute_promoted_phase_a_limits_uses_top_k_largest_components():
         total_ram_bytes=1_000_000_000,
         stage_budget_fraction=0.50,
         fixed_overhead_bytes=1024,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+        current_rss_bytes=100_000_000,
     )
 
     assert set(vars(limits)) == {
@@ -228,7 +229,7 @@ def test_promoted_component_size_summary_is_reused_without_reinspecting_mapping(
         retrieval_top_k=25,
         total_ram_bytes=1_000_000_000,
         fixed_overhead_bytes=1024,
-        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+        current_rss_bytes=100_000_000,
     )
     summarized_limits = [
         _compute_promoted_phase_a_limits(
@@ -237,7 +238,7 @@ def test_promoted_component_size_summary_is_reused_without_reinspecting_mapping(
             retrieval_top_k=25,
             total_ram_bytes=1_000_000_000,
             fixed_overhead_bytes=1024,
-            current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+            current_rss_bytes=100_000_000,
         )
         for _ in range(3)
     ]
@@ -256,9 +257,7 @@ def test_promoted_resident_retrieval_payload_is_not_reserved_twice():
         "retrieval_top_k": 4,
         "total_ram_bytes": 100_000_000,
         "max_query_batch_size": 4,
-        "detect_cgroup_fn": lambda: (None, "unavailable"),
-        "detect_total_fn": lambda: (None, "unavailable"),
-        "current_rss_fn": lambda _total: (10_000_000, "rss:test"),
+        "current_rss_bytes": 10_000_000,
     }
     pending = _compute_promoted_phase_a_limits(**kwargs)
     resident = _compute_promoted_phase_a_limits(**kwargs, retrieval_payload_resident=True)
@@ -310,9 +309,7 @@ def test_compute_promoted_phase_a_limits_shrinks_query_batch_under_tight_budget(
         total_ram_bytes=100_000_000,
         stage_budget_fraction=0.50,
         fixed_overhead_bytes=1_000_000,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+        current_rss_bytes=10_000_000,
     )
 
     assert int(limits.query_batch_size) < 100
@@ -328,9 +325,7 @@ def test_compute_promoted_phase_a_limits_uses_orcid_fanout_floor_above_top_k():
         total_ram_bytes=1_000_000_000,
         stage_budget_fraction=0.50,
         fixed_overhead_bytes=1024,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+        current_rss_bytes=100_000_000,
     )
     limits = _compute_promoted_phase_a_limits(
         query_count=10,
@@ -341,9 +336,7 @@ def test_compute_promoted_phase_a_limits_uses_orcid_fanout_floor_above_top_k():
         fixed_overhead_bytes=1024,
         candidate_rows_per_query_floor=80,
         pairs_per_query_floor=80,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+        current_rss_bytes=100_000_000,
     )
 
     assert int(limits.query_batch_size) == 10
@@ -360,9 +353,7 @@ def test_compute_promoted_phase_a_limits_uses_orcid_total_floor_for_mixed_batch(
         fixed_overhead_bytes=1024,
         candidate_rows_per_query_floor=80,
         pairs_per_query_floor=80,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+        current_rss_bytes=100_000_000,
     )
     limits = _compute_promoted_phase_a_limits(
         query_count=10,
@@ -375,9 +366,7 @@ def test_compute_promoted_phase_a_limits_uses_orcid_total_floor_for_mixed_batch(
         pairs_per_query_floor=80,
         candidate_rows_total_floor=305,
         pairs_total_floor=305,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+        current_rss_bytes=100_000_000,
     )
 
     assert int(limits.query_batch_size) == 10
@@ -393,9 +382,7 @@ def test_compute_promoted_phase_a_limits_fails_when_single_query_exceeds_budget(
             total_ram_bytes=100_000_000,
             stage_budget_fraction=0.10,
             fixed_overhead_bytes=1_000_000,
-            detect_cgroup_fn=lambda: (None, "unavailable"),
-            detect_total_fn=lambda: (None, "unavailable"),
-            current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+            current_rss_bytes=10_000_000,
         )
 
 
@@ -409,9 +396,7 @@ def test_compute_promoted_phase_a_limits_zero_queries_skip_work_and_single_query
         retrieval_top_k=50,
         total_ram_bytes=8_000_000_000,
         max_query_batch_size=None,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+        current_rss_bytes=100_000_000,
     )
 
     assert int(limits.query_batch_size) == 0
@@ -423,9 +408,7 @@ def test_compute_promoted_phase_a_limits_zero_queries_skip_work_and_single_query
         total_ram_bytes=100_000_000,
         stage_budget_fraction=0.10,
         fixed_overhead_bytes=20_000_000,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+        current_rss_bytes=10_000_000,
     )
 
     assert int(limits.query_batch_size) == 0
@@ -443,9 +426,7 @@ def test_compute_promoted_phase_a_limits_rejects_explicit_nonpositive_threshold(
                 retrieval_top_k=50,
                 total_ram_bytes=8_000_000_000,
                 max_query_batch_size=0,
-                detect_cgroup_fn=lambda: (None, "unavailable"),
-                detect_total_fn=lambda: (None, "unavailable"),
-                current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+                current_rss_bytes=100_000_000,
             )
 
 

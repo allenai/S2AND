@@ -106,7 +106,7 @@ for dataset_name in DATASETS_TO_TRAIN:
         val_pairs_size=N_VAL_TEST_SIZE,
         test_pairs_size=N_VAL_TEST_SIZE,
         n_jobs=N_JOBS,
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
     )
 

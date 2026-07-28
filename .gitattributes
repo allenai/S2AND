@@ -3,6 +3,4 @@
 s2and/data/production_model_v*.pickle filter=lfs diff=lfs merge=lfs -text
 s2and/data/production_model_v*.pkl filter=lfs diff=lfs merge=lfs -text
 s2and/data/production_model_v*/** filter=lfs diff=lfs merge=lfs -text
-tests/fixtures/arrow/pubmed_specter2/**/*.arrow filter=lfs diff=lfs merge=lfs -text
-tests/fixtures/arrow/pubmed_specter2/**/*.bin filter=lfs diff=lfs merge=lfs -text
 tests/fixtures/rust_lightgbm/*.lgb filter=lfs diff=lfs merge=lfs -text

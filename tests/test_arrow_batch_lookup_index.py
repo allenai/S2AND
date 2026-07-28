@@ -297,15 +297,7 @@ def test_raw_planner_index_rejects_source_changed_while_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    path = write_arrow_ipc_table(
-        pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}),
-        tmp_path / "signatures.arrow",
-        max_record_batch_rows=1,
-    )
-    index_path = tmp_path / "signatures.signatures_batch_index.bin"
-    write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", table_name="signatures")
+    path, index_path = _write_tiny_index(tmp_path)
     real_fingerprint_once = feature_block_arrow_module._source_file_fingerprint_once  # noqa: SLF001
 
     def mutating_fingerprint_once(path_arg: Path, *, source_size: int) -> int:
@@ -329,15 +321,7 @@ def test_request_time_batch_lookup_does_not_fingerprint_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    path = write_arrow_ipc_table(
-        pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}),
-        tmp_path / "signatures.arrow",
-        max_record_batch_rows=1,
-    )
-    index_path = tmp_path / "signatures.signatures_batch_index.bin"
-    write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", table_name="signatures")
+    path, index_path = _write_tiny_index(tmp_path)
 
     def fail_fingerprint_once(path_arg: Path, *, source_size: int) -> int:
         raise AssertionError(f"request-time lookup should not fingerprint {path_arg} size={source_size}")

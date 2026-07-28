@@ -14,10 +14,8 @@ from s2and.incremental_linking.artifact import load_incremental_linking_artifact
 from s2and.incremental_linking.features import (
     PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS,
     LinkerFeatureMatrix,
+    assemble_linker_feature_matrix,
     promoted_linker_feature_columns,
-)
-from s2and.incremental_linking.features import (
-    assemble_linker_feature_matrix as _assemble_linker_feature_matrix_impl,
 )
 from s2and.incremental_linking.linker_pairwise import (
     PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS,
@@ -35,12 +33,8 @@ from s2and.incremental_linking.retrieval import (
 from s2and.incremental_linking.runtime import (
     CandidateBatchPairwiseModelResult,
     _predict_incremental_link_or_abstain_compact,
-)
-from s2and.incremental_linking.runtime import (
-    _predict_incremental_link_or_abstain_retrieved_candidates as _retrieved_candidates_impl,
-)
-from s2and.incremental_linking.runtime import (
-    compute_candidate_batch_pairwise_model_and_aggregate_stats as _pairwise_model_stats_impl,
+    _predict_incremental_link_or_abstain_retrieved_candidates,
+    compute_candidate_batch_pairwise_model_and_aggregate_stats,
 )
 from s2and.model_pairwise import predict_pairwise_class0
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, import_s2and_rust
@@ -53,18 +47,6 @@ requires_rust_lightgbm = pytest.mark.skipif(
     not _HAS_RUST_LIGHTGBM,
     reason=f"s2and_rust unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
 )
-
-
-def assemble_linker_feature_matrix(*args: Any, **kwargs: Any) -> Any:
-    return _assemble_linker_feature_matrix_impl(*args, **kwargs)
-
-
-def compute_candidate_batch_pairwise_model_and_aggregate_stats(*args: Any, **kwargs: Any) -> Any:
-    return _pairwise_model_stats_impl(*args, **kwargs)
-
-
-def _predict_incremental_link_or_abstain_retrieved_candidates(*args: Any, **kwargs: Any) -> Any:
-    return _retrieved_candidates_impl(*args, **kwargs)
 
 
 class StaticPairwiseStats:
@@ -483,8 +465,7 @@ def _row_features_with_telemetry(retrieval_scores: np.ndarray) -> tuple[dict[str
     }
 
 
-def _promoted_gate_config(score: float = 0.0, margin: float = 0.0) -> dict[str, Any]:
-    del margin
+def _promoted_gate_config(score: float = 0.0) -> dict[str, Any]:
     scale = 200.0
     return logistic_gate_config(
         feature_names=("chosen_probability",),
@@ -524,11 +505,7 @@ def _retrieval_batch(
     retrieval_ranks: np.ndarray | None = None,
 ) -> LinkerRetrievalBatch:
     row_count = len(row_query_signature_indices)
-    candidate_batch = LinkerCandidateBatch(
-        row_count=row_count,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=row_query_signature_indices,
         row_component_keys=row_component_keys,
         retrieval_ranks=retrieval_ranks,
@@ -547,6 +524,23 @@ def _retrieval_batch(
             "query_first_token": np.asarray(["alice"] * row_count, dtype=object),
             "first_name_bucket": np.asarray(["multi_letter_first"] * row_count, dtype=object),
         },
+    )
+
+
+def _row_only_candidate_batch(
+    *,
+    row_query_signature_indices: np.ndarray,
+    row_component_keys: tuple[str, ...],
+    retrieval_ranks: np.ndarray | None = None,
+) -> LinkerCandidateBatch:
+    return LinkerCandidateBatch(
+        row_count=len(row_query_signature_indices),
+        left_signature_indices=np.zeros(0, dtype=np.uint32),
+        right_signature_indices=np.zeros(0, dtype=np.uint32),
+        pair_row_indices=np.zeros(0, dtype=np.uint32),
+        row_query_signature_indices=row_query_signature_indices,
+        row_component_keys=row_component_keys,
+        retrieval_ranks=retrieval_ranks,
     )
 
 
@@ -1087,11 +1081,7 @@ def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path:
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
     artifact = load_incremental_linking_artifact(artifact_dir)
-    candidate_batch = LinkerCandidateBatch(
-        row_count=3,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10, 10, 11], dtype=np.uint32),
         row_component_keys=("c_low", "c_high", "c_single"),
         retrieval_ranks=np.asarray([2, 1, 1], dtype=np.uint16),
@@ -1128,11 +1118,7 @@ def test_compact_link_or_abstain_abstains_when_artifact_score_threshold_too_high
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
     artifact = load_incremental_linking_artifact(artifact_dir)
-    candidate_batch = LinkerCandidateBatch(
-        row_count=1,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10], dtype=np.uint32),
         row_component_keys=("c0",),
     )
@@ -1157,11 +1143,7 @@ def test_compact_link_or_abstain_single_candidate_uses_logistic_score_feature() 
         np.asarray([0.9], dtype=np.float64),
         gate_config=_promoted_gate_config(0.95),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=1,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10], dtype=np.uint32),
         row_component_keys=("c0",),
     )
@@ -1188,11 +1170,7 @@ def test_compact_link_or_abstain_applies_numpy_logistic_gate_feature() -> None:
             calibration_mode="test",
         ),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=3,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10, 10, 11], dtype=np.uint32),
         row_component_keys=("c_margin", "c_runner_up", "c_single"),
         retrieval_ranks=np.asarray([1, 2, 1], dtype=np.uint16),
@@ -1227,11 +1205,7 @@ def test_compact_logistic_gate_can_use_materialized_bucket_feature() -> None:
             calibration_mode="test",
         ),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=1,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10], dtype=np.uint32),
         row_component_keys=("c_single",),
         retrieval_ranks=np.asarray([1], dtype=np.uint16),
@@ -1251,11 +1225,7 @@ def test_compact_constraint_require_forces_link() -> None:
         np.asarray([0.95, 0.10], dtype=np.float64),
         gate_config=_promoted_gate_config(0.99),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=2,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
         row_component_keys=("non_require_high_score", "require_low_score"),
         retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
@@ -1286,11 +1256,7 @@ def test_compact_constraint_require_rejects_conflicting_candidate_components() -
         np.asarray([0.95, 0.90], dtype=np.float64),
         gate_config=_promoted_gate_config(0.0),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=2,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
         row_component_keys=("required_component_a", "required_component_b"),
         retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
@@ -1314,11 +1280,7 @@ def test_compact_constraint_disallow_vetoes_single_member_candidate_and_chooses_
         np.asarray([0.95, 0.80], dtype=np.float64),
         gate_config=_promoted_gate_config(0.5),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=2,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
         row_component_keys=("disallowed_high_score", "eligible_lower_score"),
         retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
@@ -1347,11 +1309,7 @@ def test_compact_constraint_veto_recomputes_gate_only_for_affected_query(
         np.asarray([0.95, 0.80, 0.90, 0.10], dtype=np.float64),
         gate_config=_promoted_gate_config(0.5),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=4,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10, 10, 11, 11], dtype=np.uint32),
         row_component_keys=("vetoed_high_score", "eligible_lower_score", "q2_high_score", "q2_low_score"),
         retrieval_ranks=np.asarray([1, 2, 1, 2], dtype=np.uint16),
@@ -1387,11 +1345,7 @@ def test_compact_constraint_disallow_abstains_when_all_candidate_rows_vetoed() -
         np.asarray([0.95, 0.80], dtype=np.float64),
         gate_config=_promoted_gate_config(0.5),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=2,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
         row_component_keys=("disallowed_high_score", "disallowed_lower_score"),
         retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
@@ -1418,11 +1372,7 @@ def test_compact_orcid_match_forces_link_and_beats_non_orcid_rows() -> None:
         np.asarray([0.95, 0.10], dtype=np.float64),
         gate_config=_promoted_gate_config(0.99),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=2,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
         row_component_keys=("non_orcid_high_score", "orcid_low_score"),
         retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
@@ -1517,11 +1467,7 @@ def test_compact_hard_excluded_rows_block_component_even_against_orcid_force() -
         np.asarray([0.95, 0.60], dtype=np.float64),
         gate_config=_promoted_gate_config(0.5),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=2,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
         row_component_keys=("c_partner_linked", "c_other"),
         retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
@@ -1548,11 +1494,7 @@ def test_compact_hard_excluded_rows_abstain_when_all_rows_excluded() -> None:
         np.asarray([0.95], dtype=np.float64),
         gate_config=_promoted_gate_config(0.5),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=1,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10], dtype=np.uint32),
         row_component_keys=("c_partner_linked",),
     )
@@ -1574,11 +1516,7 @@ def test_compact_hard_excluded_rows_conflicting_require_raises_typed_error() -> 
         np.asarray([0.95, 0.60], dtype=np.float64),
         gate_config=_promoted_gate_config(0.5),
     )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=2,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
         row_component_keys=("c_partner_linked", "c_other"),
         retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
@@ -1600,11 +1538,7 @@ def test_compact_hard_excluded_rows_conflicting_require_raises_typed_error() -> 
 
 
 def test_cluster_seed_disallow_excluded_rows_builds_query_component_mask() -> None:
-    candidate_batch = LinkerCandidateBatch(
-        row_count=3,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    candidate_batch = _row_only_candidate_batch(
         row_query_signature_indices=np.asarray([0, 0, 1], dtype=np.uint32),
         row_component_keys=("c1", "c2", "c1"),
     )

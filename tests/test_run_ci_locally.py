@@ -1,24 +1,13 @@
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
-
-def _load_run_ci_locally() -> ModuleType:
-    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_ci_locally.py"
-    spec = importlib.util.spec_from_file_location("run_ci_locally", script_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from scripts import run_ci_locally as run_ci
 
 
 def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
-    run_ci = _load_run_ci_locally()
     calls: list[list[str]] = []
 
     monkeypatch.setattr(
@@ -49,7 +38,6 @@ def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
 
 
 def test_ensure_rust_on_path_rejects_rustc_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    run_ci = _load_run_ci_locally()
     rustc_path = tmp_path / "rustc"
 
     monkeypatch.setattr(
@@ -64,7 +52,6 @@ def test_ensure_rust_on_path_rejects_rustc_only(monkeypatch: pytest.MonkeyPatch,
 
 
 def test_typecheck_and_test_job_builds_required_rust_runtime(monkeypatch) -> None:
-    run_ci = _load_run_ci_locally()
     calls: list[tuple[list[str], dict[str, str] | None]] = []
     lifecycle: list[str] = []
 

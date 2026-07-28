@@ -610,7 +610,7 @@ def test_altered_cluster_signatures_arrow_round_trips_and_rejects_duplicates(tmp
         read_altered_cluster_signatures_arrow(duplicate_path)
 
 
-def test_temporary_cluster_seed_sidecars_clean_up_tmpdir(tmp_path: Path) -> None:
+def test_temporary_cluster_seed_sidecars_clean_up_tmpdir() -> None:
     pytest.importorskip("pyarrow")
 
     with temporary_cluster_seed_sidecars(

@@ -665,8 +665,8 @@ pub(crate) fn prune_native_graph_edge_scores(
         right
             .1
             .total_cmp(&left.1)
-            .then_with(|| left.0 .0.cmp(&right.0 .0).reverse())
-            .then_with(|| left.0 .1.cmp(&right.0 .1).reverse())
+            .then_with(|| left.0 .0.cmp(&right.0 .0))
+            .then_with(|| left.0 .1.cmp(&right.0 .1))
     });
     strongest.truncate(max_candidate_edges);
     edge_scores.clear();
@@ -1975,11 +1975,23 @@ pub(crate) fn sorted_subblock_merge_candidates(
 
 #[cfg(test)]
 mod subdivision_tests {
-    use super::{sorted_subblock_merge_candidates, subdivide_helper_rust, OrderedSubblocks};
+    use super::{
+        prune_native_graph_edge_scores, sorted_subblock_merge_candidates, subdivide_helper_rust,
+        OrderedSubblocks,
+    };
     use std::collections::HashMap;
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn native_graph_edge_pruning_breaks_score_ties_by_ascending_pair() {
+        let mut edge_scores = HashMap::from([((0, 3), 1.0), ((0, 1), 1.0), ((0, 2), 1.0)]);
+
+        prune_native_graph_edge_scores(&mut edge_scores, 2);
+
+        assert_eq!(edge_scores, HashMap::from([((0, 1), 1.0), ((0, 2), 1.0)]));
     }
 
     #[test]

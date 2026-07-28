@@ -114,6 +114,19 @@ _CATEGORICAL_FEATURES = (
     "query_view_full",
     "query_view_initial_only",
 )
+_EVIDENCE_AGGREGATE_PREFIX_TO_OP = {
+    "top_raw_": "top",
+    "delta_top_second_": "delta",
+    "list_mean_": "mean",
+    "list_std_": "std",
+    "list_min_": "min",
+    "list_max_": "max",
+}
+_DIRECT_FEATURE_SOURCES = {
+    "top_meta_retrieval_rank": "retrieval_rank",
+    "top_meta_query_first_token_len": "query_first_token",
+    "top_meta_query_author_len": "query_author",
+}
 
 
 def _immutable_float64_array(value: Any) -> np.ndarray:
@@ -162,6 +175,16 @@ def default_logistic_gate_feature_names() -> tuple[str, ...]:
         *(f"list_max_{feature}" for feature in evidence),
         *_CATEGORICAL_FEATURES,
     )
+
+
+def _validate_runtime_feature_names(feature_names: Sequence[str]) -> tuple[str, ...]:
+    """Return artifact feature names after enforcing the runtime-safe universe."""
+
+    resolved = _validate_unique_feature_names(feature_names)
+    unsupported = sorted(set(resolved).difference(default_logistic_gate_feature_names()))
+    if unsupported:
+        raise ValueError(f"logistic gate feature_names contain unsupported runtime features: {unsupported[:5]}")
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -345,8 +368,9 @@ def logistic_gate_config(
     resolved_weights = np.asarray(weights, dtype=np.float64)
     resolved_bias = np.asarray(bias, dtype=np.float64)
     resolved_missing = np.asarray(missing_values, dtype=np.float64)
+    resolved_feature_names = _validate_runtime_feature_names(feature_names)
     gate = NumpyLogisticGate(
-        feature_names=tuple(str(feature) for feature in feature_names),
+        feature_names=resolved_feature_names,
         weights=resolved_weights,
         bias=resolved_bias,
         missing_values=resolved_missing,
@@ -371,7 +395,7 @@ def load_logistic_gate_config(gate_config: Mapping[str, Any]) -> NumpyLogisticGa
 
     if str(gate_config.get("model_type", "")) != LOGISTIC_GATE_MODEL_TYPE:
         raise ValueError(f"Unsupported logistic gate model_type: {gate_config.get('model_type')!r}")
-    feature_names = tuple(str(feature) for feature in gate_config["feature_names"])
+    feature_names = _validate_runtime_feature_names(gate_config["feature_names"])
     classes = tuple(int(value) for value in gate_config.get("classes", LOGISTIC_GATE_CLASSES))
     weights = np.asarray(gate_config["weights"], dtype=np.float64)
     bias = np.asarray(gate_config["bias"], dtype=np.float64)
@@ -430,6 +454,44 @@ def _normalized_entropy(values: np.ndarray) -> float:
     return entropy / math.log(len(probabilities))
 
 
+def _validate_selected_feature_sources(
+    feature_names: Sequence[str],
+    feature_values: Mapping[str, Any],
+) -> None:
+    """Reject selected gate features whose runtime source column is absent."""
+
+    missing: list[tuple[str, str]] = []
+    for feature_name in feature_names:
+        source_name = _DIRECT_FEATURE_SOURCES.get(feature_name)
+        if source_name is None:
+            for prefix in _EVIDENCE_AGGREGATE_PREFIX_TO_OP:
+                if feature_name.startswith(prefix):
+                    source_name = feature_name.removeprefix(prefix)
+                    break
+        if source_name is not None and source_name not in feature_values:
+            missing.append((feature_name, source_name))
+        elif feature_name.startswith("query_view_") and "query_view" not in feature_values:
+            missing.append((feature_name, "query_view"))
+
+    bucket_features = [
+        feature_name
+        for feature_name in feature_names
+        if feature_name.startswith(("first_name_bucket_", "gate_bucket_"))
+    ]
+    has_bucket_source = "first_name_bucket" in feature_values or (
+        "query_first_token" in feature_values and "query_view" in feature_values
+    )
+    if bucket_features and not has_bucket_source:
+        missing.extend(
+            (feature_name, "first_name_bucket or (query_first_token and query_view)")
+            for feature_name in bucket_features
+        )
+
+    if missing:
+        details = ", ".join(f"{feature!r} requires {source!r}" for feature, source in missing[:5])
+        raise ValueError(f"logistic gate selected feature sources are missing: {details}")
+
+
 def build_logistic_gate_matrix(
     feature_names: Sequence[str],
     *,
@@ -458,9 +520,9 @@ def build_logistic_gate_matrix(
     elif "query_first_token" in feature_values and "query_view" in feature_values:
         first_name_bucket = first_name_bucket_array(feature_values["query_first_token"], feature_values["query_view"])
     else:
-        if any(name.startswith("first_name_bucket_") for name in resolved_feature_names):
+        if any(name.startswith(("first_name_bucket_", "gate_bucket_")) for name in resolved_feature_names):
             raise ValueError(
-                "logistic gate first_name_bucket_* features require 'first_name_bucket' or both"
+                "logistic gate first_name_bucket_* and gate_bucket_* features require 'first_name_bucket' or both"
                 " 'query_first_token' and 'query_view' in feature_values"
             )
         first_name_bucket = _object_array(feature_values, "first_name_bucket", row_count)
@@ -568,16 +630,8 @@ def build_logistic_gate_matrix(
             set_column(feature_name, (gate_bucket == feature_name.removeprefix("gate_bucket_")).astype(float))
 
     source_ops: dict[str, set[str]] = {}
-    prefix_to_op = {
-        "top_raw_": "top",
-        "delta_top_second_": "delta",
-        "list_mean_": "mean",
-        "list_std_": "std",
-        "list_min_": "min",
-        "list_max_": "max",
-    }
     for feature_name in resolved_feature_names:
-        for prefix, op in prefix_to_op.items():
+        for prefix, op in _EVIDENCE_AGGREGATE_PREFIX_TO_OP.items():
             if feature_name.startswith(prefix):
                 source_ops.setdefault(feature_name.removeprefix(prefix), set()).add(op)
                 break
@@ -696,11 +750,13 @@ def build_runtime_logistic_gate_matrix(
     candidate_batch: LinkerCandidateBatch = feature_matrix.candidate_batch
     if candidate_batch.row_query_signature_indices is None:
         raise ValueError("candidate_batch.row_query_signature_indices is required for logistic gate decisions")
+    feature_values = feature_values_from_runtime(feature_matrix, row_signals)
+    _validate_selected_feature_sources(gate.feature_names, feature_values)
     return build_logistic_gate_matrix(
         gate.feature_names,
         query_indices=candidate_batch.row_query_signature_indices,
         probabilities=probabilities,
-        feature_values=feature_values_from_runtime(feature_matrix, row_signals),
+        feature_values=feature_values,
         retrieval_ranks=candidate_batch.retrieval_ranks,
         component_keys=candidate_batch.row_component_keys,
     )

@@ -117,6 +117,14 @@ The public routes are method-based:
   handle, partitions oversized blocks with the native Rust graph
   subblocker, and reuses one Rust featurizer across the emitted subblocks.
 
+The two graph routes have a quality-equivalence contract, not an identical-partition
+contract. In the default projection mode, Python and Rust use separate deterministic
+random-number generators and seed derivations, so the projection edges and resulting
+subblocks may differ for the same signatures. Verification requires both routes to
+cover the same signatures, honor the size cap, and preserve required components; it
+does not require matching unlabeled partitions. For a fixed candidate edge set,
+score ties are resolved deterministically within each route.
+
 `batching_threshold=None` retains full-block prediction. A positive threshold
 is the maximum native subblock size; blocks at or below it are unchanged.
 Multi-letter subblocks are predicted first, then initial-only groups attach to

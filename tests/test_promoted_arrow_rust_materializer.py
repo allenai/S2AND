@@ -178,10 +178,10 @@ def test_load_target_rejects_duplicate_features(tmp_path) -> None:
         _load_target(target_path)
 
 
-def test_arrow_rust_partial_writer_reuses_label_columns_as_features(tmp_path) -> None:
+def test_arrow_rust_partial_writer_replaces_label_columns_with_materialized_features(tmp_path) -> None:
     rows = pd.DataFrame(
         {
-            "retrieval_rank": [1.0, 2.0],
+            "retrieval_rank": [2.0, 1.0],
             "query_group_id": ["q1", "q1"],
             "label": [1, 0],
         }
@@ -204,6 +204,26 @@ def test_arrow_rust_partial_writer_reuses_label_columns_as_features(tmp_path) ->
     assert out.columns.tolist() == ["_row_position", "retrieval_rank", "query_group_id", "label", "title_overlap"]
     assert out["retrieval_rank"].tolist() == [1.0, 2.0]
     assert out["title_overlap"].tolist() == pytest.approx([0.4, 0.1])
+
+
+def test_current_retrieval_window_uses_native_ranks_instead_of_source_ranks() -> None:
+    rows = pd.DataFrame(
+        {
+            "candidate_component_key": ["old-top", "current-top"],
+            "retrieval_rank": [1, 30],
+        }
+    )
+
+    selected, source_positions = promoted_train._rows_in_current_retrieval_window(  # noqa: SLF001
+        rows,
+        {"retrieval_ranks": np.asarray([2, 1], dtype=np.uint16)},
+        retrieval_top_k=1,
+        context="test",
+    )
+
+    assert source_positions.tolist() == [1]
+    assert selected["candidate_component_key"].tolist() == ["current-top"]
+    assert selected["retrieval_rank"].tolist() == [1]
 
 
 def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
@@ -256,8 +276,8 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
         expected_metrics={},
     )
     target = {
-        "feature_count": 1,
-        "features": ["min_distance"],
+        "feature_count": 2,
+        "features": ["retrieval_rank", "min_distance"],
         "params": {"n_estimators": 1},
         "metrics": {},
     }
@@ -276,11 +296,15 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
     )
     monkeypatch.setattr(promoted_train, "_release_arrow_rust_dataset_context", lambda _context: None)
 
-    def fake_materialize(**kwargs: Any) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-        assert kwargs["rows"]["candidate_component_key"].tolist() == ["candidate"]
+    def fake_materialize(**kwargs: Any) -> tuple[dict[str, np.ndarray], dict[str, Any], np.ndarray]:
+        assert kwargs["rows"]["candidate_component_key"].tolist() == ["candidate", "unreachable"]
         return (
-            {"min_distance": np.asarray([0.5], dtype=np.float32)},
+            {
+                "retrieval_rank": np.asarray([1.0], dtype=np.float32),
+                "min_distance": np.asarray([0.7], dtype=np.float32),
+            },
             {"dataset": "toy", "rows": 1, "seconds": 0.0, "mode": "arrow-rust"},
+            np.asarray([1], dtype=np.int64),
         )
 
     monkeypatch.setattr(promoted_train, "_materialize_arrow_rust_dataset_rows", fake_materialize)
@@ -306,7 +330,9 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
     output_path = output_root / "features_corrected" / "train.parquet"
     output = pd.read_parquet(output_path)
     assert bundle.root == output_root.resolve()
-    assert output["min_distance"].tolist() == pytest.approx([0.5])
+    assert output["candidate_component_key"].tolist() == ["unreachable"]
+    assert output["retrieval_rank"].tolist() == [1]
+    assert output["min_distance"].tolist() == pytest.approx([0.7])
     assert summaries[0]["rows"] == 1
     assert summaries[0]["label_filtering"]["retrieval_window"] == {
         "retrieval_top_k": 1,

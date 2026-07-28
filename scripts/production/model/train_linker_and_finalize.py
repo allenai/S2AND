@@ -872,17 +872,17 @@ def _validate_materialized_target_features(
         raise ValueError(f"{context}: materialized features contain infinite values: {infinite_features}")
 
 
-def _target_feature_frame_to_append(
+def _rows_with_materialized_target_features(
     rows: pd.DataFrame,
     dataset_features: Mapping[str, np.ndarray],
     target_features: Sequence[str],
 ) -> pd.DataFrame:
-    """Return materialized target features that are not already present in row labels."""
+    """Return rows with every target feature replaced by materialized values."""
 
-    existing = {str(column) for column in rows.columns}
-    return pd.DataFrame(
-        {str(column): dataset_features[str(column)] for column in target_features if str(column) not in existing}
-    )
+    output = rows.reset_index(drop=True).copy()
+    for column in target_features:
+        output[str(column)] = dataset_features[str(column)]
+    return output
 
 
 def _copy_bundle_support_files(
@@ -945,6 +945,27 @@ def _assemble_promoted_feature_values(
     return feature_values
 
 
+def _rows_in_current_retrieval_window(
+    rows: pd.DataFrame,
+    raw_plan: Mapping[str, Any],
+    *,
+    retrieval_top_k: int,
+    context: str,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Select rows by current native retrieval ranks and retain source positions."""
+
+    if retrieval_top_k <= 0:
+        raise ValueError(f"{context} retrieval_top_k must be positive")
+    current_ranks = as_retrieval_rank_uint16_1d(
+        "retrieval_ranks",
+        _row_signal_from_plan(raw_plan, "retrieval_ranks", object, len(rows)),
+    )
+    selected_positions = np.flatnonzero(current_ranks <= retrieval_top_k).astype(np.int64, copy=False)
+    selected_rows = rows.iloc[selected_positions].reset_index(drop=True).copy()
+    selected_rows["retrieval_rank"] = current_ranks[selected_positions].astype(np.int64, copy=False)
+    return selected_rows, selected_positions
+
+
 def _materialize_arrow_rust_dataset_rows(
     *,
     context: ArrowRustDatasetContext,
@@ -957,34 +978,48 @@ def _materialize_arrow_rust_dataset_rows(
     max_exemplars: int,
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
-) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    retrieval_top_k: int = DEFAULT_RETRIEVAL_TOP_K,
+) -> tuple[dict[str, np.ndarray], dict[str, Any], np.ndarray]:
     started = time.perf_counter()
     dataset_name = context.dataset_name
-    dataset_rows = rows.reset_index(drop=True).copy()
+    source_rows = rows.reset_index(drop=True).copy()
+    source_row_count = len(source_rows)
+    rust_module = feature_port._require_rust_runtime()  # noqa: SLF001
+    plan_fn = rust_module.raw_arrow_labeled_candidate_plan
+
+    def build_raw_plan(candidate_rows: pd.DataFrame) -> Mapping[str, Any]:
+        stored_ranks = as_retrieval_rank_uint16_1d(
+            "retrieval_rank",
+            pd.to_numeric(candidate_rows["retrieval_rank"], errors="raise").to_numpy(),
+        )
+        return plan_fn(
+            context.arrow_dataset.native,
+            candidate_rows["query_signature_id"].astype(str).tolist(),
+            candidate_rows["query_view"].astype(str).tolist(),
+            candidate_rows["query_group_id"].astype(str).tolist(),
+            candidate_rows["candidate_component_key"].astype(str).tolist(),
+            stored_ranks.tolist(),
+            context.component_members,
+            orcid_enabled=not PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
+            num_threads=max(1, int(n_jobs)),
+            max_exemplars=int(max_exemplars),
+        )
+
+    plan_started = time.perf_counter()
+    raw_plan = build_raw_plan(source_rows)
+    dataset_rows, selected_row_positions = _rows_in_current_retrieval_window(
+        source_rows,
+        raw_plan,
+        retrieval_top_k=retrieval_top_k,
+        context=f"arrow-rust:{dataset_name}",
+    )
+    if len(dataset_rows) != source_row_count:
+        raw_plan = build_raw_plan(dataset_rows)
+    raw_plan_seconds = float(time.perf_counter() - plan_started)
     row_count = len(dataset_rows)
     group_codes = tuple(
         int(value) for value in pd.factorize(dataset_rows["query_group_id"].astype(str), sort=False)[0].tolist()
     )
-    rust_module = feature_port._require_rust_runtime()  # noqa: SLF001
-    plan_fn = rust_module.raw_arrow_labeled_candidate_plan
-    plan_started = time.perf_counter()
-    retrieval_ranks = as_retrieval_rank_uint16_1d(
-        "retrieval_rank",
-        pd.to_numeric(dataset_rows["retrieval_rank"], errors="raise").to_numpy(),
-    )
-    raw_plan = plan_fn(
-        context.arrow_dataset.native,
-        dataset_rows["query_signature_id"].astype(str).tolist(),
-        dataset_rows["query_view"].astype(str).tolist(),
-        dataset_rows["query_group_id"].astype(str).tolist(),
-        dataset_rows["candidate_component_key"].astype(str).tolist(),
-        retrieval_ranks.tolist(),
-        context.component_members,
-        orcid_enabled=not PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
-        num_threads=max(1, int(n_jobs)),
-        max_exemplars=int(max_exemplars),
-    )
-    raw_plan_seconds = float(time.perf_counter() - plan_started)
     signature_ids = tuple(str(signature_id) for signature_id in raw_plan["signature_ids"])
     featurizer_started = time.perf_counter()
     featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
@@ -1060,6 +1095,7 @@ def _materialize_arrow_rust_dataset_rows(
     summary = {
         "dataset": dataset_name,
         "rows": int(row_count),
+        "rows_before_retrieval_window": int(source_row_count),
         "rust_pairwise_aggregate_pairs": int(batch.pair_count),
         "separate_rust_pairwise_aggregate_pairs": 0,
         "fused_pairwise_pairs": int(batch.pair_count),
@@ -1096,7 +1132,7 @@ def _materialize_arrow_rust_dataset_rows(
     }
     del pair_labels, fused_pairwise, featurizer
     gc.collect()
-    return feature_values, summary
+    return feature_values, summary, selected_row_positions
 
 
 def _safe_dataset_filename(dataset_name: str) -> str:
@@ -1108,10 +1144,11 @@ def _write_arrow_rust_partial(
     shard: ArrowRustPendingShard,
     dataset_features: Mapping[str, np.ndarray],
     target_features: Sequence[str],
+    selected_row_positions: np.ndarray,
 ) -> None:
     _write_arrow_rust_partial_frame(
-        rows=shard.rows,
-        row_positions=shard.row_positions,
+        rows=shard.rows.iloc[selected_row_positions].reset_index(drop=True),
+        row_positions=shard.row_positions[selected_row_positions],
         partial_path=shard.partial_path,
         dataset_features=dataset_features,
         target_features=target_features,
@@ -1126,12 +1163,11 @@ def _write_arrow_rust_partial_frame(
     dataset_features: Mapping[str, np.ndarray],
     target_features: Sequence[str],
 ) -> None:
-    feature_frame = _target_feature_frame_to_append(rows, dataset_features, target_features)
-    partial_output = pd.concat([rows.reset_index(drop=True), feature_frame], axis=1)
+    partial_output = _rows_with_materialized_target_features(rows, dataset_features, target_features)
     partial_output.insert(0, "_row_position", row_positions)
     partial_path.parent.mkdir(parents=True, exist_ok=True)
     partial_output.to_parquet(partial_path, index=False)
-    del feature_frame, partial_output
+    del partial_output
 
 
 def _finalize_arrow_rust_table_plan(
@@ -1139,22 +1175,40 @@ def _finalize_arrow_rust_table_plan(
     plan: ArrowRustTablePlan,
     target_features: Sequence[str],
     source_bundle: OfficialBundle,
+    retrieval_top_k: int,
 ) -> dict[str, Any]:
     parts = [pd.read_parquet(path) for path in plan.partial_paths]
     output = pd.concat(parts, axis=0, ignore_index=True)
     output = output.sort_values("_row_position", kind="stable").drop(columns=["_row_position"]).reset_index(drop=True)
-    if len(output) != len(plan.labels):
-        raise ValueError(f"{plan.table_key}: materialized row count mismatch: {len(output)} != {len(plan.labels)}")
+    expected_row_count = sum(int(summary["rows"]) for summary in plan.dataset_summaries)
+    if len(output) != expected_row_count:
+        raise ValueError(f"{plan.table_key}: materialized row count mismatch: {len(output)} != {expected_row_count}")
+    selected_output = _filter_candidate_rows_to_retrieval_top_k(
+        output,
+        retrieval_top_k=retrieval_top_k,
+        context=f"arrow-rust:{plan.table_key}",
+    )
+    if len(selected_output) != len(output):
+        raise ValueError(f"{plan.table_key}: materialized output contains rows outside current retrieval window")
+    output = selected_output
+    rows_before_retrieval_window = int(len(plan.labels))
+    plan.label_filtering_summary["retrieval_window"] = {
+        "retrieval_top_k": retrieval_top_k,
+        "rows_before": rows_before_retrieval_window,
+        "rows_after": int(len(output)),
+        "rows_removed": rows_before_retrieval_window - int(len(output)),
+    }
     _validate_materialized_target_features(output, target_features, context=plan.table_key)
     plan.output_path.parent.mkdir(parents=True, exist_ok=True)
     output.to_parquet(plan.output_path, index=False)
+    output_row_count = int(len(output))
     del parts, output
     gc.collect()
     return {
         "table_key": plan.table_key,
         "labels_path": str(plan.labels_path.relative_to(source_bundle.root)),
         "output_path": str(plan.output_path),
-        "rows": int(len(plan.labels)),
+        "rows": output_row_count,
         "datasets": plan.dataset_summaries,
         "label_filtering": plan.label_filtering_summary,
         "structural_cleaning": plan.structural_cleaning_summary,
@@ -1295,19 +1349,13 @@ def _materialize_arrow_rust_feature_bundle(
             labels,
             context=f"arrow-rust:{table_key}",
         )
-        rows_before_retrieval_window = int(len(labels))
-        labels = _filter_candidate_rows_to_retrieval_top_k(
-            labels,
-            retrieval_top_k=retrieval_top_k,
-            context=f"arrow-rust:{table_key}",
-        )
-        label_filtering_summary["retrieval_window"] = {
-            "retrieval_top_k": retrieval_top_k,
-            "rows_before": rows_before_retrieval_window,
-            "rows_after": int(len(labels)),
-            "rows_removed": rows_before_retrieval_window - int(len(labels)),
-        }
         if labels.empty:
+            label_filtering_summary["retrieval_window"] = {
+                "retrieval_top_k": retrieval_top_k,
+                "rows_before": 0,
+                "rows_after": 0,
+                "rows_removed": 0,
+            }
             append_empty_selection_summary(
                 table_key=table_key,
                 labels_path=labels_path,
@@ -1333,6 +1381,12 @@ def _materialize_arrow_rust_feature_bundle(
             arrow_datasets=arrow_datasets,
         )
         if labels.empty:
+            label_filtering_summary["retrieval_window"] = {
+                "retrieval_top_k": retrieval_top_k,
+                "rows_before": 0,
+                "rows_after": 0,
+                "rows_removed": 0,
+            }
             append_empty_selection_summary(
                 table_key=table_key,
                 labels_path=labels_path,
@@ -1405,7 +1459,7 @@ def _materialize_arrow_rust_feature_bundle(
                     ),
                     flush=True,
                 )
-                dataset_features, dataset_summary = _materialize_arrow_rust_dataset_rows(
+                dataset_features, dataset_summary, selected_row_positions = _materialize_arrow_rust_dataset_rows(
                     context=context,
                     rows=shard.rows,
                     target_features=target_features,
@@ -1416,11 +1470,13 @@ def _materialize_arrow_rust_feature_bundle(
                     max_exemplars=max_exemplars,
                     pairwise_model_nan_value=float(pairwise_model_nan_value),
                     pairwise_aggregate_nan_value=float(pairwise_aggregate_nan_value),
+                    retrieval_top_k=retrieval_top_k,
                 )
                 _write_arrow_rust_partial(
                     shard=shard,
                     dataset_features=dataset_features,
                     target_features=target_features,
+                    selected_row_positions=selected_row_positions,
                 )
                 table_plan = table_plans[shard.table_key]
                 table_plan.partial_paths.append(shard.partial_path)
@@ -1448,6 +1504,7 @@ def _materialize_arrow_rust_feature_bundle(
             plan=table_plans[table_key],
             target_features=target_features,
             source_bundle=source_bundle,
+            retrieval_top_k=retrieval_top_k,
         )
         summaries.append(summary)
         print(json.dumps({"event": "arrow_rust_table_featureization_done", **summary}), flush=True)

@@ -14,7 +14,7 @@ from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block import write_arrow_ipc_table
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from scripts.convert_to_arrow import RuntimeDatasetSources
-from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
+from tests.helpers import tiny_name_counts_tuple
 
 
 def _fake_sources(tmp_path: Path, dataset: str) -> RuntimeDatasetSources:
@@ -78,6 +78,73 @@ def _write_paper_authors_table(
         ),
         path,
     )
+
+
+def test_join_canonical_benchmark_names_replaces_only_name_fields() -> None:
+    signatures = {
+        "s2": {
+            "signature_id": "s2",
+            "paper_id": "p2",
+            "author_info": {"first": "Jean Marie", "middle": None, "last": "Müller", "block": "keep"},
+        },
+        "s1": {
+            "signature_id": "s1",
+            "paper_id": "p1",
+            "author_info": {"first": "Ada", "middle": None, "last": "Lovelace", "block": "keep"},
+        },
+    }
+    original = json.loads(json.dumps(signatures))
+
+    joined, report = convert_to_arrow.join_canonical_benchmark_names(
+        signatures,
+        [
+            {"signature_id": "s1", "first": "ada", "middle": "", "last": "lovelace"},
+            {"signature_id": "s2", "first": "jean-marie", "middle": "", "last": "muller"},
+        ],
+    )
+
+    assert signatures == original
+    assert list(joined) == ["s1", "s2"]
+    assert joined["s2"]["author_info"] == {
+        "first": "jean-marie",
+        "middle": "",
+        "last": "muller",
+        "block": "keep",
+    }
+    assert joined["s2"]["paper_id"] == "p2"
+    assert report == {
+        "rows": 2,
+        "changed_signatures": 2,
+        "field_changes": {"first": 2, "middle": 2, "last": 2},
+    }
+
+
+@pytest.mark.parametrize(
+    ("canonical_ids", "message"),
+    [
+        (["s1", "s1"], "duplicate signature_id"),
+        ([], "missing=\\['s1'\\]"),
+        (["s1", "s2"], "extra=\\['s2'\\]"),
+    ],
+)
+def test_join_canonical_benchmark_names_rejects_duplicate_missing_or_extra_ids(
+    canonical_ids: list[str],
+    message: str,
+) -> None:
+    signatures = {
+        "s1": {
+            "signature_id": "s1",
+            "paper_id": "p1",
+            "author_info": {"first": "Ada", "middle": None, "last": "Lovelace"},
+        }
+    }
+    canonical_rows = [
+        {"signature_id": signature_id, "first": "ada", "middle": "", "last": "lovelace"}
+        for signature_id in canonical_ids
+    ]
+
+    with pytest.raises(ValueError, match=message):
+        convert_to_arrow.join_canonical_benchmark_names(signatures, canonical_rows)
 
 
 def test_arrow_artifact_generation_excludes_request_local_sidecars(tmp_path: Path) -> None:
@@ -968,13 +1035,9 @@ def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tm
     index_path, _metrics = write_name_counts_index(
         tmp_path,
         tiny_name_counts_tuple(),
-        tiny_name_counts_provenance(),
     )
     name_counts_index = Path(index_path)
-    manifest_path = name_counts_index / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["files"]["first"]["path"] = "generations/missing/first.bin"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (name_counts_index / "first.bin").unlink()
     _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
     _write_papers_table(pa, papers_path, ["p1"])
     _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])

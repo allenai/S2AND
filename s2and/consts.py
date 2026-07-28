@@ -148,7 +148,7 @@ Incrementation history
     lowercasing branch on such titles, diverging Rust language detection from
     Python. Python feature values are unchanged; Rust-side values change only
     for titles containing those characters near the gate boundaries.
-8 - canonical_v2 name normalization cutover (docs/normalization_migration_blocked.md).
+8 - canonical_v2 name normalization cutover (docs/data.md).
     Signature first/middle/last fields are canonicalized with one routine
     (apostrophe-like marks deleted in all fields, uniform dash separators,
     dash-bound given-name compounds kept as spaced tokens, spaced canonical
@@ -171,8 +171,8 @@ Incrementation history
 """
 FEATURIZER_VERSION = 10
 
-# Name-normalization contract (docs/normalization_migration_blocked.md, OD4
-# single-mode cutover). Code, models, and data artifacts must all declare this
+# Name-normalization contract (docs/data.md). Code, models, and data artifacts
+# must all declare this
 # exact policy; rollback deploys the previous package and artifact set together.
 NORMALIZATION_VERSION = "canonical_v2"
 

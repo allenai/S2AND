@@ -9,7 +9,6 @@ import pytest
 import s2and.feature_port as feature_port
 import s2and.runtime as runtime
 from s2and.data import ANDData
-from tests.helpers import tiny_name_counts_provenance
 
 
 class DummyRustFeaturizer:
@@ -46,8 +45,12 @@ class DummyRustModule:
     RustFeaturizer = DummyRustFeaturizer
 
 
+def _dummy_arrow_dataset() -> SimpleNamespace:
+    return SimpleNamespace(native=object())
+
+
 class DummyDataset(ANDData):
-    def __init__(self, name: str, *, seed_source: str = "arrow") -> None:
+    def __init__(self, name: str) -> None:
         self.name = name
         self.mode = "train"
         self.runtime_context = SimpleNamespace(operation="test", run_id=name)
@@ -59,14 +62,7 @@ class DummyDataset(ANDData):
         self.n_jobs = 1
         self.cluster_seeds_require: dict[Any, Any] = {}
         self.cluster_seeds_disallow: set[tuple[Any, Any]] = set()
-        self._cluster_seeds_source = seed_source
-        self._cluster_seeds_initial_require_id = id(self.cluster_seeds_require)
-        self._cluster_seeds_initial_disallow_id = id(self.cluster_seeds_disallow)
-        self.arrow_seed_require: dict[Any, Any] = {}
-        self.arrow_seed_disallow: set[tuple[Any, Any]] = set()
-        self.arrow_paths = {"signatures": f"{name}.arrow"}
-        self.arrow_artifact_generation = f"test-generation-{name}"
-        self.name_counts_provenance = tiny_name_counts_provenance()
+        self.arrow_dataset = _dummy_arrow_dataset()
 
 
 def _dummy_build_rust_featurizer(
@@ -74,11 +70,7 @@ def _dummy_build_rust_featurizer(
 ) -> tuple[DummyRustFeaturizer, dict[str, float]]:
     DummyRustFeaturizer.created.append(dataset.name)
     return (
-        DummyRustFeaturizer(
-            dataset.name,
-            dataset.arrow_seed_require,
-            dataset.arrow_seed_disallow,
-        ),
+        DummyRustFeaturizer(dataset.name),
         {
             "pre_build_seconds": 0.0,
             "ffi_seconds": 0.0,
@@ -233,7 +225,7 @@ def test_cache_is_owned_by_each_dataset_and_evicts() -> None:
 @pytest.mark.parametrize(
     "attribute",
     [
-        "arrow_paths",
+        "arrow_dataset",
         "name_tuples",
         "preprocess",
         "use_orcid_id",
@@ -255,8 +247,7 @@ def test_missing_mandatory_build_input_fails_fast(attribute: str) -> None:
         lambda dataset: setattr(dataset, "use_orcid_id", False),
         lambda dataset: setattr(dataset, "n_jobs", 2),
         lambda dataset: dataset.name_tuples.add(("bill", "william")),
-        lambda dataset: setattr(dataset, "arrow_artifact_generation", "replacement"),
-        lambda dataset: dataset.arrow_paths.__setitem__("signatures", "replacement.arrow"),
+        lambda dataset: setattr(dataset, "arrow_dataset", _dummy_arrow_dataset()),
     ],
 )
 def test_material_build_input_changes_rebuild(
@@ -292,7 +283,7 @@ def test_unconsumed_python_state_does_not_rebuild(mutate: Any) -> None:
 
 
 def test_exact_seed_contents_update_in_place_and_survive_rebuild() -> None:
-    dataset = DummyDataset("seed-content", seed_source="python")
+    dataset = DummyDataset("seed-content")
     dataset.cluster_seeds_require = {"s1": "c1", "s2": "c2"}
     dataset.cluster_seeds_disallow = {("s1", "s2")}
 
@@ -319,7 +310,7 @@ def test_exact_seed_contents_update_in_place_and_survive_rebuild() -> None:
 
 
 def test_same_length_seed_container_replacement_updates_in_place() -> None:
-    dataset = DummyDataset("seed-replacement", seed_source="python")
+    dataset = DummyDataset("seed-replacement")
     dataset.cluster_seeds_require = {"s1": "c1", "s2": "c2"}
     dataset.cluster_seeds_disallow = {("s1", "s2")}
     featurizer = feature_port._get_rust_featurizer(dataset)
@@ -344,6 +335,7 @@ def test_same_length_seed_container_replacement_updates_in_place() -> None:
 def test_failed_seed_update_is_retried() -> None:
     dataset = DummyDataset("seed-retry")
     featurizer = feature_port._get_rust_featurizer(dataset)
+    initial_update_attempts = featurizer.update_attempts
     dataset.cluster_seeds_require = {"s1": "c1"}
     dataset.cluster_seeds_disallow = {("s1", "s2")}
     featurizer.fail_updates = True
@@ -353,74 +345,9 @@ def test_failed_seed_update_is_retried() -> None:
 
     featurizer.fail_updates = False
     assert feature_port._get_rust_featurizer(dataset) is featurizer
-    assert featurizer.update_attempts == 2
+    assert featurizer.update_attempts == initial_update_attempts + 2
     assert featurizer.require == {"s1": "c1"}
     assert featurizer.disallow == {("s1", "s2")}
-
-
-def test_arrow_seed_authority_survives_rebuild_until_python_replacement() -> None:
-    dataset = DummyDataset("arrow-authority")
-    dataset.arrow_seed_require = {"arrow": "component"}
-    dataset.arrow_seed_disallow = {("arrow", "other")}
-    assert type(dataset.cluster_seeds_require) is dict
-    assert type(dataset.cluster_seeds_disallow) is set
-
-    first = feature_port._get_rust_featurizer(dataset)
-    assert first.require == dataset.arrow_seed_require
-    assert first.disallow == dataset.arrow_seed_disallow
-    assert first.update_attempts == 0
-    assert type(dataset.cluster_seeds_require) is dict
-    assert type(dataset.cluster_seeds_disallow) is set
-
-    assert feature_port.evict_rust_featurizer(dataset)
-    rebuilt = feature_port._get_rust_featurizer(dataset)
-    assert rebuilt.require == dataset.arrow_seed_require
-    assert rebuilt.disallow == dataset.arrow_seed_disallow
-    assert rebuilt.update_attempts == 0
-
-    dataset.cluster_seeds_require = {}
-    dataset.cluster_seeds_disallow = set()
-    assert feature_port._get_rust_featurizer(dataset) is rebuilt
-    assert dataset._cluster_seeds_source == "python"
-    assert rebuilt.require == {}
-    assert rebuilt.disallow == set()
-    assert rebuilt.update_attempts == 1
-    assert isinstance(dataset.cluster_seeds_require, feature_port._MutationTrackedDict)
-    assert isinstance(dataset.cluster_seeds_disallow, feature_port._MutationTrackedSet)
-
-
-def test_in_place_python_seed_before_first_get_takes_authority() -> None:
-    dataset = DummyDataset("python-before-build")
-    dataset.arrow_seed_require = {"arrow": "component"}
-    dataset.arrow_seed_disallow = {("arrow", "other")}
-    dataset.cluster_seeds_require["python"] = "component"
-    dataset.cluster_seeds_disallow.add(("python", "other"))
-    assert type(dataset.cluster_seeds_require) is dict
-    assert type(dataset.cluster_seeds_disallow) is set
-
-    featurizer = feature_port._get_rust_featurizer(dataset)
-
-    assert dataset._cluster_seeds_source == "python"
-    assert featurizer.require == {"python": "component"}
-    assert featurizer.disallow == {("python", "other")}
-    assert featurizer.update_attempts == 1
-    assert isinstance(dataset.cluster_seeds_require, feature_port._MutationTrackedDict)
-    assert isinstance(dataset.cluster_seeds_disallow, feature_port._MutationTrackedSet)
-
-
-def test_explicit_empty_python_seeds_before_first_get_clear_arrow_seeds() -> None:
-    dataset = DummyDataset("empty-python-before-build")
-    dataset.arrow_seed_require = {"arrow": "component"}
-    dataset.arrow_seed_disallow = {("arrow", "other")}
-    dataset.cluster_seeds_require = {}
-    dataset.cluster_seeds_disallow = set()
-
-    featurizer = feature_port._get_rust_featurizer(dataset)
-
-    assert dataset._cluster_seeds_source == "python"
-    assert featurizer.require == {}
-    assert featurizer.disallow == set()
-    assert featurizer.update_attempts == 1
 
 
 def test_inputs_changing_during_build_are_not_cached(
@@ -431,7 +358,7 @@ def test_inputs_changing_during_build_are_not_cached(
     def changing_build(
         dataset_arg: DummyDataset,
     ) -> tuple[DummyRustFeaturizer, dict[str, float]]:
-        dataset_arg.arrow_artifact_generation = "changed-during-build"
+        dataset_arg.arrow_dataset = _dummy_arrow_dataset()
         return _dummy_build_rust_featurizer(dataset_arg)
 
     monkeypatch.setattr(feature_port, "build_rust_featurizer", changing_build)
@@ -482,7 +409,7 @@ def test_concurrent_gets_for_same_dataset_build_once(
 
 
 def test_concurrent_seed_cache_hits_sync_one_mutation_once() -> None:
-    dataset = DummyDataset("concurrent-seed-sync", seed_source="python")
+    dataset = DummyDataset("concurrent-seed-sync")
     featurizer = feature_port._get_rust_featurizer(dataset)
     dataset.cluster_seeds_require["s1"] = "c1"
     update_started = threading.Event()
@@ -560,7 +487,7 @@ def test_distinct_datasets_build_without_a_global_lock(
 
 
 def test_200k_seed_warm_hits_are_constant_space() -> None:
-    dataset = DummyDataset("large-seed-cache", seed_source="python")
+    dataset = DummyDataset("large-seed-cache")
     dataset.cluster_seeds_require = dict.fromkeys(range(200_000), "component")
     featurizer = feature_port._get_rust_featurizer(dataset)
 

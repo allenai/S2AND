@@ -99,7 +99,7 @@ def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path
         clusterer,
         {"singleton": ["s1"]},
         tmp_path / "cache",
-        {"signatures": "signatures.arrow"},
+        cast(Any, SimpleNamespace(generation_id="test-generation")),
     )
 
     assert rows[0]["block_key"] == "singleton"
@@ -142,11 +142,9 @@ def test_distance_cache_metadata_rejects_overwritten_model_path(tmp_path) -> Non
         sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected_metadata)
 
 
-def test_distance_cache_metadata_rejects_overwritten_arrow_path(tmp_path) -> None:
+def test_distance_cache_metadata_rejects_different_arrow_generation(tmp_path) -> None:
     model_path = tmp_path / "model.pkl"
     model_path.write_bytes(b"model")
-    arrow_path = tmp_path / "signatures.arrow"
-    arrow_path.write_bytes(b"first arrow")
     args = SimpleNamespace(
         arrow_root=tmp_path / "arrow",
         batching_threshold=10,
@@ -156,26 +154,24 @@ def test_distance_cache_metadata_rejects_overwritten_arrow_path(tmp_path) -> Non
         suppress_orcid_constraints=False,
         use_orcid_subblocking=False,
     )
-    arrow_paths = {"signatures": str(arrow_path)}
     metadata = sweep_eps_on_linking_gold._cache_metadata(
         cast(Any, args),
         "block",
         ["s1", "s2"],
-        sweep_eps_on_linking_gold._arrow_paths_content_digest(arrow_paths),  # noqa: SLF001
+        "first-generation",
     )
     cache_path = tmp_path / "cache.pkl"
     with cache_path.open("wb") as outfile:
         pickle.dump({"metadata": metadata, "dist": [0.25]}, outfile)
 
-    arrow_path.write_bytes(b"second arrow")
     expected_metadata = sweep_eps_on_linking_gold._cache_metadata(
         cast(Any, args),
         "block",
         ["s1", "s2"],
-        sweep_eps_on_linking_gold._arrow_paths_content_digest(arrow_paths),  # noqa: SLF001
+        "second-generation",
     )
 
-    with pytest.raises(ValueError, match="arrow_paths_digest"):
+    with pytest.raises(ValueError, match="arrow_generation_id"):
         sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected_metadata)
 
 
@@ -230,13 +226,12 @@ def test_eps_sweep_uses_strict_shared_graph_config_resolver(
     captured: dict[str, Any] = {}
 
     def fake_factory(
-        arrow_paths: object,
-        signature_ids: object,
+        arrow_dataset: object,
         *,
         config: subblocking.GraphSubblockingConfig,
         random_seed: int,
     ) -> object:
-        del arrow_paths, signature_ids, random_seed
+        del arrow_dataset, random_seed
         captured["config"] = config
         return object()
 
@@ -245,8 +240,7 @@ def test_eps_sweep_uses_strict_shared_graph_config_resolver(
 
     sweep_eps_on_linking_gold._make_arrow_specter_cluster_fn(
         clusterer,
-        {"signatures": "signatures.arrow"},
-        ["s1"],
+        object(),
     )
 
     config = captured["config"]
@@ -261,6 +255,5 @@ def test_eps_sweep_rejects_invalid_graph_config_type() -> None:
     with pytest.raises(ValueError, match="GraphSubblockingConfig, mapping, or None"):
         sweep_eps_on_linking_gold._make_arrow_specter_cluster_fn(
             clusterer,
-            {"signatures": "signatures.arrow"},
-            ["s1"],
+            object(),
         )

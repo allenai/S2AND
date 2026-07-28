@@ -5,7 +5,7 @@ This is a bounded verification gate for release artifacts that already exist in
 It compares feature matrices from two supported ingestion paths:
 
 - Python featurization over a preprocessed ``ANDData`` subset.
-- ``RustFeaturizer.from_arrow_paths(...)`` over the existing Arrow bundle.
+- one retained ``ArrowDataset`` over the existing Arrow bundle.
 
 The target is ingestion/preprocessing parity after the Rust ``from_dataset``
 constructor removal.
@@ -34,22 +34,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 def _load_json(path: Path) -> Any:
     with path.open(encoding="utf-8") as infile:
         return json.load(infile)
-
-
-def _resolve_manifest_paths(dataset_dir: Path) -> dict[str, str]:
-    manifest = _load_json(dataset_dir / "manifest.json")
-    raw_paths = manifest.get("paths")
-    if not isinstance(raw_paths, Mapping):
-        raise ValueError(f"Manifest is missing object paths: {dataset_dir / 'manifest.json'}")
-    paths: dict[str, str] = {}
-    for key, value in raw_paths.items():
-        if value is None:
-            continue
-        path = Path(str(value))
-        paths[str(key)] = str((path if path.is_absolute() else dataset_dir / path).resolve())
-    if "specter" not in paths:
-        raise ValueError(f"{dataset_dir} manifest has no specter path")
-    return paths
 
 
 def _select_signature_ids(
@@ -187,10 +171,10 @@ def _numeric_report(left: np.ndarray, right: np.ndarray, *, atol: float, rtol: f
 
 
 def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
-    from s2and.arrow_inputs import validate_arrow_prediction_artifacts
-    from s2and.consts import NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION
+    from s2and.arrow_inputs import ArrowDataset
+    from s2and.consts import NAME_COUNTS_INDEX_PATH
     from s2and.data import ANDData
-    from s2and.feature_port import build_rust_featurizer_from_arrow_paths
+    from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
     from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
     from s2and.runtime import RuntimeContext
 
@@ -234,14 +218,6 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
     anddata_seconds = time.perf_counter() - started
 
     pairs = _sample_pairs(selected_signature_ids, pair_count=int(args.pair_count), seed=int(args.seed))
-    paths = validate_arrow_prediction_artifacts(
-        _resolve_manifest_paths(arrow_dir),
-        require_specter=True,
-        require_name_counts_index=True,
-        expected_normalization_version=NORMALIZATION_VERSION,
-        context="existing Arrow/ANDData feature parity",
-    )
-
     started = time.perf_counter()
     anddata_features, _labels, _nameless_features = many_pairs_featurize(
         [(left, right, 0) for left, right in pairs],
@@ -258,21 +234,24 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
     )
     python_feature_seconds = time.perf_counter() - started
 
-    started = time.perf_counter()
-    arrow_featurizer = build_rust_featurizer_from_arrow_paths(
-        paths,
-        expected_normalization_version=NORMALIZATION_VERSION,
-        signature_ids=selected_signature_ids,
-        name_tuples=None,
-        load_name_counts=True,
-        preprocess=True,
-        num_threads=int(args.n_jobs),
-    )
-    arrow_featurizer_seconds = time.perf_counter() - started
+    with ArrowDataset.open(
+        arrow_dir,
+        require_specter=True,
+        require_name_counts_index=True,
+    ) as arrow_dataset:
+        started = time.perf_counter()
+        arrow_featurizer = build_rust_featurizer_from_arrow_dataset(
+            arrow_dataset,
+            signature_ids=selected_signature_ids,
+            name_tuples=None,
+            preprocess=True,
+            num_threads=int(args.n_jobs),
+        )
+        arrow_featurizer_seconds = time.perf_counter() - started
 
-    started = time.perf_counter()
-    arrow_features = _feature_matrix(arrow_featurizer, pairs, n_jobs=int(args.n_jobs))
-    arrow_feature_seconds = time.perf_counter() - started
+        started = time.perf_counter()
+        arrow_features = _feature_matrix(arrow_featurizer, pairs, n_jobs=int(args.n_jobs))
+        arrow_feature_seconds = time.perf_counter() - started
 
     report = _numeric_report(anddata_features, arrow_features, atol=float(args.atol), rtol=float(args.rtol))
     report.update(

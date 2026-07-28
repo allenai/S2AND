@@ -277,13 +277,11 @@ def test_query_and_summary_orcids_are_canonicalized_and_empty_values_ignored() -
 
 
 def test_orcid_enabled_false_suppresses_populated_orcid_field() -> None:
-    # work_plan section-2 #229 invariant: the per-request orcid_enabled flag is
-    # authoritative, NOT ORCID field presence. A populated, valid
-    # author_info_orcid must be suppressed at both the query-feature and
-    # cluster-summary layers when orcid_enabled=False, matching Rust
-    # (raw_arrow_features.rs gates the orcid_hash on orcid_enabled). This guards
-    # against re-introducing a field-presence-only gate on the Python side,
-    # which was the (now-resolved) divergence risk in work_plan item #229.
+    # The per-request orcid_enabled flag is authoritative, not ORCID field
+    # presence. A populated, valid author_info_orcid must be suppressed at both
+    # the query-feature and cluster-summary layers when orcid_enabled=False,
+    # matching Rust (raw_arrow_features.rs gates orcid_hash on orcid_enabled).
+    # This guards against reintroducing a field-presence-only gate in Python.
     dataset = SimpleNamespace(
         signatures={
             "q_trim": SimpleNamespace(

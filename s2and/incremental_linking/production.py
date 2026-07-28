@@ -6,26 +6,21 @@ import logging
 import math
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import s2and.incremental_linking.artifact as artifact_module
 import s2and.incremental_linking.query_adapter as query_adapter_module
 import s2and.incremental_linking.runtime as runtime_module
 from s2and import feature_port, memory_budget
-from s2and.arrow_inputs import (
-    ValidatedArrowInputs,
-    require_feature_contract_normalization_version,
-)
+from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
 from s2and.incremental_linking.feature_block import (
-    cluster_seed_disallows_from_arrow_paths,
     normalize_cluster_seed_disallow_pairs,
-    temporary_arrow_paths_with_cluster_seeds,
+    temporary_cluster_seed_sidecars,
 )
 from s2and.incremental_linking.policy import (
-    clusterer_uses_name_count_features,
     promoted_linker_orcid_force_link_enabled,
     request_cluster_seed_disallow_parts,
 )
@@ -150,7 +145,6 @@ class _DirectArrowIncrementalDataset:
 
     name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]]
     cluster_seeds_require: Mapping[str, int | str]
-    _cluster_seeds_source: str
     cluster_seeds_disallow: Iterable[tuple[str, str]]
     altered_cluster_signatures: Sequence[str] | None
     max_seed_cluster_id: int
@@ -164,9 +158,9 @@ class _QueryDisallowRescoreContext:
     clusterer: Any
     artifact: artifact_module.IncrementalLinkingArtifact
     planner: Any
-    name_counts_index: Any | None
-    arrow_paths: ValidatedArrowInputs
-    expected_normalization_version: str
+    arrow_dataset: ArrowDataset
+    cluster_seeds_path: Path
+    cluster_seed_disallows_path: Path | None
     name_tuples: Any
     retrieval_top_k: int
     partial_supervision: dict[tuple[str, str], int | float]
@@ -432,15 +426,14 @@ def _rescore_query_disallow_endpoint(
     if featurizer is None:
         context.featurizer_cache.make_room()
         featurizer_started = time.perf_counter()
-        featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
-            context.arrow_paths,
-            expected_normalization_version=context.expected_normalization_version,
+        featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
+            context.arrow_dataset,
             signature_ids=required_signature_ids,
             name_tuples=context.name_tuples,
-            load_name_counts=clusterer_uses_name_count_features(context.clusterer),
             preprocess=True,
             num_threads=context.clusterer.n_jobs,
-            name_counts_index=context.name_counts_index,
+            cluster_seeds_path=context.cluster_seeds_path,
+            cluster_seed_disallows_path=context.cluster_seed_disallows_path,
         )
         featurizer_seconds = time.perf_counter() - featurizer_started
         featurizer_build_count = 1
@@ -460,7 +453,7 @@ def _rescore_query_disallow_endpoint(
     result = runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
         context.clusterer,
         context.artifact,
-        arrow_paths=context.arrow_paths,
+        arrow_dataset=context.arrow_dataset,
         query_signature_ids=[signature_id],
         top_k=context.retrieval_top_k,
         partial_supervision=context.partial_supervision,
@@ -494,10 +487,9 @@ def _rescore_query_disallow_endpoint(
 
 def _request_cluster_seed_disallows(
     dataset: _DirectArrowIncrementalDataset,
-    arrow_paths: Mapping[str, Any],
-) -> tuple[set[tuple[str, str]], set[tuple[str, str]], set[tuple[str, str]]]:
-    arrow_disallows = cluster_seed_disallows_from_arrow_paths(arrow_paths)
-    return request_cluster_seed_disallow_parts(dataset, arrow_disallows)
+) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    request_disallows, dataset_disallows, _ = request_cluster_seed_disallow_parts(dataset, ())
+    return request_disallows, dataset_disallows
 
 
 def _plan_time_cluster_seed_disallows(
@@ -576,25 +568,6 @@ def _query_disallow_partner_ids(
     return partners
 
 
-def _seed_arrow_source_is_reusable(
-    *,
-    seed_setup_source: str,
-    recluster_map: Mapping[Any, Any],
-    planner_disallows: set[tuple[str, str]],
-    arrow_disallows: set[tuple[str, str]],
-) -> bool:
-    """Return whether seed setup preserved the authoritative Arrow sidecar.
-
-    ``_build_incremental_seed_setup`` reports ``arrow`` only when its input map
-    came from that request sidecar. Its sole map rewrite is altered-profile
-    splitting, which always populates ``recluster_map``. Therefore the source
-    provenance plus an empty rewrite map proves identity without rereading and
-    sorting the complete sidecar.
-    """
-
-    return seed_setup_source == "arrow" and not recluster_map and planner_disallows == arrow_disallows
-
-
 def _finish_incremental_with_optional_split_inverse(
     clusterer: Any,
     unassigned_signature_ids: list[str],
@@ -607,14 +580,14 @@ def _finish_incremental_with_optional_split_inverse(
     runtime_context: RuntimeContext,
     *,
     total_ram_bytes: int | None,
-    arrow_paths: Mapping[str, Any] | None = None,
+    arrow_dataset: ArrowDataset | None = None,
     split_cluster_seeds_require_inverse: Mapping[str, Sequence[str]] | None = None,
     cluster_seed_disallows: set[tuple[str, str]] | None = None,
 ) -> dict[str, list[str]]:
     method = clusterer._finish_incremental_with_seed_links
     kwargs: dict[str, Any] = {"total_ram_bytes": total_ram_bytes}
-    if arrow_paths is not None:
-        kwargs["arrow_paths"] = arrow_paths
+    if arrow_dataset is not None:
+        kwargs["arrow_dataset"] = arrow_dataset
     if split_cluster_seeds_require_inverse is not None:
         kwargs["split_cluster_seeds_require_inverse"] = split_cluster_seeds_require_inverse
     if cluster_seed_disallows is not None:
@@ -892,12 +865,12 @@ def merge_promoted_incremental_batch_telemetry(
     return merged
 
 
-def predict_incremental_promoted_linker_from_arrow_paths(
+def predict_incremental_promoted_linker_from_arrow(
     clusterer: Any,
     block_signatures: list[str],
     dataset: _DirectArrowIncrementalDataset,
     *,
-    arrow_paths: ValidatedArrowInputs,
+    arrow_dataset: ArrowDataset,
     artifact: artifact_module.IncrementalLinkingArtifact,
     prevent_new_incompatibilities: bool,
     partial_supervision: dict[tuple[str, str], int | float],
@@ -905,14 +878,10 @@ def predict_incremental_promoted_linker_from_arrow_paths(
     total_ram_bytes: int | None,
     batching_threshold: int | None,
 ) -> dict[str, Any]:
-    """Run the promoted linker from Arrow artifacts, then finish residuals through the normal path."""
+    """Run the promoted linker from one open Arrow dataset."""
 
     resolved_total_ram_bytes, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
-    base_arrow_path_payload = arrow_paths
-    request_disallows, dataset_disallows, arrow_disallows = _request_cluster_seed_disallows(
-        dataset,
-        base_arrow_path_payload,
-    )
+    request_disallows, dataset_disallows = _request_cluster_seed_disallows(dataset)
     (
         cluster_seeds_require,
         recluster_map,
@@ -923,7 +892,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         partial_supervision,
         runtime_context,
         total_ram_bytes=resolved_total_ram_bytes,
-        arrow_paths=base_arrow_path_payload,
+        arrow_dataset=arrow_dataset,
         cluster_seed_disallows=request_disallows,
     )
     seed_setup_telemetry = dict(getattr(clusterer, "_last_incremental_seed_setup_telemetry", {}) or {})
@@ -986,14 +955,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
     query_batch_size = max(1, int(initial_limits.query_batch_size or 1))
     final_limits = initial_limits
     name_tuples = dataset.name_tuples
-    expected_normalization_version: str = (
-        require_feature_contract_normalization_version(
-            clusterer,
-            context="promoted incremental raw Arrow scoring",
-        )
-        if unassigned_signature_ids
-        else ""
-    )
     query_disallow_partners = _query_disallow_partner_ids(
         unassigned_signature_ids,
         request_disallows,
@@ -1009,34 +970,15 @@ def predict_incremental_promoted_linker_from_arrow_paths(
     )
     initial_query_disallow_decisions: dict[str, _ScoredQueryDecision] = {}
     seed_arrow_start = time.perf_counter()
-    seed_arrow_reused_source = _seed_arrow_source_is_reusable(
-        seed_setup_source=str(seed_setup_telemetry.get("seed_setup_cluster_seeds_source", "")),
-        recluster_map=recluster_map,
-        planner_disallows=planner_disallows,
-        arrow_disallows=arrow_disallows,
-    )
-    arrow_path_context: AbstractContextManager[Mapping[str, Any]]
-    if seed_arrow_reused_source:
-        arrow_path_context = nullcontext(base_arrow_path_payload)
-    else:
-        arrow_path_context = temporary_arrow_paths_with_cluster_seeds(
-            base_arrow_path_payload,
-            cluster_seeds_require,
-            prefix="s2and_arrow_incremental_cluster_seeds_",
-            cluster_seeds_disallow=planner_disallows,
+    with temporary_cluster_seed_sidecars(
+        cluster_seeds_require,
+        prefix="s2and_arrow_incremental_cluster_seeds_",
+        cluster_seeds_disallow=planner_disallows,
+    ) as request_sidecars:
+        cluster_seeds_path = Path(request_sidecars["cluster_seeds"])
+        cluster_seed_disallows_path = (
+            Path(request_sidecars["cluster_seed_disallows"]) if "cluster_seed_disallows" in request_sidecars else None
         )
-    with arrow_path_context as request_arrow_paths:
-        arrow_path_payload: ValidatedArrowInputs = base_arrow_path_payload
-        if unassigned_signature_ids:
-            arrow_path_payload = base_arrow_path_payload.with_request_sidecars(
-                request_arrow_paths,
-                required_keys=("cluster_seeds",),
-                context="Promoted incremental Arrow scoring",
-                producer_hint=(
-                    "include raw Arrow tables, raw-planner batch indexes, and the request-local "
-                    "cluster_seeds sidecar before promoted incremental retrieval"
-                ),
-            )
         seed_arrow_assignment_seconds = time.perf_counter() - seed_arrow_start
         raw_planner_build_seconds = 0.0
         raw_batch_plan_count = 0
@@ -1049,22 +991,19 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         final_limits_history: list[memory_budget.PromotedPhaseALimits] = []
 
         raw_request_planner: Any | None = None
-        shared_name_counts_index: Any | None = None
-        use_name_counts = clusterer_uses_name_count_features(clusterer)
         if unassigned_signature_ids:
             planner_build_start = time.perf_counter()
             raw_request_planner = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner.from_auto_queries(  # noqa: SLF001
-                dict(arrow_path_payload),
+                arrow_dataset.native,
+                str(cluster_seeds_path),
                 top_k=retrieval_top_k,
+                cluster_seed_disallows_path=(
+                    None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path)
+                ),
                 orcid_enabled=bool(orcid_enabled),
                 num_threads=clusterer.n_jobs,
                 max_exemplars=4,
-                name_counts_index=arrow_path_payload.native_name_counts_index,
             )
-            if use_name_counts:
-                shared_name_counts_index = raw_request_planner.name_counts_index()
-                if shared_name_counts_index is None:
-                    raise RuntimeError("Raw Arrow planner did not retain the required name-count index")
             raw_planner_build_seconds = time.perf_counter() - planner_build_start
         scoring_batch_size = query_batch_size
         rescore_featurizer_cache = _QueryDisallowFeaturizerCache()
@@ -1115,15 +1054,14 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             del raw_candidate_plan
             featurizer_start = time.perf_counter()
             signature_ids = raw_plan_bundle.signature_order.signature_ids
-            raw_batch_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
-                arrow_path_payload,
-                expected_normalization_version=expected_normalization_version,
+            raw_batch_featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
+                arrow_dataset,
                 signature_ids=signature_ids,
                 name_tuples=name_tuples,
-                load_name_counts=use_name_counts,
                 preprocess=True,
                 num_threads=clusterer.n_jobs,
-                name_counts_index=shared_name_counts_index,
+                cluster_seeds_path=cluster_seeds_path,
+                cluster_seed_disallows_path=cluster_seed_disallows_path,
             )
             raw_batch_featurizer_seconds += time.perf_counter() - featurizer_start
             raw_batch_featurizer_count += 1
@@ -1147,7 +1085,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 result = runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
                     clusterer,
                     artifact,
-                    arrow_paths=arrow_path_payload,
+                    arrow_dataset=arrow_dataset,
                     query_signature_ids=query_batch,
                     top_k=retrieval_top_k,
                     partial_supervision=partial_supervision,
@@ -1199,9 +1137,9 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 clusterer=clusterer,
                 artifact=artifact,
                 planner=raw_request_planner,
-                name_counts_index=shared_name_counts_index,
-                arrow_paths=arrow_path_payload,
-                expected_normalization_version=expected_normalization_version,
+                arrow_dataset=arrow_dataset,
+                cluster_seeds_path=cluster_seeds_path,
+                cluster_seed_disallows_path=cluster_seed_disallows_path,
                 name_tuples=name_tuples,
                 retrieval_top_k=retrieval_top_k,
                 partial_supervision=partial_supervision,
@@ -1288,7 +1226,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         rescore_featurizer_cache.clear()
         del rescore_featurizer_cache
         del raw_request_planner
-        del shared_name_counts_index
         finish_start = time.perf_counter()
         predicted_clusters = _finish_incremental_with_optional_split_inverse(
             clusterer,
@@ -1301,7 +1238,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             partial_supervision,
             runtime_context,
             total_ram_bytes=resolved_total_ram_bytes,
-            arrow_paths=arrow_path_payload,
+            arrow_dataset=arrow_dataset,
             split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
             cluster_seed_disallows=request_disallows,
         )
@@ -1326,11 +1263,9 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             **residual_phase_b_telemetry,
             "incremental_finish_seconds": float(finish_seconds),
             "seed_arrow_assignment_seconds": float(seed_arrow_assignment_seconds),
-            "seed_arrow_reused_source": int(bool(seed_arrow_reused_source)),
             "seed_arrow_dataset_disallow_count": int(len(dataset_disallows)),
             "seed_arrow_disallow_count": int(len(request_disallows)),
             "arrow_promoted_incremental": 1,
-            "arrow_path_count": len(arrow_path_payload),
             "raw_arrow_planner_build_seconds": float(raw_planner_build_seconds),
             "raw_arrow_batch_plan_count": int(raw_batch_plan_count),
             "raw_arrow_batch_plan_query_count": int(raw_batch_plan_query_count),

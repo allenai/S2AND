@@ -10,7 +10,7 @@ import pyarrow as pa
 import pytest
 
 import scripts.convert_to_arrow as convert_module
-from s2and.arrow_inputs import validate_arrow_prediction_artifacts
+from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block import FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION
 from scripts.convert_to_arrow import convert_service_json_to_arrow
 
@@ -330,13 +330,8 @@ def test_convert_service_json_to_arrow_emits_empty_specter_for_empty_embeddings(
     assert manifest["validation"]["specter_count"] == 0
     assert manifest["validation"]["missing_specter_paper_count"] == 1
     assert "specter_batch_index" in resolved_paths
-    validate_arrow_prediction_artifacts(
-        resolved_paths,
-        require_specter=True,
-        require_name_counts_index=False,
-        context="test",
-        producer_hint="test",
-    )
+    with ArrowDataset.open(dataset_dir, require_specter=True):
+        pass
 
 
 def test_root_manifest_upsert_uses_bounded_shared_lock(

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import pickle
-from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +12,9 @@ import pytest
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.incremental_linking_training.classic import OfficialBundle, fit_classic
 from s2and.name_counts_index import NameCountsIndex
-from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 from s2and.name_tuple_artifact import load_name_tuple_artifact
 from s2and.orcid_prefix_counts import load_canonical_orcid_prefix_counts
-from s2and.production_training_contract import ProductionArtifactAuthority
+from s2and.production_training_contract import ModelDataset, ProductionArtifactAuthority
 from scripts.production.counts.generate_orcid_name_prefix_counts import write_publication
 from scripts.production.generate_canonical_name_tuples import regenerate
 from scripts.production.model import train_pairwise
@@ -271,29 +269,13 @@ def _write_pairwise_artifacts(tmp_path: Path) -> tuple[Path, Path, Path]:
             first_last_counts,
             last_first_initial_counts,
         ),
-        {
-            "schema_version": NAME_COUNTS_PROVENANCE_SCHEMA_VERSION,
-            "normalization_version": "canonical_v2",
-            "generation_id": "tiny-real-trainer",
-            "source_snapshot_id": "tiny-fixture",
-            "source_kind": "redshift:tiny-fixture",
-            "source_query_sha256": "1" * 64,
-            "selected_rows_sha256": "2" * 64,
-            "source_row_count": 40,
-        },
     )
 
     orcid_counts_path = tmp_path / "orcid-prefix-counts"
     write_publication(
         {},
         output_dir=orcid_counts_path,
-        source_kind="redshift:tiny-fixture",
-        source_snapshot_id="tiny-fixture",
-        source_query_sha256="3" * 64,
-        selected_rows_sha256="4" * 64,
         name_tuples=name_tuples,
-        generator_parameters={"fixture": True},
-        metrics={"output_outer_keys": 0, "output_pair_keys": 0},
     )
     return tuple_path, Path(name_counts_path), orcid_counts_path
 
@@ -331,21 +313,11 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         lambda _args: train_pairwise.PairwisePreflightPlan(
             output_dir=args.output_dir,
             dataset_names=("qian",),
-            datasets={
-                "qian": train_pairwise.DatasetInputPlan(
-                    split_mode="random_blocks",
-                    files=dataset_files,
-                    sha256={role: sha256(path.read_bytes()).hexdigest() for role, path in dataset_files.items()},
-                )
-            },
+            datasets={"qian": ModelDataset(files=dataset_files)},
+            model_plan_sha256="0" * 64,
             matrix_work_dir=matrix_work_dir,
             matrix_work_free_bytes=1_000_000_000,
             total_ram_bytes=args.total_ram_bytes,
-            source_manifest_sha256="1" * 64,
-            sealed_test_manifests={
-                "pairwise": {"manifest_sha256": "2" * 64, "members": {"tiny": {"pairs": "3" * 64}}},
-                "cluster": {"manifest_sha256": "4" * 64, "members": {"tiny": {"blocks": "5" * 64}}},
-            },
         ),
     )
 
@@ -359,5 +331,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     assert summary["main_pairwise_best_params"]
     assert summary["nameless_pairwise_best_params"]
     assert set(summary["best_clustering_params"]) == {"eps", "linkage"}
+    assert 0.0 <= summary["main_validation_roc_auc"] <= 1.0
+    assert 0.0 <= summary["nameless_validation_roc_auc"] <= 1.0
     assert list(matrix_work_dir.iterdir()) == []
     assert args.output_dir.is_dir()

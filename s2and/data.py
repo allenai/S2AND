@@ -18,7 +18,7 @@ from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from s2and.arrow_inputs import ValidatedArrowInputs
+from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import (
     _PACKAGE_DATA_DIR,
     CLUSTER_SEEDS_LOOKUP,
@@ -29,7 +29,6 @@ from s2and.consts import (
 )
 from s2and.mp import UniversalPool
 from s2and.name_counts_index import NameCountsIndex
-from s2and.name_counts_manifest import readonly_name_counts_provenance, validated_name_counts_provenance
 from s2and.name_tuple_artifact import load_name_tuple_artifact, load_packaged_name_tuple_artifact
 from s2and.runtime import (
     RuntimeContext,
@@ -558,20 +557,20 @@ class ANDData:
     """
 
     @classmethod
-    def _from_validated_arrow_training(
+    def _from_arrow_training(
         cls,
         signatures: dict[str, Signature],
         name: str,
         *,
-        arrow_paths: ValidatedArrowInputs,
+        arrow_dataset: ArrowDataset,
         **kwargs: Any,
     ) -> "ANDData":
-        """Construct a Rust-training dataset from one verified Arrow generation.
+        """Construct a Rust-training dataset from one open Arrow dataset.
 
         Args:
             signatures: Final lightweight Python signature metadata.
             name: Human-readable dataset name used in logs and metrics.
-            arrow_paths: Fully verified immutable Arrow artifact paths.
+            arrow_dataset: Open Arrow dataset retained by the returned object.
             **kwargs: Remaining train-mode ``ANDData`` construction arguments.
 
         Returns:
@@ -587,7 +586,7 @@ class ANDData:
             specter_embeddings=None,
             name_counts_index=None,
             preprocess=True,
-            _validated_arrow_inputs=arrow_paths,
+            _arrow_dataset=arrow_dataset,
             **kwargs,
         )
 
@@ -627,22 +626,17 @@ class ANDData:
         name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
         use_orcid_id: bool = True,
         compute_block_fn: Callable[[str], str] = compute_block,
-        _validated_arrow_inputs: ValidatedArrowInputs | None = None,
+        _arrow_dataset: ArrowDataset | None = None,
     ):
         init_start = time.perf_counter()
-        arrow_name_counts_provenance: Mapping[str, Any] | None = None
-        if _validated_arrow_inputs is not None:
+        if _arrow_dataset is not None:
             if mode != "train" or not preprocess:
                 raise ValueError("Arrow training requires mode='train' and preprocess=True")
             if specter_embeddings is not None or name_counts_index is not None:
-                raise ValueError("Arrow training reads SPECTER and name counts directly from its verified paths")
-            name_counts_manifest = _validated_arrow_inputs.name_counts_manifest
-            if name_counts_manifest is None:
-                raise ValueError("Arrow training requires a validated name_counts_index manifest")
-            arrow_name_counts_provenance = name_counts_manifest.source_provenance
+                raise ValueError("Arrow training reads SPECTER and name counts from its ArrowDataset")
         self.runtime_context = build_runtime_context(
             "dataset_build",
-            backend="rust" if _validated_arrow_inputs is not None else "python",
+            backend="rust" if _arrow_dataset is not None else "python",
         )
         self.original_signatures_path = signatures if isinstance(signatures, str) else None
         self.original_papers_path = papers if isinstance(papers, str) else None
@@ -652,11 +646,8 @@ class ANDData:
         self.clusters_path = clusters if isinstance(clusters, str) else None
         self.cluster_seeds_path = cluster_seeds if isinstance(cluster_seeds, str) else None
         self.specter_embeddings_path = specter_embeddings if isinstance(specter_embeddings, str) else None
-        self.arrow_paths = _validated_arrow_inputs
-        self._arrow_paper_source: tuple[str, str, set[str]] | None = None
-        self.arrow_artifact_generation = (
-            _validated_arrow_inputs.generation_id if _validated_arrow_inputs is not None else None
-        )
+        self.arrow_dataset = _arrow_dataset
+        self._arrow_paper_ids: set[str] | None = None
         self.compute_block_fn = compute_block_fn
         self.use_orcid_id = bool(use_orcid_id)
         pair_sampling_mode = _validate_pair_sampling_mode(pair_sampling_mode)
@@ -679,7 +670,7 @@ class ANDData:
         # Load signatures first so we can restrict papers/specter to relevant subset
         signatures_stage_start = time.perf_counter()
         logger.info("loading signatures")
-        if self.arrow_paths is not None:
+        if self.arrow_dataset is not None:
             # Arrow ingestion already applied use_orcid_id before construction.
             # Preserve those objects; native training owns preprocessing.
             self.signatures = cast(dict[str, Signature], signatures)
@@ -731,13 +722,9 @@ class ANDData:
 
         papers_stage_start = time.perf_counter()
         logger.info("loading papers (subset referenced by signatures)")
-        if self.arrow_paths is not None:
+        if self.arrow_dataset is not None:
             needed_paper_ids = {str(signature.paper_id) for signature in self.signatures.values()}
-            self._arrow_paper_source = (
-                self.arrow_paths["papers"],
-                self.arrow_paths["paper_authors"],
-                needed_paper_ids,
-            )
+            self._arrow_paper_ids = needed_paper_ids
             retained_paper_count = source_paper_count = len(needed_paper_ids)
         else:
             needed_paper_ids = {str(signature.paper_id) for signature in self.signatures.values()}
@@ -815,9 +802,6 @@ class ANDData:
                     cluster_num += 1
             self.max_seed_cluster_id = cluster_num
         logger.info("loaded cluster seeds")
-        self._cluster_seeds_source = "arrow" if self.arrow_paths is not None else "python"
-        self._cluster_seeds_initial_require_id = id(self.cluster_seeds_require)
-        self._cluster_seeds_initial_disallow_id = id(self.cluster_seeds_disallow)
         # check that all altered_cluster_signatures are in cluster_seeds_require
         if self.altered_cluster_signatures is not None:
             for signature_id in self.altered_cluster_signatures:
@@ -861,24 +845,20 @@ class ANDData:
             raise ValueError(f"Unknown mode: {self.mode}")
 
         self.normalization_version = NORMALIZATION_VERSION
-        self._name_counts_provenance: Mapping[str, Any] | None = None
         self.name_counts_index: NameCountsIndex | None = None
-        if arrow_name_counts_provenance is not None:
-            self.name_counts_provenance = arrow_name_counts_provenance
         if name_counts_index is not None:
-            logger.info("opening name-count index (generation-cached)")
+            logger.info("opening name-count index (manifest-cached)")
             self.name_counts_index = (
                 name_counts_index
                 if isinstance(name_counts_index, NameCountsIndex)
                 else NameCountsIndex.open(name_counts_index)
             )
-            self.name_counts_provenance = self.name_counts_index.source_provenance
             logger.info("opened name-count index")
         self.name_counts_loaded = self.name_counts_index is not None
 
         self.n_jobs = resolve_n_jobs(n_jobs)
         self.signature_to_block = self.get_signatures_to_block()
-        if self.arrow_paths is None:
+        if self.arrow_dataset is None:
             papers_from_signatures = {str(signature.paper_id) for signature in self.signatures.values()}
             for paper_id, paper in self.papers.items():
                 self.papers[paper_id] = paper._replace(in_signatures=str(paper_id) in papers_from_signatures)
@@ -891,10 +871,10 @@ class ANDData:
             resolved_name_tuples = {canonical_name_tuple_pair(first_a, first_b) for first_a, first_b in name_tuples}
         else:
             raise TypeError("name_tuples must be None or a set/frozenset of (first_a, first_b) tuples")
-        self.name_tuples = frozenset(resolved_name_tuples) if self.arrow_paths is not None else resolved_name_tuples
+        self.name_tuples = frozenset(resolved_name_tuples) if self.arrow_dataset is not None else resolved_name_tuples
 
         preprocess_papers_stage_start = time.perf_counter()
-        if self.arrow_paths is not None:
+        if self.arrow_dataset is not None:
             # Rust paper preprocessing will fill missing fields in the build path; avoid duplicate Python work.
             logger.info("Rust deferred paper preprocessing active: skipping Python paper preprocessing")
         else:
@@ -912,7 +892,7 @@ class ANDData:
         )
 
         preprocess_signatures_stage_start = time.perf_counter()
-        if self.arrow_paths is not None:
+        if self.arrow_dataset is not None:
             logger.info("Rust deferred signature preprocessing active: skipping Python signature preprocessing")
         else:
             logger.info("preprocessing signatures")
@@ -934,27 +914,25 @@ class ANDData:
 
         from s2and.arrow_training import load_papers_from_arrow
 
-        assert self._arrow_paper_source is not None
-        papers_path, paper_authors_path, needed_paper_ids = self._arrow_paper_source
-        return load_papers_from_arrow(
-            papers_path,
-            paper_authors_path,
-            needed_paper_ids=needed_paper_ids,
-        )
+        assert self.arrow_dataset is not None
+        assert self._arrow_paper_ids is not None
+        with self.arrow_dataset.use() as lease:
+            with lease.open_file("papers") as papers, lease.open_file("paper_authors") as paper_authors:
+                return load_papers_from_arrow(
+                    papers,
+                    paper_authors,
+                    needed_paper_ids=self._arrow_paper_ids,
+                )
 
     @property
-    def name_counts_provenance(self) -> Mapping[str, Any] | None:
-        """Return verified name-count provenance through a read-only view."""
+    def name_counts_manifest_sha256(self) -> str | None:
+        """Return the name-count identity from the retained resource."""
 
-        return self._name_counts_provenance
-
-    @name_counts_provenance.setter
-    def name_counts_provenance(self, value: Mapping[str, Any] | None) -> None:
-        if value is None:
-            self._name_counts_provenance = None
-            return
-        validated = validated_name_counts_provenance(value, context="ANDData.name_counts_provenance")
-        self._name_counts_provenance = readonly_name_counts_provenance(validated)
+        if self.name_counts_index is not None:
+            return self.name_counts_index.manifest_sha256
+        if self.arrow_dataset is not None and self.arrow_dataset.name_counts_manifest is not None:
+            return self.arrow_dataset.name_counts_manifest.manifest_sha256
+        return None
 
     def _signature_name_count_keys(
         self,
@@ -1001,8 +979,8 @@ class ANDData:
         use_rust_backend = _signature_preprocess_backend_decision(runtime_context)
         use_rust_featurizer = use_rust_backend
         rust_module_available = use_rust_backend
-        defer_signature_ngrams_to_rust = self.arrow_paths is not None
-        defer_signature_fields_to_rust = self.arrow_paths is not None
+        defer_signature_ngrams_to_rust = self.arrow_dataset is not None
+        defer_signature_fields_to_rust = self.arrow_dataset is not None
         logger.info(
             "Signature preprocessing backend decision: backend=%s use_rust_featurizer=%s rust_module_available=%s "
             "defer_signature_ngrams_to_rust=%s defer_signature_fields_to_rust=%s "

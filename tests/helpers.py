@@ -14,7 +14,6 @@ from typing import Any
 from s2and.data import ANDData
 from s2and.incremental_linking.query_adapter import ClusterSummary, QueryFeatures
 from s2and.name_counts_index import NameCountsIndex
-from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 from s2and.runtime import load_s2and_rust_extension
 
 
@@ -41,8 +40,7 @@ def pairwise_training_args(
         "random_seed": 1111,
         "matrix_work_dir": matrix_work_dir,
         "total_ram_bytes": 1_000_000_000_000,
-        "training_plan": None,
-        "expected_training_plan_sha256": None,
+        "model_plan": None,
         "name_counts_index_root": tmp_path / "name_counts_index",
     }
     values.update(overrides)
@@ -74,12 +72,42 @@ def write_minimal_arrow_prediction_bundle(
     root.mkdir(parents=True, exist_ok=True)
     signature_ids = [str(index) for index in range(10)] + ["q1", "q2", "seed1"]
     tables = {
-        "signatures": pa.table({"signature_id": pa.array(signature_ids, type=pa.string())}),
-        "papers": pa.table({"paper_id": pa.array(["p0"], type=pa.string())}),
-        "paper_authors": pa.table({"paper_id": pa.array(["p0"], type=pa.string())}),
+        "signatures": pa.table(
+            {
+                "signature_id": pa.array(signature_ids, type=pa.string()),
+                "paper_id": pa.array(["p0"] * len(signature_ids), type=pa.string()),
+                "author_first": pa.array(["Ada"] * len(signature_ids), type=pa.string()),
+                "author_middle": pa.array([""] * len(signature_ids), type=pa.string()),
+                "author_last": pa.array(["Lovelace"] * len(signature_ids), type=pa.string()),
+                "author_suffix": pa.array([""] * len(signature_ids), type=pa.string()),
+                "author_affiliations": pa.array([[]] * len(signature_ids), type=pa.list_(pa.string())),
+                "author_position": pa.array([0] * len(signature_ids), type=pa.int64()),
+                "author_block": pa.array(["a lovelace"] * len(signature_ids), type=pa.string()),
+            }
+        ),
+        "papers": pa.table(
+            {
+                "paper_id": pa.array(["p0"], type=pa.string()),
+                "title": pa.array(["Notes"], type=pa.string()),
+                "venue": pa.array([""], type=pa.string()),
+                "journal_name": pa.array([""], type=pa.string()),
+            }
+        ),
+        "paper_authors": pa.table(
+            {
+                "paper_id": pa.array(["p0"], type=pa.string()),
+                "position": pa.array([0], type=pa.int64()),
+                "author_name": pa.array(["Ada Lovelace"], type=pa.string()),
+            }
+        ),
     }
     if include_specter:
-        tables["specter"] = pa.table({"paper_id": pa.array(["p0"], type=pa.string())})
+        tables["specter"] = pa.table(
+            {
+                "paper_id": pa.array(["p0"], type=pa.string()),
+                "embedding": pa.array([[1.0, 0.0]], type=pa.list_(pa.float32(), 2)),
+            }
+        )
 
     paths: dict[str, str] = {}
     for table_name, table in tables.items():
@@ -95,21 +123,6 @@ def write_minimal_arrow_prediction_bundle(
         )
     write_test_arrow_artifact_manifest(root, paths)
     return paths
-
-
-def tiny_name_counts_provenance() -> dict[str, Any]:
-    """Return explicit provenance for synthetic in-memory name counts."""
-
-    return {
-        "schema_version": NAME_COUNTS_PROVENANCE_SCHEMA_VERSION,
-        "normalization_version": "canonical_v2",
-        "generation_id": "test-tiny-name-counts",
-        "source_snapshot_id": "test-fixture",
-        "source_kind": "fixture:test",
-        "source_query_sha256": "1" * 64,
-        "selected_rows_sha256": "2" * 64,
-        "source_row_count": 1,
-    }
 
 
 def tiny_name_counts() -> dict[str, Any]:
@@ -135,7 +148,6 @@ def tiny_name_counts() -> dict[str, Any]:
             "sattar d": 100,
             "konovalov a": 110,
         },
-        "provenance": tiny_name_counts_provenance(),
     }
 
 
@@ -176,7 +188,6 @@ def tiny_name_counts_index_path() -> str:
             _TINY_NAME_COUNTS_PATH, _metrics = write_name_counts_index(
                 _TINY_NAME_COUNTS_ROOT,
                 tiny_name_counts_tuple(),
-                tiny_name_counts_provenance(),
             )
     return _TINY_NAME_COUNTS_PATH
 
@@ -213,7 +224,7 @@ def build_arrow_training_dataset(
 ) -> ANDData:
     """Round-trip an ``ANDData`` through the fixed Rust-training constructor.
 
-    Rust featurizers are built exclusively through ``from_arrow_paths``, so
+    Rust featurizers are built from a retained ``ArrowDataset``, so
     tests that exercise the Rust featurizer on a hand-built ``ANDData`` must
     spool it to an Arrow bundle first. Writes signatures/papers/paper_authors
     (+ specter when the dataset carries embeddings) with the same writers
@@ -223,7 +234,9 @@ def build_arrow_training_dataset(
     returns a new fully initialized Rust-backed dataset.
     """
 
+    from s2and.arrow_inputs import ArrowDataset
     from s2and.arrow_training import build_training_anddata_from_arrow
+    from s2and.consts import NORMALIZATION_VERSION
     from s2and.incremental_linking.feature_block_arrow import (
         write_name_counts_index,
         write_raw_arrow_batch_lookup_indexes,
@@ -247,12 +260,9 @@ def build_arrow_training_dataset(
     name_counts_index_path, _name_counts_metrics = write_name_counts_index(
         bundle_dir,
         loader(),
-        tiny_name_counts_provenance(),
     )
     arrow_paths["name_counts_index"] = name_counts_index_path
     write_test_arrow_artifact_manifest(bundle_dir, arrow_paths)
-    from s2and.consts import NORMALIZATION_VERSION
-
     signature_to_cluster_id = getattr(dataset, "signature_to_cluster_id", None) or {}
     members_by_cluster: dict[str, list[str]] = {}
     for signature_id in dataset.signatures:
@@ -269,11 +279,18 @@ def build_arrow_training_dataset(
     name_tuples = getattr(dataset, "name_tuples", None)
     if isinstance(name_tuples, frozenset):
         name_tuples = set(name_tuples)
-    return build_training_anddata_from_arrow(
-        arrow_paths,
-        f"{dataset.name}_arrow",
+    arrow_dataset = ArrowDataset.open(
+        bundle_dir,
+        require_specter=include_specter,
+        require_name_counts_index=True,
         expected_normalization_version=NORMALIZATION_VERSION,
+    )
+    return build_training_anddata_from_arrow(
+        arrow_dataset,
+        f"{dataset.name}_arrow",
         clusters=clusters,
+        cluster_seeds=getattr(dataset, "cluster_seeds_path", None),
+        altered_cluster_signatures=getattr(dataset, "altered_cluster_signatures", None),
         train_pairs_size=int(getattr(dataset, "train_pairs_size", 30_000)),
         val_pairs_size=int(getattr(dataset, "val_pairs_size", 5_000)),
         test_pairs_size=int(getattr(dataset, "test_pairs_size", 5_000)),

@@ -9,8 +9,7 @@ import pytest
 
 import s2and.data as data_module
 from s2and.data import ANDData
-from s2and.name_tuple_artifact import build_name_tuple_artifact_metadata
-from tests.helpers import tiny_name_counts_index, tiny_name_counts_provenance
+from tests.helpers import tiny_name_counts_index
 
 
 def test_split_ratios_reject_default_isclose_near_miss() -> None:
@@ -206,26 +205,9 @@ def test_custom_name_tuples_are_stored_as_unordered_pairs() -> None:
     assert dataset.name_tuples == {("bill", "william")}
 
 
-def test_name_tuple_loader_rejects_invalid_rows_with_valid_binding_metadata(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_name_tuple_loader_rejects_invalid_rows(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr(data_module, "_PACKAGE_DATA_DIR", str(tmp_path))
-    data_bytes = b"alice,bob,carol\n"
-    (tmp_path / "invalid.txt").write_bytes(data_bytes)
-    metadata = build_name_tuple_artifact_metadata(
-        source_filename="source.txt",
-        source_bytes=b"source\n",
-        data_filename="invalid.txt",
-        data_bytes=data_bytes,
-        pair_count=1,
-        generated_at="2026-07-10T00:00:00+00:00",
-        input_pair_count=1,
-        dropped_identity=0,
-        dropped_prefix_compatible=0,
-        dropped_empty=0,
-        dropped_duplicate_canonical=0,
-    )
-    (tmp_path / "invalid.txt.meta.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (tmp_path / "invalid.txt").write_bytes(b"alice,bob,carol\n")
 
     with pytest.raises(ValueError, match="invalid.txt:1"):
         data_module._load_name_tuples_from_file("invalid.txt")
@@ -274,6 +256,37 @@ def test_signature_full_name_uses_only_canonical_fields() -> None:
     assert signature.author_info_full_name == "smith"
     assert dataset.papers["1"].title == "part 1"
     assert dataset.papers["1"].title_ngrams_words["1"] == 1
+
+
+def test_split_pairs_global_balanced_classes_routes_split_signatures() -> None:
+    dataset = ANDData.__new__(ANDData)
+    dataset.pair_sampling_mode = "global_balanced_classes"
+    dataset.train_pairs_size, dataset.val_pairs_size, dataset.test_pairs_size = 11, 12, 13
+    dataset.all_test_pairs_flag = True
+    calls: list[tuple[int, list[str], dict[str, list[str]], bool]] = []
+
+    def record_call(
+        sample_size: int,
+        signature_ids: list[str],
+        blocks: dict[str, list[str]],
+        all_pairs: bool = False,
+    ) -> list[tuple[str, str, int]]:
+        calls.append((sample_size, signature_ids, blocks, all_pairs))
+        return [(signature_ids[0], signature_ids[-1], sample_size)]
+
+    dataset.pair_sampling = cast(Any, record_call)
+    train = {"train": ["t1", "t2"]}
+    val = {"val": ["v1", "v2"]}
+    test = {"test": ["x1", "x2"]}
+
+    outputs = dataset.split_pairs(train, val, test)
+
+    assert calls == [
+        (11, ["t1", "t2"], train, False),
+        (12, ["v1", "v2"], val, False),
+        (13, ["x1", "x2"], test, True),
+    ]
+    assert outputs == ([("t1", "t2", 11)], [("v1", "v2", 12)], [("x1", "x2", 13)])
 
 
 class TestData(unittest.TestCase):
@@ -410,43 +423,6 @@ class TestData(unittest.TestCase):
         self.assertEqual(set(train_blocks), set(block_ids))
         self.assertEqual(val_blocks, {})
         self.assertEqual(test_blocks, {})
-
-    def test_split_pairs_global_balanced_classes_uses_split_signatures(self):
-        self.qian_dataset.pair_sampling_mode = "global_balanced_classes"
-        self.qian_dataset.train_pairs_size = 1000
-        self.qian_dataset.val_pairs_size = 500
-        self.qian_dataset.test_pairs_size = 500
-        self.qian_dataset.random_seed = 1111
-        (
-            train_block_dict,
-            val_block_dict,
-            test_block_dict,
-        ) = self.qian_dataset.split_cluster_signatures()
-
-        train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
-            train_block_dict, val_block_dict, test_block_dict
-        )
-
-        expected_train_pairs = self.qian_dataset.pair_sampling(
-            self.qian_dataset.train_pairs_size,
-            [signature for signatures in train_block_dict.values() for signature in signatures],
-            train_block_dict,
-        )
-        expected_val_pairs = self.qian_dataset.pair_sampling(
-            self.qian_dataset.val_pairs_size,
-            [signature for signatures in val_block_dict.values() for signature in signatures],
-            val_block_dict,
-        )
-        expected_test_pairs = self.qian_dataset.pair_sampling(
-            self.qian_dataset.test_pairs_size,
-            [signature for signatures in test_block_dict.values() for signature in signatures],
-            test_block_dict,
-        )
-
-        assert train_pairs == expected_train_pairs
-        assert val_pairs == expected_val_pairs
-        assert test_pairs == expected_test_pairs
-        assert train_pairs
 
     def test_blocks(self):
         expected_blocks = {
@@ -588,7 +564,6 @@ def test_preprocessing_name_counts_use_single_character_initial(tmp_path):
     index_path, _metrics = write_name_counts_index(
         tmp_path,
         ({}, {"sattar": 11}, {}, {"sattar a": 17}),
-        tiny_name_counts_provenance(),
     )
     dataset = ANDData(
         "tests/dummy/signatures.json",

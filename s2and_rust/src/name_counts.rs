@@ -1,7 +1,7 @@
 use memmap2::Mmap;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -15,8 +15,7 @@ use crate::{
     FNV_OFFSET,
 };
 
-const NAME_COUNTS_INDEX_SCHEMA_VERSION: &str = "name_counts_index_v2";
-const NAME_COUNTS_PROVENANCE_SCHEMA_VERSION: &str = "name_counts_provenance_v3";
+const NAME_COUNTS_INDEX_SCHEMA_VERSION: &str = "name_counts_index_v3";
 const NAME_COUNTS_NORMALIZATION_VERSION: &str = "canonical_v2";
 
 #[derive(Clone)]
@@ -27,7 +26,7 @@ pub(crate) struct NameCountsData {
     pub(crate) last_first_initial: f64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct RawNameCountMaps {
     pub(crate) index: Option<Arc<RawNameCountIndex>>,
 }
@@ -62,7 +61,6 @@ pub(crate) struct RawNameCountIndex {
     last: RawNameCountIndexFile,
     first_last: RawNameCountIndexFile,
     last_first_initial: RawNameCountIndexFile,
-    source_provenance_json: String,
     manifest_files: Vec<(String, String, u64, String)>,
     normalization_version: String,
     identity: NameCountsIndexIdentity,
@@ -77,38 +75,19 @@ pub(crate) struct NameCountsIndex {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NameCountsIndexIdentity {
-    canonical_root: PathBuf,
     manifest_sha256: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NameCountsManifest {
     schema_version: String,
     normalization_version: String,
-    source_provenance: NameCountsProvenance,
     files: NameCountsManifestFiles,
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct NameCountsProvenance {
-    schema_version: String,
-    normalization_version: String,
-    generation_id: String,
-    source_snapshot_id: String,
-    source_kind: String,
-    source_query_sha256: String,
-    selected_rows_sha256: String,
-    source_row_count: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    generated_at: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    cardinalities: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    rejected_row_count: Option<serde_json::Value>,
-}
-
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NameCountsManifestFiles {
     first: NameCountsManifestFile,
     last: NameCountsManifestFile,
@@ -117,6 +96,7 @@ struct NameCountsManifestFiles {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NameCountsManifestFile {
     path: String,
     byte_count: u64,
@@ -128,7 +108,6 @@ struct RawNameCountIndexPaths {
     last: RawNameCountIndexFileSpec,
     first_last: RawNameCountIndexFileSpec,
     last_first_initial: RawNameCountIndexFileSpec,
-    source_provenance_json: String,
     normalization_version: String,
     identity: NameCountsIndexIdentity,
 }
@@ -208,7 +187,6 @@ impl RawNameCountIndex {
             last: last?,
             first_last: first_last?,
             last_first_initial: last_first_initial?,
-            source_provenance_json: paths.source_provenance_json,
             manifest_files,
             normalization_version: paths.normalization_version,
             identity: paths.identity,
@@ -297,25 +275,12 @@ impl NameCountsIndex {
     pub(crate) fn shared_index(&self) -> Arc<RawNameCountIndex> {
         Arc::clone(&self.index)
     }
-
-    pub(crate) fn validate_path_root(&self, path: &str) -> PyResult<()> {
-        let requested_root = canonical_name_counts_index_root(path)?;
-        if requested_root != self.index.identity.canonical_root {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "name_counts_index handle does not match paths['name_counts_index']: \
-                 handle_root={} requested_root={}",
-                self.index.identity.canonical_root.display(),
-                requested_root.display(),
-            )));
-        }
-        Ok(())
-    }
 }
 
 #[pymethods]
 impl NameCountsIndex {
     /// Open a manifest-backed name-count index after independently verifying
-    /// its schema, provenance, paths, byte counts, and file digests.
+    /// its schema, paths, byte counts, and file digests.
     #[staticmethod]
     #[pyo3(name = "open")]
     fn open_py(py: Python<'_>, path: &str) -> PyResult<Self> {
@@ -336,17 +301,9 @@ impl NameCountsIndex {
         &self.index.identity.manifest_sha256
     }
 
-    /// Return the native-validated manifest payload and resolved file facts.
-    fn _validated_manifest_facts(&self) -> (String, String, Vec<(String, String, u64, String)>) {
-        (
-            self.index
-                .identity
-                .canonical_root
-                .to_string_lossy()
-                .into_owned(),
-            self.index.source_provenance_json.clone(),
-            self.index.manifest_files.clone(),
-        )
+    /// Return the native-validated resolved file facts.
+    fn _validated_manifest_files(&self) -> Vec<(String, String, u64, String)> {
+        self.index.manifest_files.clone()
     }
 
     /// Resolve four already-deduplicated aligned optional-key columns.
@@ -736,6 +693,7 @@ impl RawNameCountIndexFile {
 }
 
 impl RawNameCountMaps {
+    #[cfg(test)]
     pub(crate) fn from_index(index: RawNameCountIndex) -> Self {
         Self {
             index: Some(Arc::new(index)),
@@ -779,53 +737,6 @@ fn is_lowercase_sha256(value: &str) -> bool {
             .as_bytes()
             .iter()
             .all(|character| character.is_ascii_digit() || (b'a'..=b'f').contains(character))
-}
-
-impl NameCountsProvenance {
-    fn validate(&self, manifest_path: &Path) -> PyResult<()> {
-        if self.schema_version != NAME_COUNTS_PROVENANCE_SCHEMA_VERSION {
-            return Err(manifest_value_error(
-                manifest_path,
-                format!(
-                    "source_provenance requires schema_version {:?}",
-                    NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
-                ),
-            ));
-        }
-        if self.normalization_version != NAME_COUNTS_NORMALIZATION_VERSION {
-            return Err(manifest_value_error(
-                manifest_path,
-                format!(
-                    "source_provenance has invalid normalization_version; expected {:?}",
-                    NAME_COUNTS_NORMALIZATION_VERSION
-                ),
-            ));
-        }
-        for (field, value) in [
-            ("generation_id", self.generation_id.as_str()),
-            ("source_snapshot_id", self.source_snapshot_id.as_str()),
-            ("source_kind", self.source_kind.as_str()),
-        ] {
-            if value.is_empty() {
-                return Err(manifest_value_error(
-                    manifest_path,
-                    format!("source_provenance requires nonempty string {field}"),
-                ));
-            }
-        }
-        for (field, value) in [
-            ("source_query_sha256", self.source_query_sha256.as_str()),
-            ("selected_rows_sha256", self.selected_rows_sha256.as_str()),
-        ] {
-            if !is_lowercase_sha256(value) {
-                return Err(manifest_value_error(
-                    manifest_path,
-                    format!("source_provenance requires lowercase SHA-256 {field}"),
-                ));
-            }
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -887,35 +798,19 @@ fn validate_name_count_manifest_sha256(
     require_name_count_manifest_sha256(path, kind, expected_sha256, &actual_sha256)
 }
 
-fn validated_name_counts_index_manifest_path(
+fn validated_name_counts_manifest_file(
     index_dir: &Path,
     canonical_index_dir: &Path,
     entry: NameCountsManifestFile,
     kind: &str,
-    generation_name: &mut Option<String>,
 ) -> PyResult<RawNameCountIndexFileSpec> {
     let manifest_path = index_dir.join("manifest.json");
-    let path_parts = entry.path.split('/').collect::<Vec<_>>();
-    if path_parts.len() != 3
-        || path_parts[0] != "generations"
-        || matches!(path_parts[1], "" | "." | "..")
-        || entry.path.contains('\\')
-        || path_parts[2] != format!("{kind}.bin")
-    {
+    let expected_path = format!("{kind}.bin");
+    if entry.path != expected_path {
         return Err(manifest_value_error(
             &manifest_path,
-            format!("files.{kind}.path must equal generations/<generation-id>/{kind}.bin"),
+            format!("files.{kind}.path must equal {kind}.bin"),
         ));
-    }
-    match generation_name {
-        Some(expected) if expected != path_parts[1] => {
-            return Err(manifest_value_error(
-                &manifest_path,
-                "files must share one generation directory",
-            ));
-        }
-        Some(_) => {}
-        None => *generation_name = Some(path_parts[1].to_string()),
     }
     if !is_lowercase_sha256(&entry.sha256) {
         return Err(manifest_value_error(
@@ -923,7 +818,7 @@ fn validated_name_counts_index_manifest_path(
             format!("requires lowercase SHA-256 files.{kind}.sha256"),
         ));
     }
-    let resolved = index_dir.join(entry.path);
+    let resolved = index_dir.join(&entry.path);
     let canonical_resolved = fs::canonicalize(&resolved).map_err(|err| {
         pyo3::exceptions::PyFileNotFoundError::new_err(format!(
             "name-count index manifest {} points to missing files.{} target {}: {}",
@@ -954,18 +849,6 @@ fn validated_name_counts_index_manifest_path(
             manifest_path.display(),
             kind,
             canonical_resolved.display()
-        )));
-    }
-    let published_marker = canonical_resolved
-        .parent()
-        .expect("canonical file has a parent")
-        .join(".published");
-    if !published_marker.is_file() {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "name-count index manifest {} files.{} requires published marker: {}",
-            manifest_path.display(),
-            kind,
-            published_marker.display()
         )));
     }
     if metadata.len() != entry.byte_count {
@@ -1008,9 +891,6 @@ impl NameCountsManifest {
                 ),
             ));
         }
-        self.source_provenance.validate(&manifest_path)?;
-        let source_provenance_json = serde_json::to_string(&self.source_provenance)
-            .expect("validated provenance is serializable");
         let canonical_index_dir = fs::canonicalize(index_dir).map_err(|err| {
             pyo3::exceptions::PyIOError::new_err(format!(
                 "failed to resolve name-count index directory {}: {}",
@@ -1025,17 +905,10 @@ impl NameCountsManifest {
             ("first_last", files.first_last),
             ("last_first_initial", files.last_first_initial),
         ];
-        let mut generation_name = None;
         let paths: [RawNameCountIndexFileSpec; 4] = entries
             .into_iter()
             .map(|(kind, entry)| {
-                validated_name_counts_index_manifest_path(
-                    index_dir,
-                    &canonical_index_dir,
-                    entry,
-                    kind,
-                    &mut generation_name,
-                )
+                validated_name_counts_manifest_file(index_dir, &canonical_index_dir, entry, kind)
             })
             .collect::<PyResult<Vec<_>>>()?
             .try_into()
@@ -1046,12 +919,8 @@ impl NameCountsManifest {
             last,
             first_last,
             last_first_initial,
-            source_provenance_json,
             normalization_version: self.normalization_version,
-            identity: NameCountsIndexIdentity {
-                canonical_root: canonical_index_dir,
-                manifest_sha256,
-            },
+            identity: NameCountsIndexIdentity { manifest_sha256 },
         })
     }
 }
@@ -1071,13 +940,10 @@ fn read_name_counts_index_manifest(index_dir: &Path) -> PyResult<RawNameCountInd
     manifest.into_paths(index_dir, manifest_sha256)
 }
 
-fn unresolved_name_counts_index_root(path: &str) -> PyResult<PathBuf> {
-    let direct = PathBuf::from(path);
-    let nested = direct.join("name_counts_index");
-    for index_dir in [&direct, &nested] {
-        if index_dir.join("manifest.json").exists() {
-            return Ok(index_dir.clone());
-        }
+fn name_counts_index_root(path: &str) -> PyResult<PathBuf> {
+    let index_root = PathBuf::from(path);
+    if index_root.join("manifest.json").is_file() {
+        return Ok(index_root);
     }
     Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
         "name-count index path {} does not contain manifest.json",
@@ -1085,19 +951,8 @@ fn unresolved_name_counts_index_root(path: &str) -> PyResult<PathBuf> {
     )))
 }
 
-fn canonical_name_counts_index_root(path: &str) -> PyResult<PathBuf> {
-    let index_root = unresolved_name_counts_index_root(path)?;
-    fs::canonicalize(&index_root).map_err(|err| {
-        pyo3::exceptions::PyIOError::new_err(format!(
-            "failed to resolve name-count index directory {}: {}",
-            index_root.display(),
-            err
-        ))
-    })
-}
-
 fn resolve_name_counts_index_paths(path: &str) -> PyResult<RawNameCountIndexPaths> {
-    let index_root = unresolved_name_counts_index_root(path)?;
+    let index_root = name_counts_index_root(path)?;
     read_name_counts_index_manifest(&index_root)
 }
 
@@ -1116,9 +971,8 @@ mod name_counts_tests {
     use super::{
         is_lowercase_sha256, lookup_name_count_column, name_counts_index_hashes,
         resolve_name_counts_index_paths, sha256_file, validate_lookup_column_lengths,
-        NameCountsIndex, NameCountsProvenance, RawNameCountIndex, RawNameCountIndexFile,
-        RawNameCountKind, RawNameCountMaps, NAME_COUNTS_INDEX_HEADER_LEN,
-        NAME_COUNTS_INDEX_RECORD_LEN,
+        NameCountsIndex, RawNameCountIndex, RawNameCountIndexFile, RawNameCountKind,
+        RawNameCountMaps, NAME_COUNTS_INDEX_HEADER_LEN, NAME_COUNTS_INDEX_RECORD_LEN,
     };
     use std::io::{Seek, SeekFrom, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1145,32 +999,14 @@ mod name_counts_tests {
         dir
     }
 
-    fn complete_source_provenance() -> serde_json::Value {
-        serde_json::json!({
-            "schema_version": "name_counts_provenance_v3",
-            "normalization_version": "canonical_v2",
-            "generation_id": "generation-a",
-            "source_snapshot_id": "snapshot-a",
-            "source_kind": "test-fixture",
-            "source_query_sha256": "2".repeat(64),
-            "selected_rows_sha256": "1".repeat(64),
-            "source_row_count": 0,
-        })
-    }
-
-    const TEST_GENERATION_NAME: &str = "generation-a";
-
     fn index_file_path(index_dir: &std::path::Path, kind: &str) -> std::path::PathBuf {
-        index_dir
-            .join("generations")
-            .join(TEST_GENERATION_NAME)
-            .join(format!("{kind}.bin"))
+        index_dir.join(format!("{kind}.bin"))
     }
 
     fn manifest_file_entry(index_dir: &std::path::Path, kind: &str) -> serde_json::Value {
         let path = index_file_path(index_dir, kind);
         serde_json::json!({
-            "path": format!("generations/{TEST_GENERATION_NAME}/{kind}.bin"),
+            "path": format!("{kind}.bin"),
             "byte_count": path.metadata().expect("file metadata").len(),
             "sha256": sha256_file(&path).expect("hash fixture"),
         })
@@ -1190,8 +1026,6 @@ mod name_counts_tests {
 
     fn write_artifact(normalization_version_json: Option<&str>) -> std::path::PathBuf {
         let dir = unique_temp_dir("s2and_nc_version");
-        let generation_dir = dir.join("generations").join(TEST_GENERATION_NAME);
-        std::fs::create_dir_all(&generation_dir).expect("create generation dir");
         let mut files = serde_json::Map::new();
         for name in ["first", "last", "first_last", "last_first_initial"] {
             let path = index_file_path(&dir, name);
@@ -1201,10 +1035,8 @@ mod name_counts_tests {
             drop(file);
             files.insert(name.to_string(), manifest_file_entry(&dir, name));
         }
-        std::fs::write(generation_dir.join(".published"), []).expect("write published marker");
         let mut manifest = serde_json::json!({
-            "schema_version": "name_counts_index_v2",
-            "source_provenance": complete_source_provenance(),
+            "schema_version": "name_counts_index_v3",
             "files": files,
         });
         if let Some(value) = normalization_version_json {
@@ -1254,8 +1086,6 @@ mod name_counts_tests {
 
     fn write_lookup_artifact() -> std::path::PathBuf {
         let dir = unique_temp_dir("s2and_nc_lookup");
-        let generation_dir = dir.join("generations").join(TEST_GENERATION_NAME);
-        std::fs::create_dir_all(&generation_dir).expect("create generation dir");
         write_index_file(
             &index_file_path(&dir, "first"),
             RawNameCountKind::First,
@@ -1276,11 +1106,9 @@ mod name_counts_tests {
             RawNameCountKind::LastFirstInitial,
             &[("smith a", 9.0)],
         );
-        std::fs::write(generation_dir.join(".published"), []).expect("write published marker");
         let manifest = serde_json::json!({
-            "schema_version": "name_counts_index_v2",
+            "schema_version": "name_counts_index_v3",
             "normalization_version": "canonical_v2",
-            "source_provenance": complete_source_provenance(),
             "files": {
                 "first": manifest_file_entry(&dir, "first"),
                 "last": manifest_file_entry(&dir, "last"),
@@ -1325,55 +1153,6 @@ mod name_counts_tests {
         }
         pyo3::prepare_freethreaded_python();
         pyo3::Python::with_gil(|py| err.value(py).to_string())
-    }
-
-    #[test]
-    fn source_provenance_is_validated() {
-        let provenance: NameCountsProvenance =
-            serde_json::from_value(complete_source_provenance()).expect("valid provenance shape");
-        provenance
-            .validate(std::path::Path::new("manifest.json"))
-            .expect("valid provenance");
-    }
-
-    #[test]
-    fn source_provenance_rejects_non_sha_digest() {
-        let mut provenance = complete_source_provenance();
-        provenance["selected_rows_sha256"] = serde_json::Value::String("G".repeat(64));
-        let provenance: NameCountsProvenance =
-            serde_json::from_value(provenance).expect("valid provenance shape");
-        let error = provenance
-            .validate(std::path::Path::new("manifest.json"))
-            .expect_err("invalid digest must fail");
-
-        assert!(py_err_message(error).contains("lowercase SHA-256 selected_rows_sha256"));
-    }
-
-    #[test]
-    fn source_provenance_rejects_every_required_lineage_field() {
-        for field in ["source_kind", "source_query_sha256", "source_row_count"] {
-            let mut provenance = complete_source_provenance();
-            provenance
-                .as_object_mut()
-                .expect("provenance object")
-                .remove(field);
-            let message = match serde_json::from_value::<NameCountsProvenance>(provenance) {
-                Ok(_) => panic!("missing provenance field must fail"),
-                Err(error) => error.to_string(),
-            };
-            assert!(message.contains(field), "{field}: {message}");
-        }
-    }
-
-    #[test]
-    fn source_provenance_rejects_removed_selected_row_count() {
-        let mut provenance = complete_source_provenance();
-        provenance["selected_row_count"] = serde_json::Value::from(0);
-
-        let error = serde_json::from_value::<NameCountsProvenance>(provenance)
-            .err()
-            .expect("removed selected_row_count must fail");
-        assert!(error.to_string().contains("selected_row_count"));
     }
 
     #[test]
@@ -1563,13 +1342,14 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn manifest_rejects_legacy_direct_file_path() {
+    fn manifest_rejects_generation_file_path() {
         let dir = write_lookup_artifact();
         let manifest_path = dir.join("manifest.json");
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
                 .expect("parse manifest");
-        manifest["files"]["first"]["path"] = serde_json::Value::String("first.bin".to_string());
+        manifest["files"]["first"]["path"] =
+            serde_json::Value::String("generations/legacy/first.bin".to_string());
         std::fs::write(
             &manifest_path,
             serde_json::to_vec(&manifest).expect("serialize manifest"),
@@ -1577,12 +1357,12 @@ mod name_counts_tests {
         .expect("write manifest");
 
         let error = match RawNameCountIndex::open(dir.to_str().expect("utf-8 temp path")) {
-            Ok(_) => panic!("legacy direct path must fail"),
+            Ok(_) => panic!("generation path must fail"),
             Err(error) => error,
         };
         let message = py_err_message(error);
         assert!(
-            message.contains("files.first.path must equal generations/<generation-id>/first.bin"),
+            message.contains("files.first.path must equal first.bin"),
             "{message}"
         );
         std::fs::remove_dir_all(&dir).expect("remove artifact");
@@ -1637,28 +1417,6 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn native_handle_requires_matching_root() {
-        let first = write_lookup_artifact();
-        let second = write_lookup_artifact();
-        let handle = NameCountsIndex::from_shared(Arc::new(
-            RawNameCountIndex::open(first.to_str().expect("utf-8 temp path"))
-                .expect("open lookup index"),
-        ));
-
-        handle
-            .validate_path_root(first.to_str().expect("utf-8 temp path"))
-            .expect("same root must match");
-        let root_mismatch = handle
-            .validate_path_root(second.to_str().expect("utf-8 temp path"))
-            .expect_err("different root must fail");
-        assert!(py_err_message(root_mismatch).contains("does not match paths['name_counts_index']"));
-
-        drop(handle);
-        std::fs::remove_dir_all(&first).expect("remove first lookup artifact");
-        std::fs::remove_dir_all(&second).expect("remove second lookup artifact");
-    }
-
-    #[test]
     fn lookup_columns_reject_misaligned_rows_before_access() {
         assert_eq!(validate_lookup_column_lengths([2, 2, 2, 2]).unwrap(), 2);
         let error =
@@ -1678,9 +1436,6 @@ mod name_counts_tests {
 
         assert_eq!(index.normalization_version, "canonical_v2");
         assert_eq!(index.identity.manifest_sha256, expected_manifest_sha256);
-        assert!(index
-            .source_provenance_json
-            .contains(r#""schema_version":"name_counts_provenance_v3""#));
         assert_eq!(index.manifest_files.len(), 4);
         assert!(index
             .manifest_files

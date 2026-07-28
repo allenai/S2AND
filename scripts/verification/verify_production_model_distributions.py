@@ -21,7 +21,6 @@ LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 CANONICAL_TUPLE_PATHS = frozenset(
     {
         "s2and/data/s2and_name_tuples_canonical.txt",
-        "s2and/data/s2and_name_tuples_canonical.txt.meta.json",
     }
 )
 CANONICAL_ORCID_PATHS = frozenset(

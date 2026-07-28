@@ -7,10 +7,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from s2and._sha256 import is_lowercase_sha256
-from s2and.name_counts_manifest import (
-    NAME_COUNTS_MANIFEST_SHA256_FIELD,
-    validated_name_counts_provenance,
-)
 
 _FEATURE_CONTRACT_FIELD = "name_counts_manifest_sha256"
 
@@ -44,7 +40,7 @@ class NameCountsBinding:
         """Read one complete binding without copying the feature-contract mapping."""
 
         if not isinstance(feature_contract, Mapping):
-            raise ValueError(f"{context} requires a feature_contract mapping with name-count provenance")
+            raise ValueError(f"{context} requires a feature_contract mapping with a name-count identity")
         if _FEATURE_CONTRACT_FIELD not in feature_contract:
             raise ValueError(f"{context} requires {_FEATURE_CONTRACT_FIELD}")
         return cls(
@@ -56,14 +52,13 @@ class NameCountsBinding:
         )
 
     @classmethod
-    def from_provenance(cls, provenance: Any, *, context: str) -> NameCountsBinding:
-        """Read the corresponding identity directly from verified source provenance."""
+    def from_manifest_sha256(cls, manifest_sha256: Any, *, context: str) -> NameCountsBinding:
+        """Read one direct identity from an already-opened name-count manifest."""
 
-        provenance = validated_name_counts_provenance(provenance, context=context)
         return cls(
             manifest_sha256=_sha256(
-                provenance.get(NAME_COUNTS_MANIFEST_SHA256_FIELD),
-                field=NAME_COUNTS_MANIFEST_SHA256_FIELD,
+                manifest_sha256,
+                field=_FEATURE_CONTRACT_FIELD,
                 context=context,
             ),
         )
@@ -78,7 +73,7 @@ class NameCountsBinding:
         return cls(
             manifest_sha256=_sha256(
                 manifest_sha256,
-                field=NAME_COUNTS_MANIFEST_SHA256_FIELD,
+                field=_FEATURE_CONTRACT_FIELD,
                 context=context,
             ),
         )

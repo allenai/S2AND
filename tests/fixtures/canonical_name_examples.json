@@ -2312,7 +2312,7 @@
       "decisions": [
         "D6"
       ],
-      "notes": "Ties to the whitespace-only equal() latent bug in work_plan Tier B."
+      "notes": "Covers the whitespace-only equal() case after canonicalization produces empty given-name fields."
     },
     {
       "id": "empty-last",

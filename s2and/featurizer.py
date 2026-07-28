@@ -79,7 +79,7 @@ def _use_rust_featurizer(
 
     With a dataset, this is the dataset-shape decision: Rust featurizers are
     built exclusively from Arrow artifacts, so datasets without
-    ``arrow_paths`` use the Python featurizer (or raise when
+    ``arrow_dataset`` use the Python featurizer (or raise when
     the Rust backend was requested explicitly). Without a dataset, this is the
     backend-level decision only.
     """
@@ -129,11 +129,11 @@ def _ensure_python_pair_signature_ngrams(
 ) -> None:
     if _use_rust_featurizer(runtime_context, dataset):
         return
-    if getattr(dataset, "arrow_paths", None) and signature_pairs:
+    if getattr(dataset, "arrow_dataset", None) is not None and signature_pairs:
         raise RuntimeError(
             "Python featurization cannot run on a dataset built with normalized signature fields deferred to Rust. "
             "Rebuild the dataset with S2AND_BACKEND=python/backend='python', or keep Rust featurization active with "
-            "validated Arrow featurizer paths."
+            "the open Arrow dataset."
         )
     if getattr(dataset, "_s2and_python_pair_ngrams_ready", False):
         return

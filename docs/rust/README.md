@@ -11,7 +11,7 @@ for the Rust integration.
 
 | File | Purpose |
 |---|---|
-| [baselines.md](baselines.md) | Rust performance/baseline command authority and artifact conventions. Start here when refreshing Rust evidence; use the v1.3 runbook for release acceptance. |
+| [baselines.md](baselines.md) | Current promoted incremental performance-report command; use the v1.3 runbook for release acceptance. |
 | [runtime.md](runtime.md) | Runtime contract: explicit Python/Rust routes, exact native-version loading, failure semantics, Arrow validation, and verification commands. |
 | [artifact_formats.md](artifact_formats.md) | Current artifact-format choices and rejected alternatives. |
 | [arrow_dataset_spec.md](arrow_dataset_spec.md) | Required Arrow dataset layout, schemas, manifests, and validation checks for direct Rust predict and predict_incremental inputs. |
@@ -21,21 +21,20 @@ for the Rust integration.
 
 ## Key policies
 
-- **`baselines.md` is the Rust command and baseline-evidence authority.** The
-  complete v1.3 gate, execution order, thresholds, and approvals live in
-  [../1_3_release_todo.md](../1_3_release_todo.md).
+- **`baselines.md` owns only the performance-report command.** The complete
+  v1.3 gate, execution order, thresholds, and approvals live in
+  [../release.md](../release.md).
 - **Point-in-time profiling evidence** belongs in `profiling/YYYY-MM-DD.md`, not inline in design docs.
-- **Release sequence** lives in `docs/1_3_release_todo.md`; the remediation
-  backlog lives in `docs/work_plan.md`.
+- **Release sequence and acceptance requirements** live in
+  `docs/release.md`.
 - **Development artifacts** may live under `scratch/` (gitignored). Release job
-  logs are durable operational records; the runbook names the five semantic
-  release authorities.
+  logs are durable operational records. The trusted-owner runbook keeps only
+  the records needed to review results and diagnose failures.
 
 ---
 
 ## Quick links
 
-- Canonical-v2 remediation ledger: [`docs/work_plan.md`](../work_plan.md)
-- v1.3 release runbook: [`docs/1_3_release_todo.md`](../1_3_release_todo.md)
+- v1.3 release runbook: [`docs/release.md`](../release.md)
 - Verification commands: [`runtime.md` -- Verification Commands section](runtime.md)
-- Gate commands + artifact conventions: [`baselines.md`](baselines.md)
+- Performance-report command: [`baselines.md`](baselines.md)

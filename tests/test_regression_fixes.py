@@ -2,7 +2,6 @@ import copy
 import pickle
 from collections import Counter
 from itertools import chain
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -12,6 +11,7 @@ import pytest
 import s2and.eval as eval_module
 import s2and.model as model_module
 import s2and.subblocking as subblocking_module
+from s2and.arrow_inputs import ArrowDataset
 from s2and.data import ANDData, _ordered_coauthors_for_signature
 from s2and.eval import incremental_cluster_eval
 from s2and.featurizer import FeaturizationInfo
@@ -270,11 +270,11 @@ def test_fused_constraint_failure_propagates_with_offset(monkeypatch):
     assert observed_offsets == [0, 2]
 
 
-def test_predict_from_arrow_paths_rejects_disallows_with_precomputed_dists_before_build(monkeypatch, tmp_path):
-    def fake_build_from_arrow_paths(*_args, **_kwargs):
+def test_predict_from_arrow_rejects_disallows_with_precomputed_dists_before_build(monkeypatch, tmp_path):
+    def fake_build_from_arrow_dataset(*_args, **_kwargs):
         raise AssertionError("precomputed dists with disallows should be rejected before Rust featurizer build")
 
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fake_build_from_arrow_paths)
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", fake_build_from_arrow_dataset)
 
     clusterer = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
@@ -282,33 +282,14 @@ def test_predict_from_arrow_paths_rejects_disallows_with_precomputed_dists_befor
         n_jobs=1,
     )
     dists = {"block": np.asarray([0.5], dtype=np.float64)}
-    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path)
+    write_minimal_arrow_prediction_bundle(tmp_path)
+    arrow_dataset = ArrowDataset.open(tmp_path)
     with pytest.raises(ValueError, match="cluster_seeds_disallow cannot be used with precomputed dists"):
-        clusterer.predict_from_arrow_paths(
+        clusterer.predict_from_arrow(
             {"block": ["s0", "s1"]},
-            arrow_paths,
+            arrow_dataset,
             dists=dists,
             cluster_seeds_disallow={("s0", "s1")},
-        )
-
-
-@pytest.mark.parametrize("bad_path", ["", "   ", Path()])
-def test_predict_from_arrow_paths_rejects_empty_path_before_rust_builder(monkeypatch, bad_path):
-    def fail_build_from_arrow_paths(*_args, **_kwargs):
-        raise AssertionError("invalid Arrow paths should be rejected before Rust featurizer build")
-
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fail_build_from_arrow_paths)
-
-    clusterer = Clusterer(
-        featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
-        classifier=None,
-        n_jobs=1,
-    )
-
-    with pytest.raises(ValueError, match="signatures"):
-        clusterer.predict_from_arrow_paths(
-            {"block": ["s0", "s1"]},
-            {"signatures": bad_path, "papers": "papers.arrow", "paper_authors": "paper_authors.arrow"},
         )
 
 

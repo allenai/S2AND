@@ -1,8 +1,8 @@
 """Frozen canonical name-normalization example table.
 
-This test module enforces ``tests/fixtures/canonical_name_examples.json``, the
-step-1 artifact of ``docs/normalization_migration_blocked.md``, in four
-layers. The live pipeline and the fixture both use canonical_v2. The pure
+This test module enforces ``tests/fixtures/canonical_name_examples.json`` and
+the ``docs/data.md`` canonical-name contract in four layers. The live pipeline
+and the fixture both use canonical_v2. The pure
 contracts remain parametrized for useful case IDs, while the live pipeline is
 batched once to exercise the production vectorized path:
 
@@ -38,7 +38,6 @@ from s2and.incremental_linking.feature_block_arrow import write_name_counts_inde
 from s2and.name_counts_index import NameCountsIndex
 from s2and.runtime import build_runtime_context
 from s2and.text import canonical_name_count_keys, canonicalize_name_parts, same_prefix_tokens
-from tests.helpers import tiny_name_counts_provenance
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "canonical_name_examples.json"
 FIXTURE = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -97,7 +96,6 @@ def canonical_name_counts_index(tmp_path_factory) -> NameCountsIndex:
     path, _metrics = write_name_counts_index(
         tmp_path_factory.mktemp("canonical-name-counts"),
         tuple(mappings),
-        tiny_name_counts_provenance(),
     )
     return NameCountsIndex.open(path)
 
@@ -124,7 +122,7 @@ def _live_canonical_name_counts(index: NameCountsIndex):
         )
     dataset.papers = {}
     dataset.preprocess = True
-    dataset.arrow_paths = None
+    dataset.arrow_dataset = None
     dataset.name_counts_index = index
     dataset.runtime_context = build_runtime_context("canonical-name-example-test", backend="python")
     dataset.preprocess_signatures()

@@ -32,7 +32,7 @@ def _clusterer(
 
 def _rust_dataset(name: str) -> ANDData:
     dataset = build_dummy_dataset(name, name_counts_index=None)
-    cast(Any, dataset).arrow_paths = {"signatures": "mock-signatures.arrow"}
+    cast(Any, dataset).arrow_dataset = object()
     dataset.runtime_context = RuntimeContext(
         operation="test_distance_matrix_orchestration",
         backend="rust",

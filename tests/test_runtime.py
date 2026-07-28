@@ -79,23 +79,23 @@ def test_load_rust_extension_does_not_hide_broken_transitive_import() -> None:
         runtime.load_s2and_rust_extension(import_module=broken)
 
 
-def test_dataset_rust_stage_requires_arrow_paths() -> None:
+def test_dataset_rust_stage_requires_arrow_dataset() -> None:
     context = runtime.RuntimeContext(
         operation="unit_test",
         backend="rust",
         run_id="test-run",
     )
 
-    assert runtime.dataset_stage_uses_rust(context, SimpleNamespace(arrow_paths={"signatures": "x"})) is True
-    with pytest.raises(RuntimeError, match="dataset has no Arrow artifacts"):
-        runtime.dataset_stage_uses_rust(context, SimpleNamespace(arrow_paths=None))
+    assert runtime.dataset_stage_uses_rust(context, SimpleNamespace(arrow_dataset=object())) is True
+    with pytest.raises(RuntimeError, match="dataset has no ArrowDataset"):
+        runtime.dataset_stage_uses_rust(context, SimpleNamespace(arrow_dataset=None))
 
 
-def test_dataset_python_stage_never_requires_arrow_paths() -> None:
+def test_dataset_python_stage_never_requires_arrow_dataset() -> None:
     context = runtime.RuntimeContext(
         operation="unit_test",
         backend="python",
         run_id="test-run",
     )
 
-    assert runtime.dataset_stage_uses_rust(context, SimpleNamespace(arrow_paths=None)) is False
+    assert runtime.dataset_stage_uses_rust(context, SimpleNamespace(arrow_dataset=None)) is False

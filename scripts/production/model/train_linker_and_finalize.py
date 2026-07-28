@@ -12,12 +12,14 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.dataset as pa_dataset
 import pyarrow.ipc as pa_ipc
 
@@ -27,9 +29,8 @@ for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
         sys.path.insert(0, str(extra_path))
 
 from s2and import feature_port  # noqa: E402
-from s2and._sha256 import sha256_file  # noqa: E402
-from s2and.arrow_inputs import ValidatedArrowInputs, validate_arrow_prediction_artifacts  # noqa: E402
-from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, NORMALIZATION_VERSION  # noqa: E402
+from s2and.arrow_inputs import ArrowDataset  # noqa: E402
+from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER  # noqa: E402
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d  # noqa: E402
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact  # noqa: E402
 from s2and.incremental_linking.feature_block import (  # noqa: E402
@@ -67,6 +68,7 @@ from s2and.incremental_linking_training.data_loading import load_clusterer  # no
 from s2and.production_bundle import finalize_production_bundle  # noqa: E402
 from s2and.production_model import load_production_model, pairwise_bundle_binding  # noqa: E402
 from s2and.production_training_contract import (  # noqa: E402
+    FLOAT_OFFICIAL_METRIC_KEYS,
     INTEGER_OFFICIAL_METRIC_KEYS,
     LINKER_EVALUATION_REPORT_SCHEMA,
     LINKER_TARGET_SCHEMA,
@@ -94,7 +96,7 @@ class ArrowRustDatasetContext:
     row_component_scope: str
     pairwise_component_scope: str
     runtime_context: Any
-    arrow_paths: ValidatedArrowInputs
+    arrow_dataset: ArrowDataset
     component_members: dict[str, tuple[str, ...]]
     cluster_seeds_require: dict[str, str]
     cluster_seeds_disallow: frozenset[tuple[str, str]]
@@ -321,8 +323,7 @@ def _clean_arrow_rust_structural_rows(
     table_key: str,
     rows: pd.DataFrame,
     component_membership_cache: dict[str, pd.DataFrame],
-    name_counts_index_root: Path | None,
-    arrow_paths_cache: Mapping[str, ValidatedArrowInputs] | None = None,
+    arrow_datasets: Mapping[str, ArrowDataset],
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Remove candidate rows with no non-query member using Arrow signature blocks."""
 
@@ -342,8 +343,7 @@ def _clean_arrow_rust_structural_rows(
             source_bundle,
             str(dataset_name),
             cache=component_membership_cache,
-            name_counts_index_root=name_counts_index_root,
-            arrow_paths_cache=arrow_paths_cache,
+            arrow_datasets=arrow_datasets,
         )
         local = dataset_rows[["candidate_component_key", "query_signature_id", "label"]].copy()
         local["candidate_component_key"] = local["candidate_component_key"].astype(str)
@@ -430,39 +430,28 @@ def _resolve_arrow_manifest_path(raw_value: Any, *, dataset_dir: Path, bundle_ro
     raise FileNotFoundError(f"Arrow manifest path does not exist: {raw_value}")
 
 
-def _arrow_paths_for_dataset(
+def _arrow_dataset_for_dataset(
     bundle: OfficialBundle,
     dataset_name: str,
     *,
     name_counts_index_root: Path | None = None,
     require_name_counts_index: bool = True,
-) -> ValidatedArrowInputs:
+) -> ArrowDataset:
     dataset_dir = (bundle.root / "datasets" / str(dataset_name)).resolve()
-    manifest_path = dataset_dir / "manifest.json"
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"Arrow dataset manifest missing for {dataset_name!r}: {manifest_path}")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    raw_paths = manifest.get("paths", {})
-    if not isinstance(raw_paths, Mapping):
-        raise ValueError(f"Arrow dataset manifest paths must be a mapping: {manifest_path}")
-    paths: dict[str, str] = {}
-    for key, raw_value in raw_paths.items():
-        paths[str(key)] = str(_resolve_arrow_manifest_path(raw_value, dataset_dir=dataset_dir, bundle_root=bundle.root))
-    if name_counts_index_root is not None:
-        name_counts_index = Path(name_counts_index_root).resolve()
-        if not name_counts_index.exists():
-            raise FileNotFoundError(f"name_counts_index root does not exist: {name_counts_index}")
-        paths["name_counts_index"] = str(name_counts_index)
-    return validate_arrow_prediction_artifacts(
-        paths,
+    dataset = ArrowDataset.open(
+        dataset_dir,
         require_specter=True,
         require_name_counts_index=require_name_counts_index,
-        context=f"Arrow dataset {dataset_name!r} for linker train/calibrate/eval",
-        producer_hint=(
-            "include signatures/papers/paper_authors/specter Arrow files, raw-planner batch indexes, "
-            "and name_counts_index in the bundle manifest"
-        ),
     )
+    if name_counts_index_root is not None and dataset.name_counts_manifest is not None:
+        expected = Path(name_counts_index_root).resolve()
+        observed = Path(dataset.name_counts_manifest.index_dir).resolve()
+        if observed != expected:
+            dataset.close()
+            raise ValueError(
+                f"Arrow dataset {dataset_name!r} binds name_counts_index {observed}, expected {expected}"
+            )
+    return dataset
 
 
 def _component_member_ids_by_key(path: Path) -> dict[str, tuple[str, ...]]:
@@ -488,46 +477,52 @@ def _seed_constrained_signature_ids_from_maps(
     return frozenset(signature_ids)
 
 
-def _load_arrow_seed_constraints(arrow_paths: Mapping[str, str]) -> tuple[dict[str, str], frozenset[tuple[str, str]]]:
-    require_path = arrow_paths.get("cluster_seeds")
-    cluster_seeds_require = read_cluster_seeds_arrow(Path(require_path)) if require_path else {}
-    disallow_path = arrow_paths.get("cluster_seed_disallows")
-    raw_disallows = read_cluster_seed_disallows_arrow(Path(disallow_path)) if disallow_path else ()
+def _load_arrow_seed_constraints(
+    bundle: OfficialBundle,
+    dataset_name: str,
+) -> tuple[dict[str, str], frozenset[tuple[str, str]]]:
+    """Load explicit training constraints that are not part of dataset identity."""
+
+    dataset_dir = (bundle.root / "datasets" / str(dataset_name)).resolve()
+    manifest = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8"))
+    paths = manifest.get("paths")
+    if not isinstance(paths, Mapping):
+        raise ValueError(f"Arrow dataset manifest paths must be a mapping: {dataset_dir / 'manifest.json'}")
+
+    def sidecar(key: str) -> Path | None:
+        raw = paths.get(key)
+        if raw is None:
+            return None
+        return _resolve_arrow_manifest_path(raw, dataset_dir=dataset_dir, bundle_root=bundle.root)
+
+    require_path = sidecar("cluster_seeds")
+    cluster_seeds_require = read_cluster_seeds_arrow(require_path) if require_path is not None else {}
+    disallow_path = sidecar("cluster_seed_disallows")
+    raw_disallows = read_cluster_seed_disallows_arrow(disallow_path) if disallow_path is not None else ()
     cluster_seeds_disallow = frozenset((str(left), str(right)) for left, right in raw_disallows)
     return ({str(key): str(value) for key, value in cluster_seeds_require.items()}, cluster_seeds_disallow)
 
 
 def _load_arrow_signature_blocks(
-    bundle: OfficialBundle,
-    dataset_name: str,
-    *,
-    name_counts_index_root: Path | None,
-    arrow_paths: ValidatedArrowInputs | None = None,
+    arrow_dataset: ArrowDataset,
 ) -> dict[str, str]:
-    if arrow_paths is None:
-        arrow_paths = _arrow_paths_for_dataset(
-            bundle,
-            dataset_name,
-            name_counts_index_root=name_counts_index_root,
-            require_name_counts_index=False,
-        )
-    path = Path(arrow_paths["signatures"])
     out: dict[str, str] = {}
-    with pa_ipc.open_file(path) as reader:
-        schema_names = set(reader.schema.names)
-        if "author_block" not in schema_names:
-            return out
-        for batch_index in range(reader.num_record_batches):
-            batch = reader.get_batch(batch_index).select(["signature_id", "author_block"])
-            signature_ids = batch.column(0).to_pylist()
-            blocks = batch.column(1).to_pylist()
-            out.update(
-                {
-                    str(signature_id): str(block or "")
-                    for signature_id, block in zip(signature_ids, blocks, strict=True)
-                    if signature_id is not None
-                }
-            )
+    with arrow_dataset.use() as lease, lease.open_file("signatures") as infile:
+        with pa.PythonFile(infile, mode="r") as source:
+            reader = pa_ipc.open_file(source)
+            if "author_block" not in reader.schema.names:
+                return out
+            for batch_index in range(reader.num_record_batches):
+                batch = reader.get_batch(batch_index).select(["signature_id", "author_block"])
+                signature_ids = batch.column(0).to_pylist()
+                blocks = batch.column(1).to_pylist()
+                out.update(
+                    {
+                        str(signature_id): str(block or "")
+                        for signature_id, block in zip(signature_ids, blocks, strict=True)
+                        if signature_id is not None
+                    }
+                )
     return out
 
 
@@ -536,8 +531,7 @@ def _arrow_component_membership_summary(
     dataset_name: str,
     *,
     cache: dict[str, pd.DataFrame],
-    name_counts_index_root: Path | None,
-    arrow_paths_cache: Mapping[str, ValidatedArrowInputs] | None = None,
+    arrow_datasets: Mapping[str, ArrowDataset],
 ) -> pd.DataFrame:
     if dataset_name in cache:
         return cache[dataset_name]
@@ -553,12 +547,7 @@ def _arrow_component_membership_summary(
     component_keys = members["candidate_component_key"].astype(str)
     signature_to_block: dict[str, str] = {}
     if component_keys.str.contains("::", regex=False).any():
-        signature_to_block = _load_arrow_signature_blocks(
-            bundle,
-            dataset_name,
-            name_counts_index_root=name_counts_index_root,
-            arrow_paths=None if arrow_paths_cache is None else arrow_paths_cache.get(dataset_name),
-        )
+        signature_to_block = _load_arrow_signature_blocks(arrow_datasets[dataset_name])
 
     rows: list[dict[str, Any]] = []
     for component_key, group in members.groupby("candidate_component_key", sort=False):
@@ -580,22 +569,15 @@ def _build_arrow_rust_dataset_context(
     *,
     source_bundle: OfficialBundle,
     dataset_name: str,
-    name_counts_index_root: Path | None,
-    arrow_paths: ValidatedArrowInputs | None = None,
+    arrow_dataset: ArrowDataset,
 ) -> ArrowRustDatasetContext:
     started = time.perf_counter()
-    if arrow_paths is None:
-        arrow_paths = _arrow_paths_for_dataset(
-            source_bundle,
-            dataset_name,
-            name_counts_index_root=name_counts_index_root,
-        )
     member_path = _resolve_path(
         source_bundle,
         str(source_bundle.assets["candidate_members"]["datasets"][dataset_name]),
     )
     component_members = _component_member_ids_by_key(member_path)
-    cluster_seeds_require, cluster_seeds_disallow = _load_arrow_seed_constraints(arrow_paths)
+    cluster_seeds_require, cluster_seeds_disallow = _load_arrow_seed_constraints(source_bundle, dataset_name)
     seed_constrained_signature_ids = _seed_constrained_signature_ids_from_maps(
         cluster_seeds_require,
         cluster_seeds_disallow,
@@ -608,7 +590,11 @@ def _build_arrow_rust_dataset_context(
                 "dataset": dataset_name,
                 "components": int(len(component_members)),
                 "component_scope": "block-local",
-                "name_counts_index": arrow_paths.get("name_counts_index"),
+                "name_counts_index": (
+                    None
+                    if arrow_dataset.name_counts_manifest is None
+                    else str(arrow_dataset.name_counts_manifest.index_dir)
+                ),
                 "cluster_seed_require_count": int(len(cluster_seeds_require)),
                 "cluster_seed_disallow_count": int(len(cluster_seeds_disallow)),
                 "seconds": round(float(time.perf_counter() - started), 3),
@@ -624,7 +610,7 @@ def _build_arrow_rust_dataset_context(
             "joint_safe_link_arrow_rust_featureization",
             backend="rust",
         ),
-        arrow_paths=arrow_paths,
+        arrow_dataset=arrow_dataset,
         component_members=component_members,
         cluster_seeds_require=cluster_seeds_require,
         cluster_seeds_disallow=cluster_seeds_disallow,
@@ -1074,7 +1060,7 @@ def _materialize_arrow_rust_dataset_rows(
         pd.to_numeric(dataset_rows["retrieval_rank"], errors="raise").to_numpy(),
     )
     raw_plan = plan_fn(
-        dict(context.arrow_paths),
+        context.arrow_dataset.native,
         dataset_rows["query_signature_id"].astype(str).tolist(),
         dataset_rows["query_view"].astype(str).tolist(),
         dataset_rows["query_group_id"].astype(str).tolist(),
@@ -1084,17 +1070,14 @@ def _materialize_arrow_rust_dataset_rows(
         orcid_enabled=not PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
         num_threads=max(1, int(n_jobs)),
         max_exemplars=int(max_exemplars),
-        name_counts_index=context.arrow_paths.native_name_counts_index,
     )
     raw_plan_seconds = float(time.perf_counter() - plan_started)
     signature_ids = tuple(str(signature_id) for signature_id in raw_plan["signature_ids"])
     featurizer_started = time.perf_counter()
-    featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
-        context.arrow_paths,
-        expected_normalization_version=NORMALIZATION_VERSION,
+    featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
+        context.arrow_dataset,
         signature_ids=signature_ids,
         name_tuples=name_tuples,
-        load_name_counts=True,
         preprocess=True,
         num_threads=max(1, int(n_jobs)),
     )
@@ -1338,8 +1321,7 @@ def _materialize_arrow_rust_feature_bundle(
     max_exemplars: int,
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
-    name_counts_index_root: Path | None = None,
-    prevalidated_arrow_paths: Mapping[str, ValidatedArrowInputs] | None = None,
+    arrow_datasets: Mapping[str, ArrowDataset],
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
     _copy_bundle_support_files(source_bundle, output_bundle_root)
     classic_spec = source_bundle.models.get("classic")
@@ -1354,7 +1336,6 @@ def _materialize_arrow_rust_feature_bundle(
     table_plan_order: list[str] = []
     pending_by_dataset: dict[str, list[ArrowRustPendingShard]] = {}
     component_membership_cache: dict[str, pd.DataFrame] = {}
-    arrow_paths_cache: dict[str, ValidatedArrowInputs] = dict(prevalidated_arrow_paths or {})
 
     def append_empty_selection_summary(
         *,
@@ -1428,20 +1409,15 @@ def _materialize_arrow_rust_feature_bundle(
             )
             continue
         input_dataset_names = tuple(dict.fromkeys(labels["dataset"].astype(str)))
-        for dataset_name in input_dataset_names:
-            if dataset_name not in arrow_paths_cache:
-                arrow_paths_cache[dataset_name] = _arrow_paths_for_dataset(
-                    source_bundle,
-                    dataset_name,
-                    name_counts_index_root=name_counts_index_root,
-                )
+        missing_datasets = sorted(set(input_dataset_names).difference(arrow_datasets))
+        if missing_datasets:
+            raise KeyError(f"preflight did not open Arrow datasets: {missing_datasets}")
         labels, structural_cleaning_summary = _clean_arrow_rust_structural_rows(
             source_bundle=source_bundle,
             table_key=table_key,
             rows=labels,
             component_membership_cache=component_membership_cache,
-            name_counts_index_root=name_counts_index_root,
-            arrow_paths_cache=arrow_paths_cache,
+            arrow_datasets=arrow_datasets,
         )
         if labels.empty:
             append_empty_selection_summary(
@@ -1500,8 +1476,7 @@ def _materialize_arrow_rust_feature_bundle(
         context = _build_arrow_rust_dataset_context(
             source_bundle=source_bundle,
             dataset_name=dataset_name,
-            name_counts_index_root=name_counts_index_root,
-            arrow_paths=arrow_paths_cache[dataset_name],
+            arrow_dataset=arrow_datasets[dataset_name],
         )
         try:
             for shard in shards:
@@ -1616,6 +1591,58 @@ def _observed_official_metrics(summary: Mapping[str, Any]) -> dict[str, Any]:
         "weighted_average_error": weighted_average_error,
         "weighted_average_error_weights": dict(WEIGHTED_ERROR_WEIGHTS),
     }
+
+
+def _validate_observed_official_metrics(metrics: Mapping[str, Any]) -> None:
+    """Validate the official linker metrics before publishing the report."""
+
+    observed_keys = set(metrics) if isinstance(metrics, Mapping) else set()
+    if not isinstance(metrics, Mapping) or observed_keys != SUPPORTED_OFFICIAL_METRIC_KEYS:
+        raise ValueError(
+            "Linker evaluation observed_metrics must contain the complete official metric set: "
+            f"missing={sorted(SUPPORTED_OFFICIAL_METRIC_KEYS - observed_keys)} "
+            f"extra={sorted(observed_keys - SUPPORTED_OFFICIAL_METRIC_KEYS)}"
+        )
+
+    for key in INTEGER_OFFICIAL_METRIC_KEYS:
+        value = metrics[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"Linker evaluation observed metric {key!r} must be a nonnegative integer")
+    for key in FLOAT_OFFICIAL_METRIC_KEYS:
+        value = metrics[key]
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(float(value)):
+            raise ValueError(f"Linker evaluation observed metric {key!r} must be finite")
+        if not 0.0 <= float(value) <= 1.0:
+            raise ValueError(f"Linker evaluation observed metric {key!r} must be in [0, 1]")
+
+    training_rows = metrics["training_rows"]
+    training_positive_rows = metrics["training_positive_rows"]
+    queries = metrics["stratified_test_queries"]
+    if training_rows <= 0 or training_positive_rows > training_rows:
+        raise ValueError("Linker evaluation observed training counts are inconsistent")
+    if queries <= 0 or any(
+        metrics[key] > queries
+        for key in (
+            "stratified_test_errors",
+            "stratified_test_false_abstain",
+            "stratified_test_false_link",
+            "stratified_test_wrong_candidate_link",
+        )
+    ):
+        raise ValueError("Linker evaluation observed test counts are inconsistent")
+
+    weights = metrics["weighted_average_error_weights"]
+    expected_weights = dict(WEIGHTED_ERROR_WEIGHTS)
+    if not isinstance(weights, Mapping) or set(weights) != set(expected_weights):
+        raise ValueError("Linker evaluation observed weighted-average error weights have invalid fields")
+    for key, expected in expected_weights.items():
+        value = weights[key]
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(float(value)):
+            raise ValueError(f"Linker evaluation observed weight {key!r} must be finite")
+        if float(value) <= 0:
+            raise ValueError(f"Linker evaluation observed weight {key!r} must be positive")
+        if float(value) != expected:
+            raise ValueError(f"Linker evaluation observed weight {key!r} must equal the official value {expected}")
 
 
 def _resolved_output_paths(args: argparse.Namespace) -> tuple[Path, Path]:
@@ -1752,7 +1779,8 @@ def _preflight_source_rows(
     source_bundle: OfficialBundle,
     *,
     name_counts_index_root: Path | None,
-) -> tuple[int, dict[str, ValidatedArrowInputs]]:
+    arrow_stack: ExitStack,
+) -> tuple[int, dict[str, ArrowDataset]]:
     """Validate source row presence and every referenced Arrow generation."""
 
     available_tables = _source_featureless_table_keys(source_bundle)
@@ -1771,24 +1799,26 @@ def _preflight_source_rows(
         source_rows += len(rows)
         observed_datasets.update(rows["dataset"].astype(str))
 
-    arrow_paths_by_dataset: dict[str, ValidatedArrowInputs] = {}
+    arrow_datasets: dict[str, ArrowDataset] = {}
     for dataset_name in sorted(observed_datasets):
-        arrow_paths_by_dataset[dataset_name] = _arrow_paths_for_dataset(
-            source_bundle,
-            dataset_name,
-            name_counts_index_root=name_counts_index_root,
+        arrow_datasets[dataset_name] = arrow_stack.enter_context(
+            _arrow_dataset_for_dataset(
+                source_bundle,
+                dataset_name,
+                name_counts_index_root=name_counts_index_root,
+            )
         )
 
     name_count_hashes = {
-        paths.name_counts_manifest.manifest_sha256
-        for paths in arrow_paths_by_dataset.values()
-        if paths.name_counts_manifest is not None
+        dataset.name_counts_manifest.manifest_sha256
+        for dataset in arrow_datasets.values()
+        if dataset.name_counts_manifest is not None
     }
     if len(name_count_hashes) > 1:
         raise ValueError(
             f"linker source datasets reference multiple name-count generations: {sorted(name_count_hashes)}"
         )
-    return source_rows, arrow_paths_by_dataset
+    return source_rows, arrow_datasets
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -1812,92 +1842,93 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     _validate_source_bundle_support_files(source_bundle)
     name_counts_index_root = Path(args.name_counts_index_root)
-    _, prevalidated_arrow_paths = _preflight_source_rows(
-        source_bundle,
-        name_counts_index_root=name_counts_index_root,
-    )
-    clusterer = load_clusterer(
-        args.pairwise_model_path,
-        n_jobs=int(args.n_jobs),
-        expected_artifact_hashes=artifact_hashes,
-    )
-    _assert_pairwise_model_supports_arrow_materialization(clusterer, args.pairwise_model_path)
-    for dataset_name, arrow_paths in prevalidated_arrow_paths.items():
-        require_arrow_name_counts_index_for_clusterer(
-            clusterer,
-            arrow_paths,
-            context=f"linker train/calibrate/eval preflight dataset {dataset_name!r}",
+    with ExitStack() as arrow_stack:
+        _, arrow_datasets = _preflight_source_rows(
+            source_bundle,
+            name_counts_index_root=name_counts_index_root,
+            arrow_stack=arrow_stack,
         )
-    pairwise_binding = dict(
-        pairwise_bundle_binding(
-            Path(args.pairwise_model_path),
+        clusterer = load_clusterer(
+            args.pairwise_model_path,
+            n_jobs=int(args.n_jobs),
             expected_artifact_hashes=artifact_hashes,
         )
-    )
-    output_dir.mkdir(parents=True)
-    work = tempfile.TemporaryDirectory(prefix=".linker-release-", dir=output_dir)
-    work_dir = Path(work.name)
-    artifact_dir = work_dir / LINKER_STAGING_DIRNAME
-    feature_bundle_root = work_dir / "training_features"
-    feature_bundle, _featureization_summaries = _materialize_arrow_rust_feature_bundle(
-        source_bundle=source_bundle,
-        output_bundle_root=feature_bundle_root,
-        target=target,
-        name_tuples=name_tuples,
-        clusterer=clusterer,
-        n_jobs=int(args.n_jobs),
-        total_ram_bytes=int(args.total_ram_bytes),
-        table_keys=training_table_keys,
-        query_ids_by_table=calibration_query_ids or None,
-        max_exemplars=PRODUCTION_MAX_EXEMPLARS,
-        pairwise_model_nan_value=pairwise_model_nan_value,
-        pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
-        name_counts_index_root=name_counts_index_root,
-        prevalidated_arrow_paths=prevalidated_arrow_paths,
-    )
+        _assert_pairwise_model_supports_arrow_materialization(clusterer, args.pairwise_model_path)
+        for dataset_name, arrow_dataset in arrow_datasets.items():
+            require_arrow_name_counts_index_for_clusterer(
+                clusterer,
+                arrow_dataset,
+                context=f"linker train/calibrate/eval preflight dataset {dataset_name!r}",
+            )
+        pairwise_binding = dict(
+            pairwise_bundle_binding(
+                Path(args.pairwise_model_path),
+                expected_artifact_hashes=artifact_hashes,
+            )
+        )
+        output_dir.mkdir(parents=True)
+        work = tempfile.TemporaryDirectory(prefix=".linker-release-", dir=output_dir)
+        work_dir = Path(work.name)
+        artifact_dir = work_dir / LINKER_STAGING_DIRNAME
+        feature_bundle_root = work_dir / "training_features"
+        feature_bundle, _featureization_summaries = _materialize_arrow_rust_feature_bundle(
+            source_bundle=source_bundle,
+            output_bundle_root=feature_bundle_root,
+            target=target,
+            name_tuples=name_tuples,
+            clusterer=clusterer,
+            n_jobs=int(args.n_jobs),
+            total_ram_bytes=int(args.total_ram_bytes),
+            table_keys=training_table_keys,
+            query_ids_by_table=calibration_query_ids or None,
+            max_exemplars=PRODUCTION_MAX_EXEMPLARS,
+            pairwise_model_nan_value=pairwise_model_nan_value,
+            pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
+            arrow_datasets=arrow_datasets,
+        )
 
-    started = time.perf_counter()
-    active_params = dict(feature_bundle.models["classic"]["best_params"])
+        started = time.perf_counter()
+        active_params = dict(feature_bundle.models["classic"]["best_params"])
 
-    calibrated = fit_classic(feature_bundle, n_jobs=int(args.n_jobs))
-    artifact_metadata = save_incremental_linking_artifact(
-        calibrated.model,
-        artifact_dir,
-        retrieval_top_k=calibrated.retrieval_top_k,
-        gate_config=calibrated.gate_config,
-        target_spec=target,
-        pairwise_bundle_binding=pairwise_binding,
-    )
-    finalized = finalize_production_bundle(
-        pairwise_bundle_dir=Path(args.pairwise_model_path),
-        output_bundle_dir=complete_model_dir,
-        incremental_linker_artifact_dir=artifact_dir,
-        target_json=Path(args.target_json),
-        expected_artifact_hashes=artifact_hashes,
-    )
-    complete_model = load_production_model(
-        complete_model_dir,
-        expected_artifact_hashes=artifact_hashes,
-    )
-    if complete_model.incremental_linker_artifact is None:
-        raise RuntimeError("Reloaded complete model does not contain an incremental linker artifact")
-    shutil.rmtree(artifact_dir)
+        calibrated = fit_classic(feature_bundle, n_jobs=int(args.n_jobs))
+        artifact_metadata = save_incremental_linking_artifact(
+            calibrated.model,
+            artifact_dir,
+            retrieval_top_k=calibrated.retrieval_top_k,
+            gate_config=calibrated.gate_config,
+            target_spec=target,
+            pairwise_bundle_binding=pairwise_binding,
+        )
+        finalized = finalize_production_bundle(
+            pairwise_bundle_dir=Path(args.pairwise_model_path),
+            output_bundle_dir=complete_model_dir,
+            incremental_linker_artifact_dir=artifact_dir,
+            target_json=Path(args.target_json),
+            expected_artifact_hashes=artifact_hashes,
+        )
+        complete_model = load_production_model(
+            complete_model_dir,
+            expected_artifact_hashes=artifact_hashes,
+        )
+        if complete_model.incremental_linker_artifact is None:
+            raise RuntimeError("Reloaded complete model does not contain an incremental linker artifact")
+        shutil.rmtree(artifact_dir)
 
-    evaluation_feature_bundle_root = work_dir / "evaluation_features"
-    evaluation_feature_bundle, _evaluation_featureization_summaries = _materialize_arrow_rust_feature_bundle(
-        source_bundle=source_bundle,
-        output_bundle_root=evaluation_feature_bundle_root,
-        target=target,
-        name_tuples=name_tuples,
-        clusterer=complete_model,
-        n_jobs=int(args.n_jobs),
-        total_ram_bytes=int(args.total_ram_bytes),
-        table_keys=evaluation_table_keys,
-        max_exemplars=PRODUCTION_MAX_EXEMPLARS,
-        pairwise_model_nan_value=pairwise_model_nan_value,
-        pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
-        name_counts_index_root=name_counts_index_root,
-    )
+        evaluation_feature_bundle_root = work_dir / "evaluation_features"
+        evaluation_feature_bundle, _evaluation_featureization_summaries = _materialize_arrow_rust_feature_bundle(
+            source_bundle=source_bundle,
+            output_bundle_root=evaluation_feature_bundle_root,
+            target=target,
+            name_tuples=name_tuples,
+            clusterer=complete_model,
+            n_jobs=int(args.n_jobs),
+            total_ram_bytes=int(args.total_ram_bytes),
+            table_keys=evaluation_table_keys,
+            max_exemplars=PRODUCTION_MAX_EXEMPLARS,
+            pairwise_model_nan_value=pairwise_model_nan_value,
+            pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
+            arrow_datasets=arrow_datasets,
+        )
     evaluation = evaluate_classic(
         evaluation_feature_bundle,
         calibrated=calibrated,
@@ -1906,13 +1937,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     summary = evaluation.summary
     observed = _observed_official_metrics(summary)
+    _validate_observed_official_metrics(observed)
     artifact_summary = dict(artifact_metadata)
     result = {
         "schema_version": LINKER_EVALUATION_REPORT_SCHEMA,
         "mode": "arrow-rust",
         "complete_model_path": str(complete_model_dir),
         "model_manifest_path": str(finalized.manifest_path),
-        "model_manifest_sha256": sha256_file(finalized.manifest_path),
         "source_bundle_root": str(source_bundle.root),
         "target_json": str(Path(args.target_json).resolve()),
         "feature_count": int(target["feature_count"]),

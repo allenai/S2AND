@@ -6,9 +6,6 @@ from pathlib import Path
 
 import pytest
 
-import s2and.arrow_inputs as arrow_inputs_module
-import s2and.name_counts_index as name_counts_index_module
-import scripts.verification.validate_local_arrow_release as release_validation_module
 from s2and.arrow_inputs import build_arrow_artifact_manifest, require_name_counts_index_artifact
 from s2and.incremental_linking.feature_block import (
     write_arrow_batch_lookup_index,
@@ -16,7 +13,7 @@ from s2and.incremental_linking.feature_block import (
     write_name_counts_index,
 )
 from scripts.verification.validate_local_arrow_release import validate_release_root
-from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
+from tests.helpers import tiny_name_counts_tuple
 
 
 def _touch_json(path: Path, payload: dict | None = None) -> None:
@@ -105,7 +102,6 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
     write_name_counts_index(
         release_root,
         tiny_name_counts_tuple(),
-        tiny_name_counts_provenance(),
     )
 
     for file_path in (release_root / "LICENSE.txt",):
@@ -116,13 +112,35 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
             {
                 "signature_id": pa.array(["s1"], type=pa.string()),
                 "paper_id": pa.array(["p1"], type=pa.string()),
+                "author_first": pa.array(["Ada"], type=pa.string()),
+                "author_middle": pa.array([""], type=pa.string()),
+                "author_last": pa.array(["Lovelace"], type=pa.string()),
+                "author_suffix": pa.array([""], type=pa.string()),
+                "author_affiliations": pa.array([[]], type=pa.list_(pa.string())),
+                "author_position": pa.array([0], type=pa.int64()),
             }
         ),
         dataset_root / "signatures.arrow",
     )
-    write_arrow_ipc_table(pa.table({"paper_id": pa.array(["p1"], type=pa.string())}), dataset_root / "papers.arrow")
     write_arrow_ipc_table(
-        pa.table({"paper_id": pa.array(["p1"], type=pa.string()), "position": pa.array([0], type=pa.int64())}),
+        pa.table(
+            {
+                "paper_id": pa.array(["p1"], type=pa.string()),
+                "title": pa.array(["Notes"], type=pa.string()),
+                "venue": pa.array([""], type=pa.string()),
+                "journal_name": pa.array([""], type=pa.string()),
+            }
+        ),
+        dataset_root / "papers.arrow",
+    )
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(["p1"], type=pa.string()),
+                "position": pa.array([0], type=pa.int64()),
+                "author_name": pa.array(["Ada Lovelace"], type=pa.string()),
+            }
+        ),
         dataset_root / "paper_authors.arrow",
     )
     write_arrow_ipc_table(
@@ -178,12 +196,24 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
 def _rewrite_dataset_manifest_paths(release_root: Path, dataset_name: str, paths: dict[str, str]) -> None:
     dataset_manifest_path = release_root / dataset_name / "manifest.json"
     dataset_manifest = json.loads(dataset_manifest_path.read_text(encoding="utf-8"))
-    dataset_manifest["paths"] = paths
-    _touch_json(dataset_manifest_path, dataset_manifest)
+    metadata = {
+        key: value
+        for key, value in dataset_manifest.items()
+        if key not in {"normalization_version", "paths", "artifact_generation"}
+    }
+    dataset_root = dataset_manifest_path.parent
+    resolved_paths = {
+        key: str((dataset_root / value).resolve()) if not Path(value).is_absolute() else value
+        for key, value in paths.items()
+    }
+    _touch_json(
+        dataset_manifest_path,
+        build_arrow_artifact_manifest(resolved_paths, dataset_root, metadata=metadata),
+    )
     _write_root_manifest(release_root, dataset_name)
 
 
-def test_docs_work_plan_arrow_release_layout_required_files(tmp_path: Path) -> None:
+def test_arrow_release_layout_required_files(tmp_path: Path) -> None:
     release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
 
     _validate_required_release_files(release_root, dataset_name)
@@ -195,71 +225,6 @@ def test_docs_work_plan_arrow_release_layout_required_files(tmp_path: Path) -> N
         "default_model_manifest": None,
         "network_access": False,
     }
-
-
-def test_release_validation_checks_shared_name_counts_generation_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
-    root_manifest_path = release_root / "manifest.json"
-    root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))
-    replay_manifest_path = release_root / "replay" / "manifest.json"
-    replay_dataset_entry = dict(root_manifest["dataset_manifests"][0])
-    replay_dataset_entry["manifest_path"] = f"../{dataset_name}/manifest.json"
-    _touch_json(replay_manifest_path, {"dataset_manifests": [replay_dataset_entry]})
-    replay_manifest_bytes = replay_manifest_path.read_bytes()
-    root_manifest["replay_bundles"] = [
-        {
-            "bundle": "duplicate-name-counts-reference",
-            "manifest_path": "replay/manifest.json",
-            "manifest_size_bytes": len(replay_manifest_bytes),
-            "manifest_sha256": hashlib.sha256(replay_manifest_bytes).hexdigest(),
-        }
-    ]
-    _touch_json(root_manifest_path, root_manifest)
-
-    manifest_loads = 0
-    native_opens = 0
-    fallback_validations = 0
-    original_manifest_load = arrow_inputs_module.ValidatedNameCountsManifest.load
-    original_native_open = name_counts_index_module.NameCountsIndex._open_generation
-    original_fallback_validation = release_validation_module._validate_name_counts_index  # noqa: SLF001
-
-    def counted_manifest_load(cls, index_dir: str | Path):
-        nonlocal manifest_loads
-        manifest_loads += 1
-        return original_manifest_load(index_dir)
-
-    def counted_native_open(cls, path: str | Path):
-        nonlocal native_opens
-        native_opens += 1
-        return original_native_open(path)
-
-    def counted_fallback_validation(path: Path, errors: list[str], *, label: str) -> None:
-        nonlocal fallback_validations
-        fallback_validations += 1
-        original_fallback_validation(path, errors, label=label)
-
-    monkeypatch.setattr(
-        arrow_inputs_module.ValidatedNameCountsManifest,
-        "load",
-        classmethod(counted_manifest_load),
-    )
-    monkeypatch.setattr(
-        name_counts_index_module.NameCountsIndex,
-        "_open_generation",
-        classmethod(counted_native_open),
-    )
-    monkeypatch.setattr(release_validation_module, "_validate_name_counts_index", counted_fallback_validation)
-
-    metrics = validate_release_root(release_root, include_replay_bundles=True)
-
-    assert metrics["dataset_manifest_count"] == 1
-    assert metrics["replay_dataset_manifest_count"] == 1
-    assert manifest_loads == 0
-    assert native_opens == 1
-    assert fallback_validations == 0
 
 
 def test_validate_release_root_reports_dataset_manifest_checksum_mismatch(tmp_path: Path) -> None:
@@ -300,7 +265,7 @@ def test_validate_release_root_reports_missing_batch_index_path(tmp_path: Path) 
 
     with pytest.raises(
         ValueError,
-        match=r"root dataset s2and_mini is missing required Arrow artifacts.*papers_batch_index",
+        match=r"missing required Arrow artifacts.*papers_batch_index",
     ):
         validate_release_root(release_root, include_replay_bundles=False)
 
@@ -314,7 +279,7 @@ def test_validate_release_root_reports_missing_canonical_specter_batch_index(tmp
 
     with pytest.raises(
         ValueError,
-        match=r"root dataset s2and_mini is missing required Arrow artifacts.*specter_batch_index",
+        match=r"must contain both specter and specter_batch_index",
     ):
         validate_release_root(release_root, include_replay_bundles=False)
 

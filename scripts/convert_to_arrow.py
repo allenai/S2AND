@@ -540,6 +540,50 @@ def _mapping_by_id(rows: Any, *, id_key: str, label: str) -> dict[str, Mapping[s
     return mapped
 
 
+def join_canonical_benchmark_names(
+    signatures: Mapping[str, Any],
+    canonical_rows: Sequence[Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Replace benchmark name fields with canonical rows joined by signature ID."""
+
+    fields = ("first", "middle", "last")
+    for signature_id, signature in signatures.items():
+        if signature["signature_id"] != signature_id:
+            raise ValueError(f"benchmark signature key does not match signature_id: {signature_id!r}")
+
+    canonical_by_id = _mapping_by_id(canonical_rows, id_key="signature_id", label="canonical name rows")
+
+    missing = sorted(signatures.keys() - canonical_by_id.keys())
+    extra = sorted(canonical_by_id.keys() - signatures.keys())
+    if missing or extra:
+        raise ValueError(
+            "canonical name signature IDs must exactly match benchmark signatures: "
+            f"missing={missing[:10]}, extra={extra[:10]}"
+        )
+
+    field_divergence_counts = {field: 0 for field in fields}
+    changed_signature_count = 0
+    joined: dict[str, dict[str, Any]] = {}
+    for signature_id in sorted(signatures):
+        signature = signatures[signature_id]
+        author_info = dict(signature["author_info"])
+        canonical = canonical_by_id[signature_id]
+        changed = False
+        for field in fields:
+            if author_info.get(field) != canonical[field]:
+                field_divergence_counts[field] += 1
+                changed = True
+            author_info[field] = canonical[field]
+        changed_signature_count += int(changed)
+        joined[signature_id] = {**signature, "author_info": author_info}
+
+    return joined, {
+        "rows": len(joined),
+        "changed_signatures": changed_signature_count,
+        "field_changes": field_divergence_counts,
+    }
+
+
 def _altered_values(payload: Mapping[str, Any]) -> list[str]:
     values = payload.get("altered_cluster_signatures") or []
     if isinstance(values, str | bytes) or not isinstance(values, Sequence):
@@ -1387,6 +1431,20 @@ def _run_service_json(args: argparse.Namespace) -> None:
     _print_report(report)
 
 
+def _run_join_canonical_names(args: argparse.Namespace) -> None:
+    signatures = _load_json(args.signatures)
+    canonical_rows = _load_json(args.canonical_names)
+    if not isinstance(signatures, Mapping):
+        raise TypeError("benchmark signatures must be a JSON object keyed by signature_id")
+    if not isinstance(canonical_rows, list):
+        raise TypeError("canonical names must be a JSON list")
+    if args.output.exists():
+        raise FileExistsError(f"output already exists: {args.output}")
+    joined, report = join_canonical_benchmark_names(signatures, canonical_rows)
+    _write_json(args.output, joined)
+    print(json.dumps({**report, "output": str(args.output)}, indent=2, sort_keys=True))
+
+
 def _selected_runtime_dataset_names(
     *,
     datasets: Sequence[str] | None,
@@ -1544,6 +1602,15 @@ def _build_parser() -> argparse.ArgumentParser:
     service.add_argument("--copy-source-json", action="store_true")
     _add_common_runtime_args(service, default_n_jobs=4)
     service.set_defaults(func=_run_service_json)
+
+    canonical_names = subparsers.add_parser(
+        "join-canonical-names",
+        help="Replace benchmark author name fields from canonical rows joined by signature ID.",
+    )
+    canonical_names.add_argument("--signatures", type=Path, required=True)
+    canonical_names.add_argument("--canonical-names", type=Path, required=True)
+    canonical_names.add_argument("--output", type=Path, required=True)
+    canonical_names.set_defaults(func=_run_join_canonical_names)
 
     benchmark = subparsers.add_parser("benchmark", help="Convert benchmark dataset JSON/pickle files.")
     benchmark.add_argument("--source-root", type=Path, required=True)

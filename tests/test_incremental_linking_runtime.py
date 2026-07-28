@@ -508,73 +508,25 @@ def _promoted_gate_config(score: float = 0.0, margin: float = 0.0) -> dict[str, 
     )
 
 
-def test_raw_arrow_runtime_rejects_mismatched_query_view_length_before_featurizer(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    def fail_build_rust_featurizer_from_arrow_paths(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("invalid raw candidate plans should fail before featurizer construction")
-
-    monkeypatch.setattr(
-        runtime_module.feature_port,
-        "build_rust_featurizer_from_arrow_paths",
-        fail_build_rust_featurizer_from_arrow_paths,
-    )
-    clusterer = SimpleNamespace(
-        n_jobs=1,
-        featurizer_info=FeaturizationInfo(features_to_use=[]),
-        nameless_featurizer_info=None,
-    )
-
+def test_raw_arrow_plan_rejects_mismatched_query_view_length() -> None:
     with pytest.raises(ValueError, match="query_views length must match query_signature_ids"):
-        runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
-            clusterer,
-            _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0)),
-            arrow_paths={"signatures": tmp_path / "signatures.arrow"},
-            query_signature_ids=["q"],
-            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(
-                _minimal_raw_candidate_plan(
-                    query_signature_ids=["q"],
-                    left_signature_ids=["q"],
-                    query_views=[],
-                )
-            ),
-            rust_featurizer=None,
+        RawArrowPlanBundle.from_native_mapping(
+            _minimal_raw_candidate_plan(
+                query_signature_ids=["q"],
+                left_signature_ids=["q"],
+                query_views=[],
+            )
         )
 
 
-def test_raw_arrow_runtime_rejects_unknown_query_view_before_featurizer(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    def fail_build_rust_featurizer_from_arrow_paths(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("invalid raw candidate plans should fail before featurizer construction")
-
-    monkeypatch.setattr(
-        runtime_module.feature_port,
-        "build_rust_featurizer_from_arrow_paths",
-        fail_build_rust_featurizer_from_arrow_paths,
-    )
-    clusterer = SimpleNamespace(
-        n_jobs=1,
-        featurizer_info=FeaturizationInfo(features_to_use=[]),
-        nameless_featurizer_info=None,
-    )
-
+def test_raw_arrow_plan_rejects_unknown_query_view() -> None:
     with pytest.raises(ValueError, match="Unknown retrieval query_view"):
-        runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
-            clusterer,
-            _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0)),
-            arrow_paths={"signatures": tmp_path / "signatures.arrow"},
-            query_signature_ids=["q"],
-            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(
-                _minimal_raw_candidate_plan(
-                    query_signature_ids=["q"],
-                    left_signature_ids=["q"],
-                    query_views=["typo"],
-                )
-            ),
-            rust_featurizer=None,
+        RawArrowPlanBundle.from_native_mapping(
+            _minimal_raw_candidate_plan(
+                query_signature_ids=["q"],
+                left_signature_ids=["q"],
+                query_views=["typo"],
+            )
         )
 
 

@@ -11,7 +11,6 @@ import os
 import shutil
 import struct
 import tempfile
-import uuid
 from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -26,12 +25,9 @@ from s2and.arrow_inputs import (
     normalize_arrow_paths,
 )
 from s2and.arrow_schema import validate_arrow_schema
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block_contract import normalize_cluster_seed_disallow_pairs
-from s2and.name_counts_manifest import (
-    NAME_COUNTS_INDEX_SCHEMA_VERSION,
-    NAME_COUNTS_MANIFEST_SHA256_FIELD,
-    validated_name_counts_provenance,
-)
+from s2and.name_counts_manifest import NAME_COUNTS_INDEX_SCHEMA_VERSION
 from s2and.text import canonicalize_name_text
 
 ARROW_PHYSICAL_LAYOUT_SCHEMA_VERSION = "s2and_arrow_physical_v1"
@@ -357,63 +353,21 @@ def _normalize_unique_signature_ids(
     return tuple(normalized)
 
 
-def cluster_seed_disallows_path_from_arrow_paths(arrow_paths: Mapping[str, Any] | None) -> Path | None:
-    """Return the explicit cluster-seed disallow sidecar path, if configured."""
-
-    if arrow_paths is None:
-        return None
-    path_value = arrow_paths.get("cluster_seed_disallows")
-    if path_value is None:
-        return None
-    path = Path(str(path_value))
-    if not path.exists():
-        raise FileNotFoundError(f"Arrow path cluster_seed_disallows={path} does not exist")
-    return path
-
-
-def cluster_seed_disallows_from_arrow_paths(arrow_paths: Mapping[str, Any] | None) -> set[tuple[str, str]]:
-    """Read explicit Arrow cluster-seed disallows, failing on stale configured paths."""
-
-    path = cluster_seed_disallows_path_from_arrow_paths(arrow_paths)
-    if path is None:
-        return set()
-    return set(read_cluster_seed_disallows_arrow(path))
-
-
 @contextmanager
-def temporary_arrow_paths_with_cluster_seeds(
-    arrow_paths: Mapping[str, Any],
+def temporary_cluster_seed_sidecars(
     cluster_seeds_require: Mapping[Any, Any],
     *,
     prefix: str,
-    reuse_existing_cluster_seeds_when_empty: bool = False,
     cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None = None,
 ) -> Iterator[dict[str, str]]:
-    """Yield Arrow paths with request-scoped cluster-seed sidecars."""
-
-    paths = normalize_arrow_paths(arrow_paths)
-    if (
-        reuse_existing_cluster_seeds_when_empty
-        and not cluster_seeds_require
-        and cluster_seeds_disallow is None
-        and paths.get("cluster_seeds") is not None
-        and Path(paths["cluster_seeds"]).exists()
-    ):
-        yield paths
-        return
+    """Write and yield request-scoped cluster-seed sidecars."""
 
     with tempfile.TemporaryDirectory(prefix=prefix) as tmpdir:
         tmpdir_path = Path(tmpdir)
-        reusable_cluster_seeds_path = (
-            reuse_existing_cluster_seeds_when_empty
-            and not cluster_seeds_require
-            and paths.get("cluster_seeds") is not None
-            and Path(paths["cluster_seeds"]).exists()
-        )
-        if not reusable_cluster_seeds_path:
-            cluster_seed_path = tmpdir_path / "cluster_seeds.arrow"
-            write_cluster_seeds_arrow(cluster_seed_path, cluster_seeds_require)
-            paths["cluster_seeds"] = str(cluster_seed_path)
+        paths: dict[str, str] = {}
+        cluster_seed_path = tmpdir_path / "cluster_seeds.arrow"
+        write_cluster_seeds_arrow(cluster_seed_path, cluster_seeds_require)
+        paths["cluster_seeds"] = str(cluster_seed_path)
         if cluster_seeds_disallow is not None:
             disallow_path = tmpdir_path / "cluster_seed_disallows.arrow"
             write_cluster_seed_disallows_arrow(disallow_path, cluster_seeds_disallow)
@@ -1214,30 +1168,6 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _fnv64_text(digest: int, value: str) -> int:
-    raw = value.encode("utf-8")
-    digest = _fnv64_update(digest, len(raw).to_bytes(8, "little", signed=False))
-    return _fnv64_update(digest, raw)
-
-
-def _name_count_fingerprint_digest(kind_seed: int, name: str, count: float) -> int:
-    entry_digest = _fnv64_text(kind_seed, name)
-    return _fnv64_text(entry_digest, float(count).hex())
-
-
-def _finish_name_counts_arrow_fingerprint(
-    accumulators: Mapping[str, tuple[int, int, int, int]],
-) -> int:
-    digest = _fnv64_bytes(b"s2and-name-counts-arrow-v2-order-independent\x00")
-    for kind, (record_count, xor_accumulator, sum_accumulator, square_accumulator) in sorted(accumulators.items()):
-        digest = _fnv64_text(digest, kind)
-        digest = _fnv64_update(digest, record_count.to_bytes(8, "little", signed=False))
-        digest = _fnv64_update(digest, xor_accumulator.to_bytes(8, "little", signed=False))
-        digest = _fnv64_update(digest, sum_accumulator.to_bytes(8, "little", signed=False))
-        digest = _fnv64_update(digest, square_accumulator.to_bytes(8, "little", signed=False))
-    return digest
-
-
 def _validated_name_count_entry(kind: str, raw_name: Any, raw_count: Any) -> tuple[str, float]:
     """Return one strict name-count entry at the public artifact boundary."""
 
@@ -1429,7 +1359,7 @@ def _write_sorted_name_count_records(
     os.close(blob_fd)
     record_tmp = Path(record_tmp_text)
     blob_tmp = Path(blob_tmp_text)
-    output_tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    output_tmp = path.parent / f".{path.name}.tmp"
     written_records = 0
     blob_size = 0
     record_buffer = bytearray()
@@ -1513,31 +1443,23 @@ def _write_name_count_index_file(
     run_bytes = 0
     peak_buffered_records = 0
     kind_hash_seed = _name_counts_index_kind_hash_seed(kind)
-    fingerprint_kind_seed = _fnv64_text(_fnv64_bytes(b"s2and-name-count-entry-v1\x00"), kind)
-    fingerprint_xor = 0
-    fingerprint_sum = 0
-    fingerprint_square_sum = 0
     try:
         for raw_name, raw_count in mapping.items():
             name, count = _validated_name_count_entry(kind, raw_name, raw_count)
-            entry_digest = _name_count_fingerprint_digest(fingerprint_kind_seed, name, count)
-            fingerprint_xor ^= entry_digest
-            fingerprint_sum = (fingerprint_sum + entry_digest) & 0xFFFFFFFFFFFFFFFF
-            fingerprint_square_sum = (fingerprint_square_sum + (entry_digest * entry_digest)) & 0xFFFFFFFFFFFFFFFF
             name_bytes = name.encode("utf-8")
             hash_1 = _fnv64_bytes(name_bytes)
             hash_2 = _fnv64_update(kind_hash_seed, name_bytes)
             buffered.append((hash_1, hash_2, name_bytes, count))
             peak_buffered_records = max(peak_buffered_records, len(buffered))
             if len(buffered) >= max_records_in_memory and record_count > max_records_in_memory:
-                run_path = path.parent / f".{path.name}.run.{len(run_paths)}.{uuid.uuid4().hex}"
+                run_path = path.parent / f".{path.name}.run.{len(run_paths)}"
                 run_bytes += _write_name_count_sort_run(run_path, buffered)
                 run_paths.append(run_path)
                 buffered = []
 
         if run_paths:
             if buffered:
-                run_path = path.parent / f".{path.name}.run.{len(run_paths)}.{uuid.uuid4().hex}"
+                run_path = path.parent / f".{path.name}.run.{len(run_paths)}"
                 run_bytes += _write_name_count_sort_run(run_path, buffered)
                 run_paths.append(run_path)
                 buffered = []
@@ -1565,18 +1487,14 @@ def _write_name_count_index_file(
         "sort_run_count": len(run_paths),
         "peak_buffered_records": peak_buffered_records,
         "temporary_byte_count": run_bytes + assembly_tmp_bytes,
-        "fingerprint_xor": fingerprint_xor,
-        "fingerprint_sum": fingerprint_sum,
-        "fingerprint_square_sum": fingerprint_square_sum,
     }
 
 
 def write_name_counts_index(
     output_dir: str | Path,
     mappings: tuple[Mapping[Any, Any], Mapping[Any, Any], Mapping[Any, Any], Mapping[Any, Any]],
-    source_provenance: Mapping[str, Any],
 ) -> tuple[str, dict[str, int]]:
-    """Publish one new global name-count index into an absent target."""
+    """Publish one new flat global name-count index into an absent target."""
 
     output_path = Path(output_dir)
     index_dir = output_path / "name_counts_index"
@@ -1584,11 +1502,6 @@ def write_name_counts_index(
         raise FileExistsError(f"name-count index target already exists: {index_dir}")
     output_path.mkdir(parents=True, exist_ok=True)
 
-    source_provenance = validated_name_counts_provenance(
-        source_provenance,
-        context="write_name_counts_index",
-    )
-    source_provenance.pop(NAME_COUNTS_MANIFEST_SHA256_FIELD, None)
     first_dict, last_dict, first_last_dict, last_first_initial_dict = mappings
     named_mappings = (
         ("first", first_dict),
@@ -1599,16 +1512,12 @@ def write_name_counts_index(
     metrics: dict[str, int] = {}
     total_records = 0
     total_bytes = 0
-    fingerprint_accumulators: dict[str, tuple[int, int, int, int]] = {}
     manifest_files: dict[str, dict[str, int | str]] = {}
-    generation_name = f"gen-{uuid.uuid4().hex}"
     temporary_index_dir = Path(tempfile.mkdtemp(prefix=".name_counts_index.", dir=str(output_path)))
-    generation_dir = temporary_index_dir / "generations" / generation_name
-    generation_dir.mkdir(parents=True)
     try:
         for kind, mapping in named_mappings:
             filename = f"{kind}.bin"
-            index_file = generation_dir / filename
+            index_file = temporary_index_dir / filename
             file_metrics = _write_name_count_index_file(
                 index_file,
                 kind,
@@ -1620,15 +1529,8 @@ def write_name_counts_index(
             metrics[f"{kind}_bytes"] = byte_count
             total_records += record_count
             total_bytes += byte_count
-            fingerprint_accumulators[kind] = (
-                record_count,
-                file_metrics["fingerprint_xor"],
-                file_metrics["fingerprint_sum"],
-                file_metrics["fingerprint_square_sum"],
-            )
             manifest_files[kind] = {
-                "path": f"generations/{generation_name}/{filename}",
-                "record_count": record_count,
+                "path": filename,
                 "byte_count": byte_count,
                 "sha256": _sha256_file(index_file),
             }
@@ -1638,26 +1540,13 @@ def write_name_counts_index(
 
         manifest = {
             "schema_version": NAME_COUNTS_INDEX_SCHEMA_VERSION,
-            "normalization_version": source_provenance["normalization_version"],
-            "source_provenance": source_provenance,
-            "magic": _NAME_COUNTS_INDEX_MAGIC.decode("ascii"),
-            "fingerprint": _finish_name_counts_arrow_fingerprint(fingerprint_accumulators),
-            "record_layout": "hash1:u64,hash2:u64,name_offset:u64,name_len:u32,reserved:u32,count:f64",
-            "sort_order": "hash1,hash2,utf8_name_bytes",
-            "hash": "fnv1a64(name_bytes), fnv1a64(domain + kind + NUL + name_bytes)",
-            "exact_string_verification": True,
+            "normalization_version": NORMALIZATION_VERSION,
             "files": manifest_files,
         }
         manifest_path = temporary_index_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         with manifest_path.open("r+b") as manifest_input:
             os.fsync(manifest_input.fileno())
-        marker_path = generation_dir / ".published"
-        with marker_path.open("wb") as marker_output:
-            marker_output.flush()
-            os.fsync(marker_output.fileno())
-        fsync_directory(generation_dir)
-        fsync_directory(generation_dir.parent)
         fsync_directory(temporary_index_dir)
         if index_dir.exists():
             raise FileExistsError(f"name-count index target already exists: {index_dir}")

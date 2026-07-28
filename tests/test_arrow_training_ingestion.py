@@ -6,7 +6,7 @@ levels:
 
 1. Ingestion: every Python signature/paper field train mode consumes matches
    the JSON-built dataset after preprocessing.
-2. Featurizer: the from_arrow_paths-built featurizer (fast Arrow door) is used
+2. Featurizer: the retained ArrowDataset resource is used
    for Arrow-backed datasets.
 3. End-to-end: featurize() with fixed train/val/test pairs returns identical
    main + nameless matrices and labels through both ingestion paths, using the
@@ -27,6 +27,7 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 
 from s2and import feature_port  # noqa: E402
+from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.arrow_training import (  # noqa: E402
     build_training_anddata_from_arrow,
     load_papers_from_arrow,
@@ -49,7 +50,6 @@ from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddat
 from tests.helpers import (  # noqa: E402
     import_s2and_rust,
     tiny_name_counts_index,
-    tiny_name_counts_provenance,
     tiny_name_counts_tuple,
     write_test_arrow_artifact_manifest,
 )
@@ -251,19 +251,18 @@ def test_arrow_training_use_orcid_id_controls_python_and_native_ingestion(tmp_pa
     }
     paths, _ = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
+    write_test_arrow_artifact_manifest(tmp_path, paths)
+
     def native_constraint(use_orcid_id: bool) -> float | None:
-        featurizer = _RUST_MODULE.RustFeaturizer.from_arrow_paths(
-            paths,
-            None,
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-            None,
-            use_orcid_id,
-        )
-        return featurizer.get_constraints_matrix_indexed([(0, 1)])[0]
+        with ArrowDataset.open(tmp_path) as arrow_dataset:
+            featurizer = _RUST_MODULE.RustFeaturizer.from_arrow_dataset(
+                arrow_dataset.native,
+                None,
+                set(),
+                num_threads=1,
+                use_orcid_id=use_orcid_id,
+            )
+            return featurizer.get_constraints_matrix_indexed([(0, 1)])[0]
 
     assert native_constraint(True) == 0.0
     assert native_constraint(False) is None
@@ -402,27 +401,30 @@ def training_bundle(tmp_path_factory: pytest.TempPathFactory) -> Any:
         bundle_dir = tmp_path_factory.mktemp("arrow_training_bundle")
         arrow_paths = write_raw_planner_arrow_from_anddata(json_dataset, bundle_dir, include_specter=True)
         arrow_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(arrow_paths, bundle_dir)
-        name_counts_index_path, _name_counts_metrics = write_name_counts_index(
-            bundle_dir, tiny_name_counts_tuple(), tiny_name_counts_provenance()
-        )
+        name_counts_index_path, _name_counts_metrics = write_name_counts_index(bundle_dir, tiny_name_counts_tuple())
         arrow_paths["name_counts_index"] = name_counts_index_path
         write_test_arrow_artifact_manifest(bundle_dir, arrow_paths)
 
-        arrow_dataset = build_training_anddata_from_arrow(
-            arrow_paths,
-            "dummy_arrow_training",
+        with ArrowDataset.open(
+            bundle_dir,
+            require_specter=True,
+            require_name_counts_index=True,
             expected_normalization_version=NORMALIZATION_VERSION,
-            clusters=str(DUMMY_DIR / "clusters.json"),
-            random_seed=42,
-            n_jobs=1,
-        )
-        yield {
-            "json_dataset": json_dataset,
-            "arrow_dataset": arrow_dataset,
-            "arrow_paths": dict(arrow_paths),
-            "specter": specter,
-            "monkeypatch": monkeypatch,
-        }
+        ) as arrow_source:
+            arrow_dataset = build_training_anddata_from_arrow(
+                arrow_source,
+                "dummy_arrow_training",
+                clusters=str(DUMMY_DIR / "clusters.json"),
+                random_seed=42,
+                n_jobs=1,
+            )
+            yield {
+                "json_dataset": json_dataset,
+                "arrow_dataset": arrow_dataset,
+                "arrow_source": arrow_source,
+                "specter": specter,
+                "monkeypatch": monkeypatch,
+            }
     finally:
         monkeypatch.undo()
 
@@ -507,9 +509,8 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     )
 
     arrow_dataset = build_training_anddata_from_arrow(
-        training_bundle["arrow_paths"],
+        training_bundle["arrow_source"],
         "dummy_arrow_training_python_backend_specter",
-        expected_normalization_version=NORMALIZATION_VERSION,
         clusters=str(DUMMY_DIR / "clusters.json"),
         random_seed=42,
         n_jobs=1,
@@ -518,13 +519,14 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     assert arrow_dataset.runtime_context.backend == "rust"
     assert arrow_dataset.specter_embeddings == {}
     assert arrow_dataset.name_counts_index is None
-    assert arrow_dataset.arrow_paths is not None
-    assert arrow_dataset.arrow_artifact_generation
-    assert arrow_dataset.arrow_artifact_generation == arrow_dataset.arrow_paths.generation_id
-    assert arrow_dataset.arrow_paths.name_counts_manifest is not None
-    assert arrow_dataset.name_counts_provenance == arrow_dataset.arrow_paths.name_counts_manifest.source_provenance
+    assert arrow_dataset.arrow_dataset is training_bundle["arrow_source"]
+    assert (
+        arrow_dataset.name_counts_manifest_sha256
+        == training_bundle["arrow_source"].name_counts_manifest.manifest_sha256
+    )
+    assert "arrow_paths" not in arrow_dataset.__dict__
+    assert "arrow_artifact_generation" not in arrow_dataset.__dict__
     assert isinstance(arrow_dataset.name_tuples, frozenset)
-    assert arrow_dataset._cluster_seeds_source == "arrow"
     assert "papers" not in arrow_dataset.__dict__
 
 
@@ -542,9 +544,8 @@ def test_arrow_training_materializes_exact_papers_once(
 
     monkeypatch.setattr("s2and.arrow_training.load_papers_from_arrow", recording_loader)
     arrow_dataset = build_training_anddata_from_arrow(
-        training_bundle["arrow_paths"],
+        training_bundle["arrow_source"],
         "dummy_arrow_training_lazy_papers",
-        expected_normalization_version=NORMALIZATION_VERSION,
         clusters=str(DUMMY_DIR / "clusters.json"),
         random_seed=42,
         n_jobs=1,
@@ -570,9 +571,8 @@ def test_arrow_training_constructor_retains_disabled_orcid_policy(
 
     monkeypatch.setattr(Signature, "_replace", recording_replace)
     arrow_dataset = build_training_anddata_from_arrow(
-        training_bundle["arrow_paths"],
+        training_bundle["arrow_source"],
         "dummy_arrow_training_without_orcid",
-        expected_normalization_version=NORMALIZATION_VERSION,
         clusters=str(DUMMY_DIR / "clusters.json"),
         random_seed=42,
         n_jobs=1,
@@ -647,9 +647,8 @@ def test_featurize_end_to_end_with_fixed_pairs(
 
     json_dataset = _json_training_anddata("dummy_json_fixed_pairs", training_bundle["specter"], **pair_kwargs)
     arrow_dataset = build_training_anddata_from_arrow(
-        training_bundle["arrow_paths"],
+        training_bundle["arrow_source"],
         "dummy_arrow_fixed_pairs",
-        expected_normalization_version=NORMALIZATION_VERSION,
         random_seed=42,
         n_jobs=1,
         **pair_kwargs,
@@ -704,24 +703,6 @@ def test_featurize_end_to_end_with_fixed_pairs(
     assert "papers" not in arrow_dataset.__dict__
 
 
-def test_constructor_requires_batch_indexes_and_name_counts_index(training_bundle: dict[str, Any]) -> None:
-    complete_paths = dict(training_bundle["arrow_paths"])
-
-    missing_indexes = {key: value for key, value in complete_paths.items() if "batch_index" not in key}
-    with pytest.raises((ValueError, FileNotFoundError)):
-        build_training_anddata_from_arrow(
-            missing_indexes,
-            "missing_indexes",
-            expected_normalization_version=NORMALIZATION_VERSION,
-            clusters=str(DUMMY_DIR / "clusters.json"),
-        )
-
-    missing_name_counts = dict(complete_paths)
-    missing_name_counts.pop("name_counts_index", None)
-    with pytest.raises((ValueError, FileNotFoundError)):
-        build_training_anddata_from_arrow(
-            missing_name_counts,
-            "missing_name_counts",
-            expected_normalization_version=NORMALIZATION_VERSION,
-            clusters=str(DUMMY_DIR / "clusters.json"),
-        )
+def test_constructor_requires_arrow_dataset() -> None:
+    with pytest.raises(TypeError, match="open ArrowDataset"):
+        build_training_anddata_from_arrow({}, "not_open")  # type: ignore[arg-type]

@@ -4,7 +4,7 @@ This document covers the fuller install and setup options for S2AND.
 
 ## Requirements
 
-- Python `3.11.x`
+- Python `3.11`, `3.12`, or `3.13`
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 - Git LFS for the Arrow fixtures in a source checkout
 - Rust, if you are working from a source checkout or building the native extension from source:
@@ -57,10 +57,10 @@ git lfs install
 git lfs pull --include "tests/fixtures/arrow/pubmed_specter2/**"
 ```
 
-Create and activate a Python 3.11 environment:
+Create and activate a supported Python environment (3.11, 3.12, or 3.13):
 
 ```bash
-uv venv --python 3.11.13
+uv venv --python 3.11
 ```
 
 Activation examples:

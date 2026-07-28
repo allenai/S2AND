@@ -2,22 +2,18 @@ name: release artifacts (build, test, publish)
 
 on:
   workflow_dispatch:
-    inputs:
-      evidence_manifest_url:
-        description: "Immutable HTTPS URL for the reviewed release evidence manifest"
-        required: true
-        type: string
-      evidence_manifest_sha256:
-        description: "Lowercase SHA-256 of that manifest"
-        required: true
-        type: string
 
 jobs:
-  verify-release-input:
-    name: verify pinned release input
+  validate:
+    name: validate exact commit
     runs-on: ubuntu-latest
     steps:
+      - name: Require main release ref
+        run: test "$GITHUB_REF" = "refs/heads/main"
+
       - uses: actions/checkout@v5
+        with:
+          lfs: true
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
@@ -25,49 +21,16 @@ jobs:
       - name: Version sync check
         run: uv run --no-project python scripts/sync_version.py --check
 
-      - name: Download and verify release evidence manifest
-        env:
-          EVIDENCE_MANIFEST_URL: ${{ inputs.evidence_manifest_url }}
-          EVIDENCE_MANIFEST_SHA256: ${{ inputs.evidence_manifest_sha256 }}
-        run: |
-          test "$GITHUB_REF" = "refs/heads/main"
-          case "$EVIDENCE_MANIFEST_URL" in
-            https://*) ;;
-            *) echo "evidence_manifest_url must use HTTPS" >&2; exit 1 ;;
-          esac
-          case "$EVIDENCE_MANIFEST_SHA256" in
-            *[!0-9a-f]*|'') echo "evidence_manifest_sha256 must be lowercase hexadecimal" >&2; exit 1 ;;
-          esac
-          test "${#EVIDENCE_MANIFEST_SHA256}" -eq 64
-          curl --fail --location --proto '=https' --tlsv1.2 \
-            --output release-evidence-manifest.json "$EVIDENCE_MANIFEST_URL"
-          printf '%s  %s\n' "$EVIDENCE_MANIFEST_SHA256" release-evidence-manifest.json |
-            sha256sum --check --strict
-          uv run --no-project python -m json.tool release-evidence-manifest.json >/dev/null
-          uv run --no-project python s2and/release_evidence.py \
-            --manifest release-evidence-manifest.json \
-            --expected-manifest-sha256 "$EVIDENCE_MANIFEST_SHA256" \
-            --output-root release-evidence
+      - name: Install exact source environment
+        run: uv sync --frozen --extra dev
 
-      - name: Enforce release evaluation gate
-        env:
-          EVIDENCE_MANIFEST_SHA256: ${{ inputs.evidence_manifest_sha256 }}
-        run: >-
-          uv run --frozen python
-          scripts/production/model/release_pairwise.py evaluate-release
-          --evidence-manifest release-evidence/evidence_manifest.json
-          --expected-evidence-manifest-sha256 "$EVIDENCE_MANIFEST_SHA256"
-          --output-report release-evidence/evaluation_report.json
+      - name: Run release test suite
+        run: uv run pytest -q
 
-      - uses: actions/upload-artifact@v6
-        with:
-          name: release-evidence
-          path: release-evidence
-
-  s2and-dist:
-    name: s2and sdist+wheel
+  source-distributions:
+    name: source distributions
     runs-on: ubuntu-latest
-    needs: [verify-release-input]
+    needs: [validate]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -81,9 +44,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Build s2and distributions
-        run: |
-          rm -rf build
-          uv build --sdist --wheel --out-dir dist --clear
+        run: uv build --sdist --wheel --out-dir dist --clear
 
       - name: Verify built release asset contract
         run: >-
@@ -91,15 +52,45 @@ jobs:
           scripts/verification/verify_production_model_distributions.py
           --dist-dir dist --source-root .
 
+      - name: Build s2and-rust sdist
+        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
+        with:
+          maturin-version: v1.14.1
+          command: sdist
+          args: --out dist
+          working-directory: s2and_rust
+
+      # Building from sdist compiles the extension, which is a distinct path from
+      # installing a wheel. Exercise it on every supported interpreter.
+      - name: Install and exercise s2and-rust sdist
+        shell: bash
+        run: |
+          sdist="$(find s2and_rust/dist -type f -name '*.tar.gz' -print -quit)"
+          test -n "$sdist"
+          for py in 3.11 3.12 3.13; do
+            echo "::group::s2and-rust sdist smoke (py${py})"
+            smoke_venv="$RUNNER_TEMP/s2and-rust-sdist-smoke-${py}"
+            uv venv --python "$py" "$smoke_venv"
+            uv pip install --python "$smoke_venv/bin/python" "$sdist"
+            uv run --no-project --python "$smoke_venv/bin/python" python \
+              scripts/verification/smoke_installed_rust_api.py
+            echo "::endgroup::"
+          done
+
       - uses: actions/upload-artifact@v6
         with:
           name: dist-s2and
           path: dist/*
 
+      - uses: actions/upload-artifact@v6
+        with:
+          name: dist-s2and-rust-sdist
+          path: s2and_rust/dist/*
+
   wheels-windows:
     name: wheels (windows, py${{ matrix.py }})
     runs-on: windows-latest
-    needs: [verify-release-input]
+    needs: [validate]
     strategy:
       fail-fast: false
       matrix:
@@ -141,7 +132,7 @@ jobs:
   wheels-macos:
     name: wheels (macos universal2, py${{ matrix.py }})
     runs-on: macos-latest
-    needs: [verify-release-input]
+    needs: [validate]
     strategy:
       fail-fast: false
       matrix:
@@ -189,7 +180,7 @@ jobs:
   wheels-linux:
     name: wheels (linux ${{ matrix.platform.name }})
     runs-on: ubuntu-latest
-    needs: [verify-release-input]
+    needs: [validate]
     strategy:
       fail-fast: false
       matrix:
@@ -224,49 +215,20 @@ jobs:
           name: dist-s2and-rust-linux-${{ matrix.platform.name }}
           path: s2and_rust/dist/*
 
-  sdist:
-    name: sdist
+  release-smoke:
+    name: clean installed-artifact smoke (py${{ matrix.py }})
+    needs: [source-distributions, wheels-windows, wheels-macos, wheels-linux]
     runs-on: ubuntu-latest
-    needs: [verify-release-input]
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v5
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Build sdist
-        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
-        with:
-          maturin-version: v1.14.1
-          command: sdist
-          args: --out dist
-          working-directory: s2and_rust
-
-      - name: Install and exercise sdist
-        shell: bash
-        run: |
-          smoke_venv="$RUNNER_TEMP/s2and-rust-sdist-smoke"
-          sdist="$(find s2and_rust/dist -type f -name '*.tar.gz' -print -quit)"
-          test -n "$sdist"
-          uv venv --python 3.11 "$smoke_venv"
-          uv pip install --python "$smoke_venv/bin/python" "$sdist"
-          uv run --no-project --python "$smoke_venv/bin/python" python \
-            scripts/verification/smoke_installed_rust_api.py
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: dist-s2and-rust-sdist
-          path: s2and_rust/dist/*
-
-  release-bundle:
-    name: freeze release bytes
-    needs: [s2and-dist, wheels-windows, wheels-macos, wheels-linux, sdist]
-    runs-on: ubuntu-latest
-    steps:
       - name: Download s2and distributions
         uses: actions/download-artifact@v7
         with:
@@ -280,102 +242,36 @@ jobs:
           merge-multiple: true
           path: release/s2and-rust
 
-      - name: Generate and verify SHA256SUMS
-        run: |
-          cd release
-          find s2and s2and-rust -type f -print0 |
-            LC_ALL=C sort -z |
-            xargs -0 sha256sum > SHA256SUMS
-          sha256sum --check --strict SHA256SUMS
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: release-distributions
-          path: release
-
-  release-smoke:
-    name: clean installed-artifact smoke
-    needs: [release-bundle]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: Download frozen release bytes
-        uses: actions/download-artifact@v7
-        with:
-          name: release-distributions
-          path: release
-
       - name: Clean-install release artifacts
         run: |
-          cd release
-          sha256sum --check --strict SHA256SUMS
-          cd "$GITHUB_WORKSPACE"
           SMOKE_VENV="$RUNNER_TEMP/s2and-release-smoke"
-          RUST_WHEEL="$(find release/s2and-rust -type f -name '*cp311*manylinux*x86_64.whl' -print -quit)"
+          PY_TAG="cp$(echo '${{ matrix.py }}' | tr -d .)"
+          RUST_WHEEL="$(find release/s2and-rust -type f -name "*${PY_TAG}*manylinux*x86_64.whl" -print -quit)"
           PY_WHEEL="$(find release/s2and -type f -name 's2and-*.whl' -print -quit)"
           test -n "$RUST_WHEEL"
           test -n "$PY_WHEEL"
-          uv venv --python 3.11 "$SMOKE_VENV"
+          uv venv --python '${{ matrix.py }}' "$SMOKE_VENV"
           uv pip install --python "$SMOKE_VENV/bin/python" "$RUST_WHEEL" "$PY_WHEEL"
 
-      - name: Exercise installed synthetic incremental Arrow path
+      - name: Exercise installed synthetic bulk and incremental Arrow paths
         run: |
           SMOKE_VENV="$RUNNER_TEMP/s2and-release-smoke"
           cd "$RUNNER_TEMP"
           uv run --no-project --python "$SMOKE_VENV/bin/python" python \
             "$GITHUB_WORKSPACE/scripts/verification/smoke_installed_incremental_arrow.py"
 
-  release-tests:
-    name: release tests (exact commit)
-    needs: [verify-release-input]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          lfs: true
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: Install exact source environment
-        run: uv sync --extra dev
-
-      - name: Run release test suite
-        run: uv run pytest -q
-
-  # Rust publishes first. Python publication remains unreachable until the exact
-  # dependency is installable from the target index.
-  publish-s2and:
-    name: publish s2and to PyPI
-    needs: [release-bundle, release-smoke, release-tests, probe-rust-release]
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-    permissions:
-      id-token: write
-
-    steps:
-      - name: Download frozen release bytes
-        uses: actions/download-artifact@v7
+      # All matrix legs download identical artifacts; publish the tested set once
+      # so the artifact name stays unique. `needs: [release-smoke]` still waits
+      # for every leg, so publication requires all three versions to pass.
+      - uses: actions/upload-artifact@v6
+        if: matrix.py == '3.11'
         with:
           name: release-distributions
           path: release
-
-      - name: Verify frozen release bytes
-        run: cd release && sha256sum --check --strict SHA256SUMS
-
-      - name: Publish s2and
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: release/s2and
 
   publish-rust:
     name: publish s2and-rust to PyPI
-    needs: [release-bundle, release-smoke, release-tests]
+    needs: [release-smoke]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -383,29 +279,37 @@ jobs:
       id-token: write
 
     steps:
-      - name: Download frozen release bytes
+      - name: Download tested release artifacts
         uses: actions/download-artifact@v7
         with:
           name: release-distributions
           path: release
-
-      - name: Verify frozen release bytes
-        run: cd release && sha256sum --check --strict SHA256SUMS
 
       - name: Publish s2and-rust
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: release/s2and-rust
 
-  probe-rust-release:
-    name: probe exact s2and-rust release
+  publish-s2and:
+    name: publish s2and to PyPI
     needs: [publish-rust]
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+
     steps:
       - uses: actions/checkout@v5
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
+
+      - name: Download tested release artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: release-distributions
+          path: release
 
       - name: Wait for exact Rust dependency
         run: |
@@ -429,27 +333,7 @@ jobs:
           echo "s2and-rust==$RUST_VERSION was not installable after 10 attempts" >&2
           exit 1
 
-  probe-s2and-release:
-    name: probe exact s2and release
-    needs: [publish-s2and]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: Wait for exact s2and release
-        run: |
-          S2AND_VERSION="$(tr -d '[:space:]' < VERSION)"
-          for attempt in $(seq 1 10); do
-            echo "s2and install probe attempt $attempt/10 for s2and==$S2AND_VERSION"
-            if uv run --no-project --isolated --with "s2and==$S2AND_VERSION" python -c "import s2and"; then
-              exit 0
-            fi
-            if [ "$attempt" -lt 10 ]; then
-              sleep 15
-            fi
-          done
-          echo "s2and==$S2AND_VERSION was not installable after 10 attempts" >&2
-          exit 1
+      - name: Publish s2and
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: release/s2and

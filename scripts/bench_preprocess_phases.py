@@ -292,7 +292,7 @@ def _bench_signatures_preprocess(
     def _make_ds(signatures: dict[str, Any]) -> Any:
         ds = ANDData.__new__(ANDData)
         ds.runtime_context = build_runtime_context("bench_preprocess_signatures")
-        ds.arrow_paths = None
+        ds.arrow_dataset = None
         ds.preprocess = True
         ds.signatures = signatures
         ds.papers = papers

@@ -3,7 +3,7 @@
 This script demonstrates how to use a complete native S2AND model bundle for clustering.
 
 The Rust path uses Arrow inputs and calls
-`Clusterer.predict_from_arrow_paths(...)`. JSON/ANDData input calls
+`Clusterer.predict_from_arrow(...)`. JSON/ANDData input calls
 `Clusterer.predict(...)` through Python.
 You can also point `--data-root` to `tests` and run `--dataset qian`.
 
@@ -33,7 +33,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from s2and.arrow_inputs import ValidatedArrowInputs  # noqa: E402
+from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 
 
 def _resolve_root(project_root: str, maybe_relative: str) -> str:
@@ -58,15 +58,15 @@ def _select_input_route(
     dataset_name: str,
     arrow_data_root: str,
     specter_suffix: str,
-    resolve_arrow_dataset_paths,
-) -> tuple[str, ValidatedArrowInputs | None]:
+    resolve_arrow_dataset,
+) -> tuple[str, ArrowDataset | None]:
     """Resolve tutorial input routing without loading models or ANDData."""
 
     input_format = requested_input_format
-    arrow_paths = None
+    arrow_dataset = None
     if input_format in {"auto", "arrow"}:
         try:
-            arrow_paths = resolve_arrow_dataset_paths(arrow_data_root, dataset_name, specter_suffix)
+            arrow_dataset = resolve_arrow_dataset(arrow_data_root, dataset_name, specter_suffix)
         except FileNotFoundError:
             if input_format == "arrow":
                 raise
@@ -75,9 +75,9 @@ def _select_input_route(
             input_format = "arrow"
 
     if input_format == "arrow":
-        if arrow_paths is None:
-            raise RuntimeError("Arrow input selected without resolved Arrow paths")
-    return input_format, arrow_paths
+        if arrow_dataset is None:
+            raise RuntimeError("Arrow input selected without an open Arrow dataset")
+    return input_format, arrow_dataset
 
 
 def _cluster_eval_with_predict_options(
@@ -147,7 +147,7 @@ def main() -> None:
     parser.add_argument(
         "--data-root",
         type=str,
-        default=os.path.join("s2and", "data", "s2and_mini"),
+        default=os.path.join("s2and", "data-backup", "s2and_mini"),
         help=(
             "Root directory containing per-dataset subfolders. "
             "Supports both <dataset>_*.json naming (mini) and plain *.json naming (tests fixtures)."
@@ -175,7 +175,7 @@ def main() -> None:
         "--arrow-total-ram-bytes",
         type=int,
         default=1_000_000_000_000,
-        help="Memory budget passed to Clusterer.predict_from_arrow_paths.",
+        help="Memory budget passed to Clusterer.predict_from_arrow.",
     )
     parser.add_argument(
         "--load-name-counts",
@@ -218,7 +218,7 @@ def main() -> None:
     from s2and.data import ANDData
     from s2and.featurizer import DEFAULT_FEATURE_GROUPS, DEFAULT_NAMELESS_FEATURE_GROUPS, FeaturizationInfo
     from s2and.production_model import load_production_model
-    from scripts.eval_prod_models import cluster_eval_arrow, resolve_arrow_dataset_paths
+    from scripts.eval_prod_models import cluster_eval_arrow, resolve_arrow_dataset
 
     n_jobs = args.n_jobs
 
@@ -274,27 +274,28 @@ def main() -> None:
 
     cluster_metrics_all = []
     for dataset_name in datasets:
-        input_format, arrow_paths = _select_input_route(
+        input_format, arrow_dataset = _select_input_route(
             requested_input_format=args.input_format,
             dataset_name=dataset_name,
             arrow_data_root=arrow_data_root,
             specter_suffix=args.specter_suffix,
-            resolve_arrow_dataset_paths=resolve_arrow_dataset_paths,
+            resolve_arrow_dataset=resolve_arrow_dataset,
         )
 
         if input_format == "arrow":
-            if arrow_paths is None:
-                raise RuntimeError("Arrow input selected without resolved Arrow paths")
-            cluster_metrics, _b3_metrics_per_signature = cluster_eval_arrow(
-                arrow_paths,
-                clusterer,
-                random_seed=random_seed,
-                n_jobs=n_jobs,
-                split=args.split,
-                total_ram_bytes=int(args.arrow_total_ram_bytes),
-                batching_threshold=args.batching_threshold,
-            )
-            print(f"[{dataset_name}] Arrow predict_from_arrow_paths (Rust)")
+            if arrow_dataset is None:
+                raise RuntimeError("Arrow input selected without an open Arrow dataset")
+            with arrow_dataset:
+                cluster_metrics, _b3_metrics_per_signature = cluster_eval_arrow(
+                    arrow_dataset,
+                    clusterer,
+                    random_seed=random_seed,
+                    n_jobs=n_jobs,
+                    split=args.split,
+                    total_ram_bytes=int(args.arrow_total_ram_bytes),
+                    batching_threshold=args.batching_threshold,
+                )
+            print(f"[{dataset_name}] Arrow predict_from_arrow (Rust)")
             print(cluster_metrics)
             cluster_metrics_all.append(cluster_metrics)
             continue

@@ -88,13 +88,13 @@ def stage_uses_rust(runtime_context: RuntimeContext) -> bool:
 
 
 def dataset_stage_uses_rust(runtime_context: RuntimeContext, dataset: Any) -> bool:
-    """Require Arrow paths whenever a dataset operation explicitly uses Rust."""
+    """Require an Arrow dataset whenever a dataset operation uses Rust."""
 
     if not stage_uses_rust(runtime_context):
         return False
-    if getattr(dataset, "arrow_paths", None):
+    if getattr(dataset, "arrow_dataset", None) is not None:
         return True
     raise RuntimeError(
-        f"Rust was requested for {runtime_context.operation!r}, but the dataset has no Arrow artifacts. "
+        f"Rust was requested for {runtime_context.operation!r}, but the dataset has no ArrowDataset. "
         "Build it with the Rust-training Arrow constructor or use backend='python'."
     )

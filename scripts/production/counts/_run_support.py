@@ -52,7 +52,7 @@ def load_guardrails(path: Path | None, *, fields: Collection[str]) -> dict[str, 
     """Load one strict positive-integer guardrail object."""
 
     if path is None:
-        raise ValueError("--guardrails-json is required for --run-full")
+        raise ValueError("--guardrails-json is required for a full input")
     resolved = path.resolve()
     if not resolved.is_file():
         raise FileNotFoundError(f"guardrail file does not exist or is not a file: {resolved}")

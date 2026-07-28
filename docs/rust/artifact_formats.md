@@ -17,7 +17,7 @@ It replaces the older artifact-divergence migration log.
 | SPECTER | Physical `specter2.arrow` under manifest key `specter`, Arrow fixed-size-list `float32` | Canonical production/eval embedding input. An explicit historical research-training bundle may select `specter.arrow` under the same logical key. |
 | Raw-planner batch indexes | `<arrow-stem>.<path-key>.bin` S2AND binary sidecar | Required for canonical filtered reads of signatures, papers, paper authors, and the selected embedding. Current writers emit `arrow_batch_lookup_index` with magic `S2ABI002`; regenerate from the final Arrow IPC files. |
 | Name counts | `<main_data_dir>/name_counts_index/` sorted binary index | Sole supported runtime representation when the model selects name-count features; referenced from immutable Arrow manifests. |
-| Name aliases | Packaged `s2and_name_tuples_canonical.txt` plus strict adjacent `.meta.json` | Shared runtime default validated by Python and passed to Rust as explicit pairs. Avoid per-dataset alias artifacts. |
+| Name aliases | Packaged `s2and_name_tuples_canonical.txt` | Shared runtime default validated directly by Python and passed to Rust as explicit pairs. Avoid per-dataset alias artifacts. |
 | Pairwise and linker models | Native LightGBM text plus JSON metadata | Current production model-bundle format. |
 | Eval clusters | Existing clusters JSON | Offline evaluation truth only; not part of production inference scoring. |
 
@@ -30,38 +30,24 @@ default placeholder and the large index is not Python package data.
 ```text
 <main_data_dir>/name_counts_index/
   manifest.json
-  generations/<publication-generation>/
-    .published
-    first.bin
-    last.bin
-    first_last.bin
-    last_first_initial.bin
+  first.bin
+  last.bin
+  first_last.bin
+  last_first_initial.bin
 ```
 
-`manifest.json` must have `schema_version: "name_counts_index_v2"`,
-`normalization_version: "canonical_v2"`, a complete
-`name_counts_provenance_v3` `source_provenance`, and a `files` object with
-`first`, `last`, `first_last`, and `last_first_initial` entries. Each entry
-requires a nonempty contained `path`, unsigned `byte_count`, and lowercase
-SHA-256. The declared size and digest must match the file, and the file's
-directory must contain `.published`. A `record_count` may be descriptive but
-is not the acceptance authority. Each path must equal
-`generations/<publication-generation>/<kind>.bin`, and all four files must
-share the same nonempty publication-generation directory. This directory name
-is a storage identifier and need not equal `source_provenance.generation_id`.
-
-`name_counts_provenance_v3` records the input cardinality once as
-`source_row_count`; the duplicate `selected_row_count` field from v1 is not
-accepted. It retains warehouse snapshot, query, selected-row, cardinality, and
-generation audit facts, but does not name a separately published pickle.
-Those fields currently carry producer assertions; v1.3 release acceptance
-still requires B27/B28's independently traceable snapshot/query-result and
-replacement tool/source evidence. The retired `pys2` route is not accepted.
+`manifest.json` has exactly `schema_version: "name_counts_index_v3"`,
+`normalization_version: "canonical_v2"`, and a `files` object with `first`,
+`last`, `first_last`, and `last_first_initial` entries. Each entry requires a
+nonempty contained `path`, unsigned `byte_count`, and lowercase SHA-256. The
+declared size and digest must match the file. Each path must equal `<kind>.bin`;
+subdirectories and alternate filenames are rejected.
 
 The native Rust opener is the runtime authority for manifest, file-digest, and
-record validation. Python freezes the provenance and resolved file facts
-returned by that native handle for orchestration and model binding; it does
-not run a second manifest-schema validator.
+record validation. Python retains the manifest SHA-256, normalization version,
+and resolved file facts returned by that native handle for orchestration and
+model binding; it does not run a second manifest-schema validator. Producer
+mode and output cardinalities are command metrics, not runtime manifest fields.
 
 Writers require the final `name_counts_index/` target to be absent. They build
 the complete layout above in a temporary sibling directory, fsync it, and
@@ -89,11 +75,9 @@ has been removed from the runtime direction. Rust production scoring and Python
 and attaches only the resulting scalar counts. Do not build any runtime path
 that loads `name_counts.pickle` into Python dicts/lists.
 
-The legacy direct-file layout with `first.bin`, `last.bin`, `first_last.bin`,
-and `last_first_initial.bin` directly under `name_counts_index/` is rejected.
-Regenerate it as a manifest-backed generation. Production manifests must use
-the `name_counts_index` key; runtime boundaries reject the old
-`name_counts_index_dir` alias.
+The retired `generations/<generation>/` nesting is rejected. Production
+manifests must use the `name_counts_index` key; runtime boundaries reject the
+old `name_counts_index_dir` alias.
 
 ## Arrow Runtime Writers
 

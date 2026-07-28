@@ -51,8 +51,8 @@ Arrow-backed Rust training:
 
 When training/eval runs use Arrow-backed Rust featurization, paper preprocessing can be deferred to Rust
 (see `docs/rust/runtime.md` section "Arrow contract"). The fixed constructor
-binds verified `dataset.arrow_paths` before preprocessing; no lifecycle flag
-controls this route. In that mode,
+binds an open `ArrowDataset` before preprocessing; no lifecycle flag controls
+this route. In that mode,
 `preprocess_papers_parallel` is **skipped entirely**, and Rust Arrow readers handle paper normalization,
 ngrams, and language detection via Rayon parallelism, making the Python parallelism discussion above moot
 for those runs.
@@ -64,9 +64,9 @@ Conditions for the bypass:
 - The constructor pins `preprocess=True`; callers cannot select a partial
   preprocessing lifecycle for this route.
 
-The constructor selects Rust explicitly and binds one immutable
-`dataset.arrow_paths` mapping. Classic `ANDData` construction remains on the
-Python preprocessing route.
+The constructor selects Rust explicitly and retains the caller's open dataset
+handle. Classic `ANDData` construction remains on the Python preprocessing
+route.
 
 ## Recommended run setup
 
@@ -95,7 +95,7 @@ Python preprocessing route.
    For v1.3 jobs, set this envelope in the parent before detached launch,
    require children to inherit it, and retain the values in the durable job
    log. Operational logs are not release authorities. See
-   [1_3_release_todo.md](1_3_release_todo.md#stage-0-close-implementation-and-freeze-the-protocol).
+   [release.md](release.md#stage-0-freeze-inputs-and-source).
 
 3. **Choose the env pattern that matches your deployment shape**:
 

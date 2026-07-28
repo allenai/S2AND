@@ -17,10 +17,10 @@ Synthetic and writer-gate grids construct ancestor-compatible rows for every
 numerical split, assert that at least one row reaches its target node, and place
 each reachable threshold neighbor in that split's feature. Repeated-feature
 ancestors can make a descendant boundary unreachable; those nodes receive an
-explicit path witness instead. The much larger historical boosters use an
-evenly spaced deterministic split sample plus zero-sentinel representatives.
-All grids exercise missing-value sentinels per split feature instead of relying
-on random cell placement.
+explicit path witness instead. The much larger historical boosters use a
+hard-bounded sample stratified by missing behavior and threshold-neighbor
+semantics. All grids exercise missing-value sentinels per split feature instead
+of relying on random cell placement.
 """
 
 from __future__ import annotations
@@ -52,6 +52,8 @@ SOURCE_BUNDLE_BOOSTER_RELPATHS = [
 K_ZERO_THRESHOLD = float(np.float32(1e-35))
 
 PROBA_ATOL = 1e-12
+PARITY_NUM_THREADS = 4
+SOURCE_BUNDLE_MAX_ROWS = 4096
 
 ONE_SPLIT_INTERIOR_ZERO_MODEL = """\
 tree
@@ -152,15 +154,84 @@ def _select_adversarial_splits(
     splits: list[_NumericalSplit],
     max_splits: int | None,
 ) -> list[_NumericalSplit]:
-    """Select all splits or a deterministic sample plus zero-window boundaries."""
+    """Select a hard-bounded, semantically stratified split sample."""
 
     if max_splits is None or len(splits) <= max_splits:
         return splits
-    indices = set(np.linspace(0, len(splits) - 1, num=max_splits, dtype=int))
-    indices.update(
-        index for index, split in enumerate(splits) if split.threshold in {-K_ZERO_THRESHOLD, K_ZERO_THRESHOLD}
+    if max_splits <= 0:
+        raise ValueError("max_splits must be positive")
+
+    strata: dict[tuple[Any, ...], list[int]] = {}
+    for index, split in enumerate(splits):
+        strata.setdefault(_split_stratum(split), []).append(index)
+    if len(strata) > max_splits:
+        raise ValueError(f"{max_splits=} cannot represent all {len(strata)} split strata")
+
+    per_stratum = max_splits // len(strata)
+    selected_indices = {
+        indices[int(position)]
+        for indices in strata.values()
+        for position in np.linspace(0, len(indices) - 1, num=min(len(indices), per_stratum), dtype=int)
+    }
+    remaining = max_splits - len(selected_indices)
+    unselected = [index for index in range(len(splits)) if index not in selected_indices]
+    selected_indices.update(
+        unselected[int(position)]
+        for position in np.linspace(0, len(unselected) - 1, num=min(len(unselected), remaining), dtype=int)
     )
-    return [split for index, split in enumerate(splits) if index in indices]
+    selected = [split for index, split in enumerate(splits) if index in selected_indices]
+    assert len(selected) <= max_splits
+    assert {_split_stratum(split) for split in selected} == set(strata)
+    return selected
+
+
+def _threshold_neighbors(split: _NumericalSplit) -> tuple[float, float, float]:
+    """Return the three values surrounding one serialized threshold."""
+
+    return (
+        np.nextafter(split.threshold, -np.inf),
+        split.threshold,
+        np.nextafter(split.threshold, np.inf),
+    )
+
+
+def _threshold_regime(threshold: float) -> str:
+    """Classify thresholds around LightGBM's float32 zero window."""
+
+    if threshold < -K_ZERO_THRESHOLD:
+        return "below_zero_window"
+    if threshold == -K_ZERO_THRESHOLD:
+        return "negative_boundary"
+    if threshold < 0.0:
+        return "negative_interior"
+    if threshold == 0.0:
+        return "zero"
+    if threshold < K_ZERO_THRESHOLD:
+        return "positive_interior"
+    if threshold == K_ZERO_THRESHOLD:
+        return "positive_boundary"
+    return "above_zero_window"
+
+
+def _reachable_threshold_neighbors(split: _NumericalSplit) -> tuple[bool, bool, bool]:
+    """Identify boundary values compatible with same-feature ancestors."""
+
+    constraints = [constraint for constraint in split.ancestors if constraint[0].feature == split.feature]
+    return tuple(
+        all(_split_goes_left(ancestor, value) == take_left for ancestor, take_left in constraints)
+        for value in _threshold_neighbors(split)
+    )
+
+
+def _split_stratum(split: _NumericalSplit) -> tuple[str, bool, str, tuple[bool, ...]]:
+    """Describe the split semantics that an adversarial sample must retain."""
+
+    return (
+        split.missing_type,
+        split.default_left,
+        _threshold_regime(split.threshold),
+        _reachable_threshold_neighbors(split),
+    )
 
 
 def _candidate_path_values(
@@ -248,35 +319,6 @@ def _adversarial_matrix(
     matrix[4, ::2] = np.nan
     matrix[4, 1::2] = 0.0
 
-    splits = _model_numerical_splits(booster)
-    selected_splits = _select_adversarial_splits(splits, max_split_boundaries)
-
-    threshold_rows: list[np.ndarray] = []
-    for split in selected_splits:
-        split_rows: list[np.ndarray] = []
-        for value in (
-            np.nextafter(split.threshold, -np.inf),
-            split.threshold,
-            np.nextafter(split.threshold, np.inf),
-        ):
-            row = _path_constrained_row(
-                split,
-                value,
-                num_features,
-            )
-            if row is not None:
-                split_rows.append(row)
-        if not split_rows:
-            witness = _path_constrained_row(
-                split,
-                None,
-                num_features,
-            )
-            assert witness is not None
-            split_rows.append(witness)
-        threshold_rows.extend(split_rows)
-
-    missing_rows: list[np.ndarray] = []
     missing_values = (
         np.nan,
         0.0,
@@ -294,7 +336,27 @@ def _adversarial_matrix(
         np.inf,
         -np.inf,
     )
-    for feature in sorted({split.feature for split in splits}):
+    splits = _model_numerical_splits(booster)
+    split_features = sorted({split.feature for split in splits})
+    selected_splits = _select_adversarial_splits(splits, max_split_boundaries)
+
+    threshold_rows: list[np.ndarray] = []
+    for split in selected_splits:
+        split_rows: list[np.ndarray] = []
+        reachable_neighbors = _reachable_threshold_neighbors(split)
+        for value, reachable in zip(_threshold_neighbors(split), reachable_neighbors, strict=True):
+            row = _path_constrained_row(split, value, num_features)
+            assert (row is not None) == reachable
+            if row is not None:
+                split_rows.append(row)
+        if not split_rows:
+            witness = _path_constrained_row(split, None, num_features)
+            assert witness is not None
+            split_rows.append(witness)
+        threshold_rows.extend(split_rows)
+
+    missing_rows: list[np.ndarray] = []
+    for feature in split_features:
         for value in missing_values:
             row = np.full(num_features, 0.5, dtype=np.float64)
             row[feature] = value
@@ -310,20 +372,22 @@ def _assert_parity(lgb_booster: lgb.Booster, rust_booster: Any, features: np.nda
     features = np.ascontiguousarray(features, dtype=np.float64)
     assert rust_booster.num_features() == lgb_booster.num_feature()
 
-    raw_python = np.asarray(lgb_booster.predict(features, raw_score=True), dtype=np.float64)
-    raw_rust = np.asarray(rust_booster.predict_raw(features), dtype=np.float64)
+    raw_python = np.asarray(
+        lgb_booster.predict(features, raw_score=True, num_threads=PARITY_NUM_THREADS),
+        dtype=np.float64,
+    )
+    raw_rust = np.asarray(rust_booster.predict_raw(features, num_threads=PARITY_NUM_THREADS), dtype=np.float64)
     assert raw_python.shape == raw_rust.shape
     assert raw_python.tobytes() == raw_rust.tobytes(), (
         f"raw scores not bit-exact: max abs diff {np.max(np.abs(raw_python - raw_rust))}"
     )
 
-    proba_python = np.asarray(lgb_booster.predict(features), dtype=np.float64)
-    proba_rust = np.asarray(rust_booster.predict_proba_positive(features), dtype=np.float64)
+    proba_python = np.asarray(lgb_booster.predict(features, num_threads=PARITY_NUM_THREADS), dtype=np.float64)
+    proba_rust = np.asarray(
+        rust_booster.predict_proba_positive(features, num_threads=PARITY_NUM_THREADS),
+        dtype=np.float64,
+    )
     np.testing.assert_allclose(proba_rust, proba_python, rtol=0.0, atol=PROBA_ATOL)
-
-    # Thread count must not change a single bit (parallelism is over rows only).
-    raw_threaded = np.asarray(rust_booster.predict_raw(features, num_threads=4), dtype=np.float64)
-    assert raw_rust.tobytes() == raw_threaded.tobytes()
 
 
 def _assert_float32_matches_prior_widening(rust_booster: Any, features: np.ndarray) -> None:
@@ -332,19 +396,25 @@ def _assert_float32_matches_prior_widening(rust_booster: Any, features: np.ndarr
         features_f32 = np.ascontiguousarray(features, dtype=np.float32)
     widened = np.ascontiguousarray(features_f32, dtype=np.float64)
 
-    raw_widened = np.asarray(rust_booster.predict_raw(widened), dtype=np.float64)
-    raw_f32 = np.asarray(rust_booster.predict_raw_f32(features_f32), dtype=np.float64)
-    assert raw_f32.tobytes() == raw_widened.tobytes()
-
-    proba_widened = np.asarray(rust_booster.predict_proba_positive(widened), dtype=np.float64)
-    proba_f32 = np.asarray(rust_booster.predict_proba_positive_f32(features_f32), dtype=np.float64)
-    assert proba_f32.tobytes() == proba_widened.tobytes()
-
-    proba_threaded = np.asarray(
-        rust_booster.predict_proba_positive_f32(features_f32, num_threads=4),
+    raw_widened = np.asarray(
+        rust_booster.predict_raw(widened, num_threads=PARITY_NUM_THREADS),
         dtype=np.float64,
     )
-    assert proba_f32.tobytes() == proba_threaded.tobytes()
+    raw_f32 = np.asarray(
+        rust_booster.predict_raw_f32(features_f32, num_threads=PARITY_NUM_THREADS),
+        dtype=np.float64,
+    )
+    assert raw_f32.tobytes() == raw_widened.tobytes()
+
+    proba_widened = np.asarray(
+        rust_booster.predict_proba_positive(widened, num_threads=PARITY_NUM_THREADS),
+        dtype=np.float64,
+    )
+    proba_f32 = np.asarray(
+        rust_booster.predict_proba_positive_f32(features_f32, num_threads=PARITY_NUM_THREADS),
+        dtype=np.float64,
+    )
+    assert proba_f32.tobytes() == proba_widened.tobytes()
 
 
 def _train_booster(
@@ -508,6 +578,7 @@ def test_source_bundle_booster_bit_exact_parity(relpath: str) -> None:
         rng,
         max_split_boundaries=512,
     )
+    assert features.shape[0] <= SOURCE_BUNDLE_MAX_ROWS
     _assert_parity(lgb_booster, rust_booster, features)
     _assert_float32_matches_prior_widening(rust_booster, features)
 
@@ -725,7 +796,7 @@ def test_regression_model_rejected() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_input_shape_and_layout_handling() -> None:
+def test_input_shape_layout_and_thread_identity() -> None:
     rng = np.random.default_rng(11)
     lgb_booster = _train_booster(rng, inject_nans=True, num_boost_round=10)
     rust_booster = _rust_from_booster(lgb_booster)
@@ -737,7 +808,10 @@ def test_input_shape_and_layout_handling() -> None:
     empty = np.empty((0, lgb_booster.num_feature()), dtype=np.float64)
     assert np.asarray(rust_booster.predict_raw(empty)).shape == (0,)
 
+    one_thread = np.asarray(rust_booster.predict_raw(features, num_threads=1))
+    four_threads = np.asarray(rust_booster.predict_raw(features, num_threads=PARITY_NUM_THREADS))
+    assert one_thread.tobytes() == four_threads.tobytes()
+
     fortran = np.asfortranarray(features)
-    c_raw = np.asarray(rust_booster.predict_raw(features))
-    f_raw = np.asarray(rust_booster.predict_raw(fortran))
-    assert c_raw.tobytes() == f_raw.tobytes()
+    fortran_raw = np.asarray(rust_booster.predict_raw(fortran, num_threads=PARITY_NUM_THREADS))
+    assert four_threads.tobytes() == fortran_raw.tobytes()

@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 import s2and.incremental_linking.retrieval as retrieval_module
-from s2and.arrow_inputs import validate_arrow_publication_artifacts
+from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block import (
     write_arrow_batch_lookup_index,
     write_incremental_query_signatures_arrow,
@@ -26,10 +26,7 @@ from s2and.incremental_linking.retrieval import (
 )
 from s2and.incremental_linking.runtime import _seed_setup_from_component_members
 from s2and.runtime import load_s2and_rust_extension
-from tests.helpers import (
-    tiny_name_counts_provenance,
-    write_test_arrow_artifact_manifest,
-)
+from tests.helpers import write_test_arrow_artifact_manifest
 
 s2and_rust = load_s2and_rust_extension()
 
@@ -220,7 +217,7 @@ def _write_tiny_name_counts_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         {"alice wang": 5.0, "bob jones": 6.0},
         {"wang a": 8.0, "jones b": 9.0},
     )
-    index_path, _metrics = write_name_counts_index(tmp_path, mappings, tiny_name_counts_provenance())
+    index_path, _metrics = write_name_counts_index(tmp_path, mappings)
     return index_path
 
 
@@ -325,6 +322,78 @@ def _base_arrow_paths(
     return indexed_paths
 
 
+def _open_arrow_dataset(paths: dict[str, str]) -> ArrowDataset:
+    root = Path(paths["signatures"]).parent
+    write_test_arrow_artifact_manifest(root, paths)
+    return ArrowDataset.open(root)
+
+
+def _native_query_planner(
+    paths: dict[str, str],
+    query_signatures_path: Path,
+    *,
+    top_k: int,
+    orcid_enabled: bool,
+    num_threads: int | None,
+) -> Any:
+    with _open_arrow_dataset(paths) as arrow_dataset:
+        return s2and_rust.RawBlockQueryCandidatePlanner.from_query_signatures(
+            arrow_dataset.native,
+            str(query_signatures_path),
+            paths["cluster_seeds"],
+            top_k,
+            cluster_seed_disallows_path=paths.get("cluster_seed_disallows"),
+            orcid_enabled=orcid_enabled,
+            num_threads=num_threads,
+        )
+
+
+def _native_auto_planner(
+    paths: dict[str, str],
+    *,
+    top_k: int,
+    orcid_enabled: bool,
+    num_threads: int | None,
+) -> Any:
+    with _open_arrow_dataset(paths) as arrow_dataset:
+        return s2and_rust.RawBlockQueryCandidatePlanner.from_auto_queries(
+            arrow_dataset.native,
+            paths["cluster_seeds"],
+            top_k,
+            cluster_seed_disallows_path=paths.get("cluster_seed_disallows"),
+            orcid_enabled=orcid_enabled,
+            num_threads=num_threads,
+        )
+
+
+def _native_featurizer(
+    paths: dict[str, str],
+    signature_ids: list[str],
+    name_tuples: object,
+    *,
+    preprocess: bool = True,
+    num_threads: int = 1,
+) -> Any:
+    with _open_arrow_dataset(paths) as arrow_dataset:
+        return s2and_rust.RustFeaturizer.from_arrow_dataset(
+            arrow_dataset.native,
+            signature_ids,
+            name_tuples,
+            cluster_seeds_path=paths.get("cluster_seeds"),
+            cluster_seed_disallows_path=paths.get("cluster_seed_disallows"),
+            preprocess=preprocess,
+            cluster_seed_require_value=0.0,
+            cluster_seed_disallow_value=10000.0,
+            num_threads=num_threads,
+            use_orcid_id=True,
+        )
+
+
+def _native_labeled_plan(paths: dict[str, str], *args: Any, **kwargs: Any) -> dict[str, Any]:
+    with _open_arrow_dataset(paths) as arrow_dataset:
+        return s2and_rust.raw_arrow_labeled_candidate_plan(arrow_dataset.native, *args, **kwargs)
+
+
 def _raw_candidate_plan_arrow(
     paths: dict[str, str],
     query_signature_ids: list[str],
@@ -363,13 +432,17 @@ def _raw_candidate_planner_from_query_signatures(
         query_signature_ids,
         query_views=[query_view] * len(query_signature_ids),
     )
-    return s2and_rust.RawBlockQueryCandidatePlanner.from_query_signatures(
-        {**paths, "query_signatures": str(query_signatures_path)},
-        top_k=top_k,
-        orcid_enabled=orcid_enabled,
-        num_threads=num_threads,
-        max_exemplars=max_exemplars,
-    )
+    with _open_arrow_dataset(paths) as arrow_dataset:
+        return s2and_rust.RawBlockQueryCandidatePlanner.from_query_signatures(
+            arrow_dataset.native,
+            str(query_signatures_path),
+            paths["cluster_seeds"],
+            top_k,
+            cluster_seed_disallows_path=paths.get("cluster_seed_disallows"),
+            orcid_enabled=orcid_enabled,
+            num_threads=num_threads,
+            max_exemplars=max_exemplars,
+        )
 
 
 def _raw_plan_for_base_paths(paths: dict[str, str]) -> dict[str, Any]:
@@ -435,8 +508,6 @@ def test_raw_arrow_candidate_planner_ingests_query_signature_request_table(tmp_p
         query_views=["full"],
         query_authors=["Alice Wang"],
     )
-    request_paths = {**paths, "query_signatures": str(query_signatures_path)}
-
     one_shot = _raw_candidate_plan_arrow(
         paths,
         ["q1"],
@@ -445,8 +516,9 @@ def test_raw_arrow_candidate_planner_ingests_query_signature_request_table(tmp_p
         orcid_enabled=False,
         num_threads=1,
     )
-    planner = s2and_rust.RawBlockQueryCandidatePlanner.from_query_signatures(
-        request_paths,
+    planner = _native_query_planner(
+        paths,
+        query_signatures_path,
         top_k=2,
         orcid_enabled=False,
         num_threads=1,
@@ -463,10 +535,9 @@ def test_raw_arrow_candidate_planner_can_plan_bounded_auto_queries(tmp_path: Pat
     paths = _base_arrow_paths(tmp_path)
     query_signatures_path = tmp_path / "empty_incremental_query_signatures.arrow"
     write_incremental_query_signatures_arrow(query_signatures_path, [])
-    request_paths = {**paths, "query_signatures": str(query_signatures_path)}
-
-    strict_planner = s2and_rust.RawBlockQueryCandidatePlanner.from_query_signatures(
-        request_paths,
+    strict_planner = _native_query_planner(
+        paths,
+        query_signatures_path,
         top_k=2,
         orcid_enabled=False,
         num_threads=1,
@@ -474,7 +545,7 @@ def test_raw_arrow_candidate_planner_can_plan_bounded_auto_queries(tmp_path: Pat
     with pytest.raises(ValueError, match="outside the planner query set"):
         strict_planner.plan(["q1"])
 
-    reusable_planner = s2and_rust.RawBlockQueryCandidatePlanner.from_auto_queries(
+    reusable_planner = _native_auto_planner(
         paths,
         top_k=2,
         orcid_enabled=False,
@@ -498,7 +569,7 @@ def test_raw_arrow_candidate_planner_can_plan_bounded_auto_queries(tmp_path: Pat
 
 def test_reusable_raw_arrow_candidate_planner_owns_lookup_index_snapshots(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
-    planner = s2and_rust.RawBlockQueryCandidatePlanner.from_auto_queries(
+    planner = _native_auto_planner(
         paths,
         top_k=2,
         orcid_enabled=False,
@@ -600,8 +671,9 @@ def test_raw_arrow_candidate_planner_rejects_duplicate_query_signature_request_r
     )
 
     with pytest.raises(ValueError, match="duplicate signature_id"):
-        s2and_rust.RawBlockQueryCandidatePlanner.from_query_signatures(
-            {**paths, "query_signatures": str(query_signatures_path)},
+        _native_query_planner(
+            paths,
+            query_signatures_path,
             top_k=2,
             orcid_enabled=False,
             num_threads=1,
@@ -664,7 +736,7 @@ def test_raw_arrow_candidate_planner_rejects_multi_query_seed_overlap(tmp_path: 
 def test_raw_arrow_candidate_planner_requires_indexes(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path, with_indexes=False)
 
-    with pytest.raises(ValueError, match="batch lookup index"):
+    with pytest.raises(ValueError, match="missing required Arrow artifacts"):
         _raw_candidate_planner_from_query_signatures(
             paths,
             ["q1"],
@@ -705,7 +777,7 @@ def test_raw_arrow_candidate_plan_filters_cluster_seed_disallows(tmp_path: Path)
 
 def test_reusable_raw_arrow_planner_applies_dynamic_disallows_without_retaining_them(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
-    planner = s2and_rust.RawBlockQueryCandidatePlanner.from_auto_queries(
+    planner = _native_auto_planner(
         paths,
         top_k=1,
         orcid_enabled=False,
@@ -776,7 +848,7 @@ def test_raw_arrow_candidate_plan_keeps_zero_specter_vectors(tmp_path: Path) -> 
     assert np.isfinite(np.asarray(raw_plan["specter_centroid_similarity"], dtype=np.float32)).all()
 
 
-def test_rust_featurizer_from_arrow_paths_accepts_empty_specter_table(tmp_path: Path) -> None:
+def test_rust_featurizer_from_arrow_dataset_accepts_empty_specter_table(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path, with_indexes=False)
     paths["specter"] = _write_ipc(
         tmp_path / "specter.arrow",
@@ -789,15 +861,7 @@ def test_rust_featurizer_from_arrow_paths_accepts_empty_specter_table(tmp_path: 
     )
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
-    featurizer = s2and_rust.RustFeaturizer.from_arrow_paths(
-        paths,
-        ["q1", "s1"],
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-    )
+    featurizer = _native_featurizer(paths, ["q1", "s1"], set())
     signature_index = {str(signature_id): index for index, signature_id in enumerate(featurizer.signature_ids())}
     matrix = np.asarray(
         featurizer.featurize_pairs_matrix_indexed(
@@ -828,15 +892,7 @@ def test_rust_featurizer_requires_python_loaded_name_tuple_pairs(
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(_base_arrow_paths(tmp_path), tmp_path)
 
     with pytest.raises((TypeError, ValueError), match=message):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            paths,
-            ["q1", "s1"],
-            name_tuples,
-            True,
-            0.0,
-            10000.0,
-            1,
-        )
+        _native_featurizer(paths, ["q1", "s1"], name_tuples)
 
 
 def test_raw_arrow_candidate_plan_rejects_hidden_query_view(tmp_path: Path) -> None:
@@ -1017,14 +1073,7 @@ def test_raw_arrow_candidate_plan_rejects_out_of_range_batch_index(tmp_path: Pat
     )
     write_test_arrow_artifact_manifest(tmp_path, paths)
 
-    with pytest.raises(ValueError, match="batch index 999 is out of bounds"):
-        validate_arrow_publication_artifacts(
-            paths,
-            require_specter=False,
-            require_name_counts_index=False,
-        )
-
-    with pytest.raises(ValueError, match="Cannot set batch to index 999"):
+    with pytest.raises(ValueError, match="references record batch 999"):
         _raw_candidate_planner_from_query_signatures(
             paths,
             ["q1"],
@@ -1035,33 +1084,13 @@ def test_raw_arrow_candidate_plan_rejects_out_of_range_batch_index(tmp_path: Pat
         )
 
 
-def test_rust_featurizer_from_arrow_paths_empty_indexed_keep_set_skips_stale_validation(tmp_path: Path) -> None:
-    paths = _base_arrow_paths(tmp_path)
-    indexed_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
-    for key in ("signatures", "papers", "paper_authors"):
-        with Path(paths[key]).open("ab") as outfile:
-            outfile.write(b"\0")
-
-    featurizer = s2and_rust.RustFeaturizer.from_arrow_paths(
-        indexed_paths,
-        [],
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-    )
-
-    assert tuple(featurizer.signature_ids()) == ()
-
-
 def test_raw_arrow_candidate_plan_rejects_stale_batch_index(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
     indexed_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
     with Path(paths["signatures"]).open("ab") as outfile:
         outfile.write(b"\0")
 
-    with pytest.raises(ValueError, match="stale"):
+    with pytest.raises(ValueError, match="Not an Arrow file"):
         _raw_candidate_plan_arrow(
             indexed_paths,
             ["q1"],
@@ -1171,35 +1200,16 @@ def test_arrow_batch_lookup_index_rejects_same_size_same_mtime_sampled_source_ch
         )
 
 
-def test_rust_featurizer_from_arrow_paths_deduplicates_unsorted_requested_ids(tmp_path: Path) -> None:
+def test_rust_featurizer_from_arrow_dataset_deduplicates_unsorted_requested_ids(tmp_path: Path) -> None:
     unindexed_paths = _base_arrow_paths(tmp_path, with_indexes=False)
 
-    with pytest.raises(ValueError, match="filtered full scan"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            unindexed_paths,
-            ["q1", "s1"],
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-        )
-
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(unindexed_paths, tmp_path)
-    featurizer = s2and_rust.RustFeaturizer.from_arrow_paths(
-        paths,
-        ["q1", "s1", "q1", "s2", "s1"],
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-    )
+    featurizer = _native_featurizer(paths, ["q1", "s1", "q1", "s2", "s1"], set())
 
     assert tuple(featurizer.signature_ids()) == ("q1", "s1", "s2")
 
 
-def test_rust_featurizer_from_arrow_paths_rejects_null_author_position(tmp_path: Path) -> None:
+def test_rust_featurizer_from_arrow_dataset_rejects_null_author_position(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
     with pa.memory_map(paths["signatures"], "r") as source:
         signatures = pa.ipc.open_file(source).read_all()
@@ -1213,18 +1223,10 @@ def test_rust_featurizer_from_arrow_paths_rejects_null_author_position(tmp_path:
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
     with pytest.raises(ValueError, match="author_position is null"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            paths,
-            ["q1", "s1"],
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-        )
+        _native_featurizer(paths, ["q1", "s1"], set())
 
 
-def test_rust_featurizer_from_arrow_paths_reuses_cached_language(tmp_path: Path) -> None:
+def test_rust_featurizer_from_arrow_dataset_reuses_cached_language(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
     with pa.memory_map(paths["papers"], "r") as source:
         papers = pa.ipc.open_file(source).read_all()
@@ -1234,15 +1236,7 @@ def test_rust_featurizer_from_arrow_paths_reuses_cached_language(tmp_path: Path)
     paths["papers"] = _write_ipc(tmp_path / "papers_with_language.arrow", papers)
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
-    featurizer = s2and_rust.RustFeaturizer.from_arrow_paths(
-        paths,
-        ["q1", "s1"],
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-    )
+    featurizer = _native_featurizer(paths, ["q1", "s1"], set())
 
     assert tuple(featurizer.signature_ids()) == ("q1", "s1")
     features = _indexed_pair_matrix(featurizer, [("q1", "s1")])
@@ -1255,35 +1249,14 @@ def test_rust_featurizer_from_arrow_paths_reuses_cached_language(tmp_path: Path)
     )
 
 
-def test_rust_featurizer_from_arrow_paths_uses_batch_indexes(tmp_path: Path) -> None:
+def test_rust_featurizer_from_arrow_dataset_uses_batch_indexes(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path, with_indexes=False)
     indexed_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
-    indexed = s2and_rust.RustFeaturizer.from_arrow_paths(
-        indexed_paths,
-        ["q1", "s1"],
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-    )
+    indexed = _native_featurizer(indexed_paths, ["q1", "s1"], set())
 
     assert tuple(indexed.signature_ids()) == ("q1", "s1")
     assert _indexed_pair_matrix(indexed, [("q1", "s1")]).shape == (1, 33)
-
-    with Path(paths["signatures"]).open("ab") as outfile:
-        outfile.write(b"\0")
-    with pytest.raises(ValueError, match="stale"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            indexed_paths,
-            ["q1", "s1"],
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-        )
 
 
 def test_raw_arrow_candidate_plan_orcid_override_returns_all_matches(tmp_path: Path) -> None:
@@ -1918,7 +1891,7 @@ def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_see
     paths = _base_arrow_paths(tmp_path)
     paths.pop("cluster_seeds")
 
-    raw_plan = s2and_rust.raw_arrow_labeled_candidate_plan(
+    raw_plan = _native_labeled_plan(
         paths,
         ["q1", "q1"],
         ["full", "full"],
@@ -1952,7 +1925,7 @@ def test_raw_arrow_labeled_candidate_plan_scores_use_all_components_for_global_d
     paths.pop("cluster_seeds")
     component_members = {"c_match": ["s1"], "c_other": ["s2"]}
 
-    one_row = s2and_rust.raw_arrow_labeled_candidate_plan(
+    one_row = _native_labeled_plan(
         paths,
         ["q1"],
         ["full"],
@@ -1963,7 +1936,7 @@ def test_raw_arrow_labeled_candidate_plan_scores_use_all_components_for_global_d
         orcid_enabled=False,
         num_threads=1,
     )
-    two_rows = s2and_rust.raw_arrow_labeled_candidate_plan(
+    two_rows = _native_labeled_plan(
         paths,
         ["q1", "q1"],
         ["full", "full"],
@@ -1985,7 +1958,7 @@ def test_raw_arrow_candidate_plans_initial_view_keep_full_first_token(tmp_path: 
     labeled_paths = dict(paths)
     labeled_paths.pop("cluster_seeds")
 
-    raw_plan = s2and_rust.raw_arrow_labeled_candidate_plan(
+    raw_plan = _native_labeled_plan(
         labeled_paths,
         ["q1"],
         ["initial_only"],
@@ -2035,7 +2008,7 @@ def test_raw_arrow_labeled_candidate_plan_applies_block_local_members(tmp_path: 
     paths["signatures"] = _write_ipc(tmp_path / "signatures_with_blocks.arrow", signatures)
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
-    raw_plan = s2and_rust.raw_arrow_labeled_candidate_plan(
+    raw_plan = _native_labeled_plan(
         paths,
         ["q1"],
         ["full"],
@@ -2072,7 +2045,7 @@ def test_raw_arrow_labeled_candidate_plan_drops_component_with_only_foreign_memb
     paths["signatures"] = _write_ipc(tmp_path / "signatures_with_foreign_component.arrow", signatures)
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
-    raw_plan = s2and_rust.raw_arrow_labeled_candidate_plan(
+    raw_plan = _native_labeled_plan(
         paths,
         ["q1"],
         ["full"],
@@ -2137,7 +2110,7 @@ def test_raw_arrow_candidate_plan_emits_native_row_signals_from_name_counts_inde
     )
 
 
-def test_rust_featurizer_from_arrow_paths_applies_cluster_seed_disallows(tmp_path: Path) -> None:
+def test_rust_featurizer_from_arrow_dataset_applies_cluster_seed_disallows(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
     raw_plan = _raw_candidate_plan_arrow(
         paths,
@@ -2158,15 +2131,7 @@ def test_rust_featurizer_from_arrow_paths_applies_cluster_seed_disallows(tmp_pat
     )
     signature_order = RawArrowPlanBundle.from_native_mapping(raw_plan).signature_order
 
-    direct = s2and_rust.RustFeaturizer.from_arrow_paths(
-        paths,
-        list(signature_order.signature_ids),
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-    )
+    direct = _native_featurizer(paths, list(signature_order.signature_ids), set())
     pairs = [("q1", "s1"), ("q1", "s2")]
 
     assert tuple(direct.signature_ids()) == signature_order.signature_ids
@@ -2183,120 +2148,14 @@ def test_rust_featurizer_missing_name_counts_presence_is_consistent(
     paths = _base_arrow_paths(tmp_path)
     signature_ids = ["q1", "s1", "s2"]
 
-    from_arrow = s2and_rust.RustFeaturizer.from_arrow_paths(
-        paths,
-        signature_ids,
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-    )
+    from_arrow = _native_featurizer(paths, signature_ids, set())
 
     assert from_arrow.signature_name_counts_present() == [("q1", False), ("s1", False), ("s2", False)]
 
     paths_with_index = dict(paths)
     paths_with_index["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact", monkeypatch)
-    with_name_counts = s2and_rust.RustFeaturizer.from_arrow_paths(
-        paths_with_index,
-        signature_ids,
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-    )
+    with_name_counts = _native_featurizer(paths_with_index, signature_ids, set())
     assert with_name_counts.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
-
-
-def test_rust_featurizer_reuses_only_matching_planner_name_counts_handle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    paths = _base_arrow_paths(tmp_path)
-    paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact", monkeypatch)
-    planner = s2and_rust.RawBlockQueryCandidatePlanner.from_auto_queries(
-        paths,
-        top_k=2,
-        orcid_enabled=False,
-        num_threads=1,
-    )
-    name_counts_index = planner.name_counts_index()
-    assert name_counts_index is not None
-    assert name_counts_index.normalization_version == "canonical_v2"
-
-    featurizer = s2and_rust.RustFeaturizer.from_arrow_paths(
-        paths,
-        ["q1", "s1", "s2"],
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-        name_counts_index,
-    )
-    assert featurizer.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
-
-    paths_without_index = dict(paths)
-    paths_without_index.pop("name_counts_index")
-    with pytest.raises(ValueError, match=r"handle requires paths\['name_counts_index'\]"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            paths_without_index,
-            ["q1", "s1", "s2"],
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-            name_counts_index,
-        )
-
-    manifest_path = Path(paths["name_counts_index"]) / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["schema_version"] = "invalid-after-planner-build"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    reused_snapshot = s2and_rust.RustFeaturizer.from_arrow_paths(
-        paths,
-        ["q1", "s1", "s2"],
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-        name_counts_index,
-    )
-    assert reused_snapshot.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
-    with pytest.raises(ValueError, match="schema_version"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            paths,
-            ["q1", "s1", "s2"],
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-        )
-
-
-def test_rust_featurizer_from_arrow_paths_rejects_legacy_name_count_paths(tmp_path: Path) -> None:
-    for legacy_key in ("name_counts", "name_counts_index_dir"):
-        arrow_paths = _base_arrow_paths(tmp_path / legacy_key)
-        arrow_paths[legacy_key] = _write_ipc(
-            tmp_path / legacy_key / "legacy.arrow",
-            pa.table({"count": [1.0]}),
-        )
-
-        with pytest.raises(ValueError, match="use name_counts_index"):
-            s2and_rust.RustFeaturizer.from_arrow_paths(
-                arrow_paths,
-                ["q1", "s1", "s2"],
-                set(),
-                True,
-                0.0,
-                10000.0,
-                1,
-            )
 
 
 def test_rust_featurizer_rejects_unsorted_name_counts_index(
@@ -2308,15 +2167,7 @@ def test_rust_featurizer_rejects_unsorted_name_counts_index(
     _swap_first_two_name_count_records(paths["name_counts_index"], "first")
 
     with pytest.raises(ValueError, match="not sorted"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            paths,
-            ["q1", "s1", "s2"],
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-        )
+        _native_featurizer(paths, ["q1", "s1", "s2"], set())
 
 
 def test_rust_featurizer_rejects_wrong_name_counts_index_schema_version(
@@ -2331,15 +2182,7 @@ def test_rust_featurizer_rejects_wrong_name_counts_index_schema_version(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="schema_version"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            paths,
-            ["q1", "s1", "s2"],
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-        )
+        _native_featurizer(paths, ["q1", "s1", "s2"], set())
 
 
 def test_rust_featurizer_rejects_out_of_bounds_name_counts_index_record(
@@ -2351,12 +2194,4 @@ def test_rust_featurizer_rejects_out_of_bounds_name_counts_index_record(
     _corrupt_first_name_count_record_name_range(paths["name_counts_index"], "first")
 
     with pytest.raises(ValueError, match="outside blob length"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            paths,
-            ["q1", "s1", "s2"],
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-        )
+        _native_featurizer(paths, ["q1", "s1", "s2"], set())

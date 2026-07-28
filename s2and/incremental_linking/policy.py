@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from s2and.arrow_inputs import ValidatedArrowInputs
+from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block import normalize_cluster_seed_disallow_pairs
 from s2and.name_count_binding import NameCountsBinding
 
@@ -46,7 +46,7 @@ def clusterer_uses_embedding_features(clusterer: Any) -> bool:
 
 def require_arrow_name_counts_index_for_clusterer(
     clusterer: Any,
-    arrow_paths: ValidatedArrowInputs,
+    arrow_dataset: ArrowDataset,
     *,
     context: str,
 ) -> None:
@@ -54,26 +54,26 @@ def require_arrow_name_counts_index_for_clusterer(
 
     if not clusterer_uses_name_count_features(clusterer):
         return
-    if arrow_paths.get("name_counts_index") is None:
+    if not arrow_dataset.has("name_counts_index"):
         raise ValueError(
             f"{context} with selected name_counts features requires name_counts_index. "
-            "Pass the S2AND name-count index directory in arrow_paths['name_counts_index']."
+            "Open an Arrow release containing the S2AND name-count index."
         )
     expected = NameCountsBinding.from_feature_contract(
         getattr(clusterer, "feature_contract", None),
         context=f"{context} model feature_contract",
     )
-    manifest = arrow_paths.name_counts_manifest
+    manifest = arrow_dataset.name_counts_manifest
     if manifest is None:  # pragma: no cover - validated-input invariant
         raise RuntimeError("validated Arrow inputs lost the retained name-count manifest")
-    observed = NameCountsBinding.from_provenance(
-        manifest.source_provenance,
-        context=f"{context} Arrow name_counts_index source_provenance",
+    observed = NameCountsBinding.from_manifest_sha256(
+        manifest.manifest_sha256,
+        context=f"{context} Arrow name_counts_index manifest",
     )
     expected.require_matches(
         observed,
         context=context,
-        source="arrow_paths['name_counts_index']",
+        source="ArrowDataset.name_counts_manifest",
     )
 
 
@@ -91,14 +91,14 @@ def require_dataset_name_counts_binding_for_clusterer(
         getattr(clusterer, "feature_contract", None),
         context=f"{context} model feature_contract",
     )
-    observed = NameCountsBinding.from_provenance(
-        getattr(dataset, "name_counts_provenance", None),
-        context=f"{context} ANDData.name_counts_provenance",
+    observed = NameCountsBinding.from_manifest_sha256(
+        getattr(dataset, "name_counts_manifest_sha256", None),
+        context=f"{context} ANDData.name_counts_manifest_sha256",
     )
     expected.require_matches(
         observed,
         context=context,
-        source="ANDData.name_counts_provenance",
+        source="ANDData.name_counts_manifest_sha256",
     )
 
 

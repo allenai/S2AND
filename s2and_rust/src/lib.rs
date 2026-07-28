@@ -9,6 +9,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 mod arrow_batch_lookup;
+mod arrow_dataset;
 mod artifact_hash;
 mod constraints;
 mod features;
@@ -28,7 +29,8 @@ mod rust_featurizer;
 mod subblocking;
 mod text_compat;
 
-use arrow_batch_lookup::{ArrowBatchLookupIndex, IndexedArrowReadStats};
+use arrow_batch_lookup::IndexedArrowReadStats;
+use arrow_dataset::{ArrowDataset, ArrowDatasetResources};
 use constraints::{
     first_names_name_compatible, lasts_equivalent_for_constraint, same_prefix_tokens,
 };
@@ -38,17 +40,10 @@ use language_detection::detect_language_compat;
 use name_counts::{NameCountsData, NameCountsIndex, RawNameCountKind, RawNameCountMaps};
 use orcid::{normalize_orcid_compact_owned, normalize_orcid_owned};
 use pair_indexing::upper_triangle_pairs_for_range;
-use raw_arrow::paths::{
-    extract_name_counts_index_path, extract_path_mapping_string,
-    raw_arrow_feature_paths_from_py_dict, required_path_from_py_dict, RawArrowPlannerPaths,
-};
 use raw_arrow::readers::{
     read_raw_arrow_cluster_seed_disallows, read_raw_arrow_cluster_seeds,
-    read_raw_arrow_paper_authors_with_optional_index, read_raw_arrow_papers_with_optional_index,
-    read_raw_arrow_query_signatures, read_raw_arrow_signatures_with_optional_index,
-    read_raw_arrow_specter_with_optional_index, read_raw_name_counts_index,
-    RawArrowAuthorSignalData, RawArrowFeature, RawArrowPaper, RawArrowQuerySignatureRequest,
-    RawArrowSignature, RawArrowSummarySignalData,
+    read_raw_arrow_query_signatures, RawArrowAuthorSignalData, RawArrowFeature, RawArrowPaper,
+    RawArrowQuerySignatureRequest, RawArrowSignature, RawArrowSummarySignalData,
 };
 use raw_arrow_features::{
     build_raw_arrow_author_signal_data, build_raw_arrow_feature, build_raw_arrow_summary,
@@ -863,6 +858,7 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_class::<RustFeaturizer>()?;
+    m.add_class::<ArrowDataset>()?;
     m.add_class::<NameCountsIndex>()?;
     m.add_class::<RustHybridCentroidRetriever>()?;
     m.add_class::<RawBlockQueryCandidatePlanner>()?;

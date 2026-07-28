@@ -11,12 +11,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from s2and.incremental_linking.feature_block import write_name_counts_index
+from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking_training.classic import OfficialBundle
 from scripts.production.model import train_linker_and_finalize as promoted_train
 from scripts.production.model.train_linker_and_finalize import (
-    _arrow_paths_for_dataset,
     _arrow_row_seed_bypass_mask,
     _clean_arrow_rust_structural_rows,
     _load_target,
@@ -24,32 +23,7 @@ from scripts.production.model.train_linker_and_finalize import (
     _row_label_is_positive,
     _write_arrow_rust_partial_frame,
 )
-from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
-
-
-def _validate_resolved_arrow_path_keys(
-    paths: dict[str, str],
-    *,
-    require_specter: bool,
-    require_name_counts_index: bool,
-    **_kwargs: Any,
-) -> dict[str, str]:
-    required = {
-        "signatures",
-        "papers",
-        "paper_authors",
-        "signatures_batch_index",
-        "papers_batch_index",
-        "paper_authors_batch_index",
-    }
-    if require_specter:
-        required.update(("specter", "specter_batch_index"))
-    if require_name_counts_index:
-        required.add("name_counts_index")
-    missing = sorted(required.difference(paths))
-    if missing:
-        raise ValueError(f"missing Arrow path keys: {', '.join(missing)}")
-    return paths
+from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
 def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path) -> None:
@@ -288,11 +262,6 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
     }
     monkeypatch.setattr(
         promoted_train,
-        "_arrow_paths_for_dataset",
-        lambda *_args, **_kwargs: cast(Any, SimpleNamespace()),
-    )
-    monkeypatch.setattr(
-        promoted_train,
         "_clean_arrow_rust_structural_rows",
         lambda **kwargs: (
             kwargs["rows"],
@@ -315,19 +284,23 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
 
     monkeypatch.setattr(promoted_train, "_materialize_arrow_rust_dataset_rows", fake_materialize)
 
-    bundle, summaries = promoted_train._materialize_arrow_rust_feature_bundle(  # noqa: SLF001
-        source_bundle=source_bundle,
-        output_bundle_root=output_root,
-        target=target,
-        name_tuples=frozenset(),
-        clusterer=SimpleNamespace(),
-        n_jobs=1,
-        total_ram_bytes=1,
-        table_keys=("train_path",),
-        max_exemplars=4,
-        pairwise_model_nan_value=np.nan,
-        pairwise_aggregate_nan_value=0.0,
-    )
+    dataset_root = source_root / "datasets" / "toy"
+    write_minimal_arrow_prediction_bundle(dataset_root)
+    with ArrowDataset.open(dataset_root) as arrow_dataset:
+        bundle, summaries = promoted_train._materialize_arrow_rust_feature_bundle(  # noqa: SLF001
+            source_bundle=source_bundle,
+            output_bundle_root=output_root,
+            target=target,
+            name_tuples=frozenset(),
+            clusterer=SimpleNamespace(),
+            n_jobs=1,
+            total_ram_bytes=1,
+            table_keys=("train_path",),
+            max_exemplars=4,
+            pairwise_model_nan_value=np.nan,
+            pairwise_aggregate_nan_value=0.0,
+            arrow_datasets={"toy": arrow_dataset},
+        )
 
     output_path = output_root / "features_corrected" / "train.parquet"
     output = pd.read_parquet(output_path)
@@ -423,13 +396,16 @@ def test_arrow_rust_structural_cleaning_drops_all_foreign_component(
         lambda *_args, **_kwargs: {"q1": "block-a", "f1": "block-b", "f2": "block-b"},
     )
 
-    cleaned, summary = _clean_arrow_rust_structural_rows(
-        source_bundle=bundle,
-        table_key="train_path",
-        rows=rows,
-        component_membership_cache={},
-        name_counts_index_root=None,
-    )
+    dataset_root = tmp_path / "datasets" / "toy"
+    write_minimal_arrow_prediction_bundle(dataset_root)
+    with ArrowDataset.open(dataset_root) as arrow_dataset:
+        cleaned, summary = _clean_arrow_rust_structural_rows(
+            source_bundle=bundle,
+            table_key="train_path",
+            rows=rows,
+            component_membership_cache={},
+            arrow_datasets={"toy": arrow_dataset},
+        )
 
     assert cleaned.empty
     assert summary["rows_removed"] == 1
@@ -505,13 +481,16 @@ def test_arrow_rust_structural_cleaning_drops_self_only_candidates(
         },
     )
 
-    cleaned, summary = _clean_arrow_rust_structural_rows(
-        source_bundle=bundle,
-        table_key="train_path",
-        rows=rows,
-        component_membership_cache={},
-        name_counts_index_root=None,
-    )
+    dataset_root = tmp_path / "datasets" / "toy"
+    write_minimal_arrow_prediction_bundle(dataset_root)
+    with ArrowDataset.open(dataset_root) as arrow_dataset:
+        cleaned, summary = _clean_arrow_rust_structural_rows(
+            source_bundle=bundle,
+            table_key="train_path",
+            rows=rows,
+            component_membership_cache={},
+            arrow_datasets={"toy": arrow_dataset},
+        )
 
     assert cleaned["candidate_component_key"].tolist() == ["toy block::with_neighbor", "toy block::other"]
     assert summary["rows_removed"] == 2
@@ -614,163 +593,3 @@ def test_arrow_rust_pair_label_resolution_applies_seed_bypass_and_disallow_ignor
     assert summary["constraint_seed_bypass_pair_count"] == 2
     assert summary["constraint_seed_bypass_batch_calls"] == 1
     assert summary["constraint_disallow_ignored_pair_count"] == 1
-
-
-def test_arrow_paths_use_manifest_name_counts_index_unless_explicit_override(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        promoted_train,
-        "validate_arrow_prediction_artifacts",
-        _validate_resolved_arrow_path_keys,
-    )
-    bundle_root = tmp_path / "bundle"
-    dataset_dir = bundle_root / "datasets" / "toy"
-    dataset_dir.mkdir(parents=True)
-    for filename in (
-        "signatures.arrow",
-        "papers.arrow",
-        "paper_authors.arrow",
-        "specter.arrow",
-        "signatures.signatures_batch_index.bin",
-        "papers.papers_batch_index.bin",
-        "paper_authors.paper_authors_batch_index.bin",
-        "specter.specter_batch_index.bin",
-    ):
-        (dataset_dir / filename).write_bytes(b"placeholder")
-    manifest_index, _metrics = write_name_counts_index(
-        bundle_root, tiny_name_counts_tuple(), tiny_name_counts_provenance()
-    )
-    manifest_path = dataset_dir / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "paths": {
-                    "signatures": "signatures.arrow",
-                    "papers": "papers.arrow",
-                    "paper_authors": "paper_authors.arrow",
-                    "specter": "specter.arrow",
-                    "signatures_batch_index": "signatures.signatures_batch_index.bin",
-                    "papers_batch_index": "papers.papers_batch_index.bin",
-                    "paper_authors_batch_index": "paper_authors.paper_authors_batch_index.bin",
-                    "specter_batch_index": "specter.specter_batch_index.bin",
-                    "name_counts_index": "name_counts_index",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    bundle = OfficialBundle(
-        root=bundle_root.resolve(),
-        bundle_name="toy_bundle",
-        assets={},
-        models={},
-        expected_metrics={},
-    )
-
-    paths = _arrow_paths_for_dataset(bundle, "toy")
-    assert paths["name_counts_index"] == str(Path(manifest_index).resolve())
-
-    override_index, _metrics = write_name_counts_index(
-        tmp_path / "override", tiny_name_counts_tuple(), tiny_name_counts_provenance()
-    )
-    paths = _arrow_paths_for_dataset(bundle, "toy", name_counts_index_root=Path(override_index))
-    assert paths["name_counts_index"] == str(Path(override_index).resolve())
-
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "paths": {
-                    "signatures": "signatures.arrow",
-                    "papers": "papers.arrow",
-                    "paper_authors": "paper_authors.arrow",
-                    "specter": "specter.arrow",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="signatures_batch_index"):
-        _arrow_paths_for_dataset(bundle, "toy", name_counts_index_root=Path(override_index))
-
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "paths": {
-                    "signatures": "signatures.arrow",
-                    "papers": "papers.arrow",
-                    "paper_authors": "paper_authors.arrow",
-                    "specter": "specter.arrow",
-                    "signatures_batch_index": "signatures.signatures_batch_index.bin",
-                    "papers_batch_index": "papers.papers_batch_index.bin",
-                    "paper_authors_batch_index": "paper_authors.paper_authors_batch_index.bin",
-                    "specter_batch_index": "specter.specter_batch_index.bin",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="name_counts_index"):
-        _arrow_paths_for_dataset(bundle, "toy")
-    paths = _arrow_paths_for_dataset(bundle, "toy", name_counts_index_root=Path(override_index))
-    assert paths["name_counts_index"] == str(Path(override_index).resolve())
-
-
-def test_arrow_paths_alias_specter2_manifest_keys(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        promoted_train,
-        "validate_arrow_prediction_artifacts",
-        _validate_resolved_arrow_path_keys,
-    )
-    bundle_root = tmp_path / "bundle"
-    dataset_dir = bundle_root / "datasets" / "toy"
-    dataset_dir.mkdir(parents=True)
-    for filename in (
-        "signatures.arrow",
-        "papers.arrow",
-        "paper_authors.arrow",
-        "specter2.arrow",
-        "signatures.signatures_batch_index.bin",
-        "papers.papers_batch_index.bin",
-        "paper_authors.paper_authors_batch_index.bin",
-        "specter2.specter_batch_index.bin",
-    ):
-        (dataset_dir / filename).write_bytes(b"placeholder")
-    manifest_index, _metrics = write_name_counts_index(
-        bundle_root, tiny_name_counts_tuple(), tiny_name_counts_provenance()
-    )
-    (dataset_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "paths": {
-                    "signatures": "signatures.arrow",
-                    "papers": "papers.arrow",
-                    "paper_authors": "paper_authors.arrow",
-                    "specter": "specter2.arrow",
-                    "signatures_batch_index": "signatures.signatures_batch_index.bin",
-                    "papers_batch_index": "papers.papers_batch_index.bin",
-                    "paper_authors_batch_index": "paper_authors.paper_authors_batch_index.bin",
-                    "specter_batch_index": "specter2.specter_batch_index.bin",
-                    "name_counts_index": "name_counts_index",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    bundle = OfficialBundle(
-        root=bundle_root.resolve(),
-        bundle_name="toy_bundle",
-        assets={},
-        models={},
-        expected_metrics={},
-    )
-
-    paths = _arrow_paths_for_dataset(bundle, "toy")
-
-    assert paths["specter"] == str((dataset_dir / "specter2.arrow").resolve())
-    assert paths["specter_batch_index"] == str((dataset_dir / "specter2.specter_batch_index.bin").resolve())
-    assert paths["name_counts_index"] == str(Path(manifest_index).resolve())

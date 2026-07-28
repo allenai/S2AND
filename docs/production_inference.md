@@ -14,9 +14,8 @@ be used for inference with this branch. Use the previous compatible S2AND
 release when reproducing v1.21 behavior.
 
 The component behavior in this document is implemented, but a releasable v1.3
-bundle does not yet exist. Use [1_3_release_todo.md](1_3_release_todo.md) for
-execution order and blockers; [work_plan.md](work_plan.md) is only the
-remediation ledger.
+bundle does not yet exist. Use [release.md](release.md) for
+execution order and acceptance requirements.
 
 ## Complete model bundles
 
@@ -97,8 +96,8 @@ complete manifest.
 `train_linker_and_finalize.py` is one direct, expensive-job entrypoint; its
 feature materialization and staging are temporary. The
 [production command reference](../scripts/production/README.md) documents its
-arguments, and the [v1.3 runbook](1_3_release_todo.md) owns release order and
-the five release authorities.
+arguments, and the [v1.3 runbook](release.md) owns release order and
+gates.
 
 ## Explicit execution routes
 
@@ -109,8 +108,8 @@ capability matrix, or Python/Rust fallback:
 | --- | --- | --- | --- |
 | `Clusterer.predict` | `ANDData` | Python | `(clusters, distance_matrices)` |
 | `Clusterer.predict_incremental` | `ANDData` | Python | structured mapping |
-| `Clusterer.predict_from_arrow_paths` | immutable Arrow paths | Rust | `(clusters, distance_matrices)` |
-| `Clusterer.predict_incremental_from_arrow_paths` | immutable Arrow paths | Rust | structured mapping |
+| `Clusterer.predict_from_arrow` | open `ArrowDataset` | Rust | `(clusters, distance_matrices)` |
+| `Clusterer.predict_incremental_from_arrow` | open `ArrowDataset` | Rust | structured mapping |
 
 Passing a Rust runtime context to an `ANDData` API, or a Python context to an
 Arrow API, is an error. Rust entry points import the exact `s2and-rust` version
@@ -140,16 +139,14 @@ Incremental APIs always return their structured result. There is no
 
 ## Immutable Arrow contract
 
-Production Arrow input is a manifest-backed immutable generation. Validation
-checks the fixed prediction or training profile, normalization provenance, full
-generation inventory, checksums, table schemas, and batch-index fingerprints
-at the construction/deployment boundary. A successfully validated generation
-is then trusted and reused by exact identity; requests do not install
-filesystem watchers or repeatedly probe for same-path mutation.
+Production Arrow input is one manifest-backed immutable root. Open it once with
+`ArrowDataset.open(root)`: opening validates normalization, the content
+inventory, checksums, table schemas, and batch indexes, then retains the exact
+files for the handle's lifetime.
 
-Never edit an Arrow generation in place. Publish changed content under a new
-generation/path, validate it once, and construct a new dataset or featurizer.
-Request-local seed sidecars are separate from the immutable base generation.
+Never edit an open root in place. Publish changed content at a new path and open
+a new handle. Request-local seed constraints are explicit prediction arguments,
+not mutations to the base dataset.
 
 Prediction requires `signatures`, `papers`, `paper_authors`, and their
 raw-planner batch indexes. A model that uses embeddings also requires `specter`
@@ -164,40 +161,47 @@ columns retain their normal validation.
 ### Rust training constructor
 
 Rust training has one constructor:
-`s2and.arrow_training.build_training_anddata_from_arrow`. It validates the
-fixed training profile and returns a fully initialized train-mode `ANDData`.
-The dataset owns one read-only `dataset.arrow_paths` mapping and one verified
-generation identity; there is no second Arrow-path field or caller mutation
-step.
+`s2and.arrow_training.build_training_anddata_from_arrow`. It accepts one open
+handle, validates the training profile, and returns a fully initialized
+train-mode `ANDData` that retains that handle.
 
 ```python
+from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_training import build_training_anddata_from_arrow
 from s2and.consts import NORMALIZATION_VERSION
 
-dataset = build_training_anddata_from_arrow(
-    arrow_paths,
-    "training_dataset",
+arrow_dataset = ArrowDataset.open(
+    "/path/to/arrow_dataset",
+    require_name_counts_index=True,
     expected_normalization_version=NORMALIZATION_VERSION,
+)
+dataset = build_training_anddata_from_arrow(
+    arrow_dataset,
+    "training_dataset",
     clusters="/path/to/clusters.json",
 )
 ```
 
 Python SPECTER arrays and name-count mappings are not materialized for this
-route. Rust featurization reads them from `dataset.arrow_paths`.
+route. Rust reads them through the retained handle. Keep `arrow_dataset` open
+until the returned training dataset is no longer used.
 
 ### Rust inference
 
-Full-block inference accepts blocks plus the validated Arrow-path mapping:
+Full-block inference accepts blocks plus one open handle:
 
 ```python
-pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow_paths(
-    blocks,
-    arrow_paths,
-    batching_threshold=15_000,
-    cluster_seeds_require=current_seed_assignments,
-    altered_cluster_signatures=corrected_claimed_profiles,
-    total_ram_bytes=32 * 1024**3,
-)
+from s2and.arrow_inputs import ArrowDataset
+
+with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
+    pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow(
+        blocks,
+        arrow_dataset,
+        batching_threshold=15_000,
+        cluster_seeds_require=current_seed_assignments,
+        altered_cluster_signatures=corrected_claimed_profiles,
+        total_ram_bytes=32 * 1024**3,
+    )
 ```
 
 `batching_threshold` is optional. When set, blocks larger than the threshold
@@ -205,31 +209,28 @@ use strict Arrow-native Rust subblocking; smaller blocks retain the full-block
 route. The native graph fallback requires indexed SPECTER evidence even when
 the pairwise model itself does not select an embedding feature. Initial-only
 groups attach through the production bundle's promoted incremental linker.
-An explicit `cluster_seeds_require` mapping takes precedence over the Arrow
-seed sidecar. When altered claimed profiles are supplied on a subblocked
-request, their components are naturally pre-split before native subblocking;
-the resulting request-local seed view is shared by subblocking and
-featurization.
+When altered claimed profiles are supplied on a subblocked request, their
+components are naturally pre-split before native subblocking; the same explicit
+request-local seed view is shared by subblocking and featurization.
 
-Promoted incremental inference accepts either `cluster_seeds` in the Arrow
-paths or an explicit seed mapping:
+Promoted incremental inference requires an explicit seed mapping:
 
 ```python
-result = clusterer.predict_incremental_from_arrow_paths(
-    block_signatures,
-    arrow_paths,
-    cluster_seeds_require=signature_to_seed_cluster,
-    batching_threshold=5000,
-    total_ram_bytes=32 * 1024**3,
-)
+with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
+    result = clusterer.predict_incremental_from_arrow(
+        block_signatures,
+        arrow_dataset,
+        cluster_seeds_require=signature_to_seed_cluster,
+        batching_threshold=5000,
+        total_ram_bytes=32 * 1024**3,
+    )
 
 clusters = result["clusters"]
 ```
 
-The optional `cluster_seed_disallows` sidecar means “no seed-disallow evidence”
-when absent. An explicit sidecar path must exist. Arrow seed component IDs are
-preserved, so parity checks should compare partitions when another ingestion
-path assigns different cluster IDs.
+Optional disallow pairs are passed through `cluster_seeds_disallow`. Seed
+component IDs are preserved, so parity checks should compare partitions when
+another ingestion path assigns different cluster IDs.
 
 ## Incremental decision semantics
 
@@ -250,36 +251,37 @@ model’s actual final, pairwise, and aggregate feature widths.
 Canonical-v2 uses one binary `NameCountsIndex` in Python and Rust. Classic
 `ANDData` defaults to the canonical configured index and also accepts a
 verified alternate path, a shared open index handle, or explicit `None` when
-count features are intentionally absent. Arrow routes carry the same index
-under `arrow_paths["name_counts_index"]`. Runtime code does not open the
+count features are intentionally absent. Arrow routes retain the manifest-bound
+index inside `ArrowDataset`. Runtime code does not open the
 historical source pickle, and the generator no longer publishes one. Models
-bind to the native index's single `manifest_sha256`; warehouse lineage remains
-inside that manifest's `source_provenance`. Python deduplicates each
+bind directly to the native index's single `manifest_sha256`. The manifest
+contains only its schema and normalization versions plus the four binary-file
+facts; producer mode and output-count metrics are reported by the producer
+instead of entering the runtime identity. Python deduplicates each
 2,048-signature batch before
 unique keys cross the native boundary, scatters the four result columns back
 onto signatures, and discards all temporary key maps with the batch.
 
-Python is the sole name-tuple artifact loader. It validates the data and
-adjacent metadata once for the packaged immutable artifact, retains frozen
-pairs plus `data_sha256`, and passes those pairs explicitly to Rust-backed
-flows.
+Python is the sole name-tuple artifact loader. It validates the canonical text
+directly, retains frozen pairs plus the computed `data_sha256`, and passes
+those pairs explicitly to Rust-backed flows.
 
 Canonical ORCID prefix counts use a direct JSON data file and one adjacent
-`.manifest.json`. The lazy runtime loader reads each once and validates the
-schema, normalization version, unordered-pair semantics, source provenance,
-tuple binding, cardinalities, and data SHA-256 before retaining the result
-in-process. There is no ORCID generation pointer, retry loop, or legacy
-fallback. During cutover, the checked-in legacy JSON and absent canonical
-manifest make this checkout distribution-incomplete. Both filenames are
-already declared required package data and are enforced by distribution
-verification; Stage 1 of the v1.3 runbook must replace/add the approved
-canonical pair.
+`.manifest.json` containing only the `name_tuples_sha256` dependency. The lazy
+runtime loader validates the prefix-pair keys and positive integer counts,
+computes the data hash, and retains the result in-process.
+Production contracts bind that hash and require the manifest's tuple hash
+to match the canonical name-tuple artifact. There is no ORCID generation
+pointer, producer-provenance protocol, retry loop, or legacy fallback. The
+package declares both ORCID runtime paths, but the current pre-release tree
+contains neither file. Stage 1 of the v1.3 runbook must generate, review, and
+copy the approved pair before distribution verification can pass.
 
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key
-otherwise. Models, datasets, count indexes, ORCID counts, name tuples, and the
-linker must agree on their canonical-v2 provenance; legacy artifacts are
-rejected rather than adapted.
+otherwise. Production feature contracts bind canonical-v2 normalization, the
+exact name-count manifest, the ORCID and name-tuple data hashes, and the
+linker. Legacy artifacts are rejected rather than adapted.
 
 Production inference has no persistent cache. Direct Arrow/Rust prediction
 reuses already validated immutable native state in-process only. See
@@ -300,4 +302,4 @@ git diff --check
 These tests validate code and synthetic bundles only. A release additionally
 needs a clean wheel/sdist check, exact-version Rust wheel install, a real
 canonical bundle, and the approved quality/runtime/RSS gates in
-[1_3_release_todo.md](1_3_release_todo.md).
+[release.md](release.md).

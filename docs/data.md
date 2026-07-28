@@ -2,13 +2,48 @@
 
 This document covers dataset download, checked-in model artifacts, and `path_config.json`.
 
-> **Canonical-v2 migration status (2026-07-24):** the published Arrow release,
+> **Canonical-v2 release status (2026-07-27):** the published Arrow release,
 > shared name counts, and checked-in v1.21 model are legacy inputs. They are not
-> a compatible production release unit for this branch. Canonical counts and the
-> v1.3 bundle are pending; see the
-> [v1.3 release runbook](1_3_release_todo.md). Here, “v1.3” names the coordinated
-> model/data release. The Python/Rust package version is still an explicit
-> release decision.
+> a compatible production release unit for this branch. See the
+> [v1.3 release runbook](release.md).
+
+## Canonical name contract
+
+`s2and.text.canonicalize_name_parts` and its Rust equivalent are the
+authorities. Given raw `first`, `middle`, and `last` values, they:
+
+1. normalize Unicode spacing and remove soft hyphen and zero-width joiner;
+2. normalize apostrophe-like marks, transliterate, lowercase, and delete
+   apostrophes rather than making token boundaries;
+3. treat supported Unicode dash variants as one separator;
+4. replace remaining nonletters with spaces and collapse whitespace;
+5. drop at most one leading title from first name, except `md`;
+6. retain a dash-bound first-name group, otherwise keep the first token and
+   spill remaining first-name tokens into middle; and
+7. normalize last name independently, preserving spaces and surname particles.
+
+Examples: `Anne-Marie Claire` becomes first `anne marie`, middle `claire`;
+apostrophe variants of `O'Connor` become `oconnor`; and `Ou-Yang` and
+`Ou Yang` both become last `ou yang`.
+
+`s2and.text.canonical_name_count_keys` emits no sentinel keys. It emits
+`first` only when first has more than one character, `last` when present,
+`first_last` when both are informative, and `last_first_initial` when both
+components exist.
+
+At comparison time, `same_prefix_tokens` is symmetric: every aligned token in
+the shorter canonical first name must prefix its counterpart, and empty input
+is missing evidence. Alias tuples are unordered. Canonical last names retain
+spaces; only documented count/block projections compact them, while
+`canonical_lasts_equivalent` treats dash/space variants as equivalent.
+
+The live authorities are `s2and.text`, `s2and.consts.NORMALIZATION_VERSION`,
+and [the frozen examples](../tests/fixtures/canonical_name_examples.json).
+Tuple and ORCID runtime rules live in
+[production_inference.md](production_inference.md); Arrow and name-count
+formats live in [rust/arrow_dataset_spec.md](rust/arrow_dataset_spec.md) and
+[rust/artifact_formats.md](rust/artifact_formats.md). The retained manual
+tuple review is [release_evidence/name_tuple_legacy_adjudication_v1.md](release_evidence/name_tuple_legacy_adjudication_v1.md).
 
 ## Dataset download
 
@@ -43,9 +78,9 @@ uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2an
 `s2and/data/s2and_and_big_blocks_linker_dataset_20260525` is the conventional
 local name for the previously published replay subbundle. Its manifests predate
 the canonical generation contract, so it is now a legacy historical input and
-is rejected by strict v1.3 validation. B09 in
-[1_3_release_blockers.md](1_3_release_blockers.md) requires a regenerated
-replay bundle before linker training.
+is rejected by strict v1.3 validation. Regenerate the replay bundle before
+linker training as required by the
+[v1.3 runbook](release.md#stage-2-build-training-and-evaluation-data).
 
 The Arrow release stores runtime signatures, papers, paper authors, and SPECTER
 rows as Arrow IPC files. It intentionally does not duplicate legacy `raw/`,
@@ -53,8 +88,9 @@ rows as Arrow IPC files. It intentionally does not duplicate legacy `raw/`,
 
 Both Arrow/Rust inference and Python `ANDData` consume the shared
 `name_counts_index/`. Python callers pass `NAME_COUNTS_INDEX_PATH` or an open
-`NameCountsIndex` handle. The native manifest is the publication and model
-identity; its `source_provenance` retains warehouse audit lineage.
+`NameCountsIndex` handle. The SHA-256 of the validated native manifest is the
+publication and model identity. The v3 manifest contains only its schema and
+normalization versions plus the four validated binary-file facts.
 
 The previous production model source bundle is checked into this repo under
 `s2and/data/production_model_v1.21/`. Canonical-v2 rejects it; it is retained
@@ -82,21 +118,19 @@ for.
 The source bundle is excluded from package data, the obsolete v1.0-v1.2 model
 pickles have been removed, and no default production model declaration is
 distributed during cutover. Evaluation and validation tools must receive an
-explicit model bundle path. The v1.3 decision is an immutable external artifact,
-not a packaged default. B15 remains partial until the release-candidate
-distribution verifier enforces that absence.
+explicit model bundle path. The v1.3 model is an explicit external bundle, not
+a packaged default. The final tuple and ORCID assets must be generated before
+the real wheel and sdist pass the distribution verifier.
 
-New production releases use immutable native bundle directories. The component
+New production releases use fresh native bundle directories. The component
 entry points are `scripts/production/model/train_pairwise.py` and
 `scripts/production/model/train_linker_and_finalize.py`, with release-only
-  calibration/evaluation in `scripts/production/model/release_pairwise.py`;
-  stage, validate, and rename the complete bundle rather than mutating a live
-  directory. They are not by themselves the full v1.3 protocol: EPS selection,
-  a fresh linker fit against the calibrated pairwise bundle, no-second-fit
-  complete-bundle assembly, sealed evaluation, protected approval, and
-  exact-byte publication remain governed by
-  [1_3_release_todo.md](1_3_release_todo.md). Do not create new production
-  pickles.
+calibration/evaluation in `scripts/production/model/release_pairwise.py`.
+The v1.3 sequence trains the final pairwise boosters, materializes their linker
+inputs, selects EPS on validation data, fits one fresh linker, reloads the
+complete bundle, and evaluates it as described in
+[release.md](release.md). Do not create new production
+pickles.
 
 The replay target for rebuilding/auditing the promoted incremental linker lives
 at:
@@ -111,8 +145,8 @@ script.
 
 The previous promoted-linker replay data is published under the Arrow release
 prefix. Use the standalone download only to audit historical inputs; do not use
-it as the v1.3 source bundle without the B07-B10/B19 regeneration, assignment,
-and inventory work.
+it as the v1.3 source bundle without regenerated assignments, Arrow data, and
+pairwise-derived inputs.
 
 Pass the downloaded source bundle explicitly with `--source-bundle-root` to
 `scripts/production/model/train_linker_and_finalize.py`; the release command

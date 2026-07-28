@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from s2and.consts import NORMALIZATION_VERSION
-from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
+from s2and.name_counts_manifest import NAME_COUNTS_INDEX_SCHEMA_VERSION
 from scripts.production.counts import generate_name_counts
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +27,7 @@ def test_module_entrypoint_help() -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert "--fixture-input" in completed.stdout
+    assert "--input-csv" in completed.stdout
 
 
 def _write_rows(path: Path, rows: object) -> Path:
@@ -38,8 +39,6 @@ def _fixture_args(tmp_path: Path, rows: object) -> list[str]:
     return [
         "--fixture-input",
         str(_write_rows(tmp_path / "rows.json", rows)),
-        "--source-snapshot-id",
-        "fixture-2026-07-09",
         "--output-dir",
         str(tmp_path),
     ]
@@ -71,7 +70,7 @@ def _write_guardrails(path: Path, **changes: int) -> Path:
     return path
 
 
-def test_fixture_publishes_verified_native_index(tmp_path: Path) -> None:
+def test_fixture_publishes_verified_native_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     rows = [
         {"first_name": "Abd-al", "last_name": "Sattar", "count": 4},
         {"first_name": "Abd al", "last_name": "Sattar", "count": 3},
@@ -81,17 +80,16 @@ def test_fixture_publishes_verified_native_index(tmp_path: Path) -> None:
     assert generate_name_counts.main(_fixture_args(tmp_path, rows)) == 0
 
     manifest = json.loads((tmp_path / "name_counts_index" / "manifest.json").read_text(encoding="utf-8"))
-    provenance = manifest["source_provenance"]
+    output = capsys.readouterr().out
+    assert set(manifest) == {"schema_version", "normalization_version", "files"}
+    assert manifest["schema_version"] == NAME_COUNTS_INDEX_SCHEMA_VERSION
     assert manifest["normalization_version"] == NORMALIZATION_VERSION
-    assert provenance["schema_version"] == NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
-    assert provenance["source_snapshot_id"] == "fixture-2026-07-09"
-    assert provenance["source_row_count"] == 3
-    assert provenance["rejected_row_count"] == 1
-    assert provenance["source_kind"].startswith("fixture:")
+    assert '"source_row_count": 3' in output
+    assert '"rejected_row_count": 1' in output
     assert set(manifest["files"]) == {"first", "last", "first_last", "last_first_initial"}
 
 
-def test_fixture_limit_changes_selected_content(tmp_path: Path) -> None:
+def test_fixture_limit_changes_selected_content(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     rows = [
         {"first_name": "Alice", "last_name": "Smith", "count": 2},
         {"first_name": "Amy", "last_name": "Jones", "count": 2},
@@ -99,14 +97,10 @@ def test_fixture_limit_changes_selected_content(tmp_path: Path) -> None:
 
     assert generate_name_counts.main([*_fixture_args(tmp_path, rows), "--limit", "1"]) == 0
 
-    provenance = json.loads((tmp_path / "name_counts_index" / "manifest.json").read_text())["source_provenance"]
-    assert provenance["source_row_count"] == 1
-    assert provenance["cardinalities"] == {
-        "first": 1,
-        "last": 1,
-        "first_last": 1,
-        "last_first_initial": 1,
-    }
+    output = capsys.readouterr().out
+    assert '"source_row_count": 1' in output
+    for key in ("first", "last", "first_last", "last_first_initial"):
+        assert f'"{key}": 1' in output
 
 
 def test_empty_or_existing_publication_is_rejected(tmp_path: Path) -> None:
@@ -132,25 +126,25 @@ def test_builder_enforces_live_row_and_mapping_bounds() -> None:
         generate_name_counts.build_name_count_dicts(rows, max_keys_per_mapping=1)
 
 
-def test_full_dry_run_requires_one_guardrail_file_and_bounds_result(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_full_reviewed_csv_requires_guardrails_and_publishes(tmp_path: Path) -> None:
+    source = tmp_path / "name_counts.csv"
+    source.write_text("first_name,last_name,count\nAlice,Smith,2\n", encoding="utf-8")
     args = [
-        "--run-full",
-        "--source-snapshot-id",
-        "warehouse-snapshot",
+        "--input-csv",
+        str(source),
         "--output-dir",
         str(tmp_path / "output"),
-        "--dry-run",
     ]
     with pytest.raises(ValueError, match="--guardrails-json"):
         generate_name_counts.main(args)
 
     guardrails = _write_guardrails(tmp_path / "guardrails.json", max_source_rows=17)
     assert generate_name_counts.main([*args, "--guardrails-json", str(guardrails)]) == 0
-    plan = capsys.readouterr().out
-    assert "limit 18" in plan
-    assert not (tmp_path / "output").exists()
+    assert (tmp_path / "output" / "name_counts_index" / "manifest.json").is_file()
+
+    source.write_text("first_name,last_name\nAlice,Smith\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="columns"):
+        list(generate_name_counts._reviewed_csv_rows(source))
 
 
 @pytest.mark.parametrize(
@@ -171,9 +165,8 @@ def test_invalid_guardrail_authority_fails_before_execution(tmp_path: Path, valu
     with pytest.raises(ValueError, match="guardrail"):
         generate_name_counts.main(
             [
-                "--run-full",
-                "--source-snapshot-id",
-                "warehouse-snapshot",
+                "--input-csv",
+                str(path),
                 "--output-dir",
                 str(tmp_path / "output"),
                 "--guardrails-json",

@@ -3,14 +3,13 @@
 This is the reusable gate for the complete Arrow inference schema. It builds a
 bounded incumbent ``ANDData`` first, writes Arrow IPC tables and current
 raw-planner batch-index sidecars from the same bounded payload, builds
-``RustFeaturizer.from_arrow_paths(...)``, and compares features, constraints,
+one retained ``ArrowDataset``, and compares features, constraints,
 distances, and clusters.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import pickle
@@ -29,18 +28,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 REPORT_SCHEMA = "s2and_parity_evaluation_report_v1"
 
 
-def _sha256_file(path: Path) -> str:
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
-def _require_sha256(path: Path, expected: str, *, label: str) -> str:
-    observed = _sha256_file(path)
-    if observed != expected:
-        raise ValueError(f"{label} SHA-256 mismatch: expected={expected} observed={observed}")
-    return observed
-
-
 def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
     if path.exists():
         raise FileExistsError(f"Report output already exists: {path}")
@@ -51,23 +38,6 @@ def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
         os.link(staging, path)
     finally:
         staging.unlink(missing_ok=True)
-
-
-def _verified_input_sha256(args: argparse.Namespace) -> tuple[str, str]:
-    fixture_manifest = (Path(args.fixture_dir) / "meta.json").resolve()
-    model_manifest = (Path(args.model_path) / "manifest.json").resolve()
-    return (
-        _require_sha256(
-            fixture_manifest,
-            args.expected_fixture_manifest_sha256,
-            label="Fixture manifest",
-        ),
-        _require_sha256(
-            model_manifest,
-            args.expected_model_manifest_sha256,
-            label="Model manifest",
-        ),
-    )
 
 
 def _load_json(path: str | Path) -> Any:
@@ -401,7 +371,7 @@ def _resolve_parity_name_counts_index(
     *,
     output_dir: Path,
     supplied_index: Path | None,
-) -> tuple[str, str, str]:
+) -> tuple[str, str]:
     """Resolve one current name-count index shared by both parity routes."""
 
     if supplied_index is not None:
@@ -412,29 +382,26 @@ def _resolve_parity_name_counts_index(
             context="full prediction Arrow parity name counts",
             producer_hint="pass a canonical_v2 manifest-backed --name-counts-index",
         )
-        manifest_bytes = (Path(index_path) / "manifest.json").read_bytes()
-        return index_path, hashlib.sha256(manifest_bytes).hexdigest(), "supplied"
+        return index_path, "supplied"
 
     from scripts.arrow_conversion_helpers import write_bounded_name_counts_index
 
-    index_path, logical_sha256 = write_bounded_name_counts_index(signatures, output_dir)
-    return index_path, logical_sha256, "bounded_generated"
+    index_path, _logical_sha256 = write_bounded_name_counts_index(signatures, output_dir)
+    return index_path, "bounded_generated"
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    fixture_manifest_sha256, model_manifest_sha256 = _verified_input_sha256(args)
     os.environ.setdefault("S2AND_BACKEND", "rust")
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
 
     from s2and.arrow_inputs import (
+        ArrowDataset,
         build_arrow_artifact_manifest,
-        validate_arrow_prediction_artifacts,
         write_arrow_artifact_manifest,
     )
-    from s2and.consts import NORMALIZATION_VERSION
     from s2and.data import ANDData
     from s2and.feature_port import (
-        build_rust_featurizer_from_arrow_paths,
+        build_rust_featurizer_from_arrow_dataset,
         evict_rust_featurizer,
     )
     from s2and.production_model import load_production_model
@@ -478,7 +445,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     start = time.perf_counter()
-    name_counts_index_path, name_counts_sha256, name_counts_source = _resolve_parity_name_counts_index(
+    name_counts_index_path, name_counts_source = _resolve_parity_name_counts_index(
         filtered_signatures,
         output_dir=args.output_dir / "name_artifacts",
         supplied_index=args.name_counts_index,
@@ -533,14 +500,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     arrow_paths["manifest"] = str(write_arrow_artifact_manifest(arrow_manifest, args.output_dir))
     timings["write_arrow_manifest_seconds"] = time.perf_counter() - start
 
-    arrow_paths = validate_arrow_prediction_artifacts(
-        arrow_paths,
-        require_specter=not args.no_specter,
-        require_name_counts_index=True,
-        expected_normalization_version=NORMALIZATION_VERSION,
-        context="full prediction Arrow parity",
-    )
-
     block_dict = {block_name: selected_signature_ids}
     start = time.perf_counter()
     incumbent_dists = clusterer.make_distance_matrices(
@@ -553,38 +512,50 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     timings["incumbent_make_dists_seconds"] = time.perf_counter() - start
 
     evict_rust_featurizer(dataset)
-    start = time.perf_counter()
-    arrow_featurizer = build_rust_featurizer_from_arrow_paths(
-        arrow_paths,
-        expected_normalization_version=NORMALIZATION_VERSION,
-        signature_ids=selected_signature_ids,
-        name_tuples=getattr(dataset, "name_tuples", None),
-        load_name_counts=True,
-        preprocess=True,
-        num_threads=int(args.n_jobs),
-    )
-    timings["arrow_featurizer_seconds"] = time.perf_counter() - start
-
-    start = time.perf_counter()
-    arrow_dists = clusterer.make_distance_matrices_from_rust_featurizer(
-        block_dict,
-        arrow_featurizer,
-        partial_supervision={},
-        incremental_dont_use_cluster_seeds=False,
-        total_ram_bytes=int(args.total_ram_bytes),
-    )
-    timings["arrow_make_dists_seconds"] = time.perf_counter() - start
-
-    feature_constraint_comparison: dict[str, Any] | None = None
-    if args.compare_features:
+    with ArrowDataset.open(
+        args.output_dir,
+        require_specter=not args.no_specter,
+        require_name_counts_index=True,
+    ) as arrow_dataset:
         start = time.perf_counter()
-        feature_constraint_comparison = _feature_constraint_report(
-            dataset,
-            arrow_featurizer,
-            selected_signature_ids,
-            n_jobs=int(args.n_jobs),
+        arrow_featurizer = build_rust_featurizer_from_arrow_dataset(
+            arrow_dataset,
+            signature_ids=selected_signature_ids,
+            name_tuples=getattr(dataset, "name_tuples", None),
+            preprocess=True,
+            num_threads=int(args.n_jobs),
         )
-        timings["feature_constraint_compare_seconds"] = time.perf_counter() - start
+        timings["arrow_featurizer_seconds"] = time.perf_counter() - start
+
+        start = time.perf_counter()
+        arrow_dists = clusterer.make_distance_matrices_from_rust_featurizer(
+            block_dict,
+            arrow_featurizer,
+            partial_supervision={},
+            incremental_dont_use_cluster_seeds=False,
+            total_ram_bytes=int(args.total_ram_bytes),
+        )
+        timings["arrow_make_dists_seconds"] = time.perf_counter() - start
+
+        feature_constraint_comparison: dict[str, Any] | None = None
+        if args.compare_features:
+            start = time.perf_counter()
+            feature_constraint_comparison = _feature_constraint_report(
+                dataset,
+                arrow_featurizer,
+                selected_signature_ids,
+                n_jobs=int(args.n_jobs),
+            )
+            timings["feature_constraint_compare_seconds"] = time.perf_counter() - start
+
+        start = time.perf_counter()
+        arrow_clusters, _ = clusterer.predict_from_rust_featurizer(
+            block_dict,
+            arrow_featurizer,
+            dists=arrow_dists,
+            partial_supervision={},
+        )
+        timings["arrow_cluster_from_dists_seconds"] = time.perf_counter() - start
 
     start = time.perf_counter()
     incumbent_clusters, _ = clusterer.predict(
@@ -595,15 +566,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         use_s2_clusters=False,
     )
     timings["incumbent_cluster_from_dists_seconds"] = time.perf_counter() - start
-
-    start = time.perf_counter()
-    arrow_clusters, _ = clusterer.predict_from_rust_featurizer(
-        block_dict,
-        arrow_featurizer,
-        dists=arrow_dists,
-        partial_supervision={},
-    )
-    timings["arrow_cluster_from_dists_seconds"] = time.perf_counter() - start
 
     distance_comparison = {
         block_key: _numeric_report(
@@ -618,8 +580,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     clusters_exact_match = incumbent_partition == arrow_partition
     report = {
         "schema_version": REPORT_SCHEMA,
-        "fixture_manifest_sha256": fixture_manifest_sha256,
-        "model_manifest_sha256": model_manifest_sha256,
         "fixture_dir": str(args.fixture_dir),
         "output_dir": str(args.output_dir),
         "dataset": str(meta["dataset"]),
@@ -635,7 +595,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "physical_layout": physical_layout,
         "raw_planner_batch_indexes": raw_planner_index_metrics,
         "name_counts_index_metrics": name_counts_index_metrics,
-        "name_counts_sha256": name_counts_sha256,
         "name_counts_source": name_counts_source,
         "timings_seconds": {key: float(value) for key, value in timings.items()},
         "distance_comparison": distance_comparison,
@@ -655,7 +614,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture-dir", type=Path, required=True)
-    parser.add_argument("--expected-fixture-manifest-sha256", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument(
@@ -665,7 +623,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional existing canonical_v2 name-count index; otherwise a bounded index is generated.",
     )
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
-    parser.add_argument("--expected-model-manifest-sha256", required=True)
     parser.add_argument("--block-size", type=int, required=True)
     parser.add_argument("--n-jobs", type=int, default=20)
     parser.add_argument("--total-ram-bytes", type=int, default=1_000_000_000_000)

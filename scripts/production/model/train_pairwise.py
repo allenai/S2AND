@@ -23,14 +23,13 @@ from typing import Any
 
 import numpy as np
 from hyperopt import hp
+from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from s2and._sha256 import is_lowercase_sha256  # noqa: E402
-from s2and._sha256 import sha256_file as _sha256_file  # noqa: E402
 from s2and.consts import FEATURIZER_VERSION  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
@@ -44,8 +43,9 @@ from s2and.featurizer import (  # noqa: E402
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
 from s2and.production_bundle import production_version_from_bundle_dir, write_pairwise_production_bundle  # noqa: E402
 from s2and.production_training_contract import (  # noqa: E402
-    PAIRWISE_TRAINING_PLAN_SCHEMA_VERSION,
+    ModelDataset,
     ProductionArtifactAuthority,
+    load_model_plan,
     load_packaged_artifact_authority,
 )
 
@@ -58,54 +58,27 @@ DEFAULT_N_ITER = 50
 DEFAULT_N_JOBS = 25
 DEFAULT_CHUNK_SIZE = 100
 DEFAULT_RANDOM_SEED = 1111
-TRAINING_PLAN_SCHEMA = PAIRWISE_TRAINING_PLAN_SCHEMA_VERSION
 
 
-@dataclass(frozen=True)
-class DatasetInputPlan:
-    """Resolved immutable input files for one production training dataset."""
-
-    split_mode: str
-    files: Mapping[str, Path]
-    sha256: Mapping[str, str]
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PairwisePreflightPlan:
     """Validated, read-only launch plan created before artifact or dataset loading."""
 
     output_dir: Path
     dataset_names: tuple[str, ...]
-    datasets: Mapping[str, DatasetInputPlan]
+    datasets: Mapping[str, ModelDataset]
+    model_plan_sha256: str
     matrix_work_dir: Path
     matrix_work_free_bytes: int
     total_ram_bytes: int | None
-    source_manifest_sha256: str | None
-    sealed_test_manifests: Mapping[str, Any]
-
-
-def _hash_source_files(source_files: Mapping[str, Path]) -> dict[str, str]:
-    return {role: _sha256_file(path) for role, path in source_files.items()}
 
 
 def _canonical_training_artifact_hashes(authority: ProductionArtifactAuthority) -> dict[str, str]:
     """Validate canonical count artifacts and return their immutable bindings."""
 
     orcid_counts = authority.orcid_prefix_counts
-    if not orcid_counts.source_kind.startswith("redshift:"):
-        raise RuntimeError(
-            "production pairwise training requires warehouse-generated ORCID prefix counts; "
-            f"observed source_kind={orcid_counts.source_kind!r}"
-        )
     if orcid_counts.name_tuples_sha256 != authority.name_tuples.data_sha256:
         raise RuntimeError("ORCID prefix counts were generated from a different canonical name-tuple artifact")
-    name_counts_index = authority.name_counts_index
-    source_kind = name_counts_index.source_provenance.get("source_kind")
-    if not isinstance(source_kind, str) or not source_kind.startswith("redshift:"):
-        raise RuntimeError(
-            "production pairwise training requires a warehouse-generated name-count index; "
-            f"observed source_kind={source_kind!r}"
-        )
     return authority.hashes
 
 
@@ -114,109 +87,6 @@ def _search_space() -> dict[str, Any]:
         "eps": hp.uniform("eps", 0, 1),
         "linkage": hp.choice("linkage", ["average"]),
     }
-
-
-def _sha256_digest(value: Any, *, label: str) -> str:
-    """Return one lowercase SHA-256 digest."""
-
-    if not is_lowercase_sha256(value):
-        raise SystemExit(f"{label} must be a lowercase SHA-256 digest")
-    return value
-
-
-def _verified_training_plan(
-    path: Path,
-    expected_sha256: str,
-) -> tuple[dict[str, DatasetInputPlan], str, dict[str, Any]]:
-    """Load one digest-bound plan whose sealed test bindings contain no paths."""
-
-    expected_sha256 = _sha256_digest(expected_sha256, label="--expected-training-plan-sha256")
-    observed_sha256 = _sha256_file(path)
-    if observed_sha256 != expected_sha256:
-        raise SystemExit(f"Training-plan SHA-256 mismatch: expected={expected_sha256} observed={observed_sha256}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    expected_keys = {"schema_version", "source_manifest_sha256", "datasets", "sealed_test_manifests"}
-    if not isinstance(payload, Mapping) or set(payload) != expected_keys:
-        raise SystemExit(f"Training plan must contain exactly {sorted(expected_keys)}")
-    if payload["schema_version"] != TRAINING_PLAN_SCHEMA:
-        raise SystemExit(f"Training plan schema_version must be {TRAINING_PLAN_SCHEMA!r}")
-    source_manifest_sha256 = _sha256_digest(
-        payload["source_manifest_sha256"],
-        label="Training plan source_manifest_sha256",
-    )
-
-    sealed = payload["sealed_test_manifests"]
-    if not isinstance(sealed, Mapping) or set(sealed) != {"pairwise", "cluster"}:
-        raise SystemExit("Training plan sealed_test_manifests must contain exactly pairwise and cluster")
-    normalized_sealed: dict[str, Any] = {}
-    for kind in ("pairwise", "cluster"):
-        binding = sealed[kind]
-        if not isinstance(binding, Mapping) or set(binding) != {"manifest_sha256", "members"}:
-            raise SystemExit(f"Training plan sealed {kind} binding must contain exactly manifest_sha256 and members")
-        members = binding["members"]
-        if not isinstance(members, Mapping) or not members:
-            raise SystemExit(f"Training plan sealed {kind} members must be a nonempty object")
-        normalized_members: dict[str, dict[str, str]] = {}
-        for dataset_name, roles in members.items():
-            if not isinstance(dataset_name, str) or not dataset_name or not isinstance(roles, Mapping) or not roles:
-                raise SystemExit(f"Training plan sealed {kind} members must map dataset names to file digests")
-            normalized_members[dataset_name] = {
-                str(role): _sha256_digest(digest, label=f"Training plan sealed {kind} {dataset_name}:{role}")
-                for role, digest in roles.items()
-            }
-        normalized_sealed[kind] = {
-            "manifest_sha256": _sha256_digest(
-                binding["manifest_sha256"],
-                label=f"Training plan sealed {kind} manifest_sha256",
-            ),
-            "members": normalized_members,
-        }
-
-    raw_datasets = payload["datasets"]
-    if not isinstance(raw_datasets, list):
-        raise SystemExit("Training plan datasets must be a list")
-    by_name: dict[str, DatasetInputPlan] = {}
-    common_roles = {"papers", "signatures", "specter_embeddings"}
-    for spec in raw_datasets:
-        if not isinstance(spec, Mapping) or set(spec) != {"name", "split_mode", "files"}:
-            raise SystemExit("Each training-plan dataset must contain exactly name, split_mode, files")
-        name = spec["name"]
-        if not isinstance(name, str) or not name or name in by_name:
-            raise SystemExit(f"Training plan contains an invalid or duplicate dataset name: {name!r}")
-        expected_mode = "fixed_pairs" if name == "augmented" else "random_blocks"
-        if spec["split_mode"] != expected_mode:
-            raise SystemExit(f"Training plan dataset {name!r} must use split_mode={expected_mode!r}")
-        roles = common_roles | ({"train_pairs", "val_pairs"} if expected_mode == "fixed_pairs" else {"clusters"})
-        raw_files = spec["files"]
-        if not isinstance(raw_files, Mapping) or set(raw_files) != roles:
-            raise SystemExit(f"Training plan dataset {name!r} must declare exact file roles {sorted(roles)}")
-        files: dict[str, Path] = {}
-        digests: dict[str, str] = {}
-        for role in sorted(roles):
-            file_spec = raw_files[role]
-            if not isinstance(file_spec, Mapping) or set(file_spec) != {"path", "sha256"}:
-                raise SystemExit(f"Training plan file {name}:{role} must contain exactly path and sha256")
-            raw_path = file_spec["path"]
-            if not isinstance(raw_path, str) or not raw_path or not Path(raw_path).is_absolute():
-                raise SystemExit(f"Training plan file {name}:{role} path must be absolute")
-            file_path = Path(raw_path).resolve()
-            digest = _sha256_digest(file_spec["sha256"], label=f"Training plan file {name}:{role} sha256")
-            observed = _sha256_file(file_path)
-            if observed != digest:
-                raise SystemExit(
-                    f"Training plan file {name}:{role} SHA-256 mismatch: expected={digest} observed={observed}"
-                )
-            files[role] = file_path
-            digests[role] = digest
-        by_name[name] = DatasetInputPlan(split_mode=expected_mode, files=files, sha256=digests)
-
-    expected_names = set((*DEFAULT_SOURCE_DATASET_NAMES, "augmented"))
-    if set(by_name) != expected_names:
-        raise SystemExit(
-            "Training plan dataset names disagree with the production set: "
-            f"missing={sorted(expected_names - set(by_name))} extra={sorted(set(by_name) - expected_names)}"
-        )
-    return by_name, source_manifest_sha256, normalized_sealed
 
 
 def _positive_int_arg(args: argparse.Namespace, name: str) -> int:
@@ -246,7 +116,7 @@ def _preflight_matrix_work_dir(path: Path) -> int:
 
 
 def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
-    """Resolve and hash every launch input without loading artifacts or ANDData."""
+    """Resolve every launch input without loading artifacts or ANDData."""
 
     production_version = str(args.production_version)
     if not production_version or production_version != production_version.strip():
@@ -287,22 +157,25 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     if requested_total_ram is not None and int(requested_total_ram) <= 0:
         raise SystemExit(f"--total-ram-bytes must be positive, got {requested_total_ram}")
 
-    if args.training_plan is None or args.expected_training_plan_sha256 is None:
-        raise SystemExit("production training requires --training-plan and --expected-training-plan-sha256")
-    resolved, source_manifest_sha256, sealed_test_manifests = _verified_training_plan(
-        Path(args.training_plan).resolve(),
-        args.expected_training_plan_sha256,
-    )
+    if args.model_plan is None:
+        raise SystemExit("production training requires --model-plan")
+    model_plan = load_model_plan(Path(args.model_plan).resolve())
+    expected_modes = {
+        **{name: "random_blocks" for name in DEFAULT_SOURCE_DATASET_NAMES},
+        "augmented": "fixed_pairs",
+    }
+    observed_modes = {name: dataset.split_mode for name, dataset in model_plan.datasets.items()}
+    if observed_modes != expected_modes:
+        raise SystemExit("model plan datasets disagree with the production dataset set")
 
     return PairwisePreflightPlan(
         output_dir=output_dir,
         dataset_names=dataset_names,
-        datasets=resolved,
+        datasets=model_plan.datasets,
+        model_plan_sha256=model_plan.sha256,
         matrix_work_dir=matrix_work_dir,
         matrix_work_free_bytes=matrix_work_free_bytes,
         total_ram_bytes=None if requested_total_ram is None else int(requested_total_ram),
-        source_manifest_sha256=source_manifest_sha256,
-        sealed_test_manifests=sealed_test_manifests,
     )
 
 
@@ -317,10 +190,7 @@ def _training_config(
         "cluster_n_iter": int(args.cluster_n_iter),
         "dataset_inputs": {
             name: {
-                "files": {
-                    role: {"path": str(path), "sha256": plan.datasets[name].sha256[role]}
-                    for role, path in plan.datasets[name].files.items()
-                },
+                "files": {role: str(path) for role, path in plan.datasets[name].files.items()},
                 "split_mode": plan.datasets[name].split_mode,
             }
             for name in plan.dataset_names
@@ -334,14 +204,9 @@ def _training_config(
         "nan_policy": "preserve_nan",
         "nameless_features_to_use": list(DEFAULT_NAMELESS_FEATURE_GROUPS),
         "production_version": str(args.production_version),
-        "pairwise_inputs_manifest_sha256": plan.source_manifest_sha256,
-        "sealed_test_manifests": plan.sealed_test_manifests,
+        "model_plan_sha256": plan.model_plan_sha256,
         "data_random_seed": int(args.random_seed),
         "model_random_seed": 42,
-        "matrix_work_storage": {
-            "path": str(plan.matrix_work_dir),
-            "measured_free_bytes": plan.matrix_work_free_bytes,
-        },
         "source_dataset_names": list(plan.dataset_names),
         "train_pairs_size": int(args.train_pairs_size),
         "uses_monotone_constraints": True,
@@ -432,6 +297,13 @@ def _load_staged_array(path: Path) -> np.ndarray:
     return np.load(path, allow_pickle=False, mmap_mode="r")
 
 
+def _finite_validation_roc_auc(value: object) -> float:
+    metric = float(value)
+    if not np.isfinite(metric):
+        raise RuntimeError("selected validation ROC AUC must be finite")
+    return metric
+
+
 def _concatenate_staged_arrays(
     output_path: Path,
     arrays: list[Path],
@@ -464,32 +336,20 @@ def _fit_pairwise_model(
     *,
     feature_prefix: str,
     monotone_constraints: Any,
-) -> PairwiseModeler:
+) -> tuple[PairwiseModeler, float]:
     model = PairwiseModeler(
         n_iter=int(args.n_iter),
         n_jobs=int(args.n_jobs),
         monotone_constraints=monotone_constraints,
     )
-    model.fit(
-        _load_staged_array(arrays[f"{feature_prefix}X_train"]),
-        _load_staged_array(arrays["y_train"]),
-        _load_staged_array(arrays[f"{feature_prefix}X_val"]),
-        _load_staged_array(arrays["y_val"]),
-    )
+    X_train = _load_staged_array(arrays[f"{feature_prefix}X_train"])
+    y_train = _load_staged_array(arrays["y_train"])
+    X_val = _load_staged_array(arrays[f"{feature_prefix}X_val"])
+    y_val = _load_staged_array(arrays["y_val"])
+    model.fit(X_train, y_train, X_val, y_val)
+    validation_roc_auc = _finite_validation_roc_auc(roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))
     gc.collect()
-    return model
-
-
-def _assert_sources_unchanged(plan: PairwisePreflightPlan) -> None:
-    changed: list[str] = []
-    for dataset_name in plan.dataset_names:
-        dataset = plan.datasets[dataset_name]
-        after = _hash_source_files(dataset.files)
-        for role, expected_hash in dataset.sha256.items():
-            if after[role] != expected_hash:
-                changed.append(f"{dataset_name}:{role}")
-    if changed:
-        raise RuntimeError("Production training source files changed after preflight: " + ", ".join(changed))
+    return model, validation_roc_auc
 
 
 def _publish_result(
@@ -530,6 +390,13 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         artifact_hashes=artifact_hashes,
     )
     os.environ["OMP_NUM_THREADS"] = str(int(args.n_jobs))
+    logger.info(
+        "pairwise resources n_jobs=%d matrix_work_dir=%s free_bytes=%d total_ram_bytes=%s",
+        int(args.n_jobs),
+        plan.matrix_work_dir,
+        plan.matrix_work_free_bytes,
+        plan.total_ram_bytes,
+    )
 
     featurizer_info = FeaturizationInfo(
         features_to_use=list(DEFAULT_FEATURE_GROUPS),
@@ -600,7 +467,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 del anddata
             gc.collect()
 
-        _assert_sources_unchanged(plan)
         validation_dataset_names = tuple(name for name in plan.dataset_names if name != "augmented")
         union_members = {
             "X_train": plan.dataset_names,
@@ -619,7 +485,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         }
 
         logger.info("fitting pairwise model")
-        union_classifier = _fit_pairwise_model(
+        union_classifier, main_validation_roc_auc = _fit_pairwise_model(
             args,
             union_arrays,
             feature_prefix="",
@@ -627,7 +493,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         )
 
         logger.info("fitting nameless pairwise model")
-        nameless_union_classifier = _fit_pairwise_model(
+        nameless_union_classifier, nameless_validation_roc_auc = _fit_pairwise_model(
             args,
             union_arrays,
             feature_prefix="nameless_",
@@ -653,14 +519,16 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
 
         training_summary: dict[str, Any] = {
             "best_clustering_params": dict(best_params),
-            "elapsed_seconds": round(float(time.perf_counter() - started), 3),
             "main_pairwise_best_params": dict(union_classifier.best_params or {}),
             "main_train_rows": int(_load_staged_array(union_arrays["X_train"]).shape[0]),
             "main_val_rows": int(_load_staged_array(union_arrays["X_val"]).shape[0]),
+            "main_validation_roc_auc": main_validation_roc_auc,
             "nameless_pairwise_best_params": dict(nameless_union_classifier.best_params or {}),
             "nameless_train_rows": int(_load_staged_array(union_arrays["nameless_X_train"]).shape[0]),
             "nameless_val_rows": int(_load_staged_array(union_arrays["nameless_X_val"]).shape[0]),
+            "nameless_validation_roc_auc": nameless_validation_roc_auc,
         }
+        logger.info("pairwise training completed in %.3f seconds", time.perf_counter() - started)
     result = _publish_result(
         args,
         plan,
@@ -695,15 +563,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random-seed", type=int, default=DEFAULT_RANDOM_SEED)
     parser.add_argument("--matrix-work-dir", type=Path, required=True)
     parser.add_argument(
-        "--training-plan",
+        "--model-plan",
         type=Path,
         required=True,
-        help="Test-path-free plan emitted by release_pairwise.py preflight-training-inputs.",
-    )
-    parser.add_argument(
-        "--expected-training-plan-sha256",
-        required=True,
-        help="Expected SHA-256 of --training-plan.",
+        help="Training/validation inputs and EPS policy for this release run.",
     )
     parser.add_argument(
         "--total-ram-bytes",

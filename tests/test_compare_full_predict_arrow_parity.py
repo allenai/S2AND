@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sys
 
@@ -9,10 +8,7 @@ import pytest
 
 pa = pytest.importorskip("pyarrow")
 
-from s2and.arrow_inputs import (  # noqa: E402
-    build_arrow_artifact_manifest,
-    write_arrow_artifact_manifest,
-)
+from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from scripts.verification import compare_full_predict_arrow_parity as parity_module  # noqa: E402
 from scripts.verification.compare_full_predict_arrow_parity import (  # noqa: E402
     _assert_exact,
@@ -30,23 +26,17 @@ def _parity_argv(
     *,
     fixture_dir=None,
     model_dir=None,
-    expected_fixture="1" * 64,
-    expected_model="2" * 64,
 ) -> list[str]:
     return [
         "compare_full_predict_arrow_parity.py",
         "--fixture-dir",
         str(fixture_dir or tmp_path),
-        "--expected-fixture-manifest-sha256",
-        expected_fixture,
         "--output-dir",
         str(tmp_path / "out"),
         "--output-json",
         str(tmp_path / "report.json"),
         "--model-path",
         str(model_dir or tmp_path / "model"),
-        "--expected-model-manifest-sha256",
-        expected_model,
         "--block-size",
         "2",
     ]
@@ -160,37 +150,6 @@ def test_parity_main_writes_fresh_report_on_success(tmp_path, monkeypatch) -> No
     assert json.loads(output_json.read_text(encoding="utf-8")) == report
 
 
-@pytest.mark.parametrize("wrong_binding", ["fixture", "model"])
-def test_parity_wrong_digest_fails_before_fixture_loading(tmp_path, monkeypatch, wrong_binding) -> None:
-    fixture_dir = tmp_path / "fixture"
-    fixture_dir.mkdir()
-    fixture_manifest = fixture_dir / "meta.json"
-    fixture_manifest.write_text("{}\n", encoding="utf-8")
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
-    model_manifest = model_dir / "manifest.json"
-    model_manifest.write_text("{}\n", encoding="utf-8")
-    fixture_sha256 = hashlib.sha256(fixture_manifest.read_bytes()).hexdigest()
-    model_sha256 = hashlib.sha256(model_manifest.read_bytes()).hexdigest()
-    args = parity_module._build_arg_parser().parse_args(
-        _parity_argv(
-            tmp_path,
-            fixture_dir=fixture_dir,
-            model_dir=model_dir,
-            expected_fixture="0" * 64 if wrong_binding == "fixture" else fixture_sha256,
-            expected_model="0" * 64 if wrong_binding == "model" else model_sha256,
-        )[1:]
-    )
-    monkeypatch.setattr(
-        parity_module,
-        "_load_json",
-        lambda _path: pytest.fail("fixture loading must not run"),
-    )
-
-    with pytest.raises(ValueError, match="SHA-256 mismatch"):
-        parity_module.run(args)
-
-
 def test_parity_fixture_meta_paths_resolve_relative_to_fixture_dir(tmp_path) -> None:
     seed_path = tmp_path / "seeds.json"
     seed_path.write_text('{"s1": "c1", "s2": "c2"}\n', encoding="utf-8")
@@ -241,37 +200,13 @@ def test_parity_arrow_writer_adds_current_raw_planner_indexes(tmp_path) -> None:
 
 
 def test_parity_arrow_writer_publishes_validator_compatible_manifest(tmp_path) -> None:
-    from s2and.arrow_inputs import validate_arrow_prediction_artifacts
     from s2and.consts import NORMALIZATION_VERSION
+    from tests.helpers import write_minimal_arrow_prediction_bundle
 
-    arrow_paths = {
-        "signatures": _write_ipc(
-            tmp_path / "signatures.arrow",
-            pa.table({"signature_id": pa.array(["s1"], type=pa.string())}),
-        ),
-        "papers": _write_ipc(
-            tmp_path / "papers.arrow",
-            pa.table({"paper_id": pa.array(["p1"], type=pa.string())}),
-        ),
-        "paper_authors": _write_ipc(
-            tmp_path / "paper_authors.arrow",
-            pa.table({"paper_id": pa.array(["p1"], type=pa.string())}),
-        ),
-    }
-    arrow_paths, _index_metrics, _physical_layout = _write_raw_planner_indexes_and_layout(
-        arrow_paths,
+    write_minimal_arrow_prediction_bundle(tmp_path)
+    with ArrowDataset.open(
         tmp_path,
-    )
-    manifest = build_arrow_artifact_manifest(arrow_paths, tmp_path)
-    arrow_paths["manifest"] = str(write_arrow_artifact_manifest(manifest, tmp_path))
-
-    validated = validate_arrow_prediction_artifacts(
-        arrow_paths,
-        require_specter=False,
-        require_name_counts_index=False,
         expected_normalization_version=NORMALIZATION_VERSION,
-        context="full prediction parity regression test",
-    )
-
-    assert validated.generation_id
-    assert validated.normalization_version == NORMALIZATION_VERSION
+    ) as dataset:
+        assert dataset.generation_id
+        assert dataset.normalization_version == NORMALIZATION_VERSION

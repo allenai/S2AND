@@ -151,18 +151,18 @@ def test_rust_fastcluster_condensed_order_overrides_and_chunk_telemetry(
     assert telemetry["upper_triangle_index_seconds"] == 0.0
 
 
-def test_predict_from_arrow_paths_filters_real_rust_featurizer(
+def test_predict_from_arrow_filters_real_rust_featurizer(
     parity_datasets: tuple[ANDData, ANDData],
 ) -> None:
     _, rust_dataset = parity_datasets
     signatures = ["0", "1", "2", "3"]
     block = {"mixed": signatures}
-    assert "specter" not in rust_dataset.arrow_paths
+    assert not rust_dataset.arrow_dataset.has("specter")
 
     clusterer = _clusterer(fastcluster=True, batch_size=2)
-    predicted_clusters, dists = clusterer.predict_from_arrow_paths(
+    predicted_clusters, dists = clusterer.predict_from_arrow(
         block,
-        rust_dataset.arrow_paths,
+        rust_dataset.arrow_dataset,
     )
 
     predicted_ids = [signature_id for members in predicted_clusters.values() for signature_id in members]

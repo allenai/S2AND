@@ -7,7 +7,7 @@ name = "s2and"
 dynamic = ["version"]
 description = "S2AND"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11,<3.14"
 license = "MIT"
 authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 
@@ -19,7 +19,7 @@ dependencies = [
   "pycld2>=0.41",
   "scikit-learn==1.9.0",
   "text-unidecode==1.3",
-  "hyperopt==0.2.7",
+  "hyperopt==0.3.0",
   "pandas>=2.2.2,<3",
   "lightgbm==4.7.0",
   "fastcluster>=1.3,<2",
@@ -71,9 +71,10 @@ exclude = ["s2and_rust*"]
 [tool.setuptools.package-data]
 s2and = [
   "arrow_schema_contract.json",
+  "data/first_k_letter_counts_from_orcid.json",
+  "data/first_k_letter_counts_from_orcid.manifest.json",
   "data/path_config.json",
   "data/s2and_name_tuples_canonical.txt",
-  "data/s2and_name_tuples_canonical.txt.meta.json",
 ]
 
 [tool.setuptools.dynamic]

@@ -12,30 +12,19 @@ from s2and.arrow_inputs import MissingArrowArtifactError, require_name_counts_in
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_counts_index import NameCountsIndex
 from s2and.name_counts_manifest import ValidatedNameCountsManifest
-from tests.helpers import import_s2and_rust, tiny_name_counts_provenance, tiny_name_counts_tuple
+from tests.helpers import import_s2and_rust, tiny_name_counts_tuple
 
 HAS_RUST, RUST_MODULE = import_s2and_rust()
 
-_REQUIRED_PROVENANCE_FIELDS = (
-    "schema_version",
-    "normalization_version",
-    "generation_id",
-    "source_snapshot_id",
-    "source_kind",
-    "source_query_sha256",
-    "selected_rows_sha256",
-    "source_row_count",
-)
 _REQUIRED_FILE_KEYS = ("first", "last", "first_last", "last_first_initial")
 _REQUIRED_FILE_ENTRY_FIELDS = ("path", "byte_count", "sha256")
-_REQUIRED_MANIFEST_FIELDS = ("schema_version", "normalization_version", "source_provenance", "files")
+_REQUIRED_MANIFEST_FIELDS = ("schema_version", "normalization_version", "files")
 
 
 def _write_index(root: Path) -> Path:
     path, _metrics = write_name_counts_index(
         root,
         tiny_name_counts_tuple(),
-        tiny_name_counts_provenance(),
     )
     return Path(path)
 
@@ -71,10 +60,9 @@ def test_valid_manifest_has_identical_python_and_rust_identity(tmp_path: Path) -
     rust_index = RUST_MODULE.NameCountsIndex.open(str(index_dir))
     manifest_sha256 = hashlib.sha256((index_dir / "manifest.json").read_bytes()).hexdigest()
 
+    assert set(_read_manifest(index_dir)) == set(_REQUIRED_MANIFEST_FIELDS)
     assert python_manifest.normalization_version == rust_index.normalization_version
-    assert "selected_row_count" not in python_manifest.source_provenance
     assert python_manifest.manifest_sha256 == manifest_sha256
-    assert python_manifest.source_provenance["manifest_sha256"] == manifest_sha256
     assert rust_index.name_counts_manifest_sha256 == manifest_sha256
     for file_key, file_entry in _read_manifest(index_dir)["files"].items():
         retained_file = python_manifest.files[file_key]
@@ -85,22 +73,6 @@ def test_valid_manifest_has_identical_python_and_rust_identity(tmp_path: Path) -
     assert callable(rust_index._lookup_many_unique)
 
 
-def test_native_facts_preserve_optional_provenance(tmp_path: Path) -> None:
-    provenance = {
-        **tiny_name_counts_provenance(),
-        "generated_at": "2026-07-23T00:00:00Z",
-        "cardinalities": {"first": 3},
-        "rejected_row_count": 2,
-    }
-    index_dir, _metrics = write_name_counts_index(tmp_path, tiny_name_counts_tuple(), provenance)
-
-    retained = ValidatedNameCountsManifest.load(index_dir)
-
-    assert retained.source_provenance["generated_at"] == provenance["generated_at"]
-    assert retained.source_provenance["cardinalities"] == provenance["cardinalities"]
-    assert retained.source_provenance["rejected_row_count"] == 2
-
-
 def test_required_manifest_fields_are_rejected(tmp_path: Path) -> None:
     for field in _REQUIRED_MANIFEST_FIELDS:
         index_dir = _write_index(tmp_path / field)
@@ -108,40 +80,20 @@ def test_required_manifest_fields_are_rejected(tmp_path: Path) -> None:
         _assert_native_validation_rejects(index_dir, field)
 
 
-@pytest.mark.parametrize(
-    ("location", "schema_version"),
-    (("manifest", "name_counts_index_v1"), ("provenance", "name_counts_provenance_v1")),
-)
-def test_previous_schema_versions_are_rejected(
-    tmp_path: Path,
-    location: str,
-    schema_version: str,
-) -> None:
+@pytest.mark.parametrize("schema_version", ("name_counts_index_v1", "name_counts_index_v2"))
+def test_previous_schema_versions_are_rejected(tmp_path: Path, schema_version: str) -> None:
     index_dir = _write_index(tmp_path)
     manifest = _read_manifest(index_dir)
-    target = manifest if location == "manifest" else manifest["source_provenance"]
-    target["schema_version"] = schema_version
+    manifest["schema_version"] = schema_version
     _write_manifest(index_dir, manifest)
 
     _assert_native_validation_rejects(index_dir, "schema_version")
 
 
-def test_required_provenance_fields_are_rejected(tmp_path: Path) -> None:
-    for field in _REQUIRED_PROVENANCE_FIELDS:
-        index_dir = _write_index(tmp_path / field)
-        manifest = _read_manifest(index_dir)
-        manifest["source_provenance"].pop(field)
-        _write_manifest(index_dir, manifest)
-        _assert_native_validation_rejects(index_dir, field)
+def test_parent_directory_is_not_a_compatible_index_path(tmp_path: Path) -> None:
+    _write_index(tmp_path)
 
-
-def test_removed_selected_row_count_is_rejected(tmp_path: Path) -> None:
-    index_dir = _write_index(tmp_path)
-    manifest = _read_manifest(index_dir)
-    manifest["source_provenance"]["selected_row_count"] = manifest["source_provenance"]["source_row_count"]
-    _write_manifest(index_dir, manifest)
-
-    _assert_native_validation_rejects(index_dir, "selected_row_count")
+    _assert_native_validation_rejects(tmp_path, "does not contain manifest.json")
 
 
 def test_required_file_entries_are_rejected(tmp_path: Path) -> None:
@@ -162,13 +114,36 @@ def test_required_file_entry_fields_are_rejected(tmp_path: Path) -> None:
         _assert_native_validation_rejects(index_dir, field)
 
 
+@pytest.mark.parametrize(
+    ("mutation", "expected_field"),
+    (
+        ("root", "source_provenance"),
+        ("files", "middle"),
+        ("file_entry", "record_count"),
+    ),
+)
+def test_unknown_manifest_fields_are_rejected(tmp_path: Path, mutation: str, expected_field: str) -> None:
+    index_dir = _write_index(tmp_path)
+    manifest = _read_manifest(index_dir)
+    if mutation == "root":
+        manifest["source_provenance"] = {}
+    elif mutation == "files":
+        manifest["files"]["middle"] = manifest["files"]["first"]
+    elif mutation == "file_entry":
+        manifest["files"]["first"]["record_count"] = 0
+    else:  # pragma: no cover - parametrization invariant
+        raise AssertionError(f"unknown mutation {mutation}")
+    _write_manifest(index_dir, manifest)
+
+    _assert_native_validation_rejects(index_dir, expected_field)
+
+
 def test_material_contract_is_identical_at_python_and_rust_boundaries(tmp_path: Path) -> None:
     mutations = (
         ("byte_count_mismatch", "byte_count"),
         ("sha256_mismatch", "SHA-256"),
-        ("legacy_direct_path", "must equal generations"),
-        ("mismatched_generation", "share one generation"),
-        ("missing_published_marker", "published marker"),
+        ("generation_path", "must equal first.bin"),
+        ("wrong_filename", "must equal first.bin"),
     )
     for mutation, expected_field in mutations:
         index_dir = _write_index(tmp_path / mutation / "index")
@@ -177,13 +152,10 @@ def test_material_contract_is_identical_at_python_and_rust_boundaries(tmp_path: 
             manifest["files"]["first"]["byte_count"] += 1
         elif mutation == "sha256_mismatch":
             manifest["files"]["first"]["sha256"] = "f" * 64
-        elif mutation == "legacy_direct_path":
-            manifest["files"]["first"]["path"] = "first.bin"
-        elif mutation == "mismatched_generation":
-            manifest["files"]["last"]["path"] = "generations/other-generation/last.bin"
-        elif mutation == "missing_published_marker":
-            first_path = index_dir / manifest["files"]["first"]["path"]
-            (first_path.parent / ".published").unlink()
+        elif mutation == "generation_path":
+            manifest["files"]["first"]["path"] = "generations/legacy/first.bin"
+        elif mutation == "wrong_filename":
+            manifest["files"]["first"]["path"] = "last.bin"
         else:  # pragma: no cover - mutation invariant
             raise AssertionError(f"unknown mutation {mutation}")
         _write_manifest(index_dir, manifest)

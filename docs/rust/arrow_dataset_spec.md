@@ -1,13 +1,13 @@
 ﻿# Arrow Dataset Specification
 
-Status date: 2026-07-24
+Status date: 2026-07-27
 
 This document defines the Arrow artifact contract for engineers assembling
 datasets for direct Rust S2AND routes. These artifacts are used by
-`Clusterer.predict_from_arrow_paths(...)`,
-`Clusterer.predict_incremental_from_arrow_paths(...)`, and
-`build_training_anddata_from_arrow(...)`. Classic `Clusterer.predict(...)` and
-`Clusterer.predict_incremental(...)` operate on `ANDData` through Python.
+`ArrowDataset.open(root)`, `Clusterer.predict_from_arrow(...)`,
+`Clusterer.predict_incremental_from_arrow(...)`, and
+`build_training_anddata_from_arrow(...)`. Classic prediction methods operate on
+`ANDData` through Python.
 
 Production Arrow is a raw runtime input contract, not a serialized
 `ANDData(preprocess=True)` cache. The goal is feature parity with the current
@@ -68,7 +68,10 @@ Preferred on-disk layout:
   manifest.json
   name_counts_index/
     manifest.json
-    generations/<publication-generation>/...
+    first.bin
+    last.bin
+    first_last.bin
+    last_first_initial.bin
   <dataset>/
     manifest.json
     signatures.arrow
@@ -130,11 +133,11 @@ The machine-readable column contract lives at
 `s2and/arrow_schema_contract.json`. It is a parity guard for producer/consumer
 drift; runtime readers still enforce their local validation rules directly.
 
-The explicit `*_from_arrow_paths` APIs receive this mapping directly. The fixed
-Rust-training constructor stores the validated mapping once as the immutable
-`dataset.arrow_paths` authority. Rust routes do not infer sibling
-`<data_root>_arrow/<dataset>` directories or declare optional sidecars merely
-because files are present on disk. The mapping uses these keys:
+Callers open the dataset root once with `ArrowDataset.open(root)`. The handle
+validates the manifest and retains the immutable tables, indexes, and optional
+name-count index; training and prediction receive that handle directly. Rust
+routes do not infer sibling `<data_root>_arrow/<dataset>` directories. The
+manifest `paths` object uses these keys:
 
 | Key | Meaning |
 |---|---|
@@ -142,10 +145,10 @@ because files are present on disk. The mapping uses these keys:
 | `papers` | Path to `papers.arrow` |
 | `paper_authors` | Path to `paper_authors.arrow` |
 | `specter` | Path to the embedding table selected for the current model, even if the file is physically named `specter2.arrow` |
-| `query_signatures` | Request-local path to `query_signatures.arrow` for raw incremental candidate planning |
-| `cluster_seeds` | Optional path to `cluster_seeds.arrow` for incremental/seeded prediction; required only when this sidecar is the seed source |
-| `cluster_seed_disallows` | Optional path to `cluster_seed_disallows.arrow` for pairwise seed disallow constraints |
-| `altered_cluster_signatures` | Path to `altered_cluster_signatures.arrow` when altered claimed profiles are present |
+| `query_signatures` | Producer/validation path to request-local `query_signatures.arrow` |
+| `cluster_seeds` | Producer/validation path to a seed sidecar; public prediction receives seed mappings explicitly |
+| `cluster_seed_disallows` | Producer/validation path to pairwise seed-disallow constraints |
+| `altered_cluster_signatures` | Producer/validation path for altered claimed profiles |
 | `clusters` | Path to eval-only ground-truth clusters JSON |
 | `name_counts_index` | Required manifest-declared shared/global name-count index directory when the selected model uses `name_counts` |
 | `signatures_batch_index` | S2AND-generated lookup index for `signatures.arrow`; required for production filtered reads |
@@ -331,7 +334,7 @@ Both full Rust featurization and raw candidate planning reject null
 `author_position`: correct coauthor exclusion and local-window evidence cannot
 be reconstructed without the focal position. Release datasets must satisfy
 this required/non-null contract before training or evaluation; see the
-[v1.3 benchmark regeneration stage](../1_3_release_todo.md#21-canonical-benchmark-export).
+[v1.3 training and evaluation data stage](../release.md#stage-2-build-training-and-evaluation-data).
 
 ### `papers.arrow`
 
@@ -468,7 +471,7 @@ the claimed seed components that need altered-profile pre-splitting.
 
 `altered_cluster_signatures.txt` with one signature id per line is supported
 only by classic ANDData/training inputs.
-Production Arrow path mappings must point at the Arrow table.
+The producer manifest path must point at the Arrow table.
 
 ### `<dataset>_clusters.json`
 
@@ -501,8 +504,8 @@ Manifest expectations from this spec:
 2. Do not build a request-time pipeline that loads legacy name-count artifacts
    into Python dicts/lists. That defeats the purpose of this contract.
 
-The on-disk layout, manifest schema (`schema_version: "name_counts_index_v2"`),
-binary record format, and immutable-generation publication ritual are owned by
+The on-disk layout, manifest schema (`schema_version: "name_counts_index_v3"`),
+binary record format, and atomic publication contract are owned by
 [`artifact_formats.md` -- Name Counts](artifact_formats.md#name-counts). New
 writers must publish through that contract.
 
@@ -511,20 +514,16 @@ writers must publish through that contract.
 ## Name Aliases
 
 Production datasets must not contain per-dataset `name_pairs.arrow` files or
-manifest path keys. The runtime default is one strict packaged two-file
-artifact:
+manifest path keys. The runtime default is one packaged text file:
 
 ```text
 s2and_name_tuples_canonical.txt
-s2and_name_tuples_canonical.txt.meta.json
 ```
 
-The metadata binds the exact data filename, SHA-256, size, cardinality,
-canonical-v2 semantics, and source identity. If a non-default alias set is ever
-needed, make it an explicit shared/global two-file artifact with the same
-strict contract, load it through the Python name-tuple artifact loader, and
-pass the validated pairs to Rust. Do not duplicate it into every dataset or
-hide it in Arrow path bundles.
+The Python loader directly validates canonical row shape, ordering, uniqueness,
+and alias semantics. If a non-default alias set is needed, load its explicit
+text path through the same loader and pass the validated pairs to Rust. Do not
+duplicate it into every dataset or hide it in Arrow path bundles.
 
 ---
 
@@ -722,7 +721,7 @@ Required physical-layout checks for large-block optimized artifacts:
 - One-batch lookup tables have
   `row_count <= max_record_batch_rows`; otherwise they should be rejected as
   unoptimized for indexed raw planning.
-- Canonical production/eval generations contain batch indexes for signatures,
+- Canonical production/eval roots contain batch indexes for signatures,
   papers, paper authors, and the selected embedding; they were generated from
   the final Arrow files and the manifest path keys point to them. Reduced
   non-production fixtures may omit only indexes their validation profile does

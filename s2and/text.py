@@ -408,9 +408,8 @@ def has_name_dash(value: str | None) -> bool:
 
 # ------------------------ canonical_v2 name canonicalization ------------------------
 # These functions are the live canonical normalization surface used by ingestion,
-# feature extraction, subblocking, and query adaptation. The remaining release work
-# in docs/normalization_migration_blocked.md concerns artifact regeneration and model
-# retraining. Policy decisions D1-D8 are recorded in the fixture's decisions registry.
+# feature extraction, subblocking, and query adaptation. The durable contract is in
+# docs/data.md; decisions D1-D8 are recorded in the fixture's decisions registry.
 
 # D3 apostrophe-like marks: ASCII apostrophe, backtick, spacing acute, curly quotes,
 # modifier letters (okina/apostrophe), primes, saltillo, U+FE4D (classified with
@@ -477,7 +476,7 @@ def canonicalize_name_parts(
 ) -> CanonicalNameParts:
     """Canonicalize raw first/middle/last per the canonical_v2 pipeline.
 
-    Pipeline (docs/normalization_migration_blocked.md):
+    Pipeline (docs/data.md):
     - None is missing/empty; NBSP is whitespace; soft hyphen and zero-width
       joiner are deleted, not separators.
     - Apostrophe-like marks are deleted globally (D2/D3); dash-like characters

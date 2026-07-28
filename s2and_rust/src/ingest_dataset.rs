@@ -515,9 +515,9 @@ pub(crate) fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec
         return Ok(None);
     }
     // All-zero vectors are kept as present (real vectors), matching the Arrow
-    // ingest path and the Current Decisions table in docs/work_plan.md. The
-    // missing-vector treatment for all-zero rows lives at feature time in the
-    // featurizer, so both ingest modes share the same semantics here.
+    // ingest path. The missing-vector treatment for all-zero rows lives at
+    // feature time in the featurizer, so both ingest modes share the same
+    // semantics here.
     if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
         let readonly = arr.readonly();
         return Ok(Some(readonly.as_slice()?.to_vec()));
@@ -538,7 +538,7 @@ pub(crate) fn extract_name_tuples_argument(
 ) -> PyResult<HashMap<String, HashSet<String>>> {
     let obj = name_tuples.filter(|value| !value.is_none()).ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(
-            "RustFeaturizer.from_arrow_paths requires explicit name-tuple pairs; load artifacts in Python",
+            "RustFeaturizer.from_arrow_dataset requires explicit name-tuple pairs; load artifacts in Python",
         )
     })?;
     extract_name_tuples_map(obj)
@@ -617,10 +617,10 @@ pub(crate) fn build_name_counts_data_from_artifact(
     // fields, spaced — no first-token reduction and no compact-joins. A key is
     // looked up only when its components pass the gate; a gated-out key must
     // yield NaN (not the sentinel default 1.0), mirroring the Python
-    // `canonical_name_count_keys` path (docs/normalization_migration_blocked.md;
-    // work_plan section 2). Without the gates a genuinely missing component
-    // would be indistinguishable from a corpus count of 1, diverging from
-    // Python. A present key that misses the artifact defaults to 1.0.
+    // `canonical_name_count_keys` path (docs/data.md). Without the gates a genuinely
+    // missing component would be indistinguishable from a corpus count of 1,
+    // diverging from Python. A present key that misses the artifact defaults
+    // to 1.0.
     let keys = canonical_name_count_keys_compat(canonical_first, canonical_last);
     let lookup = |kind: RawNameCountKind, key: &Option<String>| match key {
         Some(key) => raw_name_counts.get(kind, key).unwrap_or(1.0),
@@ -714,11 +714,10 @@ mod name_counts_empty_surname_tests {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         );
         let dir = std::env::temp_dir().join(unique);
-        let generation_dir = dir.join("generations").join("empty-test-generation");
-        std::fs::create_dir_all(&generation_dir).expect("create temp generation dir");
+        std::fs::create_dir_all(&dir).expect("create temp index dir");
         let mut files = serde_json::Map::new();
         for name in ["first", "last", "first_last", "last_first_initial"] {
-            let path = generation_dir.join(format!("{name}.bin"));
+            let path = dir.join(format!("{name}.bin"));
             let mut file = std::fs::File::create(&path).expect("create index file");
             file.write_all(&empty_index_bytes())
                 .expect("write index header");
@@ -726,26 +725,15 @@ mod name_counts_empty_surname_tests {
             files.insert(
                 name.to_string(),
                 serde_json::json!({
-                    "path": format!("generations/empty-test-generation/{name}.bin"),
+                    "path": format!("{name}.bin"),
                     "byte_count": path.metadata().expect("file metadata").len(),
                     "sha256": sha256_file(&path).expect("hash fixture"),
                 }),
             );
         }
-        std::fs::write(generation_dir.join(".published"), []).expect("write published marker");
         let manifest = serde_json::json!({
-            "schema_version": "name_counts_index_v2",
+            "schema_version": "name_counts_index_v3",
             "normalization_version": "canonical_v2",
-            "source_provenance": {
-                "schema_version": "name_counts_provenance_v3",
-                "normalization_version": "canonical_v2",
-                "generation_id": "empty-test-generation",
-                "source_snapshot_id": "empty-test-snapshot",
-                "source_kind": "test-fixture",
-                "source_query_sha256": "1".repeat(64),
-                "selected_rows_sha256": "2".repeat(64),
-                "source_row_count": 0,
-            },
             "files": files,
         });
         std::fs::write(

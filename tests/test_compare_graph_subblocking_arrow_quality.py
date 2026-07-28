@@ -1,12 +1,13 @@
-import hashlib
 import json
 import sys
 
 import numpy as np
 import pytest
 
+from s2and.arrow_inputs import ArrowDataset, build_arrow_artifact_manifest, write_arrow_artifact_manifest
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index
 from scripts.verification import compare_graph_subblocking_arrow_quality as script
+from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
 def _base_argv() -> list[str]:
@@ -18,8 +19,6 @@ def _base_argv() -> list[str]:
         "specter.pkl",
         "--arrow-root",
         "arrow",
-        "--expected-input-manifest-sha256",
-        "0" * 64,
         "--output-dir",
         "out",
         "--maximum-size",
@@ -27,13 +26,11 @@ def _base_argv() -> list[str]:
     ]
 
 
-def _release_argv(arrow_root, output_dir, expected_sha256) -> list[str]:
+def _release_argv(arrow_root, output_dir) -> list[str]:
     return [
         "compare_graph_subblocking_arrow_quality.py",
         "--arrow-root",
         str(arrow_root),
-        "--expected-input-manifest-sha256",
-        expected_sha256,
         "--output-dir",
         str(output_dir),
         "--comparison-mode",
@@ -60,22 +57,25 @@ def _write_table(path, table) -> None:
             writer.write_table(table)
 
 
-def _write_indexed_table(path, table, *, key_column: str, table_name: str) -> None:
+def _write_indexed_table(path, table, *, key_column: str, table_name: str) -> tuple[str, str]:
     _write_table(path, table)
     index_key = f"{table_name}_batch_index"
+    index_path = path.parent / f"{table_name}.{index_key}.bin"
     write_arrow_batch_lookup_index(
         path,
-        path.parent / f"{table_name}.{index_key}.bin",
+        index_path,
         key_column=key_column,
         table_name=table_name,
     )
+    return str(path), str(index_path)
 
 
 def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_path) -> None:
     pa = pytest.importorskip("pyarrow")
     arrow_root = tmp_path / "arrow"
     embeddings = np.asarray([[1.0, 0.0], [0.99, 0.01]], dtype=np.float32)
-    _write_indexed_table(
+    paths = write_minimal_arrow_prediction_bundle(arrow_root, include_specter=True)
+    paths["signatures"], paths["signatures_batch_index"] = _write_indexed_table(
         arrow_root / "signatures.arrow",
         pa.table(
             {
@@ -83,6 +83,8 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
                 "paper_id": pa.array(["p1", "p2"], type=pa.string()),
                 "author_first": pa.array(["Hui", "Hui"], type=pa.string()),
                 "author_middle": pa.array(["", ""], type=pa.string()),
+                "author_last": pa.array(["Wang", "Wang"], type=pa.string()),
+                "author_suffix": pa.array(["", ""], type=pa.string()),
                 "author_affiliations": pa.array([["AI Lab"], ["AI Lab"]], type=pa.list_(pa.string())),
                 "author_orcid": pa.array([None, None], type=pa.string()),
                 "author_position": pa.array([0, 0], type=pa.int64()),
@@ -91,7 +93,7 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
         key_column="signature_id",
         table_name="signatures",
     )
-    _write_indexed_table(
+    paths["paper_authors"], paths["paper_authors_batch_index"] = _write_indexed_table(
         arrow_root / "paper_authors.arrow",
         pa.table(
             {
@@ -106,7 +108,7 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
         key_column="paper_id",
         table_name="paper_authors",
     )
-    _write_indexed_table(
+    paths["specter"], paths["specter_batch_index"] = _write_indexed_table(
         arrow_root / "specter.arrow",
         pa.table(
             {
@@ -117,13 +119,16 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
         key_column="paper_id",
         table_name="specter",
     )
+    write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, arrow_root), arrow_root)
 
-    dataset, signature_ids = script.load_lightweight_dataset_from_arrow(
-        arrow_root,
-        limit=2,
-        sample_mode="first",
-        seed=7,
-    )
+    with ArrowDataset.open(arrow_root, require_specter=True) as arrow_dataset:
+        with arrow_dataset.use(require_specter=True) as arrow_lease:
+            dataset, signature_ids = script.load_lightweight_dataset_from_arrow(
+                arrow_lease,
+                limit=2,
+                sample_mode="first",
+                seed=7,
+            )
 
     assert signature_ids == ["s1", "s2"]
     assert dataset.signatures["s1"].author_info_first == "Hui"
@@ -133,14 +138,11 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
     assert np.allclose(dataset.specter_embeddings["p1"], np.array([1.0, 0.0], dtype=np.float32))
 
 
-def test_subblocking_release_report_binds_input_and_output(tmp_path, monkeypatch) -> None:
+def test_subblocking_release_report_contains_metrics_and_artifact(tmp_path, monkeypatch) -> None:
     arrow_root = tmp_path / "arrow"
-    arrow_root.mkdir()
-    manifest_path = arrow_root / "manifest.json"
-    manifest_path.write_text('{"schema":"fixture"}\n', encoding="utf-8")
-    expected_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    write_minimal_arrow_prediction_bundle(arrow_root, include_specter=True)
     output_dir = tmp_path / "report"
-    monkeypatch.setattr(sys, "argv", _release_argv(arrow_root, output_dir, expected_sha256))
+    monkeypatch.setattr(sys, "argv", _release_argv(arrow_root, output_dir))
     monkeypatch.setattr(script, "load_signature_ids_from_arrow", lambda *_args, **_kwargs: ["s1", "s2"])
     monkeypatch.setattr(
         script,
@@ -150,28 +152,10 @@ def test_subblocking_release_report_binds_input_and_output(tmp_path, monkeypatch
 
     script.main()
 
-    report = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+    report = json.loads((output_dir / "subblocking_evaluation_report.json").read_text(encoding="utf-8"))
     assert report["schema_version"] == script.REPORT_SCHEMA
-    assert report["input_manifest_sha256"] == expected_sha256
-    assert (
-        report["output_sha256"]["rust_subblocks.json"]
-        == hashlib.sha256((output_dir / "rust_subblocks.json").read_bytes()).hexdigest()
-    )
-
-
-def test_subblocking_wrong_digest_fails_before_loading_data(tmp_path, monkeypatch) -> None:
-    arrow_root = tmp_path / "arrow"
-    arrow_root.mkdir()
-    (arrow_root / "manifest.json").write_text("{}\n", encoding="utf-8")
-    output_dir = tmp_path / "report"
-    monkeypatch.setattr(sys, "argv", _release_argv(arrow_root, output_dir, "0" * 64))
-    monkeypatch.setattr(
-        script,
-        "load_signature_ids_from_arrow",
-        lambda *_args, **_kwargs: pytest.fail("data loading must not run"),
-    )
-
-    with pytest.raises(ValueError, match="Input manifest SHA-256 mismatch"):
-        script.main()
-
-    assert not (output_dir / "summary.json").exists()
+    assert report["counts"]["signature_count"] == 2
+    assert json.loads((output_dir / "rust_subblocks.json").read_text(encoding="utf-8")) == {
+        "a": ["s1"],
+        "b": ["s2"],
+    }

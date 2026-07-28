@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import random
@@ -17,7 +18,8 @@ from s2and.feature_port import (
     get_constraints_matrix_indexed_rust,
 )
 from s2and.featurizer import _single_pair_featurize
-from s2and.text import detect_language
+from s2and.text import canonicalize_name_parts, detect_language
+from scripts.convert_to_arrow import join_canonical_benchmark_names
 from tests.helpers import build_arrow_training_dataset, equalish, import_s2and_rust, tiny_name_counts_index
 
 HAS_RUST, _rust_import_payload = import_s2and_rust()
@@ -61,11 +63,11 @@ def _constraint_indexed_rust(dataset, sig_id_1: str, sig_id_2: str, **kwargs):
     )[0]
 
 
-def _load_dataset_from_dir(data_dir, name):
+def _load_dataset_from_dir(data_dir, name, *, signatures=None):
     cluster_seeds_path = os.path.join(data_dir, "cluster_seeds.json")
     cluster_seeds = cluster_seeds_path if os.path.exists(cluster_seeds_path) else None
     ds = ANDData(
-        signatures=os.path.join(data_dir, "signatures.json"),
+        signatures=signatures if signatures is not None else os.path.join(data_dir, "signatures.json"),
         papers=os.path.join(data_dir, "papers.json"),
         name=name,
         mode="train",
@@ -145,7 +147,25 @@ def source_dataset():
         _reset_featurizer_env_caches()
 
         data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
-        return _attach_fake_specter_embeddings(_load_dataset_from_dir(data_dir, "dummy_parity_session"))
+        with open(os.path.join(data_dir, "signatures.json"), encoding="utf-8") as infile:
+            raw_signatures = json.load(infile)
+        canonical_rows = [
+            {
+                "signature_id": signature_id,
+                **canonicalize_name_parts(
+                    signature["author_info"].get("first"),
+                    signature["author_info"].get("middle"),
+                    signature["author_info"].get("last"),
+                )._asdict(),
+            }
+            for signature_id, signature in raw_signatures.items()
+        ]
+        signatures, report = join_canonical_benchmark_names(raw_signatures, canonical_rows)
+        assert report["rows"] == len(raw_signatures)
+        assert report["changed_signatures"] > 0
+        return _attach_fake_specter_embeddings(
+            _load_dataset_from_dir(data_dir, "dummy_parity_session", signatures=signatures)
+        )
 
 
 @pytest.fixture(scope="session")

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import s2and.runtime as runtime
-from s2and.arrow_inputs import MissingArrowArtifactError
+from s2and.arrow_inputs import ArrowDataset, MissingArrowArtifactError
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
 from tests.helpers import write_minimal_arrow_prediction_bundle
@@ -23,52 +23,23 @@ def _year_diff_clusterer() -> Clusterer:
     )
 
 
-def _unindexed_arrow_paths(tmp_path: Path) -> dict[str, str]:
-    paths = {
-        "signatures": tmp_path / "signatures.arrow",
-        "papers": tmp_path / "papers.arrow",
-        "paper_authors": tmp_path / "paper_authors.arrow",
-    }
-    for path in paths.values():
-        path.touch()
-    return {key: str(path) for key, path in paths.items()}
-
-
-def test_filtered_arrow_prediction_rejects_unindexed_input(tmp_path: Path) -> None:
-    clusterer = _year_diff_clusterer()
-
-    with pytest.raises(MissingArrowArtifactError, match="batch_index"):
-        clusterer.predict_from_arrow_paths(
-            {"block": ["s1"]},
-            _unindexed_arrow_paths(tmp_path),
-        )
-
-
-def test_incremental_arrow_prediction_rejects_unindexed_input(tmp_path: Path) -> None:
-    clusterer = _year_diff_clusterer()
-
-    with pytest.raises(MissingArrowArtifactError, match="batch_index"):
-        clusterer.predict_incremental_from_arrow_paths(
-            ["s1"],
-            _unindexed_arrow_paths(tmp_path),
-        )
-
-
-def test_filtered_arrow_prediction_rejects_disabling_required_name_counts() -> None:
+def test_filtered_arrow_prediction_rejects_disabling_required_name_counts(tmp_path: Path) -> None:
     clusterer = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["name_counts"]),
         classifier=None,
         cluster_model=None,
         n_jobs=1,
     )
+    write_minimal_arrow_prediction_bundle(tmp_path)
+    arrow_dataset = ArrowDataset.open(tmp_path)
 
     with pytest.raises(
         ValueError,
         match="cannot run with load_name_counts=False when the clusterer selects name_counts features",
     ):
-        clusterer.predict_from_arrow_paths(
+        clusterer.predict_from_arrow(
             {"block": ["s1"]},
-            {},
+            arrow_dataset,
             load_name_counts=False,
         )
 
@@ -82,24 +53,29 @@ def test_filtered_arrow_prediction_rejects_disabling_required_name_counts() -> N
     ],
 )
 def test_filtered_arrow_prediction_rejects_invalid_subblocking_arguments(
+    tmp_path: Path,
     batching_threshold: int,
     dists: dict[str, np.ndarray] | None,
     message: str,
 ) -> None:
+    write_minimal_arrow_prediction_bundle(tmp_path)
+    arrow_dataset = ArrowDataset.open(tmp_path)
     with pytest.raises(ValueError, match=message):
-        _year_diff_clusterer().predict_from_arrow_paths(
+        _year_diff_clusterer().predict_from_arrow(
             {"block": ["s0", "s1"]},
-            {},
+            arrow_dataset,
             dists=dists,
             batching_threshold=batching_threshold,
         )
 
 
 def test_filtered_arrow_prediction_requires_specter_for_subblocking(tmp_path: Path) -> None:
+    write_minimal_arrow_prediction_bundle(tmp_path)
+    arrow_dataset = ArrowDataset.open(tmp_path)
     with pytest.raises(MissingArrowArtifactError) as exc_info:
-        _year_diff_clusterer().predict_from_arrow_paths(
+        _year_diff_clusterer().predict_from_arrow(
             {"block": ["s0", "s1"]},
-            write_minimal_arrow_prediction_bundle(tmp_path),
+            arrow_dataset,
             batching_threshold=1,
         )
 
@@ -120,7 +96,7 @@ def test_classic_predict_rejects_rust_context() -> None:
         run_id="test-explicit-routing",
     )
 
-    with pytest.raises(ValueError, match="predict_from_arrow_paths"):
+    with pytest.raises(ValueError, match="predict_from_arrow"):
         clusterer.predict(
             {"block": ["s1"]},
             SimpleNamespace(name="json_dataset"),  # type: ignore[arg-type]
@@ -142,7 +118,7 @@ def test_classic_incremental_rejects_rust_context() -> None:
         run_id="test-explicit-routing",
     )
 
-    with pytest.raises(ValueError, match="predict_incremental_from_arrow_paths"):
+    with pytest.raises(ValueError, match="predict_incremental_from_arrow"):
         clusterer.predict_incremental(
             ["s1"],
             SimpleNamespace(name="json_dataset"),  # type: ignore[arg-type]

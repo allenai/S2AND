@@ -2,11 +2,7 @@ use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
-use crate::arrow_batch_lookup::{
-    read_indexed_arrow_batches, read_indexed_arrow_batches_from_index, ArrowBatchLookupIndex,
-    IndexedArrowReadStats,
-};
-use crate::name_counts::{NameCountsData, RawNameCountIndex, RawNameCountMaps};
+use crate::name_counts::NameCountsData;
 use crate::orcid::normalize_orcid_owned;
 use crate::raw_arrow::arrow_io::{
     arrow_column_index, arrow_optional_bool, arrow_optional_column_index,
@@ -667,111 +663,6 @@ pub(crate) fn read_raw_arrow_specter_from_batches(
         }
     }
     Ok(out)
-}
-
-pub(crate) fn read_raw_arrow_with_optional_index<T, F>(
-    path: &str,
-    index_path: Option<&str>,
-    index: Option<&ArrowBatchLookupIndex>,
-    key_column: &str,
-    keep_ids: Option<&HashSet<String>>,
-    read_from_batches: F,
-) -> PyResult<(T, IndexedArrowReadStats)>
-where
-    F: Fn(&str, Vec<RecordBatch>, Option<&HashSet<String>>) -> PyResult<T>,
-{
-    if let (Some(index_path), Some(keep_ids)) = (index_path, keep_ids) {
-        let (batches, stats) = match index {
-            Some(index) => {
-                read_indexed_arrow_batches_from_index(path, index_path, index, keep_ids)?
-            }
-            None => read_indexed_arrow_batches(path, index_path, key_column, keep_ids)?,
-        };
-        return Ok((read_from_batches(path, batches, Some(keep_ids))?, stats));
-    }
-    if keep_ids.is_some() && index_path.is_none() {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Refusing filtered full scan of Arrow IPC file '{path}' without a batch lookup index for key column \
-             '{key_column}'. Provide the matching *_batch_index path."
-        )));
-    }
-    let batches = read_arrow_batches(path)?;
-    let stats = IndexedArrowReadStats {
-        batches_read: batches.len(),
-        rows_scanned: batches.iter().map(|batch| batch.num_rows()).sum(),
-    };
-    let loaded = read_from_batches(path, batches, keep_ids)?;
-    Ok((loaded, stats))
-}
-
-pub(crate) fn read_raw_arrow_signatures_with_optional_index(
-    path: &str,
-    index_path: Option<&str>,
-    index: Option<&ArrowBatchLookupIndex>,
-    keep_signature_ids: Option<&HashSet<String>>,
-) -> PyResult<(HashMap<String, RawArrowSignature>, IndexedArrowReadStats)> {
-    read_raw_arrow_with_optional_index(
-        path,
-        index_path,
-        index,
-        "signature_id",
-        keep_signature_ids,
-        read_raw_arrow_signatures_from_batches,
-    )
-}
-
-pub(crate) fn read_raw_arrow_papers_with_optional_index(
-    path: &str,
-    index_path: Option<&str>,
-    index: Option<&ArrowBatchLookupIndex>,
-    keep_paper_ids: &HashSet<String>,
-) -> PyResult<(HashMap<String, RawArrowPaper>, IndexedArrowReadStats)> {
-    read_raw_arrow_with_optional_index(
-        path,
-        index_path,
-        index,
-        "paper_id",
-        Some(keep_paper_ids),
-        read_raw_arrow_papers_from_batches,
-    )
-}
-
-pub(crate) fn read_raw_arrow_paper_authors_with_optional_index(
-    path: &str,
-    index_path: Option<&str>,
-    index: Option<&ArrowBatchLookupIndex>,
-    keep_paper_ids: &HashSet<String>,
-) -> PyResult<(HashMap<String, Vec<(i64, String)>>, IndexedArrowReadStats)> {
-    read_raw_arrow_with_optional_index(
-        path,
-        index_path,
-        index,
-        "paper_id",
-        Some(keep_paper_ids),
-        read_raw_arrow_paper_authors_from_batches,
-    )
-}
-
-pub(crate) fn read_raw_arrow_specter_with_optional_index(
-    path: &str,
-    index_path: Option<&str>,
-    index: Option<&ArrowBatchLookupIndex>,
-    keep_paper_ids: &HashSet<String>,
-) -> PyResult<(HashMap<String, Vec<f32>>, IndexedArrowReadStats)> {
-    read_raw_arrow_with_optional_index(
-        path,
-        index_path,
-        index,
-        "paper_id",
-        Some(keep_paper_ids),
-        read_raw_arrow_specter_from_batches,
-    )
-}
-
-pub(crate) fn read_raw_name_counts_index(path: &str) -> PyResult<RawNameCountMaps> {
-    Ok(RawNameCountMaps::from_index(
-        RawNameCountIndex::open_fully_validated(path)?,
-    ))
 }
 
 #[cfg(test)]

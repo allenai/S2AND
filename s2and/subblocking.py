@@ -18,10 +18,9 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import MultiLabelBinarizer
 
-from s2and.arrow_inputs import require_arrow_artifacts
+from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_schema import validate_arrow_schema
 from s2and.consts import _PACKAGE_DATA_DIR, SPECTER_DIM
-from s2and.incremental_linking.feature_block_arrow import read_arrow_batch_lookup_index_batch_indices_for_request
 from s2and.orcid_prefix_counts import (
     load_canonical_orcid_prefix_counts,
 )
@@ -859,8 +858,8 @@ def cluster_with_graph_fallback(
 
 
 def _read_arrow_rows_by_values(
-    path: Any,
-    index_path: Any,
+    arrow_dataset: Any,
+    table_key: str,
     key_column: str,
     values: Sequence[str],
     *,
@@ -873,18 +872,11 @@ def _read_arrow_rows_by_values(
     keep_values = {str(value) for value in values}
     if not keep_values:
         return []
-    batch_indices = sorted(
-        read_arrow_batch_lookup_index_batch_indices_for_request(
-            path,
-            index_path,
-            key_column=key_column,
-            values=keep_values,
-        )
-    )
+    batch_indices = sorted(arrow_dataset.native.batch_indices(table_key, list(keep_values)))
     rows: list[Mapping[str, Any]] = []
     record_batches_scanned = 0
     rows_scanned = 0
-    with pa.memory_map(str(path), "r") as source:
+    with arrow_dataset.open_file(table_key) as source_file, pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
         required_columns = set(required_columns)
         required_columns.add(key_column)
@@ -964,30 +956,21 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
 
 
 def _coauthor_blocks_by_paper_from_arrow(
-    paths: Mapping[str, Any],
+    arrow_dataset: Any,
     paper_ids: Sequence[str],
     *,
     load_metrics: dict[str, int],
 ) -> dict[str, list[tuple[int, str]]]:
     pa = __import__("pyarrow")
-    paper_authors_path = paths.get("paper_authors")
-    if paper_authors_path is None:
+    if not arrow_dataset.has("paper_authors"):
         return {}
-    paper_authors_index_path = paths["paper_authors_batch_index"]
     keep_values = {str(value) for value in paper_ids}
-    batch_indices = sorted(
-        read_arrow_batch_lookup_index_batch_indices_for_request(
-            paper_authors_path,
-            paper_authors_index_path,
-            key_column="paper_id",
-            values=keep_values,
-        )
-    )
+    batch_indices = sorted(arrow_dataset.native.batch_indices("paper_authors", list(keep_values)))
     out: dict[str, list[tuple[int, str]]] = defaultdict(list)
     record_batches_scanned = 0
     rows_scanned = 0
     rows_loaded = 0
-    with pa.memory_map(str(paper_authors_path), "r") as source:
+    with arrow_dataset.open_file("paper_authors") as source_file, pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
         required_columns = {"paper_id", "position", "author_name"}
         validate_arrow_schema(reader.schema, table_name="paper_authors", columns=required_columns)
@@ -1047,30 +1030,21 @@ def _coauthor_blocks_by_paper_from_arrow(
 
 
 def _specter_embeddings_from_arrow(
-    paths: Mapping[str, Any],
+    arrow_dataset: Any,
     paper_ids: Sequence[str],
     *,
     load_metrics: dict[str, int],
 ) -> dict[str, np.ndarray]:
     pa = __import__("pyarrow")
-    if "specter" not in paths:
-        raise ValueError("Graph subblocking requires a 'specter' Arrow path")
-    specter_path = paths["specter"]
-    specter_index_path = paths["specter_batch_index"]
+    if not arrow_dataset.has("specter"):
+        raise ValueError("Graph subblocking requires SPECTER Arrow data")
     keep_values = {str(value) for value in paper_ids}
-    batch_indices = sorted(
-        read_arrow_batch_lookup_index_batch_indices_for_request(
-            specter_path,
-            specter_index_path,
-            key_column="paper_id",
-            values=keep_values,
-        )
-    )
+    batch_indices = sorted(arrow_dataset.native.batch_indices("specter", list(keep_values)))
     embeddings: dict[str, np.ndarray] = {}
     record_batches_scanned = 0
     rows_scanned = 0
     rows_loaded = 0
-    with pa.memory_map(str(specter_path), "r") as source:
+    with arrow_dataset.open_file("specter") as source_file, pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
         required_columns = {"paper_id", "embedding"}
         validate_arrow_schema(reader.schema, table_name="specter", columns=required_columns)
@@ -1114,37 +1088,17 @@ def _specter_embeddings_from_arrow(
     return embeddings
 
 
-def _require_arrow_graph_subblocking_artifacts(paths: Mapping[str, Any]) -> dict[str, str]:
-    return require_arrow_artifacts(
-        paths,
-        required_keys=(
-            "signatures",
-            "signatures_batch_index",
-            "paper_authors",
-            "paper_authors_batch_index",
-            "specter",
-            "specter_batch_index",
-        ),
-        context="Arrow graph subblocking",
-        producer_hint=(
-            "include signatures, paper_authors, specter, and matching raw-planner batch indexes; "
-            "Arrow graph subblocking refuses filtered full scans"
-        ),
-    )
-
-
 def _load_arrow_graph_subblocking_dataset(
-    paths: Mapping[str, Any],
+    arrow_dataset: Any,
     signature_ids: Sequence[str],
     *,
     random_seed: int,
     load_metrics: dict[str, int],
 ) -> SimpleNamespace:
-    paths = _require_arrow_graph_subblocking_artifacts(paths)
     signature_ids = tuple(dict.fromkeys(str(signature_id) for signature_id in signature_ids))
     signature_rows = _read_arrow_rows_by_values(
-        paths["signatures"],
-        paths["signatures_batch_index"],
+        arrow_dataset,
+        "signatures",
         "signature_id",
         signature_ids,
         required_columns={
@@ -1174,8 +1128,16 @@ def _load_arrow_graph_subblocking_dataset(
             )
         paper_id_by_signature[signature_id] = str(raw_paper_id)
     paper_ids = tuple(dict.fromkeys(paper_id_by_signature.values()))
-    coauthors_by_paper = _coauthor_blocks_by_paper_from_arrow(paths, paper_ids, load_metrics=load_metrics)
-    specter_embeddings = _specter_embeddings_from_arrow(paths, paper_ids, load_metrics=load_metrics)
+    coauthors_by_paper = _coauthor_blocks_by_paper_from_arrow(
+        arrow_dataset,
+        paper_ids,
+        load_metrics=load_metrics,
+    )
+    specter_embeddings = _specter_embeddings_from_arrow(
+        arrow_dataset,
+        paper_ids,
+        load_metrics=load_metrics,
+    )
 
     signature_objects: dict[str, SimpleNamespace] = {}
     for signature_id in signature_ids:
@@ -1226,14 +1188,14 @@ class ArrowGraphSubblockingFallback:
 
     def __init__(
         self,
-        paths: Mapping[str, Any],
-        signature_ids: Sequence[str],
+        arrow_dataset: ArrowDataset,
         *,
         config: GraphSubblockingConfig | None = None,
         random_seed: int = 0,
     ) -> None:
-        self.paths = dict(paths)
-        self.signature_ids = tuple(dict.fromkeys(str(signature_id) for signature_id in signature_ids))
+        if not isinstance(arrow_dataset, ArrowDataset):
+            raise TypeError("ArrowGraphSubblockingFallback requires an open ArrowDataset")
+        self.arrow_dataset = arrow_dataset
         self.config = config or GraphSubblockingConfig()
         self.random_seed = int(random_seed)
         self.stats: list[dict[str, Any]] = []
@@ -1244,12 +1206,15 @@ class ArrowGraphSubblockingFallback:
     def _load_signature_ids(self, signature_ids: Sequence[str]) -> None:
         signature_ids = tuple(dict.fromkeys(str(signature_id) for signature_id in signature_ids))
         start = time.perf_counter()
-        self._dataset = _load_arrow_graph_subblocking_dataset(
-            self.paths,
-            signature_ids,
-            random_seed=self.random_seed,
-            load_metrics=self.load_metrics,
-        )
+        with self.arrow_dataset.use(
+            require_specter=True,
+        ) as arrow_lease:
+            self._dataset = _load_arrow_graph_subblocking_dataset(
+                arrow_lease,
+                signature_ids,
+                random_seed=self.random_seed,
+                load_metrics=self.load_metrics,
+            )
         self.load_seconds = float(time.perf_counter() - start)
 
     def prepare(self, signature_groups: Iterable[Iterable[str]]) -> None:
@@ -1297,8 +1262,7 @@ class ArrowGraphSubblockingFallback:
 
 
 def make_arrow_graph_subblocking_cluster_fn(
-    paths: Mapping[str, Any],
-    signature_ids: Sequence[str],
+    arrow_dataset: ArrowDataset,
     *,
     config: GraphSubblockingConfig | None = None,
     random_seed: int = 0,
@@ -1306,8 +1270,7 @@ def make_arrow_graph_subblocking_cluster_fn(
     """Return a lazy Arrow-backed graph fallback callable for subblocking."""
 
     return ArrowGraphSubblockingFallback(
-        paths,
-        signature_ids,
+        arrow_dataset,
         config=config,
         random_seed=random_seed,
     )
@@ -1644,7 +1607,7 @@ def _require_unique_subblocking_signature_ids(signature_ids: Iterable[Any]) -> l
 
 
 def _make_subblocks_with_telemetry_arrow_rust(
-    arrow_paths: Mapping[str, Any],
+    arrow_dataset: Any,
     signature_ids,
     maximum_size=15000,
     first_k_letter_counts_sorted=FIRST_K_LETTER_COUNTS,
@@ -1660,7 +1623,7 @@ def _make_subblocks_with_telemetry_arrow_rust(
     rust_prefix_counts = {prefix: dict(nested_counts) for prefix, nested_counts in first_k_letter_counts_sorted.items()}
     rust_make_subblocks = load_s2and_rust_extension().make_subblocks_with_telemetry_arrow_native_graph
     subblocks, telemetry = rust_make_subblocks(
-        dict(arrow_paths),
+        arrow_dataset.native,
         [str(signature_id) for signature_id in _require_unique_subblocking_signature_ids(signature_ids)],
         int(maximum_size),
         rust_prefix_counts,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import os
 import sys
@@ -11,11 +12,7 @@ from pathlib import Path
 import pytest
 
 from s2and.consts import _PACKAGE_DATA_DIR
-from s2and.name_tuple_artifact import (
-    NAME_TUPLE_ARTIFACT_SEMANTICS,
-    build_name_tuple_artifact_metadata,
-    load_name_tuple_artifact,
-)
+from s2and.name_tuple_artifact import load_name_tuple_artifact
 from scripts.production import generate_canonical_name_tuples
 
 
@@ -32,44 +29,12 @@ def test_canonical_name_tuple_generator_requires_explicit_paths(
     assert exc_info.value.code == 2
 
 
-def _write_artifact(
-    path: Path,
-    data: bytes = b"alice,ally\n",
-    *,
-    pair_count: int = 1,
-) -> dict:
-    metadata = build_name_tuple_artifact_metadata(
-        source_filename="source.txt",
-        source_bytes=b"Alice,Ally\n",
-        data_filename=path.name,
-        data_bytes=data,
-        pair_count=pair_count,
-        generated_at="2026-07-10T00:00:00+00:00",
-        input_pair_count=1,
-        dropped_identity=0,
-        dropped_prefix_compatible=0,
-        dropped_empty=0,
-        dropped_duplicate_canonical=0,
-    )
-    path.write_bytes(data)
-    Path(str(path) + ".meta.json").write_text(json.dumps(metadata), encoding="utf-8")
-    return metadata
-
-
-def _set_pair_count(metadata: dict, pair_count: int) -> None:
-    metadata["data"]["pair_count"] = pair_count
-    metadata["generation_counts"]["input_pair_count"] = pair_count
-
-
-def test_checked_in_canonical_name_tuple_hash_matches_unchanged_data() -> None:
-    artifact = load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt")
-    metadata = json.loads(
-        (Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt.meta.json").read_text(encoding="utf-8")
-    )
+def test_checked_in_canonical_name_tuples_load_directly() -> None:
+    data_path = Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt"
+    artifact = load_name_tuple_artifact(data_path)
 
     assert len(artifact.pairs) == 5027
-    assert artifact.data_sha256 == "b21638351149389c57eca547b0f79c80084e56ad273f31e778cb1db1866945a8"
-    assert metadata["generation_counts"]["dropped_duplicate_canonical"] == 3768
+    assert artifact.data_sha256 == hashlib.sha256(data_path.read_bytes()).hexdigest()
 
 
 def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
@@ -88,25 +53,19 @@ def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
     assert artifact.pairs.isdisjoint(excluded)
 
 
-def test_custom_artifact_requires_sidecar_and_rejects_data_tamper(tmp_path: Path) -> None:
+def test_custom_artifact_loads_directly(tmp_path: Path) -> None:
     artifact_path = tmp_path / "aliases.txt"
-    artifact_path.write_text("alice,ally\n", encoding="utf-8")
-    with pytest.raises(FileNotFoundError, match="aliases.txt.meta.json"):
-        load_name_tuple_artifact(artifact_path)
+    artifact_path.write_bytes(b"alice,ally\n")
 
-    _write_artifact(artifact_path)
     artifact = load_name_tuple_artifact(artifact_path)
+
     assert artifact.pairs == frozenset({("alice", "ally")})
-
-    artifact_path.write_bytes(b"alica,ally\n")
-    with pytest.raises(ValueError, match="SHA-256 mismatch"):
-        load_name_tuple_artifact(artifact_path)
+    assert artifact.data_sha256 == hashlib.sha256(artifact_path.read_bytes()).hexdigest()
 
 
-def test_loader_reads_data_and_metadata_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loader_reads_data_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     artifact_path = tmp_path / "aliases.txt"
-    metadata_path = Path(str(artifact_path) + ".meta.json")
-    _write_artifact(artifact_path)
+    artifact_path.write_bytes(b"alice,ally\n")
     path_type = type(artifact_path)
     read_bytes = path_type.read_bytes
     reads: list[Path] = []
@@ -118,56 +77,30 @@ def test_loader_reads_data_and_metadata_once(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setattr(path_type, "read_bytes", recording_read_bytes)
 
     assert load_name_tuple_artifact(artifact_path).pairs == frozenset({("alice", "ally")})
-    assert reads == [metadata_path, artifact_path]
+    assert reads == [artifact_path]
 
 
 @pytest.mark.parametrize(
-    ("mutation", "message"),
+    ("payload", "message"),
     [
-        (lambda metadata: metadata.update(schema_version="unknown"), "schema_version"),
-        (lambda metadata: _set_pair_count(metadata, 4), "pair_count mismatch"),
-        (lambda metadata: metadata["semantics"].update(directionality="one_way"), "unsupported semantics"),
-        (
-            lambda metadata: metadata["generation_counts"].update(input_pair_count=1 << 64),
-            "unsigned 64-bit integer",
-        ),
-        (
-            lambda metadata: metadata["generation_counts"].pop("dropped_duplicate_canonical"),
-            "dropped_duplicate_canonical",
-        ),
-        (
-            lambda metadata: metadata["generation_counts"].update(input_pair_count=2),
-            "do not account for every input pair",
-        ),
+        (b"ally,alice\n", "name_a must be lexicographically less than name_b"),
+        (b"alice,ally\nalice,ally\n", "rows must be unique and sorted"),
+        (b"alice,alice\n", "identity"),
+        (b"ann,anna\n", "prefix-compatible"),
+        (b"Alice,ally\n", "noncanonical"),
+        (b"alice\n", "two nonempty fields"),
+        (b"\xff\n", "not valid UTF-8"),
     ],
 )
-def test_metadata_contract_rejects_schema_cardinality_and_semantic_drift(
-    tmp_path: Path,
-    mutation,
-    message: str,
-) -> None:
+def test_loader_rejects_semantically_invalid_rows(tmp_path: Path, payload: bytes, message: str) -> None:
     artifact_path = tmp_path / "aliases.txt"
-    metadata = _write_artifact(artifact_path)
-    mutation(metadata)
-    Path(str(artifact_path) + ".meta.json").write_text(json.dumps(metadata), encoding="utf-8")
+    artifact_path.write_bytes(payload)
 
     with pytest.raises(ValueError, match=message):
         load_name_tuple_artifact(artifact_path)
 
 
-def test_loader_rejects_noncanonical_field_order_even_with_matching_metadata(tmp_path: Path) -> None:
-    artifact_path = tmp_path / "aliases.txt"
-    _write_artifact(
-        artifact_path,
-        b"ally,alice\n",
-        pair_count=1,
-    )
-
-    with pytest.raises(ValueError, match="name_a must be lexicographically less than name_b"):
-        load_name_tuple_artifact(artifact_path)
-
-
-def test_generator_publishes_metadata_last_and_output_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generator_atomically_publishes_one_loadable_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source_path = tmp_path / "source.txt"
     output_path = tmp_path / "aliases.txt"
     source_path.write_text("Alice,Ally\nRobert,Bob\n", encoding="utf-8")
@@ -179,14 +112,14 @@ def test_generator_publishes_metadata_last_and_output_loads(tmp_path: Path, monk
         replaced_destinations.append(Path(destination))
 
     monkeypatch.setattr(generate_canonical_name_tuples.os, "replace", recording_replace)
-    metadata = generate_canonical_name_tuples.regenerate(str(source_path), str(output_path))
+    summary = generate_canonical_name_tuples.regenerate(str(source_path), str(output_path))
 
-    assert replaced_destinations == [output_path, Path(str(output_path) + ".meta.json")]
-    assert metadata["semantics"] == NAME_TUPLE_ARTIFACT_SEMANTICS
+    assert replaced_destinations == [output_path]
+    assert summary["data"]["pair_count"] == 2
     assert load_name_tuple_artifact(output_path).pairs == frozenset({("alice", "ally"), ("bob", "robert")})
 
 
-def test_generator_audits_each_filtered_and_duplicate_input_row(tmp_path: Path) -> None:
+def test_generator_reports_filtered_and_duplicate_rows(tmp_path: Path) -> None:
     source_path = tmp_path / "source.txt"
     output_path = tmp_path / "aliases.txt"
     source_path.write_text(
@@ -194,19 +127,19 @@ def test_generator_audits_each_filtered_and_duplicate_input_row(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    metadata = generate_canonical_name_tuples.regenerate(str(source_path), str(output_path))
+    summary = generate_canonical_name_tuples.regenerate(str(source_path), str(output_path))
 
-    assert metadata["generation_counts"] == {
+    assert summary["generation_counts"] == {
         "input_pair_count": 6,
         "dropped_identity": 1,
         "dropped_prefix_compatible": 1,
         "dropped_empty": 1,
         "dropped_duplicate_canonical": 2,
     }
-    assert metadata["data"]["pair_count"] == 1
+    assert summary["data"]["pair_count"] == 1
 
 
-def test_concurrent_generators_leave_one_complete_loadable_artifact(tmp_path: Path) -> None:
+def test_concurrent_generators_leave_one_loadable_artifact(tmp_path: Path) -> None:
     sources = [tmp_path / "source-a.txt", tmp_path / "source-b.txt"]
     sources[0].write_text("Alice,Ally\n", encoding="utf-8")
     sources[1].write_text("Robert,Bob\n", encoding="utf-8")
@@ -218,12 +151,10 @@ def test_concurrent_generators_leave_one_complete_loadable_artifact(tmp_path: Pa
         return generate_canonical_name_tuples.regenerate(str(source), str(output_path))
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(regenerate, source) for source in sources]
-        metadata = [future.result() for future in futures]
+        list(executor.map(regenerate, sources))
 
     artifact = load_name_tuple_artifact(output_path)
     assert artifact.pairs in (
         frozenset({("alice", "ally")}),
         frozenset({("bob", "robert")}),
     )
-    assert artifact.data_sha256 in {item["data"]["sha256"] for item in metadata}

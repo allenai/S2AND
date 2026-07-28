@@ -342,9 +342,9 @@ impl RustFeaturizer {
             if let (Some(specter_a), Some(specter_b)) = (p1.specter.as_ref(), p2.specter.as_ref()) {
                 // Match s2and.featurizer behavior at s2and/featurizer.py:1223,1227:
                 // all-zero SPECTER vectors are treated as missing, yielding NaN.
-                // The Arrow ingest path keeps all-zero rows as real vectors (per the
-                // Current Decisions table in docs/work_plan.md), so the missing-vector
-                // check has to live here instead of at the ingest boundary.
+                // The Arrow ingest path keeps all-zero rows as real vectors, so the
+                // missing-vector check has to live here instead of at the ingest
+                // boundary.
                 let a_zero = p1
                     .specter_norm
                     .map_or_else(|| specter_a.iter().all(|v| *v == 0.0), |norm| norm == 0.0);
@@ -978,53 +978,33 @@ impl RustFeaturizer {
     #[staticmethod]
     #[pyo3(
         signature = (
-            paths,
+            dataset,
             signature_ids,
             name_tuples,
+            *,
+            cluster_seeds_path = None,
+            cluster_seed_disallows_path = None,
             preprocess = true,
             cluster_seed_require_value = 0.0,
             cluster_seed_disallow_value = 10000.0,
             num_threads = None,
-            name_counts_index = None,
             use_orcid_id = true
         )
     )]
-    fn from_arrow_paths(
+    fn from_arrow_dataset(
         py: Python<'_>,
-        paths: &Bound<'_, PyAny>,
+        dataset: PyRef<'_, ArrowDataset>,
         signature_ids: Option<&Bound<'_, PyAny>>,
         name_tuples: Option<&Bound<'_, PyAny>>,
+        cluster_seeds_path: Option<String>,
+        cluster_seed_disallows_path: Option<String>,
         preprocess: bool,
         cluster_seed_require_value: f64,
         cluster_seed_disallow_value: f64,
         num_threads: Option<usize>,
-        name_counts_index: Option<Py<NameCountsIndex>>,
         use_orcid_id: bool,
     ) -> PyResult<Self> {
-        let signatures_path =
-            extract_path_mapping_string(paths, "signatures", true)?.ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err("missing signatures Arrow path")
-            })?;
-        let papers_path = extract_path_mapping_string(paths, "papers", true)?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing papers Arrow path"))?;
-        let paper_authors_path = extract_path_mapping_string(paths, "paper_authors", true)?
-            .ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err("missing paper_authors Arrow path")
-            })?;
-        let cluster_seeds_path = extract_path_mapping_string(paths, "cluster_seeds", false)?;
-        let cluster_seed_disallows_path =
-            extract_path_mapping_string(paths, "cluster_seed_disallows", false)?;
-        let specter_path = extract_path_mapping_string(paths, "specter", false)?;
-        let name_counts_index_path = extract_name_counts_index_path(paths)?;
-        let signatures_batch_index_path =
-            extract_path_mapping_string(paths, "signatures_batch_index", false)?;
-        let papers_batch_index_path =
-            extract_path_mapping_string(paths, "papers_batch_index", false)?;
-        let paper_authors_batch_index_path =
-            extract_path_mapping_string(paths, "paper_authors_batch_index", false)?;
-        let specter_batch_index_path =
-            extract_path_mapping_string(paths, "specter_batch_index", false)?;
-
+        let dataset = dataset.shared();
         let requested_signature_ids = match signature_ids {
             Some(obj) if !obj.is_none() => Some(
                 PyIterator::from_object(obj)?
@@ -1037,12 +1017,7 @@ impl RustFeaturizer {
             .as_ref()
             .map(|ids| ids.iter().cloned().collect());
 
-        let (raw_signatures, _) = read_raw_arrow_signatures_with_optional_index(
-            &signatures_path,
-            signatures_batch_index_path.as_deref(),
-            None,
-            keep_signature_ids.as_ref(),
-        )?;
+        let (raw_signatures, _) = dataset.read_signatures(keep_signature_ids.as_ref())?;
         let mut signature_ids = match requested_signature_ids {
             Some(ids) => ids,
             None => {
@@ -1070,29 +1045,12 @@ impl RustFeaturizer {
             .filter_map(|signature_id| raw_signatures.get(signature_id))
             .map(|signature| signature.paper_id.clone())
             .collect::<HashSet<_>>();
-        let (raw_papers, _) = read_raw_arrow_papers_with_optional_index(
-            &papers_path,
-            papers_batch_index_path.as_deref(),
-            None,
-            &needed_paper_ids,
-        )?;
-        let (mut raw_authors_by_paper, _) = read_raw_arrow_paper_authors_with_optional_index(
-            &paper_authors_path,
-            paper_authors_batch_index_path.as_deref(),
-            None,
-            &needed_paper_ids,
-        )?;
-        let specter_by_paper = match specter_path.as_ref() {
-            Some(path) => {
-                read_raw_arrow_specter_with_optional_index(
-                    path,
-                    specter_batch_index_path.as_deref(),
-                    None,
-                    &needed_paper_ids,
-                )?
-                .0
-            }
-            None => HashMap::new(),
+        let (raw_papers, _) = dataset.read_papers(&needed_paper_ids)?;
+        let (mut raw_authors_by_paper, _) = dataset.read_paper_authors(&needed_paper_ids)?;
+        let specter_by_paper = if dataset.has_specter() {
+            dataset.read_specter(&needed_paper_ids)?.0
+        } else {
+            HashMap::new()
         };
         let mut cluster_seeds_require = HashMap::<String, ClusterId>::new();
         if let Some(path) = cluster_seeds_path.as_ref() {
@@ -1122,22 +1080,7 @@ impl RustFeaturizer {
             extract_required_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
         let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
         let affiliation_stopwords = extract_affiliation_stopwords(py)?;
-        let raw_name_counts = match name_counts_index {
-            Some(index) => {
-                let path = name_counts_index_path.as_deref().ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(
-                        "name_counts_index handle requires paths['name_counts_index']",
-                    )
-                })?;
-                let index = index.borrow(py);
-                index.validate_path_root(path)?;
-                RawNameCountMaps::from_shared_index(index.shared_index())
-            }
-            None => match name_counts_index_path.as_ref() {
-                Some(path) => read_raw_name_counts_index(path)?,
-                None => RawNameCountMaps::default(),
-            },
-        };
+        let raw_name_counts = dataset.name_counts();
         let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
         ensure_unidecode_for_raw_arrow_inputs(
             &raw_signatures,

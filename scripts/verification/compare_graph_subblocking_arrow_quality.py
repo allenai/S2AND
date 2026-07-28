@@ -9,7 +9,6 @@ large real-data runs are explicit.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import pickle
@@ -20,7 +19,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, BinaryIO
 
 import numpy as np
 import pandas as pd
@@ -29,6 +28,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.subblocking import (  # noqa: E402
     GraphSubblockingConfig,
     _make_subblocks_with_telemetry_arrow_rust,
@@ -40,18 +40,6 @@ from s2and.text import compute_block, normalize_text  # noqa: E402
 
 _DEFAULT_GRAPH_CONFIG = GraphSubblockingConfig()
 REPORT_SCHEMA = "s2and_subblocking_evaluation_report_v1"
-
-
-def _sha256_file(path: Path) -> str:
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
-def _require_sha256(path: Path, expected: str) -> str:
-    observed = _sha256_file(path)
-    if observed != expected:
-        raise ValueError(f"Input manifest SHA-256 mismatch: expected={expected} observed={observed}")
-    return observed
 
 
 def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -69,7 +57,6 @@ def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arrow-root", type=Path, required=True)
-    parser.add_argument("--expected-input-manifest-sha256", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--raw-root", type=Path, default=None)
     parser.add_argument("--specter-pickle", type=Path, default=None)
@@ -285,33 +272,13 @@ def load_lightweight_dataset(
     return dataset, signature_ids
 
 
-def _arrow_paths(arrow_root: Path) -> dict[str, str]:
-    specter_stem = "specter2" if (arrow_root / "specter2.arrow").exists() else "specter"
-    if specter_stem == "specter2":
-        specter_index_path = arrow_root / "specter2.specter_batch_index.bin"
-    else:
-        specter_index_path = arrow_root / "specter.specter_batch_index.bin"
-    paths = {
-        "signatures": arrow_root / "signatures.arrow",
-        "signatures_batch_index": arrow_root / "signatures.signatures_batch_index.bin",
-        "paper_authors": arrow_root / "paper_authors.arrow",
-        "paper_authors_batch_index": arrow_root / "paper_authors.paper_authors_batch_index.bin",
-        "specter": arrow_root / f"{specter_stem}.arrow",
-        "specter_batch_index": specter_index_path,
-    }
-    missing = sorted(str(path) for path in paths.values() if not path.exists())
-    if missing:
-        raise FileNotFoundError(f"Missing required Arrow paths: {missing}")
-    return {key: str(value) for key, value in paths.items()}
-
-
-def _read_arrow_column_values(path: str | Path, column_name: str) -> list[Any]:
+def _read_arrow_column_values(source_file: BinaryIO, column_name: str) -> list[Any]:
     pa = __import__("pyarrow")
-    with pa.memory_map(str(path), "r") as source:
+    with pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
         column_index = reader.schema.get_field_index(column_name)
         if column_index < 0:
-            raise ValueError(f"Arrow file {path} is missing required column: {column_name!r}")
+            raise ValueError(f"Arrow file is missing required column: {column_name!r}")
         values: list[Any] = []
         for batch_index in range(reader.num_record_batches):
             values.extend(reader.get_batch(batch_index).column(column_index).to_pylist())
@@ -319,13 +286,13 @@ def _read_arrow_column_values(path: str | Path, column_name: str) -> list[Any]:
 
 
 def _read_arrow_rows(
-    path: str | Path,
+    source_file: BinaryIO,
     required_columns: set[str],
     *,
     optional_columns: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     pa = __import__("pyarrow")
-    with pa.memory_map(str(path), "r") as source:
+    with pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
         selected_columns = required_columns.union(set(optional_columns).intersection(reader.schema.names))
         column_indices = {
@@ -333,7 +300,7 @@ def _read_arrow_rows(
         }
         missing_columns = [column_name for column_name, column_index in column_indices.items() if column_index < 0]
         if missing_columns:
-            raise ValueError(f"Arrow file {path} is missing required columns: {missing_columns!r}")
+            raise ValueError(f"Arrow file is missing required columns: {missing_columns!r}")
         rows: list[dict[str, Any]] = []
         for batch_index in range(reader.num_record_batches):
             batch = reader.get_batch(batch_index)
@@ -411,14 +378,16 @@ def _signatures_from_arrow_rows(
 
 
 def load_lightweight_dataset_from_arrow(
-    arrow_root: Path,
+    arrow_lease: Any,
     *,
     limit: int | None,
     sample_mode: str,
     seed: int,
     include_specter: bool = True,
 ) -> tuple[SimpleNamespace, list[str]]:
-    paths = _arrow_paths(arrow_root)
+    """Load bounded Python comparison state from one retained generation."""
+
+    lease = arrow_lease
     signature_columns = {
         "signature_id",
         "paper_id",
@@ -428,11 +397,12 @@ def load_lightweight_dataset_from_arrow(
         "author_position",
     }
     if limit is None:
-        signature_rows = _read_arrow_rows(
-            paths["signatures"],
-            signature_columns,
-            optional_columns=("author_orcid",),
-        )
+        with lease.open_file("signatures") as source_file:
+            signature_rows = _read_arrow_rows(
+                source_file,
+                signature_columns,
+                optional_columns=("author_orcid",),
+            )
         signature_ids = _select_signature_ids(
             (str(row["signature_id"]) for row in signature_rows if row.get("signature_id") is not None),
             limit=None,
@@ -440,11 +410,12 @@ def load_lightweight_dataset_from_arrow(
             seed=seed,
         )
     else:
-        all_signature_ids = [
-            str(signature_id)
-            for signature_id in _read_arrow_column_values(paths["signatures"], "signature_id")
-            if signature_id is not None
-        ]
+        with lease.open_file("signatures") as source_file:
+            all_signature_ids = [
+                str(signature_id)
+                for signature_id in _read_arrow_column_values(source_file, "signature_id")
+                if signature_id is not None
+            ]
         signature_ids = _select_signature_ids(
             all_signature_ids,
             limit=limit,
@@ -452,8 +423,8 @@ def load_lightweight_dataset_from_arrow(
             seed=seed,
         )
         signature_rows = _read_arrow_rows_by_values(
-            paths["signatures"],
-            paths["signatures_batch_index"],
+            lease,
+            "signatures",
             "signature_id",
             signature_ids,
             required_columns=signature_columns,
@@ -468,15 +439,16 @@ def load_lightweight_dataset_from_arrow(
     paper_author_columns = {"paper_id", "position", "author_name"}
     if limit is None:
         paper_id_set = set(paper_ids)
-        paper_author_rows = [
-            row
-            for row in _read_arrow_rows(paths["paper_authors"], paper_author_columns)
-            if str(row.get("paper_id") or "") in paper_id_set
-        ]
+        with lease.open_file("paper_authors") as source_file:
+            paper_author_rows = [
+                row
+                for row in _read_arrow_rows(source_file, paper_author_columns)
+                if str(row.get("paper_id") or "") in paper_id_set
+            ]
     else:
         paper_author_rows = _read_arrow_rows_by_values(
-            paths["paper_authors"],
-            paths["paper_authors_batch_index"],
+            lease,
+            "paper_authors",
             "paper_id",
             paper_ids,
             required_columns=paper_author_columns,
@@ -489,15 +461,16 @@ def load_lightweight_dataset_from_arrow(
         specter_columns = {"paper_id", "embedding"}
         if limit is None:
             paper_id_set = set(paper_ids)
-            specter_rows = [
-                row
-                for row in _read_arrow_rows(paths["specter"], specter_columns)
-                if str(row.get("paper_id") or "") in paper_id_set
-            ]
+            with lease.open_file("specter") as source_file:
+                specter_rows = [
+                    row
+                    for row in _read_arrow_rows(source_file, specter_columns)
+                    if str(row.get("paper_id") or "") in paper_id_set
+                ]
         else:
             specter_rows = _read_arrow_rows_by_values(
-                paths["specter"],
-                paths["specter_batch_index"],
+                lease,
+                "specter",
                 "paper_id",
                 paper_ids,
                 required_columns=specter_columns,
@@ -549,18 +522,18 @@ def _graph_config(args: argparse.Namespace) -> GraphSubblockingConfig:
 
 
 def load_signature_ids_from_arrow(
-    arrow_root: Path,
+    arrow_dataset: ArrowDataset,
     *,
     limit: int | None,
     sample_mode: str,
     seed: int,
 ) -> list[str]:
-    paths = _arrow_paths(arrow_root)
-    all_signature_ids = [
-        str(signature_id)
-        for signature_id in _read_arrow_column_values(paths["signatures"], "signature_id")
-        if signature_id is not None
-    ]
+    with arrow_dataset.use() as lease, lease.open_file("signatures") as source_file:
+        all_signature_ids = [
+            str(signature_id)
+            for signature_id in _read_arrow_column_values(source_file, "signature_id")
+            if signature_id is not None
+        ]
     return _select_signature_ids(
         all_signature_ids,
         limit=limit,
@@ -749,11 +722,12 @@ def _run_python_subblocking(
 
 def _run_rust_subblocking(
     args: argparse.Namespace,
+    arrow_dataset: ArrowDataset,
     signature_ids: Sequence[str],
     config: GraphSubblockingConfig,
 ) -> tuple[dict[str, list[str]], dict[str, Any]]:
     return _make_subblocks_with_telemetry_arrow_rust(
-        _arrow_paths(args.arrow_root),
+        arrow_dataset,
         signature_ids,
         maximum_size=int(args.maximum_size),
         graph_subblocking_config=config,
@@ -784,19 +758,11 @@ def _baseline_deltas(summary: dict[str, Any], baseline_path: Path | None) -> dic
 
 def main() -> None:
     args = parse_args()
-    report_path = args.output_dir / "summary.json"
+    report_path = args.output_dir / "subblocking_evaluation_report.json"
     if report_path.exists():
         raise FileExistsError(f"Report output already exists: {report_path}")
-    input_manifest_path = args.arrow_root / "manifest.json"
-    input_manifest_sha256 = _require_sha256(
-        input_manifest_path,
-        args.expected_input_manifest_sha256,
-    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    report_identity = {
-        "schema_version": REPORT_SCHEMA,
-        "input_manifest_sha256": input_manifest_sha256,
-    }
+    report_identity = {"schema_version": REPORT_SCHEMA}
     config = _graph_config(args)
     _log_progress(
         f"starting comparison_mode={args.comparison_mode} python_source={args.python_source} "
@@ -804,19 +770,20 @@ def main() -> None:
     )
     load_start = time.perf_counter()
     if args.comparison_mode == "rust-only":
-        signature_ids = load_signature_ids_from_arrow(
-            args.arrow_root,
-            limit=args.limit,
-            sample_mode=str(args.sample_mode),
-            seed=int(args.seed),
-        )
-        component_labels = _load_component_labels(args.component_members_parquet, set(signature_ids))
-        load_seconds = time.perf_counter() - load_start
-        _log_progress(f"loaded signatures={len(signature_ids)} component_labels={len(component_labels)}")
-        rust_start = time.perf_counter()
-        _log_progress("running Rust graph subblocking")
-        rust_subblocks, rust_telemetry = _run_rust_subblocking(args, signature_ids, config)
-        rust_seconds = time.perf_counter() - rust_start
+        with ArrowDataset.open(args.arrow_root, require_specter=True) as arrow_dataset:
+            signature_ids = load_signature_ids_from_arrow(
+                arrow_dataset,
+                limit=args.limit,
+                sample_mode=str(args.sample_mode),
+                seed=int(args.seed),
+            )
+            component_labels = _load_component_labels(args.component_members_parquet, set(signature_ids))
+            load_seconds = time.perf_counter() - load_start
+            _log_progress(f"loaded signatures={len(signature_ids)} component_labels={len(component_labels)}")
+            rust_start = time.perf_counter()
+            _log_progress("running Rust graph subblocking")
+            rust_subblocks, rust_telemetry = _run_rust_subblocking(args, arrow_dataset, signature_ids, config)
+            rust_seconds = time.perf_counter() - rust_start
         rust_subblocks_path = args.output_dir / "rust_subblocks.json"
         _write_subblocks(rust_subblocks_path, rust_subblocks)
         rust_partition, rust_components = _validated_partition(
@@ -854,7 +821,6 @@ def main() -> None:
                 "partition": rust_partition,
                 "component_preservation": rust_components,
             },
-            "output_sha256": {"rust_subblocks.json": _sha256_file(rust_subblocks_path)},
             "artifacts": {
                 "summary": str(report_path),
                 "rust_subblocks": str(rust_subblocks_path),
@@ -867,13 +833,15 @@ def main() -> None:
 
     dataset: SimpleNamespace | None = None
     if args.python_source == "arrow":
-        dataset, signature_ids = load_lightweight_dataset_from_arrow(
-            args.arrow_root,
-            limit=args.limit,
-            sample_mode=str(args.sample_mode),
-            seed=int(args.seed),
-            include_specter=True,
-        )
+        with ArrowDataset.open(args.arrow_root, require_specter=True) as arrow_dataset:
+            with arrow_dataset.use(require_specter=True) as arrow_lease:
+                dataset, signature_ids = load_lightweight_dataset_from_arrow(
+                    arrow_lease,
+                    limit=args.limit,
+                    sample_mode=str(args.sample_mode),
+                    seed=int(args.seed),
+                    include_specter=True,
+                )
     else:
         if args.raw_root is None or args.specter_pickle is None:
             raise ValueError("--python-source raw requires --raw-root and --specter-pickle")
@@ -895,10 +863,11 @@ def main() -> None:
     source_subblocks, source_telemetry = _run_python_subblocking(args, dataset, signature_ids, config)
     source_hook_telemetry = {}
     source_seconds = time.perf_counter() - source_start
-    rust_start = time.perf_counter()
-    _log_progress("running Rust graph subblocking")
-    rust_subblocks, rust_telemetry = _run_rust_subblocking(args, signature_ids, config)
-    rust_seconds = time.perf_counter() - rust_start
+    with ArrowDataset.open(args.arrow_root, require_specter=True) as arrow_dataset:
+        rust_start = time.perf_counter()
+        _log_progress("running Rust graph subblocking")
+        rust_subblocks, rust_telemetry = _run_rust_subblocking(args, arrow_dataset, signature_ids, config)
+        rust_seconds = time.perf_counter() - rust_start
     if set(_signature_to_subblock(source_subblocks)) != set(_signature_to_subblock(rust_subblocks)):
         raise ValueError(f"{source_label} and Rust partitions cover different signature IDs")
 
@@ -975,12 +944,6 @@ def main() -> None:
             "telemetry": rust_telemetry,
             "partition": rust_partition,
             "component_preservation": rust_components,
-        },
-        "output_sha256": {
-            source_diff_path.name: _sha256_file(source_diff_path),
-            rust_diff_path.name: _sha256_file(rust_diff_path),
-            source_subblocks_path.name: _sha256_file(source_subblocks_path),
-            rust_subblocks_path.name: _sha256_file(rust_subblocks_path),
         },
         "artifacts": {
             "summary": str(report_path),

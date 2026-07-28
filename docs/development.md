@@ -78,7 +78,7 @@ Versioning is centralized in `VERSION`.
 This synchronizes Python/Rust package manifests mechanically. For the v1.3
 release, it does not decide whether package versions remain `0.60.0` or become
 `1.3.0`, choose the model packaging policy, or authorize publication. Those
-decisions and gates are in [1_3_release_todo.md](1_3_release_todo.md).
+decisions and gates are in [release.md](release.md).
 
 Recommended one-time hook setup:
 
@@ -109,5 +109,5 @@ Notes:
 
 - Docs index: [docs/README.md](README.md)
 - Rust runtime contract: [rust/runtime.md](rust/runtime.md)
-- Rust promotion baselines: [rust/baselines.md](rust/baselines.md)
-- v1.3 release operator runbook: [1_3_release_todo.md](1_3_release_todo.md)
+- Promoted incremental performance profiling: [rust/baselines.md](rust/baselines.md)
+- v1.3 release operator runbook: [release.md](release.md)

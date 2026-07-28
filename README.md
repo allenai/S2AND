@@ -8,7 +8,7 @@ S2AND provides the S2AND author-name-disambiguation benchmark datasets and the r
 > be generated, retrained, evaluated, and published. The package manifests
 > currently say `0.60.0`; whether the coordinated package release keeps that
 > version or becomes `1.3.0` is an explicit open decision. Release operators
-> must use [docs/1_3_release_todo.md](docs/1_3_release_todo.md).
+> must use [docs/release.md](docs/release.md).
 
 As of this version, S2AND requires the `s2and-rust` extension at install time.
 Explicit classic Python routes still exist for selected `ANDData` stages, but
@@ -30,13 +30,13 @@ and the maintained large-scale runtime require the Rust package.
 | Download the benchmark datasets | [Download Data or Model](#download-data-or-model) | [docs/data.md](docs/data.md) |
 | Train or evaluate a model | [Training and Evaluation Essentials](#training-and-evaluation-essentials) | [docs/training.md](docs/training.md) |
 | Build a production release bundle | `scripts/production/` | [docs/production_inference.md](docs/production_inference.md) |
-| Operate the v1.3 retrain and release | [v1.3 release runbook](docs/1_3_release_todo.md) | Follow its stages, blockers, approvals, and immutable release record |
+| Operate the v1.3 retrain and release | [v1.3 release runbook](docs/release.md) | Follow its stages, approvals, and release contract |
 | Operate Rust-backed large-scale inference | [Runtime and Scaling](#runtime-and-scaling) | [docs/rust/runtime.md](docs/rust/runtime.md), [docs/subblocking.md](docs/subblocking.md), [docs/threading.md](docs/threading.md) |
 | Work on the repo itself | [Development](#development) | [docs/development.md](docs/development.md) |
 
 ## Install
 
-S2AND currently targets Python 3.11.x.
+S2AND supports Python 3.11, 3.12, and 3.13.
 
 Package install:
 
@@ -57,7 +57,7 @@ Repo checkout:
 ```bash
 git lfs install
 git lfs pull --include "tests/fixtures/arrow/pubmed_specter2/**"
-uv venv --python 3.11.13
+uv venv --python 3.11
 # activate the environment, then:
 uv sync --active --extra dev
 uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
@@ -77,7 +77,7 @@ commands, WSL notes, and install variants, see [docs/install.md](docs/install.md
 > model or canonical count artifacts. No default model is distributed by this
 > branch. Use the previous published S2AND release for working v1.21 inference
 > until canonical v1.3 is trained, validated, and packaged. See
-> [docs/1_3_release_todo.md](docs/1_3_release_todo.md).
+> [docs/release.md](docs/release.md).
 
 Rust/Arrow dataset download:
 
@@ -116,7 +116,7 @@ complete canonical bundle once one has passed the release gates.
 `load_production_model(path)` accepts one explicit complete native bundle. It
 does not discover a default, load pickle models, or accept pairwise-only staging
 directories. Classic `ANDData` prediction is the Python route; explicit
-`*_from_arrow_paths` methods are the Rust route.
+methods that take an open `ArrowDataset` are the Rust route.
 
 Full inference and bundle publication details are in
 [docs/production_inference.md](docs/production_inference.md).
@@ -127,7 +127,7 @@ The example below is a small research/API example, not the production release
 protocol: it materializes test features and permits immediate evaluation.
 During the v1.3 release, test identities and scores remain sealed until the
 one-shot gates in Stages 7 and 8 of the
-[release runbook](docs/1_3_release_todo.md).
+[release runbook](docs/release.md).
 
 Minimal training flow:
 
@@ -137,6 +137,7 @@ from pathlib import Path
 
 from hyperopt import hp
 
+from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_training import build_training_anddata_from_arrow
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo, featurize
@@ -145,60 +146,49 @@ from s2and.model import Clusterer, FastCluster, PairwiseModeler
 bundle_dir = Path("/path/to/canonical_arrow_training_bundle/pubmed")
 manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
 manifest_paths = manifest["paths"]
-training_keys = [
-    "signatures",
-    "signatures_batch_index",
-    "papers",
-    "papers_batch_index",
-    "paper_authors",
-    "paper_authors_batch_index",
-    "name_counts_index",
-    "specter",
-    "specter_batch_index",
-]
-arrow_paths = {
-    key: str((bundle_dir / manifest_paths[key]).resolve())
-    for key in training_keys
-}
-
-dataset = build_training_anddata_from_arrow(
-    arrow_paths,
-    "pubmed",
+with ArrowDataset.open(
+    bundle_dir,
+    require_specter=True,
+    require_name_counts_index=True,
     expected_normalization_version=NORMALIZATION_VERSION,
-    clusters=str((bundle_dir / manifest_paths["clusters"]).resolve()),
-    train_pairs_size=1000,
-    val_pairs_size=200,
-    test_pairs_size=200,
-    n_jobs=4,
-)
+) as arrow_dataset:
+    dataset = build_training_anddata_from_arrow(
+        arrow_dataset,
+        "pubmed",
+        clusters=str((bundle_dir / manifest_paths["clusters"]).resolve()),
+        train_pairs_size=1000,
+        val_pairs_size=200,
+        test_pairs_size=200,
+        n_jobs=4,
+    )
 
-featurization_info = FeaturizationInfo()
-train, val, test = featurize(dataset, featurization_info, n_jobs=4)
-X_train, y_train, _ = train
-X_val, y_val, _ = val
+    featurization_info = FeaturizationInfo()
+    train, val, test = featurize(dataset, featurization_info, n_jobs=4)
+    X_train, y_train, _ = train
+    X_val, y_val, _ = val
 
-pairwise_model = PairwiseModeler(
-    n_iter=25,
-    monotone_constraints=featurization_info.lightgbm_monotone_constraints,
-)
-pairwise_model.fit(X_train, y_train, X_val, y_val)
+    pairwise_model = PairwiseModeler(
+        n_iter=25,
+        monotone_constraints=featurization_info.lightgbm_monotone_constraints,
+    )
+    pairwise_model.fit(X_train, y_train, X_val, y_val)
 
-clusterer = Clusterer(
-    featurization_info,
-    pairwise_model,
-    cluster_model=FastCluster(linkage="average"),
-    search_space={"eps": hp.uniform("eps", 0, 1)},
-    n_iter=25,
-    n_jobs=4,
-)
-clusterer.fit(dataset)
+    clusterer = Clusterer(
+        featurization_info,
+        pairwise_model,
+        cluster_model=FastCluster(linkage="average"),
+        search_space={"eps": hp.uniform("eps", 0, 1)},
+        n_iter=25,
+        n_jobs=4,
+    )
+    clusterer.fit(dataset)
 ```
 
-Point `bundle_dir` at a manifest-backed canonical Arrow dataset generation.
-The constructor validates its tables, batch indexes, checksums, normalization
-version, and name-count index before training; an older Arrow directory without
-the current `artifact_generation` inventory is rejected. This migration branch
-does not bundle a full training generation.
+Point `bundle_dir` at a manifest-backed canonical Arrow dataset root.
+`ArrowDataset.open(...)` validates its tables, batch indexes, checksums,
+normalization version, and name-count index once and retains the opened files
+for the handle's lifetime. This migration branch does not bundle a full
+training root.
 
 For evaluation and native-bundle publication guidance, see
 [docs/training.md](docs/training.md).
@@ -212,7 +202,8 @@ Runtime controls:
 - Rust mode requires the exact `s2and-rust` version pinned by the project
   metadata and fails explicitly if it is missing or different.
 - Public prediction routes are method-based: `ANDData` methods use Python and
-  `*_from_arrow_paths` methods use Rust.
+  `predict_from_arrow(..., arrow_dataset)` and
+  `predict_incremental_from_arrow(..., arrow_dataset)` use Rust.
 
 Cache behavior:
 
@@ -226,7 +217,7 @@ Large blocks:
 
 - `predict(..., batching_threshold=...)` uses subblocking to keep full-block work bounded.
 - `predict_incremental(...)` is the Python `ANDData` route and does not accept
-  query batching. Use `predict_incremental_from_arrow_paths(...,
+  query batching. Use `predict_incremental_from_arrow(...,
   batching_threshold=...)` for promoted Rust query batching.
 - Incremental results still include `phase_b_mode`; current supported routes report `exact`.
 - `total_ram_bytes` is the main memory-control knob for large inference jobs.
@@ -252,7 +243,7 @@ Details:
 - Training and saved-model workflows: [docs/training.md](docs/training.md)
 - Development workflow: [docs/development.md](docs/development.md)
 - Paper-era reproducibility notes: [docs/reproducibility.md](docs/reproducibility.md)
-- v1.3 retrain and release runbook: [docs/1_3_release_todo.md](docs/1_3_release_todo.md)
+- v1.3 retrain and release runbook: [docs/release.md](docs/release.md)
 - Docs index: [docs/README.md](docs/README.md)
 
 ## Development
@@ -313,8 +304,7 @@ Notes:
 ### Docs
 
 - Index (start here): `docs/README.md`
-- v1.3 release operator runbook: `docs/1_3_release_todo.md`
-- Canonical-v2 remediation ledger: `docs/work_plan.md`
+- v1.3 release operator runbook: `docs/release.md`
 
 ---
 

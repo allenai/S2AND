@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from s2and._sha256 import is_lowercase_sha256, sha256_file
 from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.name_counts_index import NameCountsIndex
 from s2and.name_tuple_artifact import NameTupleArtifact, load_packaged_name_tuple_artifact
 from s2and.orcid_prefix_counts import LoadedOrcidPrefixCounts, load_canonical_orcid_prefix_counts
 
-PAIRWISE_TRAINING_PLAN_SCHEMA_VERSION = "s2and_pairwise_training_plan_v1"
 LINKER_TARGET_SCHEMA = "incremental_linker_training_target_v1"
 LINKER_EVALUATION_REPORT_SCHEMA = "s2and_linker_evaluation_report_v1"
 REQUIRED_LINKER_TABLE_KEYS = (
@@ -44,6 +49,118 @@ FLOAT_OFFICIAL_METRIC_KEYS = frozenset(
 SUPPORTED_OFFICIAL_METRIC_KEYS = (
     INTEGER_OFFICIAL_METRIC_KEYS | FLOAT_OFFICIAL_METRIC_KEYS | {"weighted_average_error_weights"}
 )
+_COMMON_MODEL_ROLES = frozenset({"papers", "signatures", "specter_embeddings"})
+_RANDOM_BLOCK_ROLES = _COMMON_MODEL_ROLES | {"clusters"}
+_FIXED_PAIR_ROLES = _COMMON_MODEL_ROLES | {"train_pairs", "val_pairs"}
+
+
+@dataclass(frozen=True, slots=True)
+class EpsPolicy:
+    """EPS candidates and minimum accepted calibration scores."""
+
+    grid: tuple[float, ...]
+    minimum_dataset_f1: float
+    minimum_signature_weighted_f1: float
+
+
+@dataclass(frozen=True, slots=True)
+class ModelDataset:
+    """Verified files for one model-development dataset."""
+
+    files: Mapping[str, Path]
+
+    @property
+    def split_mode(self) -> str:
+        """Infer how pairs are selected from the declared file roles."""
+
+        roles = frozenset(self.files)
+        if roles == _RANDOM_BLOCK_ROLES:
+            return "random_blocks"
+        if roles == _FIXED_PAIR_ROLES:
+            return "fixed_pairs"
+        raise ValueError("invalid model dataset roles")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelPlan:
+    """One verified model-development plan and its byte identity."""
+
+    datasets: Mapping[str, ModelDataset]
+    eps: EpsPolicy
+    sha256: str
+
+
+def _unit_float(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("expected a number in [0, 1]")
+    result = float(value)
+    if not math.isfinite(result) or not 0.0 <= result <= 1.0:
+        raise ValueError("expected a number in [0, 1]")
+    return result
+
+
+def load_model_plan(path: Path) -> ModelPlan:
+    """Load and verify one unversioned model-development plan."""
+
+    contents = Path(path).read_bytes()
+    payload = json.loads(contents)
+    if not isinstance(payload, dict) or set(payload) != {"datasets", "eps"}:
+        raise ValueError("invalid model plan")
+
+    raw_eps = payload["eps"]
+    if not isinstance(raw_eps, dict) or set(raw_eps) != {
+        "grid",
+        "minimum_dataset_f1",
+        "minimum_signature_weighted_f1",
+    }:
+        raise ValueError("invalid EPS policy")
+    raw_grid = raw_eps["grid"]
+    if not isinstance(raw_grid, list) or not raw_grid:
+        raise ValueError("invalid EPS grid")
+    grid = tuple(sorted(_unit_float(value) for value in raw_grid))
+    if len(grid) != len(set(grid)):
+        raise ValueError("duplicate EPS")
+    eps = EpsPolicy(
+        grid=grid,
+        minimum_dataset_f1=_unit_float(raw_eps["minimum_dataset_f1"]),
+        minimum_signature_weighted_f1=_unit_float(raw_eps["minimum_signature_weighted_f1"]),
+    )
+
+    raw_datasets = payload["datasets"]
+    if not isinstance(raw_datasets, dict) or not raw_datasets:
+        raise ValueError("invalid model datasets")
+    observed_digests: dict[Path, str] = {}
+    datasets: dict[str, ModelDataset] = {}
+    for name, raw_files in raw_datasets.items():
+        if not isinstance(name, str) or not name or not isinstance(raw_files, dict):
+            raise ValueError("invalid model dataset")
+        if frozenset(raw_files) not in {_RANDOM_BLOCK_ROLES, _FIXED_PAIR_ROLES}:
+            raise ValueError("invalid model dataset roles")
+        files: dict[str, Path] = {}
+        for role, raw_spec in raw_files.items():
+            if not isinstance(raw_spec, dict) or set(raw_spec) != {"path", "sha256"}:
+                raise ValueError("invalid model file")
+            raw_path = raw_spec["path"]
+            expected_digest = raw_spec["sha256"]
+            if (
+                not isinstance(raw_path, str)
+                or not raw_path
+                or not Path(raw_path).is_absolute()
+                or not is_lowercase_sha256(expected_digest)
+            ):
+                raise ValueError("invalid model file")
+            file_path = Path(raw_path).resolve()
+            if file_path not in observed_digests:
+                observed_digests[file_path] = sha256_file(file_path)
+            if observed_digests[file_path] != expected_digest:
+                raise ValueError("model file digest mismatch")
+            files[role] = file_path
+        datasets[name] = ModelDataset(files=files)
+    return ModelPlan(
+        datasets=datasets,
+        eps=eps,
+        sha256=hashlib.sha256(contents).hexdigest(),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +179,6 @@ class ProductionArtifactAuthority:
             "name_counts_manifest_sha256": self.name_counts_index.manifest_sha256,
             "name_tuples_data_sha256": self.name_tuples.data_sha256,
             "orcid_prefix_counts_data_sha256": self.orcid_prefix_counts.data_sha256,
-            "orcid_prefix_counts_manifest_sha256": self.orcid_prefix_counts.manifest_sha256,
         }
 
 

@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import datetime
-import hashlib
+import csv
 import json
-import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 
-from s2and.consts import NORMALIZATION_VERSION
-from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 from s2and.text import canonical_name_count_keys, canonicalize_name_parts
 
 from ._run_support import (
@@ -22,13 +18,6 @@ from ._run_support import (
     validate_output_container,
 )
 
-QUERY = """
-select nvl(first_name, '') as first_name,
-       nvl(last_name, '') as last_name,
-       count(*) as count
-from content.authors
-group by nvl(first_name, ''), nvl(last_name, '')
-""".strip()
 GUARDRAIL_FIELDS = frozenset(
     {
         "max_source_rows",
@@ -48,18 +37,11 @@ NameCountMappings = tuple[
 ]
 
 
-def _query_text(max_source_rows: int) -> str:
-    """Return the bounded deterministic warehouse query."""
-
-    return f"{QUERY}\norder by first_name, last_name\nlimit {max_source_rows + 1}"
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--run-full", action="store_true", help="Authorize warehouse access")
+    source.add_argument("--input-csv", type=Path, help="Reviewed full warehouse export")
     source.add_argument("--fixture-input", type=Path, help="Local JSON row fixture")
-    parser.add_argument("--source-snapshot-id", required=True)
     parser.add_argument("--limit", type=int, help="Fixture-only row limit")
     parser.add_argument("--guardrails-json", type=Path, help="Reviewed full-run bounds")
     parser.add_argument("--dry-run", action="store_true")
@@ -67,14 +49,20 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _query_rows(max_source_rows: int) -> Iterator[NameCountRow]:
-    try:
-        from pys2 import _evaluate_redshift_query  # type: ignore
-    except ImportError as error:
-        raise RuntimeError("warehouse generation requires the internal pys2 package") from error
-    frame = _evaluate_redshift_query(_query_text(max_source_rows))
-    for first, last, count in zip(frame["first_name"], frame["last_name"], frame["count"], strict=True):
-        yield str(first), str(last), int(count)
+def _reviewed_csv_rows(path: Path) -> Iterator[NameCountRow]:
+    """Stream one reviewed name-count export."""
+
+    with path.open(encoding="utf-8-sig", newline="") as input_file:
+        reader = csv.DictReader(input_file)
+        if reader.fieldnames != ["first_name", "last_name", "count"]:
+            raise ValueError("reviewed export columns must be exactly first_name,last_name,count")
+        for row_number, row in enumerate(reader, start=2):
+            if None in row or any(value is None for value in row.values()):
+                raise ValueError(f"reviewed export row {row_number} does not match its header")
+            count = int(row["count"])
+            if count < 1:
+                raise ValueError(f"reviewed export row {row_number} count must be a positive integer")
+            yield row["first_name"], row["last_name"], count
 
 
 def _fixture_rows(path: Path, limit: int | None) -> Iterator[NameCountRow]:
@@ -102,23 +90,17 @@ def build_name_count_dicts(
     max_source_rows: int | None = None,
     max_keys_per_mapping: int | None = None,
     progress_callback: Callable[[dict[str, int]], None] | None = None,
-) -> tuple[NameCountMappings, dict[str, int | str]]:
+) -> tuple[NameCountMappings, dict[str, int]]:
     """Canonicalize source rows while enforcing the two live size bounds."""
 
     counters: list[Counter[str]] = [Counter(), Counter(), Counter(), Counter()]
     key_names = ("first", "last", "first_last", "last_first_initial")
     source_rows = 0
     rejected_rows = 0
-    selected_rows_digest = hashlib.sha256()
     for raw_first, raw_last, count in rows:
         source_rows += 1
         if max_source_rows is not None and source_rows > max_source_rows:
             raise ValueError(f"source rows exceeded guardrail max_source_rows={max_source_rows}")
-        for raw_name in (raw_first, raw_last):
-            raw_bytes = raw_name.encode("utf-8")
-            selected_rows_digest.update(len(raw_bytes).to_bytes(8, "little"))
-            selected_rows_digest.update(raw_bytes)
-        selected_rows_digest.update(int(count).to_bytes(8, "little", signed=True))
 
         keys = canonical_name_count_keys(canonicalize_name_parts(raw_first, None, raw_last))
         accepted = False
@@ -146,45 +128,31 @@ def build_name_count_dicts(
             del counter[key]
     return (counters[0], counters[1], counters[2], counters[3]), {
         "source_row_count": source_rows,
-        "selected_rows_sha256": selected_rows_digest.hexdigest(),
         "rejected_row_count": rejected_rows,
     }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    snapshot_id = args.source_snapshot_id.strip()
-    if not snapshot_id:
-        raise ValueError("--source-snapshot-id must be nonempty")
     limit = require_positive(args.limit, option="--limit")
-    if args.run_full and limit is not None:
-        raise ValueError("--limit is fixture-only; it does not bound warehouse scan cost")
+    full_input = args.input_csv.resolve() if args.input_csv is not None else None
+    if full_input is not None and limit is not None:
+        raise ValueError("--limit is fixture-only; it does not bound a reviewed export")
 
     publication = args.output_dir / "name_counts_index"
     output_dir = validate_output_container(args.output_dir, publication_path=publication)
-    fixture = None if args.run_full else validate_fixture_path(args.fixture_input)
-    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS) if args.run_full else None
+    fixture = validate_fixture_path(args.fixture_input) if args.fixture_input is not None else None
+    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS) if full_input is not None else None
     if guardrails is not None:
         if guardrails["min_source_rows"] > guardrails["max_source_rows"]:
             raise ValueError("guardrail min_source_rows must not exceed max_source_rows")
         if guardrails["min_keys_per_mapping"] > guardrails["max_keys_per_mapping"]:
             raise ValueError("guardrail min_keys_per_mapping must not exceed max_keys_per_mapping")
-        query = _query_text(guardrails["max_source_rows"])
-        query_sha256 = hashlib.sha256(query.encode()).hexdigest()
-        source_kind = "redshift:content.authors"
-    else:
-        assert fixture is not None
-        fixture_sha256 = hashlib.sha256(fixture.read_bytes()).hexdigest()
-        query = f"fixture_file_sha256={fixture_sha256}\nlimit={limit}"
-        query_sha256 = fixture_sha256
-        source_kind = f"fixture:{fixture}"
 
     plan = {
-        "source_kind": source_kind,
-        "source_snapshot_id": snapshot_id,
+        "mode": "full" if full_input is not None else "fixture",
+        "source": str(full_input or fixture),
         "output_dir": str(output_dir),
-        "query": query,
-        "query_sha256": query_sha256,
         "guardrails": guardrails,
         "limit": limit,
         "dry_run": bool(args.dry_run),
@@ -193,8 +161,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dry_run:
         return 0
 
-    if guardrails is not None:
-        rows = _query_rows(guardrails["max_source_rows"])
+    if full_input is not None:
+        rows = _reviewed_csv_rows(full_input)
     else:
         assert fixture is not None
         rows = _fixture_rows(fixture, limit)
@@ -232,23 +200,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"min_keys_per_mapping={guardrails['min_keys_per_mapping']}: {below_floor}"
             )
 
-    provenance = {
-        "schema_version": NAME_COUNTS_PROVENANCE_SCHEMA_VERSION,
-        "normalization_version": NORMALIZATION_VERSION,
-        "generation_id": f"{snapshot_id}-{uuid.uuid4().hex}",
-        "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-        "source_kind": source_kind,
-        "source_snapshot_id": snapshot_id,
-        "source_query_sha256": query_sha256,
+    result = {
         "cardinalities": cardinalities,
         **row_metrics,
     }
     from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 
-    index_path, index_metrics = write_name_counts_index(output_dir, mappings, provenance)
+    index_path, index_metrics = write_name_counts_index(output_dir, mappings)
     print(
         json.dumps(
-            {"result": provenance, "name_counts_index": index_path, "name_counts_index_metrics": index_metrics},
+            {"result": result, "name_counts_index": index_path, "name_counts_index_metrics": index_metrics},
             indent=2,
             sort_keys=True,
         )

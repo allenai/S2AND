@@ -1,4 +1,4 @@
-"""Exercise installed S2AND's public promoted incremental Arrow entrypoint."""
+"""Exercise installed S2AND's bulk and promoted incremental Arrow entrypoints."""
 
 from __future__ import annotations
 
@@ -16,15 +16,13 @@ import pyarrow as pa
 
 from s2and.arrow_inputs import (
     INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION,
-    ValidatedArrowInputs,
+    ArrowDataset,
     build_arrow_artifact_manifest,
-    validate_arrow_prediction_artifacts,
     write_arrow_artifact_manifest,
 )
 from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
-from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
 from s2and.incremental_linking.feature_block_arrow import write_raw_arrow_batch_lookup_indexes
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
@@ -41,13 +39,12 @@ def _sha256_file(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def _require_sha256(path: Path, expected_sha256: str, *, label: str) -> str:
+def _require_sha256(path: Path, expected_sha256: str, *, label: str) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"{label} is missing: {path}")
     observed_sha256 = _sha256_file(path)
     if observed_sha256 != expected_sha256:
         raise ValueError(f"{label} SHA-256 mismatch: expected={expected_sha256} observed={observed_sha256}")
-    return observed_sha256
 
 
 def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
@@ -57,7 +54,7 @@ def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
     return payload
 
 
-def _release_dataset_paths(data_root: Path, dataset: str) -> tuple[ValidatedArrowInputs, str]:
+def _release_dataset_root(data_root: Path, dataset: str) -> Path:
     root_manifest = _read_json_object(data_root / "manifest.json", label="Release data manifest")
     if root_manifest.get("schema") != RELEASE_DATA_MANIFEST_SCHEMA:
         raise ValueError(
@@ -70,28 +67,12 @@ def _release_dataset_paths(data_root: Path, dataset: str) -> tuple[ValidatedArro
 
     entry = entries[0]
     dataset_manifest_path = (data_root / entry["manifest_path"]).resolve()
-    dataset_manifest_sha256 = _require_sha256(
+    _require_sha256(
         dataset_manifest_path,
         str(entry["manifest_sha256"]),
         label=f"Release dataset {dataset!r} manifest",
     )
-    dataset_manifest = _read_json_object(
-        dataset_manifest_path,
-        label=f"Release dataset {dataset!r} manifest",
-    )
-    paths = {
-        str(key): str((dataset_manifest_path.parent / value).resolve())
-        for key, value in dataset_manifest["paths"].items()
-    }
-    paths["manifest"] = str(dataset_manifest_path)
-    validated = validate_arrow_prediction_artifacts(
-        paths,
-        require_specter=False,
-        require_name_counts_index=True,
-        expected_normalization_version=NORMALIZATION_VERSION,
-        context=f"installed release-candidate smoke dataset {dataset!r}",
-    )
-    return validated, dataset_manifest_sha256
+    return dataset_manifest_path.parent
 
 
 def _fit_binary_classifier(width: int, *, seed: int) -> lgb.LGBMClassifier:
@@ -161,9 +142,6 @@ def _write_arrow_request(root: Path) -> dict[str, str]:
         "paper_authors": _write_ipc(root / "paper_authors.arrow", paper_authors),
     }
     paths, _ = write_raw_arrow_batch_lookup_indexes(paths, root)
-    cluster_seeds_path = root / "cluster_seeds.arrow"
-    write_cluster_seeds_arrow(cluster_seeds_path, {"s1": "c_match", "s2": "c_other"})
-    paths["cluster_seeds"] = str(cluster_seeds_path)
     manifest = build_arrow_artifact_manifest(paths, root)
     manifest_path = write_arrow_artifact_manifest(manifest, root)
     paths["manifest"] = str(manifest_path)
@@ -225,19 +203,53 @@ def _write_synthetic_bundle(root: Path) -> Path:
 def run_smoke(root: Path) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     bundle_dir = _write_synthetic_bundle(root)
-    arrow_paths = _write_arrow_request(root / "arrow")
+    arrow_root = root / "arrow"
+    _write_arrow_request(arrow_root)
     clusterer = load_production_model(bundle_dir)
     clusterer.n_jobs = 1
-    result = clusterer.predict_incremental_from_arrow_paths(
-        ["q1", "s1", "s2"],
-        arrow_paths,
-        prevent_new_incompatibilities=False,
-        batching_threshold=1,
-        runtime_context=build_runtime_context("installed_incremental_arrow_smoke", backend="rust"),
+    with ArrowDataset.open(arrow_root) as arrow_dataset:
+        bulk_summary = _bulk_smoke_summary(
+            clusterer,
+            arrow_dataset,
+            ["q1", "s1", "s2"],
+            label="installed bulk smoke",
+        )
+        result = clusterer.predict_incremental_from_arrow(
+            ["q1", "s1", "s2"],
+            arrow_dataset,
+            prevent_new_incompatibilities=False,
+            batching_threshold=1,
+            runtime_context=build_runtime_context("installed_incremental_arrow_smoke", backend="rust"),
+            total_ram_bytes=1_000_000_000,
+            name_tuples=set(),
+            cluster_seeds_require={"s1": "c_match", "s2": "c_other"},
+        )
+    return bulk_summary | _smoke_result_summary(result, {"q1", "s1", "s2"}, label="installed incremental smoke")
+
+
+def _bulk_smoke_summary(
+    clusterer: Clusterer,
+    arrow_dataset: ArrowDataset,
+    signature_ids: list[str],
+    *,
+    label: str,
+) -> dict[str, int]:
+    clusters, _ = clusterer.predict_from_arrow(
+        {"smoke": signature_ids},
+        arrow_dataset,
+        runtime_context=build_runtime_context(label, backend="rust"),
         total_ram_bytes=1_000_000_000,
-        name_tuples=set(),
     )
-    return _smoke_result_summary(result, {"q1", "s1", "s2"}, label="installed incremental smoke")
+    clustered_ids = [str(signature_id) for members in clusters.values() for signature_id in members]
+    if len(clustered_ids) != len(signature_ids) or set(clustered_ids) != set(signature_ids):
+        raise RuntimeError(f"{label} returned an invalid partition: {clusters}")
+    pair_count = clusterer._last_arrow_predict_telemetry["rust_make_dists_pair_count"]
+    if pair_count != 3:
+        raise RuntimeError(f"{label} did not score all three pairs: {pair_count}")
+    return {
+        "bulk_signature_count": len(clustered_ids),
+        "bulk_pair_count": 3,
+    }
 
 
 def _smoke_result_summary(
@@ -251,10 +263,13 @@ def _smoke_result_summary(
         raise RuntimeError(f"{label} did not use raw Arrow: {result}")
     if telemetry.get("arrow_promoted_incremental") != 1:
         raise RuntimeError(f"{label} missed promoted Arrow runtime: {telemetry}")
-    clustered_signature_ids = {
+    clustered_signature_ids = [
         str(signature_id) for members in dict(result["clusters"]).values() for signature_id in members
-    }
-    if clustered_signature_ids != expected_signature_ids:
+    ]
+    if (
+        len(clustered_signature_ids) != len(expected_signature_ids)
+        or set(clustered_signature_ids) != expected_signature_ids
+    ):
         raise RuntimeError(f"{label} lost signatures: {result['clusters']}")
     return {
         "arrow_promoted_incremental": telemetry["arrow_promoted_incremental"],
@@ -270,9 +285,6 @@ def run_release_candidate_smoke(
     data_root: Path,
     dataset: str,
     signature_ids: Iterable[str],
-    expected_model_manifest_sha256: str,
-    expected_data_manifest_sha256: str,
-    expected_name_counts_manifest_sha256: str,
 ) -> dict[str, Any]:
     """Exercise exact downloaded release artifacts through installed Rust paths."""
 
@@ -282,22 +294,7 @@ def run_release_candidate_smoke(
     if len(selected_signature_ids) != 3 or len(set(selected_signature_ids)) != 3:
         raise ValueError("Release-candidate smoke requires exactly three distinct signature IDs")
 
-    model_manifest_sha256 = _require_sha256(
-        model_dir / "manifest.json",
-        expected_model_manifest_sha256,
-        label="Production model manifest",
-    )
-    data_manifest_sha256 = _require_sha256(
-        data_root / "manifest.json",
-        expected_data_manifest_sha256,
-        label="Release data manifest",
-    )
     expected_name_counts_index = (data_root / "name_counts_index").resolve()
-    name_counts_manifest_sha256 = _require_sha256(
-        expected_name_counts_index / "manifest.json",
-        expected_name_counts_manifest_sha256,
-        label="Name-count manifest",
-    )
     configured_name_counts_index = Path(NAME_COUNTS_INDEX_PATH).resolve()
     if configured_name_counts_index != expected_name_counts_index:
         raise ValueError(
@@ -305,38 +302,46 @@ def run_release_candidate_smoke(
             f"configured={configured_name_counts_index} expected={expected_name_counts_index}"
         )
 
-    arrow_paths, dataset_manifest_sha256 = _release_dataset_paths(data_root, dataset)
-    bound_name_counts = arrow_paths.name_counts_manifest
-    if bound_name_counts is None or Path(bound_name_counts.index_dir).resolve() != configured_name_counts_index:
-        raise ValueError(f"Release dataset {dataset!r} does not bind the configured name-count index")
-
     clusterer = load_production_model(model_dir)
     clusterer.n_jobs = 1
-    result = clusterer.predict_incremental_from_arrow_paths(
-        selected_signature_ids,
-        arrow_paths,
-        prevent_new_incompatibilities=False,
-        batching_threshold=1,
-        runtime_context=build_runtime_context("installed_release_candidate_smoke", backend="rust"),
-        total_ram_bytes=1_000_000_000,
-        cluster_seeds_require={
-            selected_signature_ids[0]: "smoke-seed-1",
-            selected_signature_ids[1]: "smoke-seed-2",
-        },
-    )
+    with ArrowDataset.open(
+        _release_dataset_root(data_root, dataset),
+        require_name_counts_index=True,
+    ) as arrow_dataset:
+        bound_name_counts = arrow_dataset.name_counts_manifest
+        if bound_name_counts is None or Path(bound_name_counts.index_dir).resolve() != configured_name_counts_index:
+            raise ValueError(f"Release dataset {dataset!r} does not bind the configured name-count index")
+        bulk_summary = _bulk_smoke_summary(
+            clusterer,
+            arrow_dataset,
+            selected_signature_ids,
+            label="release-candidate bulk smoke",
+        )
+        result = clusterer.predict_incremental_from_arrow(
+            selected_signature_ids,
+            arrow_dataset,
+            prevent_new_incompatibilities=False,
+            batching_threshold=1,
+            runtime_context=build_runtime_context("installed_release_candidate_smoke", backend="rust"),
+            total_ram_bytes=1_000_000_000,
+            cluster_seeds_require={
+                selected_signature_ids[0]: "smoke-seed-1",
+                selected_signature_ids[1]: "smoke-seed-2",
+            },
+        )
     summary = _smoke_result_summary(
         result,
         set(selected_signature_ids),
         label="release-candidate smoke",
     )
-    return summary | {
-        "configured_name_counts_index": str(configured_name_counts_index),
-        "data_manifest_sha256": data_manifest_sha256,
-        "dataset": dataset,
-        "dataset_manifest_sha256": dataset_manifest_sha256,
-        "model_manifest_sha256": model_manifest_sha256,
-        "name_counts_manifest_sha256": name_counts_manifest_sha256,
-    }
+    return (
+        bulk_summary
+        | summary
+        | {
+            "configured_name_counts_index": str(configured_name_counts_index),
+            "dataset": dataset,
+        }
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -351,9 +356,6 @@ def build_parser() -> argparse.ArgumentParser:
     release.add_argument("--data-root", type=Path, required=True)
     release.add_argument("--dataset", required=True)
     release.add_argument("--signature-ids", nargs=3, required=True, metavar=("SEED_1", "SEED_2", "QUERY"))
-    release.add_argument("--expected-model-manifest-sha256", required=True)
-    release.add_argument("--expected-data-manifest-sha256", required=True)
-    release.add_argument("--expected-name-counts-manifest-sha256", required=True)
     return parser
 
 
@@ -365,9 +367,6 @@ def main(argv: Iterable[str] | None = None) -> None:
             data_root=args.data_root,
             dataset=args.dataset,
             signature_ids=args.signature_ids,
-            expected_model_manifest_sha256=args.expected_model_manifest_sha256,
-            expected_data_manifest_sha256=args.expected_data_manifest_sha256,
-            expected_name_counts_manifest_sha256=args.expected_name_counts_manifest_sha256,
         )
     elif args.synthetic_work_dir is not None:
         summary = run_smoke(args.synthetic_work_dir)

@@ -6,54 +6,40 @@ main steps for training, evaluating, and publishing a model.
 The examples are research/API examples and intentionally make a test split
 available for immediate inspection. They are not the v1.3 release protocol.
 Release training must keep pairwise, clustering, and linker test identities
-sealed until the one-shot Stage 6 evaluation. Follow
-[1_3_release_todo.md](1_3_release_todo.md), not the example order below, for
+sealed until the one-shot Stage 5 evaluation. Follow
+[release.md](release.md), not the example order below, for
 production work.
 
 ## Build a Rust-backed training dataset
 
-The maintained training constructor consumes a manifest-backed Arrow
-generation. Ground-truth clusters remain JSON by design, but signatures,
+The maintained training constructor consumes an open, manifest-backed
+`ArrowDataset`. Ground-truth clusters remain JSON by design, but signatures,
 papers, paper authors, embeddings, batch indexes, and name counts come from the
 same immutable Arrow bundle.
 
-The example below expects a canonical training generation produced by the
-current `scripts/convert_to_arrow.py` contract. This migration branch does not
-bundle one. Older Arrow directories without `normalization_version` and the
-content-addressed `artifact_generation` inventory are intentionally rejected.
+The example below expects a canonical training root produced by
+`scripts/convert_to_arrow.py`. This migration branch does not bundle one.
 
 ```python
 import json
 from pathlib import Path
 
+from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_training import build_training_anddata_from_arrow
 from s2and.consts import NORMALIZATION_VERSION
 
 bundle_dir = Path("/path/to/canonical_arrow_training_bundle/pubmed")
 manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
 manifest_paths = manifest["paths"]
-embedding_key = "specter"
-embedding_index_key = "specter_batch_index"
-training_keys = [
-    "signatures",
-    "signatures_batch_index",
-    "papers",
-    "papers_batch_index",
-    "paper_authors",
-    "paper_authors_batch_index",
-    "name_counts_index",
-    embedding_key,
-    embedding_index_key,
-]
-arrow_paths = {
-    key: str((bundle_dir / manifest_paths[key]).resolve())
-    for key in training_keys
-}
+arrow_dataset = ArrowDataset.open(
+    bundle_dir,
+    require_name_counts_index=True,
+    expected_normalization_version=NORMALIZATION_VERSION,
+)
 
 dataset = build_training_anddata_from_arrow(
-    arrow_paths,
+    arrow_dataset,
     "pubmed",
-    expected_normalization_version=NORMALIZATION_VERSION,
     clusters=str((bundle_dir / manifest_paths["clusters"]).resolve()),
     train_pairs_size=1000,
     val_pairs_size=200,
@@ -62,12 +48,12 @@ dataset = build_training_anddata_from_arrow(
 )
 ```
 
-Set `bundle_dir` to a canonical training generation with this manifest
-contract. The constructor validates required tables,
-raw-planner batch indexes, checksums, normalization provenance, and the
-name-count index before it samples any pairs. It always selects the Rust
-training runtime and pins canonical preprocessing, regardless of
-`S2AND_BACKEND`. The requested pair counts are upper bounds when a split
+Set `bundle_dir` to a canonical training root. Opening the handle validates
+required tables, raw-planner batch indexes, checksums, normalization provenance,
+and the name-count index before any pairs are sampled. Keep `arrow_dataset`
+open while the returned dataset is used, then close it. The constructor always
+selects the Rust training runtime and pins canonical preprocessing, regardless
+of `S2AND_BACKEND`. The requested pair counts are upper bounds when a split
 contains fewer eligible within-block pairs.
 The returned dataset's Python-visible signatures and papers are reconstructed
 from the validated Arrow bundle; the constructor never injects pre-conversion
@@ -97,8 +83,8 @@ pairwise_model = PairwiseModeler(
 pairwise_model.fit(X_train, y_train, X_val, y_val)
 ```
 
-The production `train_pairwise.py` command always featurizes from its pinned
-training plan and has no cache or smoke mode. Programmatic research callers can
+The production `train_pairwise.py` command always featurizes from its frozen
+`model_plan.json` and has no cache or smoke mode. Programmatic research callers can
 use `s2and.feature_cache.cached_featurize`; see
 [caching.md](caching.md) for its exact semantics.
 
@@ -161,12 +147,11 @@ bundle containing pairwise boosters, clusterer configuration, promoted linker,
 embedded replay target, and checksummed manifest. After EPS is frozen,
 `train_linker_and_finalize.py` fits the linker once, atomically writes
 the complete bundle, reloads those exact bytes, and evaluates them. See the
-[v1.3 release runbook](1_3_release_todo.md).
+[v1.3 release runbook](release.md).
 
 Pairwise production training verifies the packaged canonical name tuples and
 records `name_tuples_data_sha256`, `name_counts_manifest_sha256`,
-`orcid_prefix_counts_data_sha256`, and
-`orcid_prefix_counts_manifest_sha256` in `feature_contract`. Bundle export does
+and `orcid_prefix_counts_data_sha256` in `feature_contract`. Bundle export does
 not synthesize missing behavior hashes. Export and load compare tuple/ORCID
 data hashes with the canonical package artifacts; the exact name-count
 manifest and complete ordered feature contract are also bound into model and
@@ -182,14 +167,16 @@ has been reloaded.
 After a bundle passes those gates, reload it explicitly:
 
 ```python
+from s2and.arrow_inputs import ArrowDataset
 from s2and.production_model import load_production_model
 
 clusterer = load_production_model("/path/to/production_model_vX.Y")
-pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow_paths(
-    blocks,
-    arrow_paths,
-    total_ram_bytes=32 * 1024**3,
-)
+with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
+    pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow(
+        blocks,
+        arrow_dataset,
+        total_ram_bytes=32 * 1024**3,
+    )
 ```
 
 `pred_distance_matrices` may be `None` when the fused clustering path is active.

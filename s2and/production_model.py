@@ -62,7 +62,6 @@ EXPLICIT_RELEASE_ARTIFACT_HASH_FIELDS = frozenset(
         "name_counts_manifest_sha256",
         "name_tuples_data_sha256",
         "orcid_prefix_counts_data_sha256",
-        "orcid_prefix_counts_manifest_sha256",
     }
 )
 _CLUSTERER_CONFIG_FIELDS = frozenset(
@@ -621,7 +620,7 @@ def _require_bundle_normalization_version(bundle_dir: Path, feature_contract: Ma
             f"Production bundle {bundle_dir} was built with normalization_version {bundle_version!r} "
             f"but this package implements {NORMALIZATION_VERSION!r}. Code, model, and artifacts move "
             "as one release unit; redeploy the matching package or rebuild the bundle "
-            "(docs/normalization_migration_blocked.md)."
+            "(docs/data.md)."
         )
 
 

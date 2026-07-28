@@ -40,8 +40,8 @@ rejects the v1.21 source bundle because its normalization contract is legacy.
 No compatible model or default is distributed on this branch; current
 evaluation requires an explicit model bundle path. The v1.3 model is fixed as
 an immutable external bundle rather than a packaged default. The fixed
-distribution verifier enforces that policy; B15 remains partial until the
-actual release archives pass it.
+distribution verifier enforces that policy; the release remains incomplete
+until the actual archives pass it.
 
 The v1.21 bundle includes the previous promoted incremental linker under
 `incremental_linker/`. Its replay target is tracked separately at
@@ -53,7 +53,8 @@ Arrow/Rust features from the source bundle, target JSON, and pairwise model,
 fits once, and writes a complete v5 bundle containing
 `reproducibility/incremental_linker_training_target.json`. It reloads that exact
 bundle before evaluation. Follow
-[1_3_release_todo.md](1_3_release_todo.md) before a full command. Durable job
-logs supplement, but do not replace, the five semantic release authorities.
+[release.md](release.md) before a full command. Durable job
+logs record the command and outcome; no separate evidence-transport protocol is
+required for the trusted-owner release.
 
 See [production_inference.md](production_inference.md) for the current inference contract.

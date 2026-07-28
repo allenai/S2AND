@@ -13,10 +13,10 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from s2and.arrow_inputs import ValidatedArrowInputs
+from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training import classic as classic_training
 from scripts.production.model import train_linker_and_finalize as promoted_train
-from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, write_minimal_arrow_prediction_bundle
 
 COMMON_TRAINING_ARGS = (
     "--source-bundle-root",
@@ -34,7 +34,6 @@ EXPLICIT_ARTIFACT_HASHES = {
     "name_counts_manifest_sha256": "a" * 64,
     "name_tuples_data_sha256": "b" * 64,
     "orcid_prefix_counts_data_sha256": "c" * 64,
-    "orcid_prefix_counts_manifest_sha256": "d" * 64,
 }
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FULL_MATERIALIZATION_SUMMARIES = tuple({"table_key": key, "rows": 1} for key in promoted_train.REQUIRED_TABLE_KEYS)
@@ -297,26 +296,18 @@ def test_run_rejects_name_count_binding_before_materialization(
         models={},
         expected_metrics={},
     )
-    arrow_paths = ValidatedArrowInputs(
-        paths={},
-        generation_id="fixture-generation",
-        normalization_version=promoted_train.NORMALIZATION_VERSION,
-    )
+    dataset_root = tmp_path / "arrow"
+    write_minimal_arrow_prediction_bundle(dataset_root)
     clusterer = SimpleNamespace()
     monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
     monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
     _stub_preflight(monkeypatch)
-    monkeypatch.setattr(
-        promoted_train,
-        "_preflight_source_rows",
-        lambda *_args, **_kwargs: (1, {"toy": arrow_paths}),
-    )
     monkeypatch.setattr(promoted_train, "load_clusterer", lambda *_args, **_kwargs: clusterer)
     monkeypatch.setattr(promoted_train, "_assert_pairwise_model_supports_arrow_materialization", lambda *_args: None)
 
-    def reject_binding(actual_clusterer: Any, actual_paths: Any, *, context: str) -> None:
+    def reject_binding(actual_clusterer: Any, actual_dataset: Any, *, context: str) -> None:
         assert actual_clusterer is clusterer
-        assert actual_paths is arrow_paths
+        assert actual_dataset is arrow_dataset
         assert "toy" in context
         raise ValueError("name-count generation mismatch")
 
@@ -335,8 +326,14 @@ def test_run_rejects_name_count_binding_before_materialization(
         ]
     )
 
-    with pytest.raises(ValueError, match="name-count generation mismatch"):
-        promoted_train.run(args)
+    with ArrowDataset.open(dataset_root) as arrow_dataset:
+        monkeypatch.setattr(
+            promoted_train,
+            "_preflight_source_rows",
+            lambda *_args, **_kwargs: (1, {"toy": arrow_dataset}),
+        )
+        with pytest.raises(ValueError, match="name-count generation mismatch"):
+            promoted_train.run(args)
 
     assert not output_dir.exists()
 
@@ -369,21 +366,21 @@ def test_target_schema_is_required_when_loaded(tmp_path: Path) -> None:
         promoted_train._load_target(target_path)  # noqa: SLF001
 
 
-def test_arrow_rust_materialization_passes_concrete_paths_to_native_planner(
+def test_arrow_rust_materialization_passes_dataset_handle_to_native_planner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_dataset = build_dummy_dataset("native_planner_boundary", mode="train")
-    arrow_dataset = build_arrow_training_dataset(source_dataset, tmp_path / "arrow")
-    arrow_paths = arrow_dataset.arrow_paths
-    assert isinstance(arrow_paths, ValidatedArrowInputs)
+    training_dataset = build_arrow_training_dataset(source_dataset, tmp_path / "arrow")
+    arrow_dataset = training_dataset.arrow_dataset
+    assert isinstance(arrow_dataset, ArrowDataset)
     real_rust_module = promoted_train.feature_port._require_rust_runtime()  # noqa: SLF001
     captured: dict[str, Any] = {}
 
     class CapturingRustModule:
         @staticmethod
         def raw_arrow_labeled_candidate_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            captured["name_counts_index"] = kwargs.get("name_counts_index")
+            captured["native_dataset"] = args[0]
             plan = real_rust_module.raw_arrow_labeled_candidate_plan(*args, **kwargs)
             captured["reused_name_counts_index"] = plan["telemetry"]["reused_name_counts_index"]
             return plan
@@ -391,11 +388,11 @@ def test_arrow_rust_materialization_passes_concrete_paths_to_native_planner(
     monkeypatch.setattr(promoted_train.feature_port, "_require_rust_runtime", lambda: CapturingRustModule)
 
     def stop_after_native_plan(*_args: Any, **_kwargs: Any) -> None:
-        raise RuntimeError("native planner accepted concrete Arrow paths")
+        raise RuntimeError("native planner accepted the retained Arrow dataset")
 
     monkeypatch.setattr(
         promoted_train.feature_port,
-        "build_rust_featurizer_from_arrow_paths",
+        "build_rust_featurizer_from_arrow_dataset",
         stop_after_native_plan,
     )
     context = promoted_train.ArrowRustDatasetContext(
@@ -403,7 +400,7 @@ def test_arrow_rust_materialization_passes_concrete_paths_to_native_planner(
         row_component_scope="block-local",
         pairwise_component_scope="block-local",
         runtime_context=SimpleNamespace(),
-        arrow_paths=arrow_paths,
+        arrow_dataset=arrow_dataset,
         component_members={"candidate": ("1",)},
         cluster_seeds_require={},
         cluster_seeds_disallow=frozenset(),
@@ -423,22 +420,25 @@ def test_arrow_rust_materialization_passes_concrete_paths_to_native_planner(
         ]
     )
 
-    with pytest.raises(RuntimeError, match="native planner accepted concrete Arrow paths"):
-        promoted_train._materialize_arrow_rust_dataset_rows(  # noqa: SLF001
-            context=context,
-            rows=rows,
-            target_features=[],
-            name_tuples=frozenset(),
-            clusterer=SimpleNamespace(),
-            n_jobs=1,
-            total_ram_bytes=1,
-            max_exemplars=1,
-            pairwise_model_nan_value=0.0,
-            pairwise_aggregate_nan_value=0.0,
-        )
+    try:
+        with pytest.raises(RuntimeError, match="native planner accepted the retained Arrow dataset"):
+            promoted_train._materialize_arrow_rust_dataset_rows(  # noqa: SLF001
+                context=context,
+                rows=rows,
+                target_features=[],
+                name_tuples=frozenset(),
+                clusterer=SimpleNamespace(),
+                n_jobs=1,
+                total_ram_bytes=1,
+                max_exemplars=1,
+                pairwise_model_nan_value=0.0,
+                pairwise_aggregate_nan_value=0.0,
+            )
 
-    assert captured["name_counts_index"] is arrow_paths.native_name_counts_index
-    assert captured["reused_name_counts_index"] is True
+        assert captured["native_dataset"] is arrow_dataset.native
+        assert captured["reused_name_counts_index"] is True
+    finally:
+        arrow_dataset.close()
 
 
 def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tmp_path: Path) -> None:
@@ -501,32 +501,89 @@ def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tm
         assert len(pd.read_parquet(classic_training._resolve_path(bundle, path))) == 1  # noqa: SLF001
 
 
-def test_observed_metrics_use_weighted_average_error() -> None:
-    summary = {
-        "training_summary": {"rows": 10, "positive_rows": 3},
-        "abstain_rule": {"promoted_logistic_gate": {"mode": "promoted_logistic_topk_multiclass_l2"}},
-        "stratified_eval_test_split": {
-            "overall": {
-                "test": {
-                    "n_queries": 100,
-                    "accuracy": 0.9,
-                    "balanced_accuracy": 0.9,
-                    "error_rate": 0.1,
-                    "errors": 10,
-                    "false_abstain": 4,
-                    "false_link": 3,
-                    "wrong_candidate_link": 3,
+def _valid_observed_metrics() -> dict[str, Any]:
+    return promoted_train._observed_official_metrics(  # noqa: SLF001
+        {
+            "training_summary": {"rows": 10, "positive_rows": 3},
+            "abstain_rule": {"promoted_logistic_gate": {"mode": "promoted_logistic_topk_multiclass_l2"}},
+            "stratified_eval_test_split": {
+                "overall": {
+                    "test": {
+                        "n_queries": 100,
+                        "accuracy": 0.9,
+                        "balanced_accuracy": 0.9,
+                        "error_rate": 0.1,
+                        "errors": 10,
+                        "false_abstain": 4,
+                        "false_link": 3,
+                        "wrong_candidate_link": 3,
+                    }
                 }
-            }
-        },
-    }
+            },
+        }
+    )
 
-    observed = promoted_train._observed_official_metrics(summary)  # noqa: SLF001
+
+def test_observed_metrics_use_weighted_average_error() -> None:
+    observed = _valid_observed_metrics()
+
+    promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
 
     assert observed["false_abstain_error_rate"] == pytest.approx(0.04)
     assert observed["false_link_error_rate"] == pytest.approx(0.03)
     assert observed["wrong_link_error_rate"] == pytest.approx(0.03)
     assert observed["weighted_average_error"] == pytest.approx(((0.25 * 0.04) + 0.03 + (1.5 * 0.03)) / 2.75)
+
+
+@pytest.mark.parametrize("change", ["missing", "extra"])
+def test_observed_metric_validation_requires_exact_official_keys(change: str) -> None:
+    observed = _valid_observed_metrics()
+    if change == "missing":
+        observed.pop("weighted_average_error")
+    else:
+        observed["unexpected_metric"] = 0.0
+
+    with pytest.raises(ValueError, match="complete official metric set"):
+        promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("stratified_test_accuracy", float("nan"), "must be finite"),
+        ("stratified_test_accuracy", 1.1, r"must be in \[0, 1\]"),
+        ("stratified_test_errors", -1, "must be a nonnegative integer"),
+        ("training_rows", 0, "training counts are inconsistent"),
+        ("stratified_test_queries", 0, "test counts are inconsistent"),
+        ("stratified_test_errors", 101, "test counts are inconsistent"),
+        (
+            "weighted_average_error_weights",
+            {
+                **promoted_train.WEIGHTED_ERROR_WEIGHTS,
+                "false_link_error_rate": 0.0,
+            },
+            "must be positive",
+        ),
+        (
+            "weighted_average_error_weights",
+            {
+                **promoted_train.WEIGHTED_ERROR_WEIGHTS,
+                "false_link_error_rate": 2.0,
+            },
+            "must equal the official value",
+        ),
+    ],
+)
+def test_observed_metric_validation_rejects_malformed_values(
+    field: str,
+    value: Any,
+    message: str,
+) -> None:
+    observed = _valid_observed_metrics()
+    observed[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
 
 
 def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
@@ -690,6 +747,13 @@ def test_release_serializes_complete_bundle_before_evaluation(
     monkeypatch.setattr(promoted_train, "save_incremental_linking_artifact", save_artifact)
     monkeypatch.setattr(promoted_train, "finalize_production_bundle", finalize_bundle)
     monkeypatch.setattr(promoted_train, "load_production_model", load_complete)
+    validate_observed_metrics = promoted_train._validate_observed_official_metrics  # noqa: SLF001
+
+    def validate_metrics(metrics: dict[str, Any]) -> None:
+        order.append("validate")
+        validate_observed_metrics(metrics)
+
+    monkeypatch.setattr(promoted_train, "_validate_observed_official_metrics", validate_metrics)
     monkeypatch.setattr(
         promoted_train,
         "load_clusterer",
@@ -712,6 +776,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
         "reload",
         "materialize_evaluation",
         "evaluate",
+        "validate",
     ]
     assert result["schema_version"] == promoted_train.LINKER_EVALUATION_REPORT_SCHEMA
     assert result["pairwise_bundle_binding"] == {"test": "binding"}

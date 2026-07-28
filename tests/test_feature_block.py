@@ -11,13 +11,10 @@ import pytest
 
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
 import s2and.runtime as runtime_module
-from s2and.arrow_inputs import (
-    ValidatedArrowInputs,
-    validate_arrow_prediction_artifacts,
-)
+from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.data import ANDData, Author, NameCounts
-from s2and.feature_port import build_rust_featurizer_from_arrow_paths
+from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
@@ -29,7 +26,7 @@ from s2and.incremental_linking.feature_block import (
     read_cluster_seed_disallows_arrow,
     read_cluster_seeds_arrow,
     read_incremental_query_signatures_arrow,
-    temporary_arrow_paths_with_cluster_seeds,
+    temporary_cluster_seed_sidecars,
     write_altered_cluster_signatures_arrow,
     write_arrow_batch_lookup_index,
     write_arrow_ipc_table,
@@ -56,7 +53,11 @@ from scripts.arrow_conversion_helpers import (
     raw_planner_arrow_tables_from_anddata,
     write_raw_planner_arrow_from_anddata,
 )
-from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple, write_test_arrow_artifact_manifest
+from tests.helpers import (
+    tiny_name_counts_tuple,
+    write_minimal_arrow_prediction_bundle,
+    write_test_arrow_artifact_manifest,
+)
 
 
 def _raw_test_clusterer(
@@ -212,12 +213,9 @@ def _raw_plan() -> dict[str, Any]:
     return plan
 
 
-def _validated_empty_arrow_inputs() -> ValidatedArrowInputs:
-    return ValidatedArrowInputs(
-        paths={},
-        generation_id="test-generation",
-        normalization_version=NORMALIZATION_VERSION,
-    )
+def _open_test_arrow_dataset(tmp_path: Path) -> ArrowDataset:
+    write_minimal_arrow_prediction_bundle(tmp_path)
+    return ArrowDataset.open(tmp_path, expected_normalization_version=NORMALIZATION_VERSION)
 
 
 def _write_raw_planner_arrow_paths(tmp_path: Path) -> dict[str, str]:
@@ -639,49 +637,18 @@ def test_altered_cluster_signatures_arrow_round_trips_and_rejects_duplicates(tmp
         read_altered_cluster_signatures_arrow(duplicate_path)
 
 
-@pytest.mark.parametrize(
-    ("bad_path", "match"),
-    [
-        (None, "papers.*None"),
-        (" ", "papers.*empty"),
-        (".", "papers.*current directory"),
-    ],
-)
-def test_temporary_arrow_paths_with_cluster_seeds_rejects_invalid_paths(
-    tmp_path: Path,
-    bad_path: object,
-    match: str,
-) -> None:
-    with pytest.raises(ValueError, match=match):
-        with temporary_arrow_paths_with_cluster_seeds(
-            {
-                "signatures": tmp_path / "signatures.arrow",
-                "papers": bad_path,
-            },
-            {},
-            prefix="test-arrow-paths-",
-        ):
-            raise AssertionError("invalid paths should fail before yielding")
-
-
-def test_temporary_arrow_paths_with_cluster_seeds_cleans_up_tmpdir(tmp_path: Path) -> None:
+def test_temporary_cluster_seed_sidecars_clean_up_tmpdir(tmp_path: Path) -> None:
     pytest.importorskip("pyarrow")
 
-    with temporary_arrow_paths_with_cluster_seeds(
-        {
-            "signatures": tmp_path / "signatures.arrow",
-            "papers": tmp_path / "papers.arrow",
-        },
+    with temporary_cluster_seed_sidecars(
         {"s1": "c1"},
-        prefix="test-arrow-paths-",
+        prefix="test-arrow-sidecars-",
         cluster_seeds_disallow=[("s1", "s2")],
-    ) as paths:
-        cluster_seed_path = Path(paths["cluster_seeds"])
-        disallow_path = Path(paths["cluster_seed_disallows"])
+    ) as sidecars:
+        cluster_seed_path = Path(sidecars["cluster_seeds"])
+        disallow_path = Path(sidecars["cluster_seed_disallows"])
         temp_dir = cluster_seed_path.parent
 
-        assert paths["signatures"] == str(tmp_path / "signatures.arrow")
-        assert paths["papers"] == str(tmp_path / "papers.arrow")
         assert cluster_seed_path.exists()
         assert disallow_path.exists()
         assert temp_dir.exists()
@@ -689,26 +656,6 @@ def test_temporary_arrow_paths_with_cluster_seeds_cleans_up_tmpdir(tmp_path: Pat
     assert not temp_dir.exists()
     assert not cluster_seed_path.exists()
     assert not disallow_path.exists()
-
-
-def test_temporary_arrow_paths_with_cluster_seeds_rewrites_stale_empty_seed_path(tmp_path: Path) -> None:
-    pytest.importorskip("pyarrow")
-    stale_seed_path = tmp_path / "missing_cluster_seeds.arrow"
-
-    with temporary_arrow_paths_with_cluster_seeds(
-        {
-            "signatures": tmp_path / "signatures.arrow",
-            "papers": tmp_path / "papers.arrow",
-            "cluster_seeds": stale_seed_path,
-        },
-        {},
-        prefix="test-arrow-paths-",
-        reuse_existing_cluster_seeds_when_empty=True,
-        cluster_seeds_disallow=[("s1", "s2")],
-    ) as paths:
-        cluster_seed_path = Path(paths["cluster_seeds"])
-        assert cluster_seed_path.exists()
-        assert cluster_seed_path != stale_seed_path
 
 
 def test_read_cluster_seeds_arrow_rejects_duplicate_signature_rows(tmp_path: Path) -> None:
@@ -888,19 +835,17 @@ def test_raw_planner_index_reuse_rejects_record_count_mismatch(tmp_path: Path) -
 
 def test_write_name_counts_index(tmp_path: Path) -> None:
     mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
-    provenance = tiny_name_counts_provenance()
 
-    index_path, index_metrics = write_name_counts_index(tmp_path, mappings, provenance)
+    index_path, index_metrics = write_name_counts_index(tmp_path, mappings)
 
     assert "reused" not in index_metrics
     assert index_metrics["row_count"] == 4
     assert index_metrics["first_count"] == 1
     manifest = json.loads((Path(index_path) / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == "name_counts_index_v2"
-    assert manifest["exact_string_verification"] is True
-    assert manifest["files"]["first"]["path"].startswith("generations/")
+    assert manifest["schema_version"] == "name_counts_index_v3"
+    assert manifest["files"]["first"]["path"] == "first.bin"
     with pytest.raises(FileExistsError, match="target already exists"):
-        write_name_counts_index(tmp_path, mappings, provenance)
+        write_name_counts_index(tmp_path, mappings)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows prevents unlinking open sort-run files")
@@ -1012,7 +957,6 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot(
     name_counts_index_path, _metrics = write_name_counts_index(
         tmp_path,
         mappings,
-        tiny_name_counts_provenance(),
     )
     base_arrow_paths["name_counts_index"] = name_counts_index_path
     arrow_paths = _with_query_signatures(
@@ -1033,66 +977,65 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot(
     monkeypatch.setattr(
         runtime_module,
         "load_s2and_rust_extension",
-        lambda: SimpleNamespace(NameCountsIndex=CountingNativeNameCountsIndex),
+        lambda: SimpleNamespace(
+            NameCountsIndex=CountingNativeNameCountsIndex,
+            _ArrowDataset=real_extension._ArrowDataset,
+        ),
     )
 
-    validated = validate_arrow_prediction_artifacts(
-        arrow_paths,
+    with ArrowDataset.open(
+        tmp_path,
         require_specter=False,
         require_name_counts_index=True,
-        require_cluster_seeds=True,
-        required_request_sidecars=("query_signatures",),
         expected_normalization_version=NORMALIZATION_VERSION,
-    )
-    retained_manifest = validated.name_counts_manifest
-    assert retained_manifest is not None
-    retained_native = validated.native_name_counts_index
-    assert retained_native is not None
+    ) as arrow_dataset:
+        retained_manifest = arrow_dataset.name_counts_manifest
+        assert retained_manifest is not None
+        retained_native = arrow_dataset.native_name_counts_index
+        assert retained_native is not None
 
-    labeled_plan = real_extension.raw_arrow_labeled_candidate_plan(
-        dict(validated),
-        ["q"],
-        ["full"],
-        ["group-q"],
-        ["c_ada"],
-        [1],
-        {"c_ada": ["s1"]},
-        orcid_enabled=False,
-        num_threads=1,
-        max_exemplars=4,
-        name_counts_index=retained_native,
-    )
-    assert labeled_plan["telemetry"]["reused_name_counts_index"] is True
-    assert native_open_calls == 1
+        labeled_plan = real_extension.raw_arrow_labeled_candidate_plan(
+            arrow_dataset.native,
+            ["q"],
+            ["full"],
+            ["group-q"],
+            ["c_ada"],
+            [1],
+            {"c_ada": ["s1"]},
+            orcid_enabled=False,
+            num_threads=1,
+            max_exemplars=4,
+        )
+        assert labeled_plan["telemetry"]["reused_name_counts_index"] is True
+        assert native_open_calls == 1
 
-    planner = real_extension.RawBlockQueryCandidatePlanner.from_query_signatures(
-        dict(validated),
-        top_k=2,
-        orcid_enabled=False,
-        num_threads=1,
-        max_exemplars=4,
-        name_counts_index=retained_native,
-    )
-    plan = planner.plan_query_signatures()
+        planner = real_extension.RawBlockQueryCandidatePlanner.from_query_signatures(
+            arrow_dataset.native,
+            arrow_paths["query_signatures"],
+            arrow_paths["cluster_seeds"],
+            2,
+            orcid_enabled=False,
+            num_threads=1,
+            max_exemplars=4,
+        )
+        plan = planner.plan_query_signatures()
 
-    assert int(plan["row_count"]) > 0
-    assert native_open_calls == 1
-    assert planner.build_telemetry()["reused_name_counts_index"] is True
-    assert planner.name_counts_index().name_counts_manifest_sha256 == retained_manifest.manifest_sha256
-    featurizer = build_rust_featurizer_from_arrow_paths(
-        validated.without("query_signatures"),
-        expected_normalization_version=NORMALIZATION_VERSION,
-        signature_ids=("q", "s1"),
-        name_tuples=set(),
-        load_name_counts=True,
-        preprocess=True,
-        num_threads=1,
-    )
-    assert featurizer.name_counts_manifest_sha256 == retained_native.name_counts_manifest_sha256
-    assert native_open_calls == 1
+        assert int(plan["row_count"]) > 0
+        assert native_open_calls == 1
+        assert planner.build_telemetry()["reused_name_counts_index"] is True
+        assert planner.name_counts_index().name_counts_manifest_sha256 == retained_manifest.manifest_sha256
+        featurizer = build_rust_featurizer_from_arrow_dataset(
+            arrow_dataset,
+            signature_ids=("s1",),
+            name_tuples=set(),
+            preprocess=True,
+            num_threads=1,
+        )
+        assert featurizer.name_counts_manifest_sha256 == retained_native.name_counts_manifest_sha256
+        assert native_open_calls == 1
 
 
-def test_raw_arrow_rejects_candidate_plan_without_component_members() -> None:
+def test_raw_arrow_rejects_candidate_plan_without_component_members(tmp_path: Path) -> None:
     class FakeFeaturizer:
         def signature_ids(self) -> list[str]:
             return ["q", "s1", "s2", "s3"]
@@ -1101,19 +1044,20 @@ def test_raw_arrow_rejects_candidate_plan_without_component_members() -> None:
     raw_plan.pop("component_members")
     raw_plan["telemetry"]["cluster_count"] = 99
 
-    with pytest.raises(KeyError, match="component_members"):
-        _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-            _raw_test_clusterer(),
-            _raw_test_artifact(),
-            arrow_paths=_validated_empty_arrow_inputs(),
-            query_signature_ids=["q"],
-            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(raw_plan),
-            rust_featurizer=FakeFeaturizer(),
-            runtime_context=SimpleNamespace(operation="raw-arrow-test", run_id="raw-arrow-test"),
-        )
+    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
+        with pytest.raises(KeyError, match="component_members"):
+            _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
+                _raw_test_clusterer(),
+                _raw_test_artifact(),
+                arrow_dataset=arrow_dataset,
+                query_signature_ids=["q"],
+                raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(raw_plan),
+                rust_featurizer=FakeFeaturizer(),
+                runtime_context=SimpleNamespace(operation="raw-arrow-test", run_id="raw-arrow-test"),
+            )
 
 
-def test_raw_arrow_partial_supervision_require_unknown_seed_rejected() -> None:
+def test_raw_arrow_partial_supervision_require_unknown_seed_rejected(tmp_path: Path) -> None:
     class FakeFeaturizer:
         def signature_ids(self) -> list[str]:
             return ["q", "s1", "s2", "s3"]
@@ -1121,51 +1065,41 @@ def test_raw_arrow_partial_supervision_require_unknown_seed_rejected() -> None:
     raw_plan = _raw_plan()
     raw_plan["component_members"] = {}
 
-    with pytest.raises(ValueError, match="partial_supervision_require_unknown_seed_signature"):
-        _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-            _raw_test_clusterer(),
-            _raw_test_artifact(),
-            arrow_paths=_validated_empty_arrow_inputs(),
-            query_signature_ids=["q"],
-            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(raw_plan),
-            rust_featurizer=FakeFeaturizer(),
-            partial_supervision={("q", "s1"): 0},
-        )
+    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
+        with pytest.raises(ValueError, match="partial_supervision_require_unknown_seed_signature"):
+            _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
+                _raw_test_clusterer(),
+                _raw_test_artifact(),
+                arrow_dataset=arrow_dataset,
+                query_signature_ids=["q"],
+                raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(raw_plan),
+                rust_featurizer=FakeFeaturizer(),
+                partial_supervision={("q", "s1"): 0},
+            )
 
 
-def test_raw_arrow_scoring_requires_featurizer_with_provided_raw_plan(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_build_rust_featurizer_from_arrow_paths(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("provided raw candidate plans must not trigger a new Arrow featurizer scan")
-
-    monkeypatch.setattr(
-        "s2and.incremental_linking.runtime.feature_port.build_rust_featurizer_from_arrow_paths",
-        fail_build_rust_featurizer_from_arrow_paths,
-    )
-
-    with pytest.raises(ValueError, match="preplanned raw Arrow scoring requires rust_featurizer"):
-        _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-            _raw_test_clusterer(),
-            _raw_test_artifact(),
-            arrow_paths=_validated_empty_arrow_inputs(),
-            query_signature_ids=["q"],
-            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
-            rust_featurizer=None,
-        )
+def test_raw_arrow_scoring_requires_featurizer_with_provided_raw_plan(tmp_path: Path) -> None:
+    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
+        with pytest.raises(ValueError, match="preplanned raw Arrow scoring requires rust_featurizer"):
+            _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
+                _raw_test_clusterer(),
+                _raw_test_artifact(),
+                arrow_dataset=arrow_dataset,
+                query_signature_ids=["q"],
+                raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
+                rust_featurizer=None,
+            )
 
 
 def test_preplanned_raw_arrow_scoring_uses_provided_plan(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     captured: dict[str, Any] = {}
 
     class FakeFeaturizer:
         def signature_ids(self) -> list[str]:
             return ["q", "s1", "s2", "s3"]
-
-    def fail_build_rust_featurizer_from_arrow_paths(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("preplanned raw Arrow scoring should reuse the supplied featurizer")
 
     def fake_from_retrieval(**kwargs: Any) -> LinkOrAbstainProductionResult:
         retrieval_batch = kwargs["retrieval_batch"]
@@ -1194,24 +1128,21 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan(
         )
 
     monkeypatch.setattr(
-        "s2and.incremental_linking.runtime.feature_port.build_rust_featurizer_from_arrow_paths",
-        fail_build_rust_featurizer_from_arrow_paths,
-    )
-    monkeypatch.setattr(
         "s2and.incremental_linking.runtime._predict_incremental_link_or_abstain_production_from_retrieval_private",
         lambda *args, **kwargs: fake_from_retrieval(**kwargs),
     )
 
-    result = _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-        _raw_test_clusterer(),
-        _raw_test_artifact(),
-        arrow_paths=_validated_empty_arrow_inputs(),
-        query_signature_ids=["q"],
-        raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
-        rust_featurizer=FakeFeaturizer(),
-        top_k=2,
-        n_jobs=1,
-    )
+    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
+        result = _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
+            _raw_test_clusterer(),
+            _raw_test_artifact(),
+            arrow_dataset=arrow_dataset,
+            query_signature_ids=["q"],
+            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
+            rust_featurizer=FakeFeaturizer(),
+            top_k=2,
+            n_jobs=1,
+        )
 
     assert captured["dataset"] is None
     assert captured["retrieval_left_indices"] == [0, 0, 0]
@@ -1223,15 +1154,13 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan(
 
 def test_preplanned_raw_arrow_scoring_uses_provided_rust_featurizer(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     captured: dict[str, Any] = {}
 
     class FakeFeaturizer:
         def signature_ids(self) -> list[str]:
             return ["q", "s1", "s2", "s3"]
-
-    def fail_build_rust_featurizer_from_arrow_paths(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("prebuilt raw Arrow featurizer should be reused")
 
     def fake_from_retrieval(**kwargs: Any) -> LinkOrAbstainProductionResult:
         retrieval_batch = kwargs["retrieval_batch"]
@@ -1260,24 +1189,21 @@ def test_preplanned_raw_arrow_scoring_uses_provided_rust_featurizer(
 
     fake_featurizer = FakeFeaturizer()
     monkeypatch.setattr(
-        "s2and.incremental_linking.runtime.feature_port.build_rust_featurizer_from_arrow_paths",
-        fail_build_rust_featurizer_from_arrow_paths,
-    )
-    monkeypatch.setattr(
         "s2and.incremental_linking.runtime._predict_incremental_link_or_abstain_production_from_retrieval_private",
         lambda *args, **kwargs: fake_from_retrieval(**kwargs),
     )
 
-    result = _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-        _raw_test_clusterer(),
-        _raw_test_artifact(),
-        arrow_paths=_validated_empty_arrow_inputs(),
-        query_signature_ids=["q"],
-        raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
-        rust_featurizer=fake_featurizer,
-        top_k=2,
-        n_jobs=1,
-    )
+    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
+        result = _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
+            _raw_test_clusterer(),
+            _raw_test_artifact(),
+            arrow_dataset=arrow_dataset,
+            query_signature_ids=["q"],
+            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
+            rust_featurizer=fake_featurizer,
+            top_k=2,
+            n_jobs=1,
+        )
 
     assert captured["featurizer"] is fake_featurizer
     assert captured["retrieval_left_indices"] == [0, 0, 0]
@@ -1287,22 +1213,23 @@ def test_preplanned_raw_arrow_scoring_uses_provided_rust_featurizer(
     assert isinstance(result.telemetry["raw_arrow_featurizer_seconds"], float)
 
 
-def test_preplanned_raw_arrow_scoring_rejects_mismatched_raw_plan_query_ids() -> None:
+def test_preplanned_raw_arrow_scoring_rejects_mismatched_raw_plan_query_ids(tmp_path: Path) -> None:
     class FakeFeaturizer:
         def signature_ids(self) -> list[str]:
             return ["q", "s1", "s2", "s3"]
 
-    with pytest.raises(ValueError, match="must exactly match requested query_signature_ids"):
-        _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-            _raw_test_clusterer(),
-            _raw_test_artifact(),
-            arrow_paths=_validated_empty_arrow_inputs(),
-            query_signature_ids=["s1"],
-            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
-            rust_featurizer=FakeFeaturizer(),
-            top_k=2,
-            n_jobs=1,
-        )
+    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
+        with pytest.raises(ValueError, match="must exactly match requested query_signature_ids"):
+            _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
+                _raw_test_clusterer(),
+                _raw_test_artifact(),
+                arrow_dataset=arrow_dataset,
+                query_signature_ids=["s1"],
+                raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
+                rust_featurizer=FakeFeaturizer(),
+                top_k=2,
+                n_jobs=1,
+            )
 
 
 def test_from_retrieval_skips_pair_id_build_when_partial_supervision_empty(

@@ -144,7 +144,7 @@ from typing import Any, cast
 
 import numpy as np
 
-from s2and.arrow_inputs import ValidatedArrowInputs
+from s2and.arrow_inputs import ArrowDataset
 
 TRAIN_MODE_ANDDATA_CURRENT = "anddata-current"
 TRAIN_MODE_ANDDATA_PYTHON = "anddata-python"
@@ -222,13 +222,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compare-train-modes",
         action="store_true",
-        help=("Run the qian-only pairwise training parity harness: ANDData/Python, and Arrow/Rust from_arrow_paths."),
+        help=("Run the qian-only pairwise training parity harness: ANDData/Python and retained Arrow/Rust."),
     )
     parser.add_argument(
         "--use-arrow",
         action="store_true",
         help=(
-            "Force production-model evaluation through direct Arrow/Rust predict_from_arrow_paths. "
+            "Force production-model evaluation through direct Arrow/Rust predict_from_arrow. "
             "Arrow is used automatically for supported evals when complete artifacts exist. Not supported with --train."
         ),
     )
@@ -495,90 +495,26 @@ def bundle_data_random_seed(model_path: Path) -> int:
     return seed
 
 
-def resolve_arrow_dataset_paths(
+def resolve_arrow_dataset(
     arrow_root: str,
     dataset_name: str,
     specter_suffix: str,
-) -> ValidatedArrowInputs:
-    from s2and.arrow_inputs import MissingArrowArtifactError, validate_arrow_prediction_artifacts
-    from s2and.incremental_linking.feature_block import RAW_PLANNER_ARROW_BATCH_INDEX_KEYS
+) -> ArrowDataset:
+    """Open the exact immutable Arrow generation for one evaluation dataset."""
 
     dataset_root = resolve_arrow_dataset_root(arrow_root, dataset_name)
-    specter_name = "specter2.arrow" if specter_suffix == SPECTER2_SUFFIX else "specter.arrow"
-
-    paths = {
-        "signatures": os.path.join(dataset_root, "signatures.arrow"),
-        "papers": os.path.join(dataset_root, "papers.arrow"),
-        "paper_authors": os.path.join(dataset_root, "paper_authors.arrow"),
-        "specter": os.path.join(dataset_root, specter_name),
-        "clusters": os.path.join(dataset_root, f"{dataset_name}_clusters.json"),
-    }
-    name_counts_index_path = _resolve_eval_name_counts_index_path(Path(dataset_root))
-    if name_counts_index_path is not None:
-        paths["name_counts_index"] = name_counts_index_path
-    missing = {key: path for key, path in paths.items() if not os.path.exists(path)}
-    if missing:
-        formatted = ", ".join(f"{key}={path}" for key, path in missing.items())
-        raise FileNotFoundError(f"Missing Arrow dataset files for {dataset_name}: {formatted}")
-    if "name_counts_index" not in paths:
+    manifest = json.loads((Path(dataset_root) / "manifest.json").read_text(encoding="utf-8"))
+    expected_specter_name = "specter2.arrow" if specter_suffix == SPECTER2_SUFFIX else "specter.arrow"
+    declared_specter = Path(str(manifest.get("paths", {}).get("specter", ""))).name
+    if declared_specter != expected_specter_name:
         raise FileNotFoundError(
-            f"Missing Arrow name_counts_index for {dataset_name}. "
-            "Production mini eval models use name-count features and Arrow eval must use the index."
+            f"Arrow dataset {dataset_name!r} declares {declared_specter!r}, not requested {expected_specter_name!r}"
         )
-    for arrow_key, index_key in RAW_PLANNER_ARROW_BATCH_INDEX_KEYS.items():
-        arrow_path = paths.get(arrow_key)
-        if arrow_path is None:
-            continue
-        arrow_stem = os.path.splitext(os.path.basename(arrow_path))[0]
-        for candidate in (
-            os.path.join(os.path.dirname(arrow_path), f"{arrow_stem}.{index_key}.bin"),
-            os.path.join(dataset_root, f"{index_key}.bin"),
-        ):
-            if os.path.exists(candidate):
-                paths[index_key] = candidate
-                break
-    try:
-        return validate_arrow_prediction_artifacts(
-            paths,
-            require_specter=True,
-            require_name_counts_index=True,
-            context=f"eval_prod_models Arrow dataset {dataset_name}",
-            producer_hint=(
-                "convert the dataset with scripts/convert_to_arrow.py so the manifest includes "
-                "name_counts_index and raw-planner batch indexes"
-            ),
-        )
-    except MissingArrowArtifactError as exc:
-        raise FileNotFoundError(str(exc)) from exc
-
-
-def _resolve_eval_name_counts_index_path(dataset_root: Path) -> str | None:
-    manifest_path = dataset_root / "manifest.json"
-    if manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Arrow manifest is not valid JSON: {manifest_path}") from exc
-        manifest_paths = manifest.get("paths", {})
-        if isinstance(manifest_paths, dict):
-            path_value = manifest_paths.get("name_counts_index")
-            if path_value is not None:
-                raw_path = Path(str(path_value))
-                candidates = [raw_path] if raw_path.is_absolute() else [dataset_root / raw_path, Path.cwd() / raw_path]
-                for resolved in candidates:
-                    if resolved.exists():
-                        return str(resolved.resolve())
-                raise FileNotFoundError(
-                    f"Arrow manifest {manifest_path} specifies name_counts_index path that does not exist: {path_value}"
-                )
-    for candidate in (
-        dataset_root / "name_counts_index",
-        dataset_root.parent / "name_counts_index",
-        dataset_root.parent.parent / "name_counts_index",
-    ):
-        if candidate.exists():
-            return str(candidate)
-    return None
+    return ArrowDataset.open(
+        dataset_root,
+        require_specter=True,
+        require_name_counts_index=True,
+    )
 
 
 def arrow_datasets_available(arrow_root: str | None, datasets: list[str], specter_suffixes: list[str]) -> bool:
@@ -595,7 +531,8 @@ def first_missing_arrow_dataset_error(
     for dataset_name in datasets:
         for specter_suffix in specter_suffixes:
             try:
-                resolve_arrow_dataset_paths(arrow_root, dataset_name, specter_suffix)
+                with resolve_arrow_dataset(arrow_root, dataset_name, specter_suffix):
+                    pass
             except (FileNotFoundError, ValueError) as exc:
                 return FileNotFoundError(
                     f"Missing Arrow files for dataset={dataset_name!r}, specter_suffix={specter_suffix!r}: {exc}"
@@ -603,11 +540,12 @@ def first_missing_arrow_dataset_error(
     return None
 
 
-def read_arrow_s2_blocks(signatures_arrow_path: str) -> dict[str, list[str]]:
+def read_arrow_s2_blocks(arrow_dataset: ArrowDataset) -> dict[str, list[str]]:
     import pyarrow as pa
 
-    with pa.memory_map(signatures_arrow_path, "r") as source:
-        table = pa.ipc.open_file(source).read_all().select(["signature_id", "author_block"])
+    with arrow_dataset.use() as lease, lease.open_file("signatures") as infile:
+        with pa.PythonFile(infile, mode="r") as source:
+            table = pa.ipc.open_file(source).read_all().select(["signature_id", "author_block"])
     block_dict: dict[str, list[str]] = defaultdict(list)
     signature_ids = table.column("signature_id").to_pylist()
     author_blocks = table.column("author_block").to_pylist()
@@ -663,7 +601,7 @@ def split_blocks_like_anddata(
     )
 
 
-def read_signature_to_cluster_id(clusters_path: str) -> dict[str, str]:
+def read_signature_to_cluster_id(clusters_path: str | Path) -> dict[str, str]:
     with open(clusters_path, encoding="utf-8") as infile:
         clusters = json.load(infile)
     signature_to_cluster_id = {}
@@ -695,8 +633,15 @@ def construct_cluster_to_signatures(
     return dict(cluster_to_signatures)
 
 
+def _arrow_clusters_path(arrow_dataset: ArrowDataset) -> Path:
+    path = arrow_dataset.root / f"{arrow_dataset.root.name}_clusters.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing Arrow evaluation clusters: {path}")
+    return path
+
+
 def cluster_eval_arrow(
-    arrow_paths: ValidatedArrowInputs,
+    arrow_dataset: ArrowDataset,
     clusterer,
     *,
     random_seed: int,
@@ -710,7 +655,7 @@ def cluster_eval_arrow(
     from s2and.eval import b3_precision_recall_fscore, pairwise_precision_recall_fscore
 
     train_block_dict, val_block_dict, test_block_dict = split_blocks_like_anddata(
-        read_arrow_s2_blocks(arrow_paths["signatures"]),
+        read_arrow_s2_blocks(arrow_dataset),
         random_seed=random_seed,
     )
     if split == "test":
@@ -721,12 +666,11 @@ def cluster_eval_arrow(
         block_dict = train_block_dict
     else:
         raise ValueError("Split must be one of: train, val, test")
-    signature_to_cluster_id = read_signature_to_cluster_id(arrow_paths["clusters"])
+    signature_to_cluster_id = read_signature_to_cluster_id(_arrow_clusters_path(arrow_dataset))
     cluster_to_signatures = construct_cluster_to_signatures(signature_to_cluster_id, block_dict)
-    predict_arrow_paths = arrow_paths.without("clusters")
-    pred_clusters, _ = clusterer.predict_from_arrow_paths(
+    pred_clusters, _ = clusterer.predict_from_arrow(
         block_dict,
-        predict_arrow_paths,
+        arrow_dataset,
         total_ram_bytes=total_ram_bytes,
         batching_threshold=batching_threshold,
         name_tuples=None,
@@ -843,8 +787,8 @@ def _sample_within_block_random_pairs(
     return random_sampling(possible, min(len(possible), int(sample_size)), int(random_seed))
 
 
-def pair_splits_from_arrow_paths(
-    arrow_paths: Mapping[str, str],
+def pair_splits_from_arrow_dataset(
+    arrow_dataset: ArrowDataset,
     *,
     random_seed: int,
     train_pairs_size: int,
@@ -852,10 +796,10 @@ def pair_splits_from_arrow_paths(
     test_pairs_size: int,
 ) -> PairwiseTrainingSplits:
     train_block_dict, val_block_dict, test_block_dict = split_blocks_like_anddata(
-        read_arrow_s2_blocks(str(arrow_paths["signatures"])),
+        read_arrow_s2_blocks(arrow_dataset),
         random_seed=random_seed,
     )
-    signature_to_cluster_id = read_signature_to_cluster_id(str(arrow_paths["clusters"]))
+    signature_to_cluster_id = read_signature_to_cluster_id(_arrow_clusters_path(arrow_dataset))
     return PairwiseTrainingSplits(
         train_pairs=_sample_within_block_random_pairs(
             train_block_dict,
@@ -933,7 +877,7 @@ def _feature_tuple_from_rust_featurizer(
 
 
 def arrow_training_feature_splits(
-    arrow_paths: Mapping[str, str],
+    arrow_dataset: ArrowDataset,
     splits: PairwiseTrainingSplits,
     *,
     featurizer_info: Any,
@@ -947,20 +891,10 @@ def arrow_training_feature_splits(
     Any,
 ]:
     from s2and import feature_port
-    from s2and.arrow_inputs import ValidatedArrowInputs
-    from s2and.consts import NORMALIZATION_VERSION
 
-    if not isinstance(arrow_paths, ValidatedArrowInputs):
-        raise TypeError("arrow_training_feature_splits requires validated Arrow inputs")
-    predict_arrow_paths = arrow_paths.without("clusters")
-    rust_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
-        predict_arrow_paths,
-        expected_normalization_version=NORMALIZATION_VERSION,
+    rust_featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
+        arrow_dataset,
         name_tuples=None,
-        load_name_counts=(
-            "name_counts" in featurizer_info.features_to_use
-            or (nameless_featurizer_info is not None and "name_counts" in nameless_featurizer_info.features_to_use)
-        ),
         num_threads=n_jobs,
     )
     return (
@@ -1281,13 +1215,13 @@ def main() -> None:
                         raise RuntimeError("Arrow evaluation requires a loaded production Clusterer")
                     if arrow_data_root is None:
                         raise RuntimeError("Arrow evaluation requires an explicit --arrow-data-root")
-                    arrow_paths = resolve_arrow_dataset_paths(arrow_data_root, dataset_name, specter_suffix)
-                    cluster_metrics, _b3_metrics_per_signature = cluster_eval_arrow(
-                        arrow_paths,
-                        clusterer,
-                        random_seed=random_seed,
-                        n_jobs=n_jobs,
-                    )
+                    with resolve_arrow_dataset(arrow_data_root, dataset_name, specter_suffix) as arrow_dataset:
+                        cluster_metrics, _b3_metrics_per_signature = cluster_eval_arrow(
+                            arrow_dataset,
+                            clusterer,
+                            random_seed=random_seed,
+                            n_jobs=n_jobs,
+                        )
                     print(cluster_metrics)
                     cluster_metrics_all.append(cluster_metrics)
                     continue
@@ -1295,49 +1229,49 @@ def main() -> None:
                 if train_flag and train_mode == TRAIN_MODE_ARROW_RUST:
                     if arrow_data_root is None:
                         raise RuntimeError("Arrow Rust training requires an explicit --arrow-data-root")
-                    arrow_paths = resolve_arrow_dataset_paths(arrow_data_root, dataset_name, specter_suffix)
-                    splits = pair_splits_from_arrow_paths(
-                        arrow_paths,
-                        random_seed=random_seed,
-                        train_pairs_size=int(args.train_pairs_size),
-                        val_pairs_size=int(args.val_pairs_size),
-                        test_pairs_size=int(args.test_pairs_size),
-                    )
-                    train, val, _test, rust_featurizer = arrow_training_feature_splits(
-                        arrow_paths,
-                        splits,
-                        featurizer_info=featurization_info,
-                        nameless_featurizer_info=nameless_featurization_info,
-                        n_jobs=n_jobs,
-                        nan_value=np.nan,
-                    )
-                    clusterer = build_pairwise_clusterer_from_features(
-                        train,
-                        val,
-                        featurization_info=featurization_info,
-                        nameless_featurization_info=nameless_featurization_info,
-                        n_jobs=n_jobs,
-                        random_seed=random_seed,
-                        pairwise_n_iter=int(args.pairwise_n_iter),
-                        cluster_n_iter=int(args.cluster_n_iter),
-                        fixed_lightgbm_params=bool(args.fixed_lightgbm_params),
-                        fixed_cluster_eps=args.fixed_cluster_eps,
-                    )
-                    if args.fixed_cluster_eps is None:
-                        clusterer = fit_clusterer_from_arrow_validation(
-                            clusterer,
-                            splits,
-                            rust_featurizer,
+                    with resolve_arrow_dataset(arrow_data_root, dataset_name, specter_suffix) as arrow_dataset:
+                        splits = pair_splits_from_arrow_dataset(
+                            arrow_dataset,
                             random_seed=random_seed,
+                            train_pairs_size=int(args.train_pairs_size),
+                            val_pairs_size=int(args.val_pairs_size),
+                            test_pairs_size=int(args.test_pairs_size),
                         )
-                    else:
-                        clusterer = apply_fixed_cluster_eps(clusterer, args.fixed_cluster_eps)
-                    cluster_metrics, _b3_metrics_per_signature = cluster_eval_arrow(
-                        arrow_paths,
-                        clusterer,
-                        random_seed=random_seed,
-                        n_jobs=n_jobs,
-                    )
+                        train, val, _test, rust_featurizer = arrow_training_feature_splits(
+                            arrow_dataset,
+                            splits,
+                            featurizer_info=featurization_info,
+                            nameless_featurizer_info=nameless_featurization_info,
+                            n_jobs=n_jobs,
+                            nan_value=np.nan,
+                        )
+                        clusterer = build_pairwise_clusterer_from_features(
+                            train,
+                            val,
+                            featurization_info=featurization_info,
+                            nameless_featurization_info=nameless_featurization_info,
+                            n_jobs=n_jobs,
+                            random_seed=random_seed,
+                            pairwise_n_iter=int(args.pairwise_n_iter),
+                            cluster_n_iter=int(args.cluster_n_iter),
+                            fixed_lightgbm_params=bool(args.fixed_lightgbm_params),
+                            fixed_cluster_eps=args.fixed_cluster_eps,
+                        )
+                        if args.fixed_cluster_eps is None:
+                            clusterer = fit_clusterer_from_arrow_validation(
+                                clusterer,
+                                splits,
+                                rust_featurizer,
+                                random_seed=random_seed,
+                            )
+                        else:
+                            clusterer = apply_fixed_cluster_eps(clusterer, args.fixed_cluster_eps)
+                        cluster_metrics, _b3_metrics_per_signature = cluster_eval_arrow(
+                            arrow_dataset,
+                            clusterer,
+                            random_seed=random_seed,
+                            n_jobs=n_jobs,
+                        )
                     print(cluster_metrics)
                     cluster_metrics_all.append(cluster_metrics)
                     continue

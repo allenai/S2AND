@@ -90,7 +90,6 @@ class NameCountsIndex:
         "manifest_sha256",
         "normalization_version",
         "path",
-        "source_provenance",
     )
 
     def __init__(
@@ -103,14 +102,13 @@ class NameCountsIndex:
         self.path = str(manifest.index_dir)
         self.manifest_sha256 = manifest.manifest_sha256
         self.normalization_version = manifest.normalization_version
-        self.source_provenance = manifest.source_provenance
 
     @classmethod
-    def _open_generation(
+    def _open_with_manifest(
         cls,
         path: str | os.PathLike[str],
     ) -> tuple[NameCountsIndex, ValidatedNameCountsManifest]:
-        """Open one immutable generation and retain its native-validated facts."""
+        """Open one immutable index and retain its native-validated manifest."""
 
         resolved_path = str(Path(os.fspath(path)).resolve())
         with _OPEN_CACHE_LOCK:
@@ -145,7 +143,7 @@ class NameCountsIndex:
     def open(cls, path: str | os.PathLike[str]) -> NameCountsIndex:
         """Verify and share one immutable name-count index at ``path``."""
 
-        opened, _manifest = cls._open_generation(path)
+        opened, _manifest = cls._open_with_manifest(path)
         return opened
 
     def lookup_many(

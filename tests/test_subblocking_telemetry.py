@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -5,14 +7,33 @@ import pyarrow as pa
 import pytest
 
 import s2and.subblocking as subblocking
+from s2and.arrow_inputs import ArrowDataset
 from s2and.data import Signature
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index
+from tests.helpers import write_test_arrow_artifact_manifest
 
 
 def _write_ipc(path, table: pa.Table) -> str:
     with pa.OSFile(str(path), "wb") as sink, pa.ipc.new_file(sink, table.schema) as writer:
         writer.write_table(table)
     return str(path)
+
+
+class _SingleBatchArrowLease:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.native = self
+
+    def batch_indices(self, _table_key: str, _values: list[str]) -> list[int]:
+        return [0]
+
+    def has(self, _table_key: str) -> bool:
+        return True
+
+    @contextmanager
+    def open_file(self, _table_key: str):
+        with Path(self.path).open("rb") as source:
+            yield source
 
 
 def _signature(signature_id: str, *, first: str, middle: str | None = None, orcid: str | None = None) -> Signature:
@@ -116,10 +137,11 @@ def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(t
             table_name="signatures",
         ),
     }
+    arrow_dataset = _open_subblocking_arrow_dataset(paths, tmp_path)
 
     with pytest.raises(ValueError, match="must be unique.*'1'"):
         subblocking._make_subblocks_with_telemetry_arrow_rust(
-            paths,
+            arrow_dataset,
             [1, "1"],
             maximum_size=2,
             first_k_letter_counts_sorted={},
@@ -129,7 +151,7 @@ def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(t
     rust_module = pytest.importorskip("s2and_rust")
     with pytest.raises(ValueError, match='must be unique.*"1"'):
         rust_module.make_subblocks_with_telemetry_arrow_native_graph(
-            paths,
+            arrow_dataset.native,
             ["1", "1"],
             2,
             {},
@@ -137,6 +159,7 @@ def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(t
             0,
             True,
         )
+    arrow_dataset.close()
 
 
 def test_make_subblocks_skips_specter_when_single_letter_block_is_in_budget(monkeypatch):
@@ -415,17 +438,9 @@ def test_coauthor_blocks_from_rowwise_arrow_normalizes_author_names(tmp_path) ->
     )
 
     paper_authors_path = _write_ipc(tmp_path / "paper_authors.arrow", paper_authors)
-    paper_authors_index_path = tmp_path / "paper_authors.paper_authors_batch_index.bin"
-    write_arrow_batch_lookup_index(
-        paper_authors_path,
-        paper_authors_index_path,
-        key_column="paper_id",
-        table_name="paper_authors",
-    )
-
     load_metrics: dict[str, int] = {}
     out = subblocking._coauthor_blocks_by_paper_from_arrow(  # noqa: SLF001
-        {"paper_authors": paper_authors_path, "paper_authors_batch_index": str(paper_authors_index_path)},
+        _SingleBatchArrowLease(paper_authors_path),
         ["p1"],
         load_metrics=load_metrics,
     )
@@ -443,17 +458,9 @@ def test_coauthor_blocks_from_rowwise_arrow_validates_blank_row_positions(tmp_pa
         }
     )
     paper_authors_path = _write_ipc(tmp_path / "paper_authors.arrow", paper_authors)
-    paper_authors_index_path = tmp_path / "paper_authors.paper_authors_batch_index.bin"
-    write_arrow_batch_lookup_index(
-        paper_authors_path,
-        paper_authors_index_path,
-        key_column="paper_id",
-        table_name="paper_authors",
-    )
-
     with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
         subblocking._coauthor_blocks_by_paper_from_arrow(  # noqa: SLF001
-            {"paper_authors": paper_authors_path, "paper_authors_batch_index": str(paper_authors_index_path)},
+            _SingleBatchArrowLease(paper_authors_path),
             ["p1"],
             load_metrics={},
         )
@@ -690,6 +697,7 @@ def _write_signatures_arrow(
             "author_middle": pa.array([row[2] for row in rows], type=pa.string()),
             "author_last": pa.array(["wang"] * len(rows), type=pa.string()),
             "author_suffix": pa.array([""] * len(rows), type=pa.string()),
+            "author_block": pa.array([f"{row[1][:1]} wang" for row in rows], type=pa.string()),
             "author_affiliations": pa.array([[] for _row in rows], type=pa.list_(pa.string())),
             "author_orcid": pa.array([row[3] for row in rows], type=pa.string()),
             "author_position": pa.array(positions, type=pa.int64()),
@@ -703,6 +711,53 @@ def _write_signatures_arrow(
 def _add_batch_index(path, index_path, *, key_column: str, table_name: str) -> str:
     write_arrow_batch_lookup_index(path, index_path, key_column=key_column, table_name=table_name)
     return str(index_path)
+
+
+def _open_subblocking_arrow_dataset(paths: dict[str, str], tmp_path: Path) -> ArrowDataset:
+    paths = dict(paths)
+    with pa.memory_map(paths["signatures"], "r") as source:
+        paper_ids = [str(value) for value in pa.ipc.open_file(source).read_all()["paper_id"].to_pylist()]
+    papers_path = _write_ipc(
+        tmp_path / "papers.arrow",
+        pa.table(
+            {
+                "paper_id": pa.array(paper_ids, type=pa.string()),
+                "title": pa.array([""] * len(paper_ids), type=pa.string()),
+                "venue": pa.array([""] * len(paper_ids), type=pa.string()),
+                "journal_name": pa.array([""] * len(paper_ids), type=pa.string()),
+            }
+        ),
+    )
+    paths["papers"] = papers_path
+    if "paper_authors" not in paths:
+        paths["paper_authors"] = _write_ipc(
+            tmp_path / "paper_authors.arrow",
+            pa.table(
+                {
+                    "paper_id": pa.array(paper_ids, type=pa.string()),
+                    "position": pa.array([0] * len(paper_ids), type=pa.int64()),
+                    "author_name": pa.array([""] * len(paper_ids), type=pa.string()),
+                }
+            ),
+        )
+    for table_name, key_column in (
+        ("signatures", "signature_id"),
+        ("papers", "paper_id"),
+        ("paper_authors", "paper_id"),
+        ("specter", "paper_id"),
+    ):
+        if table_name not in paths:
+            continue
+        index_key = f"{table_name}_batch_index"
+        if index_key not in paths:
+            paths[index_key] = _add_batch_index(
+                paths[table_name],
+                tmp_path / f"{table_name}.{index_key}.bin",
+                key_column=key_column,
+                table_name=table_name,
+            )
+    write_test_arrow_artifact_manifest(tmp_path, paths)
+    return ArrowDataset.open(tmp_path, require_specter="specter" in paths)
 
 
 @pytest.mark.parametrize(
@@ -753,16 +808,9 @@ def test_rust_arrow_prefix_subdivision_matches_python(
         maximum_size=1,
         first_k_letter_counts_sorted={},
     )
+    arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path)
     rust_subblocks, _rust_telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
-        {
-            "signatures": str(signatures_path),
-            "signatures_batch_index": _add_batch_index(
-                signatures_path,
-                tmp_path / "signatures.signatures_batch_index.bin",
-                key_column="signature_id",
-                table_name="signatures",
-            ),
-        },
+        arrow_dataset,
         signature_ids,
         maximum_size=1,
         first_k_letter_counts_sorted={},
@@ -771,6 +819,7 @@ def test_rust_arrow_prefix_subdivision_matches_python(
 
     assert {key: sorted(values) for key, values in python_subblocks.items()} == expected
     assert {key: sorted(values) for key, values in rust_subblocks.items()} == expected
+    arrow_dataset.close()
 
 
 def test_rust_arrow_make_subblocks_matches_python_orcid_repair(tmp_path):
@@ -801,16 +850,9 @@ def test_rust_arrow_make_subblocks_matches_python_orcid_repair(tmp_path):
         maximum_size=3,
         first_k_letter_counts_sorted={},
     )
+    arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path)
     rust_subblocks, rust_telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
-        {
-            "signatures": str(signatures_path),
-            "signatures_batch_index": _add_batch_index(
-                signatures_path,
-                tmp_path / "signatures.signatures_batch_index.bin",
-                key_column="signature_id",
-                table_name="signatures",
-            ),
-        },
+        arrow_dataset,
         ["s1", "s2", "s3", "s4"],
         maximum_size=3,
         first_k_letter_counts_sorted={},
@@ -823,6 +865,7 @@ def test_rust_arrow_make_subblocks_matches_python_orcid_repair(tmp_path):
     for key, value in python_telemetry.items():
         assert rust_telemetry[key] == value
     assert rust_telemetry["graph_fallback_native"] is True
+    arrow_dataset.close()
 
 
 def test_rust_arrow_orcid_repair_merges_whole_subblocks(tmp_path):
@@ -840,16 +883,9 @@ def test_rust_arrow_orcid_repair_merges_whole_subblocks(tmp_path):
         ],
     )
 
+    arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path)
     rust_subblocks, telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
-        {
-            "signatures": str(signatures_path),
-            "signatures_batch_index": _add_batch_index(
-                signatures_path,
-                tmp_path / "signatures.signatures_batch_index.bin",
-                key_column="signature_id",
-                table_name="signatures",
-            ),
-        },
+        arrow_dataset,
         ["s1", "s2", "s3", "s4", "s5", "s6"],
         maximum_size=6,
         first_k_letter_counts_sorted={},
@@ -860,6 +896,7 @@ def test_rust_arrow_orcid_repair_merges_whole_subblocks(tmp_path):
         ["s1", "s2", "s3", "s4", "s5", "s6"],
     ]
     assert telemetry["orcid_subblocking_enabled"] is True
+    arrow_dataset.close()
 
 
 def test_rust_arrow_orcid_repair_does_not_extract_from_oversized_whole_merge(tmp_path):
@@ -876,16 +913,9 @@ def test_rust_arrow_orcid_repair_does_not_extract_from_oversized_whole_merge(tmp
         ],
     )
 
+    arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path)
     rust_subblocks, telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
-        {
-            "signatures": str(signatures_path),
-            "signatures_batch_index": _add_batch_index(
-                signatures_path,
-                tmp_path / "signatures.signatures_batch_index.bin",
-                key_column="signature_id",
-                table_name="signatures",
-            ),
-        },
+        arrow_dataset,
         ["s1", "s2", "s3", "s4", "s5"],
         maximum_size=4,
         first_k_letter_counts_sorted={},
@@ -898,6 +928,7 @@ def test_rust_arrow_orcid_repair_does_not_extract_from_oversized_whole_merge(tmp
     ]
     assert telemetry["orcid_merge_skipped_due_to_capacity_count"] == 1
     assert telemetry["orcid_merge_skipped_due_to_capacity_signature_count"] == 3
+    arrow_dataset.close()
 
 
 def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_without_python_callback(tmp_path):
@@ -979,8 +1010,9 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_without_python_
     def fail_python_callback(*_args, **_kwargs):
         raise AssertionError("native graph Arrow subblocking should not call Python fallback")
 
+    arrow_dataset = _open_subblocking_arrow_dataset(paths, tmp_path)
     subblocks, telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
-        paths,
+        arrow_dataset,
         ["s1", "s2", "s3", "s4"],
         maximum_size=2,
         first_k_letter_counts_sorted={},
@@ -999,6 +1031,7 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_without_python_
     assert telemetry["graph_fallback_invocation_count"] == 1
     assert telemetry["graph_fallback_load_metrics"]["paper_authors_rows_loaded"] == 12
     assert telemetry["graph_fallback_stats"][0]["packed_component_count"] == 2
+    arrow_dataset.close()
 
 
 def test_rust_arrow_native_graph_subblocking_rejects_null_author_position(tmp_path):
@@ -1072,9 +1105,10 @@ def test_rust_arrow_native_graph_subblocking_rejects_null_author_position(tmp_pa
         ),
     }
 
+    arrow_dataset = _open_subblocking_arrow_dataset(paths, tmp_path)
     with pytest.raises(ValueError, match="author_position is null"):
         subblocking._make_subblocks_with_telemetry_arrow_rust(
-            paths,
+            arrow_dataset,
             ["s1", "s2", "s3", "s4"],
             maximum_size=2,
             first_k_letter_counts_sorted={},
@@ -1084,3 +1118,4 @@ def test_rust_arrow_native_graph_subblocking_rejects_null_author_position(tmp_pa
                 min_edge_score=0.8,
             ),
         )
+    arrow_dataset.close()

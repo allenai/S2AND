@@ -13,16 +13,13 @@ from typing import Any, cast
 
 from s2and.arrow_inputs import (
     INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION,
-    MissingArrowArtifactError,
-    ValidatedArrowInputs,
-    _validate_arrow_publication_artifacts_with_retained_name_counts,
+    ArrowDataset,
     require_name_counts_index_artifact,
 )
 
 ROOT_MANIFEST_SCHEMA = INFERENCE_ARROW_BUNDLE_SCHEMA_VERSION
 ROOT_HELPER_FILES = ("LICENSE.txt",)
 DECLARED_DIRECTORY_KEYS = frozenset({"name_counts_index"})
-_NameCountsGenerationKey = tuple[Path, str]
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:
@@ -71,15 +68,6 @@ def _validate_name_counts_index(path: Path, errors: list[str], *, label: str) ->
         )
     except (OSError, TypeError, ValueError) as exc:
         _record_error(errors, str(exc))
-
-
-def _name_counts_generation_key(path: Path) -> _NameCountsGenerationKey | None:
-    manifest_path = path / "manifest.json"
-    try:
-        manifest_bytes = manifest_path.read_bytes()
-    except OSError:
-        return None
-    return path.resolve(), hashlib.sha256(manifest_bytes).hexdigest()
 
 
 def _validate_default_model_declaration(release_root: Path, errors: list[str]) -> str | None:
@@ -163,7 +151,6 @@ def _validate_dataset_manifest(
     errors: list[str],
     *,
     label_prefix: str,
-    validated_name_counts: dict[_NameCountsGenerationKey, ValidatedArrowInputs],
 ) -> int:
     dataset = str(entry.get("dataset") or "<unknown>")
     label = f"{label_prefix} dataset {dataset}"
@@ -187,24 +174,14 @@ def _validate_dataset_manifest(
     require_name_counts_index = isinstance(requirements, Mapping) and bool(
         requirements.get("require_name_counts_index")
     )
-    resolved_paths = {
-        str(key): str(_manifest_path(path_value, manifest_path.parent)) for key, path_value in paths.items()
-    }
-    name_counts_path = Path(resolved_paths["name_counts_index"]) if "name_counts_index" in resolved_paths else None
-    name_counts_key = None if name_counts_path is None else _name_counts_generation_key(name_counts_path)
-    retained_name_counts = None if name_counts_key is None else validated_name_counts.get(name_counts_key)
     try:
-        validated = _validate_arrow_publication_artifacts_with_retained_name_counts(
-            resolved_paths,
+        with ArrowDataset.open(
+            manifest_path.parent,
             require_specter=True,
             require_name_counts_index=require_name_counts_index,
-            context=label,
-            retained_name_counts=retained_name_counts,
-        )
-        validated_manifest = validated.name_counts_manifest
-        if validated_manifest is not None:
-            validated_name_counts[(validated_manifest.index_dir, validated_manifest.manifest_sha256)] = validated
-    except MissingArrowArtifactError as exc:
+        ):
+            pass
+    except (OSError, TypeError, ValueError) as exc:
         _record_error(errors, str(exc))
 
     for key, path_value in paths.items():
@@ -218,8 +195,6 @@ def _validate_replay_bundles(
     release_root: Path,
     root_manifest: Mapping[str, Any],
     errors: list[str],
-    *,
-    validated_name_counts: dict[_NameCountsGenerationKey, ValidatedArrowInputs],
 ) -> int:
     raw_bundles = root_manifest.get("replay_bundles", [])
     if raw_bundles is None:
@@ -250,7 +225,6 @@ def _validate_replay_bundles(
                 entry,
                 errors,
                 label_prefix=f"replay bundle {bundle.get('bundle') or index}",
-                validated_name_counts=validated_name_counts,
             )
     return validated
 
@@ -264,7 +238,6 @@ def validate_release_root(release_root: Path, *, include_replay_bundles: bool = 
 
     resolved_root = release_root.resolve()
     errors: list[str] = []
-    validated_name_counts: dict[_NameCountsGenerationKey, ValidatedArrowInputs] = {}
     root_manifest_path = resolved_root / "manifest.json"
     _require_file(root_manifest_path, errors, label="root manifest")
     if not root_manifest_path.is_file():
@@ -295,7 +268,6 @@ def validate_release_root(release_root: Path, *, include_replay_bundles: bool = 
             entry,
             errors,
             label_prefix="root",
-            validated_name_counts=validated_name_counts,
         )
 
     validated_replay_datasets = (
@@ -303,15 +275,12 @@ def validate_release_root(release_root: Path, *, include_replay_bundles: bool = 
             resolved_root,
             root_manifest,
             errors,
-            validated_name_counts=validated_name_counts,
         )
         if include_replay_bundles
         else 0
     )
     root_name_counts_path = resolved_root / "name_counts_index"
-    root_name_counts_key = _name_counts_generation_key(root_name_counts_path)
-    if root_name_counts_key is None or root_name_counts_key not in validated_name_counts:
-        _validate_name_counts_index(root_name_counts_path, errors, label="root name_counts_index")
+    _validate_name_counts_index(root_name_counts_path, errors, label="root name_counts_index")
 
     if errors:
         raise ValueError("\n".join(errors))

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 from pathlib import Path
 
@@ -16,13 +15,8 @@ from s2and.incremental_linking.feature_block import (
     write_arrow_ipc_table,
     write_name_counts_index,
 )
-from scripts.production.model.linker_source_bundle import (
-    MANIFEST_SCHEMA,
-    SPEC_SCHEMA,
-    assemble_source_bundle,
-    validate_source_bundle,
-)
-from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
+from scripts.production.model.linker_source_bundle import assemble_source_bundle
+from tests.helpers import tiny_name_counts_tuple
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -44,26 +38,58 @@ def _write_arrow_root(
     root.mkdir(parents=True)
     (root / "LICENSE.txt").write_text("fixture license\n", encoding="utf-8")
     if name_counts_source is None:
-        write_name_counts_index(root, tiny_name_counts_tuple(), tiny_name_counts_provenance())
+        write_name_counts_index(root, tiny_name_counts_tuple())
     else:
         shutil.copytree(name_counts_source, root / "name_counts_index")
     dataset_root = root / "datasets" / dataset if replay else root / dataset
 
     table_specs = {
         "signatures": (
-            pa.table({"signature_id": pa.array(["s1"], type=pa.string())}),
+            pa.table(
+                {
+                    "signature_id": pa.array(["s1"], type=pa.string()),
+                    "paper_id": pa.array(["p1"], type=pa.string()),
+                    "author_first": pa.array(["Ada"], type=pa.string()),
+                    "author_middle": pa.array([""], type=pa.string()),
+                    "author_last": pa.array(["Lovelace"], type=pa.string()),
+                    "author_suffix": pa.array([""], type=pa.string()),
+                    "author_affiliations": pa.array([[]], type=pa.list_(pa.string())),
+                    "author_position": pa.array([0], type=pa.int64()),
+                }
+            ),
             "signature_id",
         ),
         "papers": (
-            pa.table({"paper_id": pa.array(["p1"], type=pa.string())}),
+            pa.table(
+                {
+                    "paper_id": pa.array(["p1"], type=pa.string()),
+                    "title": pa.array(["Notes"], type=pa.string()),
+                    "venue": pa.array([""], type=pa.string()),
+                    "journal_name": pa.array([""], type=pa.string()),
+                }
+            ),
             "paper_id",
         ),
         "paper_authors": (
-            pa.table({"paper_id": pa.array(["p1"], type=pa.string())}),
+            pa.table(
+                {
+                    "paper_id": pa.array(["p1"], type=pa.string()),
+                    "position": pa.array([0], type=pa.int64()),
+                    "author_name": pa.array(["Ada Lovelace"], type=pa.string()),
+                }
+            ),
             "paper_id",
         ),
         "specter": (
-            pa.table({"paper_id": pa.array(["p1"], type=pa.string())}),
+            pa.table(
+                {
+                    "paper_id": pa.array(["p1"], type=pa.string()),
+                    "embedding": pa.FixedSizeListArray.from_arrays(
+                        pa.array([1.0, 0.0], type=pa.float32()),
+                        2,
+                    ),
+                }
+            ),
             "paper_id",
         ),
     }
@@ -115,7 +141,7 @@ def _write_arrow_root(
     _write_json(root / "manifest.json", root_manifest)
 
 
-def _write_linker_inputs(root: Path, *, leak: bool) -> Path:
+def _write_linker_inputs(root: Path, *, leak: bool) -> None:
     label_paths = {
         "train_path": "labels/train.parquet",
         "classic_gate_source_path": "labels/calibration.parquet",
@@ -205,25 +231,13 @@ def _write_linker_inputs(root: Path, *, leak: bool) -> Path:
     }
     _write_json(root / "bundle.json", bundle)
 
-    members = [
-        {"path": "bundle.json", "role": "bundle.definition"},
-        {"path": "components/replay_demo_members.parquet", "role": "candidate_members.replay_demo"},
-        *[{"path": path, "role": f"featureless_rows.{key}"} for key, path in label_paths.items()],
-        {"path": "splits/assignments.csv", "role": "splits.assignments"},
-        {"path": "splits/internal_eval.csv", "role": "splits.internal_eval"},
-        {"path": "splits/summary.json", "role": "splits.summary"},
-    ]
-    spec_path = root.parent / "member_spec.json"
-    _write_json(spec_path, {"schema": SPEC_SCHEMA, "members": members})
-    return spec_path
-
 
 def _inputs(tmp_path: Path, *, leak: bool = False) -> dict[str, Path]:
     source_root = tmp_path / "linker-input"
     benchmark_root = tmp_path / "benchmark-arrow"
     replay_root = tmp_path / "replay-arrow"
     source_root.mkdir()
-    spec_path = _write_linker_inputs(source_root, leak=leak)
+    _write_linker_inputs(source_root, leak=leak)
     _write_arrow_root(benchmark_root, dataset="benchmark_demo", replay=False)
     _write_arrow_root(
         replay_root,
@@ -232,7 +246,6 @@ def _inputs(tmp_path: Path, *, leak: bool = False) -> dict[str, Path]:
         name_counts_source=benchmark_root / "name_counts_index",
     )
     return {
-        "member_spec_path": spec_path,
         "source_root": source_root,
         "benchmark_arrow_root": benchmark_root,
         "replay_arrow_root": replay_root,
@@ -253,56 +266,13 @@ def test_assemble_and_validate_minimal_source_bundle(
     inputs, report = assembled
     source_root = inputs["output_source_bundle"]
     data_root = inputs["output_data_root"]
-    manifest = json.loads((source_root / "source_bundle_manifest.json").read_text(encoding="utf-8"))
-
-    assert manifest["schema"] == MANIFEST_SCHEMA
-    assert {entry["role"] for entry in manifest["members"]} >= {
-        "bundle.definition",
-        "candidate_members.replay_demo",
-        "featureless_rows.train_path",
-        "splits.assignments",
-    }
     assert report["selected_source_rows"] == 4
-    assert validate_source_bundle(source_root, data_root) == report
+    assert report["source_bundle"] == str(source_root.resolve())
+    assert report["data_root"] == str(data_root.resolve())
+    assert (source_root / "bundle.json").is_file()
+    assert (data_root / "manifest.json").is_file()
     with pytest.raises(FileExistsError, match="must not exist"):
         assemble_source_bundle(**inputs)
-
-
-def test_source_inventory_rejects_same_size_same_mtime_mutation(
-    assembled: tuple[dict[str, Path], dict],
-) -> None:
-    inputs, _report = assembled
-    path = inputs["output_source_bundle"] / "labels" / "train.parquet"
-    original_stat = path.stat()
-    mutated = bytearray(path.read_bytes())
-    mutated[-1] ^= 1
-    path.write_bytes(mutated)
-    os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-
-    assert path.stat().st_size == original_stat.st_size
-    assert path.stat().st_mtime_ns == original_stat.st_mtime_ns
-    with pytest.raises(ValueError, match="sha256 mismatch"):
-        validate_source_bundle(inputs["output_source_bundle"], inputs["output_data_root"])
-
-
-def test_source_inventory_rejects_missing_member(
-    assembled: tuple[dict[str, Path], dict],
-) -> None:
-    inputs, _report = assembled
-    (inputs["output_source_bundle"] / "splits" / "summary.json").unlink()
-
-    with pytest.raises(ValueError, match="is missing"):
-        validate_source_bundle(inputs["output_source_bundle"], inputs["output_data_root"])
-
-
-def test_source_inventory_rejects_undeclared_member(
-    assembled: tuple[dict[str, Path], dict],
-) -> None:
-    inputs, _report = assembled
-    (inputs["output_source_bundle"] / "unexpected.txt").write_text("not declared\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="undeclared"):
-        validate_source_bundle(inputs["output_source_bundle"], inputs["output_data_root"])
 
 
 def test_assembly_rejects_base_identity_leakage(tmp_path: Path) -> None:

@@ -302,7 +302,7 @@ def test_python_pair_featurization_rejects_rust_deferred_signature_fields() -> N
         ANDData,
         SimpleNamespace(
             signatures={},
-            arrow_paths={"signatures": "signatures.arrow"},
+            arrow_dataset=object(),
         ),
     )
 
@@ -347,14 +347,14 @@ def test_delete_training_data_uses_global_coauthor_similarity_index(monkeypatch:
 
 
 def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Placeholder Arrow paths mark the dataset as Rust-eligible; the actual Rust
+    # A placeholder ArrowDataset marks the dataset as Rust-eligible; the actual Rust
     # featurizer build is mocked out below via feature_port._get_rust_featurizer.
     dataset = cast(
         ANDData,
         SimpleNamespace(
             name="dummy",
             mode="train",
-            arrow_paths={"signatures": "signatures.arrow"},
+            arrow_dataset=object(),
         ),
     )
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
@@ -413,14 +413,14 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatc
 def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Placeholder Arrow paths mark the dataset as Rust-eligible; the actual Rust
+    # A placeholder ArrowDataset marks the dataset as Rust-eligible; the actual Rust
     # featurizer build is mocked out below via feature_port._get_rust_featurizer.
     dataset = cast(
         ANDData,
         SimpleNamespace(
             name="dummy",
             mode="train",
-            arrow_paths={"signatures": "signatures.arrow"},
+            arrow_dataset=object(),
         ),
     )
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
@@ -518,13 +518,13 @@ def test_signature_id_to_index_or_raise_reports_missing_signature_id() -> None:
 
 
 def test_many_pairs_featurize_surfaces_rust_initialization_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Placeholder Arrow paths mark the dataset as Rust-eligible; the Rust build
+    # A placeholder ArrowDataset marks the dataset as Rust-eligible; the Rust build
     # itself is replaced with fail_prewarm below, so no real build happens.
     dataset = cast(
         ANDData,
         SimpleNamespace(
             name="dummy",
-            arrow_paths={"signatures": "signatures.arrow"},
+            arrow_dataset=object(),
         ),
     )
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])

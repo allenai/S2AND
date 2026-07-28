@@ -43,7 +43,6 @@ _TEST_CANONICAL_ARTIFACT_HASHES = {
 _TEST_EXPLICIT_ARTIFACT_HASHES = {
     **_TEST_CANONICAL_ARTIFACT_HASHES,
     "name_counts_manifest_sha256": "c" * 64,
-    "orcid_prefix_counts_manifest_sha256": "d" * 64,
 }
 
 
@@ -465,6 +464,31 @@ def test_explicit_artifact_authority_requires_exact_fields() -> None:
             )
 
 
+def test_retired_orcid_manifest_hash_is_serialized_data_not_explicit_authority() -> None:
+    retired_field = "orcid_prefix_counts_manifest_sha256"
+    feature_contract = {
+        **_TEST_EXPLICIT_ARTIFACT_HASHES,
+        retired_field: "d" * 64,
+    }
+
+    production_model_module.require_expected_artifact_hashes(
+        feature_contract,
+        _TEST_EXPLICIT_ARTIFACT_HASHES,
+        context="test feature_contract",
+    )
+
+    old_four_field_authority = {
+        **_TEST_EXPLICIT_ARTIFACT_HASHES,
+        retired_field: "d" * 64,
+    }
+    with pytest.raises(ValueError, match=rf"extra=\['{retired_field}'\]"):
+        production_model_module.require_expected_artifact_hashes(
+            feature_contract,
+            old_four_field_authority,
+            context="test feature_contract",
+        )
+
+
 def test_bundle_export_uses_training_artifact_hashes_without_loading_packaged_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -475,7 +499,6 @@ def test_bundle_export_uses_training_artifact_hashes_without_loading_packaged_ar
         "name_tuples_data_sha256": "e" * 64,
         "orcid_prefix_counts_data_sha256": "f" * 64,
         "name_counts_manifest_sha256": "1" * 64,
-        "orcid_prefix_counts_manifest_sha256": "2" * 64,
     }
     source_clusterer.feature_contract.update(explicit_hashes)
     package_loads = 0

@@ -4,19 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from s2and.consts import NORMALIZATION_VERSION, PROJECT_ROOT_PATH
+from s2and.consts import PROJECT_ROOT_PATH
 from s2and.orcid_prefix_counts import (
-    ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
     ORCID_PREFIX_DATA_FILENAME,
     ORCID_PREFIX_MANIFEST_FILENAME,
-    ORCID_PREFIX_PAIR_KEY_SEMANTICS,
     load_canonical_orcid_prefix_counts,
 )
 from scripts.production.counts import generate_orcid_name_prefix_counts as generator
@@ -38,15 +35,14 @@ def test_module_entrypoint_help() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "--expected-name-tuples-sha256" in completed.stdout
+    assert "--name-tuples-path" in completed.stdout
+    assert "--input-csv" in completed.stdout
 
 
 def _tuple_args() -> list[str]:
     return [
         "--name-tuples-path",
         str(NAME_TUPLES_PATH),
-        "--expected-name-tuples-sha256",
-        NAME_TUPLES_SHA256,
     ]
 
 
@@ -61,8 +57,6 @@ def _fixture_args(tmp_path: Path, rows: object, *, output_name: str = "publicati
         str(_write_rows(tmp_path / f"{output_name}-rows.json", rows)),
         "--output-dir",
         str(tmp_path / output_name),
-        "--source-snapshot-id",
-        "fixture-snapshot",
         *_tuple_args(),
     ]
 
@@ -85,6 +79,11 @@ def test_module_entrypoint_publishes_fixture(tmp_path: Path) -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert (tmp_path / "publication" / ORCID_PREFIX_MANIFEST_FILENAME).is_file()
+    plan = json.JSONDecoder().raw_decode(completed.stdout)[0]["plan"]
+    assert plan["source"] == str((tmp_path / "publication-rows.json").resolve())
+    assert plan["mode"] == "fixture"
+    assert "query_sha256" not in plan
+    assert "fixture_sha256" not in plan
 
 
 def _write_guardrails(path: Path, **changes: int) -> Path:
@@ -109,23 +108,17 @@ def _publish_fixture(tmp_path: Path) -> Path:
     return tmp_path / "publication"
 
 
-def test_fixture_publishes_one_manifest_authority_and_loads_immutably(tmp_path: Path) -> None:
+def test_fixture_publishes_runtime_files_and_loads_immutably(tmp_path: Path) -> None:
     output_dir = _publish_fixture(tmp_path)
 
     assert {path.name for path in output_dir.iterdir()} == {
         ORCID_PREFIX_DATA_FILENAME,
         ORCID_PREFIX_MANIFEST_FILENAME,
     }
-    manifest_payload = (output_dir / ORCID_PREFIX_MANIFEST_FILENAME).read_bytes()
-    manifest = json.loads(manifest_payload)
+    manifest = json.loads((output_dir / ORCID_PREFIX_MANIFEST_FILENAME).read_bytes())
     loaded = load_canonical_orcid_prefix_counts(output_dir)
-    assert manifest["schema_version"] == ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION
-    assert manifest["normalization_version"] == NORMALIZATION_VERSION
-    assert manifest["pair_key_semantics"] == ORCID_PREFIX_PAIR_KEY_SEMANTICS
-    assert manifest["source_kind"].startswith("fixture:")
-    assert manifest["name_tuples_sha256"] == NAME_TUPLES_SHA256
+    assert manifest == {"name_tuples_sha256": NAME_TUPLES_SHA256}
     assert loaded.data_sha256 == hashlib.sha256((output_dir / ORCID_PREFIX_DATA_FILENAME).read_bytes()).hexdigest()
-    assert loaded.manifest_sha256 == hashlib.sha256(manifest_payload).hexdigest()
     assert loaded.name_tuples_sha256 == NAME_TUPLES_SHA256
     with pytest.raises(TypeError):
         loaded.counts["al"] = {}  # type: ignore[index]
@@ -148,47 +141,25 @@ def test_existing_or_empty_publication_is_rejected_without_partial_output(tmp_pa
     assert not empty_output.exists()
 
 
-def test_full_dry_run_uses_one_guardrail_authority_and_max_plus_one_limit(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    args = [
-        "--run-full",
-        "--output-dir",
-        str(tmp_path / "output"),
-        "--source-snapshot-id",
-        "warehouse-snapshot",
-        *_tuple_args(),
-        "--dry-run",
-    ]
-    with pytest.raises(ValueError, match="--guardrails-json"):
-        generator.main(args)
-
-    guardrails = _write_guardrails(tmp_path / "guardrails.json", max_source_rows=17)
-    assert generator.main([*args, "--guardrails-json", str(guardrails)]) == 0
-    assert "limit 18" in capsys.readouterr().out
-    assert not (tmp_path / "output").exists()
-
-
-def test_full_run_rejects_invalid_expansion_guard_before_warehouse(
+def test_full_run_rejects_invalid_expansion_guard_before_reading_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     guardrails = _write_guardrails(tmp_path / "guardrails.json", max_names_per_orcid=1)
+    export = _write_rows(tmp_path / "export.csv", [])
     monkeypatch.setattr(
         generator,
-        "_load_warehouse_rows",
-        lambda *_args: pytest.fail("warehouse accessed before guardrail validation"),
+        "_load_reviewed_csv_rows",
+        lambda *_args: pytest.fail("rows read before guardrail validation"),
     )
 
     with pytest.raises(ValueError, match="max_names_per_orcid must be at least 2"):
         generator.main(
             [
-                "--run-full",
+                "--input-csv",
+                str(export),
                 "--output-dir",
                 str(tmp_path / "output"),
-                "--source-snapshot-id",
-                "warehouse-snapshot",
                 "--guardrails-json",
                 str(guardrails),
                 *_tuple_args(),
@@ -196,35 +167,75 @@ def test_full_run_rejects_invalid_expansion_guard_before_warehouse(
         )
 
 
-def test_name_tuple_digest_is_explicitly_bound_before_publication(tmp_path: Path) -> None:
-    args = _fixture_args(
-        tmp_path,
-        [{"orcid": ORCID_1, "first_name": "Alice", "middle": None}],
+def test_reviewed_csv_uses_full_guardrails_without_internal_warehouse_client(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    export = tmp_path / "orcid-export.csv"
+    rows = "".join(
+        f"0000-0000-0000-{index:04d},0000-0000-0000-{index:04d},{first},\n"
+        for index in range(10)
+        for first in ("Alice", "Amy")
     )
-    args[args.index(NAME_TUPLES_SHA256)] = "0" * 64
-    with pytest.raises(ValueError, match="does not match"):
-        generator.main(args)
-    assert not (tmp_path / "publication").exists()
+    export.write_text(
+        f"raw_orcid,orcid,first_name,middle\n{rows}",
+        encoding="utf-8",
+    )
+    guardrails = _write_guardrails(tmp_path / "guardrails.json", min_source_rows=20)
+
+    assert (
+        generator.main(
+            [
+                "--input-csv",
+                str(export),
+                "--guardrails-json",
+                str(guardrails),
+                "--output-dir",
+                str(tmp_path / "output"),
+                *_tuple_args(),
+            ]
+        )
+        == 0
+    )
+
+    plan = json.JSONDecoder().raw_decode(capsys.readouterr().out)[0]["plan"]
+    assert plan["mode"] == "full"
+    assert plan["source"] == str(export.resolve())
+    assert (tmp_path / "output" / ORCID_PREFIX_DATA_FILENAME).is_file()
 
 
-def test_builder_deduplicates_rows_and_hashes_selected_content() -> None:
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "raw_orcid,orcid,orcid,first_name,middle\n",
+        "raw_orcid,orcid,first_name,middle,source\n",
+        f"raw_orcid,orcid,first_name,middle\n{ORCID_1},{ORCID_1},Alice,,extra\n",
+    ],
+)
+def test_reviewed_csv_rejects_ambiguous_columns(tmp_path: Path, payload: str) -> None:
+    export = tmp_path / "orcid-export.csv"
+    export.write_text(payload, encoding="utf-8")
+    with pytest.raises(ValueError, match="exact header|more values than columns"):
+        list(generator._load_reviewed_csv_rows(export))
+
+
+def test_builder_deduplicates_rows() -> None:
     rows = [
         {"orcid": ORCID_1, "first_name": "Alice", "middle": None},
         {"orcid": ORCID_1, "first_name": "Amy", "middle": None},
     ]
-    counts, metrics, digest = generator.build_prefix_counts_from_sorted_rows(
+    counts, metrics = generator.build_prefix_counts_from_sorted_rows(
         rows,
         [],
         min_orcid_count=1,
     )
-    duplicate_counts, duplicate_metrics, duplicate_digest = generator.build_prefix_counts_from_sorted_rows(
+    duplicate_counts, duplicate_metrics = generator.build_prefix_counts_from_sorted_rows(
         [*rows, rows[-1]],
         [],
         min_orcid_count=1,
     )
 
     assert counts == duplicate_counts
-    assert digest == duplicate_digest
     assert metrics["source_rows"] == 2
     assert duplicate_metrics["source_rows"] == 3
     assert metrics["orcid_pair_keys_after_threshold"] > 0
@@ -249,34 +260,37 @@ def test_builder_enforces_only_live_expansion_bounds(kwargs: dict[str, int], mat
         generator.build_prefix_counts_from_sorted_rows(rows, [], min_orcid_count=1, **kwargs)
 
 
-@pytest.mark.parametrize("tamper", ["data", "cardinality", "source"])
-def test_canonical_loader_rejects_tampering(tmp_path: Path, tamper: str) -> None:
+def test_canonical_loader_rejects_semantically_invalid_counts(tmp_path: Path) -> None:
     output_dir = _publish_fixture(tmp_path)
     data_path = output_dir / ORCID_PREFIX_DATA_FILENAME
-    manifest_path = output_dir / ORCID_PREFIX_MANIFEST_FILENAME
-    manifest = json.loads(manifest_path.read_text())
-    if tamper == "data":
-        data_path.write_bytes(data_path.read_bytes() + b" ")
-    elif tamper == "cardinality":
-        manifest["metrics"]["output_pair_keys"] += 1
-        manifest_path.write_text(json.dumps(manifest))
-    else:
-        manifest["source_kind"] = ""
-        manifest_path.write_text(json.dumps(manifest))
+    counts = json.loads(data_path.read_text())
+    left = next(iter(counts))
+    right = next(iter(counts[left]))
+    counts[left][right] = 0
+    data_path.write_text(json.dumps(counts))
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="positive integers"):
         load_canonical_orcid_prefix_counts(output_dir)
 
 
-def test_source_orcid_key_and_query_order_match() -> None:
-    raw = "prefix 0000‐0000‐0000‐0001 suffix"
-    match = re.search(generator._CANONICAL_SOURCE_ORCID_SQL_PATTERN, raw, flags=re.IGNORECASE)
-    assert match is not None
-    compact = re.sub(generator._ORCID_DASH_SQL_PATTERN, "", match.group()).upper()
-    warehouse_key = f"{compact[:4]}-{compact[4:8]}-{compact[8:12]}-{compact[12:]}"
-    assert generator._canonical_source_orcid(match.group()) == warehouse_key
-    assert "order by orcid nulls last" in generator._warehouse_query(10)
-    assert generator._warehouse_query(10).endswith("limit 11\n")
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {},
+        {"name_tuples_sha256": NAME_TUPLES_SHA256.upper()},
+        {"name_tuples_sha256": NAME_TUPLES_SHA256, "source": "extra"},
+    ],
+)
+def test_canonical_loader_requires_exact_minimal_tuple_dependency(
+    tmp_path: Path,
+    manifest: dict[str, str],
+) -> None:
+    output_dir = _publish_fixture(tmp_path)
+    manifest_path = output_dir / ORCID_PREFIX_MANIFEST_FILENAME
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="lowercase name_tuples_sha256"):
+        load_canonical_orcid_prefix_counts(output_dir)
 
 
 def test_prefix_pair_lookup_is_order_independent() -> None:

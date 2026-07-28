@@ -1,23 +1,13 @@
-use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use pyo3::Bound;
 use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
-use crate::arrow_batch_lookup::IndexedArrowReadStats;
+use crate::arrow_dataset::ArrowDatasetResources;
 use crate::constraints::same_prefix_tokens;
 use crate::features::word_ngrams_counter_python_compat;
 use crate::orcid::normalize_orcid_owned;
-use crate::raw_arrow::arrow_io::{
-    arrow_column_index, arrow_optional_column_index, arrow_optional_string_list, ArrowI64Column,
-    ArrowStringColumn,
-};
-use crate::raw_arrow::paths::extract_path_mapping_string;
-use crate::raw_arrow::readers::{
-    read_raw_arrow_paper_authors_with_optional_index, read_raw_arrow_specter_with_optional_index,
-    read_raw_arrow_with_optional_index,
-};
 use crate::text_compat::{
     canonicalize_name_parts_compat, compute_block_compat, ensure_unidecode_for_text,
     normalize_text_compat_from_map,
@@ -55,136 +45,28 @@ pub(crate) fn normalize_subblocking_signature_rows(
     }
 }
 
-pub(crate) fn read_subblocking_signature_rows_from_batches(
-    path: &str,
-    batches: Vec<RecordBatch>,
-    keep_signature_ids: Option<&HashSet<String>>,
+pub(crate) fn read_subblocking_signature_rows(
+    dataset: &ArrowDatasetResources,
+    keep_signature_ids: &HashSet<String>,
 ) -> PyResult<HashMap<String, SubblockingSignatureRow>> {
-    let mut out = HashMap::new();
-    for batch in batches {
-        let signature_id_col = batch.column(arrow_column_index(&batch, "signature_id", path)?);
-        let signature_id_values =
-            ArrowStringColumn::from_string_array(signature_id_col.as_ref(), "signature_id")?;
-        let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
-        let paper_id_values =
-            ArrowStringColumn::from_string_array(paper_id_col.as_ref(), "paper_id")?;
-        let first_col = batch.column(arrow_column_index(&batch, "author_first", path)?);
-        let first_values =
-            ArrowStringColumn::from_string_array(first_col.as_ref(), "author_first")?;
-        let middle_col = batch.column(arrow_column_index(&batch, "author_middle", path)?);
-        let middle_values =
-            ArrowStringColumn::from_string_array(middle_col.as_ref(), "author_middle")?;
-        let affiliations_col =
-            batch.column(arrow_column_index(&batch, "author_affiliations", path)?);
-        let orcid_col =
-            arrow_optional_column_index(&batch, "author_orcid").map(|index| batch.column(index));
-        let orcid_values = match orcid_col.as_ref() {
-            Some(col) => Some(ArrowStringColumn::from_string_array(
-                col.as_ref(),
-                "author_orcid",
-            )?),
-            None => None,
-        };
-        let position_col = batch.column(arrow_column_index(&batch, "author_position", path)?);
-        let position_values =
-            ArrowI64Column::from_i64_array(position_col.as_ref(), "author_position")?;
-        for row in 0..batch.num_rows() {
-            let signature_id_value = signature_id_values.required_value(row, "signature_id")?;
-            if keep_signature_ids.map_or(false, |keep| !keep.contains(signature_id_value.as_ref()))
-            {
-                continue;
-            }
-            if signature_id_value.is_empty() {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "signatures Arrow cannot contain empty signature_id values",
-                ));
-            }
-            let signature_id = signature_id_value.into_owned();
-            match out.entry(signature_id.clone()) {
-                Entry::Occupied(entry) => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "signatures Arrow contains duplicate signature_id: {:?}",
-                        entry.key()
-                    )));
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(SubblockingSignatureRow {
-                        signature_id,
-                        paper_id: paper_id_values
-                            .required_value(row, "paper_id")?
-                            .into_owned(),
-                        first: first_values.optional_owned(row).unwrap_or_default(),
-                        middle: middle_values.optional_owned(row).unwrap_or_default(),
-                        affiliations: arrow_optional_string_list(
-                            affiliations_col.as_ref(),
-                            row,
-                            "author_affiliations",
-                        )?,
-                        orcid: orcid_values
-                            .as_ref()
-                            .and_then(|col| col.optional_owned(row))
-                            .and_then(|value| normalize_orcid_owned(&value)),
-                        position: position_values.optional_value(row, "author_position")?,
-                    });
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-#[cfg(test)]
-mod optional_orcid_tests {
-    use super::read_subblocking_signature_rows_from_batches;
-    use arrow::array::{new_null_array, ArrayRef, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    use std::sync::Arc;
-
-    #[test]
-    fn subblocking_signatures_without_orcid_column_read_as_none() {
-        let list_type = DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)));
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("signature_id", DataType::Utf8, false),
-            Field::new("paper_id", DataType::Utf8, false),
-            Field::new("author_first", DataType::Utf8, true),
-            Field::new("author_middle", DataType::Utf8, true),
-            Field::new("author_affiliations", list_type.clone(), true),
-            Field::new("author_position", DataType::Int64, true),
-        ]));
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from(vec!["s1"])),
-            Arc::new(StringArray::from(vec!["p1"])),
-            Arc::new(StringArray::from(vec!["Ada"])),
-            Arc::new(StringArray::from(vec![None::<&str>])),
-            new_null_array(&list_type, 1),
-            Arc::new(Int64Array::from(vec![0])),
-        ];
-        let batch = RecordBatch::try_new(schema, columns).expect("valid record batch");
-
-        let signatures = read_subblocking_signature_rows_from_batches("<test>", vec![batch], None)
-            .expect("author_orcid is optional");
-
-        assert_eq!(signatures.get("s1").expect("s1 present").orcid, None);
-    }
-}
-
-pub(crate) fn read_subblocking_signature_rows_with_optional_index(
-    path: &str,
-    index_path: Option<&str>,
-    keep_signature_ids: Option<&HashSet<String>>,
-) -> PyResult<(
-    HashMap<String, SubblockingSignatureRow>,
-    IndexedArrowReadStats,
-)> {
-    read_raw_arrow_with_optional_index(
-        path,
-        index_path,
-        None,
-        "signature_id",
-        keep_signature_ids,
-        read_subblocking_signature_rows_from_batches,
-    )
+    let (signatures, _stats) = dataset.read_signatures(Some(keep_signature_ids))?;
+    Ok(signatures
+        .into_iter()
+        .map(|(signature_id, signature)| {
+            (
+                signature_id.clone(),
+                SubblockingSignatureRow {
+                    signature_id,
+                    paper_id: signature.paper_id,
+                    first: signature.author_first,
+                    middle: signature.author_middle,
+                    affiliations: signature.affiliations,
+                    orcid: signature.orcid,
+                    position: signature.position,
+                },
+            )
+        })
+        .collect())
 }
 
 #[derive(Clone)]
@@ -472,47 +354,6 @@ impl NativeGraphSubblockingConfig {
         out.projection_count = out.projection_count.max(out.adaptive_projection_count);
         out.projection_window = out.projection_window.max(out.adaptive_projection_window);
         out
-    }
-}
-
-pub(crate) struct NativeGraphArrowPaths {
-    pub(crate) paper_authors_path: String,
-    pub(crate) paper_authors_batch_index_path: String,
-    pub(crate) specter_path: String,
-    pub(crate) specter_batch_index_path: String,
-}
-
-impl NativeGraphArrowPaths {
-    pub(crate) fn from_py(paths: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let paper_authors_path = extract_path_mapping_string(paths, "paper_authors", true)?
-            .expect("required paper_authors path exists");
-        let paper_authors_batch_index_path =
-            extract_path_mapping_string(paths, "paper_authors_batch_index", true)?
-                .expect("required paper_authors_batch_index path exists");
-        let (specter_path, specter_batch_index_path) =
-            if let Some(path) = extract_path_mapping_string(paths, "specter", false)? {
-                let index_path = extract_path_mapping_string(paths, "specter_batch_index", true)?
-                    .expect("required specter_batch_index path exists");
-                (path, index_path)
-            } else if let Some(path) = extract_path_mapping_string(paths, "specter2", false)? {
-                let index_path =
-                    match extract_path_mapping_string(paths, "specter2_batch_index", false)? {
-                        Some(value) => value,
-                        None => extract_path_mapping_string(paths, "specter_batch_index", true)?
-                            .expect("required specter_batch_index path exists"),
-                    };
-                (path, index_path)
-            } else {
-                return Err(pyo3::exceptions::PyKeyError::new_err(
-                    "Arrow path bundle is missing required key: specter or specter2",
-                ));
-            };
-        Ok(Self {
-            paper_authors_path,
-            paper_authors_batch_index_path,
-            specter_path,
-            specter_batch_index_path,
-        })
     }
 }
 
@@ -1628,13 +1469,12 @@ pub(crate) fn collect_native_graph_signature_groups(
 
 pub(crate) fn build_native_graph_evidence_store(
     py: Python<'_>,
-    paths: &Bound<'_, PyAny>,
+    dataset: &ArrowDatasetResources,
     row_by_signature_id: &HashMap<String, SubblockingSignatureRow>,
     fallback_signature_groups: &[Vec<String>],
     telemetry: &mut NativeGraphTelemetry,
 ) -> PyResult<NativeGraphEvidenceStore> {
     let load_start = Instant::now();
-    let graph_paths = NativeGraphArrowPaths::from_py(paths)?;
     let fallback_signature_ids = collect_native_graph_signature_groups(fallback_signature_groups);
     telemetry.load_metrics.signatures_record_batches_scanned = 0;
     telemetry.load_metrics.signatures_rows_scanned = fallback_signature_ids.len();
@@ -1658,18 +1498,8 @@ pub(crate) fn build_native_graph_evidence_store(
         }
         paper_ids.insert(row.paper_id.clone());
     }
-    let (paper_authors, paper_author_stats) = read_raw_arrow_paper_authors_with_optional_index(
-        &graph_paths.paper_authors_path,
-        Some(&graph_paths.paper_authors_batch_index_path),
-        None,
-        &paper_ids,
-    )?;
-    let (specter_by_paper_id, specter_stats) = read_raw_arrow_specter_with_optional_index(
-        &graph_paths.specter_path,
-        Some(&graph_paths.specter_batch_index_path),
-        None,
-        &paper_ids,
-    )?;
+    let (paper_authors, paper_author_stats) = dataset.read_paper_authors(&paper_ids)?;
+    let (specter_by_paper_id, specter_stats) = dataset.read_specter(&paper_ids)?;
     telemetry.load_metrics.paper_authors_record_batches_scanned = paper_author_stats.batches_read;
     telemetry.load_metrics.paper_authors_rows_scanned = paper_author_stats.rows_scanned;
     telemetry.load_metrics.paper_authors_rows_loaded =
@@ -2556,7 +2386,7 @@ pub(crate) fn extract_string_vec_entries(
 
 pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     py: Python<'_>,
-    paths: &Bound<'_, PyAny>,
+    dataset: &ArrowDatasetResources,
     rows: Vec<SubblockingSignatureRow>,
     maximum_size: usize,
     first_k_letter_counts_sorted: HashMap<String, HashMap<String, f64>>,
@@ -2675,7 +2505,7 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     } else {
         Some(build_native_graph_evidence_store(
             py,
-            paths,
+            dataset,
             &row_by_signature_id,
             &fallback_signature_groups,
             &mut graph_telemetry,
@@ -2763,7 +2593,7 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
 
 #[pyfunction]
 #[pyo3(signature = (
-    paths,
+    dataset,
     signature_ids,
     maximum_size,
     first_k_letter_counts_sorted,
@@ -2773,7 +2603,7 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
 ))]
 pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
     py: Python<'_>,
-    paths: &Bound<'_, PyAny>,
+    dataset: PyRef<'_, crate::arrow_dataset::ArrowDataset>,
     signature_ids: Vec<String>,
     maximum_size: usize,
     first_k_letter_counts_sorted: HashMap<String, HashMap<String, f64>>,
@@ -2781,10 +2611,7 @@ pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
     random_seed: u64,
     use_orcid_subblocking: bool,
 ) -> PyResult<(HashMap<String, Vec<String>>, Py<PyDict>)> {
-    let signatures_path = extract_path_mapping_string(paths, "signatures", true)?
-        .expect("required signatures path exists");
-    let signatures_index_path =
-        extract_path_mapping_string(paths, "signatures_batch_index", false)?;
+    let dataset = dataset.shared();
     let mut seen_signature_ids = HashSet::<String>::new();
     for signature_id in &signature_ids {
         if !seen_signature_ids.insert(signature_id.clone()) {
@@ -2795,11 +2622,7 @@ pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
     }
     let requested_signature_ids = signature_ids;
     let keep_signature_ids: HashSet<String> = requested_signature_ids.iter().cloned().collect();
-    let (subblocking_rows, _read_stats) = read_subblocking_signature_rows_with_optional_index(
-        &signatures_path,
-        signatures_index_path.as_deref(),
-        Some(&keep_signature_ids),
-    )?;
+    let subblocking_rows = read_subblocking_signature_rows(&dataset, &keep_signature_ids)?;
     let missing_signature_ids: Vec<String> = requested_signature_ids
         .iter()
         .filter(|signature_id| !subblocking_rows.contains_key(*signature_id))
@@ -2832,7 +2655,7 @@ pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
 
     make_subblocks_with_telemetry_from_rows_native_graph(
         py,
-        paths,
+        &dataset,
         signature_rows,
         maximum_size,
         first_k_letter_counts_sorted,

@@ -2,12 +2,10 @@ import logging
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
-from s2and.arrow_inputs import (
-    ValidatedArrowInputs,
-    require_normalization_version,
-)
+from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import CLUSTER_SEEDS_LOOKUP
 from s2and.data import ANDData
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
@@ -28,7 +26,6 @@ s2and_rust: Any | None = None
 
 logger = logging.getLogger("s2and")
 _S2AND_RUST_LOAD_LOCK = threading.Lock()
-_SourcePathFingerprint = tuple[Any, ...]
 _ClusterSeedStamp = tuple[object, int, object, int]
 _MISSING = object()
 
@@ -251,23 +248,15 @@ def _dataset_name_for_logs(dataset: Any) -> str:
     return str(name) if name is not None else f"<unnamed:{id(dataset)}>"
 
 
-def _rust_featurizer_source_paths(dataset: ANDData) -> tuple[_SourcePathFingerprint, ...]:
-    arrow_paths = dataset.arrow_paths
-    if not isinstance(arrow_paths, Mapping) or not arrow_paths:
-        raise RuntimeError("Rust training featurization requires dataset.arrow_paths")
-    generation = getattr(dataset, "arrow_artifact_generation", None)
-    if not isinstance(generation, str) or not generation:
-        raise ValueError("dataset.arrow_paths requires a retained arrow_artifact_generation")
-    exact_paths = tuple(sorted((str(key), str(value)) for key, value in arrow_paths.items()))
-    return (("validated_arrow_generation", generation, exact_paths),)
-
-
 def _rust_featurizer_build_inputs(dataset: ANDData) -> tuple[Any, ...]:
+    arrow_dataset = dataset.arrow_dataset
+    if arrow_dataset is None:
+        raise RuntimeError("Rust training featurization requires dataset.arrow_dataset")
     return (
         bool(dataset.preprocess),
         bool(dataset.use_orcid_id),
         resolve_n_jobs(dataset.n_jobs),
-        _rust_featurizer_source_paths(dataset),
+        arrow_dataset.native,
         frozenset(dataset.name_tuples or ()),
     )
 
@@ -296,14 +285,6 @@ def _cluster_seed_stamp(dataset: ANDData) -> _ClusterSeedStamp | None:
     disallow = getattr(dataset, "cluster_seeds_disallow", None)
     if disallow is None:
         disallow = set()
-    if (
-        getattr(dataset, "_cluster_seeds_source", "python") == "arrow"
-        and not require
-        and not disallow
-        and id(require) == getattr(dataset, "_cluster_seeds_initial_require_id", id(require))
-        and id(disallow) == getattr(dataset, "_cluster_seeds_initial_disallow_id", id(disallow))
-    ):
-        return None
 
     if not isinstance(require, _MutationTrackedDict):
         require = _MutationTrackedDict(require)
@@ -311,7 +292,6 @@ def _cluster_seed_stamp(dataset: ANDData) -> _ClusterSeedStamp | None:
     if not isinstance(disallow, _MutationTrackedSet):
         disallow = _MutationTrackedSet(disallow)
         dataset.cluster_seeds_disallow = disallow
-    dataset._cluster_seeds_source = "python"
     return (
         require.identity_token,
         require.mutation_version,
@@ -320,119 +300,64 @@ def _cluster_seed_stamp(dataset: ANDData) -> _ClusterSeedStamp | None:
     )
 
 
-def build_rust_featurizer_from_arrow_paths(
-    paths: ValidatedArrowInputs,
+def build_rust_featurizer_from_arrow_dataset(
+    arrow_dataset: ArrowDataset,
     *,
-    expected_normalization_version: str,
     signature_ids: Sequence[Any] | None = None,
     name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
-    load_name_counts: bool = False,
     preprocess: bool = True,
     cluster_seed_require_value: float = 0.0,
     cluster_seed_disallow_value: float = 10000.0,
     num_threads: int | None = None,
-    name_counts_index: Any | None = None,
     use_orcid_id: bool = True,
+    cluster_seeds_path: Path | None = None,
+    cluster_seed_disallows_path: Path | None = None,
 ) -> Any:
-    """Build a Rust featurizer directly from raw-planner Arrow IPC paths.
+    """Build a Rust featurizer from one retained Arrow dataset.
 
-    ``name_counts_index`` is an already validated native snapshot. When it is
-    omitted, the handle retained by Arrow validation is reused automatically.
     ``use_orcid_id=False`` suppresses ORCID while native signature records are
-    constructed, without rewriting the immutable Arrow generation.
+    constructed. Request-local cluster-seed sidecars remain explicit.
     """
 
-    method = _require_rust_runtime().RustFeaturizer.from_arrow_paths
-    expected_version = require_normalization_version(
-        expected_normalization_version,
-        context="RustFeaturizer.from_arrow_paths",
-    )
-    if not isinstance(paths, ValidatedArrowInputs):
-        raise TypeError("build_rust_featurizer_from_arrow_paths requires ValidatedArrowInputs")
-    if paths.normalization_version != expected_version:
-        raise ValueError(
-            "RustFeaturizer.from_arrow_paths normalization_version mismatch: "
-            f"artifact={paths.normalization_version!r} expected={expected_version!r}"
-        )
-    normalized_paths = dict(paths)
-    normalized_paths.pop("query_signatures", None)
-    normalized_paths.pop("manifest", None)
-    if not load_name_counts:
-        if name_counts_index is not None:
-            raise ValueError("name_counts_index requires load_name_counts=True")
-        normalized_paths.pop("name_counts_index", None)
-    elif name_counts_index is None:
-        name_counts_index = paths.native_name_counts_index
-    if load_name_counts and name_counts_index is not None:
-        manifest = paths.name_counts_manifest
-        if manifest is None:
-            raise RuntimeError("validated Arrow inputs lost the retained name-count manifest")
-        observed_manifest_sha256 = getattr(name_counts_index, "name_counts_manifest_sha256", None)
-        if observed_manifest_sha256 != manifest.manifest_sha256:
-            raise ValueError(
-                "shared name-count handle manifest mismatch: "
-                f"handle={observed_manifest_sha256!r} manifest={manifest.manifest_sha256!r}"
-            )
-        observed_normalization_version = getattr(name_counts_index, "normalization_version", None)
-        if observed_normalization_version != manifest.normalization_version:
-            raise ValueError(
-                "shared name-count handle normalization mismatch: "
-                f"handle={observed_normalization_version!r} manifest={manifest.normalization_version!r}"
-            )
-    resolved_name_tuples = name_tuples
-    if name_tuples is None:
-        # Package data is immutable for the process lifetime. Reuse only the
-        # frozen validated artifact so repeated Arrow requests do not rehash it.
-        resolved_name_tuples = load_packaged_name_tuple_artifact().pairs
-    args = (
-        normalized_paths,
+    if not isinstance(arrow_dataset, ArrowDataset):
+        raise TypeError("build_rust_featurizer_from_arrow_dataset requires ArrowDataset")
+    resolved_name_tuples = load_packaged_name_tuple_artifact().pairs if name_tuples is None else name_tuples
+    return _require_rust_runtime().RustFeaturizer.from_arrow_dataset(
+        arrow_dataset.native,
         None if signature_ids is None else [str(value) for value in signature_ids],
         resolved_name_tuples,
-        bool(preprocess),
-        float(cluster_seed_require_value),
-        float(cluster_seed_disallow_value),
-        None if num_threads is None else resolve_n_jobs(num_threads),
+        cluster_seeds_path=None if cluster_seeds_path is None else str(cluster_seeds_path),
+        cluster_seed_disallows_path=(None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path)),
+        preprocess=bool(preprocess),
+        cluster_seed_require_value=float(cluster_seed_require_value),
+        cluster_seed_disallow_value=float(cluster_seed_disallow_value),
+        num_threads=None if num_threads is None else resolve_n_jobs(num_threads),
+        use_orcid_id=bool(use_orcid_id),
     )
-    if name_counts_index is None and use_orcid_id:
-        return method(*args)
-    if use_orcid_id:
-        return method(*args, name_counts_index)
-    return method(*args, name_counts_index, False)
 
 
 def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
     """Build a Rust featurizer for a dataset.
 
-    Rust training datasets carry one immutable ``dataset.arrow_paths`` mapping
-    attached by
-    ``s2and.arrow_training``), which builds through ``from_arrow_paths`` —
-    the same fast Arrow door production inference uses — loading every
-    signature in the bundle (sorted ids) with Rust-side name counts.
+    Rust training datasets retain one open ``dataset.arrow_dataset`` resource,
+    which owns the exact files and native name-count snapshot used here.
     """
     pre_build_start = time.perf_counter()
     _require_rust_runtime()
     num_threads = resolve_n_jobs(dataset.n_jobs)
-    arrow_paths = dataset.arrow_paths
-    if not arrow_paths:
+    arrow_dataset = dataset.arrow_dataset
+    if arrow_dataset is None:
         raise RuntimeError(
-            "Rust featurizer construction requires Arrow IPC artifacts "
-            "(dataset.arrow_paths). Build the dataset through "
+            "Rust featurizer construction requires dataset.arrow_dataset. "
+            "Build the dataset through "
             "s2and.arrow_training.build_training_anddata_from_arrow."
         )
-    name_counts_provenance = getattr(dataset, "name_counts_provenance", None)
-    if not isinstance(name_counts_provenance, Mapping):
-        raise ValueError("Arrow-backed training requires name_counts_provenance")
     pre_build_seconds = time.perf_counter() - pre_build_start
     ffi_start = time.perf_counter()
-    featurizer = build_rust_featurizer_from_arrow_paths(
-        arrow_paths,
-        expected_normalization_version=require_normalization_version(
-            name_counts_provenance.get("normalization_version"),
-            context="Arrow-backed training name-count provenance",
-        ),
+    featurizer = build_rust_featurizer_from_arrow_dataset(
+        arrow_dataset,
         signature_ids=None,
         name_tuples=dataset.name_tuples,
-        load_name_counts=True,
         preprocess=bool(dataset.preprocess),
         cluster_seed_require_value=float(CLUSTER_SEEDS_LOOKUP["require"]),
         cluster_seed_disallow_value=float(CLUSTER_SEEDS_LOOKUP["disallow"]),
@@ -488,10 +413,10 @@ def _get_rust_featurizer(
             }
         build_count = state.build_count + 1
         logger.info(
-            "Telemetry: rust_core_build seconds=%.3f dataset=%s path=%s count=%d pre=%.3f ffi=%.3f post=%.3f",
+            "Telemetry: rust_core_build seconds=%.3f dataset=%s source=%s count=%d pre=%.3f ffi=%.3f post=%.3f",
             build_seconds,
             ds_log,
-            "from_arrow_paths",
+            "from_arrow_dataset",
             build_count,
             build_timings.get("pre_build_seconds", 0.0),
             build_timings.get("ffi_seconds", 0.0),
@@ -533,7 +458,7 @@ __all__ = [
     "build_linker_pair_aggregate_stats_arrays_rust",
     "build_linker_pair_distance_accumulators_rust",
     "build_linker_pair_features_and_aggregate_stats_arrays_rust",
-    "build_rust_featurizer_from_arrow_paths",
+    "build_rust_featurizer_from_arrow_dataset",
     "evict_rust_featurizer",
     "get_constraint_labels_index_arrays_rust",
     "get_constraints_block_upper_triangle_indexed_rust",

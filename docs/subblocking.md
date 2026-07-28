@@ -52,8 +52,10 @@ normalization while reading raw name columns.
 After Stage 1 artifact promotion, the default merge-prior mapping is loaded lazily from the packaged
 `first_k_letter_counts_from_orcid.json` and its required adjacent
 `.manifest.json`, then resolved at subblocking entry. The loader validates the
-complete canonical artifact and data digest; a missing or tampered file fails
-closed before partitioning. The current pre-release tree contains
+canonical prefix-pair keys and positive integer counts directly; the minimal
+manifest records the canonical name-tuple data hash used to generate them.
+Missing or malformed files fail closed before partitioning, and production
+contracts bind their computed hashes. The current pre-release tree contains
 neither file. These learned prefix-pair counts are considered
 only after exact-name and `same_prefix_tokens` merge candidates, so they do not
 override stronger compatibility evidence. A caller may supply an explicit
@@ -110,9 +112,9 @@ The public routes are method-based:
   `ANDData`, has no `backend` keyword, and rejects a Rust runtime context.
   Oversized fallback groups call the Python graph fallback.
 - **Rust Arrow prediction.** Call
-  `Clusterer.predict_from_arrow_paths(blocks, arrow_paths,
+  `Clusterer.predict_from_arrow(blocks, arrow_dataset,
   batching_threshold=N, total_ram_bytes=...)`. This validates the indexed Arrow
-  generation, partitions oversized blocks with the native Rust graph
+  handle, partitions oversized blocks with the native Rust graph
   subblocker, and reuses one Rust featurizer across the emitted subblocks.
 
 `batching_threshold=None` retains full-block prediction. A positive threshold
@@ -139,8 +141,8 @@ indexes, or the incremental artifact raise instead of falling back to Python or
 
 Incremental prediction has two supported routes:
 
-- **Promoted Rust linker.** `Clusterer.predict_incremental_from_arrow_paths` requires a Rust runtime context and a
-  validated Arrow artifact bundle. Retrieval and scoring run directly against those Arrow tables using the pinned
+- **Promoted Rust linker.** `Clusterer.predict_incremental_from_arrow` requires a Rust runtime context and an open
+  `ArrowDataset`. Retrieval and scoring run directly against its Arrow tables using the pinned
   native ABI.
 - **Python helper.** `Clusterer.predict_incremental` operates on `ANDData` with a Python runtime context. It covers
   partition coverage but does not implement batched incremental routing.
@@ -149,7 +151,7 @@ The APIs do not inspect native capabilities or fall back between implementations
 Rust extension is an error on the Arrow route.
 
 `batching_threshold` has two separate entry points. On full-block `Clusterer.predict`, it caps subblock size. On
-`Clusterer.predict_incremental_from_arrow_paths`, it caps the number of unassigned query signatures per linker batch.
+`Clusterer.predict_incremental_from_arrow`, it caps the number of unassigned query signatures per linker batch.
 The standalone Python `Clusterer.predict_incremental` API does not take a batching parameter.
 
 See [production_inference.md](production_inference.md#incremental-decision-semantics) for the full

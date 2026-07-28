@@ -1,64 +1,26 @@
 {
-  "exact_string_verification": true,
   "files": {
     "first": {
       "byte_count": 14066,
-      "path": "generations/pubmed-specter2/first.bin",
-      "record_count": 304,
+      "path": "first.bin",
       "sha256": "a91edfd6feea6d0453ab0386886be10ff9dcbfec87d76a3ecb6ac7ea0da9bd23"
     },
     "first_last": {
       "byte_count": 16225,
-      "path": "generations/pubmed-specter2/first_last.bin",
-      "record_count": 311,
+      "path": "first_last.bin",
       "sha256": "2396facd7f9d62a14f1e6759995aa27500d9702728551b69284468693df87d32"
     },
     "last": {
       "byte_count": 1766,
-      "path": "generations/pubmed-specter2/last.bin",
-      "record_count": 38,
+      "path": "last.bin",
       "sha256": "436ba9474d2c7b8444da1b2d93d740859cf10e267ca826dcac40e2cf2d440f21"
     },
     "last_first_initial": {
       "byte_count": 2245,
-      "path": "generations/pubmed-specter2/last_first_initial.bin",
-      "record_count": 47,
+      "path": "last_first_initial.bin",
       "sha256": "9951d0cc2d58d972fb7b6b8097b8bd9a747a070dc7a03118f3e2bc8f5a27cee9"
     }
   },
-  "hash": "fnv1a64(name_bytes), fnv1a64(domain + kind + NUL + name_bytes)",
-  "magic": "S2NCI001",
-  "projection": {
-    "dataset": "pubmed",
-    "missing_global_keys_are_omitted_to_preserve_default-count behavior": true,
-    "needed_key_count": {
-      "first": 309,
-      "first_last": 341,
-      "last": 38,
-      "last_first_initial": 47
-    },
-    "preserves_global_counts": true,
-    "projected_key_count": {
-      "first": 304,
-      "first_last": 311,
-      "last": 38,
-      "last_first_initial": 47
-    },
-    "source": "s2and/data/name_counts_index",
-    "specter": "specter2"
-  },
-  "record_layout": "hash1:u64,hash2:u64,name_offset:u64,name_len:u32,reserved:u32,count:f64",
   "normalization_version": "canonical_v2",
-  "schema_version": "name_counts_index_v2",
-  "source_provenance": {
-    "generation_id": "pubmed-specter2",
-    "normalization_version": "canonical_v2",
-    "schema_version": "name_counts_provenance_v3",
-    "selected_rows_sha256": "d83c2f30a1e4a04cb760da18541eaae81f22fe3233203eb8ccbb03cd37be2e5d",
-    "source_kind": "fixture:pubmed-specter2",
-    "source_query_sha256": "4c41d07c32caa63b0996f7870d5495d72a61ac5ae20e5bf0ec61fa5187121bb5",
-    "source_row_count": 700,
-    "source_snapshot_id": "pubmed-specter2-fixture"
-  },
-  "sort_order": "hash1,hash2,utf8_name_bytes"
+  "schema_version": "name_counts_index_v3"
 }

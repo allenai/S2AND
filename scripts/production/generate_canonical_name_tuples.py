@@ -1,7 +1,6 @@
 """Regenerate the name-tuple alias artifact under canonical_v2 normalization.
 
-Migration step 3 of docs/normalization_migration_blocked.md: name tuples are
-regenerated deterministically by re-normalizing the curated raw pairs in
+Name tuples are regenerated deterministically by re-normalizing the curated raw pairs in
 ``s2and/data/s2and_unnormalized_filtered_name_tuples.txt`` through the canonical
 normalizer, instead of re-running the archived hmni/LLM pipeline.
 
@@ -20,27 +19,20 @@ Usage:
     uv run python scripts/production/generate_canonical_name_tuples.py
         --source PATH --output PATH
 
-Production input and output paths are explicit. The output receives a JSON
-provenance sidecar under the strict ``s2and_name_tuples_v3`` contract. Data is
-replaced first and the fsynced sidecar last as the generation commit marker.
-Ship both in the same release unit as the other canonical_v2 artifacts; the
-loader keeps the "name1,name2" line format. Generate into an offline staging
-location and validate it before package promotion: two same-directory files
-cannot be replaced atomically, so interruption between replacements is
-fail-closed (checksum mismatch) and requires rerunning generation.
+Production input and output paths are explicit. The generator prints a JSON
+summary on stdout; the only persisted artifact is the canonical
+``name1,name2`` data file.
 """
 
 from __future__ import annotations
 
 import argparse
-import datetime
 import json
 import os
 import tempfile
 from pathlib import Path
 
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
-from s2and.name_tuple_artifact import build_name_tuple_artifact_metadata
 from s2and.text import canonical_name_tuple_pair, canonicalize_name_text, same_prefix_tokens
 
 
@@ -104,36 +96,27 @@ def regenerate(source_path: str, output_path: str) -> dict:
 
     ordered_pairs = sorted(canonical_pairs)
     data_bytes = "".join(f"{name_a},{name_b}\n" for name_a, name_b in ordered_pairs).encode("utf-8")
-    metadata = build_name_tuple_artifact_metadata(
-        source_filename=source.name,
-        source_bytes=source_bytes,
-        data_filename=output.name,
-        data_bytes=data_bytes,
-        pair_count=len(ordered_pairs),
-        generated_at=datetime.datetime.now(datetime.UTC).isoformat(),
-        input_pair_count=len(raw_pairs),
-        dropped_identity=dropped_identity,
-        dropped_prefix_compatible=dropped_prefix_compatible,
-        dropped_empty=dropped_empty,
-        dropped_duplicate_canonical=dropped_duplicate_canonical,
-    )
-    metadata_bytes = (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode("utf-8")
-
-    metadata_path = output.with_name(output.name + ".meta.json")
+    summary = {
+        "data": {
+            "pair_count": len(ordered_pairs),
+            "size_bytes": len(data_bytes),
+        },
+        "generation_counts": {
+            "input_pair_count": len(raw_pairs),
+            "dropped_identity": dropped_identity,
+            "dropped_prefix_compatible": dropped_prefix_compatible,
+            "dropped_empty": dropped_empty,
+            "dropped_duplicate_canonical": dropped_duplicate_canonical,
+        },
+    }
     with exclusive_file_lock(output.with_name(f".{output.name}.publish.lock")):
         data_temp = _write_fsynced_temp(output, data_bytes)
-        metadata_temp = _write_fsynced_temp(metadata_path, metadata_bytes)
         try:
-            # The sidecar is the commit marker. The lock serializes writers;
-            # readers either see one complete generation or fail its checksum.
             os.replace(data_temp, output)
-            fsync_directory(output.parent)
-            os.replace(metadata_temp, metadata_path)
             fsync_directory(output.parent)
         finally:
             data_temp.unlink(missing_ok=True)
-            metadata_temp.unlink(missing_ok=True)
-    return metadata
+    return summary
 
 
 def main() -> None:
@@ -141,8 +124,8 @@ def main() -> None:
     parser.add_argument("--source", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    metadata = regenerate(args.source, args.output)
-    print(json.dumps(metadata, indent=2))
+    summary = regenerate(args.source, args.output)
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

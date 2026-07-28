@@ -1,6 +1,23 @@
+import argparse
+import os
+
 import pytest
 
 from scripts import tutorial_for_predicting_with_the_prod_model as tutorial
+
+
+def test_tutorial_defaults_to_real_mini_dataset_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ParsedDefault(Exception):
+        pass
+
+    def assert_default(parser: argparse.ArgumentParser) -> None:
+        assert parser.get_default("data_root") == os.path.join("s2and", "data-backup", "s2and_mini")
+        raise ParsedDefault
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", assert_default)
+
+    with pytest.raises(ParsedDefault):
+        tutorial.main()
 
 
 def test_tutorial_json_eval_uses_current_predict_signature(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,15 +64,15 @@ def test_tutorial_json_eval_uses_current_predict_signature(monkeypatch: pytest.M
 
 
 def test_tutorial_arrow_route_accepts_native_subblocking_threshold() -> None:
-    arrow_paths = object()
+    arrow_dataset = object()
 
-    input_format, resolved_paths = tutorial._select_input_route(
+    input_format, resolved_dataset = tutorial._select_input_route(
         requested_input_format="auto",
         dataset_name="dummy",
         arrow_data_root="unused",
         specter_suffix="_specter2.pkl",
-        resolve_arrow_dataset_paths=lambda *_args: arrow_paths,
+        resolve_arrow_dataset=lambda *_args: arrow_dataset,
     )
 
     assert input_format == "arrow"
-    assert resolved_paths is arrow_paths
+    assert resolved_dataset is arrow_dataset

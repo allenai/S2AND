@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,17 +9,14 @@ import pytest
 
 import s2and.model as model_module
 import s2and.subblocking as subblocking_module
-from s2and.arrow_inputs import ValidatedArrowInputs, validate_arrow_prediction_artifacts
-from s2and.consts import NORMALIZATION_VERSION, PROJECT_ROOT_PATH
+from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
-from s2and.incremental_linking.feature_block_arrow import write_cluster_seeds_arrow
 from s2and.model import Clusterer
-from scripts._rust_suite.promoted_incremental_arrow_profile_cmd import (
-    _block_dict,
-    _read_signature_rows,
-    _select_workload,
+from scripts.verification.profile_promoted_incremental_arrow import (
+    read_signature_blocks,
+    select_profile_workload,
 )
-from tests.helpers import write_minimal_arrow_prediction_bundle, write_test_arrow_artifact_manifest
+from tests.helpers import write_minimal_arrow_prediction_bundle
 
 _LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec"
 
@@ -38,52 +34,11 @@ def _skip_if_missing_or_lfs_pointer(paths: list[Path]) -> None:
         raise pytest.skip.Exception(f"Git LFS artifact(s) not materialized: {pointers}")
 
 
-def _cluster_partition(clusters: Mapping[str, list[str]]) -> frozenset[frozenset[str]]:
-    return frozenset(frozenset(signature_ids) for signature_ids in clusters.values() if signature_ids)
-
-
-def _resolve_manifest_path(dataset_root: Path, value: Any) -> str:
-    raw_path = Path(str(value))
-    candidates = [raw_path] if raw_path.is_absolute() else [dataset_root / raw_path, Path(PROJECT_ROOT_PATH) / raw_path]
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate.resolve())
-    return str(candidates[0])
-
-
-def _arrow_prediction_paths(dataset_root: Path) -> ValidatedArrowInputs:
-    manifest_path = dataset_root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest_paths = manifest.get("paths")
-    if not isinstance(manifest_paths, Mapping):
-        raise ValueError(f"Arrow manifest is missing object paths: {manifest_path}")
-    paths: dict[str, str] = {}
-    for key in (
-        "signatures",
-        "papers",
-        "paper_authors",
-        "name_counts_index",
-        "signatures_batch_index",
-        "papers_batch_index",
-        "paper_authors_batch_index",
-    ):
-        value = manifest_paths.get(key)
-        if value is not None:
-            paths[key] = _resolve_manifest_path(dataset_root, value)
-
-    specter_value = manifest_paths.get("specter", manifest_paths.get("specter2"))
-    specter_index_value = manifest_paths.get("specter_batch_index", manifest_paths.get("specter2_batch_index"))
-    if specter_value is not None:
-        paths["specter"] = _resolve_manifest_path(dataset_root, specter_value)
-    if specter_index_value is not None:
-        paths["specter_batch_index"] = _resolve_manifest_path(dataset_root, specter_index_value)
-    return validate_arrow_prediction_artifacts(
-        paths,
+def _open_arrow_dataset(dataset_root: Path) -> ArrowDataset:
+    return ArrowDataset.open(
+        dataset_root,
         require_specter=True,
         require_name_counts_index=True,
-        expected_normalization_version=NORMALIZATION_VERSION,
-        context="canonical PubMed large-block Arrow runtime integration test",
-        producer_hint="publish the canonical PubMed Arrow bundle and v1.3 production model",
     )
 
 
@@ -98,7 +53,6 @@ def _clusterer() -> Clusterer:
 
 @pytest.mark.requires_lfs
 def test_canonical_pubmed_large_block_arrow_subblocking_and_incremental_no_anddata_fallback(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exercise native large-block and incremental paths against real release artifacts."""
@@ -120,15 +74,15 @@ def test_canonical_pubmed_large_block_arrow_subblocking_and_incremental_no_andda
         ]
     )
 
-    arrow_paths = _arrow_prediction_paths(dataset_root)
-    rows = _read_signature_rows(Path(arrow_paths["signatures"]))
-    blocks = _block_dict(rows)
+    arrow_dataset = _open_arrow_dataset(dataset_root)
+    with arrow_dataset.use() as lease, lease.open_file("signatures") as source_file:
+        blocks = read_signature_blocks(source_file)
     target_block = "r agarwal"
     block_signature_ids = blocks[target_block]
     seed_signature_to_cluster = {
         signature_id: f"seed_component_{index}" for index, signature_id in enumerate(block_signature_ids[:20])
     }
-    workload = _select_workload(
+    workload = select_profile_workload(
         blocks=blocks,
         signature_to_cluster_id=seed_signature_to_cluster,
         target_block=target_block,
@@ -144,9 +98,9 @@ def test_canonical_pubmed_large_block_arrow_subblocking_and_incremental_no_andda
 
     clusterer = load_production_model(str(model_root))
     clusterer.n_jobs = 1
-    pred_clusters, dists = clusterer.predict_from_arrow_paths(
+    pred_clusters, dists = clusterer.predict_from_arrow(
         {workload.target_block: block_signature_ids},
-        arrow_paths,
+        arrow_dataset,
         batching_threshold=64,
         cluster_seeds_require=workload.seed_signature_to_cluster,
         total_ram_bytes=1_000_000_000_000,
@@ -163,32 +117,18 @@ def test_canonical_pubmed_large_block_arrow_subblocking_and_incremental_no_andda
     assert block_telemetry["input_signature_count"] == len(block_signature_ids)
     assert block_telemetry["graph_fallback_native"] is True
 
-    explicit_result = clusterer.predict_incremental_from_arrow_paths(
+    explicit_result = clusterer.predict_incremental_from_arrow(
         workload.block_signatures,
-        arrow_paths,
+        arrow_dataset,
         prevent_new_incompatibilities=False,
         batching_threshold=1,
         cluster_seeds_require=workload.seed_signature_to_cluster,
         total_ram_bytes=1_000_000_000_000,
     )
-    cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
-    write_cluster_seeds_arrow(cluster_seeds_path, workload.seed_signature_to_cluster)
-    sidecar_result = clusterer.predict_incremental_from_arrow_paths(
-        workload.block_signatures,
-        {**arrow_paths, "cluster_seeds": str(cluster_seeds_path)},
-        prevent_new_incompatibilities=False,
-        batching_threshold=1,
-        total_ram_bytes=1_000_000_000_000,
-    )
-
-    assert _cluster_partition(cast(dict[str, list[str]], explicit_result["clusters"])) == _cluster_partition(
-        cast(dict[str, list[str]], sidecar_result["clusters"])
-    )
-    for result in (explicit_result, sidecar_result):
-        telemetry = cast(dict[str, Any], result["incremental_linker_telemetry"])
-        assert result["incremental_linker_query_view"] == "raw_arrow"
-        assert telemetry["arrow_promoted_incremental"] == 1
-        assert result["clusters"]
+    telemetry = cast(dict[str, Any], explicit_result["incremental_linker_telemetry"])
+    assert explicit_result["incremental_linker_query_view"] == "raw_arrow"
+    assert telemetry["arrow_promoted_incremental"] == 1
+    assert explicit_result["clusters"]
 
 
 def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
@@ -197,11 +137,8 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
 ) -> None:
     """Cover the complete bounded Arrow large-block orchestration path."""
 
-    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
-    cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
-    write_cluster_seeds_arrow(cluster_seeds_path, {"0": "claimed", "1": "claimed"})
-    arrow_paths["cluster_seeds"] = str(cluster_seeds_path)
-    write_test_arrow_artifact_manifest(tmp_path, arrow_paths)
+    write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    arrow_dataset = ArrowDataset.open(tmp_path)
 
     events: list[str] = []
     build_calls: list[dict[str, Any]] = []
@@ -212,9 +149,9 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         def cluster_seeds_require(self) -> list[tuple[str, str]]:
             return [("0", "claimed"), ("1", "claimed")]
 
-    def fake_native_subblocking(paths: dict[str, str], signature_ids: list[str], **kwargs: Any):
+    def fake_native_subblocking(dataset: Any, signature_ids: list[str], **kwargs: Any):
         events.append("native_subblocking")
-        native_calls.append({"paths": dict(paths), "signature_ids": list(signature_ids), **kwargs})
+        native_calls.append({"dataset": dataset, "signature_ids": list(signature_ids), **kwargs})
         subblocks = {
             "initial": ["6", "7", "8"],
             "multi_a": ["0", "2", "5"],
@@ -223,7 +160,7 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         assert max(map(len, subblocks.values())) <= kwargs["maximum_size"]
         return subblocks, {"final_subblock_count": 3, "input_signature_count": 9}
 
-    def fake_load_representatives(_paths: dict[str, str], signature_ids: list[str]):
+    def fake_load_representatives(_dataset: Any, signature_ids: list[str]):
         events.append("representatives")
         assert signature_ids == ["6", "0", "5", "3", "9"]
         return {
@@ -234,9 +171,10 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
             for signature_id in signature_ids
         }
 
-    def fake_build_featurizer(paths: dict[str, str], **kwargs: Any) -> FakeRustFeaturizer:
+    def fake_build_featurizer(dataset: ArrowDataset, **kwargs: Any) -> FakeRustFeaturizer:
         events.append("featurizer")
-        build_calls.append({"paths": dict(paths), **kwargs})
+        assert dataset is arrow_dataset
+        build_calls.append(dict(kwargs))
         return FakeRustFeaturizer()
 
     def fake_predict_multiple(self: Clusterer, block_dict: dict[str, list[str]], **kwargs: Any):
@@ -259,12 +197,13 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     def fake_predict_incremental(
         self: Clusterer,
         block_signatures: list[str],
-        paths: dict[str, str],
+        dataset: ArrowDataset,
         **kwargs: Any,
     ) -> dict[str, Any]:
         del self
         events.append("incremental_attach")
-        incremental_calls.append({"block_signatures": list(block_signatures), "paths": dict(paths), **kwargs})
+        assert dataset is arrow_dataset
+        incremental_calls.append({"block_signatures": list(block_signatures), **kwargs})
         assert kwargs["cluster_seeds_require"] == {
             "0": "claimed",
             "1": "claimed",
@@ -284,20 +223,21 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
 
     monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
     monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_representatives)
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fake_build_featurizer)
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", fake_build_featurizer)
     monkeypatch.setattr(Clusterer, "_predict_subblocked_multiple_letter_groups", fake_predict_multiple)
-    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow_paths", fake_predict_incremental)
+    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", fake_predict_incremental)
     monkeypatch.setattr(
         model_module,
         "make_subblocks",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python subblocking must not run")),
     )
     clusterer = _clusterer()
-    predicted, dists = clusterer.predict_from_arrow_paths(
+    predicted, dists = clusterer.predict_from_arrow(
         {"small": ["9"], "large": [str(index) for index in range(9)]},
-        arrow_paths,
+        arrow_dataset,
         batching_threshold=3,
         name_tuples=set(),
+        cluster_seeds_require={"0": "claimed", "1": "claimed"},
     )
 
     assert dists is None
@@ -312,10 +252,9 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     assert native_calls[0]["maximum_size"] == 3
     assert len(build_calls) == 1
     assert build_calls[0]["signature_ids"] == ["0", "1", "2", "5", "3", "4", "9"]
-    assert build_calls[0]["paths"]["cluster_seeds"] == str(cluster_seeds_path)
+    assert build_calls[0]["cluster_seeds_path"] is not None
     assert len(incremental_calls) == 1
     assert incremental_calls[0]["block_signatures"] == ["6", "7", "8"]
-    assert incremental_calls[0]["paths"]["cluster_seeds"] == str(cluster_seeds_path)
     assert {signature_id for members in predicted.values() for signature_id in members} == {
         str(index) for index in range(10)
     }
@@ -336,19 +275,22 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
 
 def test_arrow_subblocking_avoids_generated_key_collisions(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    def fake_native_subblocking(_paths: Mapping[str, Any], signature_ids: list[str], **_kwargs: Any):
+    def fake_native_subblocking(_dataset: Any, signature_ids: list[str], **_kwargs: Any):
         assert signature_ids == ["s1", "s2"]
         return {"x": ["s1"], "y": ["s2"]}, {}
 
     monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
+    write_minimal_arrow_prediction_bundle(tmp_path)
+    arrow_dataset = ArrowDataset.open(tmp_path)
 
     result = _clusterer()._build_arrow_subblocked_block_dict(
         {
             "a": ["s1", "s2"],
             "a|subblock=x": ["other"],
         },
-        {},
+        arrow_dataset,
         batching_threshold=1,
         cluster_seeds_require={},
     )
@@ -364,7 +306,8 @@ def test_arrow_subblocking_presplits_altered_profiles_before_prediction(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    arrow_dataset = ArrowDataset.open(tmp_path)
     rewritten_seeds = {"s1": "claimed_0", "s2": "claimed_0", "s3": "claimed_1"}
     events: list[str] = []
 
@@ -375,7 +318,7 @@ def test_arrow_subblocking_presplits_altered_profiles_before_prediction(
         assert dataset.altered_cluster_signatures == ["s1"]
         return rewritten_seeds, {"claimed_0": "claimed", "claimed_1": "claimed"}, {}, {}
 
-    def fake_load_signature_info(_paths: Mapping[str, Any], signature_ids: list[str]):
+    def fake_load_signature_info(_dataset: Any, signature_ids: list[str]):
         return {
             signature_id: SimpleNamespace(
                 author_info_first="john",
@@ -385,27 +328,30 @@ def test_arrow_subblocking_presplits_altered_profiles_before_prediction(
             for signature_id in signature_ids
         }
 
-    def fake_predict_validated(
+    def fake_predict_from_arrow(
         self: Clusterer,
         block_dict: dict[str, list[str]],
-        request_paths: ValidatedArrowInputs,
+        dataset: ArrowDataset,
+        _lease: Any,
+        sidecars: Mapping[str, str],
         **kwargs: Any,
     ):
         del self
         events.append("prediction")
+        assert dataset is arrow_dataset
         assert block_dict == {"block": ["s1", "s2", "s3"]}
-        assert model_module._read_cluster_seeds_arrow(Path(request_paths["cluster_seeds"])) == rewritten_seeds
+        assert "cluster_seeds" in sidecars
         assert kwargs["prediction_cluster_seeds_require"] == rewritten_seeds
         assert kwargs["needs_subblocking"] is True
         return {"cluster": ["s1", "s2", "s3"]}, None
 
     monkeypatch.setattr(Clusterer, "_build_incremental_seed_setup", fake_seed_setup)
     monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_signature_info)
-    monkeypatch.setattr(Clusterer, "_predict_from_validated_arrow_paths", fake_predict_validated)
+    monkeypatch.setattr(Clusterer, "_predict_from_arrow", fake_predict_from_arrow)
 
-    result, _ = _clusterer().predict_from_arrow_paths(
+    result, _ = _clusterer().predict_from_arrow(
         {"block": ["s1", "s2", "s3"]},
-        arrow_paths,
+        arrow_dataset,
         batching_threshold=2,
         name_tuples=set(),
         cluster_seeds_require={"s1": "claimed", "s2": "claimed", "s3": "claimed"},
@@ -447,12 +393,13 @@ def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
 ) -> None:
     """Keep seeded initial-only groups on the cross-subblock attachment path."""
 
-    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    arrow_dataset = ArrowDataset.open(tmp_path)
     bulk_calls: list[dict[str, list[str]]] = []
     incremental_calls: list[dict[str, Any]] = []
 
     def fake_native_subblocking(
-        _paths: Mapping[str, Any],
+        _dataset: Any,
         signature_ids: list[str],
         **_kwargs: Any,
     ) -> tuple[dict[str, list[str]], dict[str, int]]:
@@ -463,7 +410,7 @@ def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
         }, {"final_subblock_count": 2}
 
     def fake_load_representatives(
-        _paths: Mapping[str, Any],
+        _dataset: Any,
         signature_ids: list[str],
     ) -> dict[str, SimpleNamespace]:
         assert signature_ids == ["2", "0"]
@@ -475,7 +422,8 @@ def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
             for signature_id in signature_ids
         }
 
-    def fake_build_featurizer(_paths: Mapping[str, Any], **kwargs: Any) -> object:
+    def fake_build_featurizer(dataset: ArrowDataset, **kwargs: Any) -> object:
+        assert dataset is arrow_dataset
         assert kwargs["signature_ids"] == ["0", "1"]
         return object()
 
@@ -492,10 +440,11 @@ def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
     def fake_predict_incremental(
         self: Clusterer,
         block_signatures: list[str],
-        _paths: Mapping[str, Any],
+        dataset: ArrowDataset,
         **kwargs: Any,
     ) -> dict[str, Any]:
         del self
+        assert dataset is arrow_dataset
         incremental_calls.append({"block_signatures": list(block_signatures), **kwargs})
         assert block_signatures == ["2", "3", "4"]
         assert kwargs["cluster_seeds_require"] == {
@@ -508,13 +457,13 @@ def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
 
     monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
     monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_representatives)
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fake_build_featurizer)
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", fake_build_featurizer)
     monkeypatch.setattr(Clusterer, "_predict_subblocked_multiple_letter_groups", fake_predict_multiple)
-    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow_paths", fake_predict_incremental)
+    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", fake_predict_incremental)
 
-    predicted, dists = _clusterer().predict_from_arrow_paths(
+    predicted, dists = _clusterer().predict_from_arrow(
         {"large": ["0", "1", "2", "3", "4"]},
-        arrow_paths,
+        arrow_dataset,
         batching_threshold=3,
         cluster_seeds_require={"2": "initial_component", "3": "initial_component"},
         name_tuples=set(),
@@ -530,7 +479,8 @@ def test_large_arrow_block_rejects_native_subblock_over_threshold(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    arrow_dataset = ArrowDataset.open(tmp_path)
     monkeypatch.setattr(
         model_module,
         "_make_subblocks_with_telemetry_arrow_rust",
@@ -538,9 +488,9 @@ def test_large_arrow_block_rejects_native_subblock_over_threshold(
     )
 
     with pytest.raises(RuntimeError, match="Rust Arrow subblocking exceeded batching_threshold"):
-        _clusterer().predict_from_arrow_paths(
+        _clusterer().predict_from_arrow(
             {"large": [str(index) for index in range(5)]},
-            arrow_paths,
+            arrow_dataset,
             batching_threshold=3,
             name_tuples=set(),
         )
@@ -550,7 +500,8 @@ def test_large_arrow_block_rejects_oversized_explicit_seed_component_before_nati
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    arrow_dataset = ArrowDataset.open(tmp_path)
     native_called = False
     featurizer_called = False
 
@@ -565,15 +516,15 @@ def test_large_arrow_block_rejects_oversized_explicit_seed_component_before_nati
         raise AssertionError("featurizer construction must not start")
 
     monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fail_native)
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fail_featurizer)
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", fail_featurizer)
 
     with pytest.raises(
         ValueError,
         match="cluster_seeds_require component exceeds batching_threshold before Arrow subblocking",
     ):
-        _clusterer().predict_from_arrow_paths(
+        _clusterer().predict_from_arrow(
             {"large": [str(index) for index in range(5)]},
-            arrow_paths,
+            arrow_dataset,
             batching_threshold=3,
             cluster_seeds_require={str(index): "claimed" for index in range(4)},
             name_tuples=set(),
@@ -597,7 +548,8 @@ def test_large_arrow_block_rejects_invalid_native_partition(
     native_subblocks: dict[str, list[str]],
     expected_detail: str,
 ) -> None:
-    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    arrow_dataset = ArrowDataset.open(tmp_path)
     monkeypatch.setattr(
         model_module,
         "_make_subblocks_with_telemetry_arrow_rust",
@@ -605,7 +557,7 @@ def test_large_arrow_block_rejects_invalid_native_partition(
     )
     monkeypatch.setattr(
         model_module,
-        "build_rust_featurizer_from_arrow_paths",
+        "build_rust_featurizer_from_arrow_dataset",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("featurizer construction must not start")),
     )
 
@@ -613,9 +565,9 @@ def test_large_arrow_block_rejects_invalid_native_partition(
         RuntimeError,
         match=rf"Rust Arrow subblocking must return every input signature exactly once.*{expected_detail}",
     ):
-        _clusterer().predict_from_arrow_paths(
+        _clusterer().predict_from_arrow(
             {"large": [str(index) for index in range(5)]},
-            arrow_paths,
+            arrow_dataset,
             batching_threshold=3,
             name_tuples=set(),
         )

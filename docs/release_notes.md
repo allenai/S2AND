@@ -4,15 +4,31 @@
 
 The manifests currently say `0.60.0`; the coordinated release may retain that
 package version or become `1.3.0`. Model/data bundle v1.3 is a separate version
-axis. This decision is release blocker B01.
+axis. Freeze the package version before the release commit.
 
 - **Unreleased migration state:** the artifact-independent canonical-v2 code
-  and release hardening are implemented, but canonical name counts, canonical
-  ORCID prefix counts, benchmark-name re-export, the v1.3 retrain, and
-  release quality/scale measurements are still pending. The legacy
+  and release hardening are implemented. The reviewed canonical benchmark-name
+  and ORCID source exports are still needed; production artifact generation,
+  the v1.3 retrain, and release quality/scale measurements follow them. The legacy
   v1.21/v1.0-v1.2 models are not packaged and are rejected by the canonical
   loader, so 0.60.0 is not yet a usable production release. See
-  [1_3_release_todo.md](1_3_release_todo.md).
+  [release.md](release.md).
+- **Python support:** `s2and` now supports Python 3.11, 3.12, and 3.13
+  (previously 3.11 only), matching the range `s2and-rust` already declared.
+  `s2and` remains a single pure-Python wheel; `s2and-rust` continues to ship
+  per-version platform wheels. CI runs typecheck-and-test on all three
+  interpreters, and the release workflow smokes the installed artifacts and
+  compiles the `s2and-rust` sdist on each of them.
+- Simplification: release policy now has one runbook, three write-once plans,
+  and one reusable `ArrowDataset` handle. Completed Rust migration comparisons,
+  stress tools, memory calibrators, duplicated artifact protocols, their
+  dispatchers, and tool-only tests are retired. One bounded
+  `scripts/verification/profile_promoted_incremental_arrow.py` command remains
+  to produce the release performance report. The accidentally unbounded
+  booster-parity matrix is now deterministically budgeted without excluding
+  parity from the default suite; the measured full suite fell from 793.62 s
+  (1,490 passed, 3 skipped) to 100.03 s (1,391 passed, 1 skipped) during the
+  simplification.
 - Breaking: Python and Rust now share one `canonical_v2` name contract and one
   versioned feature contract. `FEATURIZER_VERSION` is 10. Titles retain letters
   and digits, CLD2 runs in explicit plain-text mode, malformed email is missing
@@ -59,21 +75,30 @@ axis. This decision is release blocker B01.
   queries, in the 20260525 assignments); the classic loader now fails closed,
   and regenerated datasets must assign splits per `base_group_id` — the same
   identity notion the classic train/holdout filter already enforces.
-- Breaking: ORCID prefix counts now use one
-  `first_k_letter_counts_from_orcid.manifest.json`; the former runtime metadata
-  and producer-report sidecars are removed.
-- Breaking: pairwise production training is one release-only command. It
-  requires the digest-pinned training plan, external name-count index, local
-  matrix workspace, validation-pair size, and explicit full-run acknowledgement;
-  packaged tuple/ORCID artifacts are the remaining data authority.
+- Breaking: ORCID prefix counts use one validated JSON file plus a minimal
+  tuple-dependency manifest. Producer provenance, schema, and metrics sidecars
+  are removed.
+- Breaking: name-count indexes require `name_counts_index_v3` and the flat
+  `name_counts_index/{manifest.json,first.bin,last.bin,first_last.bin,last_first_initial.bin}`
+  layout. The v1/v2 schemas and `generations/<generation>/` nesting are
+  rejected; regenerate or repackage the index and rebuild or retrain Arrow and
+  model artifacts bound to its manifest SHA-256.
+- Breaking: release orchestration uses one owner-authored `release.json` and
+  two generated plans. `model_plan.json` exposes only training, validation,
+  and EPS inputs; `evaluation_plan.json` owns held-out inputs, gates,
+  baselines, and the performance Arrow root and workload. The six unreleased
+  manifest/spec formats and their compatibility-free CLI flags are removed.
+  Pairwise training still requires the external name-count index, local matrix
+  workspace, validation-pair size, and explicit full-run acknowledgement.
 - Breaking: linker training is one direct entrypoint. It performs one fresh fit
   against the final pairwise bundle, writes a complete v5 bundle with the
   embedded replay target, reloads those exact bytes, and evaluates them.
 - Breaking: `NameTupleArtifact.identity` and
   `s2and_rust.read_name_tuple_artifact_identity` are removed. The Python loader
-  validates each artifact once and retains only frozen alias pairs plus
-  `data_sha256`; Python-driven Rust flows receive those explicit pairs rather
-  than reopening the artifact in Rust.
+  validates the canonical text file directly and retains only frozen alias
+  pairs plus `data_sha256`; the former `.meta.json` sidecar is removed.
+  Python-driven Rust flows receive the explicit pairs rather than reopening
+  the artifact in Rust.
 - The canonical alias artifact now contains 5,027 pairs. A manual review of all
   2,266 legacy-only candidates restored 1,343 credible aliases, retained all
   3,684 existing pairs, and excluded 906 rejects plus 17 unresolved pairs. The
@@ -92,43 +117,36 @@ axis. This decision is release blocker B01.
   Loaded incremental linker artifacts are retained on the clusterer instead of
   being reloaded and rehashed per request.
 - The native name-count index, Arrow inputs, pairwise boosters, and linker
-  metadata carry and verify normalization, generation, size, SHA-256, and
-  feature-contract provenance. The historical name-count pickle is not a
-  runtime or published representation. Manifest-relative paths cannot escape
-  their authority or depend on process CWD. Equal-size/equal-mtime mutation of
-  altered-profile/disallow inputs is detected before altered-presplit reuse.
-  Models selecting name-count features compare the exact
+  metadata retain the runtime checks needed to prevent incompatible feature
+  computation. The historical name-count pickle is not a runtime or published
+  representation. Models selecting name-count features compare the exact
   `name_counts_manifest_sha256` at Python, Arrow, and prebuilt-Rust-featurizer
   boundaries before feature work.
-- Arrow production inputs require a canonical content-addressed generation
-  manifest. Immutable dataset files and indexes are inventoried centrally;
-  request-local seed/query sidecars are kept outside that identity and parsed
-  once per request. Hot featurizer-cache checks bind exact immutable paths and
-  generation identity without rehashing files on a hit.
+- Arrow production inputs require a canonical content-addressed manifest.
+  `ArrowDataset.open(root)` validates immutable files and indexes once and
+  retains their native readers for its lifetime; prediction receives
+  request-local seeds explicitly and reuses the open handle.
 - Stored language evidence is now an all-or-nothing triple with finite
   reliability in `[0,1]`; unreliable rows must carry zero. Python and Rust
   reject partial/malformed values and agree across pair order. Raw candidate
   planning likewise has only two valid constructors: declared queries and
   explicit automatic queries; the empty-sidecar/boolean-bypass state is gone.
 - Name-count indexes are assembled completely in a temporary sibling and
-  published with one rename into an absent `name_counts_index` target. Existing
-  targets are immutable; regeneration uses a new output directory. Warehouse
-  access requires an explicit full-run flag and local fixtures are bounded.
-  ORCID counts now use one direct JSON file plus one provenance manifest, with
-  no pointer manifest, retry loop, or legacy fallback. The large name-count
-  index belongs in the immutable external data release, not Python package
-  data. The current pre-release tree declares neither ORCID file. The approved
-  canonical JSON and manifest are added with both package-data declarations in
-  the final Stage 1 release commit.
+  published with one rename into an absent `name_counts_index` target.
+  Production count generators consume reviewed CSV exports, keep warehouse
+  clients and credentials outside the repository, and bound local fixtures.
+  ORCID counts use one direct JSON file plus one minimal
+  tuple-dependency manifest, with no producer-provenance protocol, pointer
+  manifest, retry loop, or legacy fallback. The large name-count index remains
+  external data rather than Python package data.
 - Generated `within_block_random` pair sampling now uses exact seeded rank
   sampling. It preserves the legacy candidate order, selected pairs, and labels
   while memory scales with requested samples plus blocks instead of all
   candidate pairs. Fixed-pair CSV datasets remain fully loaded during the
   release-only training run.
 - Fixed train/validation/test CSV inputs now reject any unordered pair that
-  appears in more than one split. B11 still requires this schema, duplication,
-  and overlap validation to run during preflight before expensive
-  featurization.
+  appears in more than one split. Preflight performs this schema, duplication,
+  and overlap validation before expensive featurization.
 - Pairwise and complete-model bundles validate in sibling staging directories
   and publish with one rename into a new path; finalization never mutates the
   pairwise source. The release evaluation report rejects missing or nonfinite
@@ -139,17 +157,22 @@ axis. This decision is release blocker B01.
   exact matches, and the linker binding covers both through its ordered
   feature-contract digest. The production-bundle schema is version 5 and the
   clusterer-config schema is version 5; older bundles are rejected rather than
-  adapted. Historical commit `e54c6ba` documents the published v1.21 loader's
-  explicit clustering-threshold override to `0.65` for versions `1.2`/`1.21`;
-  the stored threshold is stale. The current canonical loader has no legacy
-  override, so a v1.21 baseline must use that compatible historical runtime.
-  Newly tuned canonical bundles use their own `clusterer.json` value.
-- The release workflow builds and installs Python and Rust wheels outside the
-  source tree. Rust-enabled CI fails hard on import/ABI drift, and Windows/macOS
-  jobs execute their built wheels. The Rust build-system floor and release
-  action are aligned at Maturin 1.14.1. B26 still requires the five semantic
-  authorities, protected approval, and checksums over the exact staged bytes;
-  B16 requires a real external v1.3 bundle smoke.
+  adapted. Version 5 is intentionally retained because no canonical-v2 v5
+  bundle was released. The former four-field explicit artifact authority,
+  including `orcid_prefix_counts_manifest_sha256`, is unsupported; the linker
+  is retrained against the final three-field authority rather than adapting an
+  old bundle. Historical commit `e54c6ba` documents the published v1.21
+  loader's explicit clustering-threshold override to `0.65` for versions
+  `1.2`/`1.21`; the stored threshold is stale. The current canonical loader has
+  no legacy override, so a v1.21 baseline must use that compatible historical
+  runtime. Newly tuned canonical bundles use their own `clusterer.json` value.
+- The release workflow has no evidence inputs. It tests the exact commit,
+  builds and installs Python and Rust artifacts outside the source tree, runs
+  platform wheel smokes, and enforces the `main` ref in the workflow itself
+  before routing publication through the PyPI environment. It publishes Rust,
+  waits for that exact dependency, and then publishes Python. The Rust
+  build-system floor and release action are aligned at Maturin 1.14.1. The real
+  external v1.3 model/data smoke remains a pre-publication operator gate.
 - Arrow training iterates record batches and avoids duplicate full-table
   materialization. Paper-author inputs reject duplicate positions, empty names,
   and dangling references consistently in Python and Rust. Python subblocking

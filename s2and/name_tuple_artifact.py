@@ -1,32 +1,15 @@
-"""Strict contract and loader for canonical first-name alias artifacts."""
+"""Loader for canonical first-name alias pairs."""
 
 from __future__ import annotations
 
 import hashlib
 import io
-import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
-from s2and._sha256 import is_lowercase_sha256
-from s2and.consts import _PACKAGE_DATA_DIR, NORMALIZATION_VERSION
+from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.text import canonicalize_name_text, same_prefix_tokens
-
-NAME_TUPLE_ARTIFACT_SCHEMA_VERSION = "s2and_name_tuples_v3"
-NAME_TUPLE_ARTIFACT_VERSION = 3
-NAME_TUPLE_ARTIFACT_SEMANTICS: dict[str, Any] = {
-    "encoding": "utf-8",
-    "line_format": "name_a,name_b",
-    "row_order": "lexicographic_by_fields_unique",
-    "pair_order": "name_a_lexicographically_less_than_name_b",
-    "directionality": "canonical_unordered_rows",
-    "runtime_pair_semantics": "unordered",
-    "canonicalizer": "canonicalize_name_text",
-    "drop_identity": True,
-    "drop_prefix_compatible": True,
-}
 
 
 @dataclass(frozen=True)
@@ -37,84 +20,9 @@ class NameTupleArtifact:
     data_sha256: str
 
 
-def _sha256_bytes(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
+def _parse_and_validate_pairs(data_bytes: bytes, *, data_path: Path) -> frozenset[tuple[str, str]]:
+    """Parse canonical, sorted alias pairs from one trusted release file."""
 
-
-def _require_object(value: Any, *, field: str, metadata_path: Path) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"Name-tuple metadata {metadata_path} requires object field {field!r}")
-    return value
-
-
-def _require_string(value: Any, *, field: str, metadata_path: Path) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"Name-tuple metadata {metadata_path} requires nonempty string field {field!r}")
-    return value
-
-
-def _require_nonnegative_int(value: Any, *, field: str, metadata_path: Path) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 1 << 64:
-        raise ValueError(f"Name-tuple metadata {metadata_path} requires unsigned 64-bit integer field {field!r}")
-    return value
-
-
-def _require_sha256(value: Any, *, field: str, metadata_path: Path) -> str:
-    digest = _require_string(value, field=field, metadata_path=metadata_path)
-    if not is_lowercase_sha256(digest):
-        raise ValueError(f"Name-tuple metadata {metadata_path} requires lowercase SHA-256 field {field!r}")
-    return digest
-
-
-def build_name_tuple_artifact_metadata(
-    *,
-    source_filename: str,
-    source_bytes: bytes,
-    data_filename: str,
-    data_bytes: bytes,
-    pair_count: int,
-    generated_at: str,
-    input_pair_count: int,
-    dropped_identity: int,
-    dropped_prefix_compatible: int,
-    dropped_empty: int,
-    dropped_duplicate_canonical: int,
-) -> dict[str, Any]:
-    """Build canonical metadata for a generated tuple artifact."""
-
-    return {
-        "schema_version": NAME_TUPLE_ARTIFACT_SCHEMA_VERSION,
-        "artifact_version": NAME_TUPLE_ARTIFACT_VERSION,
-        "normalization_version": NORMALIZATION_VERSION,
-        "generated_at": generated_at,
-        "source": {
-            "filename": source_filename,
-            "sha256": _sha256_bytes(source_bytes),
-            "size_bytes": len(source_bytes),
-        },
-        "data": {
-            "filename": data_filename,
-            "sha256": _sha256_bytes(data_bytes),
-            "size_bytes": len(data_bytes),
-            "pair_count": pair_count,
-        },
-        "semantics": dict(NAME_TUPLE_ARTIFACT_SEMANTICS),
-        "generation_counts": {
-            "input_pair_count": input_pair_count,
-            "dropped_identity": dropped_identity,
-            "dropped_prefix_compatible": dropped_prefix_compatible,
-            "dropped_empty": dropped_empty,
-            "dropped_duplicate_canonical": dropped_duplicate_canonical,
-        },
-    }
-
-
-def _parse_and_validate_pairs(
-    data_bytes: bytes,
-    *,
-    data_path: Path,
-    expected_pair_count: int,
-) -> frozenset[tuple[str, str]]:
     pairs: set[tuple[str, str]] = set()
     previous: tuple[str, str] | None = None
     for line_number, raw_line in enumerate(io.BytesIO(data_bytes), start=1):
@@ -145,137 +53,24 @@ def _parse_and_validate_pairs(
         if same_prefix_tokens(first_a, first_b):
             raise ValueError(f"Invalid prefix-compatible name tuple at {data_path}:{line_number}")
         pairs.add(pair)
-
-    if len(pairs) != expected_pair_count:
-        raise ValueError(
-            f"Name-tuple artifact {data_path} pair_count mismatch: metadata={expected_pair_count} actual={len(pairs)}"
-        )
     return frozenset(pairs)
 
 
 def load_name_tuple_artifact(path: str | Path) -> NameTupleArtifact:
-    """Load a tuple artifact only after validating its adjacent strict sidecar.
-
-    Explicit custom paths use the same contract as the packaged default: the
-    sidecar must be named ``<data-path>.meta.json`` and must bind the exact data
-    filename, bytes, cardinalities, normalization, and pair semantics.
-    """
+    """Load canonical alias pairs from one trusted release file."""
 
     data_path = Path(path)
-    metadata_path = data_path.with_name(data_path.name + ".meta.json")
     if not data_path.is_file():
         raise FileNotFoundError(f"Name-tuple artifact does not exist: {data_path}")
-    if not metadata_path.is_file():
-        raise FileNotFoundError(f"Name-tuple metadata does not exist: {metadata_path}")
-
-    metadata_bytes = metadata_path.read_bytes()
     data_bytes = data_path.read_bytes()
-    try:
-        metadata = json.loads(metadata_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Invalid name-tuple metadata JSON at {metadata_path}") from exc
-    if not isinstance(metadata, dict):
-        raise ValueError(f"Invalid name-tuple metadata {metadata_path}: expected a JSON object")
-
-    schema_version = _require_string(
-        metadata.get("schema_version"), field="schema_version", metadata_path=metadata_path
+    return NameTupleArtifact(
+        pairs=_parse_and_validate_pairs(data_bytes, data_path=data_path),
+        data_sha256=hashlib.sha256(data_bytes).hexdigest(),
     )
-    if schema_version != NAME_TUPLE_ARTIFACT_SCHEMA_VERSION:
-        raise ValueError(
-            f"Name-tuple metadata {metadata_path} has unsupported schema_version={schema_version!r}; "
-            f"expected {NAME_TUPLE_ARTIFACT_SCHEMA_VERSION!r}"
-        )
-    artifact_version = _require_nonnegative_int(
-        metadata.get("artifact_version"), field="artifact_version", metadata_path=metadata_path
-    )
-    if artifact_version != NAME_TUPLE_ARTIFACT_VERSION:
-        raise ValueError(
-            f"Name-tuple metadata {metadata_path} has unsupported artifact_version={artifact_version}; "
-            f"expected {NAME_TUPLE_ARTIFACT_VERSION}"
-        )
-    normalization_version = _require_string(
-        metadata.get("normalization_version"), field="normalization_version", metadata_path=metadata_path
-    )
-    if normalization_version != NORMALIZATION_VERSION:
-        raise ValueError(
-            f"Name-tuple metadata {metadata_path} normalization_version={normalization_version!r}; "
-            f"expected {NORMALIZATION_VERSION!r}"
-        )
-    _require_string(metadata.get("generated_at"), field="generated_at", metadata_path=metadata_path)
-
-    source = _require_object(metadata.get("source"), field="source", metadata_path=metadata_path)
-    _require_string(source.get("filename"), field="source.filename", metadata_path=metadata_path)
-    _require_sha256(source.get("sha256"), field="source.sha256", metadata_path=metadata_path)
-    _require_nonnegative_int(source.get("size_bytes"), field="source.size_bytes", metadata_path=metadata_path)
-
-    data = _require_object(metadata.get("data"), field="data", metadata_path=metadata_path)
-    data_filename = _require_string(data.get("filename"), field="data.filename", metadata_path=metadata_path)
-    if data_filename != data_path.name:
-        raise ValueError(
-            f"Name-tuple metadata {metadata_path} binds data.filename={data_filename!r}, expected {data_path.name!r}"
-        )
-    data_sha256 = _require_sha256(data.get("sha256"), field="data.sha256", metadata_path=metadata_path)
-    data_size_bytes = _require_nonnegative_int(
-        data.get("size_bytes"), field="data.size_bytes", metadata_path=metadata_path
-    )
-    if data_size_bytes != len(data_bytes):
-        raise ValueError(
-            f"Name-tuple artifact {data_path} size mismatch: metadata={data_size_bytes} actual={len(data_bytes)}"
-        )
-    actual_sha256 = _sha256_bytes(data_bytes)
-    if data_sha256 != actual_sha256:
-        raise ValueError(
-            f"Name-tuple artifact {data_path} SHA-256 mismatch: metadata={data_sha256} actual={actual_sha256}"
-        )
-    pair_count = _require_nonnegative_int(data.get("pair_count"), field="data.pair_count", metadata_path=metadata_path)
-
-    semantics = _require_object(metadata.get("semantics"), field="semantics", metadata_path=metadata_path)
-    if semantics != NAME_TUPLE_ARTIFACT_SEMANTICS:
-        raise ValueError(
-            f"Name-tuple metadata {metadata_path} has unsupported semantics; expected {NAME_TUPLE_ARTIFACT_SEMANTICS!r}"
-        )
-    generation_counts = _require_object(
-        metadata.get("generation_counts"), field="generation_counts", metadata_path=metadata_path
-    )
-    generation_count_fields = (
-        "input_pair_count",
-        "dropped_identity",
-        "dropped_prefix_compatible",
-        "dropped_empty",
-        "dropped_duplicate_canonical",
-    )
-    validated_generation_counts = {
-        field: _require_nonnegative_int(
-            generation_counts.get(field), field=f"generation_counts.{field}", metadata_path=metadata_path
-        )
-        for field in generation_count_fields
-    }
-    accounted_pair_count = pair_count + sum(
-        validated_generation_counts[field] for field in generation_count_fields if field != "input_pair_count"
-    )
-    if validated_generation_counts["input_pair_count"] != accounted_pair_count:
-        raise ValueError(
-            f"Name-tuple metadata {metadata_path} generation_counts do not account for every input pair: "
-            f"input_pair_count={validated_generation_counts['input_pair_count']} "
-            f"accounted_pair_count={accounted_pair_count}"
-        )
-
-    pairs = _parse_and_validate_pairs(
-        data_bytes,
-        data_path=data_path,
-        expected_pair_count=pair_count,
-    )
-    return NameTupleArtifact(pairs=pairs, data_sha256=data_sha256)
 
 
 @lru_cache(maxsize=1)
 def load_packaged_name_tuple_artifact() -> NameTupleArtifact:
-    """Validate and retain the immutable packaged canonical artifact once.
-
-    The cached value contains only frozen pairs and their content hash. This is
-    for installed package data, which is immutable for the process lifetime;
-    custom paths deliberately use the uncached loader so mutations are always
-    revalidated.
-    """
+    """Validate and retain the immutable packaged canonical artifact once."""
 
     return load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt")

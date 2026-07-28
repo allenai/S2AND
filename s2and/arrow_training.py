@@ -1,11 +1,8 @@
 """Arrow-native training ingestion.
 
-Builds a train-mode :class:`~s2and.data.ANDData` from the same Arrow
-prediction artifacts the inference runtime consumes (``signatures.arrow``,
-``papers.arrow``, ``paper_authors.arrow``, ``specter.arrow`` plus the
-raw-planner batch indexes and the ``name_counts_index/`` sidecar), and routes
-featurization through ``RustFeaturizer.from_arrow_paths`` — the only Rust
-featurizer constructor.
+Builds a train-mode :class:`~s2and.data.ANDData` from an open
+:class:`~s2and.arrow_inputs.ArrowDataset` and routes featurization through its
+retained native resource.
 
 What stays outside Arrow, by design:
 
@@ -26,15 +23,12 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
-from s2and.arrow_inputs import (
-    require_normalization_version,
-    validate_arrow_training_artifacts,
-)
-from s2and.arrow_schema import validate_arrow_file_schema, validate_arrow_schema
+from s2and.arrow_inputs import ArrowDataset
+from s2and.arrow_schema import validate_arrow_schema
 from s2and.data import ANDData, Author, Paper, Signature
 
 logger = logging.getLogger("s2and")
@@ -44,7 +38,7 @@ if TYPE_CHECKING:
 
 
 def _iter_arrow_rows(
-    path: str | Path,
+    source: Any,
     *,
     table_name: str,
     required_columns: set[str],
@@ -53,8 +47,9 @@ def _iter_arrow_rows(
 
     import pyarrow as pa
 
-    with pa.memory_map(str(path), "r") as source:
-        reader = pa.ipc.open_file(source)
+    source_context = pa.memory_map(str(source), "r") if isinstance(source, str | Path) else nullcontext(source)
+    with source_context as opened:
+        reader = pa.ipc.open_file(opened)
         validate_arrow_schema(reader.schema, table_name=table_name)
         missing_from_loader = sorted(required_columns.difference(reader.schema.names))
         if missing_from_loader:
@@ -77,7 +72,7 @@ def _required_id_value(raw_value: Any, table_name: str, column_name: str, row_in
 
 
 def load_signatures_from_arrow(
-    path: str | Path,
+    path: str | Path | BinaryIO,
     *,
     use_orcid_id: bool = True,
 ) -> dict[str, Signature]:
@@ -140,8 +135,8 @@ def load_signatures_from_arrow(
 
 
 def load_papers_from_arrow(
-    papers_path: str | Path,
-    paper_authors_path: str | Path,
+    papers_path: str | Path | BinaryIO,
+    paper_authors_path: str | Path | BinaryIO,
     *,
     needed_paper_ids: set[str] | None = None,
 ) -> dict[str, Paper]:
@@ -237,11 +232,12 @@ def _validate_unique_author_positions(paper_id: str, authors: list[Author]) -> N
 
 
 def build_training_anddata_from_arrow(
-    arrow_paths: Mapping[str, Any],
+    arrow_dataset: ArrowDataset,
     name: str,
     *,
-    expected_normalization_version: str,
     clusters: str | dict | None = None,
+    cluster_seeds: str | dict | None = None,
+    altered_cluster_signatures: str | list | set | None = None,
     train_pairs: str | pd.DataFrame | None = None,
     val_pairs: str | pd.DataFrame | None = None,
     test_pairs: str | pd.DataFrame | None = None,
@@ -255,43 +251,36 @@ def build_training_anddata_from_arrow(
 ) -> ANDData:
     """Build a fully initialized Rust-backed train ``ANDData``.
 
-    The bundle must include raw-planner indexes and ``name_counts_index``.
+    ``arrow_dataset`` must remain open while the returned dataset is used and
+    must include ``name_counts_index``.
     Python SPECTER and name-count values are never materialized; Rust reads
-    them directly from the one immutable ``dataset.arrow_paths`` mapping.
+    them directly from the retained native dataset resource.
     Set ``use_orcid_id=False`` to remove ORCID evidence from both the
-    Python-visible signatures and the Rust featurizer built from those paths.
+    Python-visible signatures and the Rust featurizer.
+    Training cluster-seed constraints remain explicit inputs rather than part
+    of the immutable dataset identity.
     """
 
-    expected_version = require_normalization_version(
-        expected_normalization_version,
-        context="arrow-native training ingestion",
-    )
+    if not isinstance(arrow_dataset, ArrowDataset):
+        raise TypeError("build_training_anddata_from_arrow requires an open ArrowDataset")
     ingest_start = time.perf_counter()
-    path_keys = {str(key) for key in arrow_paths}
-    normalized_arrow_paths = validate_arrow_training_artifacts(
-        arrow_paths,
-        require_specter="specter" in path_keys,
+    with arrow_dataset.use(
         require_name_counts_index=True,
-        expected_normalization_version=expected_version,
-        context="arrow-native training ingestion",
-        producer_hint=(
-            "include signatures, papers, paper_authors, raw-planner batch indexes, "
-            "name_counts_index, and model-required specter"
-        ),
-    )
-    if "specter" in normalized_arrow_paths:
-        validate_arrow_file_schema(normalized_arrow_paths["specter"], table_name="specter")
-    training_arrow_paths = normalized_arrow_paths.without("query_signatures")
-    signatures = load_signatures_from_arrow(
-        training_arrow_paths["signatures"],
-        use_orcid_id=use_orcid_id,
-    )
+    ) as lease:
+        has_specter = lease.has("specter")
+        with lease.open_file("signatures") as signatures_source:
+            signatures = load_signatures_from_arrow(
+                signatures_source,
+                use_orcid_id=use_orcid_id,
+            )
 
-    dataset = ANDData._from_validated_arrow_training(
+    dataset = ANDData._from_arrow_training(
         signatures=signatures,
         name=name,
-        arrow_paths=training_arrow_paths,
+        arrow_dataset=arrow_dataset,
         clusters=clusters,
+        cluster_seeds=cluster_seeds,
+        altered_cluster_signatures=altered_cluster_signatures,
         train_pairs=train_pairs,
         val_pairs=val_pairs,
         test_pairs=test_pairs,
@@ -307,7 +296,7 @@ def build_training_anddata_from_arrow(
         "Telemetry stage: stage=arrow_training_ingest seconds=%.3f signatures=%d papers=%d specter=%s",
         time.perf_counter() - ingest_start,
         len(signatures),
-        len(dataset._arrow_paper_source[2]) if dataset._arrow_paper_source is not None else 0,
-        "yes" if training_arrow_paths.get("specter") else "no",
+        len(dataset._arrow_paper_ids) if dataset._arrow_paper_ids is not None else 0,
+        "yes" if has_specter else "no",
     )
     return dataset

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import datetime
-import hashlib
+import csv
 import json
 import os
 import re
@@ -19,14 +18,10 @@ from typing import Any
 import orjson
 
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
-from s2and._sha256 import is_lowercase_sha256
-from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_tuple_artifact import NameTupleArtifact, load_name_tuple_artifact
 from s2and.orcid_prefix_counts import (
-    ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
     ORCID_PREFIX_DATA_FILENAME,
     ORCID_PREFIX_MANIFEST_FILENAME,
-    ORCID_PREFIX_PAIR_KEY_SEMANTICS,
     LoadedOrcidPrefixCounts,
     load_canonical_orcid_prefix_counts,
     validate_orcid_prefix_counts,
@@ -55,56 +50,6 @@ GUARDRAIL_FIELDS = frozenset(
     }
 )
 _CANONICAL_SOURCE_ORCID_PATTERN = re.compile(r"[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9Xx]")
-_ORCID_DASH_SQL_PATTERN = "[-‐‑‒–—−﹘﹣－]"
-_CANONICAL_SOURCE_ORCID_SQL_PATTERN = (
-    rf"(?<![0-9x])[0-9]{{4}}{_ORCID_DASH_SQL_PATTERN}?[0-9]{{4}}{_ORCID_DASH_SQL_PATTERN}?"
-    rf"[0-9]{{4}}{_ORCID_DASH_SQL_PATTERN}?[0-9]{{3}}[0-9x](?![0-9x])"
-)
-QUERY = f"""
-with source_rows as (
-select p.year, p.inserted paper_inserted,
-      pae.corpus_paper_id, pae.source, pae.orcid raw_orcid, pae.position,
-      pae.first_name, pa.middle, pae.last_name,
-      pa.corpus_author_id, au.ai2_id, pa.inserted pa_inserted,
-      pa.updated pa_updated, pa.cluster_block_key, pa.model_version,
-      pa.clusterer,
-      upper(
-        regexp_replace(
-          regexp_substr(
-            coalesce(pae.orcid, ''),
-            '{_CANONICAL_SOURCE_ORCID_SQL_PATTERN}',
-            1,
-            1,
-            'ip'
-          ),
-          '{_ORCID_DASH_SQL_PATTERN}'
-        )
-      ) canonical_orcid_compact
-from content_ext.paper_authors_orcids pae
-join content_ext.papers p
-  on pae.corpus_paper_id = p.corpus_paper_id
-join content_ext.paper_authors pa
-  on pae.corpus_paper_id = pa.corpus_paper_id
- and pae.position = pa.position + 1
- and lower(pae.last_name) = lower(pa.last)
-join content_ext.authors au
-  on pa.corpus_author_id = au.corpus_author_id
-where pae.source in ('Crossref')
-  and nullif(trim(coalesce(pae.first_name, '')), '') is not null
-)
-select raw_orcid,
-       case
-         when canonical_orcid_compact = '' then null
-         else substring(canonical_orcid_compact, 1, 4)
-          || '-' || substring(canonical_orcid_compact, 5, 4)
-          || '-' || substring(canonical_orcid_compact, 9, 4)
-          || '-' || substring(canonical_orcid_compact, 13, 4)
-       end orcid,
-       first_name, middle
-from source_rows
-order by orcid nulls last,
-         first_name, middle, corpus_paper_id, position
-"""
 
 
 def _canonical_source_orcid(value: Any) -> str | None:
@@ -201,12 +146,11 @@ def build_prefix_counts_from_sorted_rows(
     max_source_rows: int | None = None,
     max_pair_keys: int | None = None,
     progress_callback: Callable[[dict[str, int]], None] | None = None,
-) -> tuple[dict[str, dict[str, int]], dict[str, int], str]:
+) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
     """Stream sorted rows one ORCID at a time under explicit expansion bounds."""
 
     if max_names_per_orcid < 2:
         raise ValueError("max_names_per_orcid must be at least 2")
-    source_digest = hashlib.sha256(b"s2and-orcid-prefix-count-selected-input-v1\0")
     metrics = Counter[str]()
     orcid_counts: Counter[tuple[str, str]] = Counter()
     current_orcid: str | None = None
@@ -224,14 +168,6 @@ def build_prefix_counts_from_sorted_rows(
         metrics["unique_orcid_names"] += unique_name_count
         metrics["max_unique_names_per_orcid"] = max(metrics["max_unique_names_per_orcid"], unique_name_count)
         sorted_names = sorted(current_names)
-        orcid_bytes = current_orcid.encode()
-        source_digest.update(len(orcid_bytes).to_bytes(8, "little"))
-        source_digest.update(orcid_bytes)
-        source_digest.update(unique_name_count.to_bytes(8, "little"))
-        for name in sorted_names:
-            name_bytes = name.encode()
-            source_digest.update(len(name_bytes).to_bytes(8, "little"))
-            source_digest.update(name_bytes)
         metrics["selected_canonical_rows"] += unique_name_count
         for first_name, second_name in combinations(sorted_names, 2):
             orcid_counts.update(prefix_pairs_for_names(first_name, second_name))
@@ -303,39 +239,19 @@ def build_prefix_counts_from_sorted_rows(
         max_pair_keys=max_pair_keys,
     )
     metrics["max_names_per_orcid_limit"] = max_names_per_orcid
-    return counts, {**dict(metrics), **count_metrics}, source_digest.hexdigest()
+    return counts, {**dict(metrics), **count_metrics}
 
 
 def _publication_payloads(
     counts: Mapping[str, Mapping[str, int]],
     *,
-    source_kind: str,
-    source_snapshot_id: str,
-    source_query_sha256: str,
-    selected_rows_sha256: str,
     name_tuples_sha256: str,
-    generator_parameters: Mapping[str, object],
-    metrics: Mapping[str, int],
 ) -> dict[str, bytes]:
-    """Serialize the only two files in the artifact."""
+    """Serialize the trusted runtime data and its tuple dependency."""
 
     validate_orcid_prefix_counts(counts, context="counts")
     data_payload = orjson.dumps(counts, option=orjson.OPT_SORT_KEYS)
-    data_sha256 = hashlib.sha256(data_payload).hexdigest()
-    manifest = {
-        "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
-        "normalization_version": NORMALIZATION_VERSION,
-        "pair_key_semantics": ORCID_PREFIX_PAIR_KEY_SEMANTICS,
-        "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-        "source_kind": source_kind,
-        "source_snapshot_id": source_snapshot_id,
-        "source_query_sha256": source_query_sha256,
-        "selected_rows_sha256": selected_rows_sha256,
-        "name_tuples_sha256": name_tuples_sha256,
-        "data_sha256": data_sha256,
-        "generator_parameters": dict(generator_parameters),
-        "metrics": dict(metrics),
-    }
+    manifest = {"name_tuples_sha256": name_tuples_sha256}
     return {
         ORCID_PREFIX_DATA_FILENAME: data_payload,
         ORCID_PREFIX_MANIFEST_FILENAME: (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode(),
@@ -376,26 +292,14 @@ def write_publication(
     counts: Mapping[str, Mapping[str, int]],
     *,
     output_dir: Path,
-    source_kind: str,
-    source_snapshot_id: str,
-    source_query_sha256: str,
-    selected_rows_sha256: str,
     name_tuples: NameTupleArtifact,
-    generator_parameters: Mapping[str, object],
-    metrics: Mapping[str, int],
 ) -> LoadedOrcidPrefixCounts:
     """Serialize, validate, and atomically publish one fresh artifact."""
 
     return _publish(
         _publication_payloads(
             counts,
-            source_kind=source_kind,
-            source_snapshot_id=source_snapshot_id,
-            source_query_sha256=source_query_sha256,
-            selected_rows_sha256=selected_rows_sha256,
             name_tuples_sha256=name_tuples.data_sha256,
-            generator_parameters=generator_parameters,
-            metrics=metrics,
         ),
         output_dir=output_dir,
     )
@@ -415,41 +319,31 @@ def _load_fixture_rows(path: Path, limit: int | None) -> list[Mapping[str, Any]]
     return rows[:limit]
 
 
-def _warehouse_query(max_source_rows: int) -> str:
-    return f"{QUERY.rstrip()}\nlimit {max_source_rows + 1}\n"
+def _load_reviewed_csv_rows(path: Path) -> Iterator[Mapping[str, Any]]:
+    """Stream one reviewed, query-ordered warehouse export."""
 
-
-def _load_warehouse_rows(max_source_rows: int) -> Iterable[Mapping[str, Any]]:
-    try:
-        from pys2.pys2 import _evaluate_redshift_query  # type: ignore
-    except ImportError as error:
-        raise RuntimeError("Warehouse generation requires internal package pys2") from error
-    dataframe = _evaluate_redshift_query(_warehouse_query(max_source_rows))
-    columns = {str(column): index for index, column in enumerate(dataframe.columns)}
-    required_columns = ("raw_orcid", "orcid", "first_name", "middle")
-    missing_columns = [column for column in required_columns if column not in columns]
-    if missing_columns:
-        raise ValueError(f"Warehouse result is missing required columns: {missing_columns}")
-
-    def iter_rows() -> Iterator[Mapping[str, Any]]:
-        for values in dataframe.itertuples(index=False, name=None):
-            yield {column: values[columns[column]] for column in required_columns}
-
-    return iter_rows()
+    with path.open(encoding="utf-8-sig", newline="") as input_file:
+        reader = csv.DictReader(input_file)
+        fields = reader.fieldnames or []
+        expected = ["raw_orcid", "orcid", "first_name", "middle"]
+        if fields != expected:
+            raise ValueError(f"Reviewed ORCID export must have exact header: {expected}")
+        for row in reader:
+            if None in row:
+                raise ValueError("Reviewed ORCID export row has more values than columns")
+            yield row
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--input-json", type=Path, help="Bounded local row fixture")
-    source.add_argument("--run-full", action="store_true", help="Authorize warehouse access")
+    source.add_argument("--input-csv", type=Path, help="Reviewed full warehouse export")
     parser.add_argument("--limit", type=int, help="Fixture-only row limit")
     parser.add_argument("--guardrails-json", type=Path, help="Reviewed full-run bounds")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--source-snapshot-id", required=True)
     parser.add_argument("--name-tuples-path", type=Path, required=True)
-    parser.add_argument("--expected-name-tuples-sha256", required=True)
     return parser
 
 
@@ -457,15 +351,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the guarded producer."""
 
     args = _parser().parse_args(argv)
-    snapshot_id = args.source_snapshot_id.strip()
-    if not snapshot_id:
-        raise ValueError("source_snapshot_id must be a nonempty string")
     limit = require_positive(args.limit, option="--limit")
-    if args.run_full and limit is not None:
+    full_input = args.input_csv.resolve() if args.input_csv is not None else None
+    if full_input is not None and limit is not None:
         raise ValueError("--limit is fixture-only; it does not bound warehouse scan cost")
     output_dir = validate_output_container(args.output_dir, publication_path=args.output_dir)
-    fixture = None if args.run_full else validate_fixture_path(args.input_json)
-    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS) if args.run_full else None
+    fixture = validate_fixture_path(args.input_json) if args.input_json is not None else None
+    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS) if full_input is not None else None
     if guardrails is not None:
         if guardrails["min_source_rows"] > guardrails["max_source_rows"]:
             raise ValueError("guardrail min_source_rows must not exceed max_source_rows")
@@ -474,34 +366,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if guardrails["max_names_per_orcid"] < 2:
             raise ValueError("guardrail max_names_per_orcid must be at least 2")
 
-    expected_name_tuples_sha256 = args.expected_name_tuples_sha256.strip()
-    if not is_lowercase_sha256(expected_name_tuples_sha256):
-        raise ValueError("--expected-name-tuples-sha256 must be a lowercase SHA-256 digest")
     name_tuples = load_name_tuple_artifact(args.name_tuples_path.resolve())
-    if name_tuples.data_sha256 != expected_name_tuples_sha256:
-        raise ValueError(
-            "name-tuple artifact SHA-256 does not match --expected-name-tuples-sha256: "
-            f"actual={name_tuples.data_sha256} expected={expected_name_tuples_sha256}"
-        )
 
-    if guardrails is not None:
-        query = _warehouse_query(guardrails["max_source_rows"])
-        query_sha256 = hashlib.sha256(query.encode()).hexdigest()
-        source_kind = "redshift:content_ext.paper_authors_orcids"
+    if full_input is not None:
         max_names_per_orcid = guardrails["max_names_per_orcid"]
     else:
         assert fixture is not None
-        fixture_sha256 = hashlib.sha256(fixture.read_bytes()).hexdigest()
-        query = f"fixture_file_sha256={fixture_sha256}\nlimit={limit}"
-        query_sha256 = fixture_sha256
-        source_kind = f"fixture:{fixture}"
         max_names_per_orcid = FIXTURE_MAX_NAMES_PER_ORCID
     plan = {
-        "source_kind": source_kind,
-        "source_snapshot_id": snapshot_id,
+        "mode": "full" if full_input is not None else "fixture",
+        "source": str(full_input or fixture),
         "output_dir": str(output_dir),
-        "query": query,
-        "query_sha256": query_sha256,
         "guardrails": guardrails,
         "limit": limit,
         "name_tuples_sha256": name_tuples.data_sha256,
@@ -511,8 +386,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dry_run:
         return 0
 
-    if guardrails is not None:
-        rows = _load_warehouse_rows(guardrails["max_source_rows"])
+    if full_input is not None:
+        rows = _load_reviewed_csv_rows(full_input)
     else:
         assert fixture is not None
         rows = _load_fixture_rows(fixture, limit)
@@ -520,7 +395,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     def report_progress(metrics: dict[str, int]) -> None:
         print(json.dumps({"event": "orcid_prefix_progress", **metrics}, sort_keys=True))
 
-    counts, metrics, selected_rows_sha256 = build_prefix_counts_from_sorted_rows(
+    counts, metrics = build_prefix_counts_from_sorted_rows(
         rows,
         name_tuples.pairs,
         max_names_per_orcid=max_names_per_orcid,
@@ -547,31 +422,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{orcid_pair_keys} are below guardrail min_orcid_pair_keys={guardrails['min_orcid_pair_keys']}"
             )
 
-    loaded = write_publication(
+    write_publication(
         counts,
         output_dir=output_dir,
-        source_kind=source_kind,
-        source_snapshot_id=snapshot_id,
-        source_query_sha256=query_sha256,
-        selected_rows_sha256=selected_rows_sha256,
         name_tuples=name_tuples,
-        generator_parameters={
-            "k_values": list(K_VALUES),
-            "min_orcid_count": MIN_ORCID_COUNT,
-            "min_alias_count": MIN_ALIAS_COUNT,
-            "limit": limit,
-            "guardrails": guardrails,
-            "max_names_per_orcid": max_names_per_orcid,
-        },
-        metrics=metrics,
     )
     print(
         json.dumps(
             {
                 "data": str(output_dir / ORCID_PREFIX_DATA_FILENAME),
                 "manifest": str(output_dir / ORCID_PREFIX_MANIFEST_FILENAME),
-                "data_sha256": loaded.data_sha256,
-                "manifest_sha256": loaded.manifest_sha256,
                 "metrics": metrics,
             },
             indent=2,

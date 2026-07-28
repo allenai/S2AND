@@ -11,7 +11,7 @@ from typing import Any, Literal
 import numpy as np
 
 from s2and import feature_port, memory_budget
-from s2and.arrow_inputs import ValidatedArrowInputs
+from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
@@ -1685,12 +1685,6 @@ def _validate_raw_plan_query_signature_ids(
         )
 
 
-def _strip_raw_query_signature_sidecar(arrow_paths: ValidatedArrowInputs) -> ValidatedArrowInputs:
-    """Return scoring Arrow paths without request-local raw-planner inputs."""
-
-    return arrow_paths.without("query_signatures")
-
-
 def _identity_seed_setup(
     cluster_seeds_require: Mapping[str, int | str],
 ) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
@@ -1756,7 +1750,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     clusterer: Any,
     artifact: IncrementalLinkingArtifact,
     *,
-    arrow_paths: ValidatedArrowInputs,
+    arrow_dataset: ArrowDataset,
     query_signature_ids: Sequence[Any],
     raw_plan_bundle: RawArrowPlanBundle,
     rust_featurizer: Any,
@@ -1778,8 +1772,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     )
     n_jobs_resolved = resolve_n_jobs(getattr(clusterer, "n_jobs", 1) if n_jobs is None else n_jobs)
     top_k_resolved = int(artifact.retrieval_top_k if top_k is None else top_k)
-    arrow_path_payload = _strip_raw_query_signature_sidecar(arrow_paths)
-    require_arrow_name_counts_index_for_clusterer(clusterer, arrow_path_payload, context="raw Arrow scoring")
+    require_arrow_name_counts_index_for_clusterer(clusterer, arrow_dataset, context="raw Arrow scoring")
     query_signature_id_strings = tuple(str(signature_id) for signature_id in query_signature_ids)
     _validate_raw_plan_query_signature_ids(raw_plan_bundle, query_signature_id_strings)
     if rust_featurizer is None:

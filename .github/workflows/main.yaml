@@ -30,8 +30,13 @@ jobs:
         run: uv run --no-project python scripts/run_ci_locally.py lint
 
   typecheck-and-test:
+    name: typecheck-and-test (py${{ matrix.py }})
     runs-on: ubuntu-latest
     needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ["3.11", "3.12", "3.13"]
     env:
       S2AND_TEST_REQUIRE_RUST: "1"
     steps:
@@ -46,7 +51,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.py }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -60,9 +65,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             s2and_rust/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('s2and_rust/**', '!s2and_rust/target/**', '!s2and_rust/dist/**') }}
+          key: cargo-${{ runner.os }}-py${{ matrix.py }}-${{ hashFiles('s2and_rust/**', '!s2and_rust/target/**', '!s2and_rust/dist/**') }}
           restore-keys: |
-            cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-py${{ matrix.py }}-
 
       # Cache uv resolver + wheels + project venv
       - name: Cache uv + venv
@@ -71,7 +76,7 @@ jobs:
           path: |
             ~/.cache/uv
             .venv
-          key: uv-venv-${{ runner.os }}-py311-${{ hashFiles('pyproject.toml', 'uv.lock', 's2and_rust/**', '!s2and_rust/target/**', '!s2and_rust/dist/**') }}
+          key: uv-venv-${{ runner.os }}-py${{ matrix.py }}-${{ hashFiles('pyproject.toml', 'uv.lock', 's2and_rust/**', '!s2and_rust/target/**', '!s2and_rust/dist/**') }}
 
       - name: Run shared typecheck-and-test policy
         run: uv run --no-project python scripts/run_ci_locally.py typecheck-and-test

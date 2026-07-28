@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
 
 from s2and.incremental_linking import feature_block_arrow
-from tests.helpers import tiny_name_counts_provenance
 
 
 class _DuplicateNameMapping(Mapping[str, float]):
@@ -66,7 +67,6 @@ def test_writer_rejects_duplicate_logical_utf8_name_without_unbounded_set(tmp_pa
         feature_block_arrow.write_name_counts_index(
             tmp_path,
             (_DuplicateNameMapping(), {}, {}, {}),
-            tiny_name_counts_provenance(),
         )
 
 
@@ -75,7 +75,6 @@ def test_writer_rejects_keys_that_would_collide_after_stringification(tmp_path: 
         feature_block_arrow.write_name_counts_index(
             tmp_path,
             ({1: 2.0, "1": 3.0}, {}, {}, {}),
-            tiny_name_counts_provenance(),
         )
 
 
@@ -101,7 +100,6 @@ def test_writer_rejects_noncanonical_name_count_keys(tmp_path: Path, kind: str, 
         feature_block_arrow.write_name_counts_index(
             tmp_path,
             tuple(mappings[mapping_kind] for mapping_kind in ("first", "last", "first_last", "last_first_initial")),
-            tiny_name_counts_provenance(),
         )
 
 
@@ -127,7 +125,6 @@ def test_writer_rejects_nonfinite_and_nonpositive_counts(tmp_path: Path, count: 
         feature_block_arrow.write_name_counts_index(
             tmp_path,
             ({"ada": count}, {}, {}, {}),
-            tiny_name_counts_provenance(),
         )
 
 
@@ -149,10 +146,32 @@ def test_fresh_writer_validates_each_name_count_entry_once(
     feature_block_arrow.write_name_counts_index(
         tmp_path,
         mappings,
-        tiny_name_counts_provenance(),
     )
 
     assert validation_calls == sum(len(mapping) for mapping in mappings)
+
+
+def test_identical_counts_produce_byte_identical_flat_indexes(tmp_path: Path) -> None:
+    mappings = (
+        {"ada": 2.0, "grace": 3.0},
+        {"lovelace": 4.0, "hopper": 5.0},
+        {"ada lovelace": 2.0, "grace hopper": 3.0},
+        {"lovelace a": 2.0, "hopper g": 3.0},
+    )
+    reversed_mappings = tuple(dict(reversed(tuple(mapping.items()))) for mapping in mappings)
+    indexes = [
+        Path(feature_block_arrow.write_name_counts_index(tmp_path / label, values)[0])
+        for label, values in (("first", mappings), ("second", reversed_mappings))
+    ]
+    kinds = ("first", "last", "first_last", "last_first_initial")
+    expected_files = {"manifest.json", *(f"{kind}.bin" for kind in kinds)}
+
+    assert all({path.name for path in index.iterdir()} == expected_files for index in indexes)
+    manifests = [(index / "manifest.json").read_bytes() for index in indexes]
+    assert manifests[0] == manifests[1]
+    assert len({hashlib.sha256(manifest).hexdigest() for manifest in manifests}) == 1
+    manifest = json.loads(manifests[0])
+    assert {kind: entry["path"] for kind, entry in manifest["files"].items()} == {kind: f"{kind}.bin" for kind in kinds}
 
 
 @pytest.mark.parametrize(

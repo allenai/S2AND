@@ -638,15 +638,16 @@ def test_evaluation_content_identity_excludes_only_operational_paths(tmp_path: P
     _model_plan, evaluation_plan = _prepare(fixture)
     first = json.loads(evaluation_plan.read_text(encoding="utf-8"))
     relocated = json.loads(json.dumps(first))
-    relocated["performance"]["arrow_root"] = "D:/relocated/performance"
-    relocated["parity"]["fixture_dir"] = "D:/relocated/parity"
+    relocated_root = (tmp_path / "relocated").resolve()
+    relocated["performance"]["arrow_root"] = str(relocated_root / "performance")
+    relocated["parity"]["fixture_dir"] = str(relocated_root / "parity")
     for spec in relocated["parity"]["files"].values():
-        spec["path"] = "D:/relocated/parity/input"
-    relocated["subblocking"]["component_members"]["path"] = "D:/relocated/components.parquet"
+        spec["path"] = str(relocated_root / "parity" / "input")
+    relocated["subblocking"]["component_members"]["path"] = str(relocated_root / "components.parquet")
     for population in ("pairwise", "cluster"):
         for files in relocated[population].values():
             for spec in files.values():
-                spec["path"] = "D:/relocated/evaluation/input"
+                spec["path"] = str(relocated_root / "evaluation" / "input")
 
     assert evaluation_plan_content_identity(first) == evaluation_plan_content_identity(relocated)
     relocated["subblocking"]["dataset"] = "different"

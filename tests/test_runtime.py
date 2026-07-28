@@ -58,7 +58,7 @@ def test_load_rust_extension_requires_exact_version() -> None:
     exact = SimpleNamespace(__version__=runtime.REQUIRED_RUST_EXTENSION_VERSION)
     assert runtime.load_s2and_rust_extension(import_module=lambda _name: exact) is exact
 
-    mismatched = SimpleNamespace(__version__="0.60.1")
+    mismatched = SimpleNamespace(__version__="1.0.1")
     with pytest.raises(RuntimeError, match="does not match the pinned dependency"):
         runtime.load_s2and_rust_extension(import_module=lambda _name: mismatched)
 

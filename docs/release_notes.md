@@ -1,17 +1,16 @@
 # Release Notes
 
-## Unreleased canonical-v2 migration
+## Unreleased 1.0.0 canonical-v2 migration
 
-The manifests currently say `0.60.0`; the coordinated release may retain that
-package version or become `1.3.0`. Model/data bundle v1.3 is a separate version
-axis. Freeze the package version before the release commit.
+The coordinated `s2and` and `s2and-rust` package version is `1.0.0`. The
+production model and public-data version is `1.3`, on a separate version axis.
 
 - **Unreleased migration state:** the artifact-independent canonical-v2 code
   and release hardening are implemented. The reviewed canonical benchmark-name
   and ORCID source exports are still needed; production artifact generation,
   the v1.3 retrain, and release quality/scale measurements follow them. The legacy
   v1.21/v1.0-v1.2 models are not packaged and are rejected by the canonical
-  loader, so 0.60.0 is not yet a usable production release. See
+  loader, so 1.0.0 is not yet a usable production release. See
   [release.md](release.md).
 - **Python support:** `s2and` now supports Python 3.11, 3.12, and 3.13
   (previously 3.11 only), matching the range `s2and-rust` already declared.

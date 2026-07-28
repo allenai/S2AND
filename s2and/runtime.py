@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 Backend = Literal["python", "rust"]
-REQUIRED_RUST_EXTENSION_VERSION = "0.60.0"
+REQUIRED_RUST_EXTENSION_VERSION = "1.0.0"
 
 
 @dataclass(frozen=True)

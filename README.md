@@ -2,13 +2,13 @@
 
 S2AND provides the S2AND author-name-disambiguation benchmark datasets and the reference model described in the paper [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421) by Shivashankar Subramanian, Daniel King, Doug Downey, and Sergey Feldman.
 
-> **Release status (2026-07-24):** this development branch contains the
+> **Release status (2026-07-27):** this development branch contains the
 > canonical-v2 code migration, but it is not yet a complete production release.
 > Canonical artifacts and the model bundle `production_model_v1.3` still need to
-> be generated, retrained, evaluated, and published. The package manifests
-> currently say `0.60.0`; whether the coordinated package release keeps that
-> version or becomes `1.3.0` is an explicit open decision. Release operators
-> must use [docs/release.md](docs/release.md).
+> be generated, retrained, evaluated, and published. The coordinated Python and
+> Rust package version is fixed at `1.0.0`; the production model and public-data
+> version remains `1.3`. Release operators must use
+> [docs/release.md](docs/release.md).
 
 As of this version, S2AND requires the `s2and-rust` extension at install time.
 Explicit classic Python routes still exist for selected `ANDData` stages, but

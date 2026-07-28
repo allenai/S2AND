@@ -75,10 +75,10 @@ and CI commands may set it only when they are intentionally exercising the check
 
 Versioning is centralized in `VERSION`.
 
-This synchronizes Python/Rust package manifests mechanically. For the v1.3
-release, it does not decide whether package versions remain `0.60.0` or become
-`1.3.0`, choose the model packaging policy, or authorize publication. Those
-decisions and gates are in [release.md](release.md).
+This synchronizes Python/Rust package manifests mechanically. The canonical-v2
+release fixes both package versions at `1.0.0`; the production model and public
+data remain version `1.3` on a separate axis. The release policy and publication
+gates are in [release.md](release.md).
 
 Recommended one-time hook setup:
 

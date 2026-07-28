@@ -44,8 +44,9 @@ uv pip install s2and
 ```
 
 This installs the latest version available from the configured package index,
-not the unreleased canonical-v2 worktree. The canonical-v2/v1.3 package version
-is still a release decision; use the checkout flow for pre-release validation.
+not the unreleased canonical-v2 worktree. That worktree targets coordinated
+`s2and==1.0.0` and `s2and-rust==1.0.0` packages with model/public-data version
+`1.3`; use the checkout flow for pre-release validation.
 
 ## Repo checkout
 

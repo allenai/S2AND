@@ -1150,7 +1150,7 @@ provides-extras = ["orcid-counts", "dev"]
 
 [[package]]
 name = "s2and-rust"
-version = "0.60.0"
+version = "1.0.0"
 source = { directory = "s2and_rust" }
 
 [[package]]

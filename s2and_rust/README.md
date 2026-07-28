@@ -12,7 +12,7 @@ uv pip install s2and
 
 `s2and-rust` is now a required dependency of `s2and`; the historical
 `s2and[rust]` extra no longer exists. The unreleased canonical-v2 worktree
-currently pins `s2and-rust==0.60.0`; use a local same-checkout build until the
+currently pins `s2and-rust==1.0.0`; use a local same-checkout build until the
 coordinated Python/Rust release is published.
 
 When working from a checkout, use a local build so `s2and` and `s2and-rust`

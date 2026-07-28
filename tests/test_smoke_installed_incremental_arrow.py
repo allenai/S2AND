@@ -6,11 +6,21 @@ from pathlib import Path
 
 import pytest
 
+from s2and import memory_budget
 from s2and import production_model as production_model_module
 from s2and.arrow_inputs import build_arrow_artifact_manifest, write_arrow_artifact_manifest
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from scripts.verification import smoke_installed_incremental_arrow as smoke_module
 from tests.helpers import tiny_name_counts_tuple
+
+
+@pytest.fixture(autouse=True)
+def _stable_smoke_rss(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        memory_budget,
+        "current_rss_bytes_best_effort",
+        lambda _total: (100_000_000, "test"),
+    )
 
 
 def _sha256(path: Path) -> str:

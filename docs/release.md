@@ -1,10 +1,19 @@
-# S2AND v1.3 release
+# S2AND 1.0.0 / model-data v1.3 release
 
 Status date: 2026-07-27
 
 This is the sole release policy and dependency-ordered operator sequence for
-v1.3. [scripts/production/README.md](../scripts/production/README.md) is the
-command reference.
+the `s2and==1.0.0` and `s2and-rust==1.0.0` packages with production model and
+public-data version `1.3`.
+[scripts/production/README.md](../scripts/production/README.md) is the command
+reference.
+
+| Version axis | Fixed release version |
+|---|---|
+| Python package (`s2and`) | `1.0.0` |
+| Rust package (`s2and-rust`) | `1.0.0` |
+| Production model | `1.3` |
+| Public data | `1.3` |
 
 ## Current external inputs
 
@@ -12,8 +21,8 @@ Four reviewed external inputs are not in this repository:
 
 | Input | Required shape | Role |
 |---|---|---|
-| Canonical benchmark names | One JSON file per benchmark, with exactly one row per dataset `signature_id` and `first`, `middle`, `last` | Closes simplification Step 8; then Stage 2 can regenerate benchmarks |
-| ORCID names | Query-ordered CSV with `raw_orcid`, `orcid`, `first_name`, and `middle` | Closes simplification Step 8; then Stage 1 can build package assets |
+| Canonical benchmark names | One JSON file per benchmark, with exactly one row per dataset `signature_id` and `first`, `middle`, `last` | Required before Stage 2 can regenerate benchmarks |
+| ORCID names | Query-ordered CSV with `raw_orcid`, `orcid`, `first_name`, and `middle` | Required before Stage 1 can build package assets |
 | Name counts | Query-ordered CSV with `first_name`, `last_name`, and `count` | Ordinary Stage 1 release input; its producer is already complete |
 | v1.21 baseline record | Reviewed cluster B3, pairwise aggregate/per-dataset AUROC and macro-F1, and performance p50 for the frozen populations/workload, plus source/model/data/environment/command identities | Ordinary Stage 0 input copied as scalars into `release.json`; the repository has no cross-version baseline runner |
 
@@ -21,9 +30,9 @@ Do not replace the canonical or ORCID input with a fixture or relabel a legacy
 artifact. The canonical join rejects duplicate, missing, and extra IDs. The
 ORCID producer requires reviewed row and expansion bounds.
 
-Only the first two keep the simplification open. The name counts, historical
-baseline, and other benchmark/linker data are release inputs rather than
-unfinished implementation.
+The first two are the remaining implementation prerequisites carried into this
+runbook. The name counts, historical baseline, and other benchmark/linker data
+are ordinary release inputs.
 
 Two former implementation gaps are already closed:
 
@@ -104,8 +113,8 @@ orchestration and gates, and the installed-artifact smoke contract.
 ## Stage 0: freeze external choices and source
 
 - [ ] Supply and review all four external inputs listed above.
-- [ ] Choose one synchronized Python/Rust package version and record the
-      package/model/data version matrix. Apply it through the
+- [ ] Confirm the synchronized Python/Rust package version remains `1.0.0` and
+      the package/model/data matrix above is unchanged. Verify it through the
       [version-bump workflow](development.md#version-bumping), then confirm
       both package versions are unused:
 

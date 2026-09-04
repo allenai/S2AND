@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from fastcluster import linkage
-from hyperopt import Trials, fmin, hp, space_eval, tpe
-from hyperopt.pyll import scope
 from lightgbm import Booster, LGBMClassifier
 from scipy.cluster.hierarchy import fcluster
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.metrics import roc_auc_score
+
+if TYPE_CHECKING:
+    from hyperopt import Trials
 
 
 def lightgbm_booster(model: Any) -> Booster:
@@ -124,6 +125,9 @@ class PairwiseModeler:
         n_jobs: int = 16,  # for the model, not the hyperopt
         random_state: int = 42,
     ):
+        from hyperopt import hp
+        from hyperopt.pyll import scope
+
         if estimator is None:
             self.estimator = LGBMClassifier(
                 objective="binary",
@@ -192,6 +196,7 @@ class PairwiseModeler:
         Trials: the Trials object from hyperparameter optimization
         """
         if len(self.search_space) > 0:
+            from hyperopt import Trials, fmin, space_eval, tpe
 
             def obj(params):
                 params = {k: intify(v) for k, v in params.items()}

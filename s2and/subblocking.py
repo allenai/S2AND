@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import genieclust
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import TruncatedSVD
@@ -1414,6 +1413,8 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000, com
     )
 
     if np.any(X):
+        import genieclust
+
         g = genieclust.Genie(n_clusters=num_desired_subblocks, gini_threshold=0.01)
         labels = g.fit_predict(X)
     else:

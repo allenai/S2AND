@@ -14,6 +14,19 @@ The component behavior in this document is implemented, but a releasable v1.3
 bundle does not yet exist. Use [release.md](release.md) for
 execution order and acceptance requirements.
 
+## Import boundaries
+
+Importing `s2and.production_model` does not load evaluation, plotting, or
+Hyperopt modules. Pure clustering metrics live in `s2and.metrics`; existing
+imports from `s2and.eval` remain available. Evaluation loads plotting libraries
+when rendering and scopes its plot styling to that operation.
+
+Hyperopt loads when constructing a default training search space or running
+optimization. `Clusterer(..., search_space={})` skips default search-space
+construction for explicitly configured inference. The bundle loader retains
+the default search space for calibration, so loading a bundle still loads
+Hyperopt. Genie loads only when its subblocking algorithm is used.
+
 ## Prediction state ownership
 
 Prediction orchestration keeps effective seed assignments, disallow pairs,
@@ -30,6 +43,14 @@ data. The public prediction entry points retain their existing contracts.
 
 This ownership boundary is not a general thread-safety guarantee for every
 classifier or cache supplied by an application.
+
+Seed-link application is a pure decision phase shared by classic Python and
+promoted Arrow incremental completion. It accepts ordered seed memberships,
+link decisions, altered-profile mappings, and first-name metadata; it returns
+owned cluster lists, residual signatures, and rejected links. It preserves
+split-specific name checks and restores original profile IDs. The orchestrator
+resolves name aliases, logs rejections, and clusters the residual signatures.
+Name metadata is accessed lazily without copying the prepared dataset.
 
 ## Complete model bundles
 

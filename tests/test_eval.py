@@ -8,6 +8,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
+import s2and.metrics as cluster_metrics
 import s2and.shap_utils as shap_utils
 from s2and.eval import (
     _shap_values_for_tree_model_preserving_booster_params,
@@ -20,6 +21,54 @@ from s2and.eval import (
     pairwise_eval,
     pairwise_precision_recall_fscore,
 )
+
+
+def test_eval_reexports_shared_cluster_metrics() -> None:
+    """Existing evaluation imports resolve to the shared metric implementations."""
+    assert b3_precision_recall_fscore is cluster_metrics.b3_precision_recall_fscore
+    assert cluster_precision_recall_fscore is cluster_metrics.cluster_precision_recall_fscore
+    assert pairwise_precision_recall_fscore is cluster_metrics.pairwise_precision_recall_fscore
+    assert f1_score is cluster_metrics.f1_score
+
+
+@pytest.mark.parametrize("fail_save", [False, True])
+def test_pairwise_eval_scopes_plot_style(tmp_path, monkeypatch, fail_save: bool) -> None:
+    """Plot styling is applied only while rendering, including failed renders."""
+    import matplotlib as mpl
+    import matplotlib.pyplot as plt
+
+    class DummyClf:
+        def predict_proba(self, X):
+            return np.array([[0.8, 0.2], [0.2, 0.8]])
+
+    real_savefig = plt.savefig
+    labelsizes = []
+
+    def savefig(*args, **kwargs):
+        labelsizes.append(mpl.rcParams["axes.labelsize"])
+        if fail_save:
+            raise OSError("render failure")
+        return real_savefig(*args, **kwargs)
+
+    monkeypatch.setattr(plt, "savefig", savefig)
+    with mpl.rc_context({"axes.labelsize": 7, "axes.facecolor": "pink", "font.size": 8}):
+        before = mpl.rcParams.copy()
+        try:
+            if fail_save:
+                with pytest.raises(OSError, match="render failure"):
+                    pairwise_eval(
+                        np.ones((2, 1)), np.array([0, 1]), DummyClf(), str(tmp_path), "Style", ["x"], skip_shap=True
+                    )
+            else:
+                pairwise_eval(
+                    np.ones((2, 1)), np.array([0, 1]), DummyClf(), str(tmp_path), "Style", ["x"], skip_shap=True
+                )
+                assert (tmp_path / "style_roc.png").is_file()
+                assert (tmp_path / "style_pr.png").is_file()
+            assert labelsizes == [18.0] * (1 if fail_save else 2)
+            assert mpl.rcParams == before
+        finally:
+            plt.close("all")
 
 
 class TestB3AndF1(unittest.TestCase):

@@ -318,7 +318,7 @@ def test_cluster_with_specter_returns_capacity_sized_input_without_clustering(mo
     def _raise_if_called(*_args, **_kwargs):
         raise AssertionError("Genie should not run when the input already fits")
 
-    monkeypatch.setattr(subblocking.genieclust, "Genie", _raise_if_called)
+    monkeypatch.setattr("genieclust.Genie", _raise_if_called)
 
     output = subblocking.cluster_with_specter(["s1"], dataset, target_subblock_size=1)
 
@@ -355,7 +355,7 @@ def test_cluster_with_specter_caps_requested_clusters_below_sample_count(monkeyp
         def fit_predict(self, values: np.ndarray) -> np.ndarray:
             return np.zeros(values.shape[0], dtype=int)
 
-    monkeypatch.setattr(subblocking.genieclust, "Genie", StrictGenie)
+    monkeypatch.setattr("genieclust.Genie", StrictGenie)
     dataset = SimpleNamespace(
         signatures={
             "s1": _signature("s1", first="anna"),

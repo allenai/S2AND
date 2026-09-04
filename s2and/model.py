@@ -8,15 +8,14 @@ import pickle
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import lightgbm as lgb
 import numpy as np
-from hyperopt import Trials, fmin, hp, space_eval, tpe
 from sklearn.base import clone
 from tqdm import tqdm
 
@@ -28,7 +27,6 @@ from s2and.consts import (
     LARGE_INTEGER,
 )
 from s2and.data import ANDData
-from s2and.eval import b3_precision_recall_fscore
 from s2and.feature_port import (
     _get_rust_feature_data,
     _get_rust_featurizer,
@@ -56,6 +54,8 @@ from s2and.incremental_linking.production import (
     _DirectArrowIncrementalDataset,
     predict_incremental_promoted_linker_from_arrow,
 )
+from s2and.incremental_linking.seed_assignment import apply_seed_links
+from s2and.metrics import b3_precision_recall_fscore
 from s2and.model_pairwise import FastCluster, intify, predict_pairwise_class0
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
@@ -81,10 +81,12 @@ from s2and.subblocking import (
 from s2and.text import (
     canonical_name_tuple_pair,
     canonicalize_name_parts,
-    first_names_name_compatible,
     normalize_orcid_compact,
 )
 from s2and.thread_config import resolve_n_jobs
+
+if TYPE_CHECKING:
+    from hyperopt import Trials
 
 logger = logging.getLogger("s2and")
 IncrementalPhaseBMode = Literal["exact"]
@@ -744,6 +746,22 @@ def _guard_predict_block_matrix_allocation(
 
 def _signature_first_for_rules(signature: Any) -> str:
     return signature.author_info_first_normalized_without_apostrophe or signature.author_info_first or ""
+
+
+class _SignatureFirstNames(Mapping[str, str]):
+    """Project prepared signatures to first names without copying or scanning them."""
+
+    def __init__(self, signatures: Mapping[str, Any]) -> None:
+        self._signatures = signatures
+
+    def __getitem__(self, signature_id: str) -> str:
+        return _signature_first_for_rules(self._signatures[signature_id])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._signatures)
+
+    def __len__(self) -> int:
+        return len(self._signatures)
 
 
 def _load_name_tuples_for_incremental_rules() -> frozenset[tuple[str, str]]:
@@ -1609,6 +1627,8 @@ class Clusterer:
             self.cluster_model = copy.deepcopy(cluster_model)
 
         if search_space is None:
+            from hyperopt import hp
+
             self.search_space = {"eps": hp.uniform("eps", 0, 1)}
         else:
             self.search_space = search_space
@@ -3699,6 +3719,8 @@ class Clusterer:
         -------
         Clusterer: a fit clusterer, also sets the best params
         """
+        from hyperopt import Trials, fmin, space_eval, tpe
+
         assert metric_for_hyperopt in {"b3", "ratio"}
         logger.info("Fitting clusterer")
         if isinstance(datasets, ANDData):
@@ -4854,72 +4876,26 @@ class Clusterer:
         if prediction_state is None:
             prediction_state = PredictionState()
         logger.info("Assigning unassigned signatures for incremental clustering")
-        compatibility_cluster_seeds_require_inverse = (
-            split_cluster_seeds_require_inverse
-            if split_cluster_seeds_require_inverse is not None
-            else cluster_seeds_require_inverse
+        check_names = prevent_new_incompatibilities and bool(recluster_map)
+        assignment = apply_seed_links(
+            unassigned_signature_ids=unassigned_signature_ids,
+            linked_signature_to_cluster=linked_signature_to_cluster,
+            recluster_map=recluster_map,
+            cluster_seeds_require_inverse=cluster_seeds_require_inverse,
+            prevent_new_incompatibilities=prevent_new_incompatibilities,
+            first_names=_SignatureFirstNames(dataset.signatures) if check_names else {},
+            name_tuples=_name_tuples_for_incremental_rules(dataset.name_tuples) if check_names else frozenset(),
+            split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
         )
-        resolved_name_tuples = (
-            _name_tuples_for_incremental_rules(dataset.name_tuples)
-            if prevent_new_incompatibilities and recluster_map
-            else None
-        )
-        pred_clusters = defaultdict(list)
-        singleton_signatures = []
-        for cluster_id, seed_signature_ids in cluster_seeds_require_inverse.items():
-            for signature_id in seed_signature_ids:
-                pred_clusters[f"{cluster_id}"].append(signature_id)
-        for unassigned_signature in unassigned_signature_ids:
-            if unassigned_signature not in linked_signature_to_cluster:
-                singleton_signatures.append(unassigned_signature)
-                continue
-
-            best_cluster_id = linked_signature_to_cluster[unassigned_signature]
-            compatibility_cluster_id = best_cluster_id
-            # undo the altered-cluster split if applicable
-            new_name_disallowed = False
-            if best_cluster_id in recluster_map:
-                best_cluster_id = recluster_map[best_cluster_id]
-
-                if prevent_new_incompatibilities:
-                    # restrict reclusterings that would add a new name incompatibility to the main cluster
-                    main_cluster_signatures = compatibility_cluster_seeds_require_inverse.get(
-                        compatibility_cluster_id,
-                        cluster_seeds_require_inverse.get(best_cluster_id, []),
-                    )
-                    all_firsts = set(
-                        _signature_first_for_rules(dataset.signatures[signature_id])
-                        for signature_id in main_cluster_signatures
-                    )
-                    all_firsts = {first for first in all_firsts if len(first) > 1}
-
-                    # if all existing first names are single characters, there is nothing else to check
-                    if len(all_firsts) > 0:
-                        first_unassigned = _signature_first_for_rules(dataset.signatures[unassigned_signature])
-                        assert resolved_name_tuples is not None
-                        match_found = False
-                        for first_assigned in all_firsts:
-                            if first_names_name_compatible(first_assigned, first_unassigned, resolved_name_tuples):
-                                match_found = True
-                                break
-                        # if the candidate name is a prefix or a name alias for any existing name,
-                        # we allow it to cluster. Otherwise, it was clustered with a single-character
-                        # name and we don't want to allow that merge.
-                        if not match_found:
-                            signature = dataset.signatures[unassigned_signature]
-                            first = signature.author_info_first
-                            last = signature.author_info_last
-                            paper_id = signature.paper_id
-                            logger.info(
-                                "Incremental clustering prevented a name compatibility issue from being "
-                                f"added while clustering {first} {last} on {paper_id}"
-                            )
-                            new_name_disallowed = True
-
-            if new_name_disallowed:
-                singleton_signatures.append(unassigned_signature)
-            else:
-                pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
+        pred_clusters = assignment.clusters
+        singleton_signatures = assignment.residual_signature_ids
+        for signature_id in assignment.rejected_signature_ids:
+            signature = dataset.signatures[signature_id]
+            logger.info(
+                "Incremental clustering prevented a name compatibility issue from being "
+                f"added while clustering {signature.author_info_first} {signature.author_info_last} "
+                f"on {signature.paper_id}"
+            )
 
         request_cluster_seed_disallows = (
             (_cluster_seed_disallows_for_request(dataset) if seed_state is None else seed_state.cluster_seeds_disallow)

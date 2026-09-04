@@ -27,3 +27,24 @@ regressions. The bounded existing-script parity harness matched raw distances,
 features, constraints, and clusters across eight Python/Rust comparisons.
 Logs: `scratch/distance-precision-pytest.log` and
 `scratch/distance-precision-parity.log`. Ruff and configured ty checks passed.
+
+## Inference import boundary
+
+- [x] Extract pure clustering metrics and scope evaluation plotting style.
+- [x] Defer optimizer and Genie imports to their use sites.
+- [x] Verify fresh-process imports, plotting, optimization, and full regressions.
+
+Verification: `uv run --no-sync pytest -q` passed 1074 tests, including fresh
+subprocess import checks, scoped plotting style, and actual Hyperopt fitting.
+Ruff, formatting, and configured ty checks passed. Full-suite log:
+`scratch/inference-import-boundary-pytest-final.log`.
+
+## Pure seed-link assignment
+
+- [x] Extract seed-link decisions with explicit inputs and owned results.
+- [x] Preserve lazy name access, diagnostic logging, and residual orchestration.
+- [x] Verify direct decision cases and full regressions.
+
+Verification: 1090 pytest tests passed, including 16 direct decision cases and
+existing Python/Arrow incremental completion tests. Ruff, formatting, and
+configured ty checks passed. Log: `scratch/seed-link-assignment-pytest.log`.

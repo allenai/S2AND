@@ -34,6 +34,7 @@ from s2and.arrow_training import (  # noqa: E402
     load_signatures_from_arrow,
 )
 from s2and.data import ANDData, Author, Signature  # noqa: E402
+from s2and.eval import facet_eval  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
     DEFAULT_NAMELESS_FEATURE_GROUPS,
@@ -424,6 +425,51 @@ def _optionalish(value: Any) -> Any:
     """Compare optional strings modulo the ''/None encoding difference (the
     Arrow writer stores empty strings as nulls)."""
     return value if value else None
+
+
+@pytest.mark.parametrize(
+    ("first", "suffix", "same_name"),
+    [("A", None, False), ("Dr A’bdul", None, True), ("Abdul", "Jr.", False)],
+)
+def test_arrow_name_facets_match_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str, suffix: str | None, same_name: bool
+) -> None:
+    """Name facets must retain identity and normalization across Arrow ingestion."""
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+    signatures = json.loads((DUMMY_DIR / "signatures.json").read_text(encoding="utf-8"))
+    signatures["1"]["author_info"].update(first=first, suffix=suffix)
+    json_dataset = _json_training_anddata("facet_json", {}, signatures=signatures)
+    paths = write_raw_planner_arrow_from_anddata(json_dataset, tmp_path, include_specter=False)
+    paths, _ = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
+    paths["name_counts_index"], _ = write_name_counts_index(tmp_path, tiny_name_counts_tuple())
+    write_test_arrow_artifact_manifest(tmp_path, paths)
+
+    with ArrowDataset.open(tmp_path, require_name_counts_index=True) as source:
+        arrow_dataset = build_training_anddata_from_arrow(
+            source, "facet_arrow", clusters=str(DUMMY_DIR / "clusters.json"), n_jobs=1
+        )
+        assert set(json_dataset.signatures) == set(arrow_dataset.signatures)
+        assert json_dataset.signature_to_cluster_id == arrow_dataset.signature_to_cluster_id
+        assert json_dataset.signature_to_cluster_id is not None
+        metrics = {signature_id: (1.0, 1.0, 1.0) for signature_id in json_dataset.signature_to_cluster_id}
+
+        def name_facets(dataset: ANDData) -> dict[str, tuple[float, float]]:
+            return {
+                row["signature_id"]: (row["homonymity"], row["synonymity"])
+                for row in facet_eval(dataset, metrics).signature_lookup
+            }
+
+        expected = {
+            "0": (0.5, 0.0 if same_name else 0.5),
+            "1": (0.5 if same_name else 0.0, 0.0 if same_name else 0.5),
+            "2": (1.0 if same_name else 0.5, 0.0),
+            "3": (0.0, 0.0),
+            "4": (0.0, 0.0),
+        }
+        assert name_facets(json_dataset) == expected
+        assert name_facets(arrow_dataset) == expected
+        # Evaluation must not materialize the deferred fields into shared state.
+        assert all(signature.author_info_full_name is None for signature in arrow_dataset.signatures.values())
 
 
 def test_arrow_ingestion_reconstructs_training_fields(training_bundle: dict[str, Any]) -> None:

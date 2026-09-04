@@ -12,6 +12,68 @@ from s2and.data import ANDData
 from tests.helpers import tiny_name_counts_index
 
 
+@pytest.mark.parametrize(
+    "seeds, expected",
+    [
+        ({"0": {"1": "require"}, "1": {"2": "require"}}, {"0": 0, "1": 0, "2": 0}),
+        ({"2": {"1": "require"}, "1": {"0": "require"}}, {"2": 0, "1": 0, "0": 0}),
+        (
+            {"0": {"1": "require"}, "2": {"3": "require"}, "1": {"2": "require"}},
+            {"0": 0, "1": 0, "2": 0, "3": 0},
+        ),
+        (
+            {"0": {"1": "require", "2": "require"}, "3": {"4": "require"}},
+            {"0": 0, "1": 0, "2": 0, "3": 1, "4": 1},
+        ),
+        ({"0": {"1": "require"}, "1": {"0": "require"}}, {"0": 0, "1": 0}),
+        ({"0": {"0": "require"}}, {"0": 0}),
+        ({"0": {"1": "disallow"}}, {}),
+        ({}, {}),
+    ],
+    ids=["chain", "reverse_chain", "bridge", "disjoint", "cycle", "self", "disallow_only", "empty"],
+)
+def test_required_seed_components_preserve_transitive_constraints(seeds, expected):
+    dataset = ANDData(
+        signatures="tests/dummy/signatures.json",
+        papers="tests/dummy/papers.json",
+        name="seed_components",
+        mode="inference",
+        cluster_seeds=seeds,
+        name_counts_index=None,
+        name_tuples=set(),
+        preprocess=False,
+    )
+
+    assert dataset.cluster_seeds_require == expected
+    assert dataset.max_seed_cluster_id == len(set(expected.values()))
+    for left, left_component in expected.items():
+        for right, right_component in expected.items():
+            constraint = "require" if left_component == right_component else "disallow"
+            assert dataset.get_constraint(left, right) == data_module.CLUSTER_SEEDS_LOOKUP[constraint]
+
+
+def test_explicit_seed_disallow_survives_connected_require_groups():
+    dataset = ANDData(
+        signatures="tests/dummy/signatures.json",
+        papers="tests/dummy/papers.json",
+        name="seed_explicit_disallow",
+        mode="inference",
+        cluster_seeds={"0": {"1": "require", "2": "disallow"}, "1": {"2": "require"}},
+        name_counts_index=None,
+        name_tuples=set(),
+        preprocess=False,
+    )
+
+    assert dataset.cluster_seeds_require == {"0": 0, "1": 0, "2": 0}
+    assert dataset.cluster_seeds_disallow == {("0", "2")}
+    for ignore_seeds in (False, True):
+        for left, right in (("0", "2"), ("2", "0")):
+            assert (
+                dataset.get_constraint(left, right, incremental_dont_use_cluster_seeds=ignore_seeds)
+                == data_module.CLUSTER_SEEDS_LOOKUP["disallow"]
+            )
+
+
 def test_split_ratios_reject_default_isclose_near_miss() -> None:
     with pytest.raises(ValueError, match="must add to 1"):
         data_module._validate_split_ratios(5e-10, 0.5, 0.5000000004)

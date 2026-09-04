@@ -27,8 +27,10 @@ from sklearn.metrics import (
 )
 from tqdm import tqdm
 
+from s2and.data import _assemble_full_name
 from s2and.featurizer import many_pairs_featurize
 from s2and.model_pairwise import _validated_classifier_features
+from s2and.text import canonicalize_name_parts, normalize_text
 
 logger = logging.getLogger("s2and")
 
@@ -240,6 +242,8 @@ def facet_eval(
     of homonymity. The values are the per-signature B3s that have this amount of homonymity.
     ``facet_eval`` no longer accepts ``block_type``; block-size, homonymity,
     and synonymity facets use the canonical S2 block in ``author_info.block``.
+    Deferred full names on Arrow-backed datasets are canonicalized once per
+    evaluated signature without modifying the dataset.
 
     Parameters
     ----------
@@ -279,6 +283,18 @@ def facet_eval(
     synonymity: dict[str, int] = defaultdict(int)
     denominator: dict[str, int] = defaultdict(int)
     signature_keys = list(metrics_per_signature.keys())
+    full_names: dict[str, str] = {}
+    for signature_key in signature_keys:
+        signature = dataset.signatures[signature_key]
+        full_name = signature.author_info_full_name
+        if full_name is None:
+            parts = canonicalize_name_parts(
+                signature.author_info_first, signature.author_info_middle, signature.author_info_last
+            )
+            full_name = _assemble_full_name(
+                [parts.first, parts.middle, parts.last, normalize_text(signature.author_info_suffix or "")]
+            )
+        full_names[signature_key] = full_name
     for i, signature_key_a in enumerate(signature_keys):
         for signature_key_b in signature_keys[i + 1 :]:
             signature_a = dataset.signatures[signature_key_a]
@@ -286,7 +302,7 @@ def facet_eval(
             # these counts only make sense within blocks
             same_block = signature_a.author_info_block == signature_b.author_info_block
             if same_block:
-                same_name = signature_a.author_info_full_name == signature_b.author_info_full_name
+                same_name = full_names[signature_key_a] == full_names[signature_key_b]
                 same_cluster = signature_to_cluster_id[signature_key_a] == signature_to_cluster_id[signature_key_b]
                 if same_name and not same_cluster:
                     homonymity[signature_key_a] += 1

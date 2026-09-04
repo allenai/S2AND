@@ -597,6 +597,47 @@ def test_predict_incremental_return_contract(clusterer_dataset_factory):
     assert payload["phase_b_mode"] == "exact"
 
 
+@pytest.mark.parametrize("ignore_seeds, expected_count", [(False, 1), (True, 2)])
+def test_predict_posthoc_seed_merge_respects_ignore_flag(ignore_seeds: bool, expected_count: int) -> None:
+    """Seed postprocessing must not undo clustering when requires are disabled."""
+    clusterer = Clusterer(FeaturizationInfo(features_to_use=["year_diff"]), object(), n_jobs=1)
+    dataset = SimpleNamespace(cluster_seeds_require={"s1": "claimed", "s2": "claimed"}, cluster_seeds_disallow=set())
+    clusters, _ = clusterer.predict(
+        {"block": ["s1", "s2"]},
+        dataset,
+        dists={"block": np.array([1.0])},
+        incremental_dont_use_cluster_seeds=ignore_seeds,
+    )
+    assert len(clusters) == expected_count
+
+
+def test_predict_ignore_seed_requires_preserves_explicit_disallows(clusterer_dataset_factory) -> None:
+    """Disabling required seed groups must retain explicit cannot-link constraints."""
+    clusterer, dataset = clusterer_dataset_factory(name="ignore_seeds_disallow")
+    dataset.cluster_seeds_require = {"3": "claimed", "4": "claimed"}
+    dataset.cluster_seeds_disallow = set()
+    control, _ = clusterer.predict({"block": ["3", "4"]}, dataset, incremental_dont_use_cluster_seeds=True)
+    assert len(control) == 1
+    dataset.cluster_seeds_disallow = {("3", "4")}
+    clusters, _ = clusterer.predict({"block": ["3", "4"]}, dataset, incremental_dont_use_cluster_seeds=True)
+    assert len(clusters) == 2
+
+
+def test_predict_incremental_links_against_altered_components(clusterer_dataset_factory) -> None:
+    """Link to natural altered-profile components before restoring the claimed ID."""
+    clusterer, dataset = clusterer_dataset_factory(name="altered_components")
+    dataset.cluster_seeds_require = {"0": "claimed", "3": "claimed"}
+    dataset.cluster_seeds_disallow = set()
+    dataset.altered_cluster_signatures = ["0"]
+    result = _clusters(clusterer.predict_incremental(["4"], dataset))
+    assert clusterer._last_incremental_seed_setup_telemetry["seed_setup_component_count"] == 2
+    dataset.cluster_seeds_require = {"0": "split0", "3": "split3"}
+    dataset.altered_cluster_signatures = []
+    control = _clusters(clusterer.predict_incremental(["4"], dataset))
+    assert control["split3"] == ["3", "4"]
+    assert set(result["claimed"]) == {"0", "3", "4"}
+
+
 def test_promoted_incremental_orcid_fanout_by_query_counts_matching_components() -> None:
     class CountingSeedMap(dict[str, str]):
         values_call_count = 0
@@ -2516,6 +2557,7 @@ def test_predict_from_rust_featurizer_does_not_posthoc_merge_when_incremental_do
         all_disallow_signature_ids,
         *,
         block_key,
+        incremental_dont_use_cluster_seeds,
     ):
         del self, block_signatures, dist_matrix, cluster_model_params, all_disallow_signature_ids, block_key
         captured["cluster_seeds_require"] = dict(dataset.cluster_seeds_require)

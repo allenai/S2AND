@@ -5,6 +5,13 @@
 The coordinated `s2and` and `s2and-rust` package version is `1.0.0`. The
 production model and public-data version is `1.3`, on a separate version axis.
 
+- Correctness: JSON seed `require` pairs now form connected components, so
+  overlapping declarations cannot overwrite earlier must-links. Explicit
+  `disallow` pairs retain their existing precedence. Classic Python incremental
+  prediction now honors the ignore-seeds flag through postprocessing when
+  splitting altered profiles. Arrow-backed facet evaluation computes deferred
+  canonical names before comparing them, preserving homonymity and synonymity
+  metrics across JSON and Arrow ingestion.
 - **Unreleased migration state:** the artifact-independent `1.0.0` code
   and release hardening are implemented. The reviewed canonical benchmark-name
   and ORCID source exports are still needed; production artifact generation,

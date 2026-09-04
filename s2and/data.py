@@ -514,6 +514,8 @@ class ANDData:
         clusters: path to the clusters json file (or the json object)
         specter_embeddings: path to the specter embeddings pickle (or the dictionary object)
         cluster_seeds: path to the cluster seed json file (or the json object)
+            Require pairs form transitive connected groups. Explicit disallow
+            pairs remain hard negatives, including within a require group.
         altered_cluster_signatures: path to the signature ids \n-separated txt file (or a list or set object)
             Clusters that these signatures appear in will be marked as "altered"
         train_pairs: path to predefined train pairs csv (or the dataframe object)
@@ -786,20 +788,39 @@ class ANDData:
         self.cluster_seeds_require: dict[str, int | str] = {}
         self.max_seed_cluster_id = None
         if cluster_seeds_dict is not None:
-            cluster_num = 0
+            parents: dict[str, str] = {}
+            sizes: dict[str, int] = {}
+
+            def find(signature_id: str) -> str:
+                """Find a require component root with path compression."""
+                while parents[signature_id] != signature_id:
+                    parents[signature_id] = parents[parents[signature_id]]
+                    signature_id = parents[signature_id]
+                return signature_id
+
             for signature_id_a, values in cluster_seeds_dict.items():
-                root_added = False
                 for signature_id_b, constraint_string in values.items():
                     if constraint_string == "disallow":
                         self.cluster_seeds_disallow.add((signature_id_a, signature_id_b))
                     elif constraint_string == "require":
-                        if not root_added:
-                            self.cluster_seeds_require[signature_id_a] = cluster_num
-                            root_added = True
-                        self.cluster_seeds_require[signature_id_b] = cluster_num
-                if root_added:
-                    cluster_num += 1
-            self.max_seed_cluster_id = cluster_num
+                        for signature_id in (signature_id_a, signature_id_b):
+                            if signature_id not in parents:
+                                parents[signature_id] = signature_id
+                                sizes[signature_id] = 1
+                        root_a, root_b = find(signature_id_a), find(signature_id_b)
+                        if root_a != root_b:
+                            if sizes[root_a] < sizes[root_b]:
+                                root_a, root_b = root_b, root_a
+                            parents[root_b] = root_a
+                            sizes[root_a] += sizes[root_b]
+
+            # Assign compact IDs in first-seen order after all bridges are merged.
+            component_ids: dict[str, int] = {}
+            for signature_id in parents:
+                root = find(signature_id)
+                cluster_id = component_ids.setdefault(root, len(component_ids))
+                self.cluster_seeds_require[signature_id] = cluster_id
+            self.max_seed_cluster_id = len(component_ids)
         logger.info("loaded cluster seeds")
         # check that all altered_cluster_signatures are in cluster_seeds_require
         if self.altered_cluster_signatures is not None:

@@ -1718,6 +1718,7 @@ class Clusterer:
         dataset: ANDData,
         all_disallow_signature_ids: set[str],
         pred_clusters: defaultdict[str, list[str]],
+        incremental_dont_use_cluster_seeds: bool,
     ) -> None:
         if block_key == "" or pairwise_proba is None:
             return
@@ -1731,6 +1732,7 @@ class Clusterer:
             dataset,
             all_disallow_signature_ids,
             block_key=block_key,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
         )
         for signature, label in zip(block_dict[block_key], labels, strict=True):
             pred_clusters[block_key + "_" + str(label)].append(signature)
@@ -2857,6 +2859,7 @@ class Clusterer:
                     cast(Any, proxy_dataset),
                     all_disallow_signature_ids,
                     block_key=block_key,
+                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 )
                 cluster_seconds += time.perf_counter() - cluster_block_start
                 for signature, label in zip(signatures, labels, strict=True):
@@ -4035,6 +4038,8 @@ class Clusterer:
         cluster_model_params: dict[str, Any] | None,
         dataset: ANDData,
         all_disallow_signature_ids: set[str],
+        *,
+        incremental_dont_use_cluster_seeds: bool = False,
     ) -> list:
         """Cluster one block from a distance matrix and return labels."""
         if len(block_signatures) == 0:
@@ -4056,7 +4061,7 @@ class Clusterer:
         negative_one_label_locations = np.where(labels == -1)[0]
         for i, loc in enumerate(negative_one_label_locations):
             labels[loc] = max_label + 1 + i
-        if self.use_default_constraints_as_supervision:
+        if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds:
             disallow_signature_ids = all_disallow_signature_ids
             inverse_id_map = defaultdict(set)
             for signature_id, label in zip(block_signatures, labels, strict=True):
@@ -4085,6 +4090,7 @@ class Clusterer:
         all_disallow_signature_ids: set[str],
         *,
         block_key: str,
+        incremental_dont_use_cluster_seeds: bool,
     ) -> list:
         """Cluster one block and emit explicit entry/exit logs around the cluster-model fit."""
         cluster_model_name = type(self.cluster_model).__name__
@@ -4101,6 +4107,7 @@ class Clusterer:
             cluster_model_params,
             dataset,
             all_disallow_signature_ids,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
         )
         logger.info(
             "Finished cluster_model.fit for block %s using %s in %.3fs (clusters=%d)",
@@ -4209,6 +4216,7 @@ class Clusterer:
                     dataset,
                     all_disallow_signature_ids,
                     block_key=block_key,
+                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 )
                 for signature, label in zip(block_dict[block_key], labels, strict=True):
                     pred_clusters[block_key + "_" + str(label)].append(signature)
@@ -4279,6 +4287,7 @@ class Clusterer:
                         dataset=dataset,
                         all_disallow_signature_ids=all_disallow_signature_ids,
                         pred_clusters=pred_clusters,
+                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     )
                     pairwise_proba = None
 
@@ -4322,6 +4331,7 @@ class Clusterer:
                 dataset=dataset,
                 all_disallow_signature_ids=all_disallow_signature_ids,
                 pred_clusters=pred_clusters,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             )
         else:
             block_pair_index = 0
@@ -4370,6 +4380,7 @@ class Clusterer:
                     dataset=dataset,
                     all_disallow_signature_ids=all_disallow_signature_ids,
                     pred_clusters=pred_clusters,
+                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 )
 
             model_predict_seconds += self._featurize_predict_write_batches(

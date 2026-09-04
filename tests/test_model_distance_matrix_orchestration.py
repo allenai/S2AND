@@ -232,6 +232,7 @@ def test_predict_from_rust_featurizer_streams_only_nontrivial_blocks(
         _disallowed_ids: set[str],
         *,
         block_key: str,
+        incremental_dont_use_cluster_seeds: bool,
     ) -> list[int]:
         cluster_calls.append((block_key, tuple(signatures)))
         return [0] * len(signatures)

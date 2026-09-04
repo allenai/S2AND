@@ -127,6 +127,17 @@ clusterer.fit(dataset)
 
 S2AND uses agglomerative clustering with average linkage on top of the pairwise model.
 
+FastCluster's condensed distance matrices use `float64` in both Python and
+Rust, including matrices retained for EPS calibration. This matches streaming
+inference and prevents cache rounding from changing merges near the threshold.
+Storage is eight bytes per pair, or `8 * n * (n - 1) / 2` bytes for a block of
+`n` signatures. Python's stored matrices previously used two bytes per pair;
+the allocation guard now budgets the full eight bytes.
+
+When supplying `val_dists_precomputed` or prediction `dists`, generate the
+distances at `float64` precision. Recompute any previously rounded `float16`
+cache; casting it to `float64` cannot recover the original scores.
+
 ## Evaluate clustering
 
 ```python

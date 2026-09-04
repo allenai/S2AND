@@ -11,6 +11,7 @@ import s2and.model as model_module
 from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
+from s2and.prediction_state import PredictionState
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
@@ -28,6 +29,7 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     tmp_path: Path,
 ) -> None:
     """Cover the complete bounded Arrow large-block orchestration path."""
+    prediction_state = PredictionState()
 
     write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
     arrow_dataset = ArrowDataset.open(tmp_path)
@@ -124,12 +126,13 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python subblocking must not run")),
     )
     clusterer = _clusterer()
-    predicted, dists = clusterer.predict_from_arrow(
+    predicted, dists = clusterer._predict_from_arrow_request(
         {"small": ["9"], "large": [str(index) for index in range(9)]},
         arrow_dataset,
         batching_threshold=3,
         name_tuples=set(),
         cluster_seeds_require={"0": "claimed", "1": "claimed"},
+        prediction_state=prediction_state,
     )
 
     assert dists is None
@@ -151,7 +154,7 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         str(index) for index in range(10)
     }
 
-    subblocking_telemetry = clusterer._last_rust_arrow_subblocking_telemetry
+    subblocking_telemetry = prediction_state.telemetry["rust_arrow_subblocking"]
     assert subblocking_telemetry["enabled"] == 1
     assert subblocking_telemetry["maximum_size"] == 3
     assert subblocking_telemetry["input_block_count"] == 2
@@ -159,7 +162,7 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     assert subblocking_telemetry["blocks"]["large"]["final_subblock_count"] == 3
     assert subblocking_telemetry["blocks"]["large"]["seed_components_repacked"] == 1
     assert subblocking_telemetry["blocks"]["large"]["repaired_final_subblock_count"] == 4
-    predict_telemetry = clusterer._last_arrow_predict_telemetry
+    predict_telemetry = prediction_state.telemetry["arrow_predict"]
     assert predict_telemetry["signature_count"] == 10
     assert predict_telemetry["featurizer_signature_count"] == 7
     assert predict_telemetry["block_count"] == 2

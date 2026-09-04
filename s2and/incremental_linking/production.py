@@ -25,6 +25,7 @@ from s2and.incremental_linking.policy import (
     request_cluster_seed_disallow_parts,
 )
 from s2and.incremental_linking.retrieval import RawArrowPlanBundle
+from s2and.prediction_state import PredictionState
 from s2and.runtime import RuntimeContext
 
 logger = logging.getLogger("s2and")
@@ -583,9 +584,12 @@ def _finish_incremental_with_optional_split_inverse(
     arrow_dataset: ArrowDataset | None = None,
     split_cluster_seeds_require_inverse: Mapping[str, Sequence[str]] | None = None,
     cluster_seed_disallows: set[tuple[str, str]] | None = None,
+    prediction_state: PredictionState | None = None,
 ) -> dict[str, list[str]]:
     method = clusterer._finish_incremental_with_seed_links
     kwargs: dict[str, Any] = {"total_ram_bytes": total_ram_bytes}
+    if prediction_state is not None:
+        kwargs["prediction_state"] = prediction_state
     if arrow_dataset is not None:
         kwargs["arrow_dataset"] = arrow_dataset
     if split_cluster_seeds_require_inverse is not None:
@@ -881,6 +885,11 @@ def predict_incremental_promoted_linker_from_arrow(
     """Run the promoted linker from one open Arrow dataset."""
 
     resolved_total_ram_bytes, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
+    prediction_state = PredictionState(
+        cluster_seeds_require=dict(dataset.cluster_seeds_require),
+        cluster_seeds_disallow=set(dataset.cluster_seeds_disallow),
+        altered_cluster_signatures=list(dataset.altered_cluster_signatures or ()),
+    )
     request_disallows, dataset_disallows = _request_cluster_seed_disallows(dataset)
     (
         cluster_seeds_require,
@@ -894,8 +903,9 @@ def predict_incremental_promoted_linker_from_arrow(
         total_ram_bytes=resolved_total_ram_bytes,
         arrow_dataset=arrow_dataset,
         cluster_seed_disallows=request_disallows,
+        prediction_state=prediction_state,
     )
-    seed_setup_telemetry = dict(getattr(clusterer, "_last_incremental_seed_setup_telemetry", {}) or {})
+    seed_setup_telemetry = dict(prediction_state.telemetry.get("incremental_seed_setup", {}))
     if len(cluster_seeds_require) == 0:
         raise ValueError("Promoted incremental linker mode requires at least one seed cluster")
 
@@ -1241,9 +1251,10 @@ def predict_incremental_promoted_linker_from_arrow(
             arrow_dataset=arrow_dataset,
             split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
             cluster_seed_disallows=request_disallows,
+            prediction_state=prediction_state,
         )
         finish_seconds = time.perf_counter() - finish_start
-        residual_phase_b_telemetry = dict(getattr(clusterer, "_last_incremental_residual_phase_b_telemetry", {}) or {})
+        residual_phase_b_telemetry = dict(prediction_state.telemetry.get("incremental_residual_phase_b", {}))
         residual_count = sum(
             1 for signature_id in unassigned_signature_ids if signature_id not in linked_signature_clusters
         )

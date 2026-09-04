@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import logging
 import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import CLUSTER_SEEDS_LOOKUP
@@ -21,172 +23,25 @@ from s2and.rust_calls import (
 )
 from s2and.thread_config import resolve_n_jobs
 
+if TYPE_CHECKING:
+    from s2and.prediction_state import PredictionState
+
 # Treat extension as Any for typing; it is optional and loaded on first use.
 s2and_rust: Any | None = None
 
 logger = logging.getLogger("s2and")
 _S2AND_RUST_LOAD_LOCK = threading.Lock()
-_ClusterSeedStamp = tuple[object, int, object, int]
-_MISSING = object()
-
-
-class _MutationTrackedDict(dict[Any, Any]):
-    """A compact dict that invalidates native state before mutation attempts."""
-
-    __slots__ = ("_identity_token", "_mutation_version")
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if hasattr(self, "_mutation_version"):
-            self._touch()
-        else:
-            self._identity_token = object()
-            self._mutation_version = 0
-        dict.__init__(self, *args, **kwargs)
-
-    @property
-    def identity_token(self) -> object:
-        return self._identity_token
-
-    @property
-    def mutation_version(self) -> int:
-        return self._mutation_version
-
-    def _touch(self) -> None:
-        if not hasattr(self, "_mutation_version"):
-            self._identity_token = object()
-            self._mutation_version = 1
-        else:
-            self._mutation_version += 1
-
-    def __setitem__(self, key: Any, value: Any) -> None:
-        self._touch()
-        dict.__setitem__(self, key, value)
-
-    def __delitem__(self, key: Any) -> None:
-        self._touch()
-        dict.__delitem__(self, key)
-
-    def __ior__(self, other: Any) -> "_MutationTrackedDict":
-        self._touch()
-        dict.__ior__(self, other)
-        return self
-
-    def clear(self) -> None:
-        self._touch()
-        dict.clear(self)
-
-    def pop(self, key: Any, default: Any = _MISSING) -> Any:
-        self._touch()
-        return dict.pop(self, key) if default is _MISSING else dict.pop(self, key, default)
-
-    def popitem(self) -> tuple[Any, Any]:
-        self._touch()
-        return dict.popitem(self)
-
-    def setdefault(self, key: Any, default: Any = None) -> Any:
-        self._touch()
-        return dict.setdefault(self, key, default)
-
-    def update(self, *args: Any, **kwargs: Any) -> None:
-        self._touch()
-        dict.update(self, *args, **kwargs)
-
-
-class _MutationTrackedSet(set[tuple[Any, Any]]):
-    """A compact set that invalidates native state before mutation attempts."""
-
-    __slots__ = ("_identity_token", "_mutation_version")
-
-    def __init__(self, *args: Any) -> None:
-        if hasattr(self, "_mutation_version"):
-            self._touch()
-        else:
-            self._identity_token = object()
-            self._mutation_version = 0
-        set.__init__(self, *args)
-
-    @property
-    def identity_token(self) -> object:
-        return self._identity_token
-
-    @property
-    def mutation_version(self) -> int:
-        return self._mutation_version
-
-    def _touch(self) -> None:
-        if not hasattr(self, "_mutation_version"):
-            self._identity_token = object()
-            self._mutation_version = 1
-        else:
-            self._mutation_version += 1
-
-    def __iand__(self, other: Any) -> "_MutationTrackedSet":
-        self._touch()
-        set.__iand__(self, other)
-        return self
-
-    def __ior__(self, other: Any) -> "_MutationTrackedSet":
-        self._touch()
-        set.__ior__(self, other)
-        return self
-
-    def __isub__(self, other: Any) -> "_MutationTrackedSet":
-        self._touch()
-        set.__isub__(self, other)
-        return self
-
-    def __ixor__(self, other: Any) -> "_MutationTrackedSet":
-        self._touch()
-        set.__ixor__(self, other)
-        return self
-
-    def add(self, element: tuple[Any, Any]) -> None:
-        self._touch()
-        set.add(self, element)
-
-    def clear(self) -> None:
-        self._touch()
-        set.clear(self)
-
-    def difference_update(self, *others: Any) -> None:
-        self._touch()
-        set.difference_update(self, *others)
-
-    def discard(self, element: object) -> None:
-        self._touch()
-        set.discard(self, element)
-
-    def intersection_update(self, *others: Any) -> None:
-        self._touch()
-        set.intersection_update(self, *others)
-
-    def pop(self) -> Any:
-        self._touch()
-        return set.pop(self)
-
-    def remove(self, element: tuple[Any, Any]) -> None:
-        self._touch()
-        set.remove(self, element)
-
-    def symmetric_difference_update(self, other: Any) -> None:
-        self._touch()
-        set.symmetric_difference_update(self, other)
-
-    def update(self, *others: Any) -> None:
-        self._touch()
-        set.update(self, *others)
 
 
 class _RustFeaturizerState:
-    """One dataset's cached native featurizer and synchronized inputs."""
+    """One dataset's cached native feature backing and build inputs."""
 
-    __slots__ = ("lock", "featurizer", "build_inputs", "synced_seed_stamp", "build_count")
+    __slots__ = ("lock", "featurizer", "build_inputs", "build_count")
 
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.featurizer: Any | None = None
         self.build_inputs: tuple[Any, ...] | None = None
-        self.synced_seed_stamp: _ClusterSeedStamp | None = None
         self.build_count = 0
 
 
@@ -235,30 +90,6 @@ def _rust_featurizer_build_count(dataset: ANDData) -> int:
     state = _rust_featurizer_state(dataset)
     with state.lock:
         return state.build_count
-
-
-def _cluster_seed_stamp(dataset: ANDData) -> _ClusterSeedStamp | None:
-    """Return constant-size identity/version state for Python-owned seeds."""
-
-    require = getattr(dataset, "cluster_seeds_require", None)
-    if require is None:
-        require = {}
-    disallow = getattr(dataset, "cluster_seeds_disallow", None)
-    if disallow is None:
-        disallow = set()
-
-    if not isinstance(require, _MutationTrackedDict):
-        require = _MutationTrackedDict(require)
-        dataset.cluster_seeds_require = require
-    if not isinstance(disallow, _MutationTrackedSet):
-        disallow = _MutationTrackedSet(disallow)
-        dataset.cluster_seeds_disallow = disallow
-    return (
-        require.identity_token,
-        require.mutation_version,
-        disallow.identity_token,
-        disallow.mutation_version,
-    )
 
 
 def build_rust_featurizer_from_arrow_dataset(
@@ -339,7 +170,17 @@ def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
 def _get_rust_featurizer(
     dataset: ANDData,
     runtime_context: Any | None = None,
+    *,
+    prediction_state: PredictionState | None = None,
 ) -> Any:
+    """Return a request-owned seed overlay sharing cached native features."""
+    base = _get_rust_feature_data(dataset)
+    seeds = dataset if prediction_state is None else prediction_state
+    return base.with_cluster_seeds(seeds.cluster_seeds_require, seeds.cluster_seeds_disallow)
+
+
+def _get_rust_feature_data(dataset: ANDData) -> Any:
+    """Return cached seedless native features without copying request seeds."""
     _require_rust_runtime()
     ds_log = _dataset_name_for_logs(dataset)
 
@@ -347,13 +188,6 @@ def _get_rust_featurizer(
     with state.lock:
         build_inputs = _rust_featurizer_build_inputs(dataset)
         if state.featurizer is not None and state.build_inputs == build_inputs:
-            seed_stamp = _cluster_seed_stamp(dataset)
-            if seed_stamp is not None and seed_stamp != state.synced_seed_stamp:
-                state.featurizer.update_cluster_seeds(
-                    dataset.cluster_seeds_require,
-                    dataset.cluster_seeds_disallow,
-                )
-                state.synced_seed_stamp = seed_stamp
             return state.featurizer
 
         build_start = time.perf_counter()
@@ -362,16 +196,6 @@ def _get_rust_featurizer(
         if _rust_featurizer_build_inputs(dataset) != build_inputs:
             raise RuntimeError(f"Rust featurizer inputs changed while it was being built (dataset={ds_log})")
 
-        seed_stamp = _cluster_seed_stamp(dataset)
-        if seed_stamp is not None:
-            seed_overlay_start = time.perf_counter()
-            featurizer.update_cluster_seeds(dataset.cluster_seeds_require, dataset.cluster_seeds_disallow)
-            seed_overlay_seconds = time.perf_counter() - seed_overlay_start
-            build_seconds += seed_overlay_seconds
-            build_timings = {
-                **build_timings,
-                "post_build_seconds": build_timings.get("post_build_seconds", 0.0) + seed_overlay_seconds,
-            }
         build_count = state.build_count + 1
         logger.info(
             "Telemetry: rust_core_build seconds=%.3f dataset=%s source=%s count=%d pre=%.3f ffi=%.3f post=%.3f",
@@ -385,7 +209,6 @@ def _get_rust_featurizer(
         )
         state.featurizer = featurizer
         state.build_inputs = build_inputs
-        state.synced_seed_stamp = seed_stamp
         state.build_count = build_count
         return featurizer
 
@@ -397,7 +220,6 @@ def evict_rust_featurizer(dataset: ANDData) -> bool:
         removed = state.featurizer is not None
         state.featurizer = None
         state.build_inputs = None
-        state.synced_seed_stamp = None
         state.build_count = 0
         return removed
 
@@ -407,10 +229,7 @@ def warm_rust_featurizer(
     runtime_context: Any | None = None,
 ) -> None:
     """Preload the Rust featurizer into memory for low-latency inference."""
-    _get_rust_featurizer(
-        dataset,
-        runtime_context=runtime_context,
-    )
+    _get_rust_feature_data(dataset)
 
 
 __all__ = [

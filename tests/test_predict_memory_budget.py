@@ -63,6 +63,20 @@ def test_predict_helper_raises_before_matrix_allocation_when_budget_too_small(mo
         clusterer.predict_helper(block, dataset, total_ram_bytes=1_000)
 
 
+def test_stored_fastcluster_matrix_budget_uses_float64(monkeypatch):
+    """Stored Python matrices must budget eight bytes for each condensed pair."""
+    clusterer, dataset = _build_dummy_clusterer_and_dataset(name="stored_matrix_precision_budget")
+    block = {"a sattar": ["0", "1", "2"]}
+    monkeypatch.setattr(
+        model_module.memory_budget,
+        "memory_snapshot_for_stage",
+        lambda **_kwargs: _snapshot(available_bytes=16),
+    )
+
+    with pytest.raises(MemoryError, match="matrix_bytes=24 available_bytes=16"):
+        clusterer.make_distance_matrices(block, dataset, total_ram_bytes=1_000, disable_tqdm=True)
+
+
 def test_predict_helper_matches_baseline_when_budget_allows(monkeypatch):
     clusterer, dataset = _build_dummy_clusterer_and_dataset(name="dummy_predict_memory_large_budget")
     block = {"a sattar": ["0", "1", "2", "3", "4", "5", "6", "7", "8"]}

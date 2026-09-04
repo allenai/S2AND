@@ -486,6 +486,7 @@ def test_clusterer_predict_does_not_forward_batch_threshold_to_python_incrementa
                 "s2": Signature("a"),
             },
             cluster_seeds_require={},
+            cluster_seeds_disallow=set(),
         )
     )
 
@@ -515,15 +516,16 @@ def test_clusterer_predict_does_not_forward_batch_threshold_to_python_incrementa
     def fake_predict_incremental(self, block_signatures, dataset, *args, **kwargs):
         incremental_calls.append(tuple(block_signatures))
         captured_kwargs.update(kwargs)
+        assert dataset.cluster_seeds_require == {}
         return {
-            "clusters": {"merged": list(dataset.cluster_seeds_require.keys()) + list(block_signatures)},
+            "clusters": {"merged": list(kwargs["prediction_state"].cluster_seeds_require) + list(block_signatures)},
             "phase_b_mode": "exact",
             "phase_b_budget_bytes": 0,
             "phase_b_required_bytes": 0,
         }
 
     monkeypatch.setattr(Clusterer, "predict_helper", fake_predict_helper)
-    monkeypatch.setattr(Clusterer, "predict_incremental", fake_predict_incremental)
+    monkeypatch.setattr(Clusterer, "_predict_incremental_python", fake_predict_incremental)
 
     clusterer.predict(
         {"block": ["m1", "m2", "m3", "m4", "m5", "m6", "s1", "s2"]},

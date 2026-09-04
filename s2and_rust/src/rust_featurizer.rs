@@ -3,10 +3,10 @@ use super::*;
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct RustFeaturizer {
-    signatures: HashMap<String, SignatureData>,
-    signature_ids: Vec<String>,
-    papers: HashMap<PaperId, PaperData>,
-    name_tuples: HashMap<String, HashSet<String>>,
+    signatures: Arc<HashMap<String, SignatureData>>,
+    signature_ids: Arc<Vec<String>>,
+    papers: Arc<HashMap<PaperId, PaperData>>,
+    name_tuples: Arc<HashMap<String, HashSet<String>>>,
     cluster_seeds_disallow: HashSet<(String, String)>,
     cluster_seeds_require: HashMap<String, ClusterId>,
     cluster_seed_require_value: f64,
@@ -1221,10 +1221,10 @@ impl RustFeaturizer {
         let name_tuples = extract_name_tuples_argument(name_tuples)?;
 
         Ok(RustFeaturizer {
-            signatures,
-            signature_ids,
-            papers,
-            name_tuples,
+            signatures: Arc::new(signatures),
+            signature_ids: Arc::new(signature_ids),
+            papers: Arc::new(papers),
+            name_tuples: Arc::new(name_tuples),
             cluster_seeds_disallow,
             cluster_seeds_require,
             cluster_seed_require_value,
@@ -1237,6 +1237,26 @@ impl RustFeaturizer {
     #[getter]
     fn name_counts_manifest_sha256(&self) -> Option<&str> {
         self.name_counts_manifest_sha256.as_deref()
+    }
+
+    /// Create a request-owned seed overlay sharing the prepared feature backing.
+    fn with_cluster_seeds(
+        &self,
+        cluster_seeds_require: &Bound<'_, PyAny>,
+        cluster_seeds_disallow: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            signatures: Arc::clone(&self.signatures),
+            signature_ids: Arc::clone(&self.signature_ids),
+            papers: Arc::clone(&self.papers),
+            name_tuples: Arc::clone(&self.name_tuples),
+            cluster_seeds_require: extract_cluster_seeds_require(cluster_seeds_require)?,
+            cluster_seeds_disallow: extract_pair_set(cluster_seeds_disallow)?,
+            cluster_seed_require_value: self.cluster_seed_require_value,
+            cluster_seed_disallow_value: self.cluster_seed_disallow_value,
+            name_counts_manifest_sha256: self.name_counts_manifest_sha256.clone(),
+            cluster_seeds_disallow_index: OnceLock::new(),
+        })
     }
 
     fn update_cluster_seeds(
@@ -1682,7 +1702,7 @@ impl RustFeaturizer {
         let mut updated = 0usize;
         for (sig_id_obj, sig_obj) in signatures_dict.iter() {
             let sig_id: String = sig_id_obj.extract()?;
-            let Some(signature) = self.signatures.get_mut(&sig_id) else {
+            let Some(signature) = Arc::make_mut(&mut self.signatures).get_mut(&sig_id) else {
                 continue;
             };
             let counts_obj = sig_obj.getattr("author_info_name_counts")?;

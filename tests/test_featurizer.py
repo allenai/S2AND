@@ -351,7 +351,7 @@ def test_delete_training_data_uses_global_coauthor_similarity_index(monkeypatch:
 
 def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatch) -> None:
     # A placeholder ArrowDataset marks the dataset as Rust-eligible; the actual Rust
-    # featurizer build is mocked out below via feature_port._get_rust_featurizer.
+    # featurizer build is mocked out below via feature_port._get_rust_feature_data.
     dataset = cast(
         ANDData,
         SimpleNamespace(
@@ -383,7 +383,7 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatc
             del selected_indices, num_threads, nan_value
             return np.zeros((len(cast(Any, pairs)), NUM_FEATURES), dtype=np.float64)
 
-    def fake_get_rust_featurizer(*_args: object, **_kwargs: object) -> object:
+    def fake_get_rust_feature_data(*_args: object, **_kwargs: object) -> object:
         state["prewarm_called"] = True
         return FakeRustFeaturizer()
 
@@ -396,7 +396,7 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatc
         return 128, "test"
 
     monkeypatch.setattr(feature_port, "s2and_rust", object())
-    monkeypatch.setattr(feature_port, "_get_rust_featurizer", fake_get_rust_featurizer)
+    monkeypatch.setattr(feature_port, "_get_rust_feature_data", fake_get_rust_feature_data)
     monkeypatch.setattr(memory_budget, "resolve_total_ram_bytes", fake_resolve_total_ram_bytes)
     monkeypatch.setattr(memory_budget, "current_rss_bytes_best_effort", fake_current_rss)
 
@@ -417,7 +417,7 @@ def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A placeholder ArrowDataset marks the dataset as Rust-eligible; the actual Rust
-    # featurizer build is mocked out below via feature_port._get_rust_featurizer.
+    # featurizer build is mocked out below via feature_port._get_rust_feature_data.
     dataset = cast(
         ANDData,
         SimpleNamespace(
@@ -448,12 +448,12 @@ def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(
             del selected_indices, num_threads, nan_value
             return np.zeros((len(cast(Any, pairs)), NUM_FEATURES), dtype=np.float64)
 
-    def fake_get_rust_featurizer(*_args: object, **_kwargs: object) -> object:
+    def fake_get_rust_feature_data(*_args: object, **_kwargs: object) -> object:
         state["prewarm_called"] = True
         return FakeRustFeaturizer()
 
     monkeypatch.setattr(feature_port, "s2and_rust", None)
-    monkeypatch.setattr(feature_port, "_get_rust_featurizer", fake_get_rust_featurizer)
+    monkeypatch.setattr(feature_port, "_get_rust_feature_data", fake_get_rust_feature_data)
 
     many_pairs_featurize(
         [("a", "b", -1)],
@@ -542,7 +542,7 @@ def test_many_pairs_featurize_surfaces_rust_initialization_failure(monkeypatch: 
     def fail_prewarm(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("native init failed")
 
-    monkeypatch.setattr(feature_port, "_get_rust_featurizer", fail_prewarm)
+    monkeypatch.setattr(feature_port, "_get_rust_feature_data", fail_prewarm)
 
     with pytest.raises(RuntimeError, match="Rust featurizer init failed"):
         many_pairs_featurize(

@@ -33,6 +33,7 @@ from s2and.incremental_linking.retrieval import (
 )
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
 from s2and.model import Clusterer, IncrementalDistStats
+from s2and.prediction_state import PredictionState
 from tests.helpers import (
     tiny_name_counts_index,
     tiny_name_counts_tuple,
@@ -630,7 +631,6 @@ def test_predict_incremental_links_against_altered_components(clusterer_dataset_
     dataset.cluster_seeds_disallow = set()
     dataset.altered_cluster_signatures = ["0"]
     result = _clusters(clusterer.predict_incremental(["4"], dataset))
-    assert clusterer._last_incremental_seed_setup_telemetry["seed_setup_component_count"] == 2
     dataset.cluster_seeds_require = {"0": "split0", "3": "split3"}
     dataset.altered_cluster_signatures = []
     control = _clusters(clusterer.predict_incremental(["4"], dataset))
@@ -1083,11 +1083,12 @@ def test_promoted_linker_adds_partial_query_seed_disallows_to_planner_sidecar(
         suppress_orcid = True
         featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
         feature_contract = {}
-        _last_incremental_seed_setup_telemetry: dict[str, Any] = {}
 
         def _build_incremental_seed_setup(self, *_args: object, **kwargs: object):
             captured["request_disallows"] = set(kwargs["cluster_seed_disallows"])
-            self._last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
+            kwargs["prediction_state"].telemetry["incremental_seed_setup"] = {
+                "seed_setup_cluster_seeds_source": "python"
+            }
             seeds = {"seed-1": "component-1", "seed-2": "component-2"}
             inverse = {"component-1": ["seed-1"], "component-2": ["seed-2"]}
             return seeds, {}, inverse, inverse
@@ -1161,10 +1162,11 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
         suppress_orcid = False
         featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
         feature_contract = {}
-        _last_incremental_seed_setup_telemetry: dict[str, Any] = {}
 
-        def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
-            self._last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
+        def _build_incremental_seed_setup(self, *_args: object, **kwargs: object):
+            kwargs["prediction_state"].telemetry["incremental_seed_setup"] = {
+                "seed_setup_cluster_seeds_source": "python"
+            }
             return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
 
     def fail_raw_arrow_linker(*_args: object, **_kwargs: object):
@@ -1218,7 +1220,6 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
         suppress_orcid = True
         featurizer_info = FeaturizationInfo(features_to_use=["name_counts"])
         feature_contract = {}
-        _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
             seeds = {"seed-z": "c_seed_0", "seed-a": "c_seed_0"}
@@ -1368,7 +1369,6 @@ def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
         suppress_orcid = True
         featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
         feature_contract = {}
-        _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
             seeds = {"s0": "c0", "s1": "c1"}
@@ -1515,7 +1515,6 @@ def test_promoted_linker_reuses_one_plan_and_featurizer_for_four_scoring_batches
         suppress_orcid = True
         featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
         feature_contract = {}
-        _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
             return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
@@ -1596,7 +1595,6 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
         suppress_orcid = True
         featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
         feature_contract = {}
-        _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
             return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
@@ -1702,7 +1700,7 @@ def test_predict_from_arrow_uses_bound_name_counts_index(
     )
     monkeypatch.setattr(
         Clusterer,
-        "predict_from_rust_featurizer",
+        "_predict_from_rust_featurizer",
         lambda *_args, **_kwargs: ({"block": ["s1"]}, None),
     )
 
@@ -1817,7 +1815,7 @@ def _strict_rust_context(run_id: str = "test-strict-rust") -> SimpleNamespace:
     )
 
 
-def test_subblocked_single_letter_cleanup_skips_missing_dataset_rust_featurizer(monkeypatch) -> None:
+def test_subblocked_single_letter_groups_use_request_owned_seeds(monkeypatch) -> None:
     clusterer = _build_minimal_incremental_clusterer()
     dataset = cast(
         ANDData,
@@ -1831,9 +1829,11 @@ def test_subblocked_single_letter_cleanup_skips_missing_dataset_rust_featurizer(
 
     def fake_predict_incremental(self, block_signatures, *_args, **_kwargs):
         del self
+        assert dataset.cluster_seeds_require == {"seed": "seed_cluster"}
+        assert _kwargs["prediction_state"].cluster_seeds_require is not dataset.cluster_seeds_require
         return {"clusters": {"single": list(block_signatures)}}
 
-    monkeypatch.setattr(Clusterer, "predict_incremental", fake_predict_incremental)
+    monkeypatch.setattr(Clusterer, "_predict_incremental_python", fake_predict_incremental)
     result = clusterer._predict_subblocked_single_letter_incremental_groups(
         {"block|single": ["s1", "s2"]},
         pred_clusters={},
@@ -1996,6 +1996,7 @@ def test_predict_subblocked_processes_subblocks_in_sorted_key_order(clusterer_da
         incremental_dont_use_cluster_seeds=False,
         runtime_context=None,
         total_ram_bytes=None,
+        prediction_state=None,
     ):
         del self, dataset, dists, cluster_model_params, partial_supervision
         del use_s2_clusters, incremental_dont_use_cluster_seeds, runtime_context, total_ram_bytes
@@ -2081,7 +2082,9 @@ def test_finish_incremental_with_seed_links_reclusters_only_abstains():
     residual_blocks: list[list[str]] = []
     residual_total_ram_bytes: list[int | None] = []
 
-    def fake_predict_helper(block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None):
+    def fake_predict_helper(
+        block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None, prediction_state=None
+    ):
         del dataset, partial_supervision, runtime_context
         residual_blocks.append(list(block_dict["block"]))
         residual_total_ram_bytes.append(total_ram_bytes)
@@ -2199,6 +2202,7 @@ def test_finish_incremental_with_seed_links_reclusters_abstains_from_arrow(tmp_p
 
 
 def test_finish_incremental_with_seed_links_splits_residual_phase_b_by_first_initial(tmp_path: Path):
+    prediction_state = PredictionState()
     clusterer = _build_minimal_incremental_clusterer()
     arrow_dataset = _minimal_arrow_dataset(tmp_path)
     residual_blocks: list[list[str]] = []
@@ -2253,11 +2257,12 @@ def test_finish_incremental_with_seed_links_splits_residual_phase_b_by_first_ini
         {},
         runtime_context=cast(Any, object()),
         arrow_dataset=arrow_dataset,
+        prediction_state=prediction_state,
     )
 
     assert result == {"7": ["seed"], "8": ["u_a1", "u_a2"], "9": ["u_b1", "u_b2"]}
     assert residual_blocks == [["u_a1", "u_a2"], ["u_b1", "u_b2"]]
-    assert clusterer._last_incremental_residual_phase_b_telemetry == {
+    assert prediction_state.telemetry["incremental_residual_phase_b"] == {
         "residual_phase_b_signature_count": 4,
         "residual_phase_b_group_count": 2,
         "residual_phase_b_pair_count_before": 6,
@@ -2267,10 +2272,13 @@ def test_finish_incremental_with_seed_links_splits_residual_phase_b_by_first_ini
 
 
 def test_finish_incremental_with_seed_links_residual_phase_b_preserves_same_orcid_group():
+    prediction_state = PredictionState()
     clusterer = _build_minimal_incremental_clusterer()
     residual_blocks: list[list[str]] = []
 
-    def fake_predict_helper(block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None):
+    def fake_predict_helper(
+        block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None, prediction_state=None
+    ):
         del dataset, partial_supervision, runtime_context, total_ram_bytes
         residual_block = list(block_dict["block"])
         residual_blocks.append(residual_block)
@@ -2308,12 +2316,13 @@ def test_finish_incremental_with_seed_links_residual_phase_b_preserves_same_orci
         False,
         {},
         runtime_context=cast(Any, object()),
+        prediction_state=prediction_state,
     )
 
     assert result == {"7": ["seed"], "8": ["u_a", "u_b"]}
     assert residual_blocks == [["u_a", "u_b"]]
-    assert clusterer._last_incremental_residual_phase_b_telemetry["residual_phase_b_group_count"] == 1
-    assert clusterer._last_incremental_residual_phase_b_telemetry["residual_phase_b_pair_count_saved"] == 0
+    assert prediction_state.telemetry["incremental_residual_phase_b"]["residual_phase_b_group_count"] == 1
+    assert prediction_state.telemetry["incremental_residual_phase_b"]["residual_phase_b_pair_count_saved"] == 0
 
 
 def test_build_incremental_seed_setup_uses_arrow_dataset_for_altered_profile_reclustering(tmp_path: Path):
@@ -2558,6 +2567,7 @@ def test_predict_from_rust_featurizer_does_not_posthoc_merge_when_incremental_do
         *,
         block_key,
         incremental_dont_use_cluster_seeds,
+        prediction_state=None,
     ):
         del self, block_signatures, dist_matrix, cluster_model_params, all_disallow_signature_ids, block_key
         captured["cluster_seeds_require"] = dict(dataset.cluster_seeds_require)
@@ -2617,7 +2627,9 @@ def test_top1_consensus_broadcast_only_applies_when_cluster_members_agree():
         clusterer = _build_minimal_incremental_clusterer()
         clusterer.incremental_precluster_broadcast_mode = mode
 
-        def fake_predict_helper(block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None):
+        def fake_predict_helper(
+            block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None, prediction_state=None
+        ):
             del dataset, partial_supervision, runtime_context, total_ram_bytes
             if "incremental_unassigned" in block_dict:
                 return {"incremental_cluster": list(block_dict["incremental_unassigned"])}, None
@@ -2687,7 +2699,9 @@ def test_precluster_broadcast_preserves_min_score_semantics():
         clusterer.incremental_seed_score_mode = seed_score_mode
         clusterer.incremental_mean_min_hybrid_weight = mean_min_hybrid_weight
 
-        def fake_predict_helper(block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None):
+        def fake_predict_helper(
+            block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None, prediction_state=None
+        ):
             del dataset, partial_supervision, runtime_context, total_ram_bytes
             if "incremental_unassigned" in block_dict:
                 return {"incremental_cluster": list(block_dict["incremental_unassigned"])}, None

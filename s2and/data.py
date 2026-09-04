@@ -1421,6 +1421,32 @@ class ANDData:
         -------
         float: the constraint value
         """
+        return self._get_constraint(
+            signature_id_1,
+            signature_id_2,
+            cluster_seeds_require=self.cluster_seeds_require,
+            cluster_seeds_disallow=self.cluster_seeds_disallow,
+            low_value=low_value,
+            high_value=high_value,
+            dont_merge_cluster_seeds=dont_merge_cluster_seeds,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            suppress_orcid=suppress_orcid,
+        )
+
+    def _get_constraint(
+        self,
+        signature_id_1: str,
+        signature_id_2: str,
+        *,
+        cluster_seeds_require: Mapping[str, int | str],
+        cluster_seeds_disallow: set[tuple[str, str]],
+        low_value: float | int = 0,
+        high_value: float | int = LARGE_DISTANCE,
+        dont_merge_cluster_seeds: bool = True,
+        incremental_dont_use_cluster_seeds: bool = False,
+        suppress_orcid: bool = False,
+    ) -> float | None:
+        """Apply hard constraints using explicitly supplied seed state."""
         signature_1 = self.signatures[signature_id_1]
         signature_2 = self.signatures[signature_id_2]
 
@@ -1453,20 +1479,20 @@ class ANDData:
 
         # Explicit disallow pairs are hard negatives; the incremental flag only
         # suppresses seed-cluster require groups and derived cross-group disallows.
-        if (signature_id_1, signature_id_2) in self.cluster_seeds_disallow or (
+        if (signature_id_1, signature_id_2) in cluster_seeds_disallow or (
             signature_id_2,
             signature_id_1,
-        ) in self.cluster_seeds_disallow:
+        ) in cluster_seeds_disallow:
             return CLUSTER_SEEDS_LOOKUP["disallow"]
-        elif (
-            self.cluster_seeds_require.get(signature_id_1, -1) == self.cluster_seeds_require.get(signature_id_2, -2)
-        ) and (not incremental_dont_use_cluster_seeds):
+        elif (cluster_seeds_require.get(signature_id_1, -1) == cluster_seeds_require.get(signature_id_2, -2)) and (
+            not incremental_dont_use_cluster_seeds
+        ):
             return CLUSTER_SEEDS_LOOKUP["require"]
         elif (
             dont_merge_cluster_seeds
             and (not incremental_dont_use_cluster_seeds)
-            and (signature_id_1 in self.cluster_seeds_require and signature_id_2 in self.cluster_seeds_require)
-            and (self.cluster_seeds_require[signature_id_1] != self.cluster_seeds_require[signature_id_2])
+            and (signature_id_1 in cluster_seeds_require and signature_id_2 in cluster_seeds_require)
+            and (cluster_seeds_require[signature_id_1] != cluster_seeds_require[signature_id_2])
         ):
             return CLUSTER_SEEDS_LOOKUP["disallow"]
         # orcid is a very reliable indicator: if 2 orcids are present and equal, then they are the same person

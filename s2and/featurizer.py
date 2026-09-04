@@ -938,10 +938,7 @@ def _execute_rust_batch_featurization_phase(
         if rss_now > rust_batch_rss_peak_bytes:
             rust_batch_rss_peak_bytes = rss_now
 
-    rust_featurizer = feature_port._get_rust_featurizer(
-        dataset,
-        runtime_context=runtime_context,
-    )
+    rust_featurizer = feature_port._get_rust_feature_data(dataset)
     rust_selected_indices: list[int] | None = None
     if len(indices_needed_for_compute) > 0:
         rust_selected_indices = indices_needed_for_compute
@@ -1181,10 +1178,7 @@ def many_pairs_featurize(
     if _use_rust_featurizer(runtime_context, dataset):
         try:
             # Prewarm so the Arrow featurizer build doesn't land inside the RSS measurement window.
-            feature_port._get_rust_featurizer(
-                dataset,
-                runtime_context=runtime_context,
-            )
+            feature_port._get_rust_feature_data(dataset)
             rust_module_available = True
         except Exception as exc:
             raise RuntimeError(f"Rust featurizer init failed (run_id={runtime_context.run_id} error={exc})") from exc

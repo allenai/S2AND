@@ -14,6 +14,23 @@ The component behavior in this document is implemented, but a releasable v1.3
 bundle does not yet exist. Use [release.md](release.md) for
 execution order and acceptance requirements.
 
+## Prediction state ownership
+
+Prediction orchestration keeps effective seed assignments, disallow pairs,
+altered-profile overrides, and internal diagnostics in request-owned state.
+Bulk subblocking builds synthetic seeds from its completed subblocks without
+temporarily replacing the seed collections on `ANDData`. Nested predictions
+and failed subblock calls therefore leave the dataset's original seed
+collections intact.
+
+Prepared Rust feature data is reusable; the effective seed constraints belong
+to the prediction using it. Python orchestration passes those constraints at
+the Rust boundary instead of installing request overrides into cached feature
+data. The public prediction entry points retain their existing contracts.
+
+This ownership boundary is not a general thread-safety guarantee for every
+classifier or cache supplied by an application.
+
 ## Complete model bundles
 
 The public loader accepts one format: an explicit, complete, canonical native

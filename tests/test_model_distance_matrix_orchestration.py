@@ -11,6 +11,7 @@ from s2and.consts import LARGE_DISTANCE
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
+from s2and.prediction_state import PredictionState
 from s2and.runtime import RuntimeContext
 from tests.helpers import build_dummy_dataset
 
@@ -198,6 +199,7 @@ def test_fastcluster_rejects_native_constraint_count_mismatch(
 def test_predict_from_rust_featurizer_streams_only_nontrivial_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    prediction_state = PredictionState()
     make_calls: list[tuple[str, ...]] = []
     cluster_calls: list[tuple[str, tuple[str, ...]]] = []
     shared_index = {str(index): index for index in range(5)}
@@ -217,7 +219,7 @@ def test_predict_from_rust_featurizer_streams_only_nontrivial_blocks(
         make_calls.append(tuple(block_dict))
         assert kwargs["signature_index_by_id"] is shared_index
         block_key, signatures = next(iter(block_dict.items()))
-        self._last_rust_featurizer_make_dists_telemetry = {
+        kwargs["prediction_state"].telemetry["rust_featurizer_make_dists"] = {
             "block_count": 1,
             "pair_count": len(signatures) * (len(signatures) - 1) // 2,
         }
@@ -242,7 +244,7 @@ def test_predict_from_rust_featurizer_streams_only_nontrivial_blocks(
     monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", cluster_block)
 
     clusterer = _clusterer(cluster_model=None)
-    result, dists = clusterer.predict_from_rust_featurizer(
+    result, dists = clusterer._predict_from_rust_featurizer(
         {
             "empty": [],
             "singleton": ["4"],
@@ -251,6 +253,7 @@ def test_predict_from_rust_featurizer_streams_only_nontrivial_blocks(
         },
         object(),
         cluster_seeds_require={},
+        prediction_state=prediction_state,
     )
 
     assert dists is None
@@ -262,7 +265,7 @@ def test_predict_from_rust_featurizer_streams_only_nontrivial_blocks(
         "a_0": ["0", "1"],
         "b_0": ["2", "3"],
     }
-    telemetry = clusterer._last_rust_featurizer_predict_telemetry
+    telemetry = prediction_state.telemetry["rust_featurizer_predict"]
     assert telemetry["make_dists_block_count"] == 4
     assert telemetry["make_dists_pair_count"] == 2
 
@@ -270,6 +273,8 @@ def test_predict_from_rust_featurizer_streams_only_nontrivial_blocks(
 def test_predict_from_rust_featurizer_skips_setup_for_only_trivial_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    prediction_state = PredictionState()
+
     def unexpected(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("trivial blocks must not run pairwise prediction setup")
 
@@ -278,15 +283,16 @@ def test_predict_from_rust_featurizer_skips_setup_for_only_trivial_blocks(
     monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", unexpected)
 
     clusterer = _clusterer(cluster_model=None)
-    result, dists = clusterer.predict_from_rust_featurizer(
+    result, dists = clusterer._predict_from_rust_featurizer(
         {"empty": [], "first": ["0"], "second": ["1"]},
         object(),
         cluster_seeds_require={},
+        prediction_state=prediction_state,
     )
 
     assert dists is None
     assert result == {"first_0": ["0"], "second_0": ["1"]}
-    telemetry = clusterer._last_rust_featurizer_predict_telemetry
+    telemetry = prediction_state.telemetry["rust_featurizer_predict"]
     assert telemetry["make_dists_block_count"] == 3
     assert telemetry["make_dists_pair_count"] == 0
 
@@ -366,3 +372,49 @@ def test_native_seed_map_is_forwarded_without_python_pair_expansion(
         "2": "c1",
         "3": "c1",
     }
+
+
+@pytest.mark.parametrize("fail_nested", [False, True])
+def test_rust_prediction_telemetry_isolated_during_nested_request(
+    monkeypatch: pytest.MonkeyPatch, fail_nested: bool
+) -> None:
+    """An interleaved request, including failure, cannot overwrite outer diagnostics."""
+    clusterer = _clusterer(cluster_model=None)
+    original_attributes = dict(vars(clusterer))
+    outer_state = PredictionState()
+    nested_state = PredictionState()
+    featurizer = SimpleNamespace(signature_ids=lambda: ["0", "1", "2"])
+
+    def make_dists(self: Clusterer, blocks: dict[str, list[str]], native: object, **kwargs: Any):
+        state = kwargs["prediction_state"]
+        block_key, signatures = next(iter(blocks.items()))
+        state.telemetry["rust_featurizer_make_dists"] = {"request_marker": block_key}
+        if block_key == "outer":
+            try:
+                self._predict_from_rust_featurizer(
+                    {"nested": ["0", "1", "2"]},
+                    native,
+                    cluster_seeds_require={},
+                    prediction_state=nested_state,
+                )
+            except RuntimeError as error:
+                assert fail_nested
+                assert str(error) == "injected nested failure"
+        elif fail_nested:
+            raise RuntimeError("injected nested failure")
+        return {block_key: np.zeros((len(signatures), len(signatures)))}
+
+    monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", make_dists)
+    monkeypatch.setattr(
+        Clusterer, "_cluster_one_block_with_logging", lambda _self, signatures, *_args, **_kwargs: [0] * len(signatures)
+    )
+    clusters, _ = clusterer._predict_from_rust_featurizer(
+        {"outer": ["0", "1"]},
+        featurizer,
+        cluster_seeds_require={},
+        prediction_state=outer_state,
+    )
+    assert clusters == {"outer_0": ["0", "1"]}
+    assert outer_state.telemetry["rust_featurizer_predict"]["make_dists_request_marker"] == "outer"
+    assert nested_state.telemetry["rust_featurizer_make_dists"]["request_marker"] == "nested"
+    assert vars(clusterer) == original_attributes

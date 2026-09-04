@@ -123,7 +123,7 @@ def test_rust_batch_uses_configured_plan_and_chunks_for_progress(monkeypatch):
     monkeypatch.setattr(feature_port, "s2and_rust", object())
     monkeypatch.setattr(
         feature_port,
-        "_get_rust_featurizer",
+        "_get_rust_feature_data",
         lambda _dataset, **_kw: fake_rust_featurizer,
     )
 
@@ -171,7 +171,7 @@ def test_rust_batch_indexed_api_normalizes_integer_signature_ids(monkeypatch):
     monkeypatch.setattr(feature_port, "s2and_rust", object())
     monkeypatch.setattr(
         feature_port,
-        "_get_rust_featurizer",
+        "_get_rust_feature_data",
         lambda _dataset, **_kw: fake_rust_featurizer,
     )
 

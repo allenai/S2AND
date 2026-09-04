@@ -26,6 +26,7 @@ from s2and.incremental_linking.feature_block_arrow import write_raw_arrow_batch_
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
 from s2and.model import Clusterer, FastCluster
+from s2and.prediction_state import PredictionState
 from s2and.production_bundle import finalize_production_bundle, write_pairwise_production_bundle
 from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION
 from s2and.production_model import canonical_artifact_hashes, load_production_model, pairwise_bundle_binding
@@ -203,16 +204,18 @@ def _bulk_smoke_summary(
     *,
     label: str,
 ) -> dict[str, int]:
-    clusters, _ = clusterer.predict_from_arrow(
+    prediction_state = PredictionState()
+    clusters, _ = clusterer._predict_from_arrow_request(
         {"smoke": signature_ids},
         arrow_dataset,
         runtime_context=build_runtime_context(label, backend="rust"),
         total_ram_bytes=SMOKE_TOTAL_RAM_BYTES,
+        prediction_state=prediction_state,
     )
     clustered_ids = [str(signature_id) for members in clusters.values() for signature_id in members]
     if len(clustered_ids) != len(signature_ids) or set(clustered_ids) != set(signature_ids):
         raise RuntimeError(f"{label} returned an invalid partition: {clusters}")
-    pair_count = clusterer._last_arrow_predict_telemetry["rust_make_dists_pair_count"]
+    pair_count = prediction_state.telemetry["arrow_predict"]["rust_make_dists_pair_count"]
     if pair_count != 3:
         raise RuntimeError(f"{label} did not score all three pairs: {pair_count}")
     return {

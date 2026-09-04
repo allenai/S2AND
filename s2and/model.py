@@ -30,6 +30,7 @@ from s2and.consts import (
 from s2and.data import ANDData
 from s2and.eval import b3_precision_recall_fscore
 from s2and.feature_port import (
+    _get_rust_feature_data,
     _get_rust_featurizer,
     build_rust_featurizer_from_arrow_dataset,
 )
@@ -58,6 +59,7 @@ from s2and.incremental_linking.production import (
 from s2and.model_pairwise import FastCluster, intify, predict_pairwise_class0
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
+from s2and.prediction_state import PredictionState
 from s2and.runtime import (
     RuntimeContext,
     build_runtime_context,
@@ -477,6 +479,15 @@ def _normalize_cluster_seeds_require(cluster_seeds_require: Mapping[Any, Any]) -
     """Return the seed map with the same string policy used by Arrow sidecars."""
 
     return {str(signature_id): str(cluster_id) for signature_id, cluster_id in cluster_seeds_require.items()}
+
+
+def _prediction_state_from_dataset(dataset: ANDData) -> PredictionState:
+    """Snapshot prediction inputs without changing the dataset's collections."""
+    return PredictionState(
+        cluster_seeds_require=dict(dataset.cluster_seeds_require),
+        cluster_seeds_disallow=set(dataset.cluster_seeds_disallow),
+        altered_cluster_signatures=list(_dataset_altered_cluster_signatures(dataset)),
+    )
 
 
 def _cluster_seeds_require_inverse(
@@ -1155,6 +1166,7 @@ def _initialize_incremental_constraint_backend(
     *,
     use_default_constraints_as_supervision: bool,
     runtime_context: RuntimeContext,
+    prediction_state: PredictionState | None = None,
 ) -> tuple[object | None, bool | None]:
     if not use_default_constraints_as_supervision:
         return None, None
@@ -1163,7 +1175,7 @@ def _initialize_incremental_constraint_backend(
     if not use_rust_constraints:
         return None, False
 
-    return _get_rust_featurizer(dataset, runtime_context=runtime_context), True
+    return _get_rust_featurizer(dataset, runtime_context=runtime_context, prediction_state=prediction_state), True
 
 
 def _resolve_constraint_api_mode(
@@ -1186,12 +1198,14 @@ def _build_incremental_constraint_backend(
     use_default_constraints_as_supervision: bool,
     runtime_context: RuntimeContext,
     suppress_orcid: bool = False,
+    prediction_state: PredictionState | None = None,
 ) -> _IncrementalConstraintBackend:
     """Build Phase A constraint backend state once for reuse across subblocks."""
     rust_featurizer, use_rust_constraints = _initialize_incremental_constraint_backend(
         dataset,
         use_default_constraints_as_supervision=use_default_constraints_as_supervision,
         runtime_context=runtime_context,
+        prediction_state=prediction_state,
     )
     constraint_api_mode = _resolve_constraint_api_mode(rust_featurizer, use_rust_constraints)
     signature_index_by_id: dict[str, int] | None = None
@@ -1203,6 +1217,7 @@ def _build_incremental_constraint_backend(
         constraint_api_mode=constraint_api_mode,
         signature_index_by_id=signature_index_by_id,
         suppress_orcid=suppress_orcid,
+        prediction_state=prediction_state,
     )
 
 
@@ -1220,9 +1235,11 @@ def _resolve_constraint_labels_batch(
     num_threads: int | None = None,
     constraint_api_mode: str | None = None,
     signature_index_by_id: dict[str, int] | None = None,
+    prediction_state: PredictionState | None = None,
 ) -> tuple[list[float], _ConstraintBatchTelemetry]:
     if constraint_backend is not None:
         rust_featurizer = constraint_backend.rust_featurizer
+        prediction_state = constraint_backend.prediction_state
         use_rust_constraints = constraint_backend.use_rust_constraints
         constraint_policy = _ConstraintPolicy(
             dont_merge_cluster_seeds=constraint_policy.dont_merge_cluster_seeds,
@@ -1270,6 +1287,19 @@ def _resolve_constraint_labels_batch(
     values: list[float | None]
 
     def _resolve_values_python() -> list[float | None]:
+        if prediction_state is not None:
+            return [
+                dataset._get_constraint(
+                    s1,
+                    s2,
+                    cluster_seeds_require=prediction_state.cluster_seeds_require,
+                    cluster_seeds_disallow=prediction_state.cluster_seeds_disallow,
+                    dont_merge_cluster_seeds=constraint_policy.dont_merge_cluster_seeds,
+                    incremental_dont_use_cluster_seeds=constraint_policy.incremental_dont_use_cluster_seeds,
+                    suppress_orcid=constraint_policy.suppress_orcid,
+                )
+                for s1, s2 in unresolved_pairs
+            ]
         return [
             dataset.get_constraint(
                 s1,
@@ -1399,6 +1429,7 @@ class _IncrementalConstraintBackend:
     constraint_api_mode: str
     signature_index_by_id: dict[str, int] | None
     suppress_orcid: bool = False
+    prediction_state: PredictionState | None = None
 
 
 @dataclass
@@ -1692,6 +1723,7 @@ class Clusterer:
         *,
         incremental_dont_use_cluster_seeds: bool,
         constraint_backend: _IncrementalConstraintBackend,
+        prediction_state: PredictionState | None = None,
     ) -> tuple[list[float], _ConstraintBatchTelemetry]:
         return _resolve_constraint_labels_batch(
             dataset,
@@ -1706,6 +1738,7 @@ class Clusterer:
             ),
             runtime_context=runtime_context,
             num_threads=self.n_jobs,
+            prediction_state=prediction_state,
         )
 
     def _flush_completed_block(
@@ -1719,6 +1752,7 @@ class Clusterer:
         all_disallow_signature_ids: set[str],
         pred_clusters: defaultdict[str, list[str]],
         incremental_dont_use_cluster_seeds: bool,
+        prediction_state: PredictionState | None = None,
     ) -> None:
         if block_key == "" or pairwise_proba is None:
             return
@@ -1733,6 +1767,7 @@ class Clusterer:
             all_disallow_signature_ids,
             block_key=block_key,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            prediction_state=prediction_state,
         )
         for signature, label in zip(block_dict[block_key], labels, strict=True):
             pred_clusters[block_key + "_" + str(label)].append(signature)
@@ -1745,6 +1780,7 @@ class Clusterer:
         incremental_dont_use_cluster_seeds: bool = False,
         runtime_context: RuntimeContext | None = None,
         pair_chunk_size: int | None = None,
+        prediction_state: PredictionState | None = None,
     ):
         """
         Helper generator function to yield one pair for batch featurization on the fly
@@ -1773,6 +1809,7 @@ class Clusterer:
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
             runtime_context=runtime_context,
             suppress_orcid=getattr(self, "suppress_orcid", False),
+            prediction_state=prediction_state,
         )
 
         telemetry = _ConstraintTelemetryAccumulator()
@@ -1884,6 +1921,7 @@ class Clusterer:
         incremental_dont_use_cluster_seeds: bool = False,
         runtime_context: RuntimeContext | None = None,
         pair_chunk_size: int | None = None,
+        prediction_state: PredictionState | None = None,
     ):
         if runtime_context is None:
             runtime_context = build_runtime_context("constraints", backend="rust")
@@ -1895,6 +1933,7 @@ class Clusterer:
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
             runtime_context=runtime_context,
             suppress_orcid=getattr(self, "suppress_orcid", False),
+            prediction_state=prediction_state,
         )
         rust_featurizer = constraint_backend.rust_featurizer
         constraint_api_mode = constraint_backend.constraint_api_mode
@@ -2027,10 +2066,7 @@ class Clusterer:
     ) -> tuple[np.ndarray, float]:
         if chunk.block_signature_indices is not None and chunk.pair_ids is None:
             try:
-                rust_featurizer = _get_rust_featurizer(
-                    dataset,
-                    runtime_context=runtime_context,
-                )
+                rust_featurizer = _get_rust_feature_data(dataset)
                 selected_indices = _selected_feature_indices(self.featurizer_info)
                 nameless_selected_indices = (
                     _selected_feature_indices(self.nameless_featurizer_info)
@@ -2097,6 +2133,7 @@ class Clusterer:
         runtime_context: RuntimeContext,
         pair_chunk_size: int | None = None,
         total_ram_bytes: int | None = None,
+        prediction_state: PredictionState | None = None,
     ):
         chunk_count = 0
         helper_output = self._distance_matrix_chunk_helper_rust(
@@ -2106,6 +2143,7 @@ class Clusterer:
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             runtime_context=runtime_context,
             pair_chunk_size=pair_chunk_size,
+            prediction_state=prediction_state,
         )
         for chunk in helper_output:
             batch_predictions, batch_seconds = self._predict_distance_matrix_chunk(
@@ -2144,6 +2182,7 @@ class Clusterer:
         num_pairs: int,
         pair_chunk_size: int | None = None,
         total_ram_bytes: int | None = None,
+        prediction_state: PredictionState | None = None,
     ):
         helper_output = self.distance_matrix_helper(
             block_dict,
@@ -2152,6 +2191,7 @@ class Clusterer:
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             runtime_context=runtime_context,
             pair_chunk_size=pair_chunk_size,
+            prediction_state=prediction_state,
         )
         batch_num = 0
         effective_pair_chunk_size = max(1, int(pair_chunk_size if pair_chunk_size is not None else self.batch_size))
@@ -2222,6 +2262,7 @@ class Clusterer:
         tqdm_desc: str = "Writing matrices",
         pair_chunk_size: int | None = None,
         total_ram_bytes: int | None = None,
+        prediction_state: PredictionState | None = None,
     ) -> float:
         model_predict_seconds = 0.0
         prev_block_key = ""
@@ -2234,6 +2275,7 @@ class Clusterer:
             num_pairs=num_pairs,
             pair_chunk_size=pair_chunk_size,
             total_ram_bytes=total_ram_bytes,
+            prediction_state=prediction_state,
         ):
             model_predict_seconds += batch.batch_seconds
             batch_iter = tqdm(
@@ -2285,7 +2327,8 @@ class Clusterer:
 
         Returns
         -------
-        Dict: the distance matrix dictionary, keyed by block key
+        Dict: the distance matrix dictionary, keyed by block key. FastCluster
+            condensed matrices use float64, matching streaming prediction.
         """
         require_dataset_name_counts_binding_for_clusterer(
             self,
@@ -2311,7 +2354,9 @@ class Clusterer:
         # initialize pairwise_probas with correctly size arrays
         pairwise_probas = {}
         num_pairs = 0
-        fastcluster_dtype = np.float64 if use_rust_blockwise else np.float16
+        # Calibration and cached prediction must retain the same precision as
+        # streaming inference; float16 rounding can change threshold decisions.
+        fastcluster_dtype = np.float64
         for block_key, signatures in block_dict.items():
             block_size = len(signatures)
             num_pairs += int(block_size * (block_size - 1) / 2)
@@ -2476,8 +2521,12 @@ class Clusterer:
         pair_chunk_size: int | None = None,
         total_ram_bytes: int | None = None,
         signature_index_by_id: Mapping[str, int] | None = None,
+        prediction_state: PredictionState | None = None,
     ) -> dict[str, np.ndarray]:
         """Build matrices after the request boundary verified the featurizer binding."""
+
+        if prediction_state is None:
+            prediction_state = PredictionState()
 
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict_rust_featurizer", backend="rust")
@@ -2688,7 +2737,7 @@ class Clusterer:
             "chunk_count": int(chunk_count),
             "resolved_pair_chunk_size": int(resolved_pair_chunk_size),
         }
-        self._last_rust_featurizer_make_dists_telemetry = telemetry
+        prediction_state.telemetry["rust_featurizer_make_dists"] = telemetry
         logger.info(
             "Telemetry stage: stage=rust_featurizer_make_dists total_seconds=%.3f "
             "constraint_seconds=%.3f upper_triangle_index_seconds=%.3f "
@@ -2724,6 +2773,39 @@ class Clusterer:
         cluster_seeds_disallow: set[tuple[str, str]] | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """Predict full blocks from an already-built Rust featurizer."""
+
+        return Clusterer._predict_from_rust_featurizer(
+            self,
+            block_dict=block_dict,
+            rust_featurizer=rust_featurizer,
+            dists=dists,
+            cluster_model_params=cluster_model_params,
+            partial_supervision=partial_supervision,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+            total_ram_bytes=total_ram_bytes,
+            cluster_seeds_require=cluster_seeds_require,
+            cluster_seeds_disallow=cluster_seeds_disallow,
+        )
+
+    def _predict_from_rust_featurizer(
+        self,
+        block_dict: dict[str, list[str]],
+        rust_featurizer: object,
+        dists: dict[str, np.ndarray] | None = None,
+        cluster_model_params: dict[str, Any] | None = None,
+        partial_supervision: dict[tuple[str, str], int | float] | None = None,
+        incremental_dont_use_cluster_seeds: bool = False,
+        runtime_context: RuntimeContext | None = None,
+        total_ram_bytes: int | None = None,
+        cluster_seeds_require: Mapping[str, int | str] | None = None,
+        cluster_seeds_disallow: set[tuple[str, str]] | None = None,
+        prediction_state: PredictionState | None = None,
+    ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
+        """Predict full blocks from an already-built Rust featurizer."""
+
+        if prediction_state is None:
+            prediction_state = PredictionState()
 
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict_rust_featurizer", backend="rust")
@@ -2771,6 +2853,7 @@ class Clusterer:
             total_ram_bytes=total_ram_bytes,
             explicit_cluster_seeds_require=explicit_cluster_seeds_require,
             resolved_cluster_seeds_disallow=resolved_cluster_seeds_disallow,
+            prediction_state=prediction_state,
         )
 
     def _predict_from_prepared_rust_featurizer(
@@ -2787,8 +2870,12 @@ class Clusterer:
         total_ram_bytes: int | None,
         explicit_cluster_seeds_require: dict[str, int | str] | None,
         resolved_cluster_seeds_disallow: set[tuple[str, str]],
+        prediction_state: PredictionState | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """Predict with request metadata already exported from a Rust featurizer."""
+
+        if prediction_state is None:
+            prediction_state = PredictionState()
 
         built_dists = dists is None
         if built_dists:
@@ -2843,9 +2930,10 @@ class Clusterer:
                     runtime_context=runtime_context,
                     total_ram_bytes=total_ram_bytes,
                     signature_index_by_id=signature_index_by_id,
+                    prediction_state=prediction_state,
                 )
                 make_dists_seconds += time.perf_counter() - make_block_start
-                block_make_dists_telemetry = dict(getattr(self, "_last_rust_featurizer_make_dists_telemetry", {}) or {})
+                block_make_dists_telemetry = dict(prediction_state.telemetry.get("rust_featurizer_make_dists", {}))
                 for key, value in block_make_dists_telemetry.items():
                     if isinstance(value, int | float) and not isinstance(value, bool):
                         make_dists_telemetry[key] = float(make_dists_telemetry.get(key, 0.0)) + float(value)
@@ -2897,7 +2985,7 @@ class Clusterer:
             "pair_count": int(sum(len(signatures) * (len(signatures) - 1) // 2 for signatures in block_dict.values())),
             **{f"make_dists_{key}": value for key, value in make_dists_telemetry.items()},
         }
-        self._last_rust_featurizer_predict_telemetry = telemetry
+        prediction_state.telemetry["rust_featurizer_predict"] = telemetry
         logger.info(
             "Telemetry stage: stage=rust_featurizer_predict make_dists_seconds=%.3f "
             "cluster_from_dists_seconds=%.3f blocks=%d pairs=%d",
@@ -2915,8 +3003,12 @@ class Clusterer:
         *,
         batching_threshold: int,
         cluster_seeds_require: Mapping[str, int | str],
+        prediction_state: PredictionState | None = None,
     ) -> dict[str, list[str]]:
         """Partition oversized blocks without splitting required seed components."""
+
+        if prediction_state is None:
+            prediction_state = PredictionState()
 
         subblocked: dict[str, list[str]] = {}
         telemetry_by_block: dict[str, dict[str, Any]] = {}
@@ -3048,7 +3140,7 @@ class Clusterer:
             )
             telemetry_by_block[block_key] = block_telemetry
 
-        self._last_rust_arrow_subblocking_telemetry = {
+        prediction_state.telemetry["rust_arrow_subblocking"] = {
             "enabled": 1,
             "maximum_size": int(batching_threshold),
             "input_block_count": int(len(block_dict)),
@@ -3163,8 +3255,12 @@ class Clusterer:
         signature_ids: list[str],
         needs_subblocking: bool,
         prediction_cluster_seeds_require: dict[str, int | str] | None,
+        prediction_state: PredictionState | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """Run native subblocking and prediction from one request-bound Arrow view."""
+
+        if prediction_state is None:
+            prediction_state = PredictionState()
 
         arrow_subblocking_seconds = 0.0
         block_dict_multiple_letter: dict[str, list[str]] | None = None
@@ -3207,6 +3303,7 @@ class Clusterer:
                 arrow_lease,
                 batching_threshold=batching_threshold,
                 cluster_seeds_require=atomic_cluster_seeds_require,
+                prediction_state=prediction_state,
             )
             representative_signature_ids = [
                 str(signatures[0]) for signatures in block_dict_subblocked.values() if signatures
@@ -3241,7 +3338,7 @@ class Clusterer:
             # API. Freeze canonical aliases once so each pass can reuse them.
             prediction_name_tuples = frozenset(_name_tuples_for_incremental_rules(name_tuples))
         else:
-            self._last_rust_arrow_subblocking_telemetry = {
+            prediction_state.telemetry["rust_arrow_subblocking"] = {
                 "enabled": 0,
                 "maximum_size": batching_threshold,
                 "oversized_block_count": 0,
@@ -3288,6 +3385,7 @@ class Clusterer:
                 rust_featurizer=rust_featurizer,
                 cluster_seeds_disallow=cluster_seed_disallows,
                 explicit_cluster_seeds_require=None,
+                prediction_state=prediction_state,
             )
             # The sequential attachment path constructs a request-local planner
             # for each initial-only group. Release the bulk native state first so
@@ -3307,7 +3405,7 @@ class Clusterer:
             )
             result = dict(pred_clusters), None
         else:
-            result = self.predict_from_rust_featurizer(
+            result = self._predict_from_rust_featurizer(
                 block_dict,
                 rust_featurizer,
                 dists=dists,
@@ -3318,9 +3416,10 @@ class Clusterer:
                 total_ram_bytes=total_ram_bytes,
                 cluster_seeds_require=None,
                 cluster_seeds_disallow=cluster_seed_disallows,
+                prediction_state=prediction_state,
             )
         predict_seconds = time.perf_counter() - predict_start
-        nested_telemetry = dict(getattr(self, "_last_rust_featurizer_predict_telemetry", {}) or {})
+        nested_telemetry = dict(prediction_state.telemetry.get("rust_featurizer_predict", {}))
         telemetry = {
             "arrow_subblocking_seconds": float(arrow_subblocking_seconds),
             "arrow_featurizer_seconds": float(arrow_featurizer_seconds),
@@ -3332,7 +3431,7 @@ class Clusterer:
             "pair_count": int(sum(len(signatures) * (len(signatures) - 1) // 2 for signatures in block_dict.values())),
             **{f"rust_{key}": value for key, value in nested_telemetry.items()},
         }
-        self._last_arrow_predict_telemetry = telemetry
+        prediction_state.telemetry["arrow_predict"] = telemetry
         logger.info(
             "Telemetry stage: stage=arrow_predict_total total_seconds=%.3f "
             "arrow_subblocking_seconds=%.3f arrow_featurizer_seconds=%.3f "
@@ -3378,8 +3477,62 @@ class Clusterer:
                 components must be naturally pre-split before bulk subblocking.
 
         Returns:
+            Predicted clusters and optional precomputed distance matrices."""
+
+        return Clusterer._predict_from_arrow_request(
+            self,
+            block_dict=block_dict,
+            arrow_dataset=arrow_dataset,
+            dists=dists,
+            cluster_model_params=cluster_model_params,
+            partial_supervision=partial_supervision,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+            total_ram_bytes=total_ram_bytes,
+            batching_threshold=batching_threshold,
+            load_name_counts=load_name_counts,
+            name_tuples=name_tuples,
+            cluster_seeds_require=cluster_seeds_require,
+            cluster_seeds_disallow=cluster_seeds_disallow,
+            altered_cluster_signatures=altered_cluster_signatures,
+        )
+
+    def _predict_from_arrow_request(
+        self,
+        block_dict: dict[str, list[str]],
+        arrow_dataset: ArrowDataset,
+        dists: dict[str, np.ndarray] | None = None,
+        cluster_model_params: dict[str, Any] | None = None,
+        partial_supervision: dict[tuple[str, str], int | float] | None = None,
+        incremental_dont_use_cluster_seeds: bool = False,
+        runtime_context: RuntimeContext | None = None,
+        total_ram_bytes: int | None = None,
+        batching_threshold: int | None = None,
+        load_name_counts: bool | None = None,
+        name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
+        cluster_seeds_require: Mapping[Any, Any] | None = None,
+        cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None = None,
+        altered_cluster_signatures: Sequence[Any] | None = None,
+        prediction_state: PredictionState | None = None,
+    ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
+        """Predict blocks through one open Arrow dataset.
+
+        Args:
+            block_dict: Mapping from block keys to signature IDs.
+            arrow_dataset: Open immutable Arrow dataset.
+            batching_threshold: Maximum native subblock size. ``None`` keeps
+                full-block prediction; a positive value routes oversized blocks
+                through the Arrow-native Rust subblocker.
+            cluster_seeds_require: Current request-local required seed components.
+            altered_cluster_signatures: Claimed-profile signatures whose seed
+                components must be naturally pre-split before bulk subblocking.
+
+        Returns:
             Predicted clusters and optional precomputed distance matrices.
         """
+
+        if prediction_state is None:
+            prediction_state = PredictionState()
 
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict_from_arrow", backend="rust")
@@ -3467,13 +3620,13 @@ class Clusterer:
                     arrow_dataset=arrow_dataset,
                     cluster_seed_disallows=cluster_seed_disallows,
                 )
-                self._last_subblocked_altered_presplit_telemetry = {
+                prediction_state.telemetry["subblocked_altered_presplit"] = {
                     "bulk_altered_presplit_applied": int(bool(recluster_map)),
                     "bulk_altered_presplit_seconds": float(time.perf_counter() - presplit_start),
                 }
                 name_tuples = presplit_name_tuples
             else:
-                self._last_subblocked_altered_presplit_telemetry = {
+                prediction_state.telemetry["subblocked_altered_presplit"] = {
                     "bulk_altered_presplit_applied": 0,
                     "bulk_altered_presplit_seconds": 0.0,
                 }
@@ -3496,6 +3649,7 @@ class Clusterer:
                     signature_ids=signature_ids,
                     needs_subblocking=needs_subblocking,
                     prediction_cluster_seeds_require=prediction_cluster_seeds_require,
+                    prediction_state=prediction_state,
                 )
             with temporary_cluster_seed_sidecars(
                 prediction_cluster_seeds_require or {},
@@ -3520,6 +3674,7 @@ class Clusterer:
                     signature_ids=signature_ids,
                     needs_subblocking=needs_subblocking,
                     prediction_cluster_seeds_require=prediction_cluster_seeds_require,
+                    prediction_state=prediction_state,
                 )
 
     def fit(
@@ -3746,6 +3901,7 @@ class Clusterer:
         rust_featurizer: object | None = None,
         cluster_seeds_disallow: set[tuple[str, str]] | None = None,
         explicit_cluster_seeds_require: dict[str, int | str] | None = None,
+        prediction_state: PredictionState | None = None,
     ) -> dict[str, list[str]]:
         pred_clusters: dict[str, list[str]] = {}
         if len(block_dict_multiple_letter) == 0:
@@ -3776,6 +3932,7 @@ class Clusterer:
                 total_ram_bytes=total_ram_bytes,
                 explicit_cluster_seeds_require=explicit_cluster_seeds_require,
                 resolved_cluster_seeds_disallow=set(cluster_seeds_disallow or ()),
+                prediction_state=prediction_state,
             )
             logger.info("Finished Rust subblocks in %.3fs", time.time() - start)
             return pred_clusters_intermediate
@@ -3795,6 +3952,7 @@ class Clusterer:
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
+                prediction_state=prediction_state,
             )
             end = time.time()
             predict_times[block_key] = end - start
@@ -3816,61 +3974,45 @@ class Clusterer:
             return pred_clusters
 
         logger.info("Running predict incremental on subblocks with single letter first names")
-        cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
-        altered_cluster_signatures_was_present = hasattr(dataset, "altered_cluster_signatures")
-        altered_cluster_signatures_original = getattr(dataset, "altered_cluster_signatures", None)
-        dataset.cluster_seeds_require = {}
-        # This is bulk subblocking's synthetic incremental pass. The original altered-profile
-        # list and Arrow seed path are keyed to production claimed-profile seeds, not to
-        # these temporary clusters.
-        dataset.altered_cluster_signatures = []
         pred_clusters_intermediate: dict[str, list[str]] = pred_clusters
-        try:
-            for cluster_id, signatures in pred_clusters_intermediate.items():
-                for signature in signatures:
-                    dataset.cluster_seeds_require[signature] = cluster_id
-
-            predict_times: dict[str, float] = {}
-            for block_key in sorted(block_dict_single_letter.keys()):
-                block_signatures = block_dict_single_letter[block_key]
-                start_predict_time = time.time()
-                incremental_result = self.predict_incremental(
-                    block_signatures,
-                    dataset,
-                    prevent_new_incompatibilities=True,
-                    partial_supervision=partial_supervision,
-                    runtime_context=runtime_context,
-                    total_ram_bytes=total_ram_bytes,
+        predict_times: dict[str, float] = {}
+        for block_key in sorted(block_dict_single_letter):
+            # Synthetic seeds belong to this pass, not to claimed dataset profiles.
+            prediction_state = PredictionState(
+                cluster_seeds_require={
+                    signature: cluster_id
+                    for cluster_id, signatures in pred_clusters_intermediate.items()
+                    for signature in signatures
+                },
+                cluster_seeds_disallow=set(dataset.cluster_seeds_disallow),
+            )
+            start_predict_time = time.time()
+            incremental_result = self._predict_incremental_python(
+                block_dict_single_letter[block_key],
+                dataset,
+                prevent_new_incompatibilities=True,
+                partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+                total_ram_bytes=total_ram_bytes,
+                prediction_state=prediction_state,
+            )
+            clusters_payload = incremental_result.get("clusters")
+            if not isinstance(clusters_payload, dict):
+                raise RuntimeError(
+                    "predict_incremental returned invalid clusters payload; expected dict "
+                    f"got {type(clusters_payload).__name__}"
                 )
-                clusters_payload = incremental_result.get("clusters")
-                if not isinstance(clusters_payload, dict):
+            pred_clusters_intermediate = {}
+            for cluster_id, signatures in clusters_payload.items():
+                if not isinstance(signatures, list):
                     raise RuntimeError(
-                        "predict_incremental returned invalid clusters payload; expected dict "
-                        f"got {type(clusters_payload).__name__}"
+                        "predict_incremental returned invalid cluster member payload; expected list "
+                        f"for cluster_id={cluster_id!r}, got {type(signatures).__name__}"
                     )
-                pred_clusters_intermediate = {}
-                for cluster_id, signatures in clusters_payload.items():
-                    if not isinstance(signatures, list):
-                        raise RuntimeError(
-                            "predict_incremental returned invalid cluster member payload; expected list "
-                            f"for cluster_id={cluster_id!r}, got {type(signatures).__name__}"
-                        )
-                    pred_clusters_intermediate[str(cluster_id)] = [str(signature) for signature in signatures]
-                end_predict_time = time.time()
-                predict_times[block_key] = end_predict_time - start_predict_time
+                pred_clusters_intermediate[str(cluster_id)] = [str(signature) for signature in signatures]
+            predict_times[block_key] = time.time() - start_predict_time
 
-                dataset.cluster_seeds_require = {}
-                for cluster_id, signatures in pred_clusters_intermediate.items():
-                    for signature in signatures:
-                        dataset.cluster_seeds_require[signature] = cluster_id
-
-            logger.info(f"Finished subblocked predict incremental. Here's how long each subblock took: {predict_times}")
-        finally:
-            dataset.cluster_seeds_require = cluster_seeds_require_original
-            if altered_cluster_signatures_was_present:
-                dataset.altered_cluster_signatures = altered_cluster_signatures_original
-            elif hasattr(dataset, "altered_cluster_signatures"):
-                delattr(dataset, "altered_cluster_signatures")
+        logger.info(f"Finished subblocked predict incremental. Here's how long each subblock took: {predict_times}")
         return pred_clusters_intermediate
 
     def _predict_subblocked(
@@ -3886,12 +4028,15 @@ class Clusterer:
         runtime_context: RuntimeContext,
         dists: dict[str, np.ndarray] | None,
         total_ram_bytes: int | None,
+        prediction_state: PredictionState | None = None,
     ) -> tuple[dict[str, list[str]], None]:
         if stage_uses_rust(runtime_context):
             raise ValueError("Classic subblocked prediction requires a Python runtime context")
         assert batching_threshold > 0, "Batching threshold must be positive"
         assert dists is None, "If batching_threshold is not None, then can't use precomputed dists"
-        self._last_subblocked_altered_presplit_telemetry = {
+        if prediction_state is None:
+            prediction_state = _prediction_state_from_dataset(dataset)
+        prediction_state.telemetry["subblocked_altered_presplit"] = {
             "bulk_altered_presplit_applied": 0,
             "bulk_altered_presplit_seconds": 0.0,
         }
@@ -3920,6 +4065,7 @@ class Clusterer:
             rust_featurizer=None,
             cluster_seeds_disallow=set(),
             explicit_cluster_seeds_require=None,
+            prediction_state=prediction_state,
         )
         pred_clusters = self._predict_subblocked_single_letter_incremental_groups(
             block_dict_single_letter_first_names,
@@ -3986,6 +4132,7 @@ class Clusterer:
         elif stage_uses_rust(runtime_context):
             raise ValueError("Clusterer.predict operates on ANDData through Python; use predict_from_arrow for Rust")
 
+        prediction_state = _prediction_state_from_dataset(dataset)
         if partial_supervision is None:
             partial_supervision = {}
 
@@ -4008,6 +4155,7 @@ class Clusterer:
                 runtime_context=runtime_context,
                 dists=dists,
                 total_ram_bytes=total_ram_bytes,
+                prediction_state=prediction_state,
             )
 
         else:
@@ -4024,6 +4172,7 @@ class Clusterer:
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
+                prediction_state=prediction_state,
             )
             end = time.time()
             total_predict_time = end - start
@@ -4040,6 +4189,7 @@ class Clusterer:
         all_disallow_signature_ids: set[str],
         *,
         incremental_dont_use_cluster_seeds: bool = False,
+        prediction_state: PredictionState | None = None,
     ) -> list:
         """Cluster one block from a distance matrix and return labels."""
         if len(block_signatures) == 0:
@@ -4062,11 +4212,14 @@ class Clusterer:
         for i, loc in enumerate(negative_one_label_locations):
             labels[loc] = max_label + 1 + i
         if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds:
+            cluster_seeds_require = (
+                dataset.cluster_seeds_require if prediction_state is None else prediction_state.cluster_seeds_require
+            )
             disallow_signature_ids = all_disallow_signature_ids
             inverse_id_map = defaultdict(set)
             for signature_id, label in zip(block_signatures, labels, strict=True):
-                if signature_id in dataset.cluster_seeds_require and signature_id not in disallow_signature_ids:
-                    inverse_id_map[dataset.cluster_seeds_require[signature_id]].add(label)
+                if signature_id in cluster_seeds_require and signature_id not in disallow_signature_ids:
+                    inverse_id_map[cluster_seeds_require[signature_id]].add(label)
             # Clusters that should merge can still remain split after distance-based clustering.
             # This happens when required-pair zero distances are outweighed by many large distances
             # in average-linkage behavior. Post-hoc, merge label sets that overlap according to
@@ -4091,6 +4244,7 @@ class Clusterer:
         *,
         block_key: str,
         incremental_dont_use_cluster_seeds: bool,
+        prediction_state: PredictionState | None = None,
     ) -> list:
         """Cluster one block and emit explicit entry/exit logs around the cluster-model fit."""
         cluster_model_name = type(self.cluster_model).__name__
@@ -4108,6 +4262,7 @@ class Clusterer:
             dataset,
             all_disallow_signature_ids,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            prediction_state=prediction_state,
         )
         logger.info(
             "Finished cluster_model.fit for block %s using %s in %.3fs (clusters=%d)",
@@ -4129,6 +4284,7 @@ class Clusterer:
         incremental_dont_use_cluster_seeds: bool = False,
         runtime_context: RuntimeContext | None = None,
         total_ram_bytes: int | None = None,
+        prediction_state: PredictionState | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """
         Predicts clusters
@@ -4189,7 +4345,10 @@ class Clusterer:
         # pre-compute disallow set for post-hoc constraint merging
         all_disallow_signature_ids: set[str] = set()
         if self.use_default_constraints_as_supervision:
-            for sig_id_a, sig_id_b in dataset.cluster_seeds_disallow:
+            cluster_seeds_disallow = (
+                dataset.cluster_seeds_disallow if prediction_state is None else prediction_state.cluster_seeds_disallow
+            )
+            for sig_id_a, sig_id_b in cluster_seeds_disallow:
                 all_disallow_signature_ids.add(sig_id_a)
                 all_disallow_signature_ids.add(sig_id_b)
 
@@ -4217,6 +4376,7 @@ class Clusterer:
                     all_disallow_signature_ids,
                     block_key=block_key,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                    prediction_state=prediction_state,
                 )
                 for signature, label in zip(block_dict[block_key], labels, strict=True):
                     pred_clusters[block_key + "_" + str(label)].append(signature)
@@ -4274,6 +4434,7 @@ class Clusterer:
                 runtime_context=runtime_context,
                 pair_chunk_size=pair_chunk_size,
                 total_ram_bytes=total_ram_bytes,
+                prediction_state=prediction_state,
             ):
                 chunk = prediction_chunk.chunk
                 block_key = chunk.block_key
@@ -4288,6 +4449,7 @@ class Clusterer:
                         all_disallow_signature_ids=all_disallow_signature_ids,
                         pred_clusters=pred_clusters,
                         incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                        prediction_state=prediction_state,
                     )
                     pairwise_proba = None
 
@@ -4332,6 +4494,7 @@ class Clusterer:
                 all_disallow_signature_ids=all_disallow_signature_ids,
                 pred_clusters=pred_clusters,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                prediction_state=prediction_state,
             )
         else:
             block_pair_index = 0
@@ -4381,6 +4544,7 @@ class Clusterer:
                     all_disallow_signature_ids=all_disallow_signature_ids,
                     pred_clusters=pred_clusters,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                    prediction_state=prediction_state,
                 )
 
             model_predict_seconds += self._featurize_predict_write_batches(
@@ -4395,6 +4559,7 @@ class Clusterer:
                 post_block_callback=_post_block_callback,
                 pair_chunk_size=pair_chunk_size,
                 total_ram_bytes=total_ram_bytes,
+                prediction_state=prediction_state,
             )
 
         # handle singleton blocks (0 or 1 signature — never appeared in generator)
@@ -4418,6 +4583,7 @@ class Clusterer:
         total_ram_bytes: int | None = None,
         arrow_dataset: ArrowDataset | None = None,
         cluster_seed_disallows: set[tuple[str, str]] | None = None,
+        prediction_state: PredictionState | None = None,
     ) -> tuple[
         dict[str, int | str],
         dict[int | str, int | str],
@@ -4435,8 +4601,16 @@ class Clusterer:
         recluster_map: dict[int | str, int | str] = {}
         # Values are normalized into the owned mapping below; the source is
         # read-only here, so cloning it first only doubles request memory.
-        source_cluster_seeds_require = getattr(dataset, "cluster_seeds_require", {}) or {}
-        altered_cluster_signatures = _dataset_altered_cluster_signatures(dataset)
+        source_cluster_seeds_require = (
+            (getattr(dataset, "cluster_seeds_require", {}) or {})
+            if prediction_state is None
+            else prediction_state.cluster_seeds_require
+        )
+        altered_cluster_signatures = (
+            _dataset_altered_cluster_signatures(dataset)
+            if prediction_state is None
+            else prediction_state.altered_cluster_signatures
+        )
         cluster_seeds_require: dict[str, int | str]
         if (
             isinstance(dataset, _DirectArrowIncrementalDataset)
@@ -4455,7 +4629,11 @@ class Clusterer:
         cluster_seeds_require_inverse = _cluster_seeds_require_inverse(cluster_seeds_require)
 
         request_cluster_seed_disallows = (
-            _cluster_seed_disallows_for_request(dataset)
+            (
+                _cluster_seed_disallows_for_request(dataset)
+                if prediction_state is None
+                else prediction_state.cluster_seeds_disallow
+            )
             if cluster_seed_disallows is None
             else set(normalize_cluster_seed_disallow_pairs(cluster_seed_disallows))
         )
@@ -4598,6 +4776,7 @@ class Clusterer:
                         partial_supervision=job.partial_supervision,
                         runtime_context=runtime_context,
                         total_ram_bytes=total_ram_bytes,
+                        prediction_state=prediction_state,
                     )
                     altered_presplit_predict_seconds += time.perf_counter() - presplit_start
                     reclustered_by_cluster_num[job.altered_cluster_num].extend(
@@ -4617,7 +4796,9 @@ class Clusterer:
         split_cluster_seeds_require_inverse = (
             _cluster_seeds_require_inverse(cluster_seeds_require) if recluster_map else cluster_seeds_require_inverse
         )
-        self._last_incremental_seed_setup_telemetry = {
+        if prediction_state is None:
+            prediction_state = PredictionState()
+        prediction_state.telemetry["incremental_seed_setup"] = {
             "seed_setup_seconds": float(time.perf_counter() - seed_setup_start),
             "seed_setup_seed_signature_count": int(len(cluster_seeds_require)),
             "seed_setup_component_count": int(len(split_cluster_seeds_require_inverse)),
@@ -4665,9 +4846,13 @@ class Clusterer:
         arrow_dataset: ArrowDataset | None = None,
         split_cluster_seeds_require_inverse: Mapping[int | str, Sequence[str]] | None = None,
         cluster_seed_disallows: set[tuple[str, str]] | None = None,
+        prediction_state: PredictionState | None = None,
     ) -> dict[str, list[str]]:
         """Apply supplied seed-link decisions, then recluster abstained signatures."""
 
+        seed_state = prediction_state
+        if prediction_state is None:
+            prediction_state = PredictionState()
         logger.info("Assigning unassigned signatures for incremental clustering")
         compatibility_cluster_seeds_require_inverse = (
             split_cluster_seeds_require_inverse
@@ -4737,7 +4922,7 @@ class Clusterer:
                 pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
 
         request_cluster_seed_disallows = (
-            _cluster_seed_disallows_for_request(dataset)
+            (_cluster_seed_disallows_for_request(dataset) if seed_state is None else seed_state.cluster_seeds_disallow)
             if cluster_seed_disallows is None
             else set(normalize_cluster_seed_disallow_pairs(cluster_seed_disallows))
         )
@@ -4758,7 +4943,7 @@ class Clusterer:
             )
             residual_pair_count_before = len(singleton_signatures) * (len(singleton_signatures) - 1) // 2
             residual_pair_count_after = sum(len(group) * (len(group) - 1) // 2 for group in residual_groups)
-            self._last_incremental_residual_phase_b_telemetry = {
+            prediction_state.telemetry["incremental_residual_phase_b"] = {
                 "residual_phase_b_signature_count": int(len(singleton_signatures)),
                 "residual_phase_b_group_count": int(len(residual_groups)),
                 "residual_phase_b_pair_count_before": int(residual_pair_count_before),
@@ -4784,6 +4969,7 @@ class Clusterer:
                             partial_supervision=partial_supervision,
                             runtime_context=runtime_context,
                             total_ram_bytes=total_ram_bytes,
+                            prediction_state=seed_state,
                         )
                     else:
                         residual_partial_supervision = _partial_supervision_with_cluster_seed_disallows(
@@ -4811,7 +4997,7 @@ class Clusterer:
                     pred_clusters[str(new_cluster_id)] = new_cluster
                     new_cluster_id += 1
         else:
-            self._last_incremental_residual_phase_b_telemetry = {
+            prediction_state.telemetry["incremental_residual_phase_b"] = {
                 "residual_phase_b_signature_count": 0,
                 "residual_phase_b_group_count": 0,
                 "residual_phase_b_pair_count_before": 0,
@@ -4834,6 +5020,7 @@ class Clusterer:
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None = None,
         split_cluster_seeds_require_inverse: dict[int | str, list[str]] | None = None,
+        prediction_state: PredictionState | None = None,
     ) -> dict[str, list[str]]:
         config = self._incremental_experiment_config()
         # NEW!
@@ -4846,6 +5033,7 @@ class Clusterer:
             partial_supervision=partial_supervision,
             runtime_context=runtime_context,
             total_ram_bytes=total_ram_bytes,
+            prediction_state=prediction_state,
         )
 
         logger.info(
@@ -4922,6 +5110,7 @@ class Clusterer:
             runtime_context,
             total_ram_bytes=total_ram_bytes,
             split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
+            prediction_state=prediction_state,
         )
 
     def predict_incremental_from_arrow(
@@ -5112,12 +5301,15 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float],
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None,
+        prediction_state: PredictionState | None = None,
     ) -> dict[str, Any]:
         """Run classic incremental prediction through Python.
 
         This is not an external compatibility API. For behavior/parameters,
         refer to `predict_incremental`.
         """
+        if prediction_state is None:
+            prediction_state = _prediction_state_from_dataset(dataset)
         logger.info(f"Beginning incremental clustering for {len(block_signatures)} signatures...")
         (
             cluster_seeds_require,
@@ -5129,6 +5321,7 @@ class Clusterer:
             partial_supervision,
             runtime_context,
             total_ram_bytes=total_ram_bytes,
+            prediction_state=prediction_state,
         )
 
         logger.info("Getting name constraints")
@@ -5139,6 +5332,7 @@ class Clusterer:
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
             runtime_context=runtime_context,
             suppress_orcid=getattr(self, "suppress_orcid", False),
+            prediction_state=prediction_state,
         )
         signature_to_cluster_to_average_dist: dict[str, dict[int | str, IncrementalDistStats]] = defaultdict(
             lambda: defaultdict(lambda: (0.0, 0, float("inf")))
@@ -5259,6 +5453,7 @@ class Clusterer:
             runtime_context,
             total_ram_bytes=total_ram_bytes,
             split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
+            prediction_state=prediction_state,
         )
         phase_b_required_bytes = len(unassigned_signature_ids) * (len(unassigned_signature_ids) - 1) // 2 * 8
         return _build_incremental_result(

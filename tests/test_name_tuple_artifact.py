@@ -15,14 +15,6 @@ from s2and.name_tuple_artifact import load_name_tuple_artifact
 from scripts.production import generate_canonical_name_tuples
 
 
-def test_checked_in_canonical_name_tuples_load_directly() -> None:
-    data_path = Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt"
-    artifact = load_name_tuple_artifact(data_path)
-
-    assert len(artifact.pairs) == 5027
-    assert artifact.data_sha256 == hashlib.sha256(data_path.read_bytes()).hexdigest()
-
-
 def test_checked_in_source_reproduces_canonical_name_tuples_byte_exactly(tmp_path: Path) -> None:
     source_path = Path(_PACKAGE_DATA_DIR) / "s2and_unnormalized_filtered_name_tuples.txt"
     expected_path = Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt"
@@ -31,6 +23,9 @@ def test_checked_in_source_reproduces_canonical_name_tuples_byte_exactly(tmp_pat
     generate_canonical_name_tuples.regenerate(str(source_path), str(regenerated_path))
 
     assert regenerated_path.read_bytes() == expected_path.read_bytes()
+    artifact = load_name_tuple_artifact(expected_path)
+    assert len(artifact.pairs) == 5027
+    assert artifact.data_sha256 == hashlib.sha256(expected_path.read_bytes()).hexdigest()
 
 
 def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
@@ -49,16 +44,6 @@ def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
     assert artifact.pairs.isdisjoint(excluded)
 
 
-def test_custom_artifact_loads_directly(tmp_path: Path) -> None:
-    artifact_path = tmp_path / "aliases.txt"
-    artifact_path.write_bytes(b"alice,ally\n")
-
-    artifact = load_name_tuple_artifact(artifact_path)
-
-    assert artifact.pairs == frozenset({("alice", "ally")})
-    assert artifact.data_sha256 == hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-
-
 def test_loader_reads_data_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     artifact_path = tmp_path / "aliases.txt"
     artifact_path.write_bytes(b"alice,ally\n")
@@ -72,7 +57,9 @@ def test_loader_reads_data_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(path_type, "read_bytes", recording_read_bytes)
 
-    assert load_name_tuple_artifact(artifact_path).pairs == frozenset({("alice", "ally")})
+    artifact = load_name_tuple_artifact(artifact_path)
+    assert artifact.pairs == frozenset({("alice", "ally")})
+    assert artifact.data_sha256 == hashlib.sha256(b"alice,ally\n").hexdigest()
     assert reads == [artifact_path]
 
 

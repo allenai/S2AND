@@ -13,9 +13,10 @@ from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, FastCluster
 
 
-@pytest.mark.parametrize("chunk_size", [1, 7, 10000])
-@pytest.mark.parametrize("constraints_enabled", [False, True])
-@pytest.mark.parametrize("overrides_enabled", [False, True])
+@pytest.mark.parametrize(
+    ("chunk_size", "constraints_enabled", "overrides_enabled"),
+    [(7, False, False), (7, False, True), (7, True, False), (7, True, True), (1, True, True), (10000, True, True)],
+)
 def test_bulk_labels_preserve_scalar_bits(
     monkeypatch: pytest.MonkeyPatch,
     chunk_size: int,

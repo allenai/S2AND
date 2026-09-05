@@ -30,15 +30,17 @@ jobs:
         run: uv run --no-project python scripts/run_ci_locally.py lint
 
   typecheck-and-test:
-    name: typecheck-and-test (py${{ matrix.py }})
-    runs-on: ubuntu-latest
+    name: typecheck-and-test (${{ matrix.os }}, py${{ matrix.py }})
+    runs-on: ${{ matrix.os }}
     needs: [lint]
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         py: ["3.11", "3.12", "3.13"]
-    env:
-      S2AND_TEST_REQUIRE_RUST: "1"
+        include:
+          - os: windows-latest
+            py: "3.11"
     steps:
       - uses: actions/checkout@v5
         with:

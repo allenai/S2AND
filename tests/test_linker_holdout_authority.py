@@ -9,7 +9,7 @@ import pytest
 
 from s2and.incremental_linking_training import classic
 from scripts.production.model import train_linker_and_finalize as release
-from tests.test_real_tiny_trainers import _write_classic_tiny_bundle
+from tests.training_helpers import write_classic_tiny_bundle
 
 
 def test_source_authority_projects_complete_identity_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,7 +58,7 @@ def test_source_authority_projects_complete_identity_columns(tmp_path: Path, mon
 def test_filter_drops_whole_query_and_base_variants_and_resets_indices() -> None:
     rows = pd.DataFrame(
         {
-            "query_group_id": ["keep", "test:initial", "mixed", "mixed", "last"],
+            "query_group_id": ["keep", "test:full", "mixed", "mixed", "last"],
             "base_group_id": ["safe", "test-base", "test-base", "another", "safe-last"],
             "label": [1, 1, 0, 1, 0],
         },
@@ -71,15 +71,19 @@ def test_filter_drops_whole_query_and_base_variants_and_resets_indices() -> None
     assert filtered.index.tolist() == [0, 1]
     assert summary["rows_removed"] == 3
     assert summary["queries_removed"] == 2
+    assert summary["positive_rows_removed"] == 2
+    assert summary["positive_queries_removed"] == 2
+    assert summary["overlapping_query_groups"] == 1
+    assert summary["overlapping_base_groups"] == 1
 
 
 def test_removing_query_preserves_retained_native_retrieval_and_row_features(tmp_path: Path) -> None:
-    from tests.test_raw_block_candidate_plan_arrow import _base_arrow_paths, _native_labeled_plan
+    from tests.raw_arrow_helpers import base_arrow_paths, native_labeled_plan
 
-    paths = _base_arrow_paths(tmp_path)
+    paths = base_arrow_paths(tmp_path)
     paths.pop("cluster_seeds")
     components = {"c_match": ["s1"], "c_other": ["s2"]}
-    full = _native_labeled_plan(
+    full = native_labeled_plan(
         paths,
         ["q1", "q1", "s2"],
         ["full"] * 3,
@@ -90,7 +94,7 @@ def test_removing_query_preserves_retained_native_retrieval_and_row_features(tmp
         orcid_enabled=False,
         num_threads=1,
     )
-    retained = _native_labeled_plan(
+    retained = native_labeled_plan(
         paths,
         ["q1", "q1"],
         ["full"] * 2,
@@ -108,7 +112,7 @@ def test_removing_query_preserves_retained_native_retrieval_and_row_features(tmp
 
 
 def test_fit_rejects_reintroduced_overlap_before_classifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    bundle = _write_classic_tiny_bundle(tmp_path / "bundle")
+    bundle = write_classic_tiny_bundle(tmp_path / "bundle")
     rows = pd.read_csv(bundle.root / "train.csv.gz")
     identities = classic.ClassicHoldoutIdentities(frozenset(rows.query_group_id.astype(str)), frozenset(), ())
 
@@ -123,7 +127,7 @@ def test_fit_rejects_reintroduced_overlap_before_classifier(tmp_path: Path, monk
 
 
 def test_real_fit_retains_early_exclusion_counts(tmp_path: Path) -> None:
-    bundle = _write_classic_tiny_bundle(tmp_path / "bundle")
+    bundle = write_classic_tiny_bundle(tmp_path / "bundle")
     identities = classic.read_classic_holdout_identities(bundle)
     rows = pd.read_csv(bundle.root / "train.csv.gz")
     rows, early = classic._apply_classic_train_holdout_filter(

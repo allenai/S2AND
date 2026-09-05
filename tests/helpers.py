@@ -14,7 +14,6 @@ from typing import Any
 from s2and.data import ANDData
 from s2and.incremental_linking.query_adapter import ClusterSummary, QueryFeatures
 from s2and.name_counts_index import NameCountsIndex
-from s2and.runtime import load_s2and_rust_extension
 
 
 def pairwise_training_args(
@@ -200,18 +199,6 @@ def equalish(a: float, b: float, rel_tol: float = 0.0, abs_tol: float = 1e-6) ->
     if math.isnan(float(a)) and math.isnan(float(b)):
         return True
     return math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
-
-
-def import_s2and_rust() -> tuple[bool, Any | Exception | None]:
-    require_rust = os.environ.get("S2AND_TEST_REQUIRE_RUST", "").strip().lower() in {"1", "true", "yes", "on"}
-
-    try:
-        s2and_rust = load_s2and_rust_extension()
-        return True, s2and_rust
-    except Exception as err:
-        if require_rust:
-            raise RuntimeError("Rust-enabled tests require a working s2and_rust runtime") from err
-        return False, err
 
 
 def build_arrow_training_dataset(

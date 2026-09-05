@@ -33,12 +33,11 @@ import lightgbm as lgb
 import numpy as np
 import pytest
 
-from tests.helpers import import_s2and_rust
+from s2and.runtime import load_s2and_rust_extension
 
-HAS_RUST, s2and_rust = import_s2and_rust()
-if not HAS_RUST:
-    raise pytest.skip.Exception("s2and_rust extension is unavailable", allow_module_level=True)
-assert s2and_rust is not None and not isinstance(s2and_rust, Exception)
+s2and_rust = load_s2and_rust_extension()
+
+
 RustLightGBMBooster: Any = s2and_rust.RustLightGBMBooster
 
 REALISTIC_FIXTURE_DIR = Path(__file__).with_name("fixtures") / "rust_lightgbm"
@@ -52,38 +51,7 @@ PROBA_ATOL = 1e-12
 PARITY_NUM_THREADS = 4
 REALISTIC_FIXTURE_MAX_ROWS = 4096
 
-ONE_SPLIT_INTERIOR_ZERO_MODEL = """\
-tree
-version=v4
-num_class=1
-num_tree_per_iteration=1
-label_index=0
-max_feature_idx=0
-objective=binary sigmoid:1
-feature_names=f0
-feature_infos=[-2:2]
-
-Tree=0
-num_leaves=2
-num_cat=0
-split_feature=0
-split_gain=80
-threshold=-5.0000000900125474e-36
-decision_type=2
-left_child=-1
-right_child=-2
-leaf_value=-0.2 0.2
-leaf_weight=10 10
-leaf_count=40 40
-internal_value=0
-internal_weight=20
-internal_count=80
-is_linear=0
-shrinkage=0.1
-
-
-end of trees
-"""
+ONE_SPLIT_INTERIOR_ZERO_MODEL = (REALISTIC_FIXTURE_DIR / "interior_zero.lgb").read_text(encoding="utf-8")
 
 
 @dataclass(frozen=True)

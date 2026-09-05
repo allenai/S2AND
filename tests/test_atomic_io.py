@@ -159,6 +159,29 @@ def test_exclusive_file_lock_zero_timeout_still_attempts_available_lock(tmp_path
         assert lock_path.exists()
 
 
+def test_exception_releases_lock_for_another_process(tmp_path: Path) -> None:
+    """A failed publisher must not strand later writers behind its process lock."""
+    lock_path = tmp_path / "publication.lock"
+    with pytest.raises(RuntimeError, match="injected publication failure"):
+        with exclusive_file_lock(lock_path):
+            raise RuntimeError("injected publication failure")
+
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    successor = context.Process(target=_hold_lock_until_released, args=(lock_path, ready, release))
+    successor.start()
+    try:
+        assert ready.wait(timeout=5), "successor could not acquire lock after exceptional exit"
+    finally:
+        release.set()
+        successor.join(timeout=5)
+        if successor.is_alive():
+            successor.terminate()
+            successor.join(timeout=5)
+    assert successor.exitcode == 0
+
+
 def test_exclusive_file_lock_rejects_unbounded_timing_values(tmp_path: Path) -> None:
     cases = (
         ("negative-timeout", -1.0, 0.05),

@@ -107,38 +107,20 @@ def _release_fixture(
         ),
     }
     pairwise = {
-        "random": _dataset_files(
+        name: _dataset_files(
             inputs,
-            "evaluation_pair_random",
+            f"evaluation_pair_{name}",
             {
-                "signatures": {random_test_pair[0]: {}, random_test_pair[1]: {}},
+                "signatures": {left: {}, right: {}},
                 "papers": {},
                 "specter_embeddings": {},
-                "pairs": [
-                    {
-                        "signature_id_1": random_test_pair[0],
-                        "signature_id_2": random_test_pair[1],
-                        "label": heldout_labels[0],
-                    }
-                ],
+                "pairs": [{"signature_id_1": left, "signature_id_2": right, "label": label}],
             },
-        ),
-        "fixed": _dataset_files(
-            inputs,
-            "evaluation_pair_fixed",
-            {
-                "signatures": {fixed_test_pair[0]: {}, fixed_test_pair[1]: {}},
-                "papers": {},
-                "specter_embeddings": {},
-                "pairs": [
-                    {
-                        "signature_id_1": fixed_test_pair[0],
-                        "signature_id_2": fixed_test_pair[1],
-                        "label": heldout_labels[1],
-                    }
-                ],
-            },
-        ),
+        )
+        for name, (left, right), label in (
+            ("random", random_test_pair, heldout_labels[0]),
+            ("fixed", fixed_test_pair, heldout_labels[1]),
+        )
     }
     cluster = {
         "random": _dataset_files(
@@ -405,33 +387,34 @@ def test_prepare_run_rejects_a_baseline_for_a_different_contract(tmp_path, mutat
         release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
 
 
+def _binding_candidate(fixture, model_plan):
+    """Write the same immutable candidate authority for binding success and rejection."""
+    candidate = fixture.run_dir / "final" / "production_model_v1.3"
+    paths = {
+        f"reproducibility/pairwise_training_{name}.json": _write_json(
+            candidate / "reproducibility" / f"pairwise_training_{name}.json", payload
+        )
+        for name, payload in (
+            (
+                "config",
+                {"input_artifact_hashes": _artifact_authority().hashes, "model_plan_sha256": _sha256(model_plan)},
+            ),
+            ("summary", {"pair_count": 1}),
+        )
+    }
+    manifest = _write_json(
+        candidate / "manifest.json", {"sha256": {name: _sha256(path) for name, path in paths.items()}}
+    )
+    return candidate, paths["reproducibility/pairwise_training_config.json"], manifest
+
+
 def test_bind_candidate_writes_one_content_based_run_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = _release_fixture(tmp_path)
     model_plan, evaluation_plan = _prepare(fixture)
-    candidate = fixture.run_dir / "final" / "production_model_v1.3"
-    training_config = _write_json(
-        candidate / "reproducibility" / "pairwise_training_config.json",
-        {
-            "input_artifact_hashes": _artifact_authority().hashes,
-            "model_plan_sha256": _sha256(model_plan),
-        },
-    )
-    training_summary = _write_json(
-        candidate / "reproducibility" / "pairwise_training_summary.json",
-        {"pair_count": 1},
-    )
-    candidate_manifest = _write_json(
-        candidate / "manifest.json",
-        {
-            "sha256": {
-                "reproducibility/pairwise_training_config.json": _sha256(training_config),
-                "reproducibility/pairwise_training_summary.json": _sha256(training_summary),
-            }
-        },
-    )
+    candidate, training_config, candidate_manifest = _binding_candidate(fixture, model_plan)
 
     public_data_root = fixture.run_dir / "stages" / "public_data_root"
     public_manifest, _dataset_manifest = _write_public_data_root(public_data_root)
@@ -498,27 +481,7 @@ def test_bind_candidate_rejects_mismatched_release_authorities_and_training_plan
 ) -> None:
     fixture = _release_fixture(tmp_path)
     model_plan, _evaluation_plan = _prepare(fixture)
-    candidate = fixture.run_dir / "final" / "production_model_v1.3"
-    training_config = _write_json(
-        candidate / "reproducibility" / "pairwise_training_config.json",
-        {
-            "input_artifact_hashes": _artifact_authority().hashes,
-            "model_plan_sha256": _sha256(model_plan),
-        },
-    )
-    training_summary = _write_json(
-        candidate / "reproducibility" / "pairwise_training_summary.json",
-        {"pair_count": 1},
-    )
-    candidate_manifest = _write_json(
-        candidate / "manifest.json",
-        {
-            "sha256": {
-                "reproducibility/pairwise_training_config.json": _sha256(training_config),
-                "reproducibility/pairwise_training_summary.json": _sha256(training_summary),
-            }
-        },
-    )
+    candidate, training_config, candidate_manifest = _binding_candidate(fixture, model_plan)
 
     def refresh_training_config_binding() -> None:
         payload = json.loads(candidate_manifest.read_text(encoding="utf-8"))

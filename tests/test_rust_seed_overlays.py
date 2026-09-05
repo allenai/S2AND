@@ -7,11 +7,7 @@ import numpy as np
 import pytest
 
 from s2and.feature_port import _get_rust_featurizer
-from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, import_s2and_rust
-
-HAS_RUST, _RUST_IMPORT_PAYLOAD = import_s2and_rust()
-if not HAS_RUST:
-    pytest.skip(f"Rust extension unavailable: {_RUST_IMPORT_PAYLOAD}", allow_module_level=True)
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
 
 def test_native_seed_overlays_are_independent_after_interleaving_and_failure(

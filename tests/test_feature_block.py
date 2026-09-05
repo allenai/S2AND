@@ -369,49 +369,8 @@ def test_raw_planner_arrow_tables_from_anddata_rejects_signature_missing_paper()
         )
 
 
-def test_raw_planner_arrow_tables_match_schema() -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    dataset = _tiny_anddata()
-    dataset.cluster_seeds_disallow = set()
-    tables = raw_planner_arrow_tables_from_anddata(
-        dataset,
-        signature_ids=["q", "s1"],
-    )
-
-    assert set(tables) == {
-        "signatures",
-        "papers",
-        "paper_authors",
-        "cluster_seeds",
-        "cluster_seed_disallows",
-        "specter",
-    }
-    assert tables["signatures"].column_names == [
-        "signature_id",
-        "paper_id",
-        "author_first",
-        "author_middle",
-        "author_last",
-        "author_suffix",
-        "author_affiliations",
-        "author_orcid",
-        "author_position",
-        "author_block",
-        "author_email",
-        "source_author_ids",
-    ]
-    assert tables["signatures"].schema.field("author_suffix").type == pa.string()
-    assert tables["papers"].schema.field("abstract").type == pa.string()
-    assert tables["papers"].schema.field("predicted_language").type == pa.string()
-    assert tables["papers"].schema.field("is_reliable").type == pa.bool_()
-    assert tables["papers"].schema.field("language_reliability").type == pa.float64()
-    assert tables["cluster_seeds"].to_pydict() == {"signature_id": ["s1"], "cluster_id": ["c_ada"]}
-    assert tables["cluster_seed_disallows"].to_pydict() == {"signature_id_1": [], "signature_id_2": []}
-
-
 def test_raw_planner_arrow_tables_keep_all_null_optional_columns_typed() -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     tables = raw_planner_arrow_tables_from_anddata(
         _tiny_anddata(),
@@ -429,7 +388,7 @@ def test_raw_planner_arrow_tables_keep_all_null_optional_columns_typed() -> None
 
 
 def test_write_raw_planner_arrow_from_anddata_skips_empty_seed_table(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     dataset = _tiny_anddata()
     dataset.cluster_seeds_disallow = set()
@@ -448,7 +407,8 @@ def test_write_raw_planner_arrow_from_anddata_skips_empty_seed_table(tmp_path: P
 
 
 def test_incremental_query_signatures_arrow_round_trips_typed_rows(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = tmp_path / "incremental_query_signatures.arrow"
 
     write_incremental_query_signatures_arrow(
@@ -483,7 +443,8 @@ def test_incremental_query_signatures_arrow_round_trips_typed_rows(tmp_path: Pat
 
 
 def test_incremental_query_signatures_arrow_keeps_empty_table_typed(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = tmp_path / "empty_incremental_query_signatures.arrow"
 
     write_incremental_query_signatures_arrow(path, [])
@@ -498,7 +459,8 @@ def test_incremental_query_signatures_arrow_keeps_empty_table_typed(tmp_path: Pa
 
 
 def test_incremental_query_signatures_arrow_rejects_duplicate_rows(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = tmp_path / "duplicate_incremental_query_signatures.arrow"
     write_arrow_ipc_table(
         pa.table(
@@ -516,7 +478,8 @@ def test_incremental_query_signatures_arrow_rejects_duplicate_rows(tmp_path: Pat
 
 
 def test_incremental_query_signatures_arrow_rejects_unknown_query_view(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = tmp_path / "unknown_query_view_incremental_query_signatures.arrow"
 
     with pytest.raises(ValueError, match="unknown query_view"):
@@ -538,7 +501,8 @@ def test_incremental_query_signatures_arrow_rejects_unknown_query_view(tmp_path:
 
 
 def test_incremental_query_signatures_arrow_rejects_null_request_values(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = tmp_path / "null_incremental_query_signatures.arrow"
     write_arrow_ipc_table(
         pa.table(
@@ -556,7 +520,8 @@ def test_incremental_query_signatures_arrow_rejects_null_request_values(tmp_path
 
 
 def test_arrow_readers_reject_integer_id_columns(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     cases = (
         (
             "query-signature-id",
@@ -593,7 +558,8 @@ def test_arrow_readers_reject_integer_id_columns(tmp_path: Path) -> None:
 
 
 def test_altered_cluster_signatures_arrow_round_trips_and_rejects_duplicates(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = tmp_path / "altered_cluster_signatures.arrow"
 
     write_altered_cluster_signatures_arrow(path, ["seed0", "seed2"])
@@ -611,7 +577,6 @@ def test_altered_cluster_signatures_arrow_round_trips_and_rejects_duplicates(tmp
 
 
 def test_temporary_cluster_seed_sidecars_clean_up_tmpdir() -> None:
-    pytest.importorskip("pyarrow")
 
     with temporary_cluster_seed_sidecars(
         {"s1": "c1"},
@@ -632,7 +597,8 @@ def test_temporary_cluster_seed_sidecars_clean_up_tmpdir() -> None:
 
 
 def test_read_cluster_seeds_arrow_rejects_duplicate_signature_rows(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = tmp_path / "cluster_seeds.arrow"
     table = pa.table(
         {
@@ -647,7 +613,7 @@ def test_read_cluster_seeds_arrow_rejects_duplicate_signature_rows(tmp_path: Pat
 
 
 def test_write_arrow_ipc_table_writes_bounded_record_batches(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     table = pa.table({"signature_id": pa.array([str(index) for index in range(5)], type=pa.string())})
     path = write_arrow_ipc_table(table, tmp_path / "signatures.arrow", max_record_batch_rows=2)
@@ -660,7 +626,7 @@ def test_write_arrow_ipc_table_writes_bounded_record_batches(tmp_path: Path) -> 
 
 
 def test_raw_planner_index_rejects_unbounded_large_batch(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     table = pa.table({"signature_id": pa.array([str(index) for index in range(5)], type=pa.string())})
     path = write_arrow_ipc_table(table, tmp_path / "signatures.arrow")
@@ -674,7 +640,7 @@ def test_raw_planner_index_rejects_unbounded_large_batch(tmp_path: Path) -> None
 
 
 def test_raw_planner_index_metadata_uses_stem_qualified_sidecar(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     table = pa.table({"signature_id": pa.array([str(index) for index in range(5)], type=pa.string())})
     path = write_arrow_ipc_table(table, tmp_path / "signatures.arrow", max_record_batch_rows=2)
@@ -694,7 +660,7 @@ def test_raw_planner_index_metadata_uses_stem_qualified_sidecar(tmp_path: Path) 
 
 
 def test_raw_planner_index_omits_none_optional_paths(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     table = pa.table({"signature_id": pa.array(["s1"], type=pa.string())})
     path = write_arrow_ipc_table(table, tmp_path / "signatures.arrow")
@@ -713,7 +679,7 @@ def test_raw_planner_index_omits_none_optional_paths(tmp_path: Path) -> None:
 
 
 def test_raw_planner_index_rejects_null_lookup_keys(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     path = write_arrow_ipc_table(
         pa.table({"signature_id": pa.array(["s1", None], type=pa.string())}),
@@ -725,7 +691,8 @@ def test_raw_planner_index_rejects_null_lookup_keys(tmp_path: Path) -> None:
 
 
 def test_raw_planner_index_rejects_stale_python_reuse(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = write_arrow_ipc_table(
         pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}),
         tmp_path / "signatures.arrow",
@@ -741,7 +708,8 @@ def test_raw_planner_index_rejects_stale_python_reuse(tmp_path: Path) -> None:
 
 
 def test_raw_planner_index_reuse_metrics_match_fresh_schema(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = write_arrow_ipc_table(
         pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}),
         tmp_path / "signatures.arrow",
@@ -771,7 +739,8 @@ def test_raw_planner_index_reuse_metrics_match_fresh_schema(tmp_path: Path) -> N
 
 
 def test_raw_planner_index_reuse_rejects_record_count_mismatch(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = write_arrow_ipc_table(
         pa.table({"signature_id": pa.array(["s1", "s2", "s3"], type=pa.string())}),
         tmp_path / "signatures.arrow",

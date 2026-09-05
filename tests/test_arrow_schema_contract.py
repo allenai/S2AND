@@ -9,7 +9,8 @@ from s2and.arrow_schema import validate_arrow_schema
 def test_full_schema_validation_allows_missing_optional_columns_and_checks_present_ones(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     required_only = pa.schema(
         [
             pa.field("paper_id", pa.string()),
@@ -36,7 +37,8 @@ def test_full_schema_validation_allows_missing_optional_columns_and_checks_prese
 
 
 def test_subset_schema_validation_uses_exact_contract_physical_types() -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     canonical_subset = pa.schema([pa.field("paper_id", pa.string())])
     validate_arrow_schema(canonical_subset, table_name="papers", columns={"paper_id"})
 

@@ -25,155 +25,47 @@ from scripts.production.model.train_linker_and_finalize import (
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
-def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path) -> None:
+@pytest.fixture
+def target_payload() -> dict[str, Any]:
+    """Return the smallest valid promoted training target."""
+    features = list(promoted_train.promoted_linker_feature_columns())
+    return {"feature_count": len(features), "features": features, "params": {"n_estimators": 10}, "metrics": {}}
+
+
+def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path, target_payload) -> None:
     target_path = tmp_path / "target.json"
-    feature_columns = list(promoted_train.promoted_linker_feature_columns())
-    target_path.write_text(
-        json.dumps(
-            {
-                "feature_count": len(feature_columns),
-                "features": feature_columns,
-                "params": {"n_estimators": 10},
-                "metrics": {},
-            }
-        ),
-        encoding="utf-8",
+    target_path.write_text(json.dumps(target_payload), encoding="utf-8")
+    assert _load_target(target_path)["features"] == target_payload["features"]
+    target_payload["features"][0], target_payload["features"][1] = (
+        target_payload["features"][1],
+        target_payload["features"][0],
     )
-
-    target = _load_target(target_path)
-
-    assert target["features"] == feature_columns
-
-    reordered_features = feature_columns.copy()
-    reordered_features[0], reordered_features[1] = reordered_features[1], reordered_features[0]
-    target_path.write_text(
-        json.dumps(
-            {
-                "feature_count": len(reordered_features),
-                "features": reordered_features,
-                "params": {"n_estimators": 10},
-                "metrics": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-
+    target_path.write_text(json.dumps(target_payload), encoding="utf-8")
     with pytest.raises(ValueError, match="canonical order"):
         _load_target(target_path)
 
 
-def test_load_target_rejects_unknown_features(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"feature_count": 1, "features": ["not_a_promoted_feature"]}, "unknown features"),
+        ({"feature_count": 2, "features": ["min_distance", "min_distance"]}, "duplicate features"),
+        ({"params": {}}, "params"),
+        ({"params": {"n_estimators": True}}, "params"),
+        ({"params": {"n_estimators": 0}}, "params"),
+        ({"params": {"n_estimators": 1.5}}, "params"),
+        ({"metrics": {"score": float("nan")}}, "must be finite"),
+        ({"metrics": {"score": 1.0}}, "unknown metric keys"),
+        ({"metrics": {"stratified_test_accuracy": None}}, "must be numeric"),
+        ({"metrics": {"stratified_test_accuracy": True}}, "must be numeric"),
+        ({"metrics": {"stratified_test_errors": 1.5}}, "nonnegative integer"),
+        ({"metrics": {"weighted_average_error_weights": {"wrong": 1.0}}}, "must equal"),
+    ],
+)
+def test_load_target_rejects_invalid_contract(tmp_path: Path, target_payload, overrides, message: str) -> None:
     target_path = tmp_path / "target.json"
-
-    target_path.write_text(
-        json.dumps(
-            {
-                "feature_count": 1,
-                "features": ["not_a_promoted_feature"],
-                "params": {"n_estimators": 10},
-                "metrics": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="unknown features"):
-        _load_target(target_path)
-
-
-def test_load_target_rejects_invalid_params(tmp_path: Path) -> None:
-    feature_columns = list(promoted_train.promoted_linker_feature_columns())
-    target_path = tmp_path / "target.json"
-    cases = (
-        ("empty", {}),
-        ("boolean-estimators", {"n_estimators": True}),
-        ("zero-estimators", {"n_estimators": 0}),
-        ("fractional-estimators", {"n_estimators": 1.5}),
-    )
-    for case_id, params in cases:
-        target_path.write_text(
-            json.dumps(
-                {
-                    "feature_count": len(feature_columns),
-                    "features": feature_columns,
-                    "params": params,
-                    "metrics": {},
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        try:
-            _load_target(target_path)
-        except ValueError as error:
-            assert "params" in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: invalid params were accepted")
-
-
-def test_load_target_rejects_nonfinite_metrics(tmp_path: Path) -> None:
-    feature_columns = list(promoted_train.promoted_linker_feature_columns())
-    target_path = tmp_path / "target.json"
-    target_path.write_text(
-        json.dumps(
-            {
-                "feature_count": len(feature_columns),
-                "features": feature_columns,
-                "params": {"n_estimators": 10},
-                "metrics": {"score": float("nan")},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="must be finite"):
-        _load_target(target_path)
-
-
-def test_load_target_rejects_invalid_metric_schema(tmp_path: Path) -> None:
-    feature_columns = list(promoted_train.promoted_linker_feature_columns())
-    target_path = tmp_path / "target.json"
-    cases = (
-        ("unknown-key", {"score": 1.0}, "unknown metric keys"),
-        ("null-accuracy", {"stratified_test_accuracy": None}, "must be numeric"),
-        ("boolean-accuracy", {"stratified_test_accuracy": True}, "must be numeric"),
-        ("fractional-errors", {"stratified_test_errors": 1.5}, "nonnegative integer"),
-        ("wrong-weight-keys", {"weighted_average_error_weights": {"wrong": 1.0}}, "must equal"),
-    )
-    for case_id, metrics, message in cases:
-        target_path.write_text(
-            json.dumps(
-                {
-                    "feature_count": len(feature_columns),
-                    "features": feature_columns,
-                    "params": {"n_estimators": 10},
-                    "metrics": metrics,
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        try:
-            _load_target(target_path)
-        except ValueError as error:
-            assert message in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: invalid metric schema was accepted")
-
-
-def test_load_target_rejects_duplicate_features(tmp_path) -> None:
-    target_path = tmp_path / "duplicate_target.json"
-    target_path.write_text(
-        json.dumps(
-            {
-                "feature_count": 2,
-                "features": ["min_distance", "min_distance"],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="duplicate features"):
+    target_path.write_text(json.dumps(target_payload | overrides), encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
         _load_target(target_path)
 
 
@@ -386,18 +278,26 @@ def test_block_local_member_ids_drop_foreign_members() -> None:
     )
 
 
-def test_arrow_rust_structural_cleaning_drops_all_foreign_component(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_arrow_rust_structural_cleaning_preserves_only_nonself_local_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    components_dir = tmp_path / "components"
-    components_dir.mkdir()
+    """One real membership table covers self-only, mixed, unrelated, and foreign components."""
+    members = {
+        "toy block::self": ["q1"],
+        "toy block::with_neighbor": ["q1", "n1"],
+        "toy block::other": ["n2"],
+        "plain_self": ["q3"],
+        "toy block::foreign": ["f1", "f2"],
+    }
+    components = tmp_path / "components"
+    components.mkdir()
     pd.DataFrame(
         [
-            {"candidate_component_key": "block-a::foreign", "member_index": 0, "signature_id": "f1"},
-            {"candidate_component_key": "block-a::foreign", "member_index": 1, "signature_id": "f2"},
+            {"candidate_component_key": component, "member_index": index, "signature_id": sid}
+            for component, signature_ids in members.items()
+            for index, sid in enumerate(signature_ids)
         ]
-    ).to_parquet(components_dir / "toy_members.parquet", index=False)
+    ).to_parquet(components / "toy_members.parquet", index=False)
     bundle = OfficialBundle(
         root=tmp_path,
         bundle_name="toy",
@@ -409,19 +309,27 @@ def test_arrow_rust_structural_cleaning_drops_all_foreign_component(
         [
             {
                 "dataset": "toy",
-                "query_group_id": "q1:full",
-                "query_signature_id": "q1",
-                "candidate_component_key": "block-a::foreign",
-                "label": 1,
+                "query_group_id": f"{query}:full",
+                "query_signature_id": query,
+                "candidate_component_key": component,
+                "label": label,
             }
+            for query, component, label in [
+                ("q1", "toy block::self", 1),
+                ("q1", "toy block::with_neighbor", 0),
+                ("q2", "toy block::other", 1),
+                ("q3", "plain_self", 0),
+                ("q4", "toy block::foreign", 1),
+            ]
         ]
     )
     monkeypatch.setattr(
         promoted_train,
         "_load_arrow_signature_blocks",
-        lambda *_args, **_kwargs: {"q1": "block-a", "f1": "block-b", "f2": "block-b"},
+        lambda *_args, **_kwargs: (
+            dict.fromkeys(["q1", "q2", "q3", "q4", "n1", "n2"], "toy block") | {"f1": "foreign", "f2": "foreign"}
+        ),
     )
-
     dataset_root = tmp_path / "datasets" / "toy"
     write_minimal_arrow_prediction_bundle(dataset_root)
     with ArrowDataset.open(dataset_root) as arrow_dataset:
@@ -432,98 +340,12 @@ def test_arrow_rust_structural_cleaning_drops_all_foreign_component(
             component_membership_cache={},
             arrow_datasets={"toy": arrow_dataset},
         )
-
-    assert cleaned.empty
-    assert summary["rows_removed"] == 1
-    assert summary["positive_rows_removed"] == 1
-
-
-def test_arrow_rust_structural_cleaning_drops_self_only_candidates(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    components_dir = tmp_path / "components"
-    components_dir.mkdir()
-    pd.DataFrame(
-        [
-            {"candidate_component_key": "toy block::self", "member_index": 0, "signature_id": "q1"},
-            {"candidate_component_key": "toy block::with_neighbor", "member_index": 0, "signature_id": "q1"},
-            {"candidate_component_key": "toy block::with_neighbor", "member_index": 1, "signature_id": "n1"},
-            {"candidate_component_key": "toy block::other", "member_index": 0, "signature_id": "n2"},
-            {"candidate_component_key": "plain_self", "member_index": 0, "signature_id": "q3"},
-        ]
-    ).to_parquet(components_dir / "toy_members.parquet", index=False)
-    bundle = OfficialBundle(
-        root=tmp_path,
-        bundle_name="toy",
-        assets={
-            "candidate_members": {"datasets": {"toy": "components/toy_members.parquet"}},
-        },
-        models={},
-        expected_metrics={},
-    )
-    rows = pd.DataFrame(
-        [
-            {
-                "dataset": "toy",
-                "query_group_id": "q1:full",
-                "query_signature_id": "q1",
-                "candidate_component_key": "toy block::self",
-                "label": 1,
-            },
-            {
-                "dataset": "toy",
-                "query_group_id": "q1:full",
-                "query_signature_id": "q1",
-                "candidate_component_key": "toy block::with_neighbor",
-                "label": 0,
-            },
-            {
-                "dataset": "toy",
-                "query_group_id": "q2:full",
-                "query_signature_id": "q2",
-                "candidate_component_key": "toy block::other",
-                "label": 1,
-            },
-            {
-                "dataset": "toy",
-                "query_group_id": "q3:full",
-                "query_signature_id": "q3",
-                "candidate_component_key": "plain_self",
-                "label": 0,
-            },
-        ]
-    )
-
-    monkeypatch.setattr(
-        promoted_train,
-        "_load_arrow_signature_blocks",
-        lambda *_args, **_kwargs: {
-            "q1": "toy block",
-            "n1": "toy block",
-            "q2": "toy block",
-            "n2": "toy block",
-            "q3": "toy block",
-        },
-    )
-
-    dataset_root = tmp_path / "datasets" / "toy"
-    write_minimal_arrow_prediction_bundle(dataset_root)
-    with ArrowDataset.open(dataset_root) as arrow_dataset:
-        cleaned, summary = _clean_arrow_rust_structural_rows(
-            source_bundle=bundle,
-            table_key="train_path",
-            rows=rows,
-            component_membership_cache={},
-            arrow_datasets={"toy": arrow_dataset},
-        )
-
     assert cleaned["candidate_component_key"].tolist() == ["toy block::with_neighbor", "toy block::other"]
-    assert summary["rows_removed"] == 2
-    assert summary["positive_rows_removed"] == 1
+    assert summary["rows_removed"] == 3
+    assert summary["positive_rows_removed"] == 2
     assert summary["negative_rows_removed"] == 1
-    assert summary["queries_removed"] == 1
-    assert summary["positive_queries_changed_or_removed"] == 1
+    assert summary["queries_removed"] == 2
+    assert summary["positive_queries_changed_or_removed"] == 2
 
 
 def test_arrow_rust_row_seed_bypass_uses_manifest_seed_constraints() -> None:

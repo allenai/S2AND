@@ -10,6 +10,7 @@ import s2and.subblocking as subblocking
 from s2and.arrow_inputs import ArrowDataset
 from s2and.data import Signature
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index
+from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import write_test_arrow_artifact_manifest
 
 
@@ -125,7 +126,7 @@ def test_make_subblocks_preserves_integer_signature_ids() -> None:
 
 
 def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(tmp_path) -> None:
-    _require_rust_arrow_subblocking()
+    load_s2and_rust_extension()
     signatures_path = tmp_path / "signatures.arrow"
     _write_signatures_arrow(signatures_path, [("1", "anna", "", None)])
     paths = {
@@ -148,7 +149,7 @@ def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(t
             graph_subblocking_config=subblocking.GraphSubblockingConfig(),
         )
 
-    rust_module = pytest.importorskip("s2and_rust")
+    rust_module = load_s2and_rust_extension()
     with pytest.raises(ValueError, match='must be unique.*"1"'):
         rust_module.make_subblocks_with_telemetry_arrow_native_graph(
             arrow_dataset.native,
@@ -383,6 +384,16 @@ def test_union_find_find_compresses_long_parent_chain_without_recursion() -> Non
     assert union_find.parent[0] == 1499
 
 
+@pytest.mark.parametrize("bridge", [(0, 2), (2, 0)])
+def test_union_find_capacity_counts_existing_component_in_either_argument_order(bridge) -> None:
+    union_find = subblocking._UnionFind(4)
+    assert union_find.union_if_capacity(0, 1, maximum_size=3)
+    assert union_find.union_if_capacity(*bridge, maximum_size=3)
+    assert not union_find.union_if_capacity(2, 3, maximum_size=3)
+    assert union_find.find(0) == union_find.find(1) == union_find.find(2)
+    assert union_find.find(2) != union_find.find(3)
+
+
 def test_normalize_orcid_for_subblocking_matches_rust_arrow_canonical_form() -> None:
     assert (
         subblocking.normalize_orcid_for_subblocking(" https://orcid.org/0000-0002-1825-0097 ") == "0000-0002-1825-0097"
@@ -480,204 +491,97 @@ def test_terminal_full_name_is_used_for_merge_scoring() -> None:
     assert candidates == [(("chen|middle=w", "cheng"), 100004.0)]
 
 
-def test_make_subblocks_merges_normalized_orcid_components_when_enabled(monkeypatch):
+@pytest.mark.parametrize(
+    ("names", "maximum_size", "enabled", "expected", "skipped"),
+    [
+        (
+            [
+                ("aa", "https://orcid.org/0000-0002-1825-0097"),
+                ("bb", "ORCID: 0000000218250097"),
+                ("aa", "   "),
+                ("cc", "   "),
+            ],
+            3,
+            True,
+            [["s1", "s2", "s3"], ["s4"]],
+            (0, 0),
+        ),
+        (
+            [
+                ("bb", "0000-0000-0000-0001"),
+                ("bb", "0000-0000-0000-0001"),
+                ("aa", "0000-0000-0000-0001"),
+                ("aa", None),
+                ("aa", None),
+                ("bb", None),
+            ],
+            6,
+            True,
+            [["s1", "s2", "s3", "s4", "s5", "s6"]],
+            (0, 0),
+        ),
+        (
+            [
+                ("aa", "0000-0000-0000-0001"),
+                ("aa", "0000-0000-0000-0001"),
+                ("aa", None),
+                ("bb", "0000-0000-0000-0001"),
+                ("bb", None),
+            ],
+            4,
+            True,
+            [["s1", "s2", "s3"], ["s4", "s5"]],
+            (1, 3),
+        ),
+        (
+            [("aa", "https://orcid.org/0000-0002-1825-0097"), ("bb", "ORCID: 0000000218250097"), ("cc", None)],
+            3,
+            False,
+            [["s1"], ["s2"], ["s3"]],
+            (0, 0),
+        ),
+        (
+            [
+                ("aa", "0000-0000-0000-0001"),
+                ("bb", "0000-0000-0000-0001"),
+                ("bb", "0000-0000-0000-0002"),
+                ("cc", "0000-0000-0000-0002"),
+            ],
+            3,
+            True,
+            [["s1"], ["s2", "s3"], ["s4"]],
+            (2, 4),
+        ),
+    ],
+    ids=["normalized-orcid", "whole-subblocks", "over-capacity", "disabled", "transitive-over-capacity"],
+)
+def test_python_and_arrow_orcid_repair_preserve_whole_subblocks(
+    tmp_path: Path, names, maximum_size: int, enabled: bool, expected, skipped
+) -> None:
+    """Both real implementations obey the same ORCID and capacity contract."""
+    rows = [(f"s{index}", first, "", orcid) for index, (first, orcid) in enumerate(names, start=1)]
+    signatures_path = tmp_path / "signatures.arrow"
+    _write_signatures_arrow(signatures_path, rows)
     dataset = SimpleNamespace(
         signatures={
-            "s1": _signature("s1", first="aa", middle="", orcid="https://orcid.org/0000-0002-1825-0097"),
-            "s2": _signature("s2", first="bb", middle="", orcid="ORCID: 0000000218250097"),
-            "s3": _signature("s3", first="aa", middle="", orcid="   "),
-            "s4": _signature("s4", first="cc", middle="", orcid="   "),
+            sid: _signature(sid, first=first, middle=middle, orcid=orcid) for sid, first, middle, orcid in rows
         },
         random_seed=0,
     )
-
-    call_count = {"value": 0}
-
-    def fake_subdivide_helper(names, sig_ids, maximum_size, starting_k=2):
-        del names, sig_ids, maximum_size, starting_k
-        call_count["value"] += 1
-        if call_count["value"] == 1:
-            return {
-                "a": np.array(["s1", "s3"]),
-                "b": np.array(["s2"]),
-                "c": np.array(["s4"]),
-            }, {}
-        raise AssertionError("Unexpected extra call to subdivide_helper")
-
-    monkeypatch.setattr(subblocking, "subdivide_helper", fake_subdivide_helper)
-
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2", "s3", "s4"],
-        dataset,
-        maximum_size=3,
-        first_k_letter_counts_sorted={},
-    )
-
-    assert telemetry["orcid_subblocking_enabled"] is True
-    assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [["s1", "s2", "s3"], ["s4"]]
-
-
-def test_make_subblocks_orcid_repair_merges_whole_subblocks(monkeypatch):
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="bb", middle="", orcid="0000-0000-0000-0001"),
-            "s2": _signature("s2", first="bb", middle="", orcid="0000-0000-0000-0001"),
-            "s3": _signature("s3", first="aa", middle="", orcid="0000-0000-0000-0001"),
-            "s4": _signature("s4", first="aa", middle=""),
-            "s5": _signature("s5", first="aa", middle=""),
-            "s6": _signature("s6", first="bb", middle=""),
-        },
-        random_seed=0,
-    )
-
-    call_count = {"value": 0}
-
-    def fake_subdivide_helper(names, sig_ids, maximum_size, starting_k=2):
-        del names, sig_ids, maximum_size, starting_k
-        call_count["value"] += 1
-        if call_count["value"] == 1:
-            return {
-                "a": np.array(["s3", "s4", "s5"]),
-                "b": np.array(["s1", "s2", "s6"]),
-            }, {}
-        raise AssertionError("Unexpected extra call to subdivide_helper")
-
-    monkeypatch.setattr(subblocking, "subdivide_helper", fake_subdivide_helper)
-
-    subblocks, _telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2", "s3", "s4", "s5", "s6"],
-        dataset,
-        maximum_size=6,
-        first_k_letter_counts_sorted={},
-    )
-
-    assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [
-        ["s1", "s2", "s3", "s4", "s5", "s6"],
-    ]
-
-
-def test_make_subblocks_orcid_repair_does_not_extract_from_oversized_whole_merge(monkeypatch):
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="aa", middle="", orcid="0000-0000-0000-0001"),
-            "s2": _signature("s2", first="aa", middle="", orcid="0000-0000-0000-0001"),
-            "s3": _signature("s3", first="aa", middle=""),
-            "s4": _signature("s4", first="bb", middle="", orcid="0000-0000-0000-0001"),
-            "s5": _signature("s5", first="bb", middle=""),
-        },
-        random_seed=0,
-    )
-
-    call_count = {"value": 0}
-
-    def fake_subdivide_helper(names, sig_ids, maximum_size, starting_k=2):
-        del names, sig_ids, maximum_size, starting_k
-        call_count["value"] += 1
-        if call_count["value"] == 1:
-            return {
-                "a": np.array(["s1", "s2", "s3"]),
-                "b": np.array(["s4", "s5"]),
-            }, {}
-        raise AssertionError("Unexpected extra call to subdivide_helper")
-
-    monkeypatch.setattr(subblocking, "subdivide_helper", fake_subdivide_helper)
-
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2", "s3", "s4", "s5"],
-        dataset,
-        maximum_size=4,
-        first_k_letter_counts_sorted={},
-    )
-
-    assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [
-        ["s1", "s2", "s3"],
-        ["s4", "s5"],
-    ]
-    assert telemetry["orcid_merge_skipped_due_to_capacity_count"] == 1
-    assert telemetry["orcid_merge_skipped_due_to_capacity_signature_count"] == 3
-
-
-def test_make_subblocks_leaves_orcid_components_split_when_disabled(monkeypatch):
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="aa", middle="", orcid="https://orcid.org/0000-0002-1825-0097"),
-            "s2": _signature("s2", first="bb", middle="", orcid="ORCID: 0000000218250097"),
-            "s3": _signature("s3", first="cc", middle=""),
-        },
-        random_seed=0,
-    )
-
-    call_count = {"value": 0}
-
-    def fake_subdivide_helper(names, sig_ids, maximum_size, starting_k=2):
-        del names, sig_ids, maximum_size, starting_k
-        call_count["value"] += 1
-        if call_count["value"] == 1:
-            return {
-                "a": np.array(["s1"]),
-                "b": np.array(["s2"]),
-                "c": np.array(["s3"]),
-            }, {}
-        raise AssertionError("Unexpected extra call to subdivide_helper")
-
-    monkeypatch.setattr(subblocking, "subdivide_helper", fake_subdivide_helper)
-
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2", "s3"],
-        dataset,
-        maximum_size=3,
-        first_k_letter_counts_sorted={},
-        use_orcid_subblocking=False,
-    )
-
-    assert telemetry["orcid_subblocking_enabled"] is False
-    assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [["s1"], ["s2"], ["s3"]]
-
-
-def test_make_subblocks_orcid_repair_skips_oversized_connected_component_without_partial_merge(monkeypatch):
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="aa", middle="", orcid="0000-0000-0000-0001"),
-            "s2": _signature("s2", first="bb", middle="", orcid="0000-0000-0000-0001"),
-            "s3": _signature("s3", first="bb", middle="", orcid="0000-0000-0000-0002"),
-            "s4": _signature("s4", first="cc", middle="", orcid="0000-0000-0000-0002"),
-        },
-        random_seed=0,
-    )
-
-    def fake_subdivide_helper(names, sig_ids, maximum_size, starting_k=2):
-        del names, sig_ids, maximum_size, starting_k
-        return {
-            "a": np.array(["s1"]),
-            "b": np.array(["s2", "s3"]),
-            "c": np.array(["s4"]),
-        }, {}
-
-    monkeypatch.setattr(subblocking, "subdivide_helper", fake_subdivide_helper)
-
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2", "s3", "s4"],
-        dataset,
-        maximum_size=3,
-        first_k_letter_counts_sorted={},
-    )
-
-    assert subblocks == {
-        "a": ["s1"],
-        "b": ["s2", "s3"],
-        "c": ["s4"],
-    }
-    assert telemetry["orcid_merge_skipped_due_to_capacity_count"] == 2
-    assert telemetry["orcid_merge_skipped_due_to_capacity_signature_count"] == 4
-
-
-def _require_rust_arrow_subblocking():
-    from tests.helpers import import_s2and_rust
-
-    has_rust, rust_payload = import_s2and_rust()
-    if not has_rust:
-        raise pytest.skip.Exception(f"s2and_rust is unavailable: {rust_payload!r}")
-    return rust_payload
+    kwargs = dict(maximum_size=maximum_size, first_k_letter_counts_sorted={}, use_orcid_subblocking=enabled)
+    python_result = subblocking.make_subblocks_with_telemetry(list(dataset.signatures), dataset, **kwargs)
+    with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow_dataset:
+        native_result = subblocking._make_subblocks_with_telemetry_arrow_rust(
+            arrow_dataset,
+            list(dataset.signatures),
+            **kwargs,
+            graph_subblocking_config=subblocking.GraphSubblockingConfig(),
+        )
+    for subblocks, telemetry in (python_result, native_result):
+        assert sorted(sorted(members) for members in subblocks.values()) == expected
+        assert telemetry["orcid_subblocking_enabled"] is enabled
+        assert telemetry["orcid_merge_skipped_due_to_capacity_count"] == skipped[0]
+        assert telemetry["orcid_merge_skipped_due_to_capacity_signature_count"] == skipped[1]
 
 
 def _write_signatures_arrow(
@@ -686,8 +590,9 @@ def _write_signatures_arrow(
     *,
     author_positions: list[int | None] | None = None,
 ) -> None:
-    pa = pytest.importorskip("pyarrow")
-    ipc = pytest.importorskip("pyarrow.ipc")
+    import pyarrow as pa
+    import pyarrow.ipc as ipc
+
     positions = [0] * len(rows) if author_positions is None else author_positions
     table = pa.table(
         {
@@ -761,7 +666,7 @@ def _open_subblocking_arrow_dataset(paths: dict[str, str], tmp_path: Path) -> Ar
 
 
 def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:
-    _require_rust_arrow_subblocking()
+    load_s2and_rust_extension()
     cases = (
         (
             "first-prefix",
@@ -822,117 +727,8 @@ def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:
         arrow_dataset.close()
 
 
-def test_rust_arrow_make_subblocks_matches_python_orcid_repair(tmp_path):
-    _require_rust_arrow_subblocking()
-    signatures_path = tmp_path / "signatures.arrow"
-    _write_signatures_arrow(
-        signatures_path,
-        [
-            ("s1", "aa", "", "https://orcid.org/0000-0002-1825-0097"),
-            ("s2", "bb", "", "ORCID: 0000000218250097"),
-            ("s3", "aa", "", "   "),
-            ("s4", "cc", "", "   "),
-        ],
-    )
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="aa", middle="", orcid="https://orcid.org/0000-0002-1825-0097"),
-            "s2": _signature("s2", first="bb", middle="", orcid="ORCID: 0000000218250097"),
-            "s3": _signature("s3", first="aa", middle="", orcid="   "),
-            "s4": _signature("s4", first="cc", middle="", orcid="   "),
-        },
-        random_seed=0,
-    )
-
-    python_subblocks, python_telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2", "s3", "s4"],
-        dataset,
-        maximum_size=3,
-        first_k_letter_counts_sorted={},
-    )
-    arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path)
-    rust_subblocks, rust_telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
-        arrow_dataset,
-        ["s1", "s2", "s3", "s4"],
-        maximum_size=3,
-        first_k_letter_counts_sorted={},
-        graph_subblocking_config=subblocking.GraphSubblockingConfig(),
-    )
-
-    assert sorted(sorted(signature_ids) for signature_ids in rust_subblocks.values()) == sorted(
-        sorted(signature_ids) for signature_ids in python_subblocks.values()
-    )
-    for key, value in python_telemetry.items():
-        assert rust_telemetry[key] == value
-    assert rust_telemetry["graph_fallback_native"] is True
-    arrow_dataset.close()
-
-
-def test_rust_arrow_orcid_repair_merges_whole_subblocks(tmp_path):
-    _require_rust_arrow_subblocking()
-    signatures_path = tmp_path / "signatures.arrow"
-    _write_signatures_arrow(
-        signatures_path,
-        [
-            ("s1", "bb", "", "0000-0000-0000-0001"),
-            ("s2", "bb", "", "0000-0000-0000-0001"),
-            ("s3", "aa", "", "0000-0000-0000-0001"),
-            ("s4", "aa", "", None),
-            ("s5", "aa", "", None),
-            ("s6", "bb", "", None),
-        ],
-    )
-
-    arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path)
-    rust_subblocks, telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
-        arrow_dataset,
-        ["s1", "s2", "s3", "s4", "s5", "s6"],
-        maximum_size=6,
-        first_k_letter_counts_sorted={},
-        graph_subblocking_config=subblocking.GraphSubblockingConfig(),
-    )
-
-    assert sorted(sorted(signature_ids) for signature_ids in rust_subblocks.values()) == [
-        ["s1", "s2", "s3", "s4", "s5", "s6"],
-    ]
-    assert telemetry["orcid_subblocking_enabled"] is True
-    arrow_dataset.close()
-
-
-def test_rust_arrow_orcid_repair_does_not_extract_from_oversized_whole_merge(tmp_path):
-    _require_rust_arrow_subblocking()
-    signatures_path = tmp_path / "signatures.arrow"
-    _write_signatures_arrow(
-        signatures_path,
-        [
-            ("s1", "aa", "", "0000-0000-0000-0001"),
-            ("s2", "aa", "", "0000-0000-0000-0001"),
-            ("s3", "aa", "", None),
-            ("s4", "bb", "", "0000-0000-0000-0001"),
-            ("s5", "bb", "", None),
-        ],
-    )
-
-    arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path)
-    rust_subblocks, telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
-        arrow_dataset,
-        ["s1", "s2", "s3", "s4", "s5"],
-        maximum_size=4,
-        first_k_letter_counts_sorted={},
-        graph_subblocking_config=subblocking.GraphSubblockingConfig(),
-    )
-
-    assert sorted(sorted(signature_ids) for signature_ids in rust_subblocks.values()) == [
-        ["s1", "s2", "s3"],
-        ["s4", "s5"],
-    ]
-    assert telemetry["orcid_merge_skipped_due_to_capacity_count"] == 1
-    assert telemetry["orcid_merge_skipped_due_to_capacity_signature_count"] == 3
-    arrow_dataset.close()
-
-
 def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_telemetry(tmp_path):
-    _require_rust_arrow_subblocking()
+    load_s2and_rust_extension()
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
     specter_path = tmp_path / "specter.arrow"
@@ -1030,87 +826,14 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_tel
 
 
 def test_rust_arrow_native_graph_subblocking_rejects_null_author_position(tmp_path):
-    _require_rust_arrow_subblocking()
     signatures_path = tmp_path / "signatures.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter_path = tmp_path / "specter.arrow"
     _write_signatures_arrow(
         signatures_path,
-        [
-            ("s1", "hui", "", None),
-            ("s2", "hui", "", None),
-            ("s3", "hui", "", None),
-            ("s4", "hui", "", None),
-        ],
-        author_positions=[None, 0, 0, 0],
+        [("s1", "hui", "", None), ("s2", "hui", "", None)],
+        author_positions=[None, 0],
     )
-    _write_ipc(
-        paper_authors_path,
-        pa.table(
-            {
-                "paper_id": pa.array(["p_s1", "p_s1", "p_s2", "p_s2", "p_s3", "p_s3", "p_s4", "p_s4"]),
-                "position": pa.array([0, 1, 0, 1, 0, 1, 0, 1], type=pa.int64()),
-                "author_name": pa.array(
-                    [
-                        "Hui Wang",
-                        "Ada Lovelace",
-                        "Hui Wang",
-                        "Ada Lovelace",
-                        "Hui Wang",
-                        "Grace Hopper",
-                        "Hui Wang",
-                        "Grace Hopper",
-                    ],
-                    type=pa.string(),
-                ),
-            }
-        ),
-    )
-    embeddings = np.asarray([[1.0, 0.0], [0.99, 0.01], [0.0, 1.0], [0.01, 0.99]], dtype=np.float32)
-    _write_ipc(
-        specter_path,
-        pa.table(
-            {
-                "paper_id": pa.array(["p_s1", "p_s2", "p_s3", "p_s4"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array(np.ravel(embeddings), type=pa.float32()), 2),
-            }
-        ),
-    )
-    paths = {
-        "signatures": str(signatures_path),
-        "signatures_batch_index": _add_batch_index(
-            signatures_path,
-            tmp_path / "signatures.signatures_batch_index.bin",
-            key_column="signature_id",
-            table_name="signatures",
-        ),
-        "paper_authors": str(paper_authors_path),
-        "paper_authors_batch_index": _add_batch_index(
-            paper_authors_path,
-            tmp_path / "paper_authors.paper_authors_batch_index.bin",
-            key_column="paper_id",
-            table_name="paper_authors",
-        ),
-        "specter": str(specter_path),
-        "specter_batch_index": _add_batch_index(
-            specter_path,
-            tmp_path / "specter.specter_batch_index.bin",
-            key_column="paper_id",
-            table_name="specter",
-        ),
-    }
-
-    arrow_dataset = _open_subblocking_arrow_dataset(paths, tmp_path)
-    with pytest.raises(ValueError, match="author_position is null"):
-        subblocking._make_subblocks_with_telemetry_arrow_rust(
-            arrow_dataset,
-            ["s1", "s2", "s3", "s4"],
-            maximum_size=2,
-            first_k_letter_counts_sorted={},
-            graph_subblocking_config=subblocking.GraphSubblockingConfig(
-                neighbor_mode="exact",
-                neighbors=1,
-                min_edge_score=0.8,
-            ),
-        )
-    arrow_dataset.close()
+    with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow_dataset:
+        with pytest.raises(ValueError, match="author_position is null"):
+            subblocking._make_subblocks_with_telemetry_arrow_rust(
+                arrow_dataset, ["s1", "s2"], maximum_size=1, first_k_letter_counts_sorted={}
+            )

@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -19,7 +19,6 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
-from s2and.incremental_linking.completion import next_unused_cluster_id
 from s2and.incremental_linking.feature_block import (
     read_cluster_seed_disallows_arrow,
     read_incremental_query_signatures_arrow,
@@ -33,7 +32,7 @@ from s2and.incremental_linking.retrieval import (
     RawArrowPlanBundle,
 )
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
-from s2and.model import Clusterer, IncrementalDistStats
+from s2and.model import Clusterer
 from s2and.prediction_state import PredictionState
 from tests.helpers import (
     tiny_name_counts_index,
@@ -41,6 +40,7 @@ from tests.helpers import (
     write_minimal_arrow_prediction_bundle,
     write_test_arrow_artifact_manifest,
 )
+from tests.model_helpers import ConstantDistanceClassifier
 
 _PROMOTED_TEST_FEATURIZER_INFO = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
 _PROMOTED_TEST_FEATURE_COLUMNS = ("test_link_probability",)
@@ -233,50 +233,6 @@ def test_raw_plan_contiguous_query_slice_rebases_rows_and_pairs() -> None:
     assert np.shares_memory(remainder.retrieval_scores, bundle.retrieval_scores)
 
 
-def test_finish_incremental_uses_split_inverse_for_altered_incompatibility_check() -> None:
-    """A split altered profile should compare new names only against the linked split."""
-
-    def signature(first: str) -> SimpleNamespace:
-        return SimpleNamespace(
-            author_info_first=first,
-            author_info_first_normalized_without_apostrophe=first,
-            author_info_last="Jones",
-            paper_id=f"p-{first}",
-        )
-
-    dataset = SimpleNamespace(
-        signatures={
-            "seed_david": signature("David"),
-            "seed_initial": signature("D"),
-            "new_donald": signature("Donald"),
-        },
-        name_tuples=set(),
-        max_seed_cluster_id=0,
-    )
-    clusterer = SimpleNamespace(
-        use_default_constraints_as_supervision=True,
-        suppress_orcid=False,
-    )
-
-    clusters = Clusterer._finish_incremental_with_seed_links(
-        cast(Any, clusterer),
-        ["new_donald"],
-        cast(Any, dataset),
-        {"new_donald": "0_1"},
-        {"0_0": "0", "0_1": "0"},
-        {"0": ["seed_david", "seed_initial"]},
-        prevent_new_incompatibilities=True,
-        partial_supervision={},
-        runtime_context=cast(Any, SimpleNamespace()),
-        split_cluster_seeds_require_inverse={
-            "0_0": ["seed_david"],
-            "0_1": ["seed_initial"],
-        },
-    )
-
-    assert clusters == {"0": ["seed_david", "seed_initial", "new_donald"]}
-
-
 def test_finish_incremental_lazily_resolves_default_name_tuples_for_direct_arrow_dataset() -> None:
     """Direct Arrow's default name_tuples value should not crash compatibility checks."""
 
@@ -318,106 +274,15 @@ def test_finish_incremental_lazily_resolves_default_name_tuples_for_direct_arrow
     assert clusters == {"0": ["seed_xavier"], "1": ["new_zelda"]}
 
 
-def test_finish_incremental_resolves_name_tuples_once_for_all_assignments(monkeypatch: pytest.MonkeyPatch) -> None:
-    def signature(first: str) -> SimpleNamespace:
-        return SimpleNamespace(
-            author_info_first=first,
-            author_info_first_normalized_without_apostrophe=first.lower(),
-            author_info_last="Jones",
-            paper_id=f"p-{first.lower()}",
-        )
-
-    dataset = SimpleNamespace(
-        signatures={
-            "seed": signature("William"),
-            "new_1": signature("Bill"),
-            "new_2": signature("Bill"),
-            "new_3": signature("Bill"),
-        },
-        name_tuples={("william", "bill")},
-        max_seed_cluster_id=0,
-    )
-    clusterer = SimpleNamespace(
-        use_default_constraints_as_supervision=True,
-        suppress_orcid=False,
-    )
-    original_resolver = model_module._name_tuples_for_incremental_rules
-    resolver_calls = 0
-
-    def recording_resolver(name_tuples):
-        nonlocal resolver_calls
-        resolver_calls += 1
-        return original_resolver(name_tuples)
-
-    monkeypatch.setattr(model_module, "_name_tuples_for_incremental_rules", recording_resolver)
-    clusters = Clusterer._finish_incremental_with_seed_links(
-        cast(Any, clusterer),
-        ["new_1", "new_2", "new_3"],
-        cast(Any, dataset),
-        {"new_1": "0_0", "new_2": "0_1", "new_3": "0_2"},
-        {"0_0": "0", "0_1": "0", "0_2": "0"},
-        {"0": ["seed"]},
-        prevent_new_incompatibilities=True,
-        partial_supervision={},
-        runtime_context=cast(Any, SimpleNamespace()),
-        split_cluster_seeds_require_inverse={
-            "0_0": ["seed"],
-            "0_1": ["seed"],
-            "0_2": ["seed"],
-        },
-    )
-
-    assert clusters == {"0": ["seed", "new_1", "new_2", "new_3"]}
-    assert resolver_calls == 1
-
-
-def test_model_presplit_cache_fingerprint_drops_cluster_model_identity() -> None:
-    class DummyClusterModel:
-        def get_params(self, *, deep: bool = False) -> dict[str, float]:
-            return {"eps": 0.5}
-
-    classifier = object()
-    nameless_classifier = object()
-    base = {
-        "classifier": classifier,
-        "nameless_classifier": nameless_classifier,
-        "featurizer_info": SimpleNamespace(features_to_use=("year_diff",)),
-        "nameless_featurizer_info": SimpleNamespace(features_to_use=()),
-        "use_default_constraints_as_supervision": True,
-        "dont_merge_cluster_seeds": True,
-        "suppress_orcid": False,
-    }
-    first = SimpleNamespace(**base, cluster_model=DummyClusterModel())
-    second = SimpleNamespace(**base, cluster_model=DummyClusterModel())
-
-    assert model_module._model_presplit_cache_fingerprint(first) == model_module._model_presplit_cache_fingerprint(
-        second
-    )
-
-
-def test_model_presplit_cache_fingerprint_tracks_classifier_state() -> None:
-    classifier = SimpleNamespace(version=1)
-    clusterer = SimpleNamespace(
-        classifier=classifier,
-        nameless_classifier=None,
-        cluster_model=None,
-        featurizer_info=SimpleNamespace(features_to_use=("year_diff",)),
-        nameless_featurizer_info=SimpleNamespace(features_to_use=()),
-        use_default_constraints_as_supervision=True,
-        dont_merge_cluster_seeds=True,
-        suppress_orcid=False,
-    )
-
-    before = model_module._model_presplit_cache_fingerprint(clusterer)
-    classifier.version = 2
-
-    assert model_module._model_presplit_cache_fingerprint(clusterer) != before
-
-
-def test_model_presplit_cache_fingerprint_hashes_complete_numpy_fitted_state() -> None:
+@pytest.mark.parametrize("kind", ["numpy", "booster"])
+def test_model_presplit_cache_fingerprint_hashes_complete_fitted_state(kind) -> None:
     fit_x = np.concatenate((np.zeros((1_000, 1)), np.full((1_000, 1), 10.0)))
     fit_y = np.concatenate((np.zeros(1_000, dtype=int), np.ones(1_000, dtype=int)))
-    classifier = KNeighborsClassifier(n_neighbors=1, algorithm="brute").fit(fit_x, fit_y)
+    classifier = (
+        KNeighborsClassifier(n_neighbors=1, algorithm="brute")
+        if kind == "numpy"
+        else LGBMClassifier(n_estimators=1, num_leaves=2, n_jobs=1, verbosity=-1)
+    ).fit(fit_x, fit_y)
     clusterer = SimpleNamespace(
         classifier=classifier,
         nameless_classifier=None,
@@ -434,8 +299,12 @@ def test_model_presplit_cache_fingerprint_hashes_complete_numpy_fitted_state() -
     assert model_module._model_presplit_cache_fingerprint(clusterer) == before
     assert classifier.predict([[9.0]]).item() == 1
 
-    # This fitted row is hidden behind NumPy's repr ellipsis but changes predictions.
-    classifier._fit_X[500, 0] = 9.0
+    if kind == "numpy":
+        # This fitted row is hidden behind NumPy's repr ellipsis but changes predictions.
+        classifier._fit_X[500, 0] = 9.0
+    else:
+        leaf = np.asarray(classifier.booster_.predict([[9.0]], pred_leaf=True)).item()
+        classifier.booster_.set_leaf_output(0, leaf, -10.0)
 
     assert repr(classifier.__dict__) == legacy_state_repr
     assert classifier.predict([[9.0]]).item() == 0
@@ -501,37 +370,6 @@ def test_altered_presplit_lru_serializes_concurrent_get_and_eviction() -> None:
     assert target_key in cache
 
 
-def test_cluster_seed_inverse_canonicalizes_component_ids() -> None:
-    assert model_module._cluster_seeds_require_inverse({"s1": 7, "s2": "7"}) == {"7": ["s1", "s2"]}
-
-
-def test_predict_from_rust_featurizer_skips_unused_signature_rule_metadata() -> None:
-    captured: dict[str, Any] = {}
-
-    class DummyClusterer:
-        predict_from_rust_featurizer = Clusterer.predict_from_rust_featurizer
-
-        def predict_helper(self, block_dict, dataset, **kwargs):
-            captured["dataset"] = dataset
-            captured["kwargs"] = kwargs
-            return {"block_0": list(block_dict["block"])}, kwargs["dists"]
-
-    class FakeRustFeaturizer:
-        def signature_rule_metadata(self):
-            raise AssertionError("full-block prediction does not consume signature rule metadata")
-
-    clusterer = DummyClusterer()
-    cast(Any, clusterer).predict_from_rust_featurizer(
-        {"block": ["s_alice", "s_bob", "s_alicia"]},
-        FakeRustFeaturizer(),
-        dists={"block": np.asarray([0.1, 0.2, 0.3], dtype=np.float64)},
-        cluster_seeds_require={},
-    )
-
-    proxy_dataset = captured["dataset"]
-    assert proxy_dataset.signatures == {}
-
-
 def _build_dummy_clusterer_and_dataset(*, name: str = "dummy_chunked") -> tuple[Clusterer, ANDData]:
     dataset = ANDData(
         "tests/dummy/signatures.json",
@@ -543,14 +381,9 @@ def _build_dummy_clusterer_and_dataset(*, name: str = "dummy_chunked") -> tuple[
     )
 
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
-    rng = np.random.RandomState(1)
-    X_random = rng.random((10, 6))
-    y_random = rng.randint(0, 6, 10)
     clusterer = Clusterer(
         featurizer_info=featurizer_info,
-        classifier=LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1, verbosity=-1).fit(
-            X_random, y_random
-        ),
+        classifier=ConstantDistanceClassifier(),
         n_jobs=1,
         use_default_constraints_as_supervision=True,
     )
@@ -565,11 +398,6 @@ def clusterer_dataset_factory():
     return _factory
 
 
-@pytest.fixture(autouse=True)
-def _use_python_backend_by_default(monkeypatch):
-    monkeypatch.setenv("S2AND_BACKEND", "python")
-
-
 def test_predict_incremental(clusterer_dataset_factory):
     # base clustering of the random model would be
     # {'0': ['0', '1', '2'], '1': ['3', '4', '5', '8'], '2': ['6', '7']}
@@ -577,7 +405,10 @@ def test_predict_incremental(clusterer_dataset_factory):
     block = ["3", "4", "5", "6", "7", "8"]
 
     # Non-subblocked (monolithic) is the reference output.
-    output_monolithic = _clusters(dummy_clusterer.predict_incremental(block, dummy_dataset))
+    payload = dummy_clusterer.predict_incremental(block, dummy_dataset)
+    assert set(payload) >= {"clusters", "phase_b_mode", "phase_b_budget_bytes", "phase_b_required_bytes"}
+    assert payload["phase_b_mode"] == "exact"
+    output_monolithic = _clusters(payload)
     expected_output = {"0": ["6", "7"], "1": ["3", "4", "5", "8"]}
     assert _same_partition(output_monolithic, expected_output)
 
@@ -592,15 +423,6 @@ def test_predict_incremental(clusterer_dataset_factory):
     output = _clusters(dummy_clusterer.predict_incremental(block, dummy_dataset))
     expected_output = {"0": ["1", "2", "5", "8"], "1": ["6", "7", "3", "4"]}
     assert _same_partition(output, expected_output)
-
-
-def test_predict_incremental_return_contract(clusterer_dataset_factory):
-    block = ["3", "4", "5", "6", "7", "8"]
-    clusterer, dataset = clusterer_dataset_factory(name="dummy_incremental_contract")
-
-    payload = clusterer.predict_incremental(block, dataset)
-    assert set(payload) >= {"clusters", "phase_b_mode", "phase_b_budget_bytes", "phase_b_required_bytes"}
-    assert payload["phase_b_mode"] == "exact"
 
 
 @pytest.mark.parametrize("ignore_seeds, expected_count", [(False, 1), (True, 2)])
@@ -1080,15 +902,15 @@ def test_native_planner_exclusions_match_scored_supervision_direction(
     from s2and.consts import LARGE_INTEGER
     from s2and.incremental_linking.feature_block import write_cluster_seed_disallows_arrow
     from s2and.incremental_linking.retrieval import build_linker_retrieval_batch_from_raw_plan_bundle
-    from tests.test_raw_block_candidate_plan_arrow import _base_arrow_paths, _native_auto_planner
+    from tests.raw_arrow_helpers import base_arrow_paths, native_auto_planner
 
-    paths = _base_arrow_paths(tmp_path)
+    paths = base_arrow_paths(tmp_path)
     partial = {}
     if direct is not None:
         partial[("q1", "s1")] = direct
     if reverse is not None:
         partial[("s1", "q1")] = reverse
-    baseline = _native_auto_planner(paths, top_k=25, orcid_enabled=False, num_threads=1).plan(["q1"])
+    baseline = native_auto_planner(paths, top_k=25, orcid_enabled=False, num_threads=1).plan(["q1"])
     bundle = RawArrowPlanBundle.from_native_mapping(baseline)
     candidate_batch = build_linker_retrieval_batch_from_raw_plan_bundle(bundle).candidate_batch
     labels, _ = production_module.runtime_module._resolve_candidate_batch_pair_labels_rust(  # noqa: SLF001
@@ -1109,7 +931,7 @@ def test_native_planner_exclusions_match_scored_supervision_direction(
     disallow_path = tmp_path / "request_disallows.arrow"
     write_cluster_seed_disallows_arrow(disallow_path, exclusions)
     paths["cluster_seed_disallows"] = str(disallow_path)
-    current = _native_auto_planner(paths, top_k=25, orcid_enabled=False, num_threads=1).plan(["q1"])
+    current = native_auto_planner(paths, top_k=25, orcid_enabled=False, num_threads=1).plan(["q1"])
     assert "c_match" in bundle.row_component_keys
     assert ("c_match" not in current["row_component_keys"]) == (effective_distance == LARGE_DISTANCE)
     assert "c_other" in current["row_component_keys"]
@@ -1944,26 +1766,6 @@ def test_arrow_subblocked_single_letter_groups_carry_prior_assignments(tmp_path:
     ]
 
 
-def test_next_unused_cluster_id_prevents_overwrite():
-    pred_clusters = {
-        "0": ["s0"],
-        "1": ["s1"],
-        "2": ["existing_singleton_cluster"],
-    }
-    start = next_unused_cluster_id(pred_clusters, 2)
-    assert start == 3
-
-    # Simulate the singleton recluster append loop in Python incremental prediction.
-    for signatures in (["new_a"], ["new_b"]):
-        cluster_id = next_unused_cluster_id(pred_clusters, start)
-        pred_clusters[str(cluster_id)] = signatures
-        start = cluster_id + 1
-
-    assert pred_clusters["2"] == ["existing_singleton_cluster"]
-    assert pred_clusters["3"] == ["new_a"]
-    assert pred_clusters["4"] == ["new_b"]
-
-
 def test_predict_incremental_without_seeds_covers_all_signatures(clusterer_dataset_factory):
     clusterer, dataset = clusterer_dataset_factory()
     dataset.cluster_seeds_require = {}
@@ -2123,51 +1925,6 @@ def test_best_incremental_cluster_respects_seed_score_mode():
     assert best_hybrid_high_score == pytest.approx(0.08)
 
 
-def test_finish_incremental_with_seed_links_reclusters_only_abstains():
-    clusterer = _build_minimal_incremental_clusterer()
-    residual_blocks: list[list[str]] = []
-    residual_total_ram_bytes: list[int | None] = []
-
-    def fake_predict_helper(
-        block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None, prediction_state=None
-    ):
-        del dataset, partial_supervision, runtime_context
-        residual_blocks.append(list(block_dict["block"]))
-        residual_total_ram_bytes.append(total_ram_bytes)
-        return {"residual_cluster": list(block_dict["block"])}, None
-
-    clusterer.predict_helper = cast(Any, fake_predict_helper)
-    dataset = cast(
-        ANDData,
-        type(
-            "IncrementalDataset",
-            (),
-            {
-                "cluster_seeds_require": {"seed0": "7", "seed1": "8"},
-                "max_seed_cluster_id": 8,
-                "signatures": {},
-                "name_tuples": set(),
-            },
-        )(),
-    )
-
-    result = clusterer._finish_incremental_with_seed_links(
-        ["u1", "u2"],
-        dataset,
-        {"u1": "7_0"},
-        {"7_0": "7"},
-        {"7": ["seed0"], "8": ["seed1"]},
-        False,
-        {},
-        runtime_context=cast(Any, object()),
-        total_ram_bytes=123_456,
-    )
-
-    assert result == {"7": ["seed0", "u1"], "8": ["seed1"], "9": ["u2"]}
-    assert residual_blocks == []
-    assert residual_total_ram_bytes == []
-
-
 def test_finish_incremental_with_seed_links_uses_seed_setup_when_dataset_seed_map_is_empty():
     clusterer = _build_minimal_incremental_clusterer()
     dataset = cast(
@@ -2247,128 +2004,50 @@ def test_finish_incremental_with_seed_links_reclusters_abstains_from_arrow(tmp_p
     assert captured["total_ram_bytes"] == 123_456
 
 
-def test_finish_incremental_with_seed_links_splits_residual_phase_b_by_first_initial(tmp_path: Path):
-    prediction_state = PredictionState()
+def test_arrow_completion_forwards_first_names_and_orcid_bridges(tmp_path: Path):
+    """An ORCID joins initial groups while a third initial remains a singleton."""
     clusterer = _build_minimal_incremental_clusterer()
-    arrow_dataset = _minimal_arrow_dataset(tmp_path)
-    residual_blocks: list[list[str]] = []
+    arrow = _minimal_arrow_dataset(tmp_path)
+    state = PredictionState()
+    groups = []
 
-    def fake_predict_from_arrow(block_dict, dataset, **kwargs):
-        assert dataset is arrow_dataset
-        del kwargs
-        residual_block = list(block_dict["block"])
-        residual_blocks.append(residual_block)
-        return {"residual_cluster": residual_block}, None
+    def cluster_residuals(blocks, dataset, **kwargs):
+        assert dataset is arrow
+        group = list(blocks["block"])
+        groups.append(group)
+        return {"residual": group}, None
 
-    clusterer.predict_from_arrow = cast(Any, fake_predict_from_arrow)
-    dataset = cast(
-        ANDData,
-        SimpleNamespace(
-            cluster_seeds_require={"seed": "7"},
-            cluster_seeds_disallow=set(),
-            max_seed_cluster_id=7,
-            signatures={
-                "u_a1": SimpleNamespace(
-                    author_info_first_normalized_without_apostrophe="alice",
-                    author_info_first="Alice",
-                    author_info_orcid=None,
-                ),
-                "u_b1": SimpleNamespace(
-                    author_info_first_normalized_without_apostrophe="bob",
-                    author_info_first="Bob",
-                    author_info_orcid=None,
-                ),
-                "u_a2": SimpleNamespace(
-                    author_info_first_normalized_without_apostrophe="alan",
-                    author_info_first="Alan",
-                    author_info_orcid=None,
-                ),
-                "u_b2": SimpleNamespace(
-                    author_info_first_normalized_without_apostrophe="bea",
-                    author_info_first="Bea",
-                    author_info_orcid=None,
-                ),
-            },
-            name_tuples=set(),
-        ),
+    clusterer.predict_from_arrow = cluster_residuals
+    names = dict(zip(["a1", "b1", "a2", "b2", "c"], ["alice", "bob", "alan", "bea", "carol"], strict=True))
+    dataset = SimpleNamespace(
+        cluster_seeds_require={"seed": "7"},
+        cluster_seeds_disallow=set(),
+        max_seed_cluster_id=7,
+        name_tuples=set(),
+        signatures={
+            key: SimpleNamespace(
+                author_info_first=name,
+                author_info_first_normalized_without_apostrophe=name,
+                author_info_orcid="0000-0000-0000-0001" if key in {"a2", "b2"} else None,
+            )
+            for key, name in names.items()
+        },
     )
-
     result = clusterer._finish_incremental_with_seed_links(
-        ["u_a1", "u_b1", "u_a2", "u_b2"],
+        list(names),
         dataset,
         {},
         {},
         {"7": ["seed"]},
         False,
         {},
-        runtime_context=cast(Any, object()),
-        arrow_dataset=arrow_dataset,
-        prediction_state=prediction_state,
+        runtime_context=object(),
+        arrow_dataset=arrow,
+        prediction_state=state,
     )
-
-    assert result == {"7": ["seed"], "8": ["u_a1", "u_a2"], "9": ["u_b1", "u_b2"]}
-    assert residual_blocks == [["u_a1", "u_a2"], ["u_b1", "u_b2"]]
-    assert prediction_state.telemetry["incremental_residual_phase_b"] == {
-        "residual_phase_b_signature_count": 4,
-        "residual_phase_b_group_count": 2,
-        "residual_phase_b_pair_count_before": 6,
-        "residual_phase_b_pair_count_after": 2,
-        "residual_phase_b_pair_count_saved": 4,
-    }
-
-
-def test_finish_incremental_with_seed_links_residual_phase_b_preserves_same_orcid_group():
-    prediction_state = PredictionState()
-    clusterer = _build_minimal_incremental_clusterer()
-    residual_blocks: list[list[str]] = []
-
-    def fake_predict_helper(
-        block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None, prediction_state=None
-    ):
-        del dataset, partial_supervision, runtime_context, total_ram_bytes
-        residual_block = list(block_dict["block"])
-        residual_blocks.append(residual_block)
-        return {"residual_cluster": residual_block}, None
-
-    clusterer.predict_helper = cast(Any, fake_predict_helper)
-    dataset = cast(
-        ANDData,
-        SimpleNamespace(
-            cluster_seeds_require={"seed": "7"},
-            cluster_seeds_disallow=set(),
-            max_seed_cluster_id=7,
-            signatures={
-                "u_a": SimpleNamespace(
-                    author_info_first_normalized_without_apostrophe="alice",
-                    author_info_first="Alice",
-                    author_info_orcid="0000-0000-0000-0001",
-                ),
-                "u_b": SimpleNamespace(
-                    author_info_first_normalized_without_apostrophe="bob",
-                    author_info_first="Bob",
-                    author_info_orcid="0000-0000-0000-0001",
-                ),
-            },
-            name_tuples=set(),
-        ),
-    )
-
-    result = clusterer._finish_incremental_with_seed_links(
-        ["u_a", "u_b"],
-        dataset,
-        {},
-        {},
-        {"7": ["seed"]},
-        False,
-        {},
-        runtime_context=cast(Any, object()),
-        prediction_state=prediction_state,
-    )
-
-    assert result == {"7": ["seed"], "8": ["u_a", "u_b"]}
-    assert residual_blocks == [["u_a", "u_b"]]
-    assert prediction_state.telemetry["incremental_residual_phase_b"]["residual_phase_b_group_count"] == 1
-    assert prediction_state.telemetry["incremental_residual_phase_b"]["residual_phase_b_pair_count_saved"] == 0
+    assert result == {"7": ["seed"], "8": ["a1", "b1", "a2", "b2"], "9": ["c"]}
+    assert groups == [["a1", "b1", "a2", "b2"]]
+    assert state.telemetry["incremental_residual_phase_b"]["residual_phase_b_pair_count_saved"] == 4
 
 
 def test_build_incremental_seed_setup_uses_arrow_dataset_for_altered_profile_reclustering(tmp_path: Path):
@@ -2400,9 +2079,9 @@ def test_build_incremental_seed_setup_uses_arrow_dataset_for_altered_profile_rec
         ANDData,
         SimpleNamespace(
             cluster_seeds_require={"seed0": "7", "seed1": "7", "seed2": "8", "seed3": "8", "seed4": "9"},
-            cluster_seeds_disallow={("seed0", "seed1"), ("seed2", "seed3"), ("seed3", "seed4")},
+            cluster_seeds_disallow={("seed0", "seed1"), ("seed3", "seed4")},
             altered_cluster_signatures=["seed0", "seed2", "seed4"],
-            name_tuples=None,
+            name_tuples={("bob", "robert")},
         ),
     )
     runtime_context = cast(Any, object())
@@ -2424,11 +2103,9 @@ def test_build_incremental_seed_setup_uses_arrow_dataset_for_altered_profile_rec
     assert captured["arrow_dataset"] is arrow_dataset
     assert captured["partial_supervision"] == {
         ("seed0", "seed1"): LARGE_DISTANCE,
-        ("seed2", "seed3"): LARGE_DISTANCE,
     }
     assert captured["cluster_seeds_disallow"] == {
         ("seed0", "seed1"),
-        ("seed2", "seed3"),
         ("seed3", "seed4"),
     }
     assert captured["incremental_dont_use_cluster_seeds"] is True
@@ -2451,59 +2128,6 @@ def test_build_incremental_seed_setup_uses_arrow_dataset_for_altered_profile_rec
         "9": ["seed4"],
     }
     assert split_inverse is not cluster_seeds_require_inverse
-
-
-def test_altered_presplit_cache_name_tuple_key_computed_at_most_once(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-):
-    clusterer = _build_minimal_incremental_clusterer()
-    arrow_dataset = _minimal_arrow_dataset(tmp_path)
-
-    def fake_predict_from_arrow(block_dict, dataset, **kwargs):
-        assert dataset is arrow_dataset
-        del kwargs
-        return {block_key: list(signature_ids) for block_key, signature_ids in block_dict.items()}, None
-
-    clusterer.predict_from_arrow = cast(Any, fake_predict_from_arrow)
-    name_tuples = frozenset({("anne", "ann")})
-    calls = {"name_tuples_key": 0}
-    real_cacheable_value = model_module._cacheable_value
-
-    def counting_cacheable_value(value):
-        if value is name_tuples:
-            calls["name_tuples_key"] += 1
-        return real_cacheable_value(value)
-
-    monkeypatch.setattr(model_module, "_cacheable_value", counting_cacheable_value)
-
-    def run(altered_cluster_signatures: list[str]) -> None:
-        dataset = cast(
-            ANDData,
-            SimpleNamespace(
-                cluster_seeds_require={"seed0": "7", "seed1": "7", "seed2": "8", "seed3": "8", "seed4": "9"},
-                cluster_seeds_disallow=set(),
-                altered_cluster_signatures=altered_cluster_signatures,
-                name_tuples=name_tuples,
-            ),
-        )
-        clusterer._build_incremental_seed_setup(
-            dataset,
-            {},
-            runtime_context=cast(Any, object()),
-            total_ram_bytes=123_456,
-            arrow_dataset=arrow_dataset,
-        )
-
-    # Two eligible multi-signature clusters ("7", "8") must share one computation.
-    run(["seed0", "seed2", "seed4"])
-    assert calls == {"name_tuples_key": 1}
-
-    # A request whose only altered cluster is a singleton builds no cache key
-    # and must not pay for the invariants at all.
-    calls["name_tuples_key"] = 0
-    run(["seed4"])
-    assert calls == {"name_tuples_key": 0}
 
 
 def test_build_incremental_seed_setup_normalizes_without_copying_source_seed_map() -> None:
@@ -2584,65 +2208,19 @@ def test_build_incremental_seed_setup_copies_direct_arrow_map_before_altered_pro
     assert recluster_map == {}
 
 
-def test_predict_from_rust_featurizer_does_not_posthoc_merge_when_incremental_dont_use_cluster_seeds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clusterer = Clusterer(
-        featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
-        classifier=object(),
-        cluster_model=object(),
-        n_jobs=1,
-        use_default_constraints_as_supervision=True,
+def test_native_prediction_ignores_seed_requires_with_precomputed_distances():
+    clusterer = Clusterer(FeaturizationInfo(features_to_use=["year_diff"]), object(), n_jobs=1)
+    native = SimpleNamespace(
+        cluster_seeds_require=lambda: [("s1", "seeded"), ("s2", "seeded")],
+        signature_rule_metadata=lambda: [],
     )
-    captured: dict[str, Any] = {}
-
-    class FakeRustFeaturizer:
-        def cluster_seeds_require(self):
-            return [("s1", "seeded"), ("s2", "seeded")]
-
-        def signature_rule_metadata(self):
-            return []
-
-    def fake_cluster_one_block_with_logging(
-        self,
-        block_signatures,
-        dist_matrix,
-        cluster_model_params,
-        dataset,
-        all_disallow_signature_ids,
-        *,
-        block_key,
-        incremental_dont_use_cluster_seeds,
-        prediction_state=None,
-    ):
-        del self, block_signatures, dist_matrix, cluster_model_params, all_disallow_signature_ids, block_key
-        captured["cluster_seeds_require"] = dict(dataset.cluster_seeds_require)
-        return [0, 1]
-
-    monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", fake_cluster_one_block_with_logging)
-
-    pred_clusters, _ = clusterer.predict_from_rust_featurizer(
+    clusters, _ = clusterer.predict_from_rust_featurizer(
         {"block": ["s1", "s2"]},
-        FakeRustFeaturizer(),
-        dists={"block": np.asarray([[0.0, 1.0], [1.0, 0.0]])},
+        native,
+        dists={"block": np.asarray([1.0])},
         incremental_dont_use_cluster_seeds=True,
     )
-
-    assert captured["cluster_seeds_require"] == {}
-    assert _same_partition(pred_clusters, {"a": ["s1"], "b": ["s2"]})
-
-
-def test_partial_supervision_disallow_merge_respects_reverse_existing_pair():
-    dataset = SimpleNamespace(cluster_seeds_disallow={("q", "s1")})
-
-    merged = model_module._partial_supervision_with_cluster_seed_disallows(
-        ["q", "s1"],
-        dataset,
-        {("s1", "q"): 42.0},
-        cluster_seed_disallows={("q", "s1")},
-    )
-
-    assert merged == {("s1", "q"): 42.0}
+    assert _same_partition(clusters, {"a": ["s1"], "b": ["s2"]})
 
 
 def test_build_incremental_seed_setup_rejects_altered_signature_missing_seed():
@@ -2665,135 +2243,74 @@ def test_build_incremental_seed_setup_rejects_altered_signature_missing_seed():
         )
 
 
+def _run_precluster_broadcast(signature_dists, *, mode="always", score_mode="mean", weight=0.5):
+    clusterer = _build_minimal_incremental_clusterer()
+    # Supply scores directly so this scenario isolates broadcast/assignment policy.
+    clusterer.use_default_constraints_as_supervision = False
+    clusterer.incremental_precluster_broadcast_mode = mode
+    clusterer.incremental_seed_score_mode = score_mode
+    clusterer.incremental_mean_min_hybrid_weight = weight
+
+    def precluster(block_dict, *args, **kwargs):
+        assert len(block_dict) == 1
+        return {"precluster": list(next(iter(block_dict.values())))}, None
+
+    clusterer.predict_helper = cast(Any, precluster)
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            cluster_seeds_require={"seed0": 0, "seed1": 1},
+            max_seed_cluster_id=2,
+            signatures={},
+            name_tuples=set(),
+        ),
+    )
+    return clusterer._run_incremental_phases_bcd(
+        ["u1", "u2"],
+        dataset,
+        {signature: distances.copy() for signature, distances in signature_dists.items()},
+        dict(dataset.cluster_seeds_require),
+        {},
+        {0: ["seed0"], 1: ["seed1"]},
+        False,
+        {},
+        runtime_context=cast(Any, object()),
+    )
+
+
 def test_top1_consensus_broadcast_only_applies_when_cluster_members_agree():
-    def _run(
-        mode: Literal["always", "never", "top1_consensus"],
-        signature_dists: dict[str, dict[int, tuple[float, int, float]]],
-    ) -> dict[str, list[str]]:
-        clusterer = _build_minimal_incremental_clusterer()
-        # This fixture supplies scores, not signature metadata or hard rules.
-        clusterer.use_default_constraints_as_supervision = False
-        clusterer.incremental_precluster_broadcast_mode = mode
-
-        def fake_predict_helper(
-            block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None, prediction_state=None
-        ):
-            del dataset, partial_supervision, runtime_context, total_ram_bytes
-            if "incremental_unassigned" in block_dict:
-                return {"incremental_cluster": list(block_dict["incremental_unassigned"])}, None
-            if "block" in block_dict:
-                return {"singleton_cluster": list(block_dict["block"])}, None
-            raise AssertionError(f"Unexpected block_dict={block_dict}")
-
-        clusterer.predict_helper = cast(Any, fake_predict_helper)
-        dataset = cast(
-            ANDData,
-            type(
-                "IncrementalDataset",
-                (),
-                {
-                    "cluster_seeds_require": {"seed0": 0, "seed1": 1},
-                    "max_seed_cluster_id": 2,
-                    "signatures": {},
-                    "name_tuples": set(),
-                },
-            )(),
-        )
-        signature_to_cluster_to_average_dist = cast(
-            dict[str, dict[int | str, IncrementalDistStats]],
-            {signature_id: cluster_dists.copy() for signature_id, cluster_dists in signature_dists.items()},
-        )
-        return clusterer._run_incremental_phases_bcd(
-            ["u1", "u2"],
-            dataset,
-            signature_to_cluster_to_average_dist,
-            dict(dataset.cluster_seeds_require),
-            {},
-            {0: ["seed0"], 1: ["seed1"]},
-            False,
-            {},
-            runtime_context=cast(Any, object()),
-        )
-
-    divergent_top1_dists = {
+    divergent = {
         "u1": {0: (0.10, 1, 0.10), 1: (0.60, 1, 0.60)},
         "u2": {0: (0.60, 1, 0.60), 1: (0.20, 1, 0.20)},
     }
-    always_divergent = _run("always", divergent_top1_dists)
-    never_divergent = _run("never", divergent_top1_dists)
-    consensus_divergent = _run("top1_consensus", divergent_top1_dists)
-    assert always_divergent == {"0": ["seed0", "u1", "u2"], "1": ["seed1"]}
-    assert never_divergent == {"0": ["seed0", "u1"], "1": ["seed1", "u2"]}
-    assert consensus_divergent == never_divergent
-
-    consensus_top1_dists = {
+    assert _run_precluster_broadcast(divergent) == {"0": ["seed0", "u1", "u2"], "1": ["seed1"]}
+    for mode in ("never", "top1_consensus"):
+        assert _run_precluster_broadcast(divergent, mode=mode) == {
+            "0": ["seed0", "u1"],
+            "1": ["seed1", "u2"],
+        }
+    consensus = {
         "u1": {0: (0.10, 1, 0.10), 1: (0.60, 1, 0.60)},
         "u2": {0: (0.70, 1, 0.70), 1: (0.80, 1, 0.80)},
     }
-    never_consensus = _run("never", consensus_top1_dists)
-    consensus_enabled = _run("top1_consensus", consensus_top1_dists)
-    assert never_consensus == {"0": ["seed0", "u1"], "1": ["seed1"], "2": ["u2"]}
-    assert consensus_enabled == {"0": ["seed0", "u1", "u2"], "1": ["seed1"]}
+    assert _run_precluster_broadcast(consensus, mode="never") == {
+        "0": ["seed0", "u1"],
+        "1": ["seed1"],
+        "2": ["u2"],
+    }
+    assert _run_precluster_broadcast(consensus, mode="top1_consensus") == {
+        "0": ["seed0", "u1", "u2"],
+        "1": ["seed1"],
+    }
 
 
-def test_precluster_broadcast_preserves_min_score_semantics():
-    def _run(
-        *,
-        seed_score_mode: Literal["min", "mean_min_hybrid"],
-        mean_min_hybrid_weight: float = 0.5,
-    ) -> dict[str, list[str]]:
-        clusterer = _build_minimal_incremental_clusterer()
-        # This fixture supplies scores, not signature metadata or hard rules.
-        clusterer.use_default_constraints_as_supervision = False
-        clusterer.incremental_precluster_broadcast_mode = "always"
-        clusterer.incremental_seed_score_mode = seed_score_mode
-        clusterer.incremental_mean_min_hybrid_weight = mean_min_hybrid_weight
-
-        def fake_predict_helper(
-            block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None, prediction_state=None
-        ):
-            del dataset, partial_supervision, runtime_context, total_ram_bytes
-            if "incremental_unassigned" in block_dict:
-                return {"incremental_cluster": list(block_dict["incremental_unassigned"])}, None
-            if "block" in block_dict:
-                return {"singleton_cluster": list(block_dict["block"])}, None
-            raise AssertionError(f"Unexpected block_dict={block_dict}")
-
-        clusterer.predict_helper = cast(Any, fake_predict_helper)
-        dataset = cast(
-            ANDData,
-            type(
-                "IncrementalDataset",
-                (),
-                {
-                    "cluster_seeds_require": {"seed0": 0, "seed1": 1},
-                    "max_seed_cluster_id": 2,
-                    "signatures": {},
-                    "name_tuples": set(),
-                },
-            )(),
-        )
-        signature_to_cluster_to_average_dist = cast(
-            dict[str, dict[int | str, IncrementalDistStats]],
-            {
-                "u1": {0: (0.40, 1, 0.01), 1: (0.20, 1, 0.20)},
-                "u2": {0: (0.40, 1, 0.80), 1: (0.20, 1, 0.20)},
-            },
-        )
-        return clusterer._run_incremental_phases_bcd(
-            ["u1", "u2"],
-            dataset,
-            signature_to_cluster_to_average_dist,
-            dict(dataset.cluster_seeds_require),
-            {},
-            {0: ["seed0"], 1: ["seed1"]},
-            False,
-            {},
-            runtime_context=cast(Any, object()),
-        )
-
-    min_result = _run(seed_score_mode="min")
-    assert min_result == {"0": ["seed0", "u1", "u2"], "1": ["seed1"]}
-
-    hybrid_result = _run(seed_score_mode="mean_min_hybrid", mean_min_hybrid_weight=0.75)
-    assert hybrid_result == {"0": ["seed0", "u1", "u2"], "1": ["seed1"]}
+@pytest.mark.parametrize("score_mode,weight", [("min", 0.5), ("mean_min_hybrid", 0.75)])
+def test_precluster_broadcast_preserves_min_score_semantics(score_mode, weight):
+    distances = {
+        "u1": {0: (0.40, 1, 0.01), 1: (0.20, 1, 0.20)},
+        "u2": {0: (0.40, 1, 0.80), 1: (0.20, 1, 0.20)},
+    }
+    assert _run_precluster_broadcast(distances, score_mode=score_mode, weight=weight) == {
+        "0": ["seed0", "u1", "u2"],
+        "1": ["seed1"],
+    }

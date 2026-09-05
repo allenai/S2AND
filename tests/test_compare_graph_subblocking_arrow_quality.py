@@ -77,7 +77,8 @@ def test_compare_graph_subblocking_parser_requires_bounded_or_explicit_full_run(
 
 
 def _write_table(path, table) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with pa.OSFile(str(path), "wb") as sink:
         with pa.ipc.new_file(sink, table.schema) as writer:
@@ -98,7 +99,8 @@ def _write_indexed_table(path, table, *, key_column: str, table_name: str) -> tu
 
 
 def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     arrow_root = tmp_path / "arrow"
     embeddings = np.asarray([[1.0, 0.0], [0.99, 0.01]], dtype=np.float32)
     paths = write_minimal_arrow_prediction_bundle(arrow_root, include_specter=True)

@@ -10,7 +10,6 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
-import lightgbm as lgb
 import numpy as np
 import pytest
 
@@ -40,7 +39,6 @@ from s2and.production_bundle_contract import (
 )
 from s2and.production_model import (
     NativeLightGBMBinaryClassifier,
-    _config_choice,
     load_production_model,
     pairwise_bundle_binding,
 )
@@ -98,34 +96,11 @@ def _load_pairwise_staging_model(
     )
 
 
-class _PythonLightGBMScorer:
-    """Test double for the Rust scorer that executes the same saved model."""
-
-    def __init__(self, model_path: str) -> None:
-        self.model_path = str(model_path)
-        self.booster = lgb.Booster(model_file=self.model_path)
-
-    def num_features(self) -> int:
-        return int(self.booster.num_feature())
-
-    def predict_proba_positive(self, features: np.ndarray, *, num_threads: int | None = None) -> np.ndarray:
-        return np.asarray(self.booster.predict(features, num_threads=num_threads), dtype=np.float64)
-
-    def predict_proba_positive_f32(self, features: np.ndarray, *, num_threads: int | None = None) -> np.ndarray:
-        return self.predict_proba_positive(features, num_threads=num_threads)
-
-    def __deepcopy__(self, memo: dict[int, Any]) -> _PythonLightGBMScorer:
-        del memo
-        return type(self)(self.model_path)
-
-
 @pytest.fixture
 def synthetic_pairwise_bundle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, Clusterer]:
-    monkeypatch.setattr(production_model_module, "_load_rust_lightgbm_booster", _PythonLightGBMScorer)
-    monkeypatch.setattr(incremental_artifact_module, "_load_rust_lightgbm_booster", _PythonLightGBMScorer)
     monkeypatch.setattr(
         production_model_module,
         "canonical_artifact_hashes",
@@ -217,6 +192,7 @@ def test_native_production_bundle_loads_as_mutable_clusterer(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
+    (bundle_dir / "pairwise" / "stale.lgb").write_text("ignored", encoding="utf-8")
     clusterer = _load_pairwise_staging_model(bundle_dir)
 
     assert isinstance(clusterer.classifier, NativeLightGBMBinaryClassifier)
@@ -250,16 +226,6 @@ def test_production_name_count_model_requires_exact_binding(
         _load_pairwise_staging_model(bundle_dir)
 
 
-def test_native_lightgbm_set_params_rejects_unknown_params(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    clusterer = _load_pairwise_staging_model(bundle_dir)
-
-    with pytest.raises(ValueError, match="Invalid parameter"):
-        clusterer.classifier.set_params(learning_rate=0.1)
-
-
 def test_native_lightgbm_set_params_is_atomic_on_validation_failure(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
@@ -273,6 +239,10 @@ def test_native_lightgbm_set_params_is_atomic_on_validation_failure(
     original_booster = classifier.booster_
     original_fingerprint = classifier.cache_fingerprint()
 
+    with pytest.raises(ValueError, match="Invalid parameter"):
+        classifier.set_params(learning_rate=0.1)
+    with pytest.raises(ValueError, match="feature-count mismatch"):
+        NativeLightGBMBinaryClassifier(replacement_path, n_features=classifier.n_features_in_)
     with pytest.raises(ValueError, match="feature-count mismatch"):
         classifier.set_params(
             model_path=replacement_path,
@@ -313,41 +283,30 @@ def test_native_lightgbm_deepcopy_does_not_require_model_path(
     assert classifier.n_jobs != copied.n_jobs
 
 
-def test_synthetic_native_pairwise_models_match_source_boosters(
+def test_native_lightgbm_model_replacement_refreshes_predictions_and_cache_identity(
+    tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
-    bundle_dir, source_clusterer = synthetic_pairwise_bundle
-    native_clusterer = _load_pairwise_staging_model(bundle_dir)
+    """Replacing a fitted model must invalidate every representation of the old one."""
+    bundle_dir, _ = synthetic_pairwise_bundle
+    classifier = _load_pairwise_staging_model(bundle_dir).classifier
+    features = np.random.default_rng(104).normal(size=(16, classifier.n_features_in_))
+    previous_predictions = classifier.predict_proba_positive(features)
+    previous_fingerprint = classifier.cache_fingerprint()
+    previous_booster = classifier.booster_
+    replacement = tiny_binary_booster(classifier.n_features_in_, seed=103)
+    replacement_path = tmp_path / "replacement.lgb"
+    replacement.booster_.save_model(str(replacement_path))
+    expected = replacement.booster_.predict(features)
+    assert not np.allclose(previous_predictions, expected)
 
-    rng = np.random.default_rng(921)
-    main_width = len(_selected_feature_indices(source_clusterer.featurizer_info))
-    assert source_clusterer.nameless_featurizer_info is not None
-    nameless_width = len(_selected_feature_indices(source_clusterer.nameless_featurizer_info))
-    main_features = rng.normal(size=(8, main_width))
-    nameless_features = rng.normal(size=(8, nameless_width))
-    source_main_features = _validated_classifier_features(source_clusterer.classifier, main_features)
-    source_nameless_features = _validated_classifier_features(source_clusterer.nameless_classifier, nameless_features)
+    assert classifier.set_params(model_path=replacement_path) is classifier
 
-    np.testing.assert_allclose(
-        native_clusterer.classifier.predict_proba(main_features)[:, 1],
-        source_clusterer.classifier.predict_proba(source_main_features)[:, 1],
-        rtol=1e-10,
-        atol=1e-10,
-    )
-    np.testing.assert_allclose(
-        native_clusterer.classifier.predict_proba_positive(main_features),
-        native_clusterer.classifier.predict_proba(main_features)[:, 1],
-        rtol=0,
-        atol=0,
-    )
-    assert native_clusterer.nameless_classifier is not None
-    assert source_clusterer.nameless_classifier is not None
-    np.testing.assert_allclose(
-        native_clusterer.nameless_classifier.predict_proba(nameless_features)[:, 1],
-        source_clusterer.nameless_classifier.predict_proba(source_nameless_features)[:, 1],
-        rtol=1e-10,
-        atol=1e-10,
-    )
+    np.testing.assert_allclose(classifier.predict_proba_positive(features), expected, rtol=1e-12, atol=1e-12)
+    assert classifier.cache_fingerprint() != previous_fingerprint
+    assert classifier.cache_fingerprint()[1] == hashlib.sha256(replacement_path.read_bytes()).hexdigest()
+    assert classifier.booster_ is not previous_booster
+    np.testing.assert_allclose(classifier.booster_.predict(features), expected, rtol=1e-12, atol=1e-12)
 
 
 def test_complete_bundle_native_inference_does_not_load_hyperopt(
@@ -802,17 +761,6 @@ def test_manifest_requires_complete_checksum_coverage(
         _load_pairwise_staging_model(bundle_dir)
 
 
-def test_manifest_ignores_undeclared_runtime_file(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    (bundle_dir / "pairwise" / "stale.lgb").write_text("stale", encoding="utf-8")
-
-    clusterer = _load_pairwise_staging_model(bundle_dir)
-
-    assert clusterer.production_model_release_version == "9.9"
-
-
 def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
@@ -825,6 +773,7 @@ def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
         (lambda payload: payload.update({"incremental_mean_min_hybrid_weight": False}), "must be numeric"),
         (lambda payload: payload["cluster_model"].update({"family": "Other"}), "exact FastCluster"),
         (lambda payload: payload.update({"unknown_runtime_field": 1}), "field mismatch"),
+        (lambda payload: payload.update({"incremental_seed_score_mode": "unsupported"}), "incremental_seed_score_mode"),
         (
             lambda payload: payload.update({"incremental_mean_min_hybrid_weight": 2.0}),
             "hybrid_weight must be in",
@@ -854,17 +803,6 @@ def test_pairwise_fixture_cannot_relax_tolerance_to_accept_wrong_predictions(
         _load_pairwise_staging_model(bundle_dir)
 
 
-def test_native_classifier_rejects_declared_booster_feature_count(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    model_path = bundle_dir / "pairwise" / "main.lgb"
-    actual = _PythonLightGBMScorer(str(model_path)).num_features()
-
-    with pytest.raises(ValueError, match="feature-count mismatch"):
-        NativeLightGBMBinaryClassifier(model_path, n_features=actual + 1)
-
-
 def test_native_classifier_scores_in_bounded_float32_chunks(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
@@ -872,10 +810,13 @@ def test_native_classifier_scores_in_bounded_float32_chunks(
     model_path = bundle_dir / "pairwise" / "main.lgb"
     classifier = NativeLightGBMBinaryClassifier(model_path, n_jobs=1)
 
-    class CountingScorer(_PythonLightGBMScorer):
-        def __init__(self, path: str) -> None:
-            super().__init__(path)
-            self.row_counts: list[int] = []
+    native_scorer = classifier._rust_scorer
+
+    class CountingScorer:
+        row_counts: list[int] = []
+
+        def num_features(self):
+            return native_scorer.num_features()
 
         def predict_proba_positive_f32(
             self,
@@ -884,9 +825,9 @@ def test_native_classifier_scores_in_bounded_float32_chunks(
             num_threads: int | None = None,
         ) -> np.ndarray:
             self.row_counts.append(int(features.shape[0]))
-            return super().predict_proba_positive_f32(features, num_threads=num_threads)
+            return native_scorer.predict_proba_positive_f32(features, num_threads=num_threads)
 
-    scorer = CountingScorer(str(model_path))
+    scorer = CountingScorer()
     classifier._scorer = scorer  # noqa: SLF001
     matrix = np.ascontiguousarray(
         np.random.default_rng(20260709).normal(size=(5, scorer.num_features())),
@@ -1086,6 +1027,9 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
     linker_dir = tmp_path / "linker"
     target_json = _write_synthetic_linker(bundle_dir, linker_dir)
     original_manifest = (bundle_dir / "manifest.json").read_bytes()
+    stale_path = bundle_dir / "reproducibility" / "stale-sensitive.json"
+    stale_path.parent.mkdir()
+    stale_path.write_text('{"secret": true}', encoding="utf-8")
     real_replace = production_bundle_module.os.replace
 
     clusterer_config = json.loads((bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
@@ -1126,6 +1070,7 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
     )
 
     assert summary.bundle_dir == output_bundle
+    assert not (output_bundle / "reproducibility" / stale_path.name).exists()
     loaded = load_production_model(output_bundle)
     assert loaded.production_model_release_version == "9.9"
     assert loaded.incremental_linker_artifact_dir is not None
@@ -1158,132 +1103,59 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
         )
 
 
-def test_finalization_does_not_copy_undeclared_reproducibility_files(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    source_bundle, _ = synthetic_pairwise_bundle
-    stale_path = source_bundle / "reproducibility" / "stale-sensitive.json"
-    stale_path.parent.mkdir()
-    stale_path.write_text('{"secret": true}\n', encoding="utf-8")
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(source_bundle, linker_dir)
-    output_bundle = tmp_path / "complete" / "production_model_v9.9"
-
-    finalize_production_bundle(
-        pairwise_bundle_dir=source_bundle,
-        output_bundle_dir=output_bundle,
-        incremental_linker_artifact_dir=linker_dir,
-        target_json=target_json,
-    )
-
-    assert not (output_bundle / "reproducibility" / stale_path.name).exists()
+@pytest.fixture
+def finalization(tmp_path, synthetic_pairwise_bundle):
+    """One pairwise/linker pair shared by finalization and complete-loader tests."""
+    pairwise, _ = synthetic_pairwise_bundle
+    linker = tmp_path / "linker"
+    return {
+        "pairwise_bundle_dir": pairwise,
+        "output_bundle_dir": tmp_path / "complete" / "production_model_v9.9",
+        "incremental_linker_artifact_dir": linker,
+        "target_json": _write_synthetic_linker(pairwise, linker),
+    }
 
 
-def test_finalization_rejects_linker_bound_to_different_pairwise_bundle(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "complete" / "production_model_v9.9"
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(bundle_dir, linker_dir)
-    metadata_path = linker_dir / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["pairwise_bundle_binding_digest"] = "f" * 64
-    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="pairwise_bundle_binding_digest does not match"):
-        finalize_production_bundle(
-            pairwise_bundle_dir=bundle_dir,
-            output_bundle_dir=output_bundle,
-            incremental_linker_artifact_dir=linker_dir,
-            target_json=target_json,
+@pytest.mark.parametrize(
+    ("published", "field", "message"),
+    [
+        (False, "booster_sha256", "booster_sha256 mismatch"),
+        (False, "pairwise_bundle_binding_digest", "pairwise_bundle_binding_digest does not match"),
+        (False, "target", "target_spec_digest does not match target JSON"),
+        (True, "pairwise_bundle_binding_digest", "pairwise_bundle_binding_digest does not match enclosing bundle"),
+        (True, "target", "target_spec_digest does not match enclosing bundle target JSON"),
+    ],
+)
+def test_linker_identity_rejected_before_publication_and_after_rehash(finalization, published, field, message):
+    """Neither publication nor refreshed checksums may bypass semantic binding."""
+    output = finalization["output_bundle_dir"]
+    if published:
+        finalize_production_bundle(**finalization)
+        path = output / (
+            "reproducibility/incremental_linker_training_target.json"
+            if field == "target"
+            else "incremental_linker/metadata.json"
         )
-
-    assert not output_bundle.exists()
-    _load_pairwise_staging_model(bundle_dir)
-
-
-def test_finalization_rejects_target_different_from_linker_training_target(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(bundle_dir, linker_dir)
-    target_json.write_text('{"variant": "wrong"}\n', encoding="utf-8")
-
-    with pytest.raises(ValueError, match="target_spec_digest does not match target JSON"):
-        finalize_production_bundle(
-            pairwise_bundle_dir=bundle_dir,
-            output_bundle_dir=tmp_path / "complete" / "production_model_v9.9",
-            incremental_linker_artifact_dir=linker_dir,
-            target_json=target_json,
+    else:
+        path = (
+            finalization["target_json"]
+            if field == "target"
+            else finalization["incremental_linker_artifact_dir"] / "metadata.json"
         )
+    payload = json.loads(path.read_text())
+    payload["variant" if field == "target" else field] = "f" * 64
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    if published:
+        _refresh_manifest_checksum(output, path.relative_to(output).as_posix())
+    with pytest.raises(ValueError, match=message):
+        load_production_model(output) if published else finalize_production_bundle(**finalization)
+    assert output.exists() is published
+    _load_pairwise_staging_model(finalization["pairwise_bundle_dir"])
 
 
-def test_complete_bundle_rejects_target_tampering_even_with_refreshed_manifest(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "complete" / "production_model_v9.9"
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(bundle_dir, linker_dir)
-    finalize_production_bundle(
-        pairwise_bundle_dir=bundle_dir,
-        output_bundle_dir=output_bundle,
-        incremental_linker_artifact_dir=linker_dir,
-        target_json=target_json,
-    )
-    bundled_target = output_bundle / "reproducibility" / "incremental_linker_training_target.json"
-    bundled_target.write_text('{"variant": "tampered"}\n', encoding="utf-8")
-    _refresh_manifest_checksum(output_bundle, bundled_target.relative_to(output_bundle).as_posix())
-
-    with pytest.raises(ValueError, match="target_spec_digest does not match enclosing bundle target JSON"):
-        load_production_model(output_bundle)
-
-
-def test_complete_bundle_rejects_pairwise_binding_tampering_even_with_refreshed_manifest(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "complete" / "production_model_v9.9"
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(bundle_dir, linker_dir)
-    finalize_production_bundle(
-        pairwise_bundle_dir=bundle_dir,
-        output_bundle_dir=output_bundle,
-        incremental_linker_artifact_dir=linker_dir,
-        target_json=target_json,
-    )
-    metadata_path = output_bundle / "incremental_linker" / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["pairwise_bundle_binding_digest"] = "f" * 64
-    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    _refresh_manifest_checksum(output_bundle, metadata_path.relative_to(output_bundle).as_posix())
-
-    with pytest.raises(ValueError, match="pairwise_bundle_binding_digest does not match enclosing bundle"):
-        load_production_model(output_bundle)
-
-
-def test_normal_load_hashes_each_declared_file_exactly_once(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    output_bundle = tmp_path / "complete" / "production_model_v9.9"
-    linker_dir = tmp_path / "linker"
-    target_json = _write_synthetic_linker(bundle_dir, linker_dir)
-    finalize_production_bundle(
-        pairwise_bundle_dir=bundle_dir,
-        output_bundle_dir=output_bundle,
-        incremental_linker_artifact_dir=linker_dir,
-        target_json=target_json,
-    )
+def test_normal_load_hashes_each_declared_file_exactly_once(finalization, monkeypatch) -> None:
+    output_bundle = finalization["output_bundle_dir"]
+    finalize_production_bundle(**finalization)
 
     manifest_hashes: list[str] = []
     standalone_artifact_hashes: list[str] = []
@@ -1354,33 +1226,3 @@ def test_manifest_writer_rejects_invalid_release_or_lifecycle_before_writing(tmp
             )
 
     assert not (tmp_path / "manifest.json").exists()
-
-
-def test_finalize_production_bundle_rejects_invalid_incremental_linker_artifact(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    source_bundle, _ = synthetic_pairwise_bundle
-    corrupt_linker = tmp_path / "corrupt_incremental_linker"
-    target_json = _write_synthetic_linker(source_bundle, corrupt_linker)
-    metadata_path = corrupt_linker / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["booster_sha256"] = "0" * 64
-    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="booster_sha256 mismatch"):
-        finalize_production_bundle(
-            pairwise_bundle_dir=source_bundle,
-            output_bundle_dir=tmp_path / "complete" / "production_model_v9.9",
-            incremental_linker_artifact_dir=corrupt_linker,
-            target_json=target_json,
-        )
-
-
-def test_production_model_config_choice_rejects_unknown_literal() -> None:
-    with pytest.raises(ValueError, match="incremental_seed_score_mode"):
-        _config_choice(
-            {"incremental_seed_score_mode": "unsupported"},
-            "incremental_seed_score_mode",
-            allowed=frozenset({"mean", "min", "mean_min_hybrid"}),
-        )

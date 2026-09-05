@@ -44,7 +44,10 @@ See `docs/threading.md` for detailed guidance on avoiding nested parallelism and
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `S2AND_CI_TY_PLATFORM` | `linux`, `windows`, etc. | `linux` | Override platform emulation for local `ty` checks. By default, local CI runs use `--python-platform linux` to match GitHub Linux runners. |
-| `S2AND_TEST_REQUIRE_RUST` | truthy/falsey string | unset/false | CI/test-only guard. Truthy values (`1`, `true`, `yes`, `on`) require the installed Rust extension instead of allowing Rust-dependent tests to skip. Normal applications should not set it. |
+
+The full test suite requires the matching Rust extension and PyArrow without an
+environment opt-in. Tests default to Python orchestration; native cases select
+their runtime explicitly. See [the test suite guide](../tests/README.md).
 
 ---
 

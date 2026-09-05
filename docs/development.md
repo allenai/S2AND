@@ -4,6 +4,11 @@ This document collects the repo-level development commands and workflows that do
 
 ## Core commands
 
+For a fresh development environment, install the `dev` extra and build the matching Rust extension using the
+[local development build instructions](../s2and_rust/README.md#local-dev-build). The full pytest suite requires that
+native runtime. The [local CI wrapper](#local-ci-mirror) prepares it, while the
+[static-check fast path](#static-check-fast-path) supports lint/type checks without a native build.
+
 ```bash
 uv run pytest -q
 uv run ruff check .
@@ -27,7 +32,12 @@ uv run --no-project python scripts/run_ci_locally.py
 - native `cargo fmt`, correctness/suspicious `clippy`, and Rust library-test
   gates
 - a local Maturin build, installed-Rust API smoke, `ty`, and the full pytest
-  suite with `S2AND_BACKEND=python` and `S2AND_TEST_REQUIRE_RUST=1`
+  suite with `S2AND_BACKEND=python`, required native dependencies, and branch coverage
+
+PR CI runs Python 3.11–3.13 on Ubuntu and Python 3.11 on Windows. Both the local
+runner and hosted jobs use the combined 80% coverage floor in `pyproject.toml`.
+See [the test suite guide](../tests/README.md) for shared fixtures, test selection,
+and the evidence standard.
 
 The lint job runs the version and generated feature-schema checks without a
 project environment and executes the exact Ruff pin from the `dev` extra in an

@@ -22,44 +22,38 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
-pa = pytest.importorskip("pyarrow")
-
-from s2and import feature_port  # noqa: E402
-from s2and.arrow_inputs import ArrowDataset  # noqa: E402
-from s2and.arrow_training import (  # noqa: E402
+from s2and import feature_port
+from s2and.arrow_inputs import ArrowDataset
+from s2and.arrow_training import (
     build_training_anddata_from_arrow,
     load_papers_from_arrow,
     load_signatures_from_arrow,
 )
-from s2and.data import ANDData, Author, Signature  # noqa: E402
-from s2and.eval import facet_eval  # noqa: E402
-from s2and.featurizer import (  # noqa: E402
+from s2and.data import ANDData, Author, Signature
+from s2and.eval import facet_eval
+from s2and.featurizer import (
     DEFAULT_FEATURE_GROUPS,
     DEFAULT_NAMELESS_FEATURE_GROUPS,
     FeaturizationInfo,
     featurize,
 )
-from s2and.incremental_linking.feature_block import write_arrow_ipc_table  # noqa: E402
-from s2and.incremental_linking.feature_block_arrow import (  # noqa: E402
+from s2and.incremental_linking.feature_block import write_arrow_ipc_table
+from s2and.incremental_linking.feature_block_arrow import (
     write_name_counts_index,
     write_raw_arrow_batch_lookup_indexes,
 )
-from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata  # noqa: E402
-from tests.helpers import (  # noqa: E402
-    import_s2and_rust,
+from s2and.runtime import load_s2and_rust_extension
+from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
+from tests.helpers import (
     tiny_name_counts_index,
     tiny_name_counts_tuple,
     write_test_arrow_artifact_manifest,
 )
 
-HAS_RUST, _RUST_MODULE = import_s2and_rust()
-if not HAS_RUST:
-    raise pytest.skip.Exception(
-        "s2and_rust extension is required for arrow training featurization parity",
-        allow_module_level=True,
-    )
+_RUST_MODULE = load_s2and_rust_extension()
 
 DUMMY_DIR = Path(__file__).resolve().parent / "dummy"
 
@@ -148,25 +142,23 @@ def test_arrow_training_rejects_noncanonical_signature_affiliations_type(tmp_pat
         load_signatures_from_arrow(signatures_path)
 
 
-def test_arrow_training_rejects_noncanonical_paper_id_physical_type(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("table_name", "column_name", "values", "message"),
+    [
+        ("papers", "paper_id", pa.array([1], type=pa.int64()), "papers column 'paper_id' expected string"),
+        ("paper_authors", "position", pa.array([0], type=pa.int32()), "paper_authors column 'position' expected int64"),
+    ],
+)
+def test_arrow_training_rejects_noncanonical_paper_column_types(
+    tmp_path: Path, table_name: str, column_name: str, values: pa.Array, message: str
+) -> None:
     papers_path = tmp_path / "papers.arrow"
     authors_path = tmp_path / "paper_authors.arrow"
     _write_minimal_papers_table(papers_path, ["p1"])
     _write_minimal_paper_authors_table(authors_path, ["p1"])
-    _replace_arrow_column(papers_path, "paper_id", pa.array([1], type=pa.int64()))
+    _replace_arrow_column(tmp_path / f"{table_name}.arrow", column_name, values)
 
-    with pytest.raises(ValueError, match="papers column 'paper_id' expected string"):
-        load_papers_from_arrow(papers_path, authors_path)
-
-
-def test_arrow_training_rejects_noncanonical_paper_author_position_type(tmp_path: Path) -> None:
-    papers_path = tmp_path / "papers.arrow"
-    authors_path = tmp_path / "paper_authors.arrow"
-    _write_minimal_papers_table(papers_path, ["p1"])
-    _write_minimal_paper_authors_table(authors_path, ["p1"])
-    _replace_arrow_column(authors_path, "position", pa.array([0], type=pa.int32()))
-
-    with pytest.raises(ValueError, match="paper_authors column 'position' expected int64"):
+    with pytest.raises(ValueError, match=message):
         load_papers_from_arrow(papers_path, authors_path)
 
 
@@ -261,37 +253,24 @@ def test_arrow_training_use_orcid_id_controls_python_and_native_ingestion(tmp_pa
     assert native_constraint(False) is None
 
 
-def test_arrow_training_rejects_null_and_duplicate_paper_ids(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("table_name", "paper_ids", "message"),
+    [
+        ("papers", [None, "p1"], "null paper_id"),
+        ("papers", ["p1", "p1"], "duplicate paper_id"),
+        ("paper_authors", [None], "null paper_id"),
+        ("paper_authors", ["p1", "p1"], r"duplicate \(paper_id, position\)"),
+    ],
+)
+def test_arrow_training_rejects_invalid_paper_keys(
+    tmp_path: Path, table_name: str, paper_ids: list[str | None], message: str
+) -> None:
     papers_path = tmp_path / "papers.arrow"
     authors_path = tmp_path / "paper_authors.arrow"
-    _write_minimal_paper_authors_table(authors_path, ["p1"])
+    _write_minimal_papers_table(papers_path, paper_ids if table_name == "papers" else ["p1"])
+    _write_minimal_paper_authors_table(authors_path, paper_ids if table_name == "paper_authors" else ["p1"])
 
-    _write_minimal_papers_table(papers_path, [None, "p1"])
-    with pytest.raises(ValueError, match="null paper_id"):
-        load_papers_from_arrow(papers_path, authors_path)
-
-    _write_minimal_papers_table(papers_path, ["p1", "p1"])
-    with pytest.raises(ValueError, match="duplicate paper_id"):
-        load_papers_from_arrow(papers_path, authors_path)
-
-
-def test_arrow_training_rejects_null_paper_author_ids(tmp_path: Path) -> None:
-    papers_path = tmp_path / "papers.arrow"
-    authors_path = tmp_path / "paper_authors.arrow"
-    _write_minimal_papers_table(papers_path, ["p1"])
-    _write_minimal_paper_authors_table(authors_path, [None])
-
-    with pytest.raises(ValueError, match="null paper_id"):
-        load_papers_from_arrow(papers_path, authors_path)
-
-
-def test_arrow_training_rejects_duplicate_paper_author_positions(tmp_path: Path) -> None:
-    papers_path = tmp_path / "papers.arrow"
-    authors_path = tmp_path / "paper_authors.arrow"
-    _write_minimal_papers_table(papers_path, ["p1"])
-    _write_minimal_paper_authors_table(authors_path, ["p1", "p1"])
-
-    with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
+    with pytest.raises(ValueError, match=message):
         load_papers_from_arrow(papers_path, authors_path)
 
 
@@ -314,25 +293,6 @@ def test_arrow_training_preserves_blank_paper_author_names(tmp_path: Path) -> No
         papers = load_papers_from_arrow(papers_path, authors_path)
 
         assert papers["p1"].authors == [Author(author_name=author_name, position=0)], case_id
-
-
-def test_arrow_training_rejects_null_paper_author_name(tmp_path: Path) -> None:
-    papers_path = tmp_path / "papers.arrow"
-    authors_path = tmp_path / "paper_authors.arrow"
-    _write_minimal_papers_table(papers_path, ["p1"])
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "position": pa.array([0], type=pa.int64()),
-                "author_name": pa.array([None], type=pa.string()),
-            }
-        ),
-        authors_path,
-    )
-
-    with pytest.raises(ValueError, match="null author_name"):
-        load_papers_from_arrow(papers_path, authors_path)
 
 
 def test_arrow_training_filtered_papers_skip_irrelevant_validation_state(tmp_path: Path) -> None:
@@ -525,10 +485,18 @@ def test_arrow_ingestion_reconstructs_training_fields(training_bundle: dict[str,
     assert arrow_dataset.name_counts_loaded is False
 
 
-def test_arrow_training_constructor_is_always_rust_and_never_materializes_python_sidecars(
+def test_arrow_training_constructor_defers_exact_papers_and_uses_native_sidecars(
     training_bundle: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    expected_papers = training_bundle["arrow_dataset"].papers
+    load_calls = 0
+
+    def recording_loader(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal load_calls
+        load_calls += 1
+        return load_papers_from_arrow(*args, **kwargs)
+
     monkeypatch.setenv("S2AND_BACKEND", "python")
     monkeypatch.setattr(
         ANDData,
@@ -542,7 +510,7 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     )
     monkeypatch.setattr(
         "s2and.arrow_training.load_papers_from_arrow",
-        lambda *_args, **_kwargs: pytest.fail("construction must not load Python papers"),
+        recording_loader,
     )
 
     arrow_dataset = build_training_anddata_from_arrow(
@@ -562,32 +530,8 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     )
     assert isinstance(arrow_dataset.name_tuples, frozenset)
     assert "papers" not in arrow_dataset.__dict__
-
-
-def test_arrow_training_materializes_exact_papers_once(
-    training_bundle: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    load_calls = 0
-    original_loader = load_papers_from_arrow
-
-    def recording_loader(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        nonlocal load_calls
-        load_calls += 1
-        return original_loader(*args, **kwargs)
-
-    monkeypatch.setattr("s2and.arrow_training.load_papers_from_arrow", recording_loader)
-    arrow_dataset = build_training_anddata_from_arrow(
-        training_bundle["arrow_source"],
-        "dummy_arrow_training_lazy_papers",
-        clusters=str(DUMMY_DIR / "clusters.json"),
-        random_seed=42,
-        n_jobs=1,
-    )
-
-    assert "papers" not in arrow_dataset.__dict__
     assert load_calls == 0
-    assert arrow_dataset.papers == training_bundle["arrow_dataset"].papers
+    assert arrow_dataset.papers == expected_papers
     assert arrow_dataset.papers is arrow_dataset.__dict__["papers"]
     assert load_calls == 1
 

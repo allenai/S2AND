@@ -7,12 +7,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
-from s2and.incremental_linking_training.classic import OfficialBundle, fit_classic
+from s2and.incremental_linking_training.classic import fit_classic
 from s2and.name_counts_index import NameCountsIndex
 from s2and.name_tuple_artifact import load_name_tuple_artifact
 from s2and.orcid_prefix_counts import load_canonical_orcid_prefix_counts
@@ -21,6 +20,7 @@ from scripts.production.counts.generate_orcid_name_prefix_counts import write_pu
 from scripts.production.generate_canonical_name_tuples import regenerate
 from scripts.production.model import train_pairwise
 from tests.helpers import pairwise_training_args
+from tests.training_helpers import write_classic_tiny_bundle
 
 _PAIRWISE_LAST_NAMES = (
     "Adams",
@@ -36,130 +36,9 @@ _PAIRWISE_LAST_NAMES = (
 )
 
 
-def _classic_candidate_rows(
-    query_specs: list[tuple[str, str, str, bool]],
-) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    for query_index, (query_id, base_group_id, dataset, has_positive) in enumerate(query_specs):
-        for rank in (1, 2, 30):
-            label = int((has_positive and rank == 1) or (not has_positive and rank == 30))
-            rows.append(
-                {
-                    "query_group_id": query_id,
-                    "base_group_id": base_group_id,
-                    "dataset": dataset,
-                    "query_view": "full",
-                    "query_first_token": "alex",
-                    "candidate_component_key": f"{query_id}:candidate:{rank}",
-                    "retrieval_rank": rank,
-                    "label": label,
-                    "tiny_score": float(label * 2 + query_index / 10 - rank / 100),
-                }
-            )
-    return pd.DataFrame(rows)
-
-
-def _write_classic_tiny_bundle(root: Path) -> OfficialBundle:
-    root.mkdir()
-    train_rows = _classic_candidate_rows(
-        [
-            (
-                "fit-negative" if index == 0 else f"train-{index}",
-                "fit-negative-base" if index == 0 else f"train-base-{index}",
-                "train",
-                index % 2 == 0,
-            )
-            for index in range(12)
-        ]
-    )
-    gate_rows = _classic_candidate_rows(
-        [
-            ("fit-negative", "fit-negative-base", "a_khan", False),
-            ("fit-positive", "fit-positive-base", "a_khan", True),
-        ]
-    )
-    hwang_rows = _classic_candidate_rows(
-        [
-            ("check-negative", "check-negative-base", "h_wang", False),
-            ("check-positive", "check-positive-base", "h_wang", True),
-        ]
-    )
-    s2and_rows = _classic_candidate_rows(
-        [
-            ("test-negative", "test-negative-base", "s2and", False),
-            ("test-positive", "test-positive-base", "s2and", True),
-        ]
-    )
-    tables = {
-        "train.csv.gz": train_rows,
-        "gate.csv.gz": gate_rows,
-        "hwang.csv.gz": hwang_rows,
-        "s2and.csv.gz": s2and_rows,
-    }
-    for filename, frame in tables.items():
-        frame.to_csv(root / filename, index=False, compression="gzip")
-
-    pd.DataFrame(
-        [
-            {
-                "query_group_id": query_id,
-                "source_key": source_key,
-                "split": split,
-                "base_group_id": base_group_id,
-            }
-            for query_id, base_group_id, source_key, split in (
-                ("fit-negative", "fit-negative-base", "a_khan_eval", "calibration_fit"),
-                ("fit-positive", "fit-positive-base", "a_khan_eval", "calibration_fit"),
-                ("check-negative", "check-negative-base", "hwang_eval", "calibration_check"),
-                ("check-positive", "check-positive-base", "hwang_eval", "calibration_check"),
-                ("test-negative", "test-negative-base", "s2and_eval", "test"),
-                ("test-positive", "test-positive-base", "s2and_eval", "test"),
-            )
-        ]
-    ).to_csv(root / "assignments.csv", index=False)
-    pd.DataFrame({"base_group_id": ["fit-negative-base", "fit-positive-base"]}).to_csv(
-        root / "internal_eval_base_groups.csv",
-        index=False,
-    )
-
-    return OfficialBundle(
-        root=root,
-        bundle_name="tiny-real-classic",
-        assets={},
-        models={
-            "classic": {
-                "feature_columns": ["tiny_score"],
-                "retrieval_top_k": 2,
-                "best_params": {
-                    "learning_rate": 0.1,
-                    "max_depth": 2,
-                    "min_child_samples": 1,
-                    "n_estimators": 5,
-                    "num_leaves": 4,
-                },
-                "train_path": "train.csv.gz",
-                "classic_gate_source_path": "gate.csv.gz",
-                "classic_gate_internal_eval_base_groups_path": "internal_eval_base_groups.csv",
-                "s2and_eval_path": "s2and.csv.gz",
-                "hwang_eval_path": "hwang.csv.gz",
-                "promoted_stratified_gate": {
-                    "calibration_splits": ["calibration_fit", "calibration_check"],
-                    "test_split": "test",
-                },
-                "stratified_eval_test_split": {
-                    "assignments_path": "assignments.csv",
-                    "split_order": ["calibration_fit", "calibration_check", "test"],
-                    "test_split": "test",
-                },
-            }
-        },
-        expected_metrics={},
-    )
-
-
 def test_fit_classic_fits_real_booster_and_logistic_gate(tmp_path: Path) -> None:
     fitted = fit_classic(
-        _write_classic_tiny_bundle(tmp_path / "classic-bundle"),
+        write_classic_tiny_bundle(tmp_path / "classic-bundle"),
         n_jobs=1,
     )
 
@@ -329,6 +208,16 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         lambda *_args, **_kwargs: pytest.fail("Stage 3 must not run clustering calibration"),
     )
 
+    real_anddata = train_pairwise.ANDData
+
+    def checked_anddata(**kwargs):
+        assert kwargs["test_pairs"] is None
+        assert kwargs["name_counts_index"].manifest_sha256 == NameCountsIndex.open(name_counts_path).manifest_sha256
+        assert kwargs["name_tuples"] == load_name_tuple_artifact(name_tuples_path).pairs
+        assert not {"train_ratio", "val_ratio", "test_ratio"} & set(kwargs)
+        return real_anddata(**kwargs)
+
+    monkeypatch.setattr(train_pairwise, "ANDData", checked_anddata)
     result = train_pairwise.train_pairwise_bundle(args)
 
     summary = result["training_summary"]

@@ -12,14 +12,7 @@ from s2and.model import Clusterer
 from s2and.prediction_state import PredictionState
 from s2and.runtime import build_runtime_context
 from tests.helpers import tiny_name_counts_index
-
-
-class SamePersonClassifier:
-    """Give every unconstrained pair a deterministic zero distance."""
-
-    def predict_proba(self, features: np.ndarray) -> np.ndarray:
-        """Return certain same-person probabilities for all rows."""
-        return np.tile([0.0, 1.0], (len(features), 1))
+from tests.model_helpers import ConstantDistanceClassifier
 
 
 @pytest.fixture
@@ -36,7 +29,7 @@ def shared_prediction_objects() -> tuple[Clusterer, ANDData]:
     dataset.altered_cluster_signatures = ["0"]
     clusterer = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
-        classifier=SamePersonClassifier(),
+        classifier=ConstantDistanceClassifier(0.0),
         n_jobs=1,
         use_default_constraints_as_supervision=False,
     )

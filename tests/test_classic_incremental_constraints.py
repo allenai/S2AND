@@ -1,46 +1,41 @@
 """Regression coverage for conflicts introduced by classic seed attachment."""
 
-from collections.abc import Iterator
-
-import numpy as np
 import pytest
-from sklearn.dummy import DummyClassifier
 
 from s2and.consts import LARGE_DISTANCE
 from s2and.data import ANDData
+from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, _prediction_state_from_dataset
 from s2and.runtime import build_runtime_context
-from tests import test_cluster as cluster_test_helpers
+from tests.helpers import build_dummy_dataset
+from tests.model_helpers import ConstantDistanceClassifier
 
 
 @pytest.fixture
-def classic() -> Iterator[tuple[Clusterer, ANDData]]:
+def classic() -> tuple[Clusterer, ANDData]:
     """Provide real feature/constraint machinery and deterministic pair scores."""
-    fixture = cluster_test_helpers.TestClusterer()
-    fixture.setUp()
-    try:
-        fixture._fill_python_featurizer_fields()
-        dataset = fixture.dummy_dataset
-        clusterer = fixture.dummy_clusterer
-        clusterer.use_default_constraints_as_supervision = True
-        clusterer.classifier = DummyClassifier(strategy="prior").fit(np.zeros((10, 6)), np.array([0] + [1] * 9))
-        dataset.cluster_seeds_require = {"0": "seed"}
-        dataset.cluster_seeds_disallow = set()
-        dataset.altered_cluster_signatures = []
-        dataset.name_tuples = set()
-        for signature_id in ["0", "1", "2", "3"]:
-            dataset.signatures[signature_id] = dataset.signatures[signature_id]._replace(
-                author_info_first="john",
-                author_info_first_normalized_without_apostrophe="john",
-                author_info_middle="",
-                author_info_middle_normalized_without_apostrophe="",
-                author_info_last="smith",
-                author_info_last_normalized="smith",
-                author_info_orcid=None,
-            )
-        yield clusterer, dataset
-    finally:
-        fixture.tearDown()
+    dataset = build_dummy_dataset("classic_constraints", name_counts_index=True)
+    clusterer = Clusterer(
+        FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
+        ConstantDistanceClassifier(0.1),
+        n_jobs=1,
+        use_default_constraints_as_supervision=True,
+    )
+    dataset.cluster_seeds_require = {"0": "seed"}
+    dataset.cluster_seeds_disallow = set()
+    dataset.altered_cluster_signatures = []
+    dataset.name_tuples = set()
+    for signature_id in ["0", "1", "2", "3"]:
+        dataset.signatures[signature_id] = dataset.signatures[signature_id]._replace(
+            author_info_first="john",
+            author_info_first_normalized_without_apostrophe="john",
+            author_info_middle="",
+            author_info_middle_normalized_without_apostrophe="",
+            author_info_last="smith",
+            author_info_last_normalized="smith",
+            author_info_orcid=None,
+        )
+    return clusterer, dataset
 
 
 def _filter(

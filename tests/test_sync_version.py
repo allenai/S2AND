@@ -1,47 +1,74 @@
-import shutil
-import subprocess
+"""Check version updates and the complete pre-commit hook's failure boundaries."""
+
 from pathlib import Path
 
 import pytest
 
 from scripts import sync_version
+from tests.shell_helpers import run_bash
 
 
-def test_pre_commit_hook_collects_targets_without_bash_4_mapfile() -> None:
+@pytest.mark.parametrize(
+    ("staged", "check_status", "sync_status", "expected_status", "updates"),
+    [
+        ("README.md", "1", "0", 0, False),
+        ("VERSION", "0", "0", 0, False),
+        ("VERSION", "1", "0", 0, True),
+        ("VERSION", "1", "9", 9, False),
+    ],
+    ids=["unrelated-change", "already-synchronized", "update-and-stage", "sync-failure"],
+)
+def test_pre_commit_hook_only_stages_successfully_synchronized_targets(
+    tmp_path: Path, staged: str, check_status: str, sync_status: str, expected_status: int, updates: bool
+) -> None:
+    """Run the whole hook with command boundaries stubbed, never touching real Git."""
     hook = (sync_version.ROOT / ".githooks" / "pre-commit").read_text(encoding="utf-8")
-
-    assert "mapfile" not in hook
-    assert 'VERSION_TARGETS="$(uv run python scripts/sync_version.py --print-targets)"' in hook
-    assert "while IFS= read -r version_file" in hook
-    assert "${version_file%$'\\r'}" in hook
-
-
-def test_pre_commit_target_loop_strips_windows_crlf() -> None:
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash is unavailable")
-    hook = (sync_version.ROOT / ".githooks" / "pre-commit").read_text(encoding="utf-8")
-    loop_start = hook.index("VERSION_FILES=()")
-    loop_end_marker = 'done <<< "$VERSION_TARGETS"'
-    loop_end = hook.index(loop_end_marker, loop_start) + len(loop_end_marker)
-    target_loop = hook[loop_start:loop_end]
-    script = "\n".join(
-        (
-            "set -euo pipefail",
-            "VERSION_TARGETS=\"$(printf 'VERSION\\r\\npyproject.toml\\r\\nuv.lock\\r\\n')\"",
-            target_loop,
-            "printf '<%s>\\n' \"${VERSION_FILES[@]}\"",
-        )
+    commands = r"""
+git() {
+    case "$1" in
+        rev-parse) pwd ;;
+        diff) printf '%s\n' "$STAGED_FILES" ;;
+        add) printf '<%s>\n' "${@:2}" > staged-files ;;
+        *) return 97 ;;
+    esac
+}
+uv() {
+    printf '%s\n' "$*" >> commands
+    case "$*" in
+        'run python scripts/sync_version.py --print-targets')
+            printf 'VERSION\r\nfolder with spaces/manifest.toml\r\nuv.lock\r\n' ;;
+        'run python scripts/sync_version.py --check') return "$CHECK_STATUS" ;;
+        'run python scripts/sync_version.py') return "$SYNC_STATUS" ;;
+        'sync --extra dev') return 0 ;;
+        'run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml') return 0 ;;
+        'run --active --no-project ruff format scripts/sync_version.py') return 0 ;;
+        *) return 98 ;;
+    esac
+}
+"""
+    completed = run_bash(
+        commands + hook,
+        cwd=tmp_path,
+        env={"STAGED_FILES": staged, "CHECK_STATUS": check_status, "SYNC_STATUS": sync_status},
     )
-
-    completed = subprocess.run(
-        [bash],
-        check=True,
-        capture_output=True,
-        input=script.encode("utf-8"),
-    )
-
-    assert completed.stdout.decode("utf-8").splitlines() == ["<VERSION>", "<pyproject.toml>", "<uv.lock>"]
+    assert completed.returncode == expected_status, completed.stdout + completed.stderr
+    staged_files = tmp_path / "staged-files"
+    if updates:
+        assert staged_files.read_text().splitlines() == ["<VERSION>", "<folder with spaces/manifest.toml>", "<uv.lock>"]
+    else:
+        assert not staged_files.exists()
+    log = tmp_path / "commands"
+    if staged != "VERSION":
+        assert not log.exists(), "Unrelated commits must not run version tooling"
+    elif check_status == "0":
+        assert log.read_text().splitlines() == [
+            "run python scripts/sync_version.py --print-targets",
+            "run python scripts/sync_version.py --check",
+        ]
+    elif sync_status != "0":
+        assert log.read_text().splitlines()[-1] == "run python scripts/sync_version.py"
+    else:
+        assert "sync --extra dev" in log.read_text().splitlines()
 
 
 def _write_version_fixture(root: Path) -> None:

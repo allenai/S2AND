@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+from sklearn.cluster import DBSCAN
 
 import s2and.model as model_module
 from s2and.consts import LARGE_DISTANCE
@@ -418,3 +419,22 @@ def test_rust_prediction_telemetry_isolated_during_nested_request(
     assert outer_state.telemetry["rust_featurizer_predict"]["make_dists_request_marker"] == "outer"
     assert nested_state.telemetry["rust_featurizer_make_dists"]["request_marker"] == "nested"
     assert vars(clusterer) == original_attributes
+
+
+@pytest.mark.parametrize("cluster_model", [model_module.FastCluster(), DBSCAN(metric="precomputed", min_samples=1)])
+def test_precomputed_prediction_handles_trivial_blocks_and_requires_every_matrix(cluster_model):
+    clusterer = _clusterer(cluster_model=cluster_model)
+    dataset = build_dummy_dataset("precomputed")
+    pair_matrix = (
+        np.asarray([0.2])
+        if isinstance(cluster_model, model_module.FastCluster)
+        else np.asarray([[0.0, 0.2], [0.2, 0.0]])
+    )
+    matrices = {"empty": np.empty((0, 0)), "singleton": None, "pair": pair_matrix}
+    clusters, returned_matrices = clusterer.predict_helper(
+        {"empty": [], "singleton": ["2"], "pair": ["0", "1"]}, dataset, dists=matrices
+    )
+    assert {frozenset(group) for group in clusters.values()} == {frozenset({"2"}), frozenset({"0", "1"})}
+    assert returned_matrices is matrices
+    with pytest.raises(KeyError, match="Missing precomputed distance matrix for block"):
+        clusterer.predict_helper({"missing": ["0", "1"]}, dataset, dists={})

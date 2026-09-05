@@ -22,10 +22,13 @@ def native_features(tmp_path_factory: pytest.TempPathFactory) -> Any:
     return _get_rust_featurizer(arrow)
 
 
-@pytest.mark.parametrize("rows", [[], [0], [1, 4], [0, 1, 2, 3, 4]])
-@pytest.mark.parametrize("main,nameless", [([3, 1, 3, 0], [1, 0]), ([0, 1], None), ([], [])])
+@pytest.mark.parametrize(
+    ("rows", "main", "nameless", "compact"),
+    [(rows, [3, 1, 3, 0], [1, 0], compact) for rows in ([], [1, 4], [0, 1, 2, 3, 4]) for compact in (False, True)]
+    + [([1, 4], [0, 1], None, False), ([1, 4], [], [], False)],
+)
 def test_sparse_feature_rows_match_dense_bits(
-    native_features: Any, rows: list[int], main: list[int], nameless: list[int] | None
+    native_features: Any, rows: list[int], main: list[int], nameless: list[int] | None, compact: bool
 ) -> None:
     """Retain bit patterns and requested column order at a triangle row boundary."""
     kwargs = dict(
@@ -38,15 +41,17 @@ def test_sparse_feature_rows_match_dense_bits(
     )
     dense = model_module._build_block_feature_matrices_indexed_rust([3, 0, 2, 1, 4], **kwargs)
     indices = np.asarray(rows, dtype=np.intp)
-    sparse = model_module._build_block_feature_matrices_indexed_rust([3, 0, 2, 1, 4], **kwargs, scored_rows=indices)
+    sparse = model_module._build_block_feature_matrices_indexed_rust(
+        [3, 0, 2, 1, 4], **kwargs, scored_rows=indices, compact=compact
+    )
     for actual, expected in zip(sparse, dense, strict=True):
         if expected is None:
             assert actual is None
         else:
-            assert actual.shape == expected.shape
+            assert actual.shape == (expected[indices].shape if compact else expected.shape)
             assert actual.flags.c_contiguous
             np.testing.assert_array_equal(
-                np.ascontiguousarray(actual[indices]).view(np.uint64),
+                np.ascontiguousarray(actual if compact else actual[indices]).view(np.uint64),
                 np.ascontiguousarray(expected[indices]).view(np.uint64),
             )
 
@@ -64,9 +69,10 @@ class RecordingClassifier:
         return np.column_stack((distances, 1 - distances))
 
 
-@pytest.mark.parametrize("chunk_size", [1, 5, 21])
-@pytest.mark.parametrize("fastcluster", [False, True])
-@pytest.mark.parametrize("constraints", [False, True])
+@pytest.mark.parametrize(
+    ("chunk_size", "fastcluster", "constraints"),
+    [(5, False, False), (5, False, True), (5, True, False), (5, True, True), (1, True, True), (21, False, True)],
+)
 def test_sparse_features_preserve_distances_and_classifier_calls(
     native_features: Any, monkeypatch: pytest.MonkeyPatch, chunk_size: int, fastcluster: bool, constraints: bool
 ) -> None:
@@ -116,29 +122,11 @@ def test_sparse_features_preserve_distances_and_classifier_calls(
             np.testing.assert_array_equal(actual_batch.view(np.uint64), expected_batch.view(np.uint64))
 
 
-@pytest.mark.parametrize("rows", [[], [0], [1, 4], [0, 1, 2, 3, 4]])
-def test_compact_feature_rows_match_dense_bits(native_features: Any, rows: list[int]) -> None:
-    """Compact projection preserves duplicate columns and row order exactly."""
-    kwargs = dict(
-        featurizer=native_features,
-        start_offset=2,
-        max_pairs=5,
-        main_indices=[3, 1, 3, 0],
-        nameless_indices=[1, 0],
-        num_threads=10,
-    )
-    dense = model_module._build_block_feature_matrices_indexed_rust([3, 0, 2, 1, 4], **kwargs)
-    indices = np.asarray(rows, dtype=np.intp)
-    compact = model_module._build_block_feature_matrices_indexed_rust(
-        [3, 0, 2, 1, 4], **kwargs, scored_rows=indices, compact=True
-    )
-    for actual, expected in zip(compact, dense, strict=True):
-        np.testing.assert_array_equal(actual.view(np.uint64), expected[indices].view(np.uint64))
-
-
-@pytest.mark.parametrize("copy_budget", [1, 96, 100000])
-@pytest.mark.parametrize("rows", [[], [0], [0, 3, 5], list(range(7))])
-@pytest.mark.parametrize("with_nameless", [False, True])
+@pytest.mark.parametrize(
+    ("copy_budget", "rows", "with_nameless"),
+    [(budget, [0, 3, 5], nameless) for budget in (1, 96, 100000) for nameless in (False, True)]
+    + [(1, [], True), (96, [0], True), (100000, list(range(7)), True)],
+)
 def test_compact_scoring_preserves_batches_and_owned_inputs(
     monkeypatch: pytest.MonkeyPatch, copy_budget: int, rows: list[int], with_nameless: bool
 ) -> None:

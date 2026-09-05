@@ -5,7 +5,7 @@ import tracemalloc
 import pytest
 
 from s2and.consts import NUMPY_NAN
-from s2and.data import ANDData, _sample_within_block_random_pairs
+from s2and.data import ANDData, _sample_within_block_random_pairs, _upper_triangle_pair_indices
 
 
 def _legacy_sample(
@@ -29,18 +29,27 @@ def _legacy_sample(
 def _assert_pairs_equal(
     actual: list[tuple[str, str, int | float]],
     expected: list[tuple[str, str, int | float]],
-    *,
-    case_id: str,
 ) -> None:
-    assert [pair[:2] for pair in actual] == [pair[:2] for pair in expected], case_id
+    assert [pair[:2] for pair in actual] == [pair[:2] for pair in expected]
     for actual_pair, expected_pair in zip(actual, expected, strict=True):
         if math.isnan(expected_pair[2]):
-            assert math.isnan(actual_pair[2]), case_id
+            assert math.isnan(actual_pair[2])
         else:
-            assert actual_pair[2] == expected_pair[2], case_id
+            assert actual_pair[2] == expected_pair[2]
 
 
-def test_within_block_rank_sampling_matches_legacy_output() -> None:
+@pytest.mark.parametrize(
+    "random_seed,sample_size,with_cluster_labels",
+    [
+        pytest.param(0, 0, False, id="empty-sample"),
+        pytest.param(0, 4, False, id="partial-sample"),
+        pytest.param(0, 11, False, id="sample-capped-to-population"),
+        pytest.param(7, 10, True, id="cluster-labels"),
+    ],
+)
+def test_within_block_rank_sampling_matches_legacy_output(
+    random_seed: int, sample_size: int, with_cluster_labels: bool
+) -> None:
     blocks = {
         "empty": [],
         "singleton": ["singleton"],
@@ -59,28 +68,32 @@ def test_within_block_rank_sampling_matches_legacy_output() -> None:
         "g": "five",
         "h": "six",
     }
-    cases = (
-        ("empty-sample", 0, 0, False),
-        ("single-pair", 0, 1, False),
-        ("partial-sample", 0, 4, False),
-        ("exact-population", 0, 10, False),
-        ("sample-capped-to-population", 0, 11, False),
-        ("seed-1111", 1111, 4, False),
-        ("maximum-seed", 2**31 - 1, 4, False),
-        ("cluster-labels", 7, 10, True),
-    )
-    for case_id, random_seed, sample_size, with_cluster_labels in cases:
-        signature_to_cluster_id = cluster_ids if with_cluster_labels else None
+    signature_to_cluster_id = cluster_ids if with_cluster_labels else None
 
-        dataset = ANDData.__new__(ANDData)
-        dataset.pair_sampling_mode = "within_block_random"
-        dataset.signature_to_cluster_id = signature_to_cluster_id
-        dataset.random_seed = random_seed
+    dataset = ANDData.__new__(ANDData)
+    dataset.pair_sampling_mode = "within_block_random"
+    dataset.signature_to_cluster_id = signature_to_cluster_id
+    dataset.random_seed = random_seed
 
-        actual = dataset.pair_sampling(sample_size, [], blocks)
-        expected = _legacy_sample(blocks, signature_to_cluster_id, sample_size, random_seed)
+    actual = dataset.pair_sampling(sample_size, [], blocks)
+    expected = _legacy_sample(blocks, signature_to_cluster_id, sample_size, random_seed)
 
-        _assert_pairs_equal(actual, expected, case_id=case_id)
+    _assert_pairs_equal(actual, expected)
+
+
+@pytest.mark.parametrize("block_size", [2, 17, 200_000])
+def test_pair_rank_row_boundaries_preserve_pair_identity(block_size: int) -> None:
+    """Ranks at both ends of each sampled row retain their exact signature indices."""
+    pair_count = math.comb(block_size, 2)
+    for first in sorted({0, (block_size - 2) // 2, block_size - 2}):
+        # Count the pairs remaining in the suffix, independently of the binary
+        # search's row-start formula. Large ranks exceed 32-bit integer range.
+        row_start = pair_count - math.comb(block_size - first, 2)
+        row_end = pair_count - math.comb(block_size - first - 1, 2) - 1
+        assert _upper_triangle_pair_indices(block_size, row_start) == (first, first + 1)
+        assert _upper_triangle_pair_indices(block_size, row_end) == (first, block_size - 1)
+        if first > 0:
+            assert _upper_triangle_pair_indices(block_size, row_start - 1) == (first - 1, block_size - 1)
 
 
 def test_within_block_rank_sampling_preserves_negative_sample_error() -> None:

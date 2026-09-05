@@ -23,32 +23,19 @@ from s2and.incremental_linking.artifact import (
 )
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.incremental_linking.features import promoted_linker_feature_columns
-from s2and.incremental_linking.logistic_gate import logistic_gate_config
-from tests.helpers import import_s2and_rust
-from tests.promoted_linking_helpers import build_tiny_promoted_booster, synthetic_pairwise_bundle_binding
-
-_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust()
-requires_rust_lightgbm = pytest.mark.skipif(
-    not _HAS_RUST_LIGHTGBM,
-    reason=f"s2and_rust unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
+from tests.promoted_linking_helpers import (
+    build_tiny_promoted_booster,
+    synthetic_pairwise_bundle_binding,
+    tiny_logistic_gate_config,
 )
+
 _TEST_TARGET_SPEC = {"variant": "test"}
-
-
-def _logistic_gate_config(link: bool = True) -> dict[str, object]:
-    return logistic_gate_config(
-        feature_names=("chosen_probability",),
-        weights=np.asarray([[0.0, 0.0, 0.0]], dtype=np.float64),
-        bias=np.asarray([0.0, 0.0, 10.0 if link else -10.0], dtype=np.float64),
-        missing_values=np.asarray([0.0], dtype=np.float64),
-        calibration_mode="test",
-    )
 
 
 def _valid_metadata_payload() -> dict[str, Any]:
     return {
         "booster_sha256": "a" * 64,
-        "gate_config": _logistic_gate_config(),
+        "gate_config": tiny_logistic_gate_config(),
         "generated_by_runtime": __version__,
         "kind": INCREMENTAL_LINKER_KIND,
         "pairwise_bundle_binding_digest": canonical_json_digest(synthetic_pairwise_bundle_binding()),
@@ -87,15 +74,23 @@ def _write_fake_artifact(artifact_dir: Path) -> Path:
     return artifact_dir
 
 
-@requires_rust_lightgbm
-def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -> None:
+def test_artifact_lifecycle_preserves_predictions_and_immutable_identity(tmp_path: Path, monkeypatch) -> None:
     booster, fixture = build_tiny_promoted_booster()
     artifact_dir = tmp_path / "artifact"
     binding = synthetic_pairwise_bundle_binding()
+    with pytest.raises(ValueError, match="pairwise_bundle_binding is required"):
+        save_incremental_linking_artifact(
+            booster,
+            artifact_dir,
+            gate_config=tiny_logistic_gate_config(),
+            target_spec=_TEST_TARGET_SPEC,
+            pairwise_bundle_binding={},
+        )
+    assert not artifact_dir.exists()
     metadata = save_incremental_linking_artifact(
         booster,
         artifact_dir,
-        gate_config=_logistic_gate_config(),
+        gate_config=tiny_logistic_gate_config(),
         target_spec=_TEST_TARGET_SPEC,
         pairwise_bundle_binding=binding,
     )
@@ -121,6 +116,24 @@ def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -
     assert loaded.target_spec_digest == canonical_json_digest(_TEST_TARGET_SPEC)
     expected = np.asarray(booster.predict(fixture), dtype=np.float64)
     np.testing.assert_allclose(loaded.predict_probabilities(fixture), expected, rtol=1e-10, atol=1e-10)
+    assert copy.deepcopy(loaded) is loaded
+    with pytest.raises(FileExistsError, match="already exists"):
+        save_incremental_linking_artifact(
+            booster,
+            artifact_dir,
+            gate_config=tiny_logistic_gate_config(),
+            target_spec=_TEST_TARGET_SPEC,
+            pairwise_bundle_binding=binding,
+        )
+    assert json.loads((artifact_dir / METADATA_FILENAME).read_text()) == metadata
+    monkeypatch.chdir(tmp_path)
+    serialized = pickle.dumps(load_incremental_linking_artifact(Path("artifact")))
+    other_dir = tmp_path / "other-cwd"
+    other_dir.mkdir()
+    monkeypatch.chdir(other_dir)
+    restored = pickle.loads(serialized)
+    assert restored.artifact_dir == artifact_dir.resolve()
+    np.testing.assert_allclose(restored.predict_probabilities(fixture), expected, rtol=1e-10, atol=1e-10)
     np.testing.assert_allclose(
         loaded.predict_probabilities(fixture, max_rows_per_chunk=1),
         expected,
@@ -129,20 +142,6 @@ def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -
     )
 
 
-def test_save_rejects_empty_pairwise_bundle_binding(tmp_path: Path) -> None:
-    booster, _fixture = build_tiny_promoted_booster()
-    with pytest.raises(ValueError, match="pairwise_bundle_binding is required"):
-        save_incremental_linking_artifact(
-            booster,
-            tmp_path,
-            gate_config=_logistic_gate_config(),
-            target_spec=_TEST_TARGET_SPEC,
-            pairwise_bundle_binding={},
-        )
-    assert not (tmp_path / METADATA_FILENAME).exists()
-
-
-@requires_rust_lightgbm
 def test_artifact_publication_failure_leaves_target_absent_and_is_retry_safe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -165,7 +164,7 @@ def test_artifact_publication_failure_leaves_target_absent_and_is_retry_safe(
         return save_incremental_linking_artifact(
             booster,
             artifact_dir,
-            gate_config=_logistic_gate_config(),
+            gate_config=tiny_logistic_gate_config(),
             target_spec=_TEST_TARGET_SPEC,
             pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
         )
@@ -177,28 +176,6 @@ def test_artifact_publication_failure_leaves_target_absent_and_is_retry_safe(
     monkeypatch.setattr(artifact_module.os, "replace", real_replace)
     save()
     load_incremental_linking_artifact(artifact_dir)
-
-
-@requires_rust_lightgbm
-def test_artifact_publication_requires_a_new_directory(tmp_path: Path) -> None:
-    booster, _fixture = build_tiny_promoted_booster()
-    artifact_dir = tmp_path / "artifact"
-
-    def save() -> dict[str, Any]:
-        return save_incremental_linking_artifact(
-            booster,
-            artifact_dir,
-            gate_config=_logistic_gate_config(),
-            target_spec=_TEST_TARGET_SPEC,
-            pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
-        )
-
-    save()
-    original_metadata = (artifact_dir / METADATA_FILENAME).read_bytes()
-
-    with pytest.raises(FileExistsError, match="already exists"):
-        save()
-    assert (artifact_dir / METADATA_FILENAME).read_bytes() == original_metadata
 
 
 def test_concurrent_conflicting_artifact_publication_has_one_immutable_winner(tmp_path: Path) -> None:
@@ -332,47 +309,3 @@ def test_load_rejects_wrong_booster_feature_count(
 
     with pytest.raises(ValueError, match="booster feature count mismatch"):
         load_incremental_linking_artifact(artifact_dir)
-
-
-def test_deepcopy_shares_immutable_artifact_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    artifact_dir = _write_fake_artifact(tmp_path / "artifact")
-    monkeypatch.setattr(
-        artifact_module,
-        "_load_rust_lightgbm_booster",
-        lambda booster_path: _ConstantRustBooster(),
-    )
-    artifact = load_incremental_linking_artifact(artifact_dir)
-    fixture = np.zeros((1, len(artifact.feature_columns)), dtype=np.float32)
-    before = artifact.predict_probabilities(fixture)
-
-    copied = copy.deepcopy(artifact)
-
-    assert copied is artifact
-    np.testing.assert_array_equal(copied.predict_probabilities(fixture), before)
-
-
-def test_pickle_reload_is_independent_of_current_working_directory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    artifact_dir = _write_fake_artifact(tmp_path / "artifact")
-    monkeypatch.setattr(
-        artifact_module,
-        "_load_rust_lightgbm_booster",
-        lambda booster_path: _ConstantRustBooster(),
-    )
-    monkeypatch.chdir(tmp_path)
-    artifact = load_incremental_linking_artifact(Path("artifact"))
-    serialized = pickle.dumps(artifact)
-
-    other_dir = tmp_path / "other-cwd"
-    other_dir.mkdir()
-    monkeypatch.chdir(other_dir)
-    restored = pickle.loads(serialized)
-
-    assert restored.artifact_dir == artifact_dir.resolve()
-    fixture = np.zeros((1, len(restored.feature_columns)), dtype=np.float32)
-    np.testing.assert_array_equal(restored.predict_probabilities(fixture), np.asarray([0.5]))

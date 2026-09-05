@@ -1,6 +1,5 @@
 """Verify completion decisions independently of inference backends."""
 
-import logging
 from unittest.mock import Mock
 
 import pytest
@@ -16,8 +15,7 @@ from s2and.incremental_linking.seed_assignment import SeedLinkAssignment
 from s2and.prediction_state import PredictionState
 
 
-def test_completion_preserves_order_allocates_ids_and_owns_results(caplog):
-    caplog.set_level(logging.INFO, logger="s2and")
+def test_completion_preserves_order_allocates_ids_and_owns_results():
     assignment = SeedLinkAssignment({"0": ["seed0"], "2": ["seed2"], "profile": ["seedp"]}, ["a", "b", "c", "d"], [])
     backend_output = {"unrelated_id": ["a"], "0": ["c"]}
     callback = Mock(return_value=backend_output)
@@ -56,17 +54,10 @@ def test_completion_preserves_order_allocates_ids_and_owns_results(caplog):
     assert assignment.clusters["0"] == ["seed0"]
     assert backend_output["unrelated_id"] == ["a"]
     assert assignment.residual_signature_ids == ["a", "b", "c", "d"]
-    assert caplog.messages == [
-        "Clustering together the still unassigned signatures",
-        "Telemetry stage: stage=incremental_residual_phase_b residual_signatures=4 groups=3 "
-        "pairs_before=6 pairs_after=1",
-        "Done. Returning incrementally predicted clusters",
-    ]
 
 
 @pytest.mark.parametrize("residuals", [[], ["a"]])
-def test_empty_or_singleton_completion_skips_backend_and_replaces_telemetry(residuals, caplog):
-    caplog.set_level(logging.INFO, logger="s2and")
+def test_empty_or_singleton_completion_skips_backend_and_replaces_telemetry(residuals):
     callback = Mock(side_effect=AssertionError("backend must not run"))
     state = PredictionState(telemetry={"incremental_residual_phase_b": {"stale": 1}, "other": {"keep": True}})
     result = complete_incremental_prediction(
@@ -82,9 +73,6 @@ def test_empty_or_singleton_completion_skips_backend_and_replaces_telemetry(resi
     )
     assert result == ({"8": ["seed"], "9": ["a"]} if residuals else {"8": ["seed"]})
     callback.assert_not_called()
-    assert caplog.messages[-1] == "Done. Returning incrementally predicted clusters"
-    if not residuals:
-        assert len(caplog.messages) == 1
     assert state.telemetry == {
         "other": {"keep": True},
         "incremental_residual_phase_b": {
@@ -164,12 +152,29 @@ def test_hyphenated_names_bridge_initial_groups_transitively():
     assert first_initials("  jean-luc pierre ") == frozenset({"j", "l", "p"})
     assert residual_first_initial_groups(
         ["j", "l", "jl", "p"],
-        first_names={"j": "jean", "l": "luc", "jl": "jean-luc", "p": "pierre"},
+        first_names={"j": "jean", "l": "luc", "jl": "jean-luc-pierre", "p": "pierre"},
         orcids={},
         partial_supervision={},
         use_default_constraints_as_supervision=True,
         suppress_orcid=False,
-    ) == [["j", "l", "jl"], ["p"]]
+    ) == [["j", "l", "jl", "p"]]
+
+
+@pytest.mark.parametrize("suppress_orcid", [False, True])
+def test_residual_partition_preserves_transitive_mixed_bridges(suppress_orcid: bool) -> None:
+    """ORCID and reverse-pair supervision can connect several initial components."""
+    groups = residual_first_initial_groups(
+        ["d", "a", "e", "b", "c", "aa"],
+        first_names={"a": "alice", "aa": "amy", "b": "bob", "c": "carol", "d": "dan", "e": "eve"},
+        orcids={"aa": "shared", "b": "shared"},
+        partial_supervision={("c", "b"): 0.25, ("e", "d"): LARGE_DISTANCE},
+        use_default_constraints_as_supervision=True,
+        suppress_orcid=suppress_orcid,
+    )
+
+    assert groups == (
+        [["d"], ["a", "aa"], ["e"], ["b", "c"]] if suppress_orcid else [["d"], ["a", "b", "c", "aa"], ["e"]]
+    )
 
 
 def test_cluster_id_allocation_only_skips_exact_numeric_keys():

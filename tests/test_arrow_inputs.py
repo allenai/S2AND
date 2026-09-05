@@ -4,10 +4,10 @@ import hashlib
 import json
 import os
 import threading
-from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
+from typing import BinaryIO
 
 import pytest
 
@@ -49,7 +49,8 @@ def _write_dataset(
     include_name_counts: bool = False,
     signature_id: str = "s1",
 ) -> dict[str, str]:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     root.mkdir(parents=True, exist_ok=True)
     tables = {
         "signatures": pa.table(
@@ -110,14 +111,6 @@ def _rewrite_manifest(root: Path, transform) -> None:
     path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
-def _replace_open_path(source: Path, target: Path) -> None:
-    if os.name == "nt":
-        target.unlink()
-        source.rename(target)
-    else:
-        os.replace(source, target)
-
-
 def test_manifest_writer_owns_runtime_fields_and_publishes_atomically(tmp_path: Path) -> None:
     signatures_path = tmp_path / "signatures.arrow"
     signatures_path.write_bytes(b"signatures")
@@ -134,6 +127,53 @@ def test_manifest_writer_owns_runtime_fields_and_publishes_atomically(tmp_path: 
     assert set(manifest["files"]["signatures"]) == {"byte_count", "sha256"}
     assert set(manifest) == {"kind", "format_version", "paths", "files"}
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "replace"])
+def test_failed_manifest_publication_preserves_previous_generation_and_cleans_temporary_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    """A failed commit must leave the previous manifest usable for retry."""
+    artifact = tmp_path / "signatures.arrow"
+    artifact.write_bytes(b"first generation")
+    original = build_arrow_artifact_manifest({"signatures": artifact}, tmp_path)
+    manifest_path = write_arrow_artifact_manifest(original, tmp_path)
+    original_bytes = manifest_path.read_bytes()
+    artifact.write_bytes(b"second generation")
+    replacement = build_arrow_artifact_manifest({"signatures": artifact}, tmp_path)
+
+    def fail_replace(source: Path, target: Path) -> None:
+        assert target == manifest_path
+        assert json.loads(source.read_text(encoding="utf-8")) == replacement
+        raise OSError("injected manifest publication failure")
+
+    real_temporary_file = arrow_inputs.tempfile.NamedTemporaryFile
+
+    def fail_write(*args, **kwargs):
+        output = real_temporary_file(*args, **kwargs)
+        original_write = output.write
+
+        def write_partial_manifest(text: str) -> None:
+            original_write(text[:1])
+            raise OSError("injected manifest publication failure")
+
+        output.write = write_partial_manifest
+        return output
+
+    with monkeypatch.context() as patch:
+        if failure_stage == "write":
+            patch.setattr(arrow_inputs.tempfile, "NamedTemporaryFile", fail_write)
+        else:
+            patch.setattr(Path, "replace", fail_replace)
+        with pytest.raises(OSError, match="injected manifest publication failure"):
+            write_arrow_artifact_manifest(replacement, tmp_path)
+
+    assert manifest_path.read_bytes() == original_bytes
+    assert list(tmp_path.glob(".manifest.json.*.tmp")) == []
+    write_arrow_artifact_manifest(replacement, tmp_path)
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == replacement
 
 
 def test_manifest_writer_rejects_artifacts_outside_its_authority(tmp_path: Path) -> None:
@@ -252,24 +292,6 @@ def test_generation_identity_uses_role_and_content_not_filename(tmp_path: Path) 
     assert first_manifest["files"] == renamed_manifest["files"]
 
 
-def test_arrow_dataset_open_retains_one_identity_without_mapping_behavior(tmp_path: Path) -> None:
-    _write_dataset(tmp_path, include_specter=True)
-
-    dataset = ArrowDataset.open(tmp_path, require_specter=True)
-
-    assert dataset.root == tmp_path.resolve()
-    assert len(dataset.generation_id) == 64
-    assert dataset.has("signatures")
-    assert dataset.has("specter")
-    assert dataset.native.keys.issuperset({"signatures", "specter"})
-    assert not isinstance(dataset, Mapping)
-    with pytest.raises(TypeError):
-        dataset["signatures"]  # type: ignore[index]
-    with pytest.raises(TypeError, match=r"ArrowDataset\.open"):
-        ArrowDataset()  # type: ignore[call-arg]
-    dataset.close()
-
-
 def test_cold_open_hashes_each_file_once_and_reuse_never_rehashes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -367,21 +389,82 @@ def test_close_is_deterministic_and_use_after_close_is_rejected(tmp_path: Path) 
         _ = dataset.native
 
 
-def test_retained_reader_survives_path_replacement(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure_stage", ["open", "checksum", "schema", "native"])
+def test_failed_open_closes_all_acquired_files_and_can_be_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    """Partial acquisition and validation errors must not leak retained handles."""
     paths = _write_dataset(tmp_path)
-    signatures_path = Path(paths["signatures"])
-    original = signatures_path.read_bytes()
+    opened: list[BinaryIO] = []
+    real_open = arrow_inputs._open_retained_path
+
+    def track_open(path: Path) -> BinaryIO:
+        if failure_stage == "open" and len(opened) == 1:
+            raise OSError("injected retained-file open failure")
+        source = real_open(path)
+        opened.append(source)
+        return source
+
+    def fail_validation(*_args, **_kwargs) -> None:
+        raise ValueError(f"injected {failure_stage} failure")
+
+    failure_points = {
+        "checksum": "_hash_retained_file",
+        "schema": "_validate_retained_arrow_schema",
+        "native": "_construct_native_arrow_dataset",
+    }
+    with monkeypatch.context() as patch:
+        patch.setattr(arrow_inputs, "_open_retained_path", track_open)
+        if failure_stage in failure_points:
+            patch.setattr(arrow_inputs, failure_points[failure_stage], fail_validation)
+        with pytest.raises(OSError if failure_stage == "open" else ValueError, match="injected"):
+            ArrowDataset.open(tmp_path)
+
+    assert len(opened) == (1 if failure_stage == "open" else len(paths))
+    assert all(source.closed for source in opened)
+    with ArrowDataset.open(tmp_path) as dataset:
+        with dataset.use() as lease:
+            with lease.open_file("signatures") as source:
+                assert source.read() == Path(paths["signatures"]).read_bytes()
+
+
+def test_reader_exception_releases_duplicate_and_lease_without_closing_dataset(tmp_path: Path) -> None:
+    """A failed reader must leave the retained generation reusable and closable."""
+    paths = _write_dataset(tmp_path)
     dataset = ArrowDataset.open(tmp_path)
-    replacement_root = tmp_path / "replacement"
-    replacement_paths = _write_dataset(replacement_root, signature_id="s2")
 
-    _replace_open_path(Path(replacement_paths["signatures"]), signatures_path)
+    with pytest.raises(RuntimeError, match="injected reader failure"):
+        with dataset.use() as failed_lease:
+            with failed_lease.open_file("signatures") as failed_source:
+                assert failed_source.read(16)
+                raise RuntimeError("injected reader failure")
 
-    assert signatures_path.read_bytes() != original
+    assert failed_source.closed
+    with pytest.raises(RuntimeError, match="lease is not active"):
+        _ = failed_lease.native
     with dataset.use() as lease:
         with lease.open_file("signatures") as source:
-            assert source.read() == original
+            assert source.read() == Path(paths["signatures"]).read_bytes()
     dataset.close()
+    assert dataset.closed
+
+
+@pytest.mark.parametrize("requirement", ["require_specter", "require_name_counts_index"])
+def test_rejected_use_profile_does_not_leak_active_lease(tmp_path: Path, requirement: str) -> None:
+    """A model requesting unavailable features must not prevent dataset cleanup."""
+    _write_dataset(tmp_path)
+    dataset = ArrowDataset.open(tmp_path)
+
+    with pytest.raises(MissingArrowArtifactError):
+        with dataset.use(**{requirement: True}):
+            pytest.fail("incomplete dataset accepted required model material")
+
+    with dataset.use() as lease:
+        assert lease.has("signatures")
+    dataset.close()
+    assert dataset.closed
 
 
 def test_same_size_corruption_before_open_is_rejected(tmp_path: Path) -> None:
@@ -399,7 +482,8 @@ def test_open_validates_schema_before_native_construction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     paths = _write_dataset(tmp_path)
     write_arrow_ipc_table(pa.table({"signature_id": ["s1"]}), paths["signatures"])
     write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, tmp_path), tmp_path)
@@ -445,9 +529,9 @@ def test_open_can_require_optional_material(tmp_path: Path) -> None:
 
 
 def test_name_counts_state_is_retained_by_the_dataset(tmp_path: Path) -> None:
-    _write_dataset(tmp_path, include_name_counts=True)
+    _write_dataset(tmp_path, include_name_counts=True, include_specter=True)
 
-    dataset = ArrowDataset.open(tmp_path, require_name_counts_index=True)
+    dataset = ArrowDataset.open(tmp_path, require_name_counts_index=True, require_specter=True)
 
     assert dataset.name_counts_index is not None
     assert dataset.native_name_counts_index is not None

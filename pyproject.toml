@@ -85,10 +85,17 @@ version = { file = "VERSION" }
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
+addopts = ["--strict-config", "--strict-markers", "-ra"]
 
 [tool.coverage.run]
 # pytest-cov 7 delegates subprocess measurement to coverage.py.
 patch = ["subprocess"]
+branch = true
+
+[tool.coverage.report]
+# The bounded suite measures about 85% combined line/branch coverage on Windows.
+# Leave platform headroom while rejecting substantial coverage loss in CI.
+fail_under = 80
 
 # Ruff config (used for lint + format)
 [tool.ruff]

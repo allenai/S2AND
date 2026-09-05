@@ -6,13 +6,12 @@ from hashlib import sha256
 from types import SimpleNamespace
 
 import numpy as np
+import pyarrow as pa
 import pytest
 
-pa = pytest.importorskip("pyarrow")
-
-from s2and.arrow_inputs import ArrowDataset  # noqa: E402
-from scripts.verification import compare_full_predict_arrow_parity as parity_module  # noqa: E402
-from scripts.verification.compare_full_predict_arrow_parity import (  # noqa: E402
+from s2and.arrow_inputs import ArrowDataset
+from scripts.verification import compare_full_predict_arrow_parity as parity_module
+from scripts.verification.compare_full_predict_arrow_parity import (
     _assert_exact,
     _cluster_partition,
     _feature_constraint_report,

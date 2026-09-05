@@ -189,8 +189,8 @@ def write_arrow_artifact_manifest(
             encoding="utf-8",
             delete=False,
         ) as output:
-            output.write(encoded)
             temporary_path = Path(output.name)
+            output.write(encoded)
         temporary_path.replace(manifest_path)
     except Exception:
         if temporary_path is not None:

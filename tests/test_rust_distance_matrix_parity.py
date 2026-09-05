@@ -12,14 +12,8 @@ from s2and.feature_port import _get_rust_featurizer
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, FastCluster
 from s2and.prediction_state import PredictionState
-from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, import_s2and_rust
-
-HAS_RUST, _RUST_IMPORT_PAYLOAD = import_s2and_rust()
-if not HAS_RUST:
-    raise pytest.skip.Exception(
-        f"s2and_rust extension not built/installed: {_RUST_IMPORT_PAYLOAD}",
-        allow_module_level=True,
-    )
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
+from tests.model_helpers import ConstantDistanceClassifier
 
 
 class _DeterministicClassifier:
@@ -30,17 +24,6 @@ class _DeterministicClassifier:
         weights = np.linspace(0.1, 0.6, matrix.shape[1], dtype=np.float64)
         scores = np.nan_to_num(matrix, nan=0.0, posinf=1_000.0, neginf=-1_000.0) @ weights
         distances = 0.5 + 0.25 * np.tanh(scores / 10.0)
-        return np.column_stack((distances, 1.0 - distances))
-
-
-class _ConstantDistanceClassifier:
-    """Return a precise distance independent of feature values or batch size."""
-
-    def __init__(self, distance: float) -> None:
-        self.distance = distance
-
-    def predict_proba(self, features: object) -> NDArray[np.float64]:
-        distances = np.full(len(np.asarray(features)), self.distance, dtype=np.float64)
         return np.column_stack((distances, 1.0 - distances))
 
 
@@ -240,7 +223,7 @@ def _assert_fastcluster_precision_parity(
     python_dataset, rust_dataset = parity_datasets
     block = {"threshold": ["0", "1", "2"]}
     clusterer = _clusterer(fastcluster=True, batch_size=pair_chunk_size)
-    clusterer.classifier = _ConstantDistanceClassifier(distance)
+    clusterer.classifier = ConstantDistanceClassifier(distance)
     rust_featurizer = _get_rust_featurizer(rust_dataset)
     matrices = [
         clusterer.make_distance_matrices(block, dataset, partial_supervision=partial_supervision, disable_tqdm=True)

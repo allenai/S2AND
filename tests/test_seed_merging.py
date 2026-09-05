@@ -11,6 +11,7 @@ from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, FastCluster
 from s2and.runtime import build_runtime_context
 from tests.helpers import tiny_name_counts_index
+from tests.model_helpers import ConstantDistanceClassifier
 
 
 @pytest.mark.parametrize("backend", ["python", "rust"])
@@ -77,14 +78,6 @@ def test_seed_restoration_matches_effective_directional_supervision(
         assert {frozenset(group) for group in output.values()} == expected
 
 
-class DifferentPersonClassifier:
-    """Keep unconstrained pairs separate without fitting a stochastic model."""
-
-    def predict_proba(self, features: np.ndarray) -> np.ndarray:
-        """Return a fixed non-match probability for each feature row."""
-        return np.tile([0.9, 0.1], (len(features), 1))
-
-
 @pytest.mark.parametrize("override", ["none", "ignore_seeds", "partial_disallow", "dataset_disallow"])
 def test_batched_prediction_preserves_initial_only_seed_member(monkeypatch: pytest.MonkeyPatch, override: str) -> None:
     """Subblocking honors original seeds and explicit separation in combination."""
@@ -104,7 +97,7 @@ def test_batched_prediction_preserves_initial_only_seed_member(monkeypatch: pyte
         name_counts_index=tiny_name_counts_index(),
     )
     clusterer = Clusterer(
-        FeaturizationInfo(features_to_use=["year_diff", "misc_features"]), DifferentPersonClassifier(), n_jobs=1
+        FeaturizationInfo(features_to_use=["year_diff", "misc_features"]), ConstantDistanceClassifier(0.9), n_jobs=1
     )
     blocks = {"a sattar": ["0", "1", "2"]}
     if override == "dataset_disallow":
@@ -143,7 +136,7 @@ def test_explicit_partial_disallow_overrides_original_seed():
         name_counts_index=tiny_name_counts_index(),
     )
     clusterer = Clusterer(
-        FeaturizationInfo(features_to_use=["year_diff", "misc_features"]), DifferentPersonClassifier(), n_jobs=1
+        FeaturizationInfo(features_to_use=["year_diff", "misc_features"]), ConstantDistanceClassifier(0.9), n_jobs=1
     )
     clusters, _ = clusterer.predict({"a sattar": ["0", "1"]}, dataset, partial_supervision={("0", "1"): 10000.0})
     distances = clusterer.make_distance_matrices(

@@ -1,7 +1,7 @@
 import copy
 import pickle
 from collections import Counter
-from itertools import chain
+from itertools import chain, combinations, islice
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -55,9 +55,7 @@ def test_cacheable_value_preserves_list_order_but_sorts_sets():
     assert model_module._cacheable_value(["year_diff", "name_counts"]) != model_module._cacheable_value(
         ["name_counts", "year_diff"]
     )
-    assert model_module._cacheable_value({"year_diff", "name_counts"}) == model_module._cacheable_value(
-        {"name_counts", "year_diff"}
-    )
+    assert model_module._cacheable_value({"year_diff", "name_counts"}) == ("name_counts", "year_diff")
 
 
 def test_altered_presplit_cache_does_not_make_clusterer_unserializable() -> None:
@@ -96,32 +94,6 @@ def test_classic_subblocking_allocates_collision_safe_keys_and_preserves_members
     assert Counter(chain.from_iterable(observed.values())) == Counter(chain.from_iterable(input_blocks.values()))
 
 
-def _expected_upper_triangle_pairs_for_range(
-    block_size: int,
-    start_offset: int,
-    max_pairs: int | None,
-) -> list[tuple[int, int]]:
-    total_pairs = block_size * (block_size - 1) // 2
-    count = total_pairs - start_offset if max_pairs is None else min(max_pairs, total_pairs - start_offset)
-    row = 0
-    remaining_offset = start_offset
-    while row < block_size - 1:
-        row_len = block_size - row - 1
-        if remaining_offset < row_len:
-            break
-        remaining_offset -= row_len
-        row += 1
-    col = row + 1 + remaining_offset
-    pairs = []
-    for _ in range(count):
-        pairs.append((row, col))
-        col += 1
-        if col >= block_size:
-            row += 1
-            col = row + 1
-    return pairs
-
-
 def test_upper_triangle_indices_for_range_matches_row_major_order():
     cases = (
         ("small-first", 6, 0, 4),
@@ -138,7 +110,7 @@ def test_upper_triangle_indices_for_range_matches_row_major_order():
     for case_id, block_size, start_offset, max_pairs in cases:
         left, right = model_module._upper_triangle_indices_for_range(block_size, start_offset, max_pairs)
         actual = list(zip(left.tolist(), right.tolist(), strict=True))
-        expected = _expected_upper_triangle_pairs_for_range(block_size, start_offset, max_pairs)
+        expected = list(islice(combinations(range(block_size), 2), start_offset, start_offset + max_pairs))
         assert actual == expected, case_id
 
 

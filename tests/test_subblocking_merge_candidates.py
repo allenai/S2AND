@@ -10,6 +10,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
 from s2and.subblocking import (
     GraphSubblockingConfig,
+    _pack_component_ids_greedy,
     _projection_neighbor_edge_scores,
     _prune_edge_scores,
     _score_candidate_edge,
@@ -23,7 +24,8 @@ from tests.helpers import write_test_arrow_artifact_manifest
 
 
 def _write_arrow_ipc_batches(path, batches) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with pa.OSFile(str(path), "wb") as sink:
         with pa.ipc.new_file(sink, batches[0].schema) as writer:
@@ -32,7 +34,8 @@ def _write_arrow_ipc_batches(path, batches) -> None:
 
 
 def _open_graph_dataset(paths: dict[str, Any], tmp_path) -> ArrowDataset:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     with pa.memory_map(str(paths["signatures"]), "r") as source:
         signatures = pa.ipc.open_file(source).read_all()
     for column_name, value in (
@@ -83,7 +86,8 @@ def _single_signature_graph_dataset(
     author_affiliations: tuple[str | None, ...] = ("lab",),
     author_position: int | None = 0,
 ) -> ArrowDataset:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
     specter_path = tmp_path / "specter.arrow"
@@ -200,7 +204,8 @@ def test_sorted_subblock_merge_candidates_keeps_exact_maximum_size_pair() -> Non
     ]
 
 
-def test_projection_neighbor_edge_scores_match_slow_reference() -> None:
+@pytest.mark.parametrize("row_count", [1, 6], ids=["singleton-no-self-edges", "overlapping-neighborhoods"])
+def test_projection_neighbor_edge_scores_match_slow_reference(row_count: int) -> None:
     matrix = np.asarray(
         [
             [1.0, 0.0, 0.0],
@@ -212,6 +217,7 @@ def test_projection_neighbor_edge_scores_match_slow_reference() -> None:
         ],
         dtype=np.float32,
     )
+    matrix = matrix[:row_count]
     matrix /= np.linalg.norm(matrix, axis=1)[:, None]
     evidences = [
         SimpleNamespace(coauthor_blocks=frozenset({"a"}), affiliation_keys=frozenset({"lab1"})),
@@ -221,6 +227,7 @@ def test_projection_neighbor_edge_scores_match_slow_reference() -> None:
         SimpleNamespace(coauthor_blocks=frozenset({"c"}), affiliation_keys=frozenset({"lab3"})),
         SimpleNamespace(coauthor_blocks=frozenset({"c"}), affiliation_keys=frozenset({"lab1"})),
     ]
+    evidences = evidences[:row_count]
     config = GraphSubblockingConfig(
         projection_count=4,
         projection_window=3,
@@ -265,8 +272,29 @@ def test_prune_edge_scores_tie_breaker_is_independent_of_insertion_order() -> No
     assert tuple(reverse) == tuple(forward)
 
 
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [("edge-greedy", [[0, 2], [1, 3]]), ("aggregate-greedy", [[0, 3], [1, 2]])],
+)
+def test_component_packing_uses_selected_affinity_within_capacity(strategy, expected) -> None:
+    # A and B cannot share a bin. C favors A's best edge (.8), but B's total (1.1).
+    components = [["a0", "a1"], ["b0", "b1"], ["c"], ["d"]]
+    edges = {(0, 1): 100.0, (0, 4): 0.8, (1, 4): 0.1, (2, 4): 0.5, (3, 4): 0.6}
+    bins = _pack_component_ids_greedy(
+        components,
+        edges,
+        root_by_index=[0, 0, 2, 2, 4, 5],
+        component_id_by_root={0: 0, 2: 1, 4: 2, 5: 3},
+        target_subblock_size=3,
+        config=GraphSubblockingConfig(component_pack_strategy=strategy),
+    )
+
+    assert bins == expected
+    assert [sum(len(components[index]) for index in bucket) for bucket in bins] == [3, 3]
+
+
 def test_arrow_graph_subblocking_fallback_accepts_missing_orcid_and_packs_components(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
@@ -400,7 +428,7 @@ def test_arrow_graph_subblocking_rejects_null_or_empty_paper_id(tmp_path, paper_
 
 
 def test_arrow_graph_subblocking_prepare_limits_loaded_evidence_to_fallback_union(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
@@ -519,7 +547,7 @@ def test_arrow_graph_subblocking_prepare_limits_loaded_evidence_to_fallback_unio
 
 
 def test_arrow_graph_subblocking_tolerates_sparse_evidence_and_reports_load_metrics(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
@@ -699,7 +727,7 @@ def test_graph_subblocking_uses_raw_paper_coauthors_when_signature_blocks_are_mi
     dataset = SimpleNamespace(
         signatures=signatures,
         papers=papers,
-        specter_embeddings={f"p{index}": np.zeros(2, dtype=np.float32) for index in range(4)},
+        specter_embeddings={},
         random_seed=0,
     )
     hidden_stats: list[dict[str, object]] = []

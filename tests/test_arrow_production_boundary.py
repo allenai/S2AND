@@ -76,13 +76,7 @@ def test_filtered_arrow_prediction_requires_specter_for_subblocking(tmp_path: Pa
 
 
 def test_classic_predict_rejects_rust_context() -> None:
-    clusterer = Clusterer(
-        featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
-        classifier=None,
-        cluster_model=None,
-        n_jobs=1,
-        batch_size=2,
-    )
+    clusterer = _year_diff_clusterer()
     runtime_context = runtime.RuntimeContext(
         operation="cluster_predict",
         backend="rust",
@@ -98,13 +92,7 @@ def test_classic_predict_rejects_rust_context() -> None:
 
 
 def test_classic_incremental_rejects_rust_context() -> None:
-    clusterer = Clusterer(
-        featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
-        classifier=None,
-        cluster_model=None,
-        n_jobs=1,
-        batch_size=2,
-    )
+    clusterer = _year_diff_clusterer()
     runtime_context = runtime.RuntimeContext(
         operation="cluster_predict_incremental",
         backend="rust",

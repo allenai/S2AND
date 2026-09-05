@@ -29,8 +29,11 @@ def test_public_arrow_subblocking_preserves_effective_seed_disallows(
     )
     from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
     from tests.helpers import write_test_arrow_artifact_manifest
-    from tests.promoted_linking_helpers import build_tiny_promoted_booster, synthetic_pairwise_bundle_binding
-    from tests.test_incremental_linking_artifact import _logistic_gate_config
+    from tests.promoted_linking_helpers import (
+        build_tiny_promoted_booster,
+        synthetic_pairwise_bundle_binding,
+        tiny_logistic_gate_config,
+    )
 
     paths = write_minimal_arrow_prediction_bundle(tmp_path / "arrow", include_specter=True)
     with pa.OSFile(paths["signatures"], "rb") as source:
@@ -56,7 +59,7 @@ def test_public_arrow_subblocking_preserves_effective_seed_disallows(
     save_incremental_linking_artifact(
         booster,
         artifact_dir,
-        gate_config=_logistic_gate_config(),
+        gate_config=tiny_logistic_gate_config(),
         target_spec={},
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )

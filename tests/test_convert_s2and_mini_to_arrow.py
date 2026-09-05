@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pyarrow as pa
 import pytest
 
 import scripts.convert_to_arrow as convert_to_arrow
@@ -32,12 +33,12 @@ def _fake_sources(tmp_path: Path, dataset: str) -> RuntimeDatasetSources:
     )
 
 
-def _write_signatures_table(pa: Any, path: Path, signature_ids: list[str | None], paper_ids: list[str]) -> None:
-    row_count = len(signature_ids)
-    write_arrow_ipc_table(
-        pa.table(
+def _minimal_tables(row_count: int = 1) -> dict[str, pa.Table]:
+    paper_ids = [f"p{i + 1}" for i in range(row_count)]
+    return {
+        "signatures": pa.table(
             {
-                "signature_id": pa.array(signature_ids, type=pa.string()),
+                "signature_id": pa.array([f"s{i + 1}" for i in range(row_count)], type=pa.string()),
                 "paper_id": pa.array(paper_ids, type=pa.string()),
                 "author_first": pa.array(["Ada"] * row_count, type=pa.string()),
                 "author_middle": pa.array([""] * row_count, type=pa.string()),
@@ -48,14 +49,7 @@ def _write_signatures_table(pa: Any, path: Path, signature_ids: list[str | None]
                 "author_position": pa.array(list(range(row_count)), type=pa.int64()),
             }
         ),
-        path,
-    )
-
-
-def _write_papers_table(pa: Any, path: Path, paper_ids: list[str]) -> None:
-    row_count = len(paper_ids)
-    write_arrow_ipc_table(
-        pa.table(
+        "papers": pa.table(
             {
                 "paper_id": pa.array(paper_ids, type=pa.string()),
                 "title": pa.array(["Notes"] * row_count, type=pa.string()),
@@ -63,26 +57,21 @@ def _write_papers_table(pa: Any, path: Path, paper_ids: list[str]) -> None:
                 "journal_name": pa.array(["Journal"] * row_count, type=pa.string()),
             }
         ),
-        path,
-    )
-
-
-def _write_paper_authors_table(
-    pa: Any,
-    path: Path,
-    paper_ids: list[str],
-    author_names: list[str | None],
-) -> None:
-    write_arrow_ipc_table(
-        pa.table(
+        "paper_authors": pa.table(
             {
                 "paper_id": pa.array(paper_ids, type=pa.string()),
-                "position": pa.array(list(range(len(paper_ids))), type=pa.int64()),
-                "author_name": pa.array(author_names, type=pa.string()),
+                "position": pa.array(list(range(row_count)), type=pa.int64()),
+                "author_name": pa.array(["Ada Lovelace"] * row_count, type=pa.string()),
             }
         ),
-        path,
-    )
+    }
+
+
+def _write_tables(tmp_path: Path, tables: dict[str, pa.Table]) -> dict[str, str]:
+    paths = {name: str(tmp_path / f"{name}.arrow") for name in tables}
+    for name, table in tables.items():
+        write_arrow_ipc_table(table, Path(paths[name]))
+    return paths
 
 
 def test_join_canonical_benchmark_names_replaces_only_name_fields() -> None:
@@ -443,41 +432,20 @@ def test_linker_replay_main_writes_datasets_under_release_root(
 
 
 def test_validate_manifest_require_embeddings_reports_missing_specter_rows(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    signatures_path = tmp_path / "signatures.arrow"
-    papers_path = tmp_path / "papers.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter_path = tmp_path / "specter.arrow"
-    _write_signatures_table(pa, signatures_path, ["s1", "s2"], ["p1", "p2"])
-    _write_papers_table(pa, papers_path, ["p1", "p2"])
-    _write_paper_authors_table(pa, paper_authors_path, ["p1", "p2"], ["Ada Lovelace", "Bob Smith"])
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([0.1, 0.2], type=pa.float32()), 2),
-            }
-        ),
-        specter_path,
-    )
-
-    paths, _metrics = write_raw_arrow_batch_lookup_indexes(
+    tables = _minimal_tables(row_count=2)
+    tables["specter"] = pa.table(
         {
-            "signatures": str(signatures_path),
-            "papers": str(papers_path),
-            "paper_authors": str(paper_authors_path),
-            "specter": str(specter_path),
-        },
-        tmp_path,
+            "paper_id": pa.array(["p1"], type=pa.string()),
+            "embedding": pa.FixedSizeListArray.from_arrays(pa.array([0.1, 0.2], type=pa.float32()), 2),
+        }
     )
+    paths, _metrics = write_raw_arrow_batch_lookup_indexes(_write_tables(tmp_path, tables), tmp_path)
 
     metrics = convert_to_arrow.validate_arrow_dataset_manifest(
         {"paths": paths},
         require_embeddings=True,
         require_name_counts_index=False,
     )
-
     assert metrics["specter_count"] == 1
     assert metrics["missing_specter_paper_count"] == 1
     assert metrics["missing_specter_paper_examples"] == ["p2"]
@@ -492,142 +460,56 @@ def test_validate_manifest_require_embeddings_reports_missing_specter_rows(tmp_p
 
 
 def test_validate_arrow_dataset_manifest_rejects_malformed_optional_column(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    signatures_path = tmp_path / "signatures.arrow"
-    papers_path = tmp_path / "papers.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
-    _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "title": pa.array(["Notes"], type=pa.string()),
-                "venue": pa.array(["Proceedings"], type=pa.string()),
-                "journal_name": pa.array(["Journal"], type=pa.string()),
-                "language_reliability": pa.array([0.75], type=pa.float32()),
-            }
-        ),
-        papers_path,
-    )
+    tables = _minimal_tables()
+    tables["papers"] = tables["papers"].append_column("language_reliability", pa.array([0.75], type=pa.float32()))
+    paths = _write_tables(tmp_path, tables)
 
     with pytest.raises(ValueError, match="language_reliability.*expected float64"):
         convert_to_arrow.validate_arrow_dataset_manifest(
-            {
-                "paths": {
-                    "signatures": str(signatures_path),
-                    "papers": str(papers_path),
-                    "paper_authors": str(paper_authors_path),
-                },
-            },
+            {"paths": paths},
             require_embeddings=False,
             require_name_counts_index=False,
         )
 
 
-def test_validate_arrow_dataset_manifest_rejects_null_required_strings(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    cases = (
-        ("signature-id", None, "Ada Lovelace", "signatures.signature_id contains null value"),
-        ("author-name", "s1", None, "paper_authors.author_name contains null value"),
+@pytest.mark.parametrize(
+    ("table_name", "column_name"),
+    [("signatures", "signature_id"), ("signatures", "author_position"), ("paper_authors", "author_name")],
+)
+def test_validate_arrow_dataset_manifest_rejects_null_required_values(
+    tmp_path: Path, table_name: str, column_name: str
+) -> None:
+    tables = _minimal_tables()
+    table = tables[table_name]
+    tables[table_name] = table.set_column(
+        table.schema.get_field_index(column_name),
+        column_name,
+        pa.array([None], type=table.schema.field(column_name).type),
     )
-    for case_id, signature_id, author_name, message in cases:
-        case_root = tmp_path / case_id
-        case_root.mkdir()
-        signatures_path = case_root / "signatures.arrow"
-        papers_path = case_root / "papers.arrow"
-        paper_authors_path = case_root / "paper_authors.arrow"
-        _write_signatures_table(pa, signatures_path, [signature_id], ["p1"])
-        _write_papers_table(pa, papers_path, ["p1"])
-        _write_paper_authors_table(pa, paper_authors_path, ["p1"], [author_name])
+    paths = _write_tables(tmp_path, tables)
 
-        try:
-            convert_to_arrow.validate_arrow_dataset_manifest(
-                {
-                    "paths": {
-                        "signatures": str(signatures_path),
-                        "papers": str(papers_path),
-                        "paper_authors": str(paper_authors_path),
-                    },
-                },
-                require_embeddings=False,
-                require_name_counts_index=False,
-            )
-        except ValueError as error:
-            assert message in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: null required string was accepted")
-
-
-def test_validate_arrow_dataset_manifest_rejects_null_author_position(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    signatures_path = tmp_path / "signatures.arrow"
-    papers_path = tmp_path / "papers.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(["s1"], type=pa.string()),
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "author_first": pa.array(["Ada"], type=pa.string()),
-                "author_middle": pa.array([""], type=pa.string()),
-                "author_last": pa.array(["Lovelace"], type=pa.string()),
-                "author_suffix": pa.array([""], type=pa.string()),
-                "author_affiliations": pa.array([["Analytical Engine"]], type=pa.list_(pa.string())),
-                "author_orcid": pa.array([""], type=pa.string()),
-                "author_position": pa.array([None], type=pa.int64()),
-            }
-        ),
-        signatures_path,
-    )
-    _write_papers_table(pa, papers_path, ["p1"])
-    _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
-
-    with pytest.raises(ValueError, match="signatures.author_position contains null value"):
+    with pytest.raises(ValueError, match=rf"{table_name}\.{column_name} contains null value"):
         convert_to_arrow.validate_arrow_dataset_manifest(
-            {
-                "paths": {
-                    "signatures": str(signatures_path),
-                    "papers": str(papers_path),
-                    "paper_authors": str(paper_authors_path),
-                },
-            },
+            {"paths": paths},
             require_embeddings=False,
             require_name_counts_index=False,
         )
 
 
 def test_validate_arrow_dataset_manifest_accepts_blank_paper_author_names(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    for case_id, author_name in (("empty", ""), ("blank", "   ")):
-        case_root = tmp_path / case_id
-        case_root.mkdir()
-        signatures_path = case_root / "signatures.arrow"
-        papers_path = case_root / "papers.arrow"
-        paper_authors_path = case_root / "paper_authors.arrow"
-        _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
-        _write_papers_table(pa, papers_path, ["p1"])
-        _write_paper_authors_table(pa, paper_authors_path, ["p1"], [author_name])
+    tables = _minimal_tables(row_count=2)
+    tables["paper_authors"] = tables["paper_authors"].set_column(2, "author_name", pa.array(["", "   "]))
+    paths, _metrics = write_raw_arrow_batch_lookup_indexes(_write_tables(tmp_path, tables), tmp_path)
+    metrics = convert_to_arrow.validate_arrow_dataset_manifest(
+        {"paths": paths},
+        require_embeddings=False,
+        require_name_counts_index=False,
+    )
 
-        paths, _metrics = write_raw_arrow_batch_lookup_indexes(
-            {
-                "signatures": str(signatures_path),
-                "papers": str(papers_path),
-                "paper_authors": str(paper_authors_path),
-            },
-            case_root,
-        )
-        metrics = convert_to_arrow.validate_arrow_dataset_manifest(
-            {"paths": paths},
-            require_embeddings=False,
-            require_name_counts_index=False,
-        )
-
-        assert metrics["paper_author_count"] == 1, case_id
+    assert metrics["paper_author_count"] == 2
 
 
 def test_write_specter_arrow_reports_zero_size_vectors(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    pytest.importorskip("pyarrow")
     source_path = tmp_path / "specter.pkl"
     output_path = tmp_path / "specter.arrow"
     with source_path.open("wb") as outfile:
@@ -654,37 +536,18 @@ def test_write_specter_arrow_reports_zero_size_vectors(tmp_path: Path, caplog: p
 
 
 def test_validate_arrow_dataset_dir_resolves_relative_manifest_paths(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    signatures_path = tmp_path / "signatures.arrow"
-    papers_path = tmp_path / "papers.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter_path = tmp_path / "specter.arrow"
-    _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
-    _write_papers_table(pa, papers_path, ["p1"])
-    _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([0.1, 0.2], type=pa.float32()), 2),
-            }
-        ),
-        specter_path,
-    )
-    paths, _metrics = write_raw_arrow_batch_lookup_indexes(
+    tables = _minimal_tables()
+    tables["specter"] = pa.table(
         {
-            "signatures": str(signatures_path),
-            "papers": str(papers_path),
-            "paper_authors": str(paper_authors_path),
-            "specter": str(specter_path),
-        },
-        tmp_path,
+            "paper_id": pa.array(["p1"], type=pa.string()),
+            "embedding": pa.FixedSizeListArray.from_arrays(pa.array([0.1, 0.2], type=pa.float32()), 2),
+        }
     )
-    name_counts_index, _metrics = write_name_counts_index(
+    paths, _metrics = write_raw_arrow_batch_lookup_indexes(_write_tables(tmp_path, tables), tmp_path)
+    paths["name_counts_index"], _metrics = write_name_counts_index(
         tmp_path / "name_counts_index",
         tiny_name_counts_tuple(),
     )
-    paths["name_counts_index"] = name_counts_index
     write_test_arrow_artifact_manifest(tmp_path, paths)
 
     metrics = convert_to_arrow.validate_arrow_dataset_dir(
@@ -692,60 +555,28 @@ def test_validate_arrow_dataset_dir_resolves_relative_manifest_paths(tmp_path: P
         require_embeddings=True,
         require_name_counts_index=True,
     )
-
     assert metrics["signature_count"] == 1
     assert metrics["name_counts_index_present"] is True
 
 
 def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    signatures_path = tmp_path / "signatures.arrow"
-    papers_path = tmp_path / "papers.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    index_path, _metrics = write_name_counts_index(
-        tmp_path,
-        tiny_name_counts_tuple(),
-    )
-    name_counts_index = Path(index_path)
-    (name_counts_index / "first.bin").unlink()
-    _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
-    _write_papers_table(pa, papers_path, ["p1"])
-    _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
+    paths = _write_tables(tmp_path, _minimal_tables())
+    paths["name_counts_index"], _metrics = write_name_counts_index(tmp_path, tiny_name_counts_tuple())
+    (Path(paths["name_counts_index"]) / "first.bin").unlink()
 
     with pytest.raises(ValueError, match=r"files\.first target"):
         convert_to_arrow.validate_arrow_dataset_manifest(
-            {
-                "paths": {
-                    "signatures": str(signatures_path),
-                    "papers": str(papers_path),
-                    "paper_authors": str(paper_authors_path),
-                    "name_counts_index": str(name_counts_index),
-                },
-            },
+            {"paths": paths},
             require_embeddings=False,
             require_name_counts_index=True,
         )
 
 
 def test_validate_arrow_dataset_manifest_requires_batch_index_sidecar(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    signatures_path = tmp_path / "signatures.arrow"
-    papers_path = tmp_path / "papers.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
-    _write_papers_table(pa, papers_path, ["p1"])
-    _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
-    manifest = {
-        "paths": {
-            "signatures": str(signatures_path),
-            "papers": str(papers_path),
-            "paper_authors": str(paper_authors_path),
-        },
-    }
-
+    paths = _write_tables(tmp_path, _minimal_tables())
     with pytest.raises(FileNotFoundError, match="signatures_batch_index"):
         convert_to_arrow.validate_arrow_dataset_manifest(
-            manifest,
+            {"paths": paths},
             require_embeddings=False,
             require_name_counts_index=False,
         )

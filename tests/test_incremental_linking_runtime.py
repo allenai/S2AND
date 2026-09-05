@@ -37,16 +37,11 @@ from s2and.incremental_linking.runtime import (
     compute_candidate_batch_pairwise_model_and_aggregate_stats,
 )
 from s2and.model_pairwise import predict_pairwise_class0
-from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, import_s2and_rust
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
+from tests.model_helpers import ConstantDistanceClassifier
 from tests.promoted_linking_helpers import build_tiny_promoted_booster, synthetic_pairwise_bundle_binding
 
 runtime_module: Any = runtime_module
-
-_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust()
-requires_rust_lightgbm = pytest.mark.skipif(
-    not _HAS_RUST_LIGHTGBM,
-    reason=f"s2and_rust unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
-)
 
 
 class StaticPairwiseStats:
@@ -77,14 +72,6 @@ class StaticArtifact:
         assert max_rows_per_chunk is None or max_rows_per_chunk >= 1
         self.last_num_threads = num_threads
         return self.probabilities
-
-
-def _static_pairwise_stats(row_count: int) -> Any:
-    return StaticPairwiseStats(row_count)
-
-
-def _static_artifact(probabilities: np.ndarray, gate_config: dict[str, Any]) -> Any:
-    return StaticArtifact(probabilities, gate_config)
 
 
 class FirstColumnDistanceClassifier:
@@ -183,66 +170,23 @@ def _minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
     return raw_plan
 
 
-def test_raw_arrow_plan_bundle_rejects_pair_row_index_outside_row_count() -> None:
-    raw_plan = _minimal_raw_candidate_plan(pair_row_indices=np.asarray([5], dtype=np.uint32))
-
-    with pytest.raises(ValueError, match="pair_row_indices.*row_count=1"):
-        RawArrowPlanBundle.from_native_mapping(raw_plan)
-
-
-def test_raw_candidate_plan_rejects_legacy_numeric_pair_indices() -> None:
-    raw_plan = _minimal_raw_candidate_plan(left_signature_indices=np.asarray([0], dtype=np.uint32))
-
-    with pytest.raises(ValueError, match="legacy numeric pair indices"):
+@pytest.mark.parametrize(
+    "overrides,message",
+    [
+        ({"pair_row_indices": [5]}, "pair_row_indices.*row_count=1"),
+        ({"left_signature_indices": [0]}, "legacy numeric pair indices"),
+        ({"row_query_signature_indices": [1]}, "row_query_signature_indices.*query_signature_ids length=1"),
+        ({"retrieval_ranks": [-1]}, "retrieval_ranks"),
+        ({"retrieval_ranks": [0]}, "retrieval_ranks"),
+        ({"row_query_year_missing": [-1]}, "row_query_year_missing.*non-0/1"),
+        ({"query_views": []}, "query_views length must match query_signature_ids"),
+        ({"query_views": ["typo"]}, "Unknown retrieval query_view"),
+    ],
+)
+def test_raw_candidate_plan_rejects_invalid_rows(overrides, message):
+    with pytest.raises(ValueError, match=message):
         build_linker_retrieval_batch_from_raw_plan_bundle(
-            RawArrowPlanBundle.from_native_mapping(raw_plan),
-            signature_id_to_index={"q0": 0, "s1": 1},
-        )
-
-
-def test_raw_candidate_plan_rejects_row_query_index_outside_query_count() -> None:
-    raw_plan = _minimal_raw_candidate_plan(row_query_signature_indices=np.asarray([1], dtype=np.uint32))
-
-    with pytest.raises(ValueError, match="row_query_signature_indices.*query_signature_ids length=1"):
-        build_linker_retrieval_batch_from_raw_plan_bundle(
-            RawArrowPlanBundle.from_native_mapping(raw_plan),
-            signature_id_to_index={"q0": 0, "s1": 1},
-        )
-
-
-def test_raw_candidate_plan_rejects_invalid_retrieval_rank() -> None:
-    for retrieval_rank in (-1, 0):
-        raw_plan = {
-            "query_signature_ids": ["q0"],
-            "query_views": ["full"],
-            "query_authors": ["Alice"],
-            "row_count": 1,
-            "pair_count": 1,
-            "row_query_signature_indices": np.asarray([0], dtype=np.uint32),
-            "row_component_keys": ["c1"],
-            "retrieval_scores": np.asarray([0.9], dtype=np.float32),
-            "retrieval_ranks": [retrieval_rank],
-            "pair_row_indices": np.asarray([0], dtype=np.uint32),
-            "left_signature_ids": ["q0"],
-            "right_signature_ids": ["s1"],
-            "component_members": {"c1": ["s1"]},
-        }
-        for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
-            raw_plan[raw_key] = np.asarray([""] if dtype is object else [0], dtype=dtype)
-
-        with pytest.raises(ValueError, match="retrieval_ranks"):
-            build_linker_retrieval_batch_from_raw_plan_bundle(
-                RawArrowPlanBundle.from_native_mapping(raw_plan),
-                signature_id_to_index={"q0": 0, "s1": 1},
-            )
-
-
-def test_raw_candidate_plan_rejects_invalid_uint8_flag() -> None:
-    raw_plan = _minimal_raw_candidate_plan(row_query_year_missing=[-1])
-
-    with pytest.raises(ValueError, match="row_query_year_missing.*non-0/1"):
-        build_linker_retrieval_batch_from_raw_plan_bundle(
-            RawArrowPlanBundle.from_native_mapping(raw_plan),
+            RawArrowPlanBundle.from_native_mapping(_minimal_raw_candidate_plan(**overrides)),
             signature_id_to_index={"q0": 0, "s1": 1},
         )
 
@@ -476,28 +420,6 @@ def _promoted_gate_config(score: float = 0.0) -> dict[str, Any]:
     )
 
 
-def test_raw_arrow_plan_rejects_mismatched_query_view_length() -> None:
-    with pytest.raises(ValueError, match="query_views length must match query_signature_ids"):
-        RawArrowPlanBundle.from_native_mapping(
-            _minimal_raw_candidate_plan(
-                query_signature_ids=["q"],
-                left_signature_ids=["q"],
-                query_views=[],
-            )
-        )
-
-
-def test_raw_arrow_plan_rejects_unknown_query_view() -> None:
-    with pytest.raises(ValueError, match="Unknown retrieval query_view"):
-        RawArrowPlanBundle.from_native_mapping(
-            _minimal_raw_candidate_plan(
-                query_signature_ids=["q"],
-                left_signature_ids=["q"],
-                query_views=["typo"],
-            )
-        )
-
-
 def _retrieval_batch(
     *,
     row_query_signature_indices: np.ndarray,
@@ -549,7 +471,25 @@ def _empty_feature_matrix(candidate_batch: LinkerCandidateBatch) -> LinkerFeatur
         matrix=np.zeros((candidate_batch.row_count, len(promoted_linker_feature_columns())), dtype=np.float32),
         feature_columns=promoted_linker_feature_columns(),
         candidate_batch=candidate_batch,
-        pairwise_stats=_static_pairwise_stats(candidate_batch.row_count),
+        pairwise_stats=StaticPairwiseStats(candidate_batch.row_count),
+    )
+
+
+def _compact_decisions(probabilities, *, gate=0.5, queries=None, row_signals=None, hard_excluded_rows=None):
+    """Run the real gate with explicit candidate probabilities and hard evidence."""
+    count = len(probabilities)
+    batch = _row_only_candidate_batch(
+        row_query_signature_indices=np.asarray([10] * count if queries is None else queries, dtype=np.uint32),
+        row_component_keys=tuple(f"c{index}" for index in range(count)),
+        retrieval_ranks=np.arange(1, count + 1, dtype=np.uint16),
+    )
+    signals = {"first_name_bucket": np.asarray(["multi_letter_first"] * count, dtype=object)}
+    signals.update({name: np.asarray(values, dtype=np.float32) for name, values in (row_signals or {}).items()})
+    return _predict_incremental_link_or_abstain_compact(
+        StaticArtifact(np.asarray(probabilities), _promoted_gate_config(gate)),
+        _empty_feature_matrix(batch),
+        row_signals=signals,
+        hard_excluded_rows=None if hard_excluded_rows is None else np.asarray(hard_excluded_rows),
     )
 
 
@@ -598,7 +538,7 @@ def _fake_pairwise_result(candidate_batch: LinkerCandidateBatch) -> CandidateBat
             "top5_mean_distance": np.zeros(row_count, dtype=np.float32),
             "pair_count": np.asarray([candidate_batch.pair_count] * row_count, dtype=np.float32),
         },
-        pairwise_stats=_static_pairwise_stats(row_count),
+        pairwise_stats=StaticPairwiseStats(row_count),
         telemetry={
             "candidate_row_count": row_count,
             "pair_count": candidate_batch.pair_count,
@@ -612,388 +552,88 @@ def _fake_pairwise_result(candidate_batch: LinkerCandidateBatch) -> CandidateBat
     )
 
 
-def test_fused_pairwise_model_and_aggregates_preserve_existing_distance_semantics(monkeypatch) -> None:
+@pytest.mark.parametrize("model_nan,aggregate_nan", [(0.0, np.nan), (np.nan, 0.0)])
+def test_fused_native_features_scoring_and_constraints(tmp_path, monkeypatch, model_nan, aggregate_nan):
+    dataset = build_arrow_training_dataset(build_dummy_dataset("fused", name_counts_index=True), tmp_path)
+    native = runtime_module.feature_port._get_rust_featurizer(dataset)
+    pairs = [(0, 1), (0, 2), (3, 4), (0, 3), (1, 4), (2, 5)]
+    rows = np.asarray([0, 0, 1, 2, 2, 2], dtype=np.uint32)
     candidate_batch = LinkerCandidateBatch(
         row_count=4,
-        left_signature_indices=np.asarray([0, 1, 2, 3, 4], dtype=np.uint32),
-        right_signature_indices=np.asarray([10, 11, 12, 13, 14], dtype=np.uint32),
-        pair_row_indices=np.asarray([0, 0, 1, 2, 2], dtype=np.uint32),
+        left_signature_indices=np.asarray([left for left, _ in pairs], dtype=np.uint32),
+        right_signature_indices=np.asarray([right for _, right in pairs], dtype=np.uint32),
+        pair_row_indices=rows,
     )
-    main_distances = np.asarray([0.2, 0.5, 0.1, 0.9, 0.4], dtype=np.float64)
-    nameless_distances = np.asarray([0.4, 0.7, 0.3, 0.7, 0.2], dtype=np.float64)
-    calls: list[dict[str, Any]] = []
+    labels = np.asarray(
+        [np.nan, -LARGE_INTEGER, LARGE_DISTANCE - LARGE_INTEGER, np.nan, LARGE_DISTANCE - LARGE_INTEGER, np.nan],
+        dtype=np.float64,
+    )
+    raw_features = np.asarray(native.featurize_pairs_matrix_indexed(pairs, None, 1, np.nan))
+    assert np.isnan(raw_features[np.isnan(labels), :7]).any()
 
-    def fake_build_arrays(
-        left_signature_indices,
-        _right_signature_indices,
-        row_indices,
-        row_count,
-        *,
-        matrix_indices,
-        aggregate_indices,
-        num_threads,
-        nan_value,
-        aggregate_nan_value,
-        featurizer=None,
-    ):
-        assert featurizer is not None
-        calls.append(
-            {
-                "matrix_indices": tuple(matrix_indices),
-                "aggregate_indices": tuple(aggregate_indices),
-                "num_threads": num_threads,
-                "nan_value": nan_value,
-                "aggregate_nan_value": aggregate_nan_value,
-            }
-        )
-        offsets = np.asarray(left_signature_indices, dtype=np.int64)
-        position_by_index = {int(index): position for position, index in enumerate(matrix_indices)}
-        matrix = np.zeros((len(offsets), len(matrix_indices)), dtype=np.float64)
-        matrix[:, position_by_index[0]] = main_distances[offsets]
-        matrix[:, position_by_index[6]] = nameless_distances[offsets]
-        counts = np.zeros(int(row_count), dtype=np.uint32)
-        valid_counts = np.zeros((int(row_count), len(aggregate_indices)), dtype=np.uint64)
-        sums = np.zeros((int(row_count), len(aggregate_indices)), dtype=np.float64)
-        mins = np.full((int(row_count), len(aggregate_indices)), np.inf, dtype=np.float64)
-        maxs = np.full((int(row_count), len(aggregate_indices)), -np.inf, dtype=np.float64)
-        aggregate_positions = [position_by_index[int(feature_index)] for feature_index in aggregate_indices]
-        for pair_offset, local_row in enumerate(row_indices):
-            row = int(local_row)
-            counts[row] += 1
-            values = matrix[pair_offset, aggregate_positions].copy()
-            valid = ~np.isnan(values)
-            if not np.isnan(float(aggregate_nan_value)):
-                values[~valid] = float(aggregate_nan_value)
-                valid = np.ones_like(valid, dtype=bool)
-            if np.any(valid):
-                valid_counts[row, valid] += 1
-                sums[row, valid] += values[valid]
-                mins[row, valid] = np.minimum(mins[row, valid], values[valid])
-                maxs[row, valid] = np.maximum(maxs[row, valid], values[valid])
-        return matrix, counts, valid_counts, sums, mins, maxs
+    class RecordingClassifier(ConstantDistanceClassifier):
+        def predict_proba(self, features):
+            self.features = features.copy()
+            return super().predict_proba(features)
 
-    monkeypatch.setattr(
-        runtime_module.feature_port,
+    main, nameless = RecordingClassifier(0.2), RecordingClassifier(0.6)
+    # Observe both native boundaries while still executing their actual implementations.
+    monkeypatch.setattr("s2and.thread_config.os.cpu_count", lambda: 5)
+    threads = []
+    for name in (
         "build_linker_pair_features_and_aggregate_stats_arrays_rust",
-        fake_build_arrays,
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "_accumulate_pairwise_distance_chunk",
-        lambda **kwargs: _python_distance_accumulators(
-            row_indices=kwargs["row_indices"],
-            row_count=kwargs["row_count"],
-            model_distances=kwargs["model_distances"],
-            labels=kwargs["labels"],
-        ),
-    )
+        "build_linker_pair_distance_accumulators_rust",
+    ):
+        original = getattr(runtime_module.feature_port, name)
 
-    labels = np.full(candidate_batch.pair_count, np.nan, dtype=np.float64)
-    labels[1] = -float(LARGE_INTEGER)
+        def record(*args, _original=original, **kwargs):
+            threads.append(kwargs["num_threads"])
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(runtime_module.feature_port, name, record)
+
     result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
-        SimpleNamespace(),
+        dataset,
         candidate_batch,
-        classifier=FirstColumnDistanceClassifier(),
+        classifier=main,
         featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
-        nameless_classifier=FirstColumnDistanceClassifier(),
+        nameless_classifier=nameless,
         nameless_featurizer_info=FeaturizationInfo(features_to_use=["affiliation_similarity"]),
         pair_labels=labels,
-        n_jobs=3,
-        featurizer=object(),
+        n_jobs=-1,
+        featurizer=native,
+        pairwise_model_nan_value=model_nan,
+        pairwise_aggregate_nan_value=aggregate_nan,
     )
+    assert threads == [5, 5]
+    for scorer, indices in ((main, range(6)), (nameless, [6])):
+        expected = raw_features[np.isnan(labels)][:, indices].copy()
+        if not np.isnan(model_nan):
+            expected[np.isnan(expected)] = model_nan
+        np.testing.assert_array_equal(scorer.features, expected)
 
-    assert len(calls) == 1
-    assert 0 in calls[0]["matrix_indices"]
-    assert 6 in calls[0]["matrix_indices"]
-    assert tuple(calls[0]["aggregate_indices"]) == tuple(PROMOTED_PAIRWISE_AGG_FEATURE_INDICES)
-    assert np.isnan(float(calls[0]["nan_value"]))
-    assert float(calls[0]["aggregate_nan_value"]) == 0.0
-    assert tuple(result.pairwise_stats.aggregate_feature_columns) == tuple(PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS)
-    np.testing.assert_array_equal(result.pairwise_stats.counts, np.asarray([2, 1, 2, 0], dtype=np.uint64))
-    np.testing.assert_array_equal(result.pairwise_stats.valid_counts[:, 0], np.asarray([2, 1, 2, 0]))
-    np.testing.assert_allclose(result.pairwise_stats.sums[:, 0], np.asarray([1.1, 0.3, 0.9, 0.0]))
-    np.testing.assert_allclose(result.pairwise_stats.mins[:, 0], np.asarray([0.4, 0.3, 0.2, np.inf]))
-    np.testing.assert_allclose(result.pairwise_stats.maxs[:, 0], np.asarray([0.7, 0.3, 0.7, -np.inf]))
-    np.testing.assert_allclose(result.row_signals["min_distance"], np.asarray([0.0, 0.2, 0.3, 1.0]))
-    np.testing.assert_allclose(result.row_signals["mean_distance"], np.asarray([0.15, 0.2, 0.55, 1.0]))
-    np.testing.assert_allclose(result.row_signals["top3_mean_distance"], np.asarray([0.15, 0.2, 0.55, 1.0]))
-    np.testing.assert_allclose(result.row_signals["top5_mean_distance"], np.asarray([0.15, 0.2, 0.55, 1.0]))
-    np.testing.assert_array_equal(
-        result.row_signals["pair_count"],
-        np.asarray([2.0, 1.0, 2.0, 0.0], dtype=np.float32),
-    )
-    assert result.telemetry["pair_count"] == 5
-    assert result.telemetry["chunk_count"] == 1
-
-
-def test_fused_pairwise_model_uses_configurable_nan_policies(monkeypatch) -> None:
-    candidate_batch = LinkerCandidateBatch(
-        row_count=1,
-        left_signature_indices=np.asarray([0, 1], dtype=np.uint32),
-        right_signature_indices=np.asarray([10, 11], dtype=np.uint32),
-        pair_row_indices=np.asarray([0, 0], dtype=np.uint32),
-    )
-    calls: list[tuple[float, float]] = []
-
-    def fake_build_arrays(
-        left_signature_indices,
-        _right_signature_indices,
-        row_indices,
-        row_count,
-        *,
-        matrix_indices,
-        aggregate_indices,
-        num_threads,
-        nan_value,
-        aggregate_nan_value,
-        featurizer=None,
-    ):
-        del _right_signature_indices, featurizer
-        assert num_threads == 1
-        calls.append((float(nan_value), float(aggregate_nan_value)))
-        offsets = np.asarray(left_signature_indices, dtype=np.int64)
-        position_by_index = {int(index): position for position, index in enumerate(matrix_indices)}
-        matrix = np.full((len(offsets), len(matrix_indices)), 0.25, dtype=np.float64)
-        last_aggregate_position = position_by_index[int(aggregate_indices[-1])]
-        matrix[0, last_aggregate_position] = np.nan
-        matrix[1, last_aggregate_position] = 0.75
-        counts = np.zeros(int(row_count), dtype=np.uint32)
-        valid_counts = np.zeros((int(row_count), len(aggregate_indices)), dtype=np.uint64)
-        sums = np.zeros((int(row_count), len(aggregate_indices)), dtype=np.float64)
-        mins = np.full((int(row_count), len(aggregate_indices)), np.inf, dtype=np.float64)
-        maxs = np.full((int(row_count), len(aggregate_indices)), -np.inf, dtype=np.float64)
-        aggregate_positions = [position_by_index[int(feature_index)] for feature_index in aggregate_indices]
-        for pair_offset, local_row in enumerate(row_indices):
-            row = int(local_row)
-            counts[row] += 1
-            values = matrix[pair_offset, aggregate_positions].copy()
-            valid = ~np.isnan(values)
-            if not np.isnan(float(aggregate_nan_value)):
-                values[~valid] = float(aggregate_nan_value)
-                valid = np.ones_like(valid, dtype=bool)
-            if np.any(valid):
-                valid_counts[row, valid] += 1
-                sums[row, valid] += values[valid]
-                mins[row, valid] = np.minimum(mins[row, valid], values[valid])
-                maxs[row, valid] = np.maximum(maxs[row, valid], values[valid])
-        return matrix, counts, valid_counts, sums, mins, maxs
-
-    monkeypatch.setattr(
-        runtime_module.feature_port,
-        "build_linker_pair_features_and_aggregate_stats_arrays_rust",
-        fake_build_arrays,
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "_accumulate_pairwise_distance_chunk",
-        lambda **kwargs: _python_distance_accumulators(
-            row_indices=kwargs["row_indices"],
-            row_count=kwargs["row_count"],
-            model_distances=kwargs["model_distances"],
-            labels=kwargs["labels"],
-        ),
-    )
-
-    result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
-        SimpleNamespace(),
-        candidate_batch,
-        classifier=FirstColumnDistanceClassifier(),
-        featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
-        pair_labels=np.full(candidate_batch.pair_count, np.nan, dtype=np.float64),
-        pairwise_model_nan_value=0.0,
-        pairwise_aggregate_nan_value=0.0,
-        featurizer=object(),
-    )
-
-    assert len(calls) == 1
-    assert calls[0][0] == 0.0
-    assert calls[0][1] == 0.0
-    assert result.pairwise_stats.valid_counts[0, -1] == 2
-    assert result.pairwise_stats.mean_matrix()[0, -1] == pytest.approx(0.375)
-
-    calls.clear()
-    result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
-        SimpleNamespace(),
-        candidate_batch,
-        classifier=FirstColumnDistanceClassifier(),
-        featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
-        pair_labels=np.full(candidate_batch.pair_count, np.nan, dtype=np.float64),
-        pairwise_model_nan_value=np.nan,
-        pairwise_aggregate_nan_value=np.nan,
-        featurizer=object(),
-    )
-
-    assert len(calls) == 1
-    assert np.isnan(calls[0][0])
-    assert np.isnan(calls[0][1])
-    assert result.pairwise_stats.valid_counts[0, -1] == 1
-    assert result.pairwise_stats.mean_matrix()[0, -1] == pytest.approx(0.75)
-
-
-def test_fused_pairwise_model_preserves_true_hard_disallow_distances(monkeypatch) -> None:
-    candidate_batch = LinkerCandidateBatch(
-        row_count=2,
-        left_signature_indices=np.asarray([0, 1, 2], dtype=np.uint32),
-        right_signature_indices=np.asarray([10, 11, 12], dtype=np.uint32),
-        pair_row_indices=np.asarray([0, 0, 1], dtype=np.uint32),
-    )
-
-    def fake_build_arrays(
-        left_signature_indices,
-        _right_signature_indices,
-        row_indices,
-        row_count,
-        *,
-        matrix_indices,
-        aggregate_indices,
-        num_threads,
-        nan_value,
-        aggregate_nan_value,
-        featurizer=None,
-    ):
-        assert featurizer is not None
-        assert num_threads == 2
-        assert np.isnan(float(nan_value))
-        assert float(aggregate_nan_value) == 0.0
-        offsets = np.asarray(left_signature_indices, dtype=np.int64)
-        position_by_index = {int(index): position for position, index in enumerate(matrix_indices)}
-        matrix = np.zeros((len(offsets), len(matrix_indices)), dtype=np.float64)
-        matrix[:, position_by_index[0]] = np.asarray([0.2, 0.4, 0.6], dtype=np.float64)[offsets]
-        counts = np.zeros(int(row_count), dtype=np.uint32)
-        valid_counts = np.zeros((int(row_count), len(aggregate_indices)), dtype=np.uint64)
-        sums = np.zeros((int(row_count), len(aggregate_indices)), dtype=np.float64)
-        mins = np.full((int(row_count), len(aggregate_indices)), np.inf, dtype=np.float64)
-        maxs = np.full((int(row_count), len(aggregate_indices)), -np.inf, dtype=np.float64)
-        for local_row in row_indices:
-            row = int(local_row)
-            counts[row] += 1
-            valid_counts[row] += 1
-            mins[row] = 0.0
-            maxs[row] = 0.0
-        return matrix, counts, valid_counts, sums, mins, maxs
-
-    monkeypatch.setattr(
-        runtime_module.feature_port,
-        "build_linker_pair_features_and_aggregate_stats_arrays_rust",
-        fake_build_arrays,
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "_accumulate_pairwise_distance_chunk",
-        lambda **kwargs: _python_distance_accumulators(
-            row_indices=kwargs["row_indices"],
-            row_count=kwargs["row_count"],
-            model_distances=kwargs["model_distances"],
-            labels=kwargs["labels"],
-        ),
-    )
-
-    labels = np.full(candidate_batch.pair_count, np.nan, dtype=np.float64)
-    labels[1:] = float(LARGE_DISTANCE - LARGE_INTEGER)
-    result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
-        SimpleNamespace(),
-        candidate_batch,
-        classifier=FirstColumnDistanceClassifier(),
-        featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
-        pair_labels=labels,
-        n_jobs=2,
-        featurizer=object(),
-    )
-
-    np.testing.assert_allclose(result.row_signals["min_distance"], np.asarray([0.2, LARGE_DISTANCE]))
-    np.testing.assert_allclose(
-        result.row_signals["mean_distance"],
-        np.asarray([(0.2 + LARGE_DISTANCE) / 2.0, LARGE_DISTANCE], dtype=np.float32),
-    )
-    np.testing.assert_allclose(
-        result.row_signals["top3_mean_distance"],
-        np.asarray([(0.2 + LARGE_DISTANCE) / 2.0, LARGE_DISTANCE], dtype=np.float32),
-    )
-    np.testing.assert_allclose(
-        result.row_signals["top5_mean_distance"],
-        np.asarray([(0.2 + LARGE_DISTANCE) / 2.0, LARGE_DISTANCE], dtype=np.float32),
-    )
-    np.testing.assert_array_equal(result.row_signals["pair_count"], np.asarray([2.0, 1.0], dtype=np.float32))
+    # Dense reduction is an independent oracle for the fused native aggregation.
+    aggregate = raw_features[:, PROMOTED_PAIRWISE_AGG_FEATURE_INDICES].copy()
+    assert np.isnan(aggregate).any()
+    if not np.isnan(aggregate_nan):
+        aggregate[np.isnan(aggregate)] = aggregate_nan
+    stats = result.pairwise_stats
+    assert tuple(stats.aggregate_feature_columns) == tuple(PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS)
+    np.testing.assert_array_equal(stats.counts, [2, 1, 3, 0])
+    for row in range(4):
+        values = aggregate[rows == row]
+        valid = ~np.isnan(values)
+        np.testing.assert_array_equal(stats.valid_counts[row], valid.sum(axis=0))
+        np.testing.assert_allclose(stats.sums[row], np.nansum(values, axis=0))
+        np.testing.assert_allclose(stats.mins[row], np.min(np.where(valid, values, np.inf), axis=0, initial=np.inf))
+        np.testing.assert_allclose(stats.maxs[row], np.max(np.where(valid, values, -np.inf), axis=0, initial=-np.inf))
+    np.testing.assert_allclose(result.row_signals["min_distance"], [0, LARGE_DISTANCE, 0.4, 1])
+    for signal in ("mean_distance", "top3_mean_distance", "top5_mean_distance"):
+        np.testing.assert_allclose(result.row_signals[signal], [0.2, LARGE_DISTANCE, (LARGE_DISTANCE + 0.8) / 3, 1])
+    np.testing.assert_array_equal(result.row_signals["pair_count"], [2, 1, 3, 0])
     assert result.telemetry["hard_disallow_distance_pair_count"] == 2
     assert result.telemetry["index_remap_bytes_per_pair"] == 8
-    assert result.telemetry["predicted_index_remap_bytes"] == (result.pairwise_stats.chunk_plan.chunk_pairs * 8)
-
-
-def test_fused_pairwise_model_resolves_negative_n_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("s2and.thread_config.os.cpu_count", lambda: 5)
-    seen_threads: list[int] = []
-    candidate_batch = LinkerCandidateBatch(
-        row_count=1,
-        left_signature_indices=np.asarray([0], dtype=np.uint32),
-        right_signature_indices=np.asarray([1], dtype=np.uint32),
-        pair_row_indices=np.asarray([0], dtype=np.uint32),
-    )
-
-    class FeaturizerWithDistanceAccumulator:
-        def linker_pair_distance_accumulators(self):
-            return None
-
-    def fake_build_arrays(
-        _left_signature_indices,
-        _right_signature_indices,
-        _row_indices,
-        row_count,
-        *,
-        matrix_indices,
-        aggregate_indices,
-        num_threads,
-        **_kwargs,
-    ):
-        seen_threads.append(int(num_threads))
-        matrix = np.zeros((1, len(matrix_indices)), dtype=np.float64)
-        matrix[:, 0] = 0.2
-        return (
-            matrix,
-            np.ones(int(row_count), dtype=np.uint32),
-            np.ones((int(row_count), len(aggregate_indices)), dtype=np.uint64),
-            np.zeros((int(row_count), len(aggregate_indices)), dtype=np.float64),
-            np.zeros((int(row_count), len(aggregate_indices)), dtype=np.float64),
-            np.zeros((int(row_count), len(aggregate_indices)), dtype=np.float64),
-        )
-
-    def fake_distance_accumulators(
-        _row_indices,
-        row_count,
-        model_distances,
-        *,
-        num_threads,
-        **_kwargs,
-    ):
-        seen_threads.append(int(num_threads))
-        return (
-            np.ones(int(row_count), dtype=np.uint64),
-            np.asarray([float(model_distances[0])], dtype=np.float64),
-            np.asarray([float(model_distances[0])], dtype=np.float64),
-            np.asarray([[float(model_distances[0]), np.inf, np.inf, np.inf, np.inf]], dtype=np.float64),
-            0,
-        )
-
-    monkeypatch.setattr(
-        runtime_module.feature_port,
-        "build_linker_pair_features_and_aggregate_stats_arrays_rust",
-        fake_build_arrays,
-    )
-    monkeypatch.setattr(
-        runtime_module.feature_port,
-        "build_linker_pair_distance_accumulators_rust",
-        fake_distance_accumulators,
-    )
-
-    compute_candidate_batch_pairwise_model_and_aggregate_stats(
-        SimpleNamespace(),
-        candidate_batch,
-        classifier=FirstColumnDistanceClassifier(),
-        featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
-        n_jobs=-1,
-        featurizer=FeaturizerWithDistanceAccumulator(),
-    )
-
-    assert seen_threads == [5, 5]
+    assert result.telemetry["predicted_index_remap_bytes"] == stats.chunk_plan.chunk_pairs * 8
 
 
 def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
@@ -1069,14 +709,14 @@ def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
     )
 
 
-@requires_rust_lightgbm
-def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path: Path) -> None:
+@pytest.mark.parametrize("gate", [0.0, 1.1], ids=["accept", "reject"])
+def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path: Path, gate: float) -> None:
     booster, _fixture = build_tiny_promoted_booster()
     artifact_dir = tmp_path / "artifact"
     save_incremental_linking_artifact(
         booster,
         artifact_dir,
-        gate_config=_promoted_gate_config(0.0),
+        gate_config=_promoted_gate_config(gate),
         target_spec={},
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
@@ -1089,7 +729,7 @@ def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path:
     feature_matrix = assemble_linker_feature_matrix(
         candidate_batch,
         _row_features(np.asarray([0.1, 0.9, 0.8], dtype=np.float32)),
-        pairwise_stats=_static_pairwise_stats(row_count=3),
+        pairwise_stats=StaticPairwiseStats(row_count=3),
     )
 
     result = _predict_incremental_link_or_abstain_compact(
@@ -1099,68 +739,15 @@ def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path:
     )
 
     assert len(result.probabilities) == 3
-    assert [decision.action for decision in result.decisions] == ["link", "link"]
-    assert result.decisions[0].query_signature_index == 10
-    assert result.decisions[0].component_key == "c_high"
-    assert result.decisions[1].query_signature_index == 11
-    assert result.decisions[1].component_key == "c_single"
-
-
-@requires_rust_lightgbm
-def test_compact_link_or_abstain_abstains_when_artifact_score_threshold_too_high(tmp_path: Path) -> None:
-    booster, _fixture = build_tiny_promoted_booster()
-    artifact_dir = tmp_path / "artifact"
-    save_incremental_linking_artifact(
-        booster,
-        artifact_dir,
-        gate_config=_promoted_gate_config(1.1),
-        target_spec={},
-        pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
+    assert [decision.query_signature_index for decision in result.decisions] == [10, 11]
+    assert [(decision.action, decision.component_key) for decision in result.decisions] == (
+        [("link", "c_high"), ("link", "c_single")] if gate == 0 else [("abstain", None)] * 2
     )
-    artifact = load_incremental_linking_artifact(artifact_dir)
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10], dtype=np.uint32),
-        row_component_keys=("c0",),
-    )
-    feature_matrix = assemble_linker_feature_matrix(
-        candidate_batch,
-        _row_features(np.asarray([0.9], dtype=np.float32)),
-        pairwise_stats=_static_pairwise_stats(row_count=1),
-    )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        feature_matrix,
-        row_signals={"first_name_bucket": np.asarray(["multi_letter_first"], dtype=object)},
-    )
-
-    assert result.decisions[0].action == "abstain"
-    assert result.decisions[0].component_key is None
-
-
-def test_compact_link_or_abstain_single_candidate_uses_logistic_score_feature() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.9], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.95),
-    )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10], dtype=np.uint32),
-        row_component_keys=("c0",),
-    )
-    feature_matrix = _empty_feature_matrix(candidate_batch)
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        feature_matrix,
-        row_signals={"first_name_bucket": np.asarray(["multi_letter_first"], dtype=object)},
-    )
-
-    assert result.decisions[0].action == "abstain"
 
 
 def test_compact_link_or_abstain_applies_numpy_logistic_gate_feature() -> None:
     scale = 200.0
-    artifact = _static_artifact(
+    artifact = StaticArtifact(
         np.asarray([0.60, 0.55, 0.40], dtype=np.float64),
         gate_config=logistic_gate_config(
             feature_names=("score_margin",),
@@ -1195,7 +782,7 @@ def test_compact_link_or_abstain_applies_numpy_logistic_gate_feature() -> None:
 
 
 def test_compact_logistic_gate_can_use_materialized_bucket_feature() -> None:
-    artifact = _static_artifact(
+    artifact = StaticArtifact(
         np.asarray([0.60], dtype=np.float64),
         gate_config=logistic_gate_config(
             feature_names=("first_name_bucket_multi_letter_first",),
@@ -1220,189 +807,87 @@ def test_compact_logistic_gate_can_use_materialized_bucket_feature() -> None:
     assert result.decisions[0].action == "link"
 
 
-def test_compact_constraint_require_forces_link() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.10], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.99),
-    )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
-        row_component_keys=("non_require_high_score", "require_low_score"),
-        retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
-    )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(candidate_batch),
+@pytest.mark.parametrize("force", ["constraint_require_count", "orcid_match"])
+def test_compact_forced_link_keeps_full_group_runner_up(force):
+    """A forced low-score row beats both the model gate and a high-score rival."""
+    result = _compact_decisions(
+        [0.95, 0.10],
+        gate=0.99,
         row_signals={
-            "constraint_pair_count": np.asarray([1.0, 1.0], dtype=np.float32),
-            "constraint_require_count": np.asarray([0.0, 1.0], dtype=np.float32),
-            "constraint_disallow_count": np.asarray([0.0, 0.0], dtype=np.float32),
-            "constraint_disallow_fraction": np.asarray([0.0, 0.0], dtype=np.float32),
+            force: [0, 1],
+            "constraint_pair_count": [1, 1],
+            "constraint_disallow_count": [0, int(force == "orcid_match")],
+            "constraint_disallow_fraction": [0, int(force == "orcid_match")],
         },
     )
-
-    assert result.decisions[0].action == "link"
-    assert result.decisions[0].component_key == "require_low_score"
-    assert result.decisions[0].score == pytest.approx(0.10)
-    # Runner-up margin is reported against the full query group (the non-required
-    # candidate at 0.95), not just within the constraint-required subset.
-    assert result.decisions[0].runner_up_score == pytest.approx(0.95)
-    assert result.decisions[0].score_margin == pytest.approx(-0.85)
+    decision = result.decisions[0]
+    assert (decision.action, decision.component_key) == ("link", "c1")
+    assert decision.score == pytest.approx(0.10)
+    assert decision.runner_up_score == pytest.approx(0.95)
+    assert decision.score_margin == pytest.approx(-0.85)
 
 
-def test_compact_constraint_require_rejects_conflicting_candidate_components() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.90], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.0),
-    )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
-        row_component_keys=("required_component_a", "required_component_b"),
-        retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
-    )
-
-    with pytest.raises(ValueError, match="constraint_require_conflicting_candidate_components"):
-        _predict_incremental_link_or_abstain_compact(
-            artifact,
-            _empty_feature_matrix(candidate_batch),
-            row_signals={
-                "constraint_pair_count": np.asarray([1.0, 1.0], dtype=np.float32),
-                "constraint_require_count": np.asarray([1.0, 1.0], dtype=np.float32),
-                "constraint_disallow_count": np.asarray([0.0, 0.0], dtype=np.float32),
-                "constraint_disallow_fraction": np.asarray([0.0, 0.0], dtype=np.float32),
-            },
+@pytest.mark.parametrize(
+    "excluded,message",
+    [
+        (None, "constraint_require_conflicting_candidate_components"),
+        ([True, False], "cluster_seed_disallow_conflicts_with_require_constraint"),
+    ],
+)
+def test_compact_rejects_conflicting_requirements(excluded, message):
+    requires = [1, 1] if excluded is None else [1, 0]
+    with pytest.raises(ValueError, match=message):
+        _compact_decisions(
+            [0.95, 0.60],
+            hard_excluded_rows=excluded,
+            row_signals={"constraint_pair_count": requires, "constraint_require_count": requires},
         )
 
 
-def test_compact_constraint_disallow_vetoes_single_member_candidate_and_chooses_next() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.80], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.5),
-    )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
-        row_component_keys=("disallowed_high_score", "eligible_lower_score"),
-        retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
-    )
+def test_compact_constraint_veto_recomputes_gate_only_for_affected_query(monkeypatch):
+    gate_row_counts = []
+    original = runtime_module.build_runtime_logistic_gate_matrix
 
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(candidate_batch),
+    def recording_gate_builder(*args, **kwargs):
+        gate_row_counts.append(args[1].candidate_batch.row_count)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_module, "build_runtime_logistic_gate_matrix", recording_gate_builder)
+    result = _compact_decisions(
+        [0.95, 0.80, 0.90, 0.10],
+        queries=[10, 10, 11, 11],
         row_signals={
-            "constraint_pair_count": np.asarray([1.0, 1.0], dtype=np.float32),
-            "constraint_require_count": np.asarray([0.0, 0.0], dtype=np.float32),
-            "constraint_disallow_count": np.asarray([1.0, 0.0], dtype=np.float32),
-            "constraint_disallow_fraction": np.asarray([1.0, 0.0], dtype=np.float32),
+            "constraint_pair_count": [1, 1, 1, 1],
+            "constraint_disallow_count": [1, 0, 0, 0],
+            "constraint_disallow_fraction": [1, 0, 0, 0],
         },
     )
-
-    assert result.decisions[0].action == "link"
-    assert result.decisions[0].component_key == "eligible_lower_score"
+    assert gate_row_counts == [4, 1]
+    assert [decision.component_key for decision in result.decisions] == ["c1", "c2"]
     assert result.decisions[0].score == pytest.approx(0.80)
 
 
-def test_compact_constraint_veto_recomputes_gate_only_for_affected_query(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.80, 0.90, 0.10], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.5),
-    )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10, 10, 11, 11], dtype=np.uint32),
-        row_component_keys=("vetoed_high_score", "eligible_lower_score", "q2_high_score", "q2_low_score"),
-        retrieval_ranks=np.asarray([1, 2, 1, 2], dtype=np.uint16),
-    )
-    gate_row_counts: list[int] = []
-    original_gate_builder = runtime_module.build_runtime_logistic_gate_matrix
-
-    def recording_gate_builder(*args: Any, **kwargs: Any):
-        feature_matrix = args[1]
-        gate_row_counts.append(int(feature_matrix.candidate_batch.row_count))
-        return original_gate_builder(*args, **kwargs)
-
-    monkeypatch.setattr(runtime_module, "build_runtime_logistic_gate_matrix", recording_gate_builder)
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(candidate_batch),
+@pytest.mark.parametrize("hard", [False, True], ids=["constraint-veto", "hard-exclusion"])
+def test_compact_abstains_when_every_candidate_is_excluded(hard):
+    result = _compact_decisions(
+        [0.95, 0.80],
+        hard_excluded_rows=[True, True] if hard else None,
         row_signals={
-            "constraint_pair_count": np.ones(4, dtype=np.float32),
-            "constraint_require_count": np.zeros(4, dtype=np.float32),
-            "constraint_disallow_count": np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            "constraint_disallow_fraction": np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            "constraint_pair_count": [1, 1],
+            "constraint_disallow_count": [1, 1],
+            "constraint_disallow_fraction": [1, 1],
         },
     )
-
-    assert gate_row_counts == [4, 1]
-    assert result.decisions[0].component_key == "eligible_lower_score"
-    assert result.decisions[1].component_key == "q2_high_score"
-
-
-def test_compact_constraint_disallow_abstains_when_all_candidate_rows_vetoed() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.80], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.5),
-    )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
-        row_component_keys=("disallowed_high_score", "disallowed_lower_score"),
-        retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
-    )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(candidate_batch),
-        row_signals={
-            "constraint_pair_count": np.asarray([1.0, 1.0], dtype=np.float32),
-            "constraint_require_count": np.asarray([0.0, 0.0], dtype=np.float32),
-            "constraint_disallow_count": np.asarray([1.0, 1.0], dtype=np.float32),
-            "constraint_disallow_fraction": np.asarray([1.0, 1.0], dtype=np.float32),
-        },
-    )
-
-    assert result.decisions[0].action == "abstain"
-    assert result.decisions[0].component_key is None
-    assert result.decisions[0].row_index is None
-
-
-def test_compact_orcid_match_forces_link_and_beats_non_orcid_rows() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.10], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.99),
-    )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
-        row_component_keys=("non_orcid_high_score", "orcid_low_score"),
-        retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
-    )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(candidate_batch),
-        row_signals={
-            "orcid_match": np.asarray([0.0, 1.0], dtype=np.float32),
-            "constraint_pair_count": np.asarray([1.0, 1.0], dtype=np.float32),
-            "constraint_require_count": np.asarray([0.0, 0.0], dtype=np.float32),
-            "constraint_disallow_count": np.asarray([0.0, 1.0], dtype=np.float32),
-            "constraint_disallow_fraction": np.asarray([0.0, 1.0], dtype=np.float32),
-        },
-    )
-
-    assert result.decisions[0].action == "link"
-    assert result.decisions[0].component_key == "orcid_low_score"
-    assert result.decisions[0].score == pytest.approx(0.10)
-    # Runner-up margin is reported against the full query group (the non-ORCID
-    # candidate at 0.95), not just within the ORCID-forced subset.
-    assert result.decisions[0].runner_up_score == pytest.approx(0.95)
-    assert result.decisions[0].score_margin == pytest.approx(-0.85)
+    decision = result.decisions[0]
+    assert (decision.action, decision.component_key, decision.row_index) == ("abstain", None, None)
+    if hard:
+        assert decision.score is None
 
 
 def test_runtime_orcid_force_link_policy_is_independent_of_model_features(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifact = _static_artifact(
+    artifact = StaticArtifact(
         np.asarray([0.95, 0.10], dtype=np.float64),
         gate_config=_promoted_gate_config(0.99),
     )
@@ -1421,13 +906,13 @@ def test_runtime_orcid_force_link_policy_is_independent_of_model_features(
     force_enabled = _predict_incremental_link_or_abstain_retrieved_candidates(
         artifact,
         retrieval_batch,
-        pairwise_stats=_static_pairwise_stats(row_count=2),
+        pairwise_stats=StaticPairwiseStats(row_count=2),
         orcid_force_link_enabled=True,
     )
     force_disabled = _predict_incremental_link_or_abstain_retrieved_candidates(
         artifact,
         retrieval_batch,
-        pairwise_stats=_static_pairwise_stats(row_count=2),
+        pairwise_stats=StaticPairwiseStats(row_count=2),
         orcid_force_link_enabled=False,
     )
 
@@ -1458,83 +943,15 @@ def test_constraint_disallow_veto_policy_pins_two_pair_half_disallow_fall_throug
     assert veto.tolist() == [True, False, True, False, True, True]
 
 
-def test_compact_hard_excluded_rows_block_component_even_against_orcid_force() -> None:
-    # Hard exclusions carry cluster-seed disallows against a component that a
-    # mutually-disallowed query already linked to. Semantics match plan-time
-    # retrieval exclusion: the row is treated as never retrieved, so an ORCID
-    # match on it cannot force a link the way it overrides the soft veto layer.
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.60], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.5),
+def test_hard_exclusion_beats_orcid_and_preserves_eligible_candidate():
+    result = _compact_decisions(
+        [0.95, 0.60],
+        row_signals={"orcid_match": [1, 0]},
+        hard_excluded_rows=[True, False],
     )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
-        row_component_keys=("c_partner_linked", "c_other"),
-        retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
-    )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(candidate_batch),
-        row_signals={
-            "first_name_bucket": np.asarray(["multi_letter_first"] * 2, dtype=object),
-            "orcid_match": np.asarray([1.0, 0.0], dtype=np.float32),
-        },
-        hard_excluded_rows=np.asarray([True, False]),
-    )
-
-    assert result.decisions[0].action == "link"
-    assert result.decisions[0].component_key == "c_other"
+    assert (result.decisions[0].action, result.decisions[0].component_key) == ("link", "c1")
     assert result.decision_telemetry["cluster_seed_disallow_excluded_row_count"] == 1
     assert result.decision_telemetry["cluster_seed_disallow_excluded_query_count"] == 1
-
-
-def test_compact_hard_excluded_rows_abstain_when_all_rows_excluded() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.95], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.5),
-    )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10], dtype=np.uint32),
-        row_component_keys=("c_partner_linked",),
-    )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(candidate_batch),
-        row_signals={"first_name_bucket": np.asarray(["multi_letter_first"], dtype=object)},
-        hard_excluded_rows=np.asarray([True]),
-    )
-
-    assert result.decisions[0].action == "abstain"
-    assert result.decisions[0].component_key is None
-    assert result.decisions[0].score is None
-
-
-def test_compact_hard_excluded_rows_conflicting_require_raises_typed_error() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.60], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.5),
-    )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10, 10], dtype=np.uint32),
-        row_component_keys=("c_partner_linked", "c_other"),
-        retrieval_ranks=np.asarray([1, 2], dtype=np.uint16),
-    )
-
-    with pytest.raises(ValueError, match="cluster_seed_disallow_conflicts_with_require_constraint"):
-        _predict_incremental_link_or_abstain_compact(
-            artifact,
-            _empty_feature_matrix(candidate_batch),
-            row_signals={
-                "first_name_bucket": np.asarray(["multi_letter_first"] * 2, dtype=object),
-                "constraint_pair_count": np.asarray([1.0, 0.0], dtype=np.float32),
-                "constraint_require_count": np.asarray([1.0, 0.0], dtype=np.float32),
-                "constraint_disallow_count": np.zeros(2, dtype=np.float32),
-                "constraint_disallow_fraction": np.zeros(2, dtype=np.float32),
-            },
-            hard_excluded_rows=np.asarray([True, False]),
-        )
 
 
 def test_cluster_seed_disallow_excluded_rows_builds_query_component_mask() -> None:
@@ -1581,7 +998,7 @@ def test_query_disallow_partner_ids_collects_query_pairs_from_both_channels() ->
 def test_private_retrieved_candidate_slice_scores_matrix_and_records_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifact = _static_artifact(
+    artifact = StaticArtifact(
         np.asarray([0.1, 0.9, 0.8], dtype=np.float64),
         gate_config=_promoted_gate_config(0.0),
     )
@@ -1602,7 +1019,7 @@ def test_private_retrieved_candidate_slice_scores_matrix_and_records_telemetry(
     result = _predict_incremental_link_or_abstain_retrieved_candidates(
         artifact,
         retrieval_batch,
-        pairwise_stats=_static_pairwise_stats(row_count=3),
+        pairwise_stats=StaticPairwiseStats(row_count=3),
     )
 
     assert result.feature_matrix.matrix.shape == (3, len(promoted_linker_feature_columns()))
@@ -1627,7 +1044,7 @@ def test_private_retrieved_candidate_slice_scores_matrix_and_records_telemetry(
 def test_private_retrieved_candidate_slice_returns_no_candidate_abstains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifact = _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
+    artifact = StaticArtifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
     retrieval_batch = _retrieval_batch(
         row_query_signature_indices=np.asarray([], dtype=np.uint32),
         row_component_keys=(),
@@ -1641,7 +1058,7 @@ def test_private_retrieved_candidate_slice_returns_no_candidate_abstains(
     result = _predict_incremental_link_or_abstain_retrieved_candidates(
         artifact,
         retrieval_batch,
-        pairwise_stats=_static_pairwise_stats(row_count=0),
+        pairwise_stats=StaticPairwiseStats(row_count=0),
         no_candidate_query_signature_indices=np.asarray([42], dtype=np.uint32),
     )
 
@@ -1652,7 +1069,7 @@ def test_private_retrieved_candidate_slice_returns_no_candidate_abstains(
 
 
 def test_private_retrieved_candidate_slice_rejects_partial_supervision() -> None:
-    artifact = _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
+    artifact = StaticArtifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
     retrieval_batch = _retrieval_batch(
         row_query_signature_indices=np.asarray([], dtype=np.uint32),
         row_component_keys=(),
@@ -1662,7 +1079,7 @@ def test_private_retrieved_candidate_slice_rejects_partial_supervision() -> None
         _predict_incremental_link_or_abstain_retrieved_candidates(
             artifact,
             retrieval_batch,
-            pairwise_stats=_static_pairwise_stats(row_count=0),
+            pairwise_stats=StaticPairwiseStats(row_count=0),
             partial_supervision={("q", "m"): "require"},
         )
 
@@ -1699,7 +1116,7 @@ def test_query_author_for_gate_fallback_includes_full_signature_name() -> None:
 def test_from_retrieval_validates_partial_supervision_against_full_seed_map() -> None:
     featurizer = FakeRuntimeFeaturizer(["q1", "s1", "s2"])
     clusterer = FakeProductionClusterer({"s1": "c1"})
-    artifact = _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
+    artifact = StaticArtifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
     retrieval_batch = _production_retrieval_batch(
         row_query_signature_indices=np.asarray([], dtype=np.uint32),
         row_component_keys=(),
@@ -1724,7 +1141,7 @@ def test_from_retrieval_records_artifact_retrieval_top_k_when_not_passed(
 ) -> None:
     featurizer = FakeRuntimeFeaturizer(["q1", "s1"])
     clusterer = FakeProductionClusterer({"s1": "c1"})
-    artifact = _static_artifact(np.asarray([0.9], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
+    artifact = StaticArtifact(np.asarray([0.9], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
     artifact.retrieval_top_k = 37
     retrieval_batch = _production_retrieval_batch(
         row_query_signature_indices=np.asarray([0], dtype=np.uint32),

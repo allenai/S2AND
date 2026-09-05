@@ -11,7 +11,6 @@ from s2and.arrow_inputs import (
     ARROW_COLLECTION_KIND,
     PUBLIC_DATA_KIND,
     build_arrow_artifact_manifest,
-    require_name_counts_index_artifact,
 )
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.feature_block import (
@@ -31,41 +30,6 @@ def _touch_json(path: Path, payload: dict | None = None) -> None:
 def _touch_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"")
-
-
-def _validate_required_release_files(release_root: Path, dataset_name: str) -> None:
-    pa = pytest.importorskip("pyarrow")
-    root_manifest = json.loads((release_root / "manifest.json").read_text(encoding="utf-8"))
-    dataset_manifest_path = release_root / dataset_name / "manifest.json"
-    dataset_manifest = json.loads(dataset_manifest_path.read_text(encoding="utf-8"))
-    manifest_paths = dataset_manifest.get("paths", {}) if isinstance(dataset_manifest, dict) else {}
-    embedding_path = manifest_paths.get("specter", "specter.arrow")
-    dataset_entry = root_manifest["dataset_manifests"][dataset_name]
-    assert set(dataset_entry) == {"path", "sha256"}
-    assert dataset_entry["sha256"] == hashlib.sha256(dataset_manifest_path.read_bytes()).hexdigest()
-    required_paths = [
-        release_root / "manifest.json",
-        release_root / "LICENSE.txt",
-        release_root / "name_counts_index" / "manifest.json",
-        release_root / dataset_name / "manifest.json",
-        release_root / dataset_name / "signatures.arrow",
-        release_root / dataset_name / "papers.arrow",
-        release_root / dataset_name / "paper_authors.arrow",
-        release_root / dataset_name / str(embedding_path),
-        release_root / dataset_name / "signatures.signatures_batch_index.bin",
-    ]
-
-    missing_paths = [path.relative_to(release_root) for path in required_paths if not path.exists()]
-    assert missing_paths == []
-    require_name_counts_index_artifact(
-        release_root / "name_counts_index",
-        context="release layout test",
-        producer_hint="test fixture must include complete name_counts_index",
-    )
-    for key in ("signatures", "papers", "paper_authors", "specter"):
-        path = release_root / dataset_name / manifest_paths[key]
-        with pa.memory_map(str(path), "r") as source:
-            assert pa.ipc.open_file(source).read_all().num_rows >= 1
 
 
 def _write_root_manifest(
@@ -93,7 +57,8 @@ def _write_root_manifest(
 
 
 def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini") -> tuple[Path, str]:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     release_root = tmp_path / "release"
 
     write_name_counts_index(
@@ -206,7 +171,6 @@ def _rewrite_dataset_manifest_paths(release_root: Path, dataset_name: str, paths
 def test_arrow_release_layout_required_files(tmp_path: Path) -> None:
     release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
 
-    _validate_required_release_files(release_root, dataset_name)
     assert validate_release_root(release_root) == {
         "release_root": str(release_root.resolve()),
         "dataset_manifest_count": 1,

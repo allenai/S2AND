@@ -1,40 +1,24 @@
 from __future__ import annotations
 
-import numpy as np
 import pytest
-from lightgbm import LGBMClassifier
 
 import s2and.model as model_module
 from s2and import memory_budget
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
-from tests.helpers import tiny_name_counts_index
+from tests.helpers import build_dummy_dataset
+from tests.model_helpers import ConstantDistanceClassifier
 
 
 def _build_dummy_clusterer_and_dataset(*, name: str = "dummy_predict_memory") -> tuple[Clusterer, ANDData]:
-    dataset = ANDData(
-        "tests/dummy/signatures.json",
-        "tests/dummy/papers.json",
-        clusters="tests/dummy/clusters.json",
-        cluster_seeds="tests/dummy/cluster_seeds.json",
-        name=name,
-        name_counts_index=tiny_name_counts_index(),
-    )
-
-    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
-    rng = np.random.RandomState(1)
-    x_random = rng.random((10, 6))
-    y_random = rng.randint(0, 6, 10)
     clusterer = Clusterer(
-        featurizer_info=featurizer_info,
-        classifier=LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1, verbosity=-1).fit(
-            x_random, y_random
-        ),
+        FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
+        ConstantDistanceClassifier(),
         n_jobs=1,
         use_default_constraints_as_supervision=False,
     )
-    return clusterer, dataset
+    return clusterer, build_dummy_dataset(name, name_counts_index=True)
 
 
 def _snapshot(*, available_bytes: int, total_ram_bytes: int = 1_000) -> memory_budget.MemorySnapshot:
@@ -49,21 +33,8 @@ def _snapshot(*, available_bytes: int, total_ram_bytes: int = 1_000) -> memory_b
     )
 
 
-def test_predict_helper_raises_before_matrix_allocation_when_budget_too_small(monkeypatch):
-    clusterer, dataset = _build_dummy_clusterer_and_dataset(name="dummy_predict_memory_too_small")
-    block = {"a sattar": ["0", "1", "2"]}
-
-    monkeypatch.setattr(
-        model_module.memory_budget,
-        "memory_snapshot_for_stage",
-        lambda **_kwargs: _snapshot(available_bytes=16),
-    )
-
-    with pytest.raises(MemoryError, match="Predict exact block exceeds memory budget before matrix allocation"):
-        clusterer.predict_helper(block, dataset, total_ram_bytes=1_000)
-
-
-def test_stored_fastcluster_matrix_budget_uses_float64(monkeypatch):
+@pytest.mark.parametrize("route", ["make_distance_matrices", "predict_helper"])
+def test_fastcluster_matrix_budget_uses_float64(monkeypatch, route):
     """Stored Python matrices must budget eight bytes for each condensed pair."""
     clusterer, dataset = _build_dummy_clusterer_and_dataset(name="stored_matrix_precision_budget")
     block = {"a sattar": ["0", "1", "2"]}
@@ -74,7 +45,7 @@ def test_stored_fastcluster_matrix_budget_uses_float64(monkeypatch):
     )
 
     with pytest.raises(MemoryError, match="matrix_bytes=24 available_bytes=16"):
-        clusterer.make_distance_matrices(block, dataset, total_ram_bytes=1_000, disable_tqdm=True)
+        getattr(clusterer, route)(block, dataset, total_ram_bytes=1_000)
 
 
 def test_predict_helper_matches_baseline_when_budget_allows(monkeypatch):

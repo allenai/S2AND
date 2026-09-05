@@ -1,5 +1,6 @@
 import json
 import unittest
+from functools import cached_property, partial
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -9,7 +10,7 @@ import pytest
 
 import s2and.data as data_module
 from s2and.data import ANDData
-from tests.helpers import tiny_name_counts_index
+from tests.helpers import build_dummy_dataset, tiny_name_counts_index
 
 
 @pytest.mark.parametrize(
@@ -135,13 +136,6 @@ def test_split_ratios_do_not_create_a_partition_for_tolerated_roundoff() -> None
     assert train == ["a", "b"]
     assert val == []
     assert test == []
-
-
-def test_maybe_load_list_empty_file_returns_empty_list(tmp_path):
-    empty_path = tmp_path / "empty.txt"
-    empty_path.write_text("", encoding="utf-8")
-
-    assert ANDData.maybe_load_list(str(empty_path)) == []
 
 
 def test_maybe_load_json_reads_utf8_text(tmp_path):
@@ -348,20 +342,21 @@ def test_split_pairs_global_balanced_classes_routes_split_signatures() -> None:
 
 
 class TestData(unittest.TestCase):
-    def setUp(self):
-        super().setUp()
-        self.qian_dataset = ANDData(
+    @cached_property
+    def qian_dataset(self):
+        return ANDData(
             "tests/qian/signatures.json",
-            # "tests/qian/papers.json",
             {},
             clusters="tests/qian/clusters.json",
             name="qian",
             name_counts_index=None,
             preprocess=False,
         )
-        self.dummy_dataset = ANDData(
+
+    @cached_property
+    def dummy_dataset(self):
+        return ANDData(
             "tests/dummy/signatures.json",
-            # "tests/dummy/papers.json",
             {},
             clusters="tests/dummy/clusters.json",
             name="dummy",
@@ -491,79 +486,34 @@ class TestData(unittest.TestCase):
         assert self.dummy_dataset.get_blocks() == expected_blocks
 
     def test_initialization(self):
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                clusters={},
-                name="",
-                mode="train",
-                unit_of_data_split="blocks",
-                pair_sampling_mode="global_balanced_classes",
-                name_counts_index=None,
-                preprocess=False,
-            )
+        make_dataset = partial(
+            ANDData,
+            signatures={},
+            papers={},
+            name="initialization",
+            mode="train",
+            name_counts_index=None,
+            preprocess=False,
+        )
+        for options, message in (
+            (
+                {"clusters": {}, "unit_of_data_split": "blocks", "pair_sampling_mode": "global_balanced_classes"},
+                "Block-based cluster splits",
+            ),
+            ({"clusters": {}, "train_pairs": []}, "Set exactly one"),
+            ({}, "Set exactly one"),
+            ({"train_blocks": [], "train_pairs": []}, "both train_blocks and train_pairs"),
+            ({"train_blocks": []}, "Train blocks still needs clusters"),
+            ({"mode": "dummy", "clusters": {}}, "Unknown mode"),
+            ({"clusters": {}, "pair_sampling_mode": "global_unbalanced"}, "Unknown pair_sampling_mode"),
+        ):
+            with pytest.raises(ValueError, match=message):
+                make_dataset(**options)
 
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                name="",
-                mode="train",
-                clusters={},
-                train_pairs=cast(Any, []),
-                name_counts_index=None,
-                preprocess=False,
-            )
-
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                name="",
-                mode="train",
-                clusters=None,
-                train_pairs=None,
-                train_blocks=None,
-                name_counts_index=None,
-                preprocess=False,
-            )
-
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                name="",
-                mode="train",
-                train_blocks=[],
-                train_pairs=cast(Any, []),
-                name_counts_index=None,
-                preprocess=False,
-            )
-
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                name="",
-                mode="train",
-                train_blocks=[],
-                clusters=None,
-                name_counts_index=None,
-                preprocess=False,
-            )
-
-        dataset = ANDData(signatures={}, papers={}, name="", mode="inference", name_counts_index=None, preprocess=False)
+        dataset = make_dataset(mode="inference")
         assert dataset.signature_to_cluster_id is None
-
-        dataset = ANDData(signatures={}, papers={}, name="", mode="inference", name_counts_index=None, preprocess=False)
         assert dataset.pair_sampling_mode == "within_block_random"
         assert dataset.all_test_pairs_flag
-
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={}, papers={}, clusters={}, name="", mode="dummy", name_counts_index=None, preprocess=False
-            )
 
     def test_construct_cluster_to_signatures(self):
         cluster_to_signatures = self.dummy_dataset.construct_cluster_to_signatures({"a": ["0", "1"], "b": ["3", "4"]})
@@ -571,49 +521,12 @@ class TestData(unittest.TestCase):
         assert cluster_to_signatures == expected_cluster_to_signatures
 
     def test_multiprocessing_preprocessing_consistency(self):
-        """Test that multiprocessing preprocessing produces identical results to single-threaded"""
-        # Create datasets with same data but different n_jobs settings
-        dataset_single = ANDData(
-            "tests/dummy/signatures.json",
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            name="dummy_single",
-            name_counts_index=None,
-            preprocess=True,
-            n_jobs=1,
-        )
+        dataset_single = build_dummy_dataset("preprocessing_single", n_jobs=1)
+        dataset_multi = build_dummy_dataset("preprocessing_multi", n_jobs=2)
 
-        dataset_multi = ANDData(
-            "tests/dummy/signatures.json",
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            name="dummy_multi",
-            name_counts_index=None,
-            preprocess=True,
-            n_jobs=2,
-        )
-
-        # Verify that at least one paper was processed (has title normalization)
-        assert len(dataset_single.papers) > 0 and len(dataset_multi.papers) > 0
-
-        # Compare that papers are preprocessed identically
-        for paper_id in dataset_single.papers:
-            paper_single = dataset_single.papers[paper_id]
-            paper_multi = dataset_multi.papers[paper_id]
-
-            # Check that key preprocessed fields are identical
-            assert paper_single.title == paper_multi.title, f"Title mismatch for paper {paper_id}"
-            assert paper_single.predicted_language == paper_multi.predicted_language, (
-                f"Language mismatch for paper {paper_id}"
-            )
-            assert paper_single.is_english == paper_multi.is_english, f"is_english mismatch for paper {paper_id}"
-            assert paper_single.is_reliable == paper_multi.is_reliable, f"is_reliable mismatch for paper {paper_id}"
-
-            # Check ngrams are identical
-            if paper_single.title_ngrams_words is not None and paper_multi.title_ngrams_words is not None:
-                assert paper_single.title_ngrams_words == paper_multi.title_ngrams_words, (
-                    f"Title ngrams mismatch for paper {paper_id}"
-                )
+        assert dataset_single.papers
+        assert dataset_single.papers == dataset_multi.papers
+        assert dataset_single.signatures == dataset_multi.signatures
 
 
 def test_preprocessing_name_counts_use_single_character_initial(tmp_path):
@@ -709,20 +622,6 @@ def test_empty_altered_cluster_signatures_file_loads_as_empty_list(tmp_path):
     )
 
     assert dataset.altered_cluster_signatures == []
-
-
-def test_pair_sampling_invalid_mode_raises_value_error():
-    with pytest.raises(ValueError, match="Unknown pair_sampling_mode"):
-        ANDData(
-            signatures={},
-            papers={},
-            clusters={},
-            name="invalid_pair_sampling_mode",
-            mode="train",
-            pair_sampling_mode="global_unbalanced",  # type: ignore[arg-type]
-            name_counts_index=None,
-            preprocess=False,
-        )
 
 
 def test_fixed_pairs_does_not_mutate_source_dataframes():

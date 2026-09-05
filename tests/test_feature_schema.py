@@ -75,6 +75,7 @@ def _assert_selected_contract(groups: list[str]) -> None:
 
 def test_default_metadata_preserves_fitted_model_contract():
     info = FeaturizationInfo()
+    assert tuple(info.features_to_use) == GOLDEN_GROUPS
     assert DEFAULT_FEATURE_GROUPS == GOLDEN_GROUPS
     assert NAME_DEPENDENT_FEATURE_GROUPS == GOLDEN_NAME_GROUPS
     assert DEFAULT_NAMELESS_FEATURE_GROUPS == tuple(group for group in GOLDEN_GROUPS if group not in GOLDEN_NAME_GROUPS)
@@ -84,12 +85,12 @@ def test_default_metadata_preserves_fitted_model_contract():
     _assert_selected_contract(list(GOLDEN_GROUPS))
 
 
-def test_every_group_subset_preserves_canonical_metadata():
-    for mask in range(1 << len(GOLDEN_GROUPS)):
-        groups = [group for bit, group in enumerate(GOLDEN_GROUPS) if mask & (1 << bit)]
+def test_selected_groups_preserve_canonical_metadata():
+    # Selection is independent per group; cover each membership plus ordering,
+    # duplication, empty selection, and the production nameless combination.
+    for groups in ([], *([group] for group in GOLDEN_GROUPS), list(DEFAULT_NAMELESS_FEATURE_GROUPS)):
         _assert_selected_contract(groups)
-        # Selection order and repetitions must not reorder or duplicate columns.
-        _assert_selected_contract(list(reversed(groups)) + groups)
+    _assert_selected_contract(list(reversed(GOLDEN_GROUPS)) + list(GOLDEN_GROUPS))
 
 
 def test_advanced_feature_calculation_order_matches_fitted_model_contract():

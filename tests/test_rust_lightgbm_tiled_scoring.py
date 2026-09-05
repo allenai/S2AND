@@ -1,12 +1,16 @@
 """Verify tiled scoring preserves scalar score bits across tile boundaries."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
-from tests.test_rust_lightgbm_booster_parity import (
-    ONE_SPLIT_INTERIOR_ZERO_MODEL,
-    RustLightGBMBooster,
-)
+from s2and.runtime import load_s2and_rust_extension
+
+RustLightGBMBooster = load_s2and_rust_extension().RustLightGBMBooster
+ONE_SPLIT_INTERIOR_ZERO_MODEL = (
+    Path(__file__).with_name("fixtures") / "rust_lightgbm" / "interior_zero.lgb"
+).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("row_count", [0, 1, 63, 64, 65, 127, 128, 129, 1001])

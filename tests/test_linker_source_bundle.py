@@ -281,8 +281,9 @@ def assembled(tmp_path: Path) -> tuple[dict[str, Path], dict]:
     return inputs, assemble_source_bundle(**inputs)
 
 
-def test_assemble_and_validate_minimal_source_bundle(
+def test_assembled_source_bundle_is_valid_bound_and_portable(
     assembled: tuple[dict[str, Path], dict],
+    tmp_path: Path,
 ) -> None:
     inputs, report = assembled
     source_root = inputs["output_source_bundle"]
@@ -315,52 +316,6 @@ def test_assemble_and_validate_minimal_source_bundle(
     with pytest.raises(FileExistsError, match="must not exist"):
         assemble_source_bundle(**inputs)
 
-
-def test_assembly_rejects_source_leakage_and_published_arrow_inputs(tmp_path: Path) -> None:
-    inputs = _inputs(tmp_path, leak=True)
-
-    with pytest.raises(ValueError, match="base_group_id values in multiple splits"):
-        assemble_source_bundle(**inputs)
-
-    published_inputs = _inputs(tmp_path / "published")
-    manifest_path = published_inputs["benchmark_arrow_root"] / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["kind"] = PUBLIC_DATA_KIND
-    manifest["release_version"] = "1.3"
-    _write_json(manifest_path, manifest)
-
-    with pytest.raises(ValueError, match="must be a generic Arrow collection"):
-        assemble_source_bundle(**published_inputs)
-    assert not published_inputs["output_source_bundle"].exists()
-    assert not published_inputs["output_data_root"].exists()
-
-
-def test_assembled_roots_are_movable_and_self_contained(
-    assembled: tuple[dict[str, Path], dict],
-    tmp_path: Path,
-) -> None:
-    inputs, _report = assembled
-    moved_source = tmp_path / "moved" / "source"
-    moved_data = tmp_path / "moved" / "data"
-    shutil.copytree(inputs["output_source_bundle"], moved_source)
-    shutil.copytree(inputs["output_data_root"], moved_data)
-
-    assert validate_release_root(moved_data)["replay_dataset_manifest_count"] == 1
-    moved_bundle = load_bundle(moved_source)
-    with ExitStack() as arrow_stack:
-        selected_rows, datasets = preflight_source_rows(
-            moved_bundle,
-            name_counts_index_root=moved_source / "name_counts_index",
-            arrow_stack=arrow_stack,
-        )
-        assert selected_rows == 4
-        assert set(datasets) == {"replay_demo"}
-
-
-def test_assembly_rebinds_manifests_to_the_single_published_name_count_index(tmp_path: Path) -> None:
-    inputs = _inputs(tmp_path)
-    assemble_source_bundle(**inputs)
-
     data_root = inputs["output_data_root"]
     replay_root = data_root / "linker_replay"
     replay_manifest_path = replay_root / "manifest.json"
@@ -379,6 +334,41 @@ def test_assembly_rebinds_manifests_to_the_single_published_name_count_index(tmp
     public_manifest = json.loads((data_root / "manifest.json").read_text(encoding="utf-8"))
     replay_entry = public_manifest["replay_bundles"]["linker_replay"]
     assert replay_entry["sha256"] == _sha256(replay_manifest_path)
+
+    moved_source = tmp_path / "moved" / "source"
+    moved_data = tmp_path / "moved" / "data"
+    shutil.copytree(inputs["output_source_bundle"], moved_source)
+    shutil.copytree(inputs["output_data_root"], moved_data)
+
+    assert validate_release_root(moved_data)["replay_dataset_manifest_count"] == 1
+    moved_bundle = load_bundle(moved_source)
+    with ExitStack() as arrow_stack:
+        selected_rows, datasets = preflight_source_rows(
+            moved_bundle,
+            name_counts_index_root=moved_source / "name_counts_index",
+            arrow_stack=arrow_stack,
+        )
+        assert selected_rows == 4
+        assert set(datasets) == {"replay_demo"}
+
+
+def test_assembly_rejects_source_leakage_and_published_arrow_inputs(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path, leak=True)
+
+    with pytest.raises(ValueError, match="base_group_id values in multiple splits"):
+        assemble_source_bundle(**inputs)
+
+    published_inputs = _inputs(tmp_path / "published")
+    manifest_path = published_inputs["benchmark_arrow_root"] / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["kind"] = PUBLIC_DATA_KIND
+    manifest["release_version"] = "1.3"
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(ValueError, match="must be a generic Arrow collection"):
+        assemble_source_bundle(**published_inputs)
+    assert not published_inputs["output_source_bundle"].exists()
+    assert not published_inputs["output_data_root"].exists()
 
 
 def test_assembly_rejects_name_count_identity_mismatch_before_copy(tmp_path: Path) -> None:

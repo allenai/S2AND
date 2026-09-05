@@ -150,7 +150,9 @@ def test_pair_splits_from_arrow_dataset_samples_within_block_random_pairs(
     assert splits.test_pairs == []
 
 
-def test_feature_tuple_from_rust_featurizer_uses_one_union_call_and_projects_feature_groups() -> None:
+def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_path, monkeypatch) -> None:
+    from s2and import feature_port
+
     calls: list[dict[str, Any]] = []
 
     class FakeRustFeaturizer:
@@ -180,14 +182,25 @@ def test_feature_tuple_from_rust_featurizer_uses_one_union_call_and_projects_fea
     )
     nameless_info = SimpleNamespace(features_to_use=["nameless"], feature_group_to_index={"nameless": [4, 2]})
 
-    features, labels, nameless = eval_prod_models._feature_tuple_from_rust_featurizer(
-        FakeRustFeaturizer(),
-        [("s3", "s1", 0.25), ("s1", "s2", 1)],
-        featurizer_info=main_info,
-        nameless_featurizer_info=nameless_info,
-        n_jobs=3,
-        nan_value=-7.5,
-    )
+    def build(dataset, **kwargs):
+        assert dataset is arrow_dataset
+        assert kwargs == {"name_tuples": None, "num_threads": 3}
+        return FakeRustFeaturizer()
+
+    monkeypatch.setattr(feature_port, "build_rust_featurizer_from_arrow_dataset", build)
+    pairs = [("s3", "s1", 0.25), ("s1", "s2", 1)]
+    splits = eval_prod_models.PairwiseTrainingSplits(pairs, [], [], {}, {}, {}, {})
+    with _open_minimal_arrow_dataset(tmp_path) as arrow_dataset:
+        train, val, test, _ = eval_prod_models.arrow_training_feature_splits(
+            arrow_dataset,
+            splits,
+            featurizer_info=main_info,
+            nameless_featurizer_info=nameless_info,
+            n_jobs=3,
+            nan_value=-7.5,
+        )
+    features, labels, nameless = train
+    assert val[0].shape == test[0].shape == (0, 3)
 
     assert calls == [
         {
@@ -201,40 +214,6 @@ def test_feature_tuple_from_rust_featurizer_uses_one_union_call_and_projects_fea
     assert labels.tolist() == [0.25, 1.0]
     assert nameless is not None
     assert nameless.tolist() == [[2.0, 4.0], [102.0, 104.0]]
-
-
-def test_arrow_training_feature_splits_uses_open_dataset(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from s2and import feature_port
-
-    captured: dict[str, Any] = {}
-
-    class FakeRustFeaturizer:
-        def signature_ids(self) -> list[str]:
-            return []
-
-    def fake_build(arrow_dataset, **kwargs):
-        captured["arrow_dataset"] = arrow_dataset
-        captured["kwargs"] = kwargs
-        return FakeRustFeaturizer()
-
-    monkeypatch.setattr(feature_port, "build_rust_featurizer_from_arrow_dataset", fake_build)
-    splits = eval_prod_models.PairwiseTrainingSplits([], [], [], {}, {}, {}, {})
-
-    with _open_minimal_arrow_dataset(tmp_path) as arrow_dataset:
-        eval_prod_models.arrow_training_feature_splits(
-            arrow_dataset,
-            splits,
-            featurizer_info=SimpleNamespace(features_to_use=[], feature_group_to_index={}),
-            nameless_featurizer_info=None,
-            n_jobs=1,
-            nan_value=float("nan"),
-        )
-
-        assert captured["arrow_dataset"] is arrow_dataset
-    assert captured["kwargs"] == {"name_tuples": None, "num_threads": 1}
 
 
 def test_split_blocks_like_anddata_matches_anddata_and_rejects_tiny_inputs() -> None:

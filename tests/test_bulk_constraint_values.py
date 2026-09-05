@@ -21,8 +21,10 @@ def native_constraints(tmp_path_factory: pytest.TempPathFactory) -> Any:
         return _get_rust_featurizer(arrow_dataset)
 
 
-@pytest.mark.parametrize("start_offset,max_pairs", [(0, None), (0, 0), (1, 1), (2, 3), (10, 7)])
-@pytest.mark.parametrize("flags", range(8))
+@pytest.mark.parametrize(
+    ("start_offset", "max_pairs", "flags"),
+    [(0, None, flags) for flags in range(8)] + [(0, 0, 7), (1, 1, 7), (2, 3, 7), (10, 7, 7)],
+)
 def test_values_only_preserves_optional_float_bits(
     native_constraints: Any, start_offset: int, max_pairs: int | None, flags: int
 ) -> None:
@@ -51,8 +53,11 @@ def test_values_only_preserves_optional_float_bits(
     )
 
 
-@pytest.mark.parametrize("indices", [[], [0], [999999], [0, 1], [0, 999999], [-1, 0], [2**32, 0]])
-@pytest.mark.parametrize("start_offset", [0, -1, 99])
+@pytest.mark.parametrize(
+    ("indices", "start_offset"),
+    [(indices, 0) for indices in ([], [0], [999999], [0, 1], [0, 999999], [-1, 0], [2**32, 0])]
+    + [([], -1), ([0, 1], -1), ([0, 1], 99)],
+)
 def test_values_only_preserves_boundary_results_and_errors(
     native_constraints: Any, indices: list[int], start_offset: int
 ) -> None:

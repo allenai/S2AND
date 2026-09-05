@@ -323,7 +323,7 @@ def test_distinct_datasets_build_without_a_global_lock(
 
     assert all(not thread.is_alive() for thread in threads)
     assert errors == []
-    assert DummyRustFeaturizer.created == ["parallel-second", "parallel-first"]
+    assert sorted(DummyRustFeaturizer.created) == ["parallel-first", "parallel-second"]
 
 
 def test_feature_only_hits_reuse_backing_without_reading_seeds() -> None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,7 +54,8 @@ def test_ensure_rust_on_path_rejects_rustc_only(monkeypatch: pytest.MonkeyPatch,
         run_ci.ensure_rust_on_path()
 
 
-def test_typecheck_and_test_job_builds_required_rust_runtime(monkeypatch) -> None:
+@pytest.mark.parametrize("smoke_fails", [False, True])
+def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, smoke_fails) -> None:
     calls: list[tuple[list[str], dict[str, str] | None]] = []
     lifecycle: list[str] = []
 
@@ -62,8 +65,21 @@ def test_typecheck_and_test_job_builds_required_rust_runtime(monkeypatch) -> Non
     monkeypatch.setattr(run_ci, "run_native_rust_checks", lambda: lifecycle.append("check-rust"))
     monkeypatch.setattr(run_ci, "run_maturin_develop_with_retries", lambda: lifecycle.append("build-rust"))
     monkeypatch.setattr(run_ci, "run_ty_checks", lambda: lifecycle.append("typecheck"))
-    monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append((args, env)))
+    failure = subprocess.CalledProcessError(7, "native smoke")
 
+    def run_uv(args, *, env=None):
+        calls.append((args, env))
+        if smoke_fails:
+            raise failure
+
+    monkeypatch.setattr(run_ci, "run_uv", run_uv)
+    if smoke_fails:
+        with pytest.raises(subprocess.CalledProcessError) as caught:
+            run_ci.run_typecheck_and_test_job(lock_present=True)
+        assert caught.value is failure
+        assert lifecycle == ["ensure-rust", "check-rust", "build-rust"]
+        assert len(calls) == 1
+        return
     run_ci.run_typecheck_and_test_job(lock_present=True)
 
     pytest_calls = [args for args, _env in calls if args[:3] == ["run", "--no-sync", "pytest"]]
@@ -71,7 +87,6 @@ def test_typecheck_and_test_job_builds_required_rust_runtime(monkeypatch) -> Non
     assert lifecycle == ["ensure-rust", "check-rust", "build-rust", "typecheck"]
     assert calls[0][0] == ["run", "--no-sync", "python", "scripts/verification/smoke_installed_rust_api.py"]
     assert calls[0][1] is not None
-    assert calls[0][1]["S2AND_TEST_REQUIRE_RUST"] == "1"
     assert "S2AND_BACKEND" not in calls[0][1]
     assert all("-ra" in args for args in pytest_calls)
     assert pytest_calls[0] == [
@@ -82,8 +97,46 @@ def test_typecheck_and_test_job_builds_required_rust_runtime(monkeypatch) -> Non
         "tests/",
         "--cov=s2and",
         "--cov-report=term-missing",
-        "--cov-fail-under=40",
     ]
     assert calls[1][1] is not None
     assert calls[1][1]["S2AND_BACKEND"] == "python"
-    assert calls[1][1]["S2AND_TEST_REQUIRE_RUST"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("platform", "failures", "expected_attempts", "expected_delays"),
+    [("nt", 1, 2, [2.0]), ("nt", 3, 3, [2.0, 4.0]), ("posix", 1, 1, [])],
+    ids=["retry-recovers", "retry-exhausted", "non-windows-no-retry"],
+)
+def test_maturin_retries_are_bounded_and_surface_final_failure(
+    monkeypatch, tmp_path: Path, capsys, platform, failures, expected_attempts, expected_delays
+) -> None:
+    artifact = tmp_path / "stale.pyd"
+    artifact.write_bytes(b"stale extension")
+    attempts = []
+    delays = []
+    failure = subprocess.CalledProcessError(23, "maturin develop")
+
+    def build(_args):
+        attempts.append(1)
+        if len(attempts) <= failures:
+            raise failure
+        assert not artifact.exists(), "Retry must clear the stale extension first"
+
+    monkeypatch.setattr(run_ci, "os", SimpleNamespace(name=platform))
+    monkeypatch.setattr(run_ci, "run_uv", build)
+    monkeypatch.setattr(run_ci, "_rust_extension_artifacts", lambda: [artifact] if artifact.exists() else [])
+    monkeypatch.setattr(run_ci.time, "sleep", delays.append)
+
+    if failures >= expected_attempts:
+        with pytest.raises(subprocess.CalledProcessError) as caught:
+            run_ci.run_maturin_develop_with_retries()
+        assert caught.value is failure
+    else:
+        run_ci.run_maturin_develop_with_retries()
+
+    assert len(attempts) == expected_attempts
+    assert delays == expected_delays
+    output = capsys.readouterr()
+    assert f"attempt {expected_attempts}/" in output.out
+    if expected_delays:
+        assert "exit code 23" in output.err

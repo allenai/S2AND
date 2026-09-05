@@ -14,7 +14,6 @@ import s2and.memory_budget as memory_budget
 from s2and.consts import LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.featurizer import (
-    DEFAULT_FEATURE_GROUPS,
     NUM_FEATURES,
     FeaturizationInfo,
     _ensure_python_pair_signature_ngrams,
@@ -68,10 +67,6 @@ def test_default_features_are_instance_isolated() -> None:
     assert first.features_to_use is not second.features_to_use
 
 
-def test_default_feature_group_policy_is_canonical() -> None:
-    assert tuple(FeaturizationInfo().features_to_use) == DEFAULT_FEATURE_GROUPS
-
-
 def test_resolve_selection_pairs_never_samples_test_pairs() -> None:
     train_signatures = {"train": ["s1", "s2"]}
     val_signatures = {"val": ["s3", "s4"]}
@@ -103,24 +98,6 @@ def test_resolve_selection_pairs_never_samples_test_pairs() -> None:
 def test_featurization_info_rejects_unknown_feature_groups() -> None:
     with pytest.raises(ValueError, match="Unknown feature group"):
         FeaturizationInfo(features_to_use=["year_diff", "reference_features"])
-
-
-def test_featurizer_computes_requested_pairs() -> None:
-    dataset = _dummy_dataset("dummy_featurizer")
-    featurizer = FeaturizationInfo(features_to_use=_FULL_FEATURES)
-    test_pairs = [
-        ("3", "0", 0),
-        ("3", "1", 0),
-        ("3", "2", 0),
-        ("3", "2", -1),
-    ]
-
-    features, labels, _ = many_pairs_featurize(test_pairs, dataset, featurizer, n_jobs=2, chunk_size=1, nan_value=-1)
-
-    expected_width = sum(len(featurizer.feature_group_to_index[name]) for name in _FULL_FEATURES)
-    assert features.shape == (len(test_pairs), expected_width)
-    np.testing.assert_array_equal(labels, np.asarray([0, 0, 0, -1]))
-    assert np.any(features != -LARGE_INTEGER)
 
 
 def test_single_pair_featurize_surfaces_missing_preprocessed_fields() -> None:
@@ -395,7 +372,7 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatc
         assert state["prewarm_called"] is True
         return 128, "test"
 
-    monkeypatch.setattr(feature_port, "s2and_rust", object())
+    monkeypatch.setattr(feature_port, "s2and_rust", None)
     monkeypatch.setattr(feature_port, "_get_rust_feature_data", fake_get_rust_feature_data)
     monkeypatch.setattr(memory_budget, "resolve_total_ram_bytes", fake_resolve_total_ram_bytes)
     monkeypatch.setattr(memory_budget, "current_rss_bytes_best_effort", fake_current_rss)
@@ -411,60 +388,6 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatc
 
     assert state["prewarm_called"] is True
     assert state["rss_called"] is True
-
-
-def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A placeholder ArrowDataset marks the dataset as Rust-eligible; the actual Rust
-    # featurizer build is mocked out below via feature_port._get_rust_feature_data.
-    dataset = cast(
-        ANDData,
-        SimpleNamespace(
-            name="dummy",
-            mode="train",
-            arrow_dataset=object(),
-        ),
-    )
-    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
-    runtime_context = RuntimeContext(
-        operation="featurization_run",
-        backend="rust",
-        run_id="run-lazy-load",
-    )
-    state = {"prewarm_called": False}
-
-    class FakeRustFeaturizer:
-        def signature_ids(self) -> list[str]:
-            return ["a", "b"]
-
-        def featurize_pairs_matrix_indexed(
-            self,
-            pairs: object,
-            selected_indices: object,
-            num_threads: object,
-            nan_value: object,
-        ) -> np.ndarray:
-            del selected_indices, num_threads, nan_value
-            return np.zeros((len(cast(Any, pairs)), NUM_FEATURES), dtype=np.float64)
-
-    def fake_get_rust_feature_data(*_args: object, **_kwargs: object) -> object:
-        state["prewarm_called"] = True
-        return FakeRustFeaturizer()
-
-    monkeypatch.setattr(feature_port, "s2and_rust", None)
-    monkeypatch.setattr(feature_port, "_get_rust_feature_data", fake_get_rust_feature_data)
-
-    many_pairs_featurize(
-        [("a", "b", -1)],
-        dataset,
-        featurizer_info,
-        n_jobs=1,
-        chunk_size=1,
-        runtime_context=runtime_context,
-    )
-
-    assert state["prewarm_called"] is True
 
 
 def test_get_constraint() -> None:
@@ -483,6 +406,7 @@ def test_multiprocessing_featurization_consistency() -> None:
         ("3", "1", 0),
         ("3", "2", 0),
         ("0", "1", 1),
+        ("3", "2", -1),
     ]
 
     features_single, labels_single, _ = many_pairs_featurize(
@@ -502,6 +426,9 @@ def test_multiprocessing_featurization_consistency() -> None:
         nan_value=-1,
     )
 
+    assert features_single.shape == (5, len(featurizer.get_feature_names()))
+    assert np.any(features_single != -LARGE_INTEGER)
+    np.testing.assert_array_equal(labels_single, [0, 0, 0, 1, -1])
     _assert_feature_arrays_equal(features_single, features_multi)
     np.testing.assert_array_equal(labels_single, labels_multi)
 

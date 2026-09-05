@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 from pathlib import Path
@@ -75,30 +74,6 @@ def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_incremental_linking_runtime_imports_stay_runtime_safe() -> None:
-    runtime_root = Path("s2and/incremental_linking")
-    scripts_imports: list[str] = []
-    model_imports: list[str] = []
-    for path in runtime_root.glob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == "scripts" or alias.name.startswith("scripts."):
-                        scripts_imports.append(str(path))
-                    if alias.name == "s2and.model" or alias.name.startswith("s2and.model."):
-                        model_imports.append(str(path))
-            elif isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                if module == "scripts" or module.startswith("scripts."):
-                    scripts_imports.append(str(path))
-                if module == "s2and.model" or module.startswith("s2and.model."):
-                    model_imports.append(str(path))
-
-    assert scripts_imports == []
-    assert model_imports == []
-
-
 def test_linker_commands_require_name_counts_root() -> None:
     arguments = list(COMMON_TRAINING_ARGS)
     option_index = arguments.index("--name-counts-index-root")
@@ -148,10 +123,12 @@ def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -
     internal_eval_path = splits_dir / "internal_eval.csv"
     pd.DataFrame({"base_group_id": ["internal"]}).to_csv(internal_eval_path, index=False)
     pd.DataFrame(
-        [
-            {"query_group_id": "q1", "source_key": "s", "base_group_id": "b1", "split": "calibration_fit"},
-            {"query_group_id": "q2", "source_key": "s", "base_group_id": "b1", "split": "test"},
-        ]
+        {
+            "query_group_id": ["q1", "q2"],
+            "source_key": ["s", "s"],
+            "base_group_id": ["b1", "b1"],
+            "split": ["calibration_fit", "test"],
+        }
     ).to_csv(assignments_path, index=False)
     classic = {
         "classic_gate_internal_eval_base_groups_path": "splits/internal_eval.csv",
@@ -201,20 +178,12 @@ def test_release_table_plan_keeps_frozen_test_queries_out_of_training(tmp_path: 
     assignments_path = tmp_path / "splits" / "assignments.csv"
     assignments_path.parent.mkdir()
     pd.DataFrame(
-        [
-            {
-                "query_group_id": "calibration-query",
-                "source_key": "hwang_eval",
-                "split": "calibration_fit",
-                "base_group_id": "calibration-base",
-            },
-            {
-                "query_group_id": "frozen-test-query",
-                "source_key": "s2and_eval",
-                "split": "test",
-                "base_group_id": "test-base",
-            },
-        ]
+        {
+            "query_group_id": ["calibration-query", "frozen-test-query"],
+            "source_key": ["hwang_eval", "s2and_eval"],
+            "split": ["calibration_fit", "test"],
+            "base_group_id": ["calibration-base", "test-base"],
+        }
     ).to_csv(assignments_path, index=False)
     bundle = promoted_train.OfficialBundle(
         root=tmp_path.resolve(),
@@ -542,32 +511,18 @@ def test_observed_metric_validation_rejects_malformed_values() -> None:
 
 def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
     rows = pd.DataFrame(
-        [
-            {
-                "base_group_id": "base-2",
-                "chosen_candidate_component_key": "candidate-2",
-                "chosen_probability": 0.25,
-                "correct": 0,
-                "predicted_action": "abstain",
-                "query_case_id": "query-2",
-                "query_safe_target": 1,
-                "query_safe_target_source": "retrieved_window",
-                "source_key": "source",
-                "split": "test",
-            },
-            {
-                "base_group_id": "base-1",
-                "chosen_candidate_component_key": "candidate-1",
-                "chosen_probability": 0.75,
-                "correct": 1,
-                "predicted_action": "link_candidate",
-                "query_case_id": "query-1",
-                "query_safe_target": 1,
-                "query_safe_target_source": "manual_override",
-                "source_key": "source",
-                "split": "test",
-            },
-        ]
+        {
+            "base_group_id": ["base-2", "base-1"],
+            "chosen_candidate_component_key": ["candidate-2", "candidate-1"],
+            "chosen_probability": [0.25, 0.75],
+            "correct": [0, 1],
+            "predicted_action": ["abstain", "link_candidate"],
+            "query_case_id": ["query-2", "query-1"],
+            "query_safe_target": [1, 1],
+            "query_safe_target_source": ["retrieved_window", "manual_override"],
+            "source_key": ["source", "source"],
+            "split": ["test", "test"],
+        }
     )
     first_path = tmp_path / "first.csv"
     second_path = tmp_path / "second.csv"

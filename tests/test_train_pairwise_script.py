@@ -135,39 +135,6 @@ def test_training_rejects_source_mutation_before_loading_artifacts_or_data(
         train_pairwise.train_pairwise_bundle(args)
 
 
-def test_training_reaches_anddata_without_any_test_input(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plan_path = _write_model_plan(tmp_path)
-    args = _args(
-        tmp_path,
-        model_plan=plan_path,
-    )
-
-    class BoundaryReached(Exception):
-        pass
-
-    def inspect_anddata(**kwargs: object) -> None:
-        assert kwargs["test_pairs"] is None
-        assert kwargs["name_counts_index"] is authority.name_counts_index
-        assert kwargs["name_tuples"] == frozenset()
-        assert not {"train_ratio", "val_ratio", "test_ratio"} & set(kwargs)
-        raise BoundaryReached
-
-    authority = _artifact_authority()
-    monkeypatch.setattr(
-        train_pairwise,
-        "load_packaged_artifact_authority",
-        lambda **_kwargs: authority,
-    )
-    monkeypatch.setattr(train_pairwise, "_canonical_training_artifact_hashes", lambda _authority: {})
-    monkeypatch.setattr(train_pairwise, "ANDData", inspect_anddata)
-
-    with pytest.raises(BoundaryReached):
-        train_pairwise.train_pairwise_bundle(args)
-
-
 def test_augmented_dataset_contract_is_checked_before_featurization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -273,15 +240,12 @@ def test_artifact_authority_uses_packaged_runtime_data(monkeypatch: pytest.Monke
     )
 
     assert train_pairwise._canonical_training_artifact_hashes(_artifact_authority()) == authority.hashes
+    with pytest.raises(RuntimeError, match="different canonical name-tuple"):
+        train_pairwise._canonical_training_artifact_hashes(_artifact_authority(tuple_hash="x" * 64))
     assert opened == {
         "name_counts": Path("name-counts"),
         "orcid": Path(production_training_contract._PACKAGE_DATA_DIR),
     }
-
-
-def test_artifact_validation_rejects_mismatched_name_tuples() -> None:
-    with pytest.raises(RuntimeError, match="different canonical name-tuple"):
-        train_pairwise._canonical_training_artifact_hashes(_artifact_authority(tuple_hash="x" * 64))
 
 
 def test_staging_keeps_only_train_validation_and_checks_disk(

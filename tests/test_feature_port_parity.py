@@ -19,15 +19,7 @@ from s2and.feature_port import (
 from s2and.featurizer import _single_pair_featurize
 from s2and.text import canonicalize_name_parts, detect_language
 from scripts.convert_to_arrow import join_canonical_benchmark_names
-from tests.helpers import build_arrow_training_dataset, equalish, import_s2and_rust, tiny_name_counts_index
-
-HAS_RUST, _rust_import_payload = import_s2and_rust()
-_RUST_IMPORT_ERROR = None if HAS_RUST else _rust_import_payload
-if not HAS_RUST:
-    raise pytest.skip.Exception(
-        f"s2and_rust extension not built/installed: {_RUST_IMPORT_ERROR}",
-        allow_module_level=True,
-    )
+from tests.helpers import build_arrow_training_dataset, equalish, tiny_name_counts_index
 
 
 def _paper_for_sig(dataset, sig_id):
@@ -680,24 +672,16 @@ def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases(tmp_path):
     assert indexed_values == [None]
 
 
-def test_get_constraints_matrix_indexed_rust_parity(source_dataset, arrow_dataset, constraint_pairs):
+@pytest.mark.parametrize(
+    "constraint_kwargs", [{}, {"dont_merge_cluster_seeds": False}, {"incremental_dont_use_cluster_seeds": True}]
+)
+def test_get_constraints_matrix_indexed_rust_parity(source_dataset, arrow_dataset, constraint_pairs, constraint_kwargs):
     rust_featurizer = _get_rust_featurizer(arrow_dataset)
-    signature_ids = list(rust_featurizer.signature_ids())
-    signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
-    indexed_pairs = [(signature_index[s1], signature_index[s2]) for s1, s2 in constraint_pairs]
-
-    expected = [source_dataset.get_constraint(s1, s2) for s1, s2 in constraint_pairs]
-    indexed_values = get_constraints_matrix_indexed_rust(indexed_pairs, featurizer=rust_featurizer)
-    assert len(indexed_values) == len(expected)
-    for pair, ref_val, indexed_val in zip(
-        constraint_pairs,
-        expected,
-        indexed_values,
-        strict=True,
-    ):
-        assert ref_val == indexed_val, (
-            f"Batch indexed constraint mismatch for pair {pair}: ref={ref_val}, indexed={indexed_val}"
-        )
+    signature_index = {sid: index for index, sid in enumerate(rust_featurizer.signature_ids())}
+    indexed_pairs = [(signature_index[left], signature_index[right]) for left, right in constraint_pairs]
+    expected = [source_dataset.get_constraint(left, right, **constraint_kwargs) for left, right in constraint_pairs]
+    actual = get_constraints_matrix_indexed_rust(indexed_pairs, featurizer=rust_featurizer, **constraint_kwargs)
+    assert actual == expected
 
 
 def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(arrow_dataset, constraint_pairs):
@@ -771,34 +755,3 @@ def test_linker_pair_distance_accumulators_match_python_large(arrow_dataset):
     np.testing.assert_allclose(mins, expected_mins)
     np.testing.assert_allclose(top, expected_top)
     assert hard_disallow == expected_hard_disallow
-
-
-@pytest.mark.parametrize(
-    ("constraint_kwargs"),
-    [
-        {"dont_merge_cluster_seeds": False},
-        {"incremental_dont_use_cluster_seeds": True},
-    ],
-)
-def test_get_constraints_matrix_indexed_rust_flag_parity(
-    source_dataset,
-    arrow_dataset,
-    constraint_pairs,
-    constraint_kwargs,
-):
-    rust_featurizer = _get_rust_featurizer(arrow_dataset)
-    expected = [source_dataset.get_constraint(s1, s2, **constraint_kwargs) for s1, s2 in constraint_pairs]
-
-    signature_ids = list(rust_featurizer.signature_ids())
-    signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
-    indexed_pairs = [(signature_index[s1], signature_index[s2]) for s1, s2 in constraint_pairs]
-    got_indexed = get_constraints_matrix_indexed_rust(
-        indexed_pairs,
-        featurizer=rust_featurizer,
-        **constraint_kwargs,
-    )
-
-    for pair, ref_val, indexed_val in zip(constraint_pairs, expected, got_indexed, strict=True):
-        assert ref_val == indexed_val, (
-            f"Flag parity mismatch (indexed) for pair {pair}: ref={ref_val}, got={indexed_val}"
-        )

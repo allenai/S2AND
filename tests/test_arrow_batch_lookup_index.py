@@ -16,7 +16,8 @@ from s2and.incremental_linking.feature_block import (
 
 
 def _write_tiny_index(tmp_path: Path) -> tuple[str, Path]:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path = write_arrow_ipc_table(
         pa.table({"signature_id": pa.array(["s1", "s2", "s3"], type=pa.string())}),
         tmp_path / "signatures.arrow",
@@ -27,9 +28,49 @@ def _write_tiny_index(tmp_path: Path) -> tuple[str, Path]:
     return path, index_path
 
 
-def test_native_source_digests_match_v1_fingerprint_and_sha256(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        read_arrow_batch_lookup_index_batch_indices,
+        feature_block_arrow_module.read_arrow_batch_lookup_index_batch_indices_for_request,
+    ],
+    ids=["strict", "request"],
+)
+def test_lookup_returns_every_batch_for_repeated_keys_and_omits_absent_keys(tmp_path: Path, lookup) -> None:
+    """A paper's authors can span several batches, all of which must be selected."""
+    import pyarrow as pa
+
+    keys = ["paper-a", "paper-a", "paper-b", "paper-c", "paper-a", "paper-c", "paper-d"]
+    path = write_arrow_ipc_table(
+        pa.table({"paper_id": pa.array(keys, type=pa.string())}),
+        tmp_path / "paper_authors.arrow",
+        max_record_batch_rows=2,
+    )
+    index_path = tmp_path / "paper_authors.index"
+    write_arrow_batch_lookup_index(path, index_path, key_column="paper_id", table_name="paper_authors")
+
+    for requested, expected in (
+        (["paper-a"], {0, 2}),
+        (["paper-c", "paper-c", "missing"], {1, 2}),
+        (["paper-a", "paper-d"], {0, 2, 3}),
+        (["missing"], set()),
+        ([], set()),
+    ):
+        assert lookup(path, index_path, key_column="paper_id", values=iter(requested)) == expected
+
+
+@pytest.mark.parametrize(
+    "byte_count",
+    [0, 3, 1024 * 1024 - 1, 1024 * 1024, 1024 * 1024 + 17],
+    ids=["empty", "known-abc", "before-buffer-boundary", "exact-buffer-boundary", "partial-final-buffer"],
+)
+def test_native_source_digests_match_v1_fingerprint_and_sha256(tmp_path: Path, byte_count: int) -> None:
+    """Verify real file hashing across native read-buffer boundaries and EOF."""
+    source_bytes = (
+        b"abc" if byte_count == 3 else bytes(range(256)) * (byte_count // 256) + bytes(range(byte_count % 256))
+    )
     source_path = tmp_path / "source.bin"
-    source_path.write_bytes(b"abc")
+    source_path.write_bytes(source_bytes)
     source_size = source_path.stat().st_size
     expected_fingerprint = feature_block_arrow_module._fnv64_bytes(  # noqa: SLF001
         feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN  # noqa: SLF001
@@ -40,7 +81,7 @@ def test_native_source_digests_match_v1_fingerprint_and_sha256(tmp_path: Path) -
     )
     expected_fingerprint = feature_block_arrow_module._fnv64_update(  # noqa: SLF001
         expected_fingerprint,
-        b"abc",
+        source_bytes,
     )
 
     observed_fingerprint = feature_block_arrow_module._source_file_fingerprint_once(  # noqa: SLF001
@@ -52,9 +93,11 @@ def test_native_source_digests_match_v1_fingerprint_and_sha256(tmp_path: Path) -
         source_size=source_size,
     )
 
-    assert observed_fingerprint == expected_fingerprint == 11851141429550314739
+    assert observed_fingerprint == expected_fingerprint
+    if source_bytes == b"abc":
+        assert expected_fingerprint == 11851141429550314739
     assert observed_combined_fingerprint == expected_fingerprint
-    assert observed_sha256 == hashlib.sha256(b"abc").hexdigest()
+    assert observed_sha256 == hashlib.sha256(source_bytes).hexdigest()
 
 
 def test_native_utf8_batch_hash_matches_python_fnv1a64() -> None:
@@ -70,7 +113,8 @@ def test_write_uses_bounded_sorted_runs_and_preserves_v1_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     keys = ["zeta", "alpha", "theta", "beta", "eta", "gamma", "delta"]
     path = write_arrow_ipc_table(
         pa.table({"signature_id": pa.array(keys, type=pa.string())}),
@@ -219,7 +263,7 @@ def test_write_reuse_fingerprints_source_once_and_validates_last_record(
 
 
 def test_raw_planner_index_rejects_same_size_unsampled_middle_rewrite_python(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     signature_ids = [f"key{index:013d}" for index in range(30_000)]
     path = write_arrow_ipc_table(
@@ -266,7 +310,7 @@ def test_raw_planner_index_rejects_source_changed_while_building(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     path = write_arrow_ipc_table(
         pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}),

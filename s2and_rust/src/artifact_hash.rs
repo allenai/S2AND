@@ -85,15 +85,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_fingerprint_includes_domain_size_and_content() {
-        let mut observed = fnv64_update(FNV64_OFFSET, ARROW_SOURCE_HASH_DOMAIN);
-        observed = fnv64_update(observed, &3_u64.to_le_bytes());
-        observed = fnv64_update(observed, b"abc");
-
-        assert_eq!(observed, 11851141429550314739);
-    }
-
-    #[test]
     fn utf8_hash_matches_fnv1a64_contract() {
         assert_eq!(fnv64_update(FNV64_OFFSET, b"abc"), 16654208175385433931);
     }

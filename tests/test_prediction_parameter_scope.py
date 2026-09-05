@@ -19,21 +19,14 @@ from s2and.model import (
 )
 from s2and.runtime import build_runtime_context
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
-
-
-class ConstantDistanceClassifier:
-    """Place every unconstrained pair between the two tested thresholds."""
-
-    def predict_proba(self, features: np.ndarray) -> np.ndarray:
-        """Return distances of 0.6 for each pair."""
-        return np.tile([0.6, 0.4], (len(features), 1))
+from tests.model_helpers import ConstantDistanceClassifier
 
 
 def clusterer(eps: float = 0.5) -> Clusterer:
     """Create a small deterministic clustering model."""
     return Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
-        classifier=ConstantDistanceClassifier(),
+        classifier=ConstantDistanceClassifier(0.6),
         cluster_model=FastCluster(eps=eps),
         n_jobs=1,
         use_default_constraints_as_supervision=False,

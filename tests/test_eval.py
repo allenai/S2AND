@@ -8,7 +8,6 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-import s2and.metrics as cluster_metrics
 import s2and.shap_utils as shap_utils
 from s2and.eval import (
     _shap_values_for_tree_model_preserving_booster_params,
@@ -20,15 +19,46 @@ from s2and.eval import (
     facet_eval,
     pairwise_eval,
     pairwise_precision_recall_fscore,
+    pairwise_probability_metrics,
 )
 
 
-def test_eval_reexports_shared_cluster_metrics() -> None:
-    """Existing evaluation imports resolve to the shared metric implementations."""
-    assert b3_precision_recall_fscore is cluster_metrics.b3_precision_recall_fscore
-    assert cluster_precision_recall_fscore is cluster_metrics.cluster_precision_recall_fscore
-    assert pairwise_precision_recall_fscore is cluster_metrics.pairwise_precision_recall_fscore
-    assert f1_score is cluster_metrics.f1_score
+@pytest.mark.parametrize("include_average_precision", [False, True])
+def test_pairwise_probability_metrics_match_hand_calculated_ensemble(include_average_precision: bool) -> None:
+    """Averaging once and predicting negative at exactly 0.5 produce known metrics."""
+    metrics, probabilities = pairwise_probability_metrics(
+        np.array([0, 1, 0, 1]),
+        np.array([0.0, 0.6, 0.6, 1.0]),
+        np.array([0.2, 0.4, 0.8, 0.6]),
+        include_average_precision=include_average_precision,
+    )
+
+    np.testing.assert_allclose(probabilities, [0.1, 0.5, 0.7, 0.8], rtol=0, atol=1e-15)
+    # One true/false positive and one true/false negative give every macro metric 1/2.
+    # Three of the four positive-negative pairs are ordered correctly (AUROC 3/4).
+    expected = {"rows": 4, "auroc": 0.75, "macro_f1": 0.5, "macro_precision": 0.5, "macro_recall": 0.5}
+    if include_average_precision:
+        # Positive labels rank first and third: AP = (1 + 2/3) / 2.
+        expected["average_precision"] = 5 / 6
+    assert metrics == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("labels", "main", "nameless", "message"),
+    [
+        ([], [], [], "requires nonempty labels with both classes"),
+        ([1, 1], [0.8, 0.9], [0.7, 0.8], "requires nonempty labels with both classes"),
+        ([0, 1], [0.1], [0.2, 0.8], "must have equal shape"),
+        ([0, 1], [0.1, 0.9], [0.2], "must have equal shape"),
+    ],
+    ids=["empty-evaluation", "single-class", "missing-main-score", "missing-nameless-score"],
+)
+def test_pairwise_probability_metrics_reject_unevaluable_populations(
+    labels: list[int], main: list[float], nameless: list[float], message: str
+) -> None:
+    """Incomplete prediction populations must not produce a release metric report."""
+    with pytest.raises(ValueError, match=message):
+        pairwise_probability_metrics(np.array(labels), np.array(main), np.array(nameless))
 
 
 @pytest.mark.parametrize("fail_save", [False, True])
@@ -221,116 +251,6 @@ class TestShapIntegration(unittest.TestCase):
         shap_utils._SHAP_MODULE = self._orig_shap_module
 
     # -------------------- pairwise_eval tests --------------------
-
-    def test_pairwise_eval_writes_shap_single(self):
-        class DummyClf:
-            def predict_proba(self, X):
-                p = np.zeros((X.shape[0], 2))
-                p[:, 1] = 0.5
-                return p
-
-        X = np.ones((5, 4))
-        y = np.array([0, 1, 0, 1, 0])
-
-        clf = DummyClf()
-        with tempfile.TemporaryDirectory() as td:
-            _ = pairwise_eval(
-                X=X,
-                y=y,
-                classifier=clf,
-                figs_path=td,
-                title="Test SHAP Single",
-                shap_feature_names=[f"f{i}" for i in range(X.shape[1])],
-                skip_shap=False,
-            )
-            base = "test_shap_single"
-            self.assertTrue(os.path.exists(os.path.join(td, base + "_roc.png")))
-            self.assertTrue(os.path.exists(os.path.join(td, base + "_pr.png")))
-            self.assertTrue(os.path.exists(os.path.join(td, base + "_shap.png")))
-
-    def test_pairwise_eval_writes_shap_nameless(self):
-        class DummyClf:
-            def predict_proba(self, X):
-                p = np.zeros((X.shape[0], 2))
-                p[:, 1] = 0.6
-                return p
-
-        X = np.ones((6, 3))
-        y = np.array([1, 0, 1, 0, 1, 0])
-        clf = DummyClf()
-        nameless = DummyClf()
-        nameless_X = np.ones((6, 2))
-
-        with tempfile.TemporaryDirectory() as td:
-            _ = pairwise_eval(
-                X=X,
-                y=y,
-                classifier=clf,
-                figs_path=td,
-                title="Test SHAP Nameless",
-                shap_feature_names=[f"f{i}" for i in range(X.shape[1])],
-                nameless_classifier=nameless,
-                nameless_X=nameless_X,
-                nameless_feature_names=[f"nf{i}" for i in range(nameless_X.shape[1])],
-                skip_shap=False,
-            )
-            base = "test_shap_nameless"
-            self.assertTrue(os.path.exists(os.path.join(td, base + "_roc.png")))
-            self.assertTrue(os.path.exists(os.path.join(td, base + "_pr.png")))
-            self.assertTrue(os.path.exists(os.path.join(td, base + "_shap_0.png")))
-            self.assertTrue(os.path.exists(os.path.join(td, base + "_shap_1.png")))
-
-    def test_pairwise_eval_skip_shap(self):
-        # ensure we don't create SHAP files when skip_shap=True
-        class DummyClf:
-            def predict_proba(self, X):
-                p = np.zeros((X.shape[0], 2))
-                p[:, 1] = 0.4
-                return p
-
-        X = np.ones((4, 3))
-        y = np.array([0, 1, 0, 1])
-        with tempfile.TemporaryDirectory() as td:
-            _ = pairwise_eval(
-                X=X,
-                y=y,
-                classifier=DummyClf(),
-                figs_path=td,
-                title="Skip SHAP",
-                shap_feature_names=["a", "b", "c"],
-                skip_shap=True,
-            )
-            base = "skip_shap"
-            self.assertTrue(os.path.exists(os.path.join(td, base + "_roc.png")))
-            self.assertTrue(os.path.exists(os.path.join(td, base + "_pr.png")))
-            self.assertFalse(os.path.exists(os.path.join(td, base + "_shap.png")))
-
-    def test_pairwise_eval_wrapper_unwraps_classifier(self):
-        class Inner:
-            def predict_proba(self, X):
-                p = np.zeros((X.shape[0], 2))
-                p[:, 1] = 0.7
-                return p
-
-        class Wrapper:
-            def __init__(self):
-                self.classifier = Inner()
-
-        X = np.ones((5, 2))
-        y = np.array([0, 1, 0, 1, 0])
-        with tempfile.TemporaryDirectory() as td:
-            _ = pairwise_eval(
-                X=X,
-                y=y,
-                classifier=Wrapper(),
-                figs_path=td,
-                title="Wrapped",
-                shap_feature_names=["f0", "f1"],
-                skip_shap=False,
-            )
-            self.assertTrue(os.path.exists(os.path.join(td, "wrapped_roc.png")))
-            self.assertTrue(os.path.exists(os.path.join(td, "wrapped_pr.png")))
-            self.assertTrue(os.path.exists(os.path.join(td, "wrapped_shap.png")))
 
     def test_pairwise_eval_validates_fitted_feature_names(self):
         import pandas as pd
@@ -652,3 +572,49 @@ def test_write_claims_eval_shap_plots_requires_nameless_features(monkeypatch):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("mode", ["single", "wrapped-nameless", "skip"])
+def test_pairwise_eval_writes_only_requested_plots(tmp_path, monkeypatch, mode):
+    """Exercise scorer unwrapping and SHAP routing with one plotting fixture."""
+    import matplotlib.pyplot as plt
+
+    shapes = []
+
+    def shap_values(matrix):
+        shapes.append(matrix.shape)
+        return np.zeros_like(matrix)
+
+    monkeypatch.setattr(
+        shap_utils,
+        "_SHAP_MODULE",
+        SimpleNamespace(
+            TreeExplainer=lambda model: SimpleNamespace(shap_values=shap_values),
+            summary_plot=lambda *args, **kwargs: None,
+        ),
+    )
+    scorer = SimpleNamespace(predict_proba=lambda matrix: np.tile([0.4, 0.6], (len(matrix), 1)))
+    wrapped = mode == "wrapped-nameless"
+    classifier = SimpleNamespace(classifier=scorer) if wrapped else scorer
+    try:
+        pairwise_eval(
+            np.ones((4, 3)),
+            np.array([0, 1, 0, 1]),
+            classifier,
+            str(tmp_path),
+            "Plots",
+            ["a", "b", "c"],
+            nameless_classifier=classifier if wrapped else None,
+            nameless_X=np.ones((4, 2)) if wrapped else None,
+            nameless_feature_names=["d", "e"] if wrapped else None,
+            skip_shap=mode == "skip",
+        )
+        expected = {"plots_roc.png", "plots_pr.png"}
+        if mode == "single":
+            expected.add("plots_shap.png")
+        elif wrapped:
+            expected.update({"plots_shap_0.png", "plots_shap_1.png"})
+        assert {path.name for path in tmp_path.glob("*.png")} == expected
+        assert shapes == ([] if mode == "skip" else [(4, 3), (4, 2)] if wrapped else [(4, 3)])
+    finally:
+        plt.close("all")

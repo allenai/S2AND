@@ -22,21 +22,6 @@ def _native_features(dataset: ArrowDataset) -> np.ndarray:
     return np.asarray(featurizer.featurize_pairs_matrix_indexed([(0, 1)], None, 1, np.nan))
 
 
-def test_native_reads_preserve_active_python_stream_position(tmp_path: Path) -> None:
-    """Native reads must not alter a live Python buffered stream's cursor."""
-    write_minimal_arrow_prediction_bundle(tmp_path)
-    expected = (tmp_path / "signatures.arrow").read_bytes()
-
-    with ArrowDataset.open(tmp_path) as dataset, dataset.use() as lease:
-        with lease.open_file("signatures") as source:
-            prefix = source.read(8)
-            position = source.tell()
-            _native_features(dataset)
-
-            assert source.tell() == position
-            assert prefix + source.read() == expected
-
-
 def test_native_and_python_readers_share_dataset_across_threads(tmp_path: Path) -> None:
     """Interleave a native request with another request's Python file lease."""
     write_minimal_arrow_prediction_bundle(tmp_path)
@@ -49,8 +34,10 @@ def test_native_and_python_readers_share_dataset_across_threads(tmp_path: Path) 
         def read_python() -> bytes:
             with dataset.use() as lease, lease.open_file("signatures") as source:
                 prefix = source.read(8)
+                position = source.tell()
                 barrier.wait(timeout=30)
                 barrier.wait(timeout=30)
+                assert source.tell() == position
                 return prefix + source.read()
 
         def read_native() -> np.ndarray:

@@ -8,6 +8,7 @@ import numpy as np
 
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.features import promoted_linker_feature_columns
+from s2and.incremental_linking.logistic_gate import logistic_gate_config
 from s2and.model import Clusterer, FastCluster, _selected_feature_indices
 from s2and.production_bundle import write_pairwise_production_bundle
 from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION, EpsCalibration
@@ -100,3 +101,14 @@ def build_tiny_promoted_booster() -> tuple[lgb.Booster, np.ndarray]:
         num_boost_round=6,
     )
     return booster, matrix[:3]
+
+
+def tiny_logistic_gate_config(link: bool = True) -> dict[str, object]:
+    """Build a deterministic gate with an explicit link preference."""
+    return logistic_gate_config(
+        feature_names=("chosen_probability",),
+        weights=np.asarray([[0.0, 0.0, 0.0]], dtype=np.float64),
+        bias=np.asarray([0.0, 0.0, 10.0 if link else -10.0], dtype=np.float64),
+        missing_values=np.asarray([0.0], dtype=np.float64),
+        calibration_mode="test",
+    )

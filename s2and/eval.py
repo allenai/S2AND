@@ -24,7 +24,7 @@ from sklearn.metrics import (
 )
 from tqdm import tqdm
 
-from s2and.data import _assemble_full_name
+from s2and.data import _assemble_full_name, _resolve_signature_splits
 from s2and.featurizer import many_pairs_featurize
 from s2and.metrics import (
     b3_precision_recall_fscore as b3_precision_recall_fscore,
@@ -85,7 +85,7 @@ def cluster_eval(
     Dict: Dictionary of clusterwise metrics.
     Dict: Same as above but broken down by signature.
     """
-    train_block_dict, val_block_dict, test_block_dict = dataset.split_blocks_helper(dataset.get_blocks())
+    train_block_dict, val_block_dict, test_block_dict = _resolve_signature_splits(dataset)
     if split == "test":
         block_dict = test_block_dict
     elif split == "val":
@@ -162,7 +162,7 @@ def incremental_cluster_eval(
         train_block_dict,
         val_block_dict,
         test_block_dict,
-    ) = dataset.split_cluster_signatures()
+    ) = _resolve_signature_splits(dataset)
     # evaluation must happen only on test-signatures in blocks, so remove train/val signatures
     observed_signatures = set()
     for _, signatures in train_block_dict.items():
@@ -174,8 +174,16 @@ def incremental_cluster_eval(
     eval_block_dict_full = {}
     eval_block_dict_for_metrics: dict[str, list[str]]
     if split == "test":
+        selected_signatures = {
+            signature
+            for blocks in (train_block_dict, val_block_dict, test_block_dict)
+            for signatures in blocks.values()
+            for signature in signatures
+        }
         for block_key, _ in test_block_dict.items():
-            eval_block_dict_full[block_key] = block_dict[block_key]
+            eval_block_dict_full[block_key] = [
+                signature for signature in block_dict[block_key] if signature in selected_signatures
+            ]
         cluster_to_signatures = dataset.construct_cluster_to_signatures(test_block_dict)
         eval_block_dict_for_metrics = test_block_dict
         for _, signatures in val_block_dict.items():
@@ -216,9 +224,10 @@ def incremental_cluster_eval(
     # to avoid sparsity in b3 computation, we use all the signatures' ground-truth
     full_cluster_to_signatures = dataset.construct_cluster_to_signatures(pred_clusters)
 
+    scored_signatures = {signature for signatures in eval_block_dict_for_metrics.values() for signature in signatures}
     eval_only_pred_clusters = {}
     for cluster_key, signatures in pred_clusters.items():
-        test_signatures = list(set(signatures).difference(observed_signatures))
+        test_signatures = [signature for signature in signatures if signature in scored_signatures]
         assert len(set(test_signatures).intersection(observed_signatures)) == 0
         if len(test_signatures) > 0:
             eval_only_pred_clusters[cluster_key] = test_signatures

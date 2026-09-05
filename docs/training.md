@@ -155,6 +155,15 @@ When supplying `val_dists_precomputed` or prediction `dists`, generate the
 distances at `float64` precision. Recompute any previously rounded `float16`
 cache; casting it to `float64` cannot recover the original scores.
 
+Pairwise training, `Clusterer.fit()`, and clustering evaluation resolve the
+same signature splits: explicit block lists take precedence over explicit
+signature lists, followed by the configured block, signature, or time split.
+Default split ordering and random seeds are preserved. Recompute validation
+distance matrices if the selected signatures or their order change, including
+when moving from the former random calibration population to an explicit
+validation split. The precomputed matrix mapping does not record signature
+identities and cannot detect an obsolete matrix merely from its dimensions.
+
 ## Evaluate clustering
 
 ```python
@@ -165,6 +174,15 @@ print(metrics)
 ```
 
 `metrics_per_signature` is useful when you want to slice performance by signature properties.
+
+`cluster_eval()` predicts and scores the selected split. In
+`incremental_cluster_eval()`, validation prediction also includes observed
+training signatures, and test prediction includes observed training and
+validation signatures in the tested blocks. Only signatures belonging to the
+requested evaluation split contribute per-signature scores. Records outside
+explicit split lists are excluded from prediction context. B3 retains its
+existing context-aware calculation; pairwise metrics use evaluation-only
+memberships.
 
 ## Publish and reload a trained model
 
@@ -179,6 +197,14 @@ fresh `calibrated` pairwise sibling. After EPS is frozen,
 `train_linker_and_finalize.py` fits the linker once, atomically writes
 the complete bundle, reloads those exact bytes, and evaluates them. See the
 [v1.3 release runbook](release.md).
+
+Linker training excludes complete holdout query and base identities before
+feature materialization, using identity columns from the source tables even
+when only calibration rows are materialized for fitting. An overlap excludes
+the whole training query. Candidate component context remains complete so
+retrieval statistics for retained queries stay unchanged. The same identity
+authority is checked again before fitting, and diagnostics retain the early
+exclusion counts. Frozen test labels and features are not needed for this check.
 
 Pairwise production training verifies the packaged canonical name tuples and
 records `name_tuples_data_sha256`, `name_counts_manifest_sha256`,

@@ -8,9 +8,73 @@ import pytest
 
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
-from s2and.model import Clusterer
+from s2and.model import Clusterer, FastCluster
 from s2and.runtime import build_runtime_context
 from tests.helpers import tiny_name_counts_index
+
+
+@pytest.mark.parametrize("backend", ["python", "rust"])
+@pytest.mark.parametrize("reverse_block", [False, True])
+@pytest.mark.parametrize("reverse_entries", [False, True])
+@pytest.mark.parametrize("soft_distance", [0.0, 0.2])
+def test_seed_restoration_matches_effective_directional_supervision(
+    tmp_path: Path, backend: str, reverse_block: bool, reverse_entries: bool, soft_distance: float
+) -> None:
+    """Restoration uses the same direct-before-reverse rule as scored distances."""
+    from s2and.feature_port import _get_rust_featurizer
+    from tests.helpers import build_arrow_training_dataset
+
+    dataset = ANDData(
+        "tests/dummy/signatures.json",
+        "tests/dummy/papers.json",
+        name="seed_directional_precedence",
+        mode="inference",
+        cluster_seeds={"0": {"1": "require"}},
+        name_counts_index=tiny_name_counts_index(),
+    )
+    clusterer = Clusterer(
+        FeaturizationInfo(features_to_use=["year_diff"]),
+        classifier=None,
+        cluster_model=FastCluster(eps=0.3),
+        n_jobs=1,
+    )
+    blocks = {"block": ["2", "1", "0"] if reverse_block else ["2", "0", "1"]}
+    reference = {("2", "0"): 0.0, ("2", "1"): 1.0, ("0", "1"): soft_distance}
+    contradictory = {**reference, ("1", "0"): 10000.0}
+    if reverse_entries:
+        contradictory = dict(reversed(list(contradictory.items())))
+    if reverse_block:
+        reference[("0", "1")] = 10000.0
+
+    if backend == "rust":
+        arrow_dataset = build_arrow_training_dataset(dataset, tmp_path)
+        featurizer = _get_rust_featurizer(arrow_dataset)
+        matrices = [
+            clusterer.make_distance_matrices_from_rust_featurizer(blocks, featurizer, partial_supervision=supervision)
+            for supervision in (reference, contradictory)
+        ]
+        outputs = [
+            clusterer.predict_from_rust_featurizer(
+                blocks,
+                featurizer,
+                partial_supervision=supervision,
+                cluster_seeds_require=dataset.cluster_seeds_require,
+            )[0]
+            for supervision in (reference, contradictory)
+        ]
+    else:
+        matrices = [
+            clusterer.make_distance_matrices(blocks, dataset, partial_supervision=supervision)
+            for supervision in (reference, contradictory)
+        ]
+        outputs = [
+            clusterer.predict(blocks, dataset, partial_supervision=supervision)[0]
+            for supervision in (reference, contradictory)
+        ]
+    np.testing.assert_array_equal(matrices[0]["block"], matrices[1]["block"])
+    expected = {frozenset({"0", "2"}), frozenset({"1"})} if reverse_block else {frozenset({"0", "1", "2"})}
+    for output in outputs:
+        assert {frozenset(group) for group in output.values()} == expected
 
 
 class DifferentPersonClassifier:
@@ -136,6 +200,57 @@ def test_soft_supervision_overrides_dataset_cannot_link():
 
     assert seed_disallow_adjacency({("a", "b")}, {("b", "a"): 0.0}) == {}
     assert seed_disallow_adjacency(set(), {("a", "b"): 0.9}) == {}
+
+
+def test_directional_precedence_is_scoped_to_evaluated_blocks() -> None:
+    """Do not impose a matrix orientation on cross-block or unscored pairs."""
+    from s2and.seed_merging import seed_disallow_adjacency
+
+    partial = {("a", "b"): 0.2, ("b", "a"): 10000.0}
+    hard = {"a": {"b"}, "b": {"a"}}
+    assert seed_disallow_adjacency({("a", "b")}, partial, blocks=[["a", "b"]]) == {}
+    assert seed_disallow_adjacency(set(), partial, blocks=[["b", "a"]]) == hard
+    assert seed_disallow_adjacency(set(), partial, blocks=[["a"], ["b"]]) == hard
+    assert seed_disallow_adjacency(set(), partial) == hard
+    assert seed_disallow_adjacency(set(), {("b", "a"): 10000.0}, blocks=[["a", "b"]]) == hard
+
+
+@pytest.mark.parametrize("reverse_block", [False, True])
+def test_subblocked_restoration_retains_prior_matrix_order(
+    monkeypatch: pytest.MonkeyPatch, reverse_block: bool
+) -> None:
+    """Cluster iteration order must not redefine prior supervision precedence."""
+    from s2and.prediction_state import PredictionState
+
+    dataset = ANDData(
+        "tests/dummy/signatures.json",
+        "tests/dummy/papers.json",
+        name="subblock_directional_precedence",
+        mode="inference",
+        cluster_seeds={"0": {"1": "require"}},
+        name_counts_index=tiny_name_counts_index(),
+    )
+    clusterer = Clusterer(FeaturizationInfo(features_to_use=["year_diff"]), classifier=None, n_jobs=1)
+    observed_seeds: list[dict[str, int | str]] = []
+
+    def incremental(
+        _signatures: list[str], _dataset: ANDData, *, prediction_state: PredictionState, **_kwargs: object
+    ) -> dict[str, object]:
+        observed_seeds.append(prediction_state.cluster_seeds_require)
+        return {"clusters": {"done": ["0", "1", "2", "3"]}}
+
+    monkeypatch.setattr(clusterer, "_predict_incremental_python", incremental)
+    clusterer._predict_subblocked_single_letter_incremental_groups(
+        {"initial": ["3"]},
+        # Deliberately put 1 before 0 in the cluster iteration order.
+        pred_clusters={"first": ["1"], "second": ["2", "0"]},
+        dataset=dataset,
+        partial_supervision={("0", "1"): 0.0, ("1", "0"): 10000.0},
+        runtime_context=build_runtime_context("subblock_directional_precedence", backend="python"),
+        prior_blocks=[["2", "1", "0"] if reverse_block else ["2", "0", "1"]],
+    )
+    assert len(observed_seeds) == 1
+    assert (observed_seeds[0]["0"] == observed_seeds[0]["1"]) is (not reverse_block)
 
 
 def test_initial_only_seed_partitions_receive_distinct_synthetic_ids():

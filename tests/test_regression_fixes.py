@@ -412,6 +412,8 @@ def test_sampling_balanced_homonym_synonym_respects_sample_size():
 def test_incremental_cluster_eval_val_uses_val_block_for_pairwise_metrics(monkeypatch):
     class DummyDataset:
         def __init__(self):
+            self.train_blocks = None
+            self.train_signatures = None
             self.signature_to_cluster_id = {"s_train": "c_train", "s_val": "c_val", "s_test": "c_test"}
 
         def get_blocks(self):

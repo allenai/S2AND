@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from lightgbm import LGBMClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -53,6 +54,34 @@ class OfficialBundle:
     assets: dict[str, Any]
     models: dict[str, Any]
     expected_metrics: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ClassicHoldoutIdentities:
+    """Complete query/base identity authority shared by training stages."""
+
+    query_group_ids: frozenset[str]
+    base_group_ids: frozenset[str]
+    sources: tuple[dict[str, Any], ...]
+
+
+def read_classic_holdout_identities(bundle: OfficialBundle) -> ClassicHoldoutIdentities:
+    """Read only identity columns from complete source holdout tables.
+
+    Featureless assets are authoritative for release bundles. Direct training
+    callers use their complete configured calibration/evaluation tables.
+    """
+    spec = dict(bundle.models["classic"])
+    source_files = bundle.assets.get("featureless_rows", {}).get("files")
+    if source_files is not None:
+        spec = {"extra_eval_paths": {}}
+        for key, path in source_files.items():
+            if key.startswith("extra_eval_paths."):
+                spec["extra_eval_paths"][key.split(".", 1)[1]] = path
+            else:
+                spec[key] = path
+    query_ids, base_ids, sources = _read_classic_holdout_identity_sets(bundle, spec)
+    return ClassicHoldoutIdentities(frozenset(query_ids), frozenset(base_ids), tuple(sources))
 
 
 @dataclass(frozen=True)
@@ -323,7 +352,7 @@ def _read_classic_holdout_identity_sets(
     source_summaries: list[dict[str, Any]] = []
     for source_name, path_like in _iter_classic_train_holdout_paths(spec):
         path = _resolve_path(bundle, path_like)
-        header = _read_csv(path, nrows=0).columns
+        header = pq.read_schema(path).names if path.suffix == ".parquet" else _read_csv(path, nrows=0).columns
         identity_columns = [column for column in ("query_group_id", "base_group_id") if column in header]
         if not identity_columns:
             source_summaries.append(
@@ -384,6 +413,11 @@ def _apply_classic_train_holdout_filter(
         else pd.Series(False, index=train_df.index)
     )
     remove_mask = query_overlap_mask | base_overlap_mask
+    # Candidate rows form one query decision; never change its candidate window
+    # by excluding only some rows when a base identity matches a holdout.
+    if "query_group_id" in train_df:
+        excluded_queries = set(train_df.loc[remove_mask, "query_group_id"].astype(str))
+        remove_mask = train_df["query_group_id"].astype(str).isin(excluded_queries)
     removed = train_df[remove_mask].copy()
     filtered = train_df[~remove_mask].copy()
 
@@ -418,7 +452,7 @@ def _apply_classic_train_holdout_filter(
         "holdout_base_groups": int(len(holdout_base_group_ids)),
         "holdout_sources": list(holdout_sources or []),
     }
-    return filtered, summary
+    return filtered.reset_index(drop=True), summary
 
 
 def _is_missing_scalar(value: Any) -> bool:
@@ -1941,8 +1975,22 @@ def fit_classic(
     bundle: OfficialBundle,
     *,
     n_jobs: int = DEFAULT_CLASSIC_N_JOBS,
+    holdout_identities: ClassicHoldoutIdentities | None = None,
+    pre_materialization_holdout_summary: Mapping[str, Any] | None = None,
 ) -> CalibratedClassicModel:
-    """Fit the booster and gate without opening the frozen test split."""
+    """Fit the booster and gate without reading frozen test labels/features.
+
+    Args:
+        bundle: Training and calibration feature tables.
+        n_jobs: Number of classifier workers.
+        holdout_identities: Complete source identity authority. Direct callers
+            may omit this when the bundle retains complete holdout tables.
+        pre_materialization_holdout_summary: Earlier exclusion counts to report.
+            When supplied, any remaining overlap is a materialization failure.
+
+    Returns:
+        Fitted booster, calibrated gate, and training diagnostics.
+    """
 
     spec = bundle.models["classic"]
     feature_columns = tuple(spec["feature_columns"])
@@ -1963,16 +2011,21 @@ def fit_classic(
     )
     train_rows_after_retrieval_window = int(len(train_df))
     train_df["label"] = pd.to_numeric(train_df["label"], errors="coerce").fillna(0).astype(np.int8)
-    holdout_query_group_ids, holdout_base_group_ids, holdout_sources = _read_classic_holdout_identity_sets(
-        bundle,
-        spec,
-    )
+    if pre_materialization_holdout_summary is not None and holdout_identities is None:
+        raise ValueError("Pre-materialization holdout summary requires complete holdout identities")
+    identities = read_classic_holdout_identities(bundle) if holdout_identities is None else holdout_identities
     train_df, train_holdout_filter_summary = _apply_classic_train_holdout_filter(
         train_df,
-        holdout_query_group_ids=holdout_query_group_ids,
-        holdout_base_group_ids=holdout_base_group_ids,
-        holdout_sources=holdout_sources,
+        holdout_query_group_ids=set(identities.query_group_ids),
+        holdout_base_group_ids=set(identities.base_group_ids),
+        holdout_sources=list(identities.sources),
     )
+    if pre_materialization_holdout_summary is not None:
+        if train_holdout_filter_summary["rows_removed"]:
+            raise ValueError("Materialized training rows overlap complete holdout identities")
+        train_holdout_filter_summary = dict(pre_materialization_holdout_summary)
+    if train_df.empty:
+        raise ValueError("No training rows remain after holdout exclusion")
     train_df, train_filter_summary = _apply_classic_train_row_cap(
         train_df,
         rule_name=spec.get("train_row_cap_rule"),
@@ -1991,6 +2044,10 @@ def fit_classic(
         n_jobs=n_jobs,
     )
     started = perf_counter()
+    if train_df["query_group_id"].astype(str).isin(identities.query_group_ids).any() or (
+        "base_group_id" in train_df and train_df["base_group_id"].astype(str).isin(identities.base_group_ids).any()
+    ):
+        raise ValueError("Training rows overlap complete holdout identities before fitting")
     model.fit(train_matrix, train_labels, sample_weight=sample_weight)
     train_seconds = float(perf_counter() - started)
 

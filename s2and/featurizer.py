@@ -17,7 +17,7 @@ from s2and.consts import (
     LARGE_INTEGER,
     NUMPY_NAN,
 )
-from s2and.data import ANDData
+from s2and.data import ANDData, _resolve_signature_splits
 from s2and.feature_schema import (
     DEFAULT_FEATURE_GROUPS as DEFAULT_FEATURE_GROUPS,
 )
@@ -1307,18 +1307,6 @@ def many_pairs_featurize(
     return features, labels, nameless_features
 
 
-def _training_signature_splits(
-    dataset: ANDData,
-) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
-    """Resolve signature splits from the dataset's configured split authority."""
-
-    if dataset.train_blocks is not None:
-        return dataset.split_cluster_signatures_fixed()
-    if dataset.train_signatures is not None:
-        return dataset.split_data_signatures_fixed()
-    return dataset.split_cluster_signatures()
-
-
 def resolve_selection_pairs(
     dataset: ANDData,
 ) -> tuple[list[tuple[str, str, int | float]], list[tuple[str, str, int | float]]]:
@@ -1340,7 +1328,7 @@ def resolve_selection_pairs(
     if dataset.train_pairs is not None:
         train_pairs, val_pairs = dataset.fixed_train_val_pairs()
     else:
-        train_signatures, val_signatures, _ = _training_signature_splits(dataset)
+        train_signatures, val_signatures, _ = _resolve_signature_splits(dataset)
         train_pairs, val_pairs, _ = dataset.split_pairs(train_signatures, val_signatures, {})
 
     train_identities = {tuple(sorted((str(left), str(right)))) for left, right, _ in train_pairs}
@@ -1376,7 +1364,7 @@ def resolve_training_pairs(
         raise ValueError(f"resolve_training_pairs requires mode='train', got {dataset.mode!r}")
     if dataset.train_pairs is not None:
         return dataset.fixed_pairs()
-    train_signatures, val_signatures, test_signatures = _training_signature_splits(dataset)
+    train_signatures, val_signatures, test_signatures = _resolve_signature_splits(dataset)
     return dataset.split_pairs(train_signatures, val_signatures, test_signatures)
 
 

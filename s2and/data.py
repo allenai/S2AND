@@ -2120,6 +2120,28 @@ class ANDData:
             return pairs
 
 
+def _resolve_signature_splits(
+    dataset: ANDData,
+) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
+    """Resolve split identities without adding prediction context.
+
+    Explicit block splits take precedence over explicit signature splits.
+    Otherwise use the dataset's configured random or chronological split,
+    preserving its ordering and random seed.
+
+    Args:
+        dataset: Dataset containing the split configuration.
+
+    Returns:
+        Train, validation, and test signatures grouped by block.
+    """
+    if dataset.train_blocks is not None:
+        return dataset.split_cluster_signatures_fixed()
+    if dataset.train_signatures is not None:
+        return dataset.split_data_signatures_fixed()
+    return dataset.split_cluster_signatures()
+
+
 def preprocess_paper_1(item: tuple[str, Paper], *, preprocess: bool = True) -> tuple[str, Paper]:
     """
     helper function to perform most of the preprocessing of a paper

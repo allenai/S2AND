@@ -11,8 +11,39 @@ from s2and.consts import LARGE_DISTANCE
 def seed_disallow_adjacency(
     disallow_pairs: Iterable[tuple[str, str]],
     partial_supervision: Mapping[tuple[str, str], int | float],
+    *,
+    blocks: Iterable[Sequence[str]] = (),
 ) -> dict[str, set[str]]:
-    """Index explicit hard negatives, honoring caller supervision overrides."""
+    """Index explicit hard negatives, honoring caller supervision overrides.
+
+    Args:
+        disallow_pairs: Dataset cannot-link pairs.
+        partial_supervision: Caller distances, which override dataset pairs.
+        blocks: Evaluated signature partitions in distance-matrix order. Within
+            each block, direct supervision wins over a reverse entry. Pairs
+            outside these blocks retain their explicit hard negatives.
+
+    Returns:
+        Symmetric adjacency of effective hard negatives.
+    """
+    directional_ids = {
+        signature_id
+        for (left, right), distance in partial_supervision.items()
+        if distance == LARGE_DISTANCE and (right, left) in partial_supervision
+        for signature_id in (left, right)
+    }
+    # Only contradictory directions need ordering metadata. Keep the ordinary
+    # sparse path independent of the number of signatures in the request.
+    positions = (
+        {
+            signature_id: (block_index, position)
+            for block_index, signatures in enumerate(blocks)
+            for position, signature_id in enumerate(signatures)
+            if signature_id in directional_ids
+        }
+        if directional_ids
+        else {}
+    )
     adjacency: dict[str, set[str]] = defaultdict(set)
     for left, right in disallow_pairs:
         if (left, right) in partial_supervision or (right, left) in partial_supervision:
@@ -21,6 +52,16 @@ def seed_disallow_adjacency(
         adjacency[right].add(left)
     for (left, right), distance in partial_supervision.items():
         if distance == LARGE_DISTANCE:
+            left_position = positions.get(left)
+            right_position = positions.get(right)
+            if (
+                (right, left) in partial_supervision
+                and left_position is not None
+                and right_position is not None
+                and left_position[0] == right_position[0]
+                and left_position[1] > right_position[1]
+            ):
+                continue
             adjacency[left].add(right)
             adjacency[right].add(left)
     return dict(adjacency)

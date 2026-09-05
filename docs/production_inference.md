@@ -44,6 +44,14 @@ data. The public prediction entry points retain their existing contracts.
 This ownership boundary is not a general thread-safety guarantee for every
 classifier or cache supplied by an application.
 
+Per-call `cluster_model_params` apply throughout the prediction request,
+including initial-only attachment, altered-profile splitting, and residual
+clustering on the Python and Arrow routes. Each block still fits a fresh
+clustering estimator. Explicit `preserve_input` choices survive nested calls,
+and the shared model's stored parameters are unchanged. Altered-profile caches
+remain reusable and distinguish effective clustering parameters. Graph
+subblocking continues to use its separate graph configuration.
+
 Seed-link application is a pure decision phase shared by classic Python and
 promoted Arrow incremental completion. It accepts ordered seed memberships,
 link decisions, altered-profile mappings, and first-name metadata; it returns
@@ -63,6 +71,20 @@ Python subblocked prediction carries original required seed memberships into
 the initial-only attachment pass, including members not yet predicted. Explicit
 hard cannot-link supervision also constrains post-clustering seed merges;
 indirect merges cannot reconnect a forbidden pair.
+Within an evaluated block, seed restoration uses the same direct-before-reverse
+supervision precedence as distance construction. An overridden reverse
+cannot-link is not reintroduced when restoring required seed memberships.
+
+Classic incremental prediction checks proposed attachments for conflicts
+before restoring their destination profiles. Explicit required attachments
+take priority, followed by effective distance and signature ID. Conflicting
+ordinary attachments return to residual clustering without trying another seed.
+Conflicting mandatory attachments raise an explicit error.
+Default name constraints apply between new attachments; altered profiles keep
+their existing compatibility policy for historical names. Explicit negatives
+are checked against restored profile identities. The default-constraints and
+ORCID flags, along with caller supervision precedence, still govern these
+checks. Promoted Arrow linking retains its separate conflict-resolution policy.
 
 Promoted incremental prediction checks disallows against restored profile
 identities. A query forbidden from one member of an altered profile cannot

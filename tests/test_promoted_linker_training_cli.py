@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import pytest
@@ -33,10 +33,18 @@ EXPLICIT_ARTIFACT_HASHES = {
     "name_tuples_data_sha256": "b" * 64,
     "orcid_prefix_counts_data_sha256": "c" * 64,
 }
-FULL_MATERIALIZATION_SUMMARIES = tuple({"table_key": key, "rows": 1} for key in promoted_train.REQUIRED_TABLE_KEYS)
+FULL_MATERIALIZATION_SUMMARIES = tuple(
+    {"table_key": key, "rows": 1, "label_filtering": {"train_holdout": {"rows_removed": 0}}}
+    for key in promoted_train.REQUIRED_TABLE_KEYS
+)
 
 
 def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        promoted_train,
+        "read_classic_holdout_identities",
+        lambda _bundle: classic_training.ClassicHoldoutIdentities(frozenset(), frozenset(), ()),
+    )
     monkeypatch.setattr(
         promoted_train,
         "load_packaged_artifact_authority",
@@ -629,8 +637,14 @@ def test_release_serializes_complete_bundle_before_evaluation(
     monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
     _stub_preflight(monkeypatch)
 
+    training_authorities: list[Any] = []
+
     def materialize(**_kwargs: Any) -> tuple[Any, list[dict[str, Any]]]:
         stage = "materialize_training" if "materialize_training" not in order else "materialize_evaluation"
+        if stage == "materialize_training":
+            training_authorities.append(_kwargs["holdout_identities"])
+        else:
+            assert "holdout_identities" not in _kwargs
         order.append(stage)
         return bundle, list(FULL_MATERIALIZATION_SUMMARIES)
 
@@ -642,7 +656,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
     output_dir = tmp_path / "out"
     query_predictions_bytes = b"query_case_id\nquery-1\n"
     calibrated = classic_training.CalibratedClassicModel(
-        model=object(),
+        model=cast(Any, object()),
         gate_config={"model_type": "test"},
         retrieval_top_k=25,
         training_summary=summary["training_summary"],
@@ -650,6 +664,8 @@ def test_release_serializes_complete_bundle_before_evaluation(
     )
 
     def fit_classic(_bundle: Any, **_kwargs: Any) -> Any:
+        assert _kwargs["holdout_identities"] is training_authorities[0]
+        assert _kwargs["pre_materialization_holdout_summary"] == {"rows_removed": 0}
         order.append("fit")
         return calibrated
 

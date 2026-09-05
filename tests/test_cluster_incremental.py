@@ -2625,6 +2625,8 @@ def test_top1_consensus_broadcast_only_applies_when_cluster_members_agree():
         signature_dists: dict[str, dict[int, tuple[float, int, float]]],
     ) -> dict[str, list[str]]:
         clusterer = _build_minimal_incremental_clusterer()
+        # This fixture supplies scores, not signature metadata or hard rules.
+        clusterer.use_default_constraints_as_supervision = False
         clusterer.incremental_precluster_broadcast_mode = mode
 
         def fake_predict_helper(
@@ -2695,6 +2697,8 @@ def test_precluster_broadcast_preserves_min_score_semantics():
         mean_min_hybrid_weight: float = 0.5,
     ) -> dict[str, list[str]]:
         clusterer = _build_minimal_incremental_clusterer()
+        # This fixture supplies scores, not signature metadata or hard rules.
+        clusterer.use_default_constraints_as_supervision = False
         clusterer.incremental_precluster_broadcast_mode = "always"
         clusterer.incremental_seed_score_mode = seed_score_mode
         clusterer.incremental_mean_min_hybrid_weight = mean_min_hybrid_weight

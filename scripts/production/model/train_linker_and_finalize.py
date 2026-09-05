@@ -52,7 +52,9 @@ from s2and.incremental_linking_training.classic import (  # noqa: E402
     PROMOTED_PAIRWISE_COLUMNS,
     SUPPORTED_PROMOTED_FEATURE_COLUMNS,
     WEIGHTED_ERROR_WEIGHTS,
+    ClassicHoldoutIdentities,
     OfficialBundle,
+    _apply_classic_train_holdout_filter,
     _classic_stratified_eval_source_specs,
     _drop_unlabeled_singleton_orcid_rows,
     _filter_candidate_rows_to_retrieval_top_k,
@@ -62,6 +64,7 @@ from s2and.incremental_linking_training.classic import (  # noqa: E402
     evaluate_classic,
     fit_classic,
     load_bundle,
+    read_classic_holdout_identities,
 )
 from s2and.incremental_linking_training.data_loading import load_clusterer  # noqa: E402
 from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
@@ -1285,6 +1288,7 @@ def _materialize_arrow_rust_feature_bundle(
     total_ram_bytes: int,
     table_keys: Sequence[str],
     query_ids_by_table: Mapping[str, set[str]] | None = None,
+    holdout_identities: ClassicHoldoutIdentities | None = None,
     max_exemplars: int,
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
@@ -1349,6 +1353,17 @@ def _materialize_arrow_rust_feature_bundle(
             labels,
             context=f"arrow-rust:{table_key}",
         )
+        if table_key == "train_path" and holdout_identities is not None:
+            labels, holdout_summary = _apply_classic_train_holdout_filter(
+                labels,
+                holdout_query_group_ids=set(holdout_identities.query_group_ids),
+                holdout_base_group_ids=set(holdout_identities.base_group_ids),
+                holdout_sources=list(holdout_identities.sources),
+            )
+            holdout_summary["stage"] = "before_feature_materialization"
+            label_filtering_summary["train_holdout"] = holdout_summary
+            if labels.empty:
+                raise ValueError("No training rows remain after holdout exclusion before materialization")
         if labels.empty:
             label_filtering_summary["retrieval_window"] = {
                 "retrieval_top_k": retrieval_top_k,
@@ -1380,6 +1395,8 @@ def _materialize_arrow_rust_feature_bundle(
             component_membership_cache=component_membership_cache,
             arrow_datasets=arrow_datasets,
         )
+        if table_key == "train_path" and holdout_identities is not None and labels.empty:
+            raise ValueError("No training rows remain after holdout exclusion and structural cleaning")
         if labels.empty:
             label_filtering_summary["retrieval_window"] = {
                 "retrieval_top_k": retrieval_top_k,
@@ -1723,6 +1740,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         pairwise_model_path=Path(args.pairwise_model_path),
     )
     validate_source_bundle_support_files(source_bundle)
+    holdout_identities = read_classic_holdout_identities(source_bundle)
     name_counts_index_root = Path(args.name_counts_index_root)
     with ExitStack() as arrow_stack:
         _, arrow_datasets = preflight_source_rows(
@@ -1762,6 +1780,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             total_ram_bytes=int(args.total_ram_bytes),
             table_keys=training_table_keys,
             query_ids_by_table=calibration_query_ids or None,
+            holdout_identities=holdout_identities,
             max_exemplars=PRODUCTION_MAX_EXEMPLARS,
             pairwise_model_nan_value=pairwise_model_nan_value,
             pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
@@ -1771,7 +1790,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         started = time.perf_counter()
         active_params = dict(feature_bundle.models["classic"]["best_params"])
 
-        calibrated = fit_classic(feature_bundle, n_jobs=int(args.n_jobs))
+        train_materialization_summary = next(
+            summary for summary in _featureization_summaries if summary["table_key"] == "train_path"
+        )
+        calibrated = fit_classic(
+            feature_bundle,
+            n_jobs=int(args.n_jobs),
+            holdout_identities=holdout_identities,
+            pre_materialization_holdout_summary=train_materialization_summary["label_filtering"]["train_holdout"],
+        )
         artifact_metadata = save_incremental_linking_artifact(
             calibrated.model,
             artifact_dir,

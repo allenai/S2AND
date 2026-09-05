@@ -26,7 +26,7 @@ from s2and.consts import (
     LARGE_DISTANCE,
     LARGE_INTEGER,
 )
-from s2and.data import ANDData
+from s2and.data import ANDData, _resolve_signature_splits
 from s2and.feature_port import (
     _get_rust_feature_data,
     _get_rust_featurizer,
@@ -167,6 +167,31 @@ class _AlteredPresplitJob:
     cache_key: tuple[Any, ...] | None
 
 
+def _clusterer_with_prediction_params(clusterer: Any, params: dict[str, Any] | None) -> Any:
+    """Bind explicit clustering overrides to a shallow, request-owned receiver.
+
+    Pairwise models and native resources remain shared. Nested prediction calls
+    reuse this receiver, while each block still clones its clustering estimator.
+    """
+    if not params or params is getattr(clusterer, "_s2and_prediction_params_source", None):
+        return clusterer
+    if params is getattr(clusterer, "_s2and_prediction_params", None):
+        return clusterer
+    request = copy.copy(clusterer)
+    request.cluster_model = clone(clusterer.cluster_model)
+    effective_params = {key: intify(value) for key, value in params.items()}
+    request.cluster_model.set_params(**effective_params)
+    request._s2and_prediction_params_source = params
+    request._s2and_prediction_params = effective_params
+    request._s2and_prediction_cache_owner = getattr(clusterer, "_s2and_prediction_cache_owner", clusterer)
+    return request
+
+
+def _prediction_cluster_model_params(clusterer: Any, params: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Retain explicit overrides in nested calls, including input ownership."""
+    return params if params is not None else getattr(clusterer, "_s2and_prediction_params", None)
+
+
 def _model_presplit_cache_fingerprint(clusterer: Any) -> tuple[Any, ...]:
     cluster_model = getattr(clusterer, "cluster_model", None)
     get_params = getattr(cluster_model, "get_params", None)
@@ -223,6 +248,7 @@ def _estimator_cache_fingerprint(estimator: Any) -> Any:
 def _altered_presplit_cache_state(
     clusterer: Any,
 ) -> tuple[OrderedDict[tuple[Any, ...], tuple[tuple[str, ...], ...]], Any]:
+    clusterer = getattr(clusterer, "_s2and_prediction_cache_owner", clusterer)
     with _ALTERED_PRESPLIT_CACHE_INIT_LOCK:
         cache = getattr(clusterer, "_s2and_altered_presplit_cache", None)
         if not isinstance(cache, OrderedDict):
@@ -2764,6 +2790,8 @@ class Clusterer:
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """Predict full blocks from an already-built Rust featurizer."""
 
+        if any(len(signatures) > 1 for signatures in block_dict.values()):
+            self = _clusterer_with_prediction_params(self, cluster_model_params)
         if prediction_state is None:
             prediction_state = PredictionState()
 
@@ -2834,6 +2862,9 @@ class Clusterer:
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """Predict with request metadata already exported from a Rust featurizer."""
 
+        if any(len(signatures) > 1 for signatures in block_dict.values()):
+            self = _clusterer_with_prediction_params(self, cluster_model_params)
+        cluster_model_params = _prediction_cluster_model_params(self, cluster_model_params)
         if prediction_state is None:
             prediction_state = PredictionState()
 
@@ -2846,7 +2877,9 @@ class Clusterer:
             )
         if built_dists:
             pred_clusters: defaultdict[str, list[str]] = defaultdict(list)
-            disallow_adjacency = seed_disallow_adjacency(proxy_dataset.cluster_seeds_disallow, partial_supervision)
+            disallow_adjacency = seed_disallow_adjacency(
+                proxy_dataset.cluster_seeds_disallow, partial_supervision, blocks=block_dict.values()
+            )
             effective_cluster_model_params = cluster_model_params
             if isinstance(self.cluster_model, FastCluster):
                 fastcluster_params: dict[str, Any] = dict(cluster_model_params or {})
@@ -3487,6 +3520,8 @@ class Clusterer:
             Predicted clusters and optional precomputed distance matrices.
         """
 
+        if any(len(signatures) > 1 for signatures in block_dict.values()) or altered_cluster_signatures:
+            self = _clusterer_with_prediction_params(self, cluster_model_params)
         if prediction_state is None:
             prediction_state = PredictionState()
 
@@ -3695,7 +3730,7 @@ class Clusterer:
         weights: list[float] = []
         for dataset in datasets:
             # blocks
-            train_block_dict, val_block_dict, _ = dataset.split_cluster_signatures()
+            train_block_dict, val_block_dict, _ = _resolve_signature_splits(dataset)
             # incremental setting uses all the signatures in train and val
             # block-wise split uses only validation set for building the clustering model
             if dataset.unit_of_data_split == "time" or dataset.unit_of_data_split == "signatures":
@@ -3933,6 +3968,7 @@ class Clusterer:
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None = None,
         incremental_dont_use_cluster_seeds: bool = False,
+        prior_blocks: Iterable[Sequence[str]] = (),
     ) -> dict[str, list[str]]:
         if len(block_dict_single_letter) == 0:
             return pred_clusters
@@ -3954,7 +3990,9 @@ class Clusterer:
             if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds
             else {}
         )
-        disallow_adjacency = seed_disallow_adjacency(dataset.cluster_seeds_disallow, partial_supervision)
+        disallow_adjacency = seed_disallow_adjacency(
+            dataset.cluster_seeds_disallow, partial_supervision, blocks=prior_blocks
+        )
         for block_key in sorted(block_dict_single_letter):
             synthetic_seeds = restore_seed_membership(pred_clusters_intermediate, original_seeds, disallow_adjacency)
             # Synthetic seeds belong to this pass, not to claimed dataset profiles.
@@ -4051,6 +4089,7 @@ class Clusterer:
             runtime_context=runtime_context,
             total_ram_bytes=total_ram_bytes,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            prior_blocks=block_dict_multiple_letter_first_names.values(),
         )
         return dict(pred_clusters), None
 
@@ -4079,7 +4118,7 @@ class Clusterer:
         dists: Dict
             (optional) precomputed distance matrices
         cluster_model_params: Dict
-            params to set on the cluster model
+            Request-local clustering parameters, including incremental subblock phases.
         partial_supervision: Dict
             the dictionary of partial supervision provided with this dataset/these blocks
         use_s2_clusters: bool
@@ -4104,6 +4143,11 @@ class Clusterer:
         distances are built and clustered in the fused one-block-at-a-time path.
         """
 
+        if not use_s2_clusters and (
+            any(len(signatures) > 1 for signatures in block_dict.values())
+            or (batching_threshold is not None and sum(map(len, block_dict.values())) > 1)
+        ):
+            self = _clusterer_with_prediction_params(self, cluster_model_params)
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict", backend="python")
         elif stage_uses_rust(runtime_context):
@@ -4275,6 +4319,9 @@ class Clusterer:
         Optional[Dict]: the predicted distance matrices. This is None when
         distances are built and clustered in the fused one-block-at-a-time path.
         """
+        if not use_s2_clusters and any(len(signatures) > 1 for signatures in block_dict.values()):
+            self = _clusterer_with_prediction_params(self, cluster_model_params)
+        cluster_model_params = _prediction_cluster_model_params(self, cluster_model_params)
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict", backend="python")
 
@@ -4305,7 +4352,9 @@ class Clusterer:
         cluster_seeds_disallow = (
             dataset.cluster_seeds_disallow if prediction_state is None else prediction_state.cluster_seeds_disallow
         )
-        disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
+        disallow_adjacency = seed_disallow_adjacency(
+            cluster_seeds_disallow, partial_supervision, blocks=block_dict.values()
+        )
 
         effective_cluster_model_params = cluster_model_params
         fastcluster_fused_dtype = np.float16
@@ -4898,6 +4947,151 @@ class Clusterer:
 
         return cluster_residuals
 
+    def _filter_classic_incremental_links(
+        self,
+        dataset: ANDData,
+        proposed_links: Mapping[str, int | str],
+        scores: Mapping[str, float],
+        *,
+        cluster_seeds_require: Mapping[str, int | str],
+        recluster_map: Mapping[int | str, int | str],
+        partial_supervision: dict[tuple[str, str], int | float],
+        runtime_context: RuntimeContext,
+        prediction_state: PredictionState | None,
+    ) -> dict[str, int | str]:
+        """Reject conflicting classic attachments without selecting another seed.
+
+        Explicit negatives apply to restored profiles, including historical
+        members. Default constraints are checked only between new attachments;
+        historical names retain the altered-profile split policy in completion.
+        Checks use the original request state, never synthetic must-link labels
+        for the proposed attachments. Required accepted links win before ordinary
+        links, followed by effective distance and signature ID.
+        """
+        if not proposed_links:
+            return {}
+
+        def restored(component_id: int | str) -> str:
+            return str(recluster_map.get(component_id, component_id))
+
+        def supervision_distance(query: str, partner: str) -> int | float | None:
+            return partial_supervision.get((query, partner), partial_supervision.get((partner, query)))
+
+        dataset_disallows = (
+            (dataset.cluster_seeds_disallow if prediction_state is None else prediction_state.cluster_seeds_disallow)
+            if self.use_default_constraints_as_supervision
+            else set()
+        )
+        explicit_disallows = seed_disallow_adjacency(dataset_disallows, partial_supervision)
+        required: set[str] = set()
+        require_parent = {query: query for query in proposed_links}
+
+        def require_root(query: str) -> str:
+            while require_parent[query] != query:
+                require_parent[query] = require_parent[require_parent[query]]
+                query = require_parent[query]
+            return query
+
+        for left, right in partial_supervision:
+            for query, seed in ((left, right), (right, left)):
+                if query not in proposed_links or seed not in cluster_seeds_require:
+                    continue
+                value = supervision_distance(query, seed)
+                if value == 0 and restored(proposed_links[query]) == restored(cluster_seeds_require[seed]):
+                    required.add(query)
+
+        def query_priority(query: str) -> tuple[bool, float, str]:
+            return query not in required, scores[query], query
+
+        for left, right in partial_supervision:
+            if (
+                left in proposed_links
+                and right in proposed_links
+                and restored(proposed_links[left]) == restored(proposed_links[right])
+            ):
+                member, query = sorted((left, right), key=query_priority)
+                # Within an atomic group, attachment checks use this same
+                # priority order: the later query's direct entry takes precedence.
+                if supervision_distance(query, member) == 0:
+                    require_parent[require_root(left)] = require_root(right)
+
+        require_groups: dict[str, list[str]] = defaultdict(list)
+        for query in proposed_links:
+            require_groups[require_root(query)].append(query)
+
+        def group_priority(group: list[str]) -> tuple[bool, float, str]:
+            return (
+                not any(query in required for query in group),
+                min(scores[query] for query in group),
+                min(group),
+            )
+
+        accepted: dict[str, int | str] = {}
+        new_members: dict[str, list[str]] = defaultdict(list)
+        backend = None
+        rejected_count = 0
+        for group in sorted(require_groups.values(), key=group_priority):
+            profile_id = restored(proposed_links[group[0]])
+            members = new_members[profile_id]
+            previous_count = len(members)
+            pending: set[str] = set()
+            conflict = False
+            for query in sorted(group, key=query_priority):
+                # Sparse explicit edges avoid scanning every historical seed
+                # for every proposed link, including restored claimed profiles.
+                conflict = any(
+                    (
+                        (partner in cluster_seeds_require and restored(cluster_seeds_require[partner]) == profile_id)
+                        or (partner in accepted and restored(accepted[partner]) == profile_id)
+                        or partner in pending
+                    )
+                    and supervision_distance(query, partner) in (None, LARGE_DISTANCE)
+                    for partner in explicit_disallows.get(query, ())
+                )
+                if not conflict and members and self.use_default_constraints_as_supervision:
+                    if backend is None:
+                        backend = _build_incremental_constraint_backend(
+                            dataset,
+                            use_default_constraints_as_supervision=True,
+                            runtime_context=runtime_context,
+                            suppress_orcid=self.suppress_orcid,
+                            prediction_state=prediction_state,
+                        )
+                    chunk_size = max(1, int(self.batch_size))
+                    for start in range(0, len(members), chunk_size):
+                        labels, _ = self._resolve_constraint_batch(
+                            dataset,
+                            [(query, member) for member in members[start : start + chunk_size]],
+                            partial_supervision=partial_supervision,
+                            runtime_context=runtime_context,
+                            incremental_dont_use_cluster_seeds=False,
+                            constraint_backend=backend,
+                        )
+                        if any(label + LARGE_INTEGER >= LARGE_DISTANCE for label in labels):
+                            conflict = True
+                            break
+                if conflict:
+                    break
+                pending.add(query)
+                members.append(query)
+            if conflict:
+                del members[previous_count:]
+                if any(query in required for query in group):
+                    raise ValueError(
+                        "Conflicting required classic incremental attachments: "
+                        f"signature_ids={sorted(group)!r} restored_cluster_id={profile_id!r}"
+                    )
+                rejected_count += len(group)
+                continue
+            accepted.update((query, proposed_links[query]) for query in group)
+        logger.info(
+            "Classic incremental attachment constraints: proposed=%d accepted=%d rejected=%d",
+            len(proposed_links),
+            len(accepted),
+            rejected_count,
+        )
+        return accepted
+
     def _run_incremental_phases_bcd(
         self,
         unassigned_signature_ids: list[str],
@@ -4981,6 +5175,7 @@ class Clusterer:
                         signature_to_cluster_to_average_dist.setdefault(signature, {})[cluster_id] = out
 
         linked_signature_to_cluster: dict[str, int | str] = {}
+        linked_signature_scores: dict[str, float] = {}
         for unassigned_signature in unassigned_signature_ids:
             cluster_dists = signature_to_cluster_to_average_dist.get(unassigned_signature, {})
             best_cluster_id, best_dist, _second_best_dist = self._best_incremental_cluster(
@@ -4989,6 +5184,18 @@ class Clusterer:
             )
             if best_cluster_id is not None and best_dist <= self.cluster_model.eps:
                 linked_signature_to_cluster[unassigned_signature] = best_cluster_id
+                linked_signature_scores[unassigned_signature] = best_dist
+
+        linked_signature_to_cluster = self._filter_classic_incremental_links(
+            dataset,
+            linked_signature_to_cluster,
+            linked_signature_scores,
+            cluster_seeds_require=cluster_seeds_require,
+            recluster_map=recluster_map,
+            partial_supervision=partial_supervision,
+            runtime_context=runtime_context,
+            prediction_state=prediction_state,
+        )
 
         return self._finish_incremental_with_seed_links(
             unassigned_signature_ids,

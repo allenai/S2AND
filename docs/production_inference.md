@@ -57,6 +57,14 @@ the initial-only attachment pass, including members not yet predicted. Explicit
 hard cannot-link supervision also constrains post-clustering seed merges;
 indirect merges cannot reconnect a forbidden pair.
 
+Promoted incremental prediction checks disallows against restored profile
+identities. A query forbidden from one member of an altered profile cannot
+attach through a sibling split. These exclusions apply before retrieval top-k.
+Mutually disallowed queries likewise cannot attach to different splits that
+restore to the same profile; the lower-priority query is rescored through the
+existing exclusion mechanism. The additional bookkeeping uses explicit
+constraint edges and split mappings rather than enumerating paper pairs.
+
 ## Complete model bundles
 
 The public loader accepts one format: an explicit, complete, canonical native

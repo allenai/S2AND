@@ -1454,9 +1454,12 @@ def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
         disallow_partners: Mapping[str, set[str]],
         *,
         rescore: Any,
+        sibling_components: Mapping[str, tuple[str, ...]] | None = None,
     ) -> tuple[dict[str, str], dict[str, int]]:
         captured["rescore_callback_refs"].append(weakref.ref(rescore))
-        return real_resolve_query_disallows(initial_decisions, disallow_partners, rescore=rescore)
+        return real_resolve_query_disallows(
+            initial_decisions, disallow_partners, rescore=rescore, sibling_components=sibling_components
+        )
 
     monkeypatch.setattr(production_module, "compute_promoted_incremental_limits", fake_limits)
     monkeypatch.setattr(production_module, "_QueryDisallowRescoreContext", capturing_rescore_context)

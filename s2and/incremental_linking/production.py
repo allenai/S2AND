@@ -250,6 +250,7 @@ def _resolve_query_disallows_globally(
     disallow_partners: Mapping[str, set[str]],
     *,
     rescore: Callable[[str, set[str]], _ScoredQueryDecision],
+    sibling_components: Mapping[str, tuple[str, ...]] | None = None,
 ) -> tuple[dict[str, str], dict[str, int]]:
     """Resolve query-query disallows with one request-global deterministic priority."""
 
@@ -265,11 +266,14 @@ def _resolve_query_disallows_globally(
     for initial in order:
         signature_id = initial.signature_id
         excluded_components = {
-            str(partner_decision.decision.component_key)
+            sibling
             for partner_id in disallow_partners.get(signature_id, ())
             if (partner_decision := finalized.get(str(partner_id))) is not None
             and partner_decision.decision.action == "link"
             and partner_decision.decision.component_key is not None
+            for sibling in (sibling_components or {}).get(
+                str(partner_decision.decision.component_key), (str(partner_decision.decision.component_key),)
+            )
         }
         decision = initial
         if (
@@ -368,6 +372,47 @@ def _cluster_seed_representatives(cluster_seeds_require: Mapping[str, int | str]
         if current is None or normalized_seed_id < current:
             representatives[normalized_component_key] = normalized_seed_id
     return representatives
+
+
+def _restored_profile_siblings(recluster_map: Mapping[str, int | str]) -> dict[str, tuple[str, ...]]:
+    """Index natural components that restore to the same claimed profile."""
+
+    components_by_profile: dict[str, list[str]] = {}
+    for component, profile in recluster_map.items():
+        components_by_profile.setdefault(str(profile), []).append(str(component))
+    siblings: dict[str, tuple[str, ...]] = {}
+    for components in components_by_profile.values():
+        group = tuple(sorted(components))
+        siblings.update((component, group) for component in group)
+    return siblings
+
+
+def _expand_restored_profile_disallows(
+    disallows: set[tuple[str, str]],
+    *,
+    query_signature_ids: Sequence[str],
+    cluster_seeds_require: Mapping[str, int | str],
+    sibling_components: Mapping[str, tuple[str, ...]],
+    seed_representatives: Mapping[str, str],
+) -> set[tuple[str, str]]:
+    """Exclude every sibling split before retrieval can select a restored profile."""
+
+    if not sibling_components or not disallows:
+        return disallows
+    query_ids = set(query_signature_ids)
+    expanded = set(disallows)
+    for left, right in disallows:
+        if left in query_ids and right in cluster_seeds_require:
+            query, seed = left, right
+        elif right in query_ids and left in cluster_seeds_require:
+            query, seed = right, left
+        else:
+            continue
+        component = str(cluster_seeds_require[seed])
+        for sibling in sibling_components.get(component, ()):
+            representative = seed_representatives[sibling]
+            expanded.add((query, representative) if query < representative else (representative, query))
+    return expanded
 
 
 def _query_seed_disallows_for_rescore(
@@ -978,6 +1023,22 @@ def predict_incremental_promoted_linker_from_arrow(
             seed_signature_ids=cluster_seeds_require,
         )
     )
+    sibling_components = _restored_profile_siblings(recluster_map)
+    seed_representatives = {}
+    if query_disallow_partners:
+        seed_representatives = _cluster_seed_representatives(cluster_seeds_require)
+    elif sibling_components and planner_disallows:
+        seed_representatives = {
+            component: min(str(member) for member in component_members_for_sizes[component])
+            for component in sibling_components
+        }
+    planner_disallows = _expand_restored_profile_disallows(
+        planner_disallows,
+        query_signature_ids=unassigned_signature_ids,
+        cluster_seeds_require=cluster_seeds_require,
+        sibling_components=sibling_components,
+        seed_representatives=seed_representatives,
+    )
     initial_query_disallow_decisions: dict[str, _ScoredQueryDecision] = {}
     seed_arrow_start = time.perf_counter()
     with temporary_cluster_seed_sidecars(
@@ -1156,7 +1217,7 @@ def predict_incremental_promoted_linker_from_arrow(
                 runtime_context=runtime_context,
                 total_ram_bytes=resolved_total_ram_bytes,
                 cluster_seeds_require=cluster_seeds_require,
-                cluster_seed_representative_by_component=_cluster_seed_representatives(cluster_seeds_require),
+                cluster_seed_representative_by_component=seed_representatives,
                 orcid_fanout_by_query=orcid_fanout_by_query,
                 component_sizes=component_size_summary,
                 memory_layout=memory_layout,
@@ -1182,6 +1243,7 @@ def predict_incremental_promoted_linker_from_arrow(
                 initial_query_disallow_decisions,
                 query_disallow_partners,
                 rescore=_record_rescore,
+                sibling_components=sibling_components,
             )
             linked_signature_clusters.update(globally_linked)
             final_limits_history.extend(outcome.limits for outcome in rescore_outcomes)

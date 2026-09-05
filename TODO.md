@@ -88,3 +88,13 @@ The shared sparse merge helper adds no pair scoring. A 10,000-signature
 microbenchmark with 20 disallows remained approximately 8.4 ms before/after.
 Full combined local CI passed: 1119 Python tests and 119 Rust tests.
 Log: `scratch/completed-work-local-ci.log`.
+
+## Restored-profile disallow enforcement
+
+- [x] Exclude all sibling splits of a disallowed profile before retrieval top-k.
+- [x] Resolve cross-query conflicts using the restored destination identity.
+- [x] Verify batched abstention and alternative-profile reassignment with native planning.
+
+The bounded 10,000-seed benchmark added about 23 microseconds of exclusion
+bookkeeping per request. Full combined local CI passed: 1119 Python tests and
+119 Rust tests. Log: `scratch/completed-work-local-ci.log`.

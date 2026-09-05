@@ -3,9 +3,126 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 import s2and.incremental_linking.production as production_module
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
+
+
+@pytest.mark.parametrize("query_disallow", [False, True])
+@pytest.mark.parametrize("batch_size", [1, 2])
+@pytest.mark.parametrize("external_fallback", [False, True])
+def test_altered_profile_disallows_survive_native_planning_and_restoration(
+    tmp_path, monkeypatch, query_disallow, batch_size, external_fallback
+) -> None:
+    """Exercise production sidecars, native retrieval, conflict rescore, and finalization."""
+    from s2and.arrow_inputs import ArrowDataset
+    from s2and.featurizer import FeaturizationInfo
+    from s2and.model import Clusterer
+    from tests.helpers import write_minimal_arrow_prediction_bundle
+
+    write_minimal_arrow_prediction_bundle(tmp_path)
+    queries = ["q1", "q2"] if query_disallow else ["q1"]
+    disallow = ("q1", "q2") if query_disallow else ("0", "q1")
+    seeds = {"0": "claimed_0", "1": "claimed_1"}
+    original_inverse = {"claimed": ["0", "1"]}
+    split_inverse = {"claimed_0": ["0"], "claimed_1": ["1"]}
+    if external_fallback:
+        seeds["2"] = "outside"
+        original_inverse["outside"] = ["2"]
+        split_inverse["outside"] = ["2"]
+    dataset = production_module._DirectArrowIncrementalDataset(
+        name_tuples=set(),
+        cluster_seeds_require={"0": "claimed", "1": "claimed"},
+        cluster_seeds_disallow={disallow},
+        altered_cluster_signatures=["0"],
+        max_seed_cluster_id=0,
+        signatures={},
+    )
+
+    class SplitClusterer:
+        n_jobs = 1
+        suppress_orcid = True
+        featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+        _finish_incremental_with_seed_links = Clusterer._finish_incremental_with_seed_links
+
+        def _build_incremental_seed_setup(self, *args, **kwargs):
+            return (
+                seeds,
+                {"claimed_0": "claimed", "claimed_1": "claimed"},
+                original_inverse,
+                split_inverse,
+            )
+
+    scored_plans = []
+
+    def score_available_candidate(*args, **kwargs):
+        plan = kwargs["raw_plan_bundle"]
+        scored_plans.append((plan.query_signature_ids, plan.row_component_keys))
+        signature_ids = kwargs["rust_featurizer"].signature_ids()
+        decisions = []
+        for offset, query in enumerate(plan.query_signature_ids):
+            rows = np.flatnonzero(plan.row_query_offsets == offset)
+            preferred = "claimed_0" if query == "q1" else "claimed_1"
+            matching_rows = [int(row) for row in rows if plan.row_component_keys[int(row)] == preferred]
+            row = matching_rows[0] if matching_rows else (int(rows[0]) if len(rows) else None)
+            component = plan.row_component_keys[row] if row is not None else None
+            decisions.append(
+                LinkOrAbstainDecision(
+                    signature_ids.index(query),
+                    "link" if component else "abstain",
+                    row,
+                    component,
+                    0.95 if query == "q1" else 0.90,
+                    None,
+                    None,
+                )
+            )
+        return SimpleNamespace(
+            compact_result=SimpleNamespace(decisions=decisions),
+            decision_row_signals={},
+            linked_signature_clusters={
+                signature_ids[d.query_signature_index]: d.component_key for d in decisions if d.action == "link"
+            },
+            telemetry={
+                "query_count": len(decisions),
+                "candidate_row_count": plan.row_count,
+                "pair_count": plan.pair_count,
+            },
+        )
+
+    monkeypatch.setattr(
+        production_module.feature_port,
+        "build_rust_featurizer_from_arrow_dataset",
+        lambda dataset, **kwargs: SimpleNamespace(signature_ids=lambda: list(kwargs["signature_ids"])),
+    )
+    monkeypatch.setattr(
+        production_module.runtime_module,
+        "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
+        score_available_candidate,
+    )
+    with ArrowDataset.open(tmp_path) as arrow_dataset:
+        result = production_module.predict_incremental_promoted_linker_from_arrow(
+            SplitClusterer(),
+            [*seeds, *queries],
+            dataset,
+            arrow_dataset=arrow_dataset,
+            artifact=SimpleNamespace(artifact_dir=tmp_path, retrieval_top_k=2, feature_columns=("test",)),
+            prevent_new_incompatibilities=False,
+            partial_supervision={},
+            runtime_context=SimpleNamespace(run_id="restored-disallow"),
+            total_ram_bytes=32 * 1024**3,
+            batching_threshold=batch_size,
+        )
+    assert not any(set(disallow) <= set(members) for members in result["clusters"].values())
+    assert set(result["clusters"]["claimed"]) == ({"0", "1", "q1"} if query_disallow else {"0", "1"})
+    if query_disallow:
+        assert result["incremental_linker_telemetry"]["global_query_disallow_rescore_count"] == 1
+        assert scored_plans[-1] == (("q2",), ("outside",) if external_fallback else ())
+    else:
+        assert scored_plans == [(("q1",), ("outside",) if external_fallback else ())]
+    if external_fallback:
+        assert set(result["clusters"]["outside"]) == {"2", "q2" if query_disallow else "q1"}
 
 
 def test_memory_safe_query_batch_shrinks_to_refreshed_limit(monkeypatch) -> None:

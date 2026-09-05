@@ -186,17 +186,14 @@ memberships.
 
 ## Publish and reload a trained model
 
-Do not publish a pickle. The public loader accepts one complete native bundle
-containing pairwise boosters, clusterer configuration, promoted linker,
-embedded replay target, and checksummed manifest. Its root manifest records
-`kind: "s2and_model"`, the plan-derived `release_version`, the exact
-`generated_by_runtime`, EPS calibration state, and the file checksum
-inventory. Pairwise training writes EPS
-`0.5` with calibration state `pending`; validation-only calibration writes a
-fresh `calibrated` pairwise sibling. After EPS is frozen,
-`train_linker_and_finalize.py` fits the linker once, atomically writes
-the complete bundle, reloads those exact bytes, and evaluates them. See the
-[v1.3 release runbook](release.md).
+The public loader requires a complete native bundle; it rejects pickles and
+pairwise-only training stages. The research example above trains the pairwise
+model and clusterer, but a publishable bundle also needs the promoted linker
+and validated release artifacts. See the
+[bundle contract](production_inference.md#complete-model-bundles) for required
+files, feature provenance, checksums, and staged publication. Follow the
+[v1.3 release runbook](release.md) for pairwise training, validation-only EPS
+selection, linker finalization, and evaluation through the reloaded bundle.
 
 Linker training excludes complete holdout query and base identities before
 feature materialization, using identity columns from the source tables even
@@ -206,23 +203,7 @@ retrieval statistics for retained queries stay unchanged. The same identity
 authority is checked again before fitting, and diagnostics retain the early
 exclusion counts. Frozen test labels and features are not needed for this check.
 
-Pairwise production training verifies the packaged canonical name tuples and
-records `name_tuples_data_sha256`, `name_counts_manifest_sha256`,
-and `orcid_prefix_counts_data_sha256` in `feature_contract`. Bundle export does
-not synthesize missing behavior hashes. Export and load compare tuple/ORCID
-data hashes with the canonical package artifacts; the exact name-count
-manifest and complete ordered feature contract are also bound into model and
-linker provenance.
-
-The promoted linker's fixed-role metadata records
-`kind: "s2and_incremental_linker"`, the exact generating runtime, its booster
-checksum, and digests binding the pairwise bundle and complete training target
-JSON. The complete bundle keeps that target at
-`reproducibility/incremental_linker_training_target.json`; finalization and
-loading reject a mismatch. Evaluation starts only after the serialized bundle
-has been reloaded.
-
-After a bundle passes those gates, reload it explicitly:
+After a complete bundle passes the release gates, reload it explicitly:
 
 ```python
 from s2and.arrow_inputs import ArrowDataset

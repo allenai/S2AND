@@ -52,7 +52,7 @@ Benchmark script:
 Arrow-backed Rust training:
 
 When training/eval runs use Arrow-backed Rust featurization, paper preprocessing can be deferred to Rust
-(see `docs/rust/runtime.md` section "Arrow contract"). The fixed constructor
+(see [the Arrow training constructor](training.md#build-a-rust-backed-training-dataset)). The fixed constructor
 binds an open `ArrowDataset` before preprocessing; no lifecycle flag controls
 this route. In that mode,
 `preprocess_papers_parallel` is **skipped entirely**, and Rust Arrow readers handle paper normalization,
@@ -159,9 +159,11 @@ Rules of thumb:
 
 ## Rust Rayon pool lifetime
 
-The Rust extension caches Rayon thread pools by thread count for reuse. Those worker threads stay alive for the process
-lifetime, even between calls. This should not consume CPU when idle, but it does mean “thread count” tools may show more
-threads than expected.
+The Rust extension caches up to eight Rayon thread pools, keyed by thread count.
+Adding a ninth cached thread count evicts the least recently used entry.
+Worker threads stay alive while their pool is retained by the cache or an active
+call, including between calls for cached pools. Idle workers should not consume
+CPU, but thread-count tools may show more threads than the current call requests.
 
 If you need to guarantee that all worker threads fully exit between runs, use process boundaries (run each workload in a
 fresh Python process).

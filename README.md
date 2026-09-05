@@ -32,7 +32,7 @@ and the maintained large-scale runtime require the Rust package.
 | Train or evaluate a model | [Training and Evaluation Essentials](#training-and-evaluation-essentials) | [docs/training.md](docs/training.md) |
 | Build a production release bundle | `scripts/production/` | [docs/production_inference.md](docs/production_inference.md) |
 | Operate the v1.3 retrain and release | [v1.3 release runbook](docs/release.md) | Follow its stages, approvals, and release contract |
-| Operate Rust-backed large-scale inference | [Runtime and Scaling](#runtime-and-scaling) | [docs/rust/runtime.md](docs/rust/runtime.md), [docs/subblocking.md](docs/subblocking.md), [docs/threading.md](docs/threading.md) |
+| Operate Rust-backed large-scale inference | [Runtime and Scaling](#runtime-and-scaling) | [Execution routes](docs/production_inference.md#explicit-execution-routes), [docs/subblocking.md](docs/subblocking.md), [docs/threading.md](docs/threading.md) |
 | Work on the repo itself | [Development](#development) | [docs/development.md](docs/development.md) |
 
 ## Install
@@ -45,13 +45,8 @@ Package install:
 uv pip install s2and
 ```
 
-That command installs the latest package available from the configured index;
-it does not install this unreleased worktree. Use the repo-checkout flow below
-when validating `1.0.0` before publication.
-
-The base install includes the exactly matched `s2and-rust` runtime. During the
-`1.0.0` cutover, no default production model is packaged; inference callers
-must provide an explicit compatible bundle.
+This installs the published package and its exactly matched `s2and-rust`
+runtime. Use a source checkout to validate the unreleased `1.0.0` worktree.
 
 Repo checkout:
 
@@ -64,12 +59,10 @@ uv sync --active --extra dev
 uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 ```
 
-Source checkouts use Git LFS for the realistic LightGBM parity fixture. Run
-`git lfs pull` after cloning and after switching branches that change it.
-
-The Rust build step is required for source checkouts unless you are using an
-already-built compatible `s2and-rust` wheel. For OS prerequisites, activation
-commands, WSL notes, and install variants, see [docs/install.md](docs/install.md).
+Source checkouts need the matching Rust extension and the LFS-managed parity
+fixture; repeat `git lfs pull` after switching branches that change it.
+For OS prerequisites, activation commands, WSL notes, and install variants, see
+[docs/install.md](docs/install.md).
 
 ## Download Data or Model
 
@@ -230,7 +223,7 @@ Concurrency:
 
 Details:
 
-- Runtime contract: [docs/rust/runtime.md](docs/rust/runtime.md)
+- Execution routes: [docs/production_inference.md](docs/production_inference.md#explicit-execution-routes)
 - Threading guidance: [docs/threading.md](docs/threading.md)
 - Subblocking and memory tradeoffs: [docs/subblocking.md](docs/subblocking.md)
 - Environment variables: [docs/environment.md](docs/environment.md)
@@ -242,7 +235,7 @@ Details:
 - Production inference: [docs/production_inference.md](docs/production_inference.md)
 - Training and saved-model workflows: [docs/training.md](docs/training.md)
 - Development workflow: [docs/development.md](docs/development.md)
-- Paper-era reproducibility notes: [docs/reproducibility.md](docs/reproducibility.md)
+- Paper-era reproducibility notes: [Reproducibility](#reproducibility)
 - v1.3 retrain and release runbook: [docs/release.md](docs/release.md)
 - Docs index: [docs/README.md](docs/README.md)
 
@@ -257,7 +250,7 @@ uv run ruff format .
 uv run ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
 ```
 
-To run the entire CI suite mimicking the GH Actions:
+Run the shared local/hosted CI suite, including native build and checks:
 
 ```bash
 uv run --no-project python scripts/run_ci_locally.py
@@ -272,40 +265,35 @@ For lint and type checks without Rust extension compilation, use the
 The full pytest suite is not a no-native check; build the required extension first or use `scripts/run_ci_locally.py`.
 
 ### Version bumping
-Versioning is centralized in the `VERSION` file (single source of truth). When you update it, we sync the Python/Rust
-manifests and regenerate lockfiles.
 
-One-time setup for hooks (recommended):
-```bash
-git config core.hooksPath .githooks
-```
-
-Workflow:
-```bash
-# 1) edit VERSION to the new semantic version
-
-# 2) sync manifests
-uv run python scripts/sync_version.py
-
-# 3) regenerate lockfiles
-uv sync --extra dev
-uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml
-```
-
-Notes:
-- The pre-commit hook only runs when `VERSION` is staged and will auto-sync + regenerate lockfiles if needed.
-- `uv.lock` and `s2and_rust/Cargo.lock` are generated files and will contain the version after syncing.
-
-### Docs
-
-- Index (start here): `docs/README.md`
-- v1.3 release operator runbook: `docs/release.md`
-
----
+`VERSION` is the source of truth for Python/Rust package versions. Follow the
+[version-bump workflow](docs/development.md#version-bumping) to configure the
+hook, synchronize manifests, and regenerate both lockfiles.
 
 ## Reproducibility
 
-The original paper-era environment and scripts live on the `s2and_paper` branch. See [docs/reproducibility.md](docs/reproducibility.md) for the current guidance and compatibility notes for old released artifacts.
+The original paper experiments used the `s2and_paper` branch with Python
+`3.7.9` and the package pins in `paper_experiments_env.txt`. Start in that branch
+with an isolated environment:
+
+```bash
+git checkout s2and_paper
+uv venv --python 3.7.9
+```
+
+Install that branch's pinned environment from `paper_experiments_env.txt`, then
+rerun its paper experiment commands. The selected artifacts retained in
+`scripts/archive/` are historical references, not supported current entrypoints
+or substitutes for the paper branch; see the
+[archive catalog](scripts/README.md#archived-historical-artifacts).
+
+Use paper-era seed artifacts such as `full_union_seed_*.pickle` with the paper
+branch. Some historical model pickles contain a dictionary with a `clusterer`
+key rather than a bare clusterer. Current `main` neither distributes nor loads
+production-model pickles. Reproduce later historical releases with their
+compatible release or Git history; current model loading and publication follow
+the [native-bundle contract](docs/production_inference.md#complete-model-bundles)
+and [release runbook](docs/release.md).
 
 ## Licensing
 

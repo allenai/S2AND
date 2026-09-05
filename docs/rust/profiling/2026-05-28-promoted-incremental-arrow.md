@@ -4,10 +4,11 @@ Date: 2026-05-28 UTC
 
 > **Historical snapshot:** paths, the word “canonical,” and command lines below
 > describe the 2026-05-28 environment. The current profiler requires explicit
-> `--model-path` and v1.3 uses an explicit regenerated `--arrow-root`; do not
-> rerun these commands as a current release gate. See
-> [../baselines.md](../baselines.md) and
-> [../../release.md](../../release.md).
+> `--model-path`, `--evaluation-plan`, and `--run-binding`; the frozen evaluation
+> plan supplies the regenerated Arrow root and exact workload. Do not rerun
+> these commands as a current release gate. See the
+> [performance command reference](../../../scripts/production/README.md#promoted-incremental-performance-report)
+> and [release runbook](../../release.md).
 
 ## Scope
 

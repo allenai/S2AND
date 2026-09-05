@@ -23,27 +23,29 @@ command reference. Canonical-name rules live in [data.md](data.md).
 - Production inference: [production_inference.md](production_inference.md)
 - Training and evaluation: [training.md](training.md)
 - Development workflow: [development.md](development.md)
-- Reproducibility and paper-era notes: [reproducibility.md](reproducibility.md)
+- Reproducibility and paper-era notes: [root README](../README.md#reproducibility)
 
 ## Runtime and operations
 
 - v1.3 release policy and runbook: [release.md](release.md)
-- Rust documentation index and scope: [rust/README.md](rust/README.md)
-- Rust runtime contract and verification commands: [rust/runtime.md](rust/runtime.md)
+- Runtime routing verification: [development.md](development.md#runtime-routing-verification)
 - Environment variables: [environment.md](environment.md)
 - Threading and parallelism: [threading.md](threading.md)
 - Subblocking for large blocks: [subblocking.md](subblocking.md)
-- Promoted incremental performance report: [rust/baselines.md](rust/baselines.md)
+- Promoted incremental performance report:
+  [production command reference](../scripts/production/README.md#promoted-incremental-performance-report)
 - Public Arrow/name-count formats and direct Rust dataset schema:
   [rust/arrow_dataset_spec.md](rust/arrow_dataset_spec.md)
 
 ## Deep dives and engineering notes
 
-- Version-authority rationale and implementation record:
-  [../version_simplification.md](../version_simplification.md)
 - Release notes: [release_notes.md](release_notes.md)
+- September test audit and verification record: [test_audit_2026_09.md](test_audit_2026_09.md)
 - Retained historical Rust profiling evidence:
   [rust/profiling/2026-05-28-promoted-incremental-arrow.md](rust/profiling/2026-05-28-promoted-incremental-arrow.md)
+- Bulk Arrow optimization measurements:
+  [initial optimizations](rust/profiling/2026-09-04-bulk-optimizations.md) and
+  [specialization follow-up](rust/profiling/2026-09-04-bulk-followup.md)
 
 ## Script documentation
 
@@ -56,8 +58,8 @@ command reference. Canonical-name rules live in [data.md](data.md).
 
 - Runtime and operations docs describe current behavior, knobs, and verification commands.
 - Deep dives explain subsystem behavior or preserve historical context for active areas.
-- Dated profiling snapshots are immutable historical evidence. Their old dates
+- Dated profiling snapshots belong under `rust/profiling/` and are immutable
+  historical evidence. Their old dates
   and commands are preserved intentionally, are exempt from live-link checks,
   and are not current release gates.
-- `AGENTS.md` is repository working policy rather than product documentation;
-  the vendored `s2and_rust/vendor/cld2/README.md` is third-party documentation.
+- The vendored `s2and_rust/vendor/cld2/README.md` is third-party documentation.

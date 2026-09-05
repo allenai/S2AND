@@ -138,6 +138,19 @@ together as a reproducibility pair. The loader requires exact checksum
 coverage for the derived paths, hashes every declared file once, and ignores
 unrelated files that are not part of the runtime contract.
 
+Pairwise production training records `name_tuples_data_sha256`,
+`name_counts_manifest_sha256`, and `orcid_prefix_counts_data_sha256` in
+`feature_contract`. Bundle export does not synthesize missing behavior hashes.
+Export and load compare tuple/ORCID data hashes with the canonical package
+artifacts; the exact name-count manifest and complete ordered feature contract
+are also bound into model and linker provenance.
+
+The linker's fixed-role metadata records `kind: "s2and_incremental_linker"`,
+the exact generating runtime, its booster checksum, and digests binding the
+pairwise bundle and complete training target JSON. The complete bundle keeps
+that target at `reproducibility/incremental_linker_training_target.json`;
+finalization and loading reject a mismatch.
+
 `load_production_model(path)` rejects legacy pickles, incomplete directories,
 and `pairwise_only` manifests. A pairwise-only bundle is an internal training
 stage and has a separate internal loader; it is never a public inference model.
@@ -190,6 +203,8 @@ capability matrix, or Python/Rust fallback:
 
 | API | Input authority | Backend | Result |
 | --- | --- | --- | --- |
+| `ANDData(...)` | classic data inputs | Python | initialized `ANDData` |
+| `build_training_anddata_from_arrow(...)` | open `ArrowDataset` | Rust | train-mode `ANDData` retaining the handle |
 | `Clusterer.predict` | `ANDData` | Python | `(clusters, distance_matrices)` |
 | `Clusterer.predict_incremental` | `ANDData` | Python | structured mapping |
 | `Clusterer.predict_from_arrow` | open `ArrowDataset` | Rust | `(clusters, distance_matrices)` |
@@ -200,6 +215,10 @@ Arrow API, is an error. Rust entry points import the exact `s2and-rust` version
 pinned by the project metadata and fail on a missing or different version. That
 dependency is part of the normal S2AND install; there is no `s2and[rust]`
 compatibility extra.
+
+The [environment reference](environment.md#runtime-and-telemetry) documents
+backend selection and errors for runtime contexts built without an explicit
+backend. Public APIs retain the routes above regardless of that default.
 
 Classic `ANDData` prediction remains useful for Python training, fixtures, and
 reference checks over the canonical S2 partition. `author_info.block` is its

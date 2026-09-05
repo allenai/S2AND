@@ -85,6 +85,21 @@ The full pytest suite requires the native name-count index. Build the extension 
 Do not set `PYTHONPATH` for normal repo scripts; it can shadow the installed package or compiled Rust extension. Test
 and CI commands may set it only when they are intentionally exercising the checkout source tree.
 
+## Runtime routing verification
+
+After building the matching extension with the
+[local development build instructions](../s2and_rust/README.md#local-dev-build),
+run the focused constructor and backend-routing tests:
+
+```bash
+uv run pytest -q tests/test_runtime.py tests/test_data.py tests/test_arrow_training_ingestion.py
+```
+
+The [inference guide](production_inference.md#explicit-execution-routes) owns
+the runtime contract. Feature parity, subblocking quality, packaging, and
+installed-runtime checks use the focused commands in the
+[production command reference](../scripts/production/README.md#evaluation).
+
 ## Version bumping
 
 Versioning is centralized in `VERSION`.
@@ -124,6 +139,7 @@ Notes:
 ## Related docs
 
 - Docs index: [docs/README.md](README.md)
-- Rust runtime contract: [rust/runtime.md](rust/runtime.md)
-- Promoted incremental performance profiling: [rust/baselines.md](rust/baselines.md)
+- Runtime contract: [production_inference.md](production_inference.md#explicit-execution-routes)
+- Promoted incremental performance profiling:
+  [production command reference](../scripts/production/README.md#promoted-incremental-performance-report)
 - v1.3 release operator runbook: [release.md](release.md)

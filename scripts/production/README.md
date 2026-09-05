@@ -421,7 +421,7 @@ by `assets.candidate_members.datasets` in the frozen linker-source
 `bundle.json`. It must contain `signature_id` and
 `candidate_component_key` columns and match the selected Arrow root.
 
-Produce all five reports:
+Produce pairwise, cluster, subblocking, and parity reports:
 
 ```powershell
 uv run python scripts/production/model/release_pairwise.py evaluate-pairs `
@@ -465,23 +465,49 @@ uv run python scripts/verification/compare_full_predict_arrow_parity.py `
   --block-size REVIEWED_BLOCK_SIZE `
   --n-jobs REVIEWED_N_JOBS `
   --total-ram-bytes REVIEWED_TOTAL_RAM_BYTES
+```
 
+The parity command verifies every fixture file and all behavior-affecting
+options against the frozen evaluation plan. Subblocking verifies the bound
+public-data root, resolves the frozen dataset name through that root's
+manifest, and verifies the component-members file and full
+workload/configuration. No component report can stamp the run binding on an
+alternate population or workload.
+
+### Promoted incremental performance report
+
+The release performance workload is promoted incremental linking against the
+reviewed Arrow replay root and complete production model. Run a bounded
+profile first:
+
+```powershell
 uv run --with psutil python scripts/verification/profile_promoted_incremental_arrow.py `
   --evaluation-plan path/to/run/evaluation_plan.json `
   --model-path path/to/production_model_vX.Y `
   --run-binding path/to/run/run_binding.json `
   --require-rust-release `
-  --write-json path/to/run/reports/performance_evaluation_report.json `
-  --full-run
+  --write-json path/to/run/reports/performance_evaluation_report.json
 ```
 
-The performance Arrow root and complete workload come from the frozen
-evaluation plan. The parity command verifies every fixture file and all
-behavior-affecting options against that plan. Subblocking verifies the bound
-public-data root, resolves the frozen dataset name through that root's
-manifest, and verifies the component-members file and full
-workload/configuration. No component report can stamp the run binding on an
-alternate population or workload.
+The report path must be fresh. The frozen evaluation plan supplies the Arrow
+root and exact workload. For an approved release workload above the built-in
+query or seed limits, add `--full-run` after the bounded rehearsal; the flag
+does not change the plan's workload or authorize a larger run.
+
+The command records the exact workload, Rust extension identity, per-run
+timing and process-tree RSS, and summary statistics. Release evaluation
+consumes:
+
+- the prepared run's `run_binding_sha256`;
+- the exact reviewed `workload`;
+- `summary.predict_seconds.p50`; and
+- `summary.peak_rss_gb.max`.
+
+Keep command logs beside the report. Historical measurements remain in
+[the profiling directory](../../docs/rust/profiling/); they are evidence
+snapshots, not active commands.
+
+### Apply release gates
 
 Apply the gates directly:
 

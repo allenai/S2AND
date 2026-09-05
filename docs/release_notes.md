@@ -218,6 +218,37 @@ production model and public-data version is `1.3`, on a separate version axis.
   remain pending; the retained 2026-05-28 Rust snapshot is dirty-worktree
   historical evidence, not an accepted baseline.
 
+### Historical verification records
+
+These records describe earlier runs, not verification of the current checkout.
+The later [September test audit](test_audit_2026_09.md) records its own results
+and verification limits.
+
+#### PR 80 audit fixes
+
+Full local CI passed on Windows/Python 3.11 with the rebuilt native extension:
+1429 Python tests, 120 Rust tests, 88.56% coverage; lint, formatting, Clippy,
+type checks, and native smoke passed. Command:
+`uv run --no-project python -u scripts/run_ci_locally.py`.
+Run record and logs: `scratch/pr80_fixes/ci-1/`.
+
+All 53 linker features match runtime across the tested clean/conflicting/seeded
+cases and are invariant to target-label changes. Independent seed-restoration
+comparison matched the previous algorithm on 2500 randomized cases.
+On the bounded 100000-signature fixture, seed-restoration peak traced Python
+allocation fell from 8196498 to 5767832 bytes; pair-supervision allocation was
+unchanged. The new holdout fingerprint used 88152 temporary Python bytes.
+Profile evidence: `scratch/pr80_fixes/*profile*`.
+Production-scale accuracy and memory remain release gates requiring the missing
+canonical data exports and v1.3 artifacts; label-assisted metrics must be regenerated.
+
+#### Shared incremental completion
+
+Full local CI passed: 1134 Python tests, 119 Rust tests, 87.40% coverage.
+Direct component tests cover grouping, IDs, telemetry, input isolation, and
+failure propagation; existing Python/Arrow integration tests pass through the
+shared component. Log: `scratch/incremental-completion-local-ci.log`.
+
 ## 0.51.1
 
 - Ships the package as `0.51.1` and pins optional Rust installs to `s2and-rust==0.51.1`.

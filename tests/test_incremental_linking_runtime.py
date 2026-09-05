@@ -1101,6 +1101,116 @@ def test_production_query_author_row_signals_reuses_retrieval_signal() -> None:
     )
 
 
+@pytest.mark.parametrize("row_count", [0, 2])
+def test_authoritative_query_author_signals_require_no_query_objects(row_count: int) -> None:
+    retrieval_batch = _production_retrieval_batch(
+        row_query_signature_indices=np.zeros(row_count, dtype=np.uint32),
+        row_component_keys=("c1",) * row_count,
+    )
+    retrieval_batch.row_signals["query_author"] = np.asarray(["Ada Lovelace"] * row_count, dtype=object)
+    assert (
+        runtime_module._production_query_author_row_signals(
+            retrieval_batch,
+            query_signature_id_by_index={0: "q1"},
+            query_by_signature_id=None,
+        )
+        == {}
+    )
+
+
+@pytest.mark.parametrize("query_objects", [None, {"q1": SimpleNamespace(query_author="Ada Lovelace")}])
+@pytest.mark.parametrize("authors", [[], [["Ada Lovelace"]]])
+def test_query_author_row_signal_rejects_malformed_length_and_shape(query_objects, authors) -> None:
+    retrieval_batch = _production_retrieval_batch(
+        row_query_signature_indices=np.asarray([0], dtype=np.uint32),
+        row_component_keys=("c1",),
+    )
+    retrieval_batch.row_signals["query_author"] = np.asarray(authors, dtype=object)
+    with pytest.raises(ValueError, match=r"query_author row signal must have shape \(1,\)"):
+        runtime_module._production_query_author_row_signals(
+            retrieval_batch,
+            query_signature_id_by_index={0: "q1"},
+            query_by_signature_id=query_objects,
+        )
+
+
+def test_query_author_row_signal_requires_authority_without_query_objects() -> None:
+    retrieval_batch = _production_retrieval_batch(
+        row_query_signature_indices=np.asarray([0], dtype=np.uint32),
+        row_component_keys=("c1",),
+    )
+    with pytest.raises(ValueError, match="query_author row signal is required when queries are not provided"):
+        runtime_module._production_query_author_row_signals(
+            retrieval_batch,
+            query_signature_id_by_index={0: "q1"},
+            query_by_signature_id=None,
+        )
+
+
+@pytest.mark.parametrize("author,expected_action", [("Ada Lovelace", "link"), ("A", "abstain"), ("", "abstain")])
+@pytest.mark.parametrize("author_source", ["authoritative", "authoritative_with_queries", "fallback"])
+def test_from_retrieval_preserves_author_dependent_gate_decisions(
+    monkeypatch: pytest.MonkeyPatch, author: str, expected_action: str, author_source: str
+) -> None:
+    bundle = RawArrowPlanBundle.from_native_mapping(_minimal_raw_candidate_plan(query_authors=[author]))
+    retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(bundle)
+    query_kwargs: dict[str, Any] = {}
+    if author_source == "fallback":
+        del retrieval_batch.row_signals["query_author"]
+        query_kwargs["queries"] = [SimpleNamespace(author_info_first=author)]
+    elif author_source == "authoritative_with_queries":
+        query_kwargs["queries"] = [SimpleNamespace(query_author="Ignored Author")]
+    artifact = StaticArtifact(
+        np.asarray([0.9]),
+        logistic_gate_config(
+            feature_names=("top_meta_query_author_len",),
+            weights=[[-1.0, 0.0, 1.0]],
+            bias=[5.0, -10.0, -5.0],
+            missing_values=[0.0],
+            calibration_mode="test",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "compute_candidate_batch_pairwise_model_and_aggregate_stats",
+        lambda _dataset, candidate_batch, **_kwargs: _fake_pairwise_result(candidate_batch),
+    )
+    result = runtime_module._predict_incremental_link_or_abstain_production_from_retrieval_private(
+        FakeProductionClusterer({"s1": "c1"}),
+        artifact,
+        featurizer=FakeRuntimeFeaturizer(["q0", "s1"]),
+        retrieval_batch=retrieval_batch,
+        query_signature_ids=["q0"],
+        cluster_seeds_require={"s1": "c1"},
+        **query_kwargs,
+    )
+    assert result.compact_result.decisions[0].action == expected_action
+    assert result.linked_signature_clusters == ({"q0": "c1"} if expected_action == "link" else {})
+    assert result.compact_result.probabilities.tolist() == [0.9]
+    gate_matrix, _ = runtime_module.build_runtime_logistic_gate_matrix(
+        artifact.gate_model,
+        result.feature_matrix,
+        result.compact_result.probabilities,
+        row_signals={**retrieval_batch.row_signals, **result.decision_row_signals},
+    )
+    assert gate_matrix.tolist() == [[len(author)]]
+
+
+def test_from_retrieval_rejects_mismatched_query_object_count() -> None:
+    with pytest.raises(ValueError, match="queries and query_signature_ids must have equal length: 0 != 1"):
+        runtime_module._predict_incremental_link_or_abstain_production_from_retrieval_private(
+            FakeProductionClusterer({"s1": "c1"}),
+            StaticArtifact(np.asarray([]), _promoted_gate_config()),
+            featurizer=FakeRuntimeFeaturizer(["q1", "s1"]),
+            retrieval_batch=_production_retrieval_batch(
+                row_query_signature_indices=np.asarray([], dtype=np.uint32), row_component_keys=()
+            ),
+            queries=[],
+            query_signature_ids=["q1"],
+            cluster_seeds_require={"s1": "c1"},
+        )
+
+
 def test_query_author_for_gate_fallback_includes_full_signature_name() -> None:
     query = SimpleNamespace(
         query_author="",

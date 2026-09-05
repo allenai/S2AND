@@ -1386,6 +1386,137 @@ def test_raw_arrow_plan_bundle_adopts_native_numeric_arrays_without_copying() ->
         assert not adopted.flags.writeable, key
 
 
+@pytest.mark.parametrize("empty", [False, True], ids=["populated", "empty"])
+def test_raw_arrow_labeled_plan_preserves_ordered_schema_and_native_dtypes(tmp_path: Path, empty: bool) -> None:
+    paths = base_arrow_paths(tmp_path)
+    row_count = 0 if empty else 1
+    plan = native_labeled_plan(
+        paths,
+        [] if empty else ["q1"],
+        [] if empty else ["full"],
+        [] if empty else ["q1-full"],
+        [] if empty else ["c_match"],
+        np.asarray([] if empty else [1], dtype=np.uint16),
+        # Empty rows return before parsing component metadata.
+        object() if empty else {"c_match": ["s1"]},
+        num_threads=1,
+    )
+    query_keys = ("query_views", "query_authors")
+    row_identity_keys = (
+        "row_query_signature_ids",
+        "row_query_views",
+        "row_query_authors",
+        "row_query_group_ids",
+        "row_component_keys",
+    )
+    presence_keys = (
+        "row_query_has_specter",
+        "row_query_has_name_counts",
+        "row_candidate_has_affiliations",
+        "row_candidate_has_coauthors",
+        "row_candidate_has_specter_exemplars",
+        "row_candidate_has_name_counts",
+    )
+    common_row_keys = tuple(key for key, _signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS)
+    presence_offset = common_row_keys.index("row_orcid_match")
+    assert tuple(plan) == (
+        "row_count",
+        "pair_count",
+        "signature_ids",
+        "query_signature_ids",
+        *(query_keys + row_identity_keys if empty else row_identity_keys + query_keys),
+        "left_signature_ids",
+        "right_signature_ids",
+        "pair_row_indices",
+        "retrieval_scores",
+        "retrieval_ranks",
+        *common_row_keys[:presence_offset],
+        *presence_keys,
+        *common_row_keys[presence_offset:],
+        "telemetry",
+    )
+    assert plan["row_count"] == row_count
+    assert plan["pair_count"] == row_count
+    for key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
+        if dtype is object:
+            assert isinstance(plan[key], list)
+            assert len(plan[key]) == row_count
+        else:
+            native_dtype = np.uint32 if key in {"row_component_sizes", "row_named_signature_counts"} else dtype
+            assert plan[key].dtype == native_dtype, key
+            assert plan[key].shape == (row_count,), key
+    for key, dtype in (
+        ("pair_row_indices", np.uint32),
+        ("retrieval_scores", np.float32),
+        ("retrieval_ranks", np.uint16),
+        *((key, np.uint8) for key in presence_keys),
+    ):
+        assert plan[key].dtype == dtype, key
+        assert plan[key].shape == (row_count,), key
+    if empty:
+        assert plan["telemetry"] == {
+            "signature_count": 0,
+            "paper_count": 0,
+            "paper_author_paper_count": 0,
+            "component_count": 0,
+            "query_signature_count": 0,
+            "row_count": 0,
+            "pair_count": 0,
+            "timings": {"total_secs": 0.0},
+        }
+
+
+@pytest.mark.parametrize("labeled", [False, True], ids=["online", "labeled"])
+def test_native_candidate_plan_arrays_are_owned_by_each_result(tmp_path: Path, labeled: bool) -> None:
+    paths = base_arrow_paths(tmp_path)
+    planner = native_auto_planner(paths, top_k=2, orcid_enabled=False, num_threads=1)
+
+    def make_plan() -> dict[str, Any]:
+        if not labeled:
+            return planner.plan(["q1"])
+        return native_labeled_plan(
+            paths,
+            ["q1"],
+            ["full"],
+            ["q1-full"],
+            ["c_match"],
+            np.asarray([1], dtype=np.uint16),
+            {"c_match": ["s1"]},
+            num_threads=1,
+        )
+
+    first = make_plan()
+    second = make_plan()
+    arrays = {key: value for key, value in first.items() if isinstance(value, np.ndarray)}
+    assert arrays
+    for key, array in arrays.items():
+        assert array.size > 0, key
+        assert array.flags.writeable, key
+        assert not np.shares_memory(array, second[key]), key
+        assert array.dtype == second[key].dtype, key
+        assert array.tobytes() == second[key].tobytes(), key
+        expected_bytes = second[key].tobytes()
+        array[:] = 0
+        assert second[key].tobytes() == expected_bytes, key
+
+
+def test_raw_arrow_online_plan_keeps_query_metadata_when_all_candidates_are_disallowed(tmp_path: Path) -> None:
+    paths = base_arrow_paths(tmp_path)
+    planner = native_auto_planner(paths, top_k=2, orcid_enabled=False, num_threads=1)
+    plan = planner.plan(["q1"], additional_cluster_seed_disallows=[("q1", "s1"), ("q1", "s2")])
+
+    assert plan["row_count"] == 0
+    assert plan["pair_count"] == 0
+    assert plan["query_signature_ids"] == ["q1"]
+    assert plan["query_views"] == ["full"]
+    assert len(plan["query_authors"]) == 1
+    assert plan["telemetry"]["query_signature_count"] == 1
+    for key, _signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
+        assert len(plan[key]) == 0, key
+    with pytest.raises(ValueError, match="query_signature_ids must be non-empty"):
+        planner.plan([])
+
+
 def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_seeds(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path)
     paths.pop("cluster_seeds")

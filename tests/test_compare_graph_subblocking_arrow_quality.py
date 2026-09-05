@@ -1,6 +1,9 @@
 import hashlib
 import json
+import pickle
 import sys
+from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,13 +17,14 @@ from s2and.arrow_inputs import (
 )
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.contracts import canonical_json_digest
-from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index
+from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_name_counts_index
+from s2and.subblocking import GraphSubblockingConfig
 from scripts.production.model.run_binding import (
     build_run_binding_payload,
     evaluation_plan_content_identity,
 )
 from scripts.verification import compare_graph_subblocking_arrow_quality as script
-from tests.helpers import write_minimal_arrow_prediction_bundle
+from tests.helpers import tiny_name_counts_tuple, write_minimal_arrow_prediction_bundle
 
 
 def _base_argv() -> list[str]:
@@ -59,13 +63,14 @@ def _release_argv(arrow_root, public_data_root, component_members, output_dir) -
         "--output-dir",
         str(output_dir),
         "--comparison-mode",
-        "rust-only",
+        "python-vs-rust",
+        "--python-source",
+        "arrow",
         "--component-members-parquet",
         str(component_members),
         "--maximum-size",
         "2",
-        "--limit",
-        "2",
+        "--allow-full",
     ]
 
 
@@ -98,10 +103,9 @@ def _write_indexed_table(path, table, *, key_column: str, table_name: str) -> tu
     return str(path), str(index_path)
 
 
-def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_path) -> None:
+def _write_two_signature_arrow_bundle(arrow_root: Path) -> dict[str, str]:
     import pyarrow as pa
 
-    arrow_root = tmp_path / "arrow"
     embeddings = np.asarray([[1.0, 0.0], [0.99, 0.01]], dtype=np.float32)
     paths = write_minimal_arrow_prediction_bundle(arrow_root, include_specter=True)
     paths["signatures"], paths["signatures_batch_index"] = _write_indexed_table(
@@ -121,6 +125,19 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
         ),
         key_column="signature_id",
         table_name="signatures",
+    )
+    paths["papers"], paths["papers_batch_index"] = _write_indexed_table(
+        arrow_root / "papers.arrow",
+        pa.table(
+            {
+                "paper_id": pa.array(["p1", "p2"], type=pa.string()),
+                "title": pa.array(["First paper", "Second paper"], type=pa.string()),
+                "venue": pa.array(["", ""], type=pa.string()),
+                "journal_name": pa.array(["", ""], type=pa.string()),
+            }
+        ),
+        key_column="paper_id",
+        table_name="papers",
     )
     paths["paper_authors"], paths["paper_authors_batch_index"] = _write_indexed_table(
         arrow_root / "paper_authors.arrow",
@@ -149,6 +166,12 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
         table_name="specter",
     )
     write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, arrow_root), arrow_root)
+    return paths
+
+
+def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_path) -> None:
+    arrow_root = tmp_path / "arrow"
+    _write_two_signature_arrow_bundle(arrow_root)
 
     with ArrowDataset.open(arrow_root, require_specter=True) as arrow_dataset:
         with arrow_dataset.use(require_specter=True) as arrow_lease:
@@ -167,11 +190,51 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
     assert np.allclose(dataset.specter_embeddings["p1"], np.array([1.0, 0.0], dtype=np.float32))
 
 
-def test_subblocking_release_report_contains_metrics_and_artifact(tmp_path, monkeypatch) -> None:
+def test_direct_research_loaders_keep_bounded_input_support(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    (raw_root / "signatures.json").write_text(
+        json.dumps(
+            {
+                signature_id: {"paper_id": "p1", "author_info": {"first": "Hui", "position": 0}}
+                for signature_id in ("s1", "s2")
+            }
+        ),
+        encoding="utf-8",
+    )
+    (raw_root / "papers.json").write_text(
+        json.dumps({"p1": {"authors": [{"position": 0, "author_name": "Hui Wang"}]}}),
+        encoding="utf-8",
+    )
+    specter_path = tmp_path / "specter.pkl"
+    specter_path.write_bytes(pickle.dumps({"p1": np.array([1.0, 0.0], dtype=np.float32)}))
+
+    dataset, signature_ids = script.load_lightweight_dataset(
+        raw_root, specter_path, limit=1, sample_mode="first", seed=7
+    )
+
+    assert signature_ids == ["s1"]
+    assert set(dataset.signatures) == {"s1"}
+    assert dataset.signatures["s1"].author_info_first == "Hui"
+    assert np.array_equal(dataset.specter_embeddings["p1"], [1.0, 0.0])
+
+    arrow_root = tmp_path / "arrow"
+    _write_two_signature_arrow_bundle(arrow_root)
+    with ArrowDataset.open(arrow_root) as arrow_dataset:
+        assert script.load_signature_ids_from_arrow(arrow_dataset, limit=1, sample_mode="first", seed=7) == ["s1"]
+
+
+@pytest.fixture
+def release_inputs(tmp_path: Path) -> SimpleNamespace:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     public_data_root = tmp_path / "public"
     arrow_root = public_data_root / "dummy"
-    write_minimal_arrow_prediction_bundle(arrow_root, include_specter=True)
-    public_data_root.mkdir(exist_ok=True)
+    paths = _write_two_signature_arrow_bundle(arrow_root)
+    paths["name_counts_index"], _metrics = write_name_counts_index(public_data_root, tiny_name_counts_tuple())
+    write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, arrow_root), arrow_root)
+    (public_data_root / "LICENSE.txt").write_text("Test fixture\n", encoding="utf-8")
     (public_data_root / "manifest.json").write_text(
         json.dumps(
             {
@@ -189,8 +252,11 @@ def test_subblocking_release_report_contains_metrics_and_artifact(tmp_path, monk
         encoding="utf-8",
     )
     component_members = tmp_path / "components.parquet"
-    component_members.write_text("reviewed\n", encoding="utf-8")
-    public_manifest_sha256 = hashlib.sha256((arrow_root / "manifest.json").read_bytes()).hexdigest()
+    pq.write_table(
+        pa.table({"signature_id": ["s1", "s2"], "candidate_component_key": ["same", "same"]}),
+        component_members,
+    )
+    public_manifest_sha256 = hashlib.sha256((public_data_root / "manifest.json").read_bytes()).hexdigest()
     output_dir = tmp_path / "report"
     identity_file = tmp_path / "identity.json"
     identity_file.write_text("{}\n", encoding="utf-8")
@@ -202,31 +268,64 @@ def test_subblocking_release_report_contains_metrics_and_artifact(tmp_path, monk
     }
     evaluation_payload = {
         "baseline_record_sha256": "a" * 64,
-        "baselines": {},
-        "cluster": {"dummy": {"blocks": file_spec}},
-        "gates": {},
-        "pairwise": {"dummy": {"pairs": file_spec}},
+        "baselines": {
+            "cluster_signature_weighted_b3_f1": 1.0,
+            "pairwise_aggregate": {"auroc": 1.0, "macro_f1": 1.0},
+            "pairwise_datasets": {"dummy": {"auroc": 1.0, "macro_f1": 1.0}},
+            "predict_seconds_p50": 1.0,
+        },
+        "cluster": {
+            "dummy": {role: file_spec for role in ("signatures", "papers", "specter_embeddings", "clusters", "blocks")}
+        },
+        "gates": {
+            "cluster_signature_weighted_b3_f1_max_drop": 0.005,
+            "pairwise_aggregate_auroc_max_drop": 0.001,
+            "pairwise_aggregate_macro_f1_max_drop": 0.005,
+            "pairwise_dataset_auroc_max_drop": 0.001,
+            "pairwise_dataset_macro_f1_max_drop": 0.005,
+            "peak_rss_absolute_max_gb": 4.0,
+            "runtime_max_ratio": 1.1,
+            "subblocking_maximum_size": 2,
+        },
+        "pairwise": {"dummy": {role: file_spec for role in ("signatures", "papers", "specter_embeddings", "pairs")}},
         "parity": {
             "block": "dummy",
             "dataset": "dummy",
-            "files": {"signatures": file_spec},
+            "files": {"signatures": file_spec, "papers": file_spec},
             "fixture_dir": str(tmp_path.resolve()),
-            "workload": {"fixture": True},
+            "workload": {
+                "block_size": 2,
+                "compare_features": True,
+                "include_specter": False,
+                "n_jobs": 1,
+                "total_ram_bytes": 1_000_000,
+                "use_cluster_seeds": False,
+            },
         },
         "performance": {
-            "arrow_root": str(arrow_root.resolve()),
+            "arrow_root": str(public_data_root.resolve()),
             "arrow_root_manifest_sha256": public_manifest_sha256,
             "workload": {"dataset": "dummy"},
         },
         "subblocking": {
             "component_members": component_spec,
             "dataset": "dummy",
-            "workload": {"release": True},
+            "workload": {
+                "allow_full": True,
+                "comparison_mode": "python-vs-rust",
+                "graph_config": asdict(GraphSubblockingConfig()),
+                "limit": None,
+                "maximum_size": 2,
+                "orcid_subblocking": True,
+                "python_source": "arrow",
+                "sample_mode": "random",
+                "seed": 42,
+                "top_diff_subblocks": 30,
+            },
         },
     }
     evaluation_plan = tmp_path / "evaluation_plan.json"
     evaluation_plan.write_text(json.dumps(evaluation_payload), encoding="utf-8")
-    public_root_sha256 = hashlib.sha256((public_data_root / "manifest.json").read_bytes()).hexdigest()
     (tmp_path / "run_binding.json").write_text(
         json.dumps(
             build_run_binding_payload(
@@ -237,59 +336,106 @@ def test_subblocking_release_report_contains_metrics_and_artifact(tmp_path, monk
                         evaluation_plan_content_identity(evaluation_payload)
                     ),
                     "model_plan_content_sha256": "d" * 64,
-                    "public_data_root_manifest_sha256": public_root_sha256,
+                    "public_data_root_manifest_sha256": public_manifest_sha256,
                 }
             )
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        _release_argv(arrow_root, public_data_root, component_members, output_dir),
+    return SimpleNamespace(
+        argv=_release_argv(arrow_root, public_data_root, component_members, output_dir),
+        evaluation_plan=evaluation_plan,
+        output_dir=output_dir,
     )
-    args = script.parse_args()
-    workload = {
-        "allow_full": bool(args.allow_full),
-        "comparison_mode": str(args.comparison_mode),
-        "graph_config": script._graph_config(args).__dict__,
-        "limit": args.limit,
-        "maximum_size": int(args.maximum_size),
-        "orcid_subblocking": bool(args.orcid_subblocking),
-        "python_source": str(args.python_source),
-        "sample_mode": str(args.sample_mode),
-        "seed": int(args.seed),
-        "top_diff_subblocks": int(args.top_diff_subblocks),
-    }
-    monkeypatch.setattr(
-        script,
-        "_load_evaluation_plan",
-        lambda _path: SimpleNamespace(
-            subblocking={
-                "component_members": (
-                    component_members.resolve(),
-                    component_spec["sha256"],
-                ),
-                "dataset": "dummy",
-                "workload": workload,
-            }
-        ),
-    )
-    monkeypatch.setattr(script, "validate_release_root", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(script, "load_signature_ids_from_arrow", lambda *_args, **_kwargs: ["s1", "s2"])
-    monkeypatch.setattr(script, "_load_component_labels", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(
-        script,
-        "_run_rust_subblocking",
-        lambda *_args, **_kwargs: ({"a": ["s1"], "b": ["s2"]}, {"ok": 1}),
-    )
+
+
+def test_subblocking_release_report_contains_metrics_and_artifact(release_inputs, monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", release_inputs.argv)
+
+    def python_subblocks(_args, dataset, signature_ids, _config):
+        assert signature_ids == ["s1", "s2"]
+        assert dataset.signatures["s1"].author_info_coauthor_blocks == ("a lovelace",)
+        assert set(dataset.specter_embeddings) == {"p1", "p2"}
+        return {"python-block": list(signature_ids)}, {"implementation": "python"}
+
+    def rust_subblocks(_args, arrow_dataset, signature_ids, _config):
+        assert isinstance(arrow_dataset, ArrowDataset)
+        assert signature_ids == ["s1", "s2"]
+        return {"rust-block": list(signature_ids)}, {"implementation": "rust"}
+
+    monkeypatch.setattr(script, "_run_python_subblocking", python_subblocks)
+    monkeypatch.setattr(script, "_run_rust_subblocking", rust_subblocks)
 
     script.main()
 
+    output_dir = release_inputs.output_dir
     report = json.loads((output_dir / "subblocking_evaluation_report.json").read_text(encoding="utf-8"))
+    assert set(report) == {
+        "run_binding_sha256",
+        "inputs",
+        "graph_config",
+        "counts",
+        "python",
+        "rust",
+        "artifacts",
+        "baseline_deltas",
+    }
     assert len(report["run_binding_sha256"]) == 64
     assert report["counts"]["signature_count"] == 2
-    assert json.loads((output_dir / "rust_subblocks.json").read_text(encoding="utf-8")) == {
-        "a": ["s1"],
-        "b": ["s2"],
-    }
+    assert report["inputs"]["comparison_mode"] == "python-vs-rust"
+    assert report["inputs"]["python_source"] == "arrow"
+    assert report["inputs"]["raw_root"] is None
+    assert report["inputs"]["specter_pickle"] is None
+    assert report["inputs"]["limit"] is None
+    assert report["inputs"]["allow_full"] is True
+    assert report["baseline_deltas"] == {}
+    assert report["python"]["hook_telemetry"] == {}
+    for implementation in ("python", "rust"):
+        expected_fields = {"seconds", "telemetry", "partition", "component_preservation"}
+        if implementation == "python":
+            expected_fields.add("hook_telemetry")
+        assert set(report[implementation]) == expected_fields
+        assert report[implementation]["telemetry"] == {"implementation": implementation}
+        assert report[implementation]["partition"]["max_subblock_size"] == 2
+        assert report[implementation]["component_preservation"]["component_pair_recall"] == 1.0
+        subblocks_path = output_dir / f"{implementation}_subblocks.json"
+        assert list(json.loads(subblocks_path.read_text(encoding="utf-8")).values()) == [["s1", "s2"]]
+        assert report["artifacts"][f"{implementation}_subblocks"] == str(subblocks_path)
+        diff_path = output_dir / f"diff_heavy_{implementation}_subblocks.csv"
+        assert diff_path.is_file()
+        assert report["artifacts"][f"{implementation}_diff_csv"] == str(diff_path)
+
+    with pytest.raises(FileExistsError, match="Report output already exists"):
+        script.main()
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--comparison-mode", "rust-only"],
+        ["--python-source", "raw", "--raw-root", "raw", "--specter-pickle", "specter.pkl"],
+        ["--limit", "1"],
+        ["--maximum-size", "1"],
+    ],
+)
+def test_subblocking_release_rejects_unbound_workloads(release_inputs, monkeypatch, extra_args) -> None:
+    monkeypatch.setattr(sys, "argv", [*release_inputs.argv, *extra_args])
+
+    with pytest.raises(ValueError, match="Release subblocking does not accept|workload does not match"):
+        script.main()
+
+    assert not list(release_inputs.output_dir.iterdir())
+
+
+@pytest.mark.parametrize("change", [{"comparison_mode": "rust-only"}, {"python_source": "raw"}])
+def test_subblocking_release_plan_rejects_research_modes(release_inputs, monkeypatch, change) -> None:
+    evaluation_plan = release_inputs.evaluation_plan
+    payload = json.loads(evaluation_plan.read_text(encoding="utf-8"))
+    payload["subblocking"]["workload"].update(change)
+    evaluation_plan.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", release_inputs.argv)
+
+    with pytest.raises(ValueError, match="release subblocking must compare Python-vs-Rust"):
+        script.main()
+
+    assert not list(release_inputs.output_dir.iterdir())

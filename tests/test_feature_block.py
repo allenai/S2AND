@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1037,7 +1038,8 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan_and_featurizer(
         captured["featurizer"] = kwargs["featurizer"]
         captured["retrieval_left_indices"] = retrieval_batch.candidate_batch.left_signature_indices.tolist()
         captured["retrieval_right_indices"] = retrieval_batch.candidate_batch.right_signature_indices.tolist()
-        captured["queries"] = kwargs["queries"]
+        assert "queries" not in kwargs
+        captured["query_authors"] = retrieval_batch.row_signals["query_author"].tolist()
         return LinkOrAbstainProductionResult(
             feature_matrix=LinkerFeatureMatrix(
                 matrix=np.empty((2, 0), dtype=np.float32),
@@ -1063,6 +1065,12 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan_and_featurizer(
         lambda *args, **kwargs: fake_from_retrieval(**kwargs),
     )
 
+    def reject_query_placeholder(**kwargs: Any) -> SimpleNamespace:
+        assert "query_author" not in kwargs, "Arrow scoring must use the existing author row signal"
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr("s2and.incremental_linking.runtime.SimpleNamespace", reject_query_placeholder)
+
     fake_featurizer = FakeFeaturizer()
     raw_plan = _raw_plan()
     raw_plan["component_members"] = component_members
@@ -1085,7 +1093,7 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan_and_featurizer(
     assert captured["featurizer"] is fake_featurizer
     assert captured["retrieval_left_indices"] == [0, 0, 0]
     assert captured["retrieval_right_indices"] == [1, 2, 3]
-    assert captured["queries"][0].query_author == "Ada Lovelace"
+    assert captured["query_authors"] == ["Ada Lovelace", "Ada Lovelace"]
     assert result.linked_signature_clusters == {"q": "c_ada"}
     assert result.telemetry["raw_arrow_retrieval_seconds"] == 0.0
     assert result.telemetry["raw_arrow_signature_count"] == 4
@@ -1113,6 +1121,21 @@ def test_preplanned_raw_arrow_scoring_rejects_mismatched_raw_plan_query_ids(tmp_
                 rust_featurizer=FakeFeaturizer(),
                 top_k=2,
                 n_jobs=1,
+            )
+
+
+def test_preplanned_raw_arrow_scoring_rejects_mismatched_query_author_count(tmp_path: Path) -> None:
+    bundle = replace(RawArrowPlanBundle.from_native_mapping(_raw_plan()), query_authors=())
+    featurizer = SimpleNamespace(signature_ids=lambda: ["q", "s1", "s2", "s3"])
+    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
+        with pytest.raises(ValueError, match="query_authors length must match query_signature_ids: 0 != 1"):
+            _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
+                _raw_test_clusterer(),
+                _raw_test_artifact(),
+                arrow_dataset=arrow_dataset,
+                query_signature_ids=["q"],
+                raw_plan_bundle=bundle,
+                rust_featurizer=featurizer,
             )
 
 

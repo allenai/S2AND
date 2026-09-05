@@ -827,96 +827,20 @@ def main() -> None:
         f"maximum_size={args.maximum_size} limit={args.limit}"
     )
     load_start = time.perf_counter()
-    if args.comparison_mode == "rust-only":
-        with ArrowDataset.open(args.arrow_root, require_specter=True) as arrow_dataset:
-            signature_ids = load_signature_ids_from_arrow(
-                arrow_dataset,
+    with ArrowDataset.open(args.arrow_root, require_specter=True) as arrow_dataset:
+        with arrow_dataset.use(require_specter=True) as arrow_lease:
+            dataset, signature_ids = load_lightweight_dataset_from_arrow(
+                arrow_lease,
                 limit=args.limit,
                 sample_mode=str(args.sample_mode),
                 seed=int(args.seed),
+                include_specter=True,
             )
-            component_labels = _load_component_labels(args.component_members_parquet, set(signature_ids))
-            load_seconds = time.perf_counter() - load_start
-            _log_progress(f"loaded signatures={len(signature_ids)} component_labels={len(component_labels)}")
-            rust_start = time.perf_counter()
-            _log_progress("running Rust graph subblocking")
-            rust_subblocks, rust_telemetry = _run_rust_subblocking(args, arrow_dataset, signature_ids, config)
-            rust_seconds = time.perf_counter() - rust_start
-        rust_subblocks_path = args.output_dir / "rust_subblocks.json"
-        _write_subblocks(rust_subblocks_path, rust_subblocks)
-        rust_partition, rust_components = _validated_partition(
-            rust_subblocks,
-            signature_ids,
-            int(args.maximum_size),
-            component_labels,
-        )
-        summary = {
-            **report_identity,
-            "inputs": {
-                "comparison_mode": "rust-only",
-                "python_source": None,
-                "raw_root": None,
-                "specter_pickle": None,
-                "arrow_root": str(args.arrow_root),
-                "component_members_parquet": str(args.component_members_parquet)
-                if args.component_members_parquet is not None
-                else None,
-                "limit": args.limit,
-                "allow_full": bool(args.allow_full),
-                "sample_mode": str(args.sample_mode),
-                "seed": int(args.seed),
-                "maximum_size": int(args.maximum_size),
-                "orcid_subblocking": bool(args.orcid_subblocking),
-                "load_seconds": float(load_seconds),
-            },
-            "graph_config": config.__dict__,
-            "counts": {
-                "signature_count": int(len(signature_ids)),
-            },
-            "rust": {
-                "seconds": float(rust_seconds),
-                "telemetry": rust_telemetry,
-                "partition": rust_partition,
-                "component_preservation": rust_components,
-            },
-            "artifacts": {
-                "summary": str(report_path),
-                "rust_subblocks": str(rust_subblocks_path),
-            },
-        }
-        summary["baseline_deltas"] = _baseline_deltas(summary, args.baseline_summary)
-        _write_fresh_json(report_path, summary)
-        print(json.dumps(summary, indent=2), flush=True)
-        return
-
-    dataset: SimpleNamespace | None = None
-    if args.python_source == "arrow":
-        with ArrowDataset.open(args.arrow_root, require_specter=True) as arrow_dataset:
-            with arrow_dataset.use(require_specter=True) as arrow_lease:
-                dataset, signature_ids = load_lightweight_dataset_from_arrow(
-                    arrow_lease,
-                    limit=args.limit,
-                    sample_mode=str(args.sample_mode),
-                    seed=int(args.seed),
-                    include_specter=True,
-                )
-    else:
-        if args.raw_root is None or args.specter_pickle is None:
-            raise ValueError("--python-source raw requires --raw-root and --specter-pickle")
-        dataset, signature_ids = load_lightweight_dataset(
-            args.raw_root,
-            args.specter_pickle,
-            limit=args.limit,
-            sample_mode=str(args.sample_mode),
-            seed=int(args.seed),
-        )
     component_labels = _load_component_labels(args.component_members_parquet, set(signature_ids))
     load_seconds = time.perf_counter() - load_start
     _log_progress(f"loaded signatures={len(signature_ids)} component_labels={len(component_labels)}")
     source_label = "python"
     source_start = time.perf_counter()
-    if dataset is None:
-        raise RuntimeError("Python comparison requires a loaded Python dataset")
     _log_progress("running Python graph subblocking")
     source_subblocks, source_telemetry = _run_python_subblocking(args, dataset, signature_ids, config)
     source_hook_telemetry = {}

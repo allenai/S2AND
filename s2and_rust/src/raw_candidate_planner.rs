@@ -1,6 +1,120 @@
 use super::*;
 use numpy::IntoPyArray;
 use pyo3::types::{PyList, PyString};
+/// Shared evidence columns emitted in the same order by both planner routes.
+#[derive(Default)]
+struct RawArrowEvidenceSignals {
+    row_orcid_match: Vec<u8>,
+    row_middle_initial_compatibility: Vec<f32>,
+    row_affiliation_overlap: Vec<f32>,
+    row_coauthor_overlap: Vec<f32>,
+    row_venue_overlap: Vec<f32>,
+    row_year_compatibility: Vec<f32>,
+    row_title_overlap: Vec<f32>,
+    row_specter_centroid_similarity: Vec<f32>,
+    row_specter_exemplar_similarity: Vec<f32>,
+    row_last_name_count_min_rarity: Vec<f32>,
+    row_candidate_last_name_count_min_rarity: Vec<f32>,
+    row_candidate_last_first_name_count_min_rarity: Vec<f32>,
+    row_last_first_name_count_min_rarity: Vec<f32>,
+    row_first_prefix_x_last_first_name_count_min_rarity: Vec<f32>,
+    row_candidate_cluster_max_paper_author_count: Vec<f32>,
+    row_paper_author_list_max_jaccard: Vec<f32>,
+    row_paper_author_list_max_containment: Vec<f32>,
+    row_paper_author_list_max_overlap_count: Vec<f32>,
+    row_local_author_window10_jaccard_max: Vec<f32>,
+    row_local_author_window10_overlap_count_max: Vec<f32>,
+    row_best_author_count_log_absdiff: Vec<f32>,
+}
+
+impl RawArrowEvidenceSignals {
+    /// Move the owned columns into NumPy without changing their native dtypes.
+    fn append_to(self, py: Python<'_>, payload: &Bound<'_, PyDict>) -> PyResult<()> {
+        payload.set_item("row_orcid_match", self.row_orcid_match.into_pyarray(py))?;
+        payload.set_item(
+            "middle_initial_compatibility",
+            self.row_middle_initial_compatibility.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "affiliation_overlap",
+            self.row_affiliation_overlap.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "coauthor_overlap",
+            self.row_coauthor_overlap.into_pyarray(py),
+        )?;
+        payload.set_item("venue_overlap", self.row_venue_overlap.into_pyarray(py))?;
+        payload.set_item(
+            "year_compatibility",
+            self.row_year_compatibility.into_pyarray(py),
+        )?;
+        payload.set_item("title_overlap", self.row_title_overlap.into_pyarray(py))?;
+        payload.set_item(
+            "specter_centroid_similarity",
+            self.row_specter_centroid_similarity.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "specter_exemplar_similarity",
+            self.row_specter_exemplar_similarity.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_last_name_count_min_rarity",
+            self.row_last_name_count_min_rarity.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_candidate_last_name_count_min_rarity",
+            self.row_candidate_last_name_count_min_rarity
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_candidate_last_first_name_count_min_rarity",
+            self.row_candidate_last_first_name_count_min_rarity
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_last_first_name_count_min_rarity",
+            self.row_last_first_name_count_min_rarity.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_first_prefix_x_last_first_name_count_min_rarity",
+            self.row_first_prefix_x_last_first_name_count_min_rarity
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_candidate_cluster_max_paper_author_count",
+            self.row_candidate_cluster_max_paper_author_count
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_paper_author_list_max_jaccard",
+            self.row_paper_author_list_max_jaccard.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_paper_author_list_max_containment",
+            self.row_paper_author_list_max_containment.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_paper_author_list_max_overlap_count",
+            self.row_paper_author_list_max_overlap_count
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_local_author_window10_jaccard_max",
+            self.row_local_author_window10_jaccard_max.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_local_author_window10_overlap_count_max",
+            self.row_local_author_window10_overlap_count_max
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_best_author_count_log_absdiff",
+            self.row_best_author_count_log_absdiff.into_pyarray(py),
+        )?;
+        Ok(())
+    }
+}
+
 struct RawArrowPlannerBuildTelemetry {
     read_cluster_seeds_secs: f64,
     read_signatures_secs: f64,
@@ -1733,78 +1847,30 @@ impl RawBlockQueryCandidatePlanner {
             "row_query_has_coauthors",
             row_query_has_coauthors.into_pyarray(py),
         )?;
-        payload.set_item("row_orcid_match", row_orcid_match.into_pyarray(py))?;
-        payload.set_item(
-            "middle_initial_compatibility",
-            row_middle_initial_compatibility.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "affiliation_overlap",
-            row_affiliation_overlap.into_pyarray(py),
-        )?;
-        payload.set_item("coauthor_overlap", row_coauthor_overlap.into_pyarray(py))?;
-        payload.set_item("venue_overlap", row_venue_overlap.into_pyarray(py))?;
-        payload.set_item(
-            "year_compatibility",
-            row_year_compatibility.into_pyarray(py),
-        )?;
-        payload.set_item("title_overlap", row_title_overlap.into_pyarray(py))?;
-        payload.set_item(
-            "specter_centroid_similarity",
-            row_specter_centroid_similarity.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "specter_exemplar_similarity",
-            row_specter_exemplar_similarity.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_last_name_count_min_rarity",
-            row_last_name_count_min_rarity.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_candidate_last_name_count_min_rarity",
-            row_candidate_last_name_count_min_rarity.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_candidate_last_first_name_count_min_rarity",
-            row_candidate_last_first_name_count_min_rarity.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_last_first_name_count_min_rarity",
-            row_last_first_name_count_min_rarity.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_first_prefix_x_last_first_name_count_min_rarity",
-            row_first_prefix_x_last_first_name_count_min_rarity.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_candidate_cluster_max_paper_author_count",
-            row_candidate_cluster_max_paper_author_count.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_paper_author_list_max_jaccard",
-            row_paper_author_list_max_jaccard.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_paper_author_list_max_containment",
-            row_paper_author_list_max_containment.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_paper_author_list_max_overlap_count",
-            row_paper_author_list_max_overlap_count.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_local_author_window10_jaccard_max",
-            row_local_author_window10_jaccard_max.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_local_author_window10_overlap_count_max",
-            row_local_author_window10_overlap_count_max.into_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_best_author_count_log_absdiff",
-            row_best_author_count_log_absdiff.into_pyarray(py),
-        )?;
+        RawArrowEvidenceSignals {
+            row_orcid_match,
+            row_middle_initial_compatibility,
+            row_affiliation_overlap,
+            row_coauthor_overlap,
+            row_venue_overlap,
+            row_year_compatibility,
+            row_title_overlap,
+            row_specter_centroid_similarity,
+            row_specter_exemplar_similarity,
+            row_last_name_count_min_rarity,
+            row_candidate_last_name_count_min_rarity,
+            row_candidate_last_first_name_count_min_rarity,
+            row_last_first_name_count_min_rarity,
+            row_first_prefix_x_last_first_name_count_min_rarity,
+            row_candidate_cluster_max_paper_author_count,
+            row_paper_author_list_max_jaccard,
+            row_paper_author_list_max_containment,
+            row_paper_author_list_max_overlap_count,
+            row_local_author_window10_jaccard_max,
+            row_local_author_window10_overlap_count_max,
+            row_best_author_count_log_absdiff,
+        }
+        .append_to(py, &payload)?;
         payload.set_item("telemetry", telemetry)?;
         timings.set_item("payload_secs", payload_start.elapsed().as_secs_f64())?;
         timings.set_item("total_secs", total_start.elapsed().as_secs_f64())?;
@@ -1885,72 +1951,7 @@ fn raw_arrow_labeled_empty_plan(py: Python<'_>) -> PyResult<Py<PyDict>> {
         "row_candidate_has_name_counts",
         Vec::<u8>::new().into_pyarray(py),
     )?;
-    payload.set_item("row_orcid_match", Vec::<u8>::new().into_pyarray(py))?;
-    payload.set_item(
-        "middle_initial_compatibility",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item("affiliation_overlap", Vec::<f32>::new().into_pyarray(py))?;
-    payload.set_item("coauthor_overlap", Vec::<f32>::new().into_pyarray(py))?;
-    payload.set_item("venue_overlap", Vec::<f32>::new().into_pyarray(py))?;
-    payload.set_item("year_compatibility", Vec::<f32>::new().into_pyarray(py))?;
-    payload.set_item("title_overlap", Vec::<f32>::new().into_pyarray(py))?;
-    payload.set_item(
-        "specter_centroid_similarity",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "specter_exemplar_similarity",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_last_name_count_min_rarity",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_last_name_count_min_rarity",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_last_first_name_count_min_rarity",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_last_first_name_count_min_rarity",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_first_prefix_x_last_first_name_count_min_rarity",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_cluster_max_paper_author_count",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_jaccard",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_containment",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_overlap_count",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_local_author_window10_jaccard_max",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_local_author_window10_overlap_count_max",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_best_author_count_log_absdiff",
-        Vec::<f32>::new().into_pyarray(py),
-    )?;
+    RawArrowEvidenceSignals::default().append_to(py, &payload)?;
     payload.set_item("telemetry", telemetry)?;
     Ok(payload.unbind())
 }
@@ -2820,78 +2821,30 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         "row_candidate_has_name_counts",
         row_candidate_has_name_counts.into_pyarray(py),
     )?;
-    payload.set_item("row_orcid_match", row_orcid_match.into_pyarray(py))?;
-    payload.set_item(
-        "middle_initial_compatibility",
-        row_middle_initial_compatibility.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "affiliation_overlap",
-        row_affiliation_overlap.into_pyarray(py),
-    )?;
-    payload.set_item("coauthor_overlap", row_coauthor_overlap.into_pyarray(py))?;
-    payload.set_item("venue_overlap", row_venue_overlap.into_pyarray(py))?;
-    payload.set_item(
-        "year_compatibility",
-        row_year_compatibility.into_pyarray(py),
-    )?;
-    payload.set_item("title_overlap", row_title_overlap.into_pyarray(py))?;
-    payload.set_item(
-        "specter_centroid_similarity",
-        row_specter_centroid_similarity.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "specter_exemplar_similarity",
-        row_specter_exemplar_similarity.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_last_name_count_min_rarity",
-        row_last_name_count_min_rarity.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_last_name_count_min_rarity",
-        row_candidate_last_name_count_min_rarity.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_last_first_name_count_min_rarity",
-        row_candidate_last_first_name_count_min_rarity.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_last_first_name_count_min_rarity",
-        row_last_first_name_count_min_rarity.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_first_prefix_x_last_first_name_count_min_rarity",
-        row_first_prefix_x_last_first_name_count_min_rarity.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_cluster_max_paper_author_count",
-        row_candidate_cluster_max_paper_author_count.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_jaccard",
-        row_paper_author_list_max_jaccard.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_containment",
-        row_paper_author_list_max_containment.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_overlap_count",
-        row_paper_author_list_max_overlap_count.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_local_author_window10_jaccard_max",
-        row_local_author_window10_jaccard_max.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_local_author_window10_overlap_count_max",
-        row_local_author_window10_overlap_count_max.into_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_best_author_count_log_absdiff",
-        row_best_author_count_log_absdiff.into_pyarray(py),
-    )?;
+    RawArrowEvidenceSignals {
+        row_orcid_match,
+        row_middle_initial_compatibility,
+        row_affiliation_overlap,
+        row_coauthor_overlap,
+        row_venue_overlap,
+        row_year_compatibility,
+        row_title_overlap,
+        row_specter_centroid_similarity,
+        row_specter_exemplar_similarity,
+        row_last_name_count_min_rarity,
+        row_candidate_last_name_count_min_rarity,
+        row_candidate_last_first_name_count_min_rarity,
+        row_last_first_name_count_min_rarity,
+        row_first_prefix_x_last_first_name_count_min_rarity,
+        row_candidate_cluster_max_paper_author_count,
+        row_paper_author_list_max_jaccard,
+        row_paper_author_list_max_containment,
+        row_paper_author_list_max_overlap_count,
+        row_local_author_window10_jaccard_max,
+        row_local_author_window10_overlap_count_max,
+        row_best_author_count_log_absdiff,
+    }
+    .append_to(py, &payload)?;
     payload.set_item("telemetry", telemetry)?;
     Ok(payload.unbind())
 }

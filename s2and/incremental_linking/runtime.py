@@ -989,7 +989,7 @@ def _production_query_author_row_signals(
     retrieval_batch: LinkerRetrievalBatch,
     *,
     query_signature_id_by_index: Mapping[int, str],
-    query_by_signature_id: Mapping[str, Any],
+    query_by_signature_id: Mapping[str, Any] | None,
 ) -> dict[str, np.ndarray]:
     candidate_batch = retrieval_batch.candidate_batch
     row_count = int(candidate_batch.row_count)
@@ -999,6 +999,8 @@ def _production_query_author_row_signals(
         if values.shape != (row_count,):
             raise ValueError(f"query_author row signal must have shape ({row_count},), got {values.shape}")
         return {}
+    if query_by_signature_id is None:
+        raise ValueError("query_author row signal is required when queries are not provided")
     row_query_indices = candidate_batch.row_query_signature_indices
     if row_query_indices is None:
         raise ValueError("candidate_batch.row_query_signature_indices is required for query_author row signals")
@@ -1465,7 +1467,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     *,
     featurizer: Any,
     retrieval_batch: LinkerRetrievalBatch,
-    queries: Sequence[Any],
+    queries: Sequence[Any] | None = None,
     query_signature_ids: Sequence[Any],
     cluster_seeds_require: Mapping[str, int | str],
     partial_supervision: Mapping[tuple[Any, Any], int | float] | None = None,
@@ -1477,9 +1479,13 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     retrieval_top_k: int | None = None,
     cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
 ) -> LinkOrAbstainProductionResult:
-    """Run production scoring/gating from an already retrieved candidate batch."""
+    """Run production scoring/gating from an already retrieved candidate batch.
 
-    if len(queries) != len(query_signature_ids):
+    Omit ``queries`` when retrieval supplies the authoritative ``query_author``
+    row signal. Callers without that signal may still supply query objects.
+    """
+
+    if queries is not None and len(queries) != len(query_signature_ids):
         raise ValueError(
             f"queries and query_signature_ids must have equal length: {len(queries)} != {len(query_signature_ids)}"
         )
@@ -1503,9 +1509,14 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         int(query_index): query_signature_id
         for query_index, query_signature_id in zip(query_signature_indices, query_signature_id_strings, strict=True)
     }
-    query_by_signature_id = {
-        query_signature_id: query for query_signature_id, query in zip(query_signature_id_strings, queries, strict=True)
-    }
+    query_by_signature_id = (
+        None
+        if queries is None
+        else {
+            query_signature_id: query
+            for query_signature_id, query in zip(query_signature_id_strings, queries, strict=True)
+        }
+    )
 
     candidate_batch = retrieval_batch.candidate_batch
     retrieved_query_indices = (
@@ -1698,18 +1709,6 @@ def _seed_map_from_component_members(
     return cluster_seeds_require
 
 
-def _query_placeholders_from_authors(
-    query_authors: Sequence[str],
-    query_signature_ids: Sequence[str],
-) -> tuple[SimpleNamespace, ...]:
-    if len(query_authors) != len(query_signature_ids):
-        raise ValueError(
-            "raw Arrow candidate plan query_authors length must match query_signature_ids: "
-            f"{len(query_authors)} != {len(query_signature_ids)}"
-        )
-    return tuple(SimpleNamespace(query_author=str(value or "")) for value in query_authors)
-
-
 def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     clusterer: Any,
     artifact: IncrementalLinkingArtifact,
@@ -1752,10 +1751,11 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         signature_id_to_index=featurizer_signature_id_to_index,
     )
     stage_start = time.perf_counter()
-    query_placeholders = _query_placeholders_from_authors(
-        raw_plan_bundle.query_authors,
-        query_signature_id_strings,
-    )
+    if len(raw_plan_bundle.query_authors) != len(query_signature_id_strings):
+        raise ValueError(
+            "raw Arrow candidate plan query_authors length must match query_signature_ids: "
+            f"{len(raw_plan_bundle.query_authors)} != {len(query_signature_id_strings)}"
+        )
     cluster_seeds_require = _seed_map_from_component_members(raw_plan_bundle.component_members)
     seed_signature_count = len(cluster_seeds_require)
     if seed_signature_count == 0 and raw_plan_bundle.telemetry is not None:
@@ -1768,7 +1768,6 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         artifact,
         featurizer=featurizer,
         retrieval_batch=retrieval_batch,
-        queries=query_placeholders,
         query_signature_ids=query_signature_id_strings,
         partial_supervision=partial_supervision,
         cluster_seeds_require=cluster_seeds_require,

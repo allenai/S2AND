@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import s2and.incremental_linking.artifact as artifact_module
-import s2and.incremental_linking.query_adapter as query_adapter_module
 import s2and.incremental_linking.runtime as runtime_module
 from s2and import feature_port, memory_budget
 from s2and.arrow_inputs import ArrowDataset
@@ -35,6 +34,7 @@ from s2and.incremental_linking.retrieval import RawArrowPlanBundle
 from s2and.incremental_linking.seed_assignment import apply_seed_links
 from s2and.prediction_state import PredictionState
 from s2and.runtime import RuntimeContext
+from s2and.text import normalize_orcid
 
 logger = logging.getLogger("s2and")
 
@@ -641,7 +641,7 @@ def _signature_orcid(dataset: _DirectArrowIncrementalDataset, signature_id: str)
     if signature is None:
         return None
     value = getattr(signature, "author_info_orcid", None)
-    return query_adapter_module.normalize_orcid(value)
+    return normalize_orcid(value)
 
 
 def promoted_incremental_orcid_fanout_by_query(

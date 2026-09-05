@@ -260,19 +260,14 @@ uv run ty check s2and --ignore unresolved-import --ignore unused-type-ignore-com
 To run the entire CI suite mimicking the GH Actions:
 
 ```bash
-uv run python scripts/run_ci_locally.py
+uv run --no-project python scripts/run_ci_locally.py
 ```
 
 See [docs/development.md](docs/development.md#local-ci-mirror) for the shared
 hosted/local job policy and individual-job commands.
 
-To run static CI checks locally without Rust extension compilation (faster iteration):
-```bash
-uv sync --active --extra dev --frozen --no-install-package s2and-rust
-uv run --active --no-project ruff format --check s2and scripts/*.py
-uv run --active --no-project ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
-uv run --active --no-project ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute
-```
+For lint and type checks without Rust extension compilation, use the
+[static-check fast path](docs/development.md#static-check-fast-path).
 
 The full pytest suite is not a no-native check; build the required extension first or use `scripts/run_ci_locally.py`.
 

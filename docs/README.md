@@ -3,7 +3,7 @@
 This directory holds both user-facing guides and internal engineering notes.
 
 Documentation status: reviewed against the simplified `1.0.0` worktree on
-2026-07-27. Current-behavior docs do not imply that canonical artifacts or a
+2026-09-04. Current-behavior docs do not imply that canonical artifacts or a
 v1.3 model have already been published.
 
 [release.md](release.md) is the sole v1.3 release policy and runbook.

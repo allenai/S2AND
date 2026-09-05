@@ -66,8 +66,15 @@ final repair pass can merge whole subblocks that contain the same ORCID, but it 
 from an existing subblock. The merge runs only when the combined whole subblocks fit within `maximum_size`; otherwise
 the split is preserved and telemetry records the capacity skip.
 
-The ORCID key is canonicalized to match Rust Arrow ingestion: keep digits and `X`/`x`, require exactly 16 ORCID
-characters, uppercase the check digit, and format as `0000-0000-0000-0000`. Blank or invalid values are ignored.
+The ORCID key is canonicalized to match Rust Arrow ingestion: extract the first
+structured token containing 15 ASCII digits followed by an ASCII digit or
+`X`/`x`, with optional supported dash separators between four-character groups.
+The token cannot be immediately adjacent to another ASCII digit or `X`/`x`.
+URL and label prefixes are accepted; arbitrary punctuation inside the token is
+not stripped. The result uses ASCII hyphens and an uppercase final `X`, for
+example `ORCID: 000000021825009x` becomes `0000-0002-1825-009X`.
+This validates the token's structure, not its checksum. Values with no matching
+token are ignored.
 This subblocking policy is independent from same-ORCID hard-link distance constraints.
 The `use_orcid_subblocking` flag controls only that final same-ORCID repair; it
 does not disable the prefix-pair merge priors described above.
@@ -149,11 +156,14 @@ indexes, or the incremental artifact raise instead of falling back to Python or
 
 Incremental prediction has two supported routes:
 
-- **Promoted Rust linker.** `Clusterer.predict_incremental_from_arrow` requires a Rust runtime context and an open
-  `ArrowDataset`. Retrieval and scoring run directly against its Arrow tables using the pinned
-  native ABI.
-- **Python helper.** `Clusterer.predict_incremental` operates on `ANDData` with a Python runtime context. It covers
-  partition coverage but does not implement batched incremental routing.
+- **Promoted Rust linker.** `Clusterer.predict_incremental_from_arrow` requires
+  an open `ArrowDataset` and creates a Rust runtime context when none is supplied.
+  An explicit context must select Rust. Retrieval and scoring run directly
+  against its Arrow tables using the pinned native ABI.
+- **Python helper.** `Clusterer.predict_incremental` operates on `ANDData` and
+  creates a Python runtime context when none is supplied. An explicit context
+  must select Python. It covers partition coverage but does not implement
+  batched incremental routing.
 
 The APIs do not inspect native capabilities or fall back between implementations. A missing or mismatched pinned
 Rust extension is an error on the Arrow route.

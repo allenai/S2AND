@@ -1,6 +1,6 @@
 ﻿# Arrow Dataset Specification
 
-Status date: 2026-07-27
+Status date: 2026-09-04
 
 This document defines the Arrow artifact contract for engineers assembling
 datasets for direct Rust S2AND routes. These artifacts are used by
@@ -34,19 +34,22 @@ Required for full-block prediction:
   the model uses `embedding_similarity`; production/eval bundles use physical
   `specter2.arrow`
 
-Required in addition for seeded prediction or incremental prediction promoted
-through Arrow:
+Public seeded prediction receives `cluster_seeds_require` explicitly.
+`predict_incremental_from_arrow(...)` requires this mapping to be nonempty;
+request-local disallows and altered profiles are supplied through
+`cluster_seeds_disallow` and `altered_cluster_signatures`. Published request
+sidecars do not supply these public API arguments.
+
+The raw incremental planner uses request-local tables, materialized by the
+runtime from the prediction request:
 
 - request-local `query_signatures.arrow` for raw incremental candidate planning
 - `cluster_seeds.arrow`
 
-Optional for seeded prediction or incremental prediction promoted through Arrow:
+Optional producer/validation sidecars:
 
-- `cluster_seed_disallows.arrow` when pairwise seed disallow constraints exist
-
-Required when incremental input contains altered claimed profiles:
-
-- `altered_cluster_signatures.arrow`
+- `cluster_seed_disallows.arrow` for pairwise seed disallow constraints
+- `altered_cluster_signatures.arrow` for altered claimed profiles
 
 Offline evaluation datasets may also include:
 
@@ -95,25 +98,24 @@ Notes:
   raw incremental planner. Runtime helpers may materialize it from existing
   Python request arguments; producers that already have a typed request should
   pass it under the `query_signatures` path key.
-- `cluster_seeds.arrow` is one accepted seed source for seeded/incremental
-  datasets. It can be omitted for unseeded full prediction, offline eval, and
-  incremental production requests that provide seed assignments through another
-  normalized request/dataset mapping such as `dataset.cluster_seeds_require`.
-  Promoted Rust incremental prediction still requires a seed source; when the
-  source is not a physical Arrow sidecar, the runtime materializes a
-  request-local `cluster_seeds.arrow`.
+- `cluster_seeds.arrow` records seed assignments for producer/validation
+  tooling and raw planner inputs. Public Arrow prediction uses the explicit
+  `cluster_seeds_require` argument; incremental prediction requires a nonempty
+  mapping and materializes a request-local `cluster_seeds.arrow` from it.
+  Publishing a seed sidecar does not replace that argument.
 - `cluster_seed_disallows.arrow` preserves pairwise seed disallow constraints.
   Hand-authored artifacts can omit it when the request has no seed disallows;
   converters may emit an empty table instead. An explicit path must exist when
-  present.
+  present. Public Arrow prediction receives these constraints through the
+  explicit `cluster_seeds_disallow` argument.
 - When using `scripts.arrow_conversion_helpers.write_raw_planner_arrow_from_anddata(...)` to publish physical
   seeded/incremental seed sidecars, pass `include_empty_cluster_seeds=True` so
   empty seed/disallow tables are still emitted.
-- `altered_cluster_signatures.arrow` is required for incremental datasets whose
-  seed clusters include altered claimed profiles. When an in-memory
-  `ANDData.altered_cluster_signatures` request value is present it is
-  authoritative; otherwise the Arrow file is the producer-owned request
-  artifact for this condition. `altered_cluster_signatures.txt` is not a valid
+- `altered_cluster_signatures.arrow` records altered claimed profiles for
+  producer/validation tooling. Public Arrow prediction reads altered profiles
+  from the explicit `altered_cluster_signatures` argument, with no fallback to
+  this sidecar. Classic prediction reads `ANDData.altered_cluster_signatures`.
+  `altered_cluster_signatures.txt` is not a valid
   production Arrow sidecar; it remains only for older fixtures and
   ANDData-compatible training tooling.
 - `<dataset>_clusters.json` is ground truth for offline evaluation only. It is
@@ -324,9 +326,9 @@ omitted; when present, they must have the listed type.
 | `author_affiliations` | `list<string>` | yes | Author affiliations; prefer empty list over null |
 | `author_orcid` | `string` | yes | Optional column containing ORCID evidence when available |
 | `author_position` | `int64` | no | Author position on the paper |
-| `author_block` | `string` | yes | S2 block key, needed for block reconstruction/eval |
-| `author_email` | `string` | yes | Author email |
-| `source_author_ids` | `list<string>` | yes | Upstream author ids |
+| `author_block` | `string` | yes | Optional column containing the S2 block key; needed for block reconstruction/eval |
+| `author_email` | `string` | yes | Optional column containing author email |
+| `source_author_ids` | `list<string>` | yes | Optional column containing upstream author ids |
 
 Name-count values are intentionally not part of the signature table.
 
@@ -395,10 +397,12 @@ One row per embedded paper. Required columns:
 All vectors in one file must have the same dimension, and `paper_id` values
 must be unique. A missing embedding means there is no row for that `paper_id`;
 do not represent missing vectors with a null `embedding` value. If the model
-uses `embedding_similarity`, every paper referenced by `signatures.arrow` should
-have an embedding row for the selected embedding version. Missing embeddings can
-change scores and should fail validation unless the target model explicitly
-permits them.
+uses `embedding_similarity`, the selected embedding table must exist, but
+partial coverage (including a valid zero-row table) is accepted. Missing vectors
+use the runtime's missing-vector feature behavior and can change scores.
+For a source contract that guarantees complete coverage, validate with
+`--require-complete-embeddings`; `--require-embeddings` checks table presence
+and structure without requiring an embedding for every referenced paper.
 
 ### `query_signatures.arrow`
 
@@ -418,12 +422,11 @@ and validates a non-empty `query_author` against that derived query author.
 
 ### `cluster_seeds.arrow`
 
-One accepted seed source for incremental/seeded prediction through the Arrow
-promoted path. Optional for unseeded full prediction and for incremental
-production requests that provide seed assignments through another normalized
-request/dataset mapping. Promoted Rust incremental prediction requires some seed
-source; if the caller provides a non-Arrow mapping, the runtime writes a
-request-local `cluster_seeds.arrow` before entering raw Arrow retrieval.
+Seed assignment table for producer/validation tooling and raw incremental
+planning. Public Arrow prediction receives seeds through the explicit
+`cluster_seeds_require` mapping. Incremental prediction requires a nonempty
+mapping and writes a request-local `cluster_seeds.arrow` before entering raw
+Arrow retrieval; it does not load seed assignments from a published sidecar.
 
 | Column | Arrow type | Nulls | Meaning |
 |---|---:|---:|---|
@@ -437,10 +440,11 @@ strings.
 
 ### `cluster_seed_disallows.arrow`
 
-Optional for incremental/seeded prediction through the Arrow promoted path.
-Omit the file when no seed disallows are present, or emit a valid empty table
-when using a converter configured to keep seed/disallow tables explicit. An
-explicit path must exist when present.
+Optional producer/validation sidecar for seed disallow constraints. Public Arrow
+prediction receives these pairs through the explicit `cluster_seeds_disallow`
+argument. Omit the file when no seed disallows are present, or emit a valid empty
+table when using a converter configured to keep seed/disallow tables explicit.
+An explicit path must exist when present.
 
 | Column | Arrow type | Nulls | Meaning |
 |---|---:|---:|---|
@@ -454,9 +458,10 @@ should fail validation.
 
 ### `altered_cluster_signatures.arrow`
 
-Required for incremental prediction when the request includes altered claimed
-profiles. Omit it, or write an empty table, when no altered profiles are
-present.
+Producer/validation sidecar describing altered claimed profiles. Public Arrow
+prediction receives these ids through the explicit `altered_cluster_signatures`
+argument and does not load them from this file. Omit it, or write an empty table,
+when no altered profiles are present.
 
 Required columns:
 
@@ -464,9 +469,10 @@ Required columns:
 |---|---:|---:|---|
 | `signature_id` | `string` | no | Seed signature id belonging to an altered claimed profile |
 
-Each id must exist in `signatures.arrow` and in the active seed source. At
-runtime, S2AND maps these signature ids through the seed assignments to identify
-the claimed seed components that need altered-profile pre-splitting.
+Each id must exist in `signatures.arrow` and in the active seed assignments. At
+runtime, S2AND maps the explicitly supplied altered signature ids through the
+seed assignments to identify the claimed seed components that need
+altered-profile pre-splitting.
 `signature_id` values must be unique.
 
 `altered_cluster_signatures.txt` with one signature id per line is supported
@@ -620,12 +626,10 @@ Conditional `paths` entries:
 - `specter` is required when the selected model uses `embedding_similarity`.
   This is the selected embedding file for the run, even when the physical file is
   named `specter2.arrow`.
-- `cluster_seeds` is required only when the published Arrow sidecar is the seed
-  source. Seeded or incremental Arrow prediction may instead receive a
-  normalized request/dataset seed mapping and materialize request-local Arrow.
-  `cluster_seed_disallows` is optional; omit it when no disallows are present.
-- `altered_cluster_signatures` is required when altered claimed profiles are
-  present.
+- `cluster_seeds`, `cluster_seed_disallows`, and `altered_cluster_signatures`
+  are optional producer/validation paths. Public Arrow prediction receives
+  seeds, disallows, and altered profiles as explicit arguments; declaring these
+  paths does not populate the request.
 - `clusters` is eval-only ground truth.
 - `name_counts_index` is required when the selected model uses name-count
   features.
@@ -698,7 +702,8 @@ Required checks:
   `signatures.signature_id` and `cluster_seeds.signature_id`.
 - `name_counts_index/manifest.json` exists when the selected model uses
   `name_counts`.
-- Manifest row counts match the corresponding Arrow table row counts.
+- Manifest `files` entries match the retained files' byte counts and SHA-256
+  digests. Row counts are derived from Arrow tables and are not manifest fields.
 - `author_block` is present when the dataset will be used for block
   reconstruction or offline eval.
 - Signature row order matches the source `ANDData` order or the documented

@@ -1,6 +1,6 @@
 # Threading and parallelism
 
-Status date: 2026-07-24
+Status date: 2026-09-04
 
 S2AND uses multiple libraries that can each create their own thread pools (Rust Rayon, LightGBM/OpenMP, BLAS, etc.).
 If those pools are configured independently, runs can oversubscribe CPU cores and show higher-than-expected CPU usage.
@@ -15,8 +15,10 @@ Within the Python API, treat `n_jobs` as the canonical concurrency setting for a
 (`-1` means all CPUs); zero, booleans, strings, and floats are rejected.
 
 - **Rust Arrow routes**: Python passes `num_threads=n_jobs` into the Rust extension for batch constraints + featurization.
-- **LightGBM inference**: `Clusterer.n_jobs` propagates into the underlying estimators; prediction uses the
-  estimator's configured threading rather than passing a separate `num_threads` override to `predict_proba()`.
+- **Production model scoring**: `Clusterer.n_jobs` propagates into the underlying
+  estimators. `NativeLightGBMBinaryClassifier` passes its configured `n_jobs` to
+  `RustLightGBMBooster`, which scores through Rayon. OpenMP does not control this
+  inference path.
 - **Python preprocessing**: `ANDData(n_jobs=...)` controls the limited (and platform-dependent) pooling used in some
   preprocessing phases (see “Python preprocessing parallelism” below).
 
@@ -75,14 +77,16 @@ route.
    - `clusterer.n_jobs = N` (or pass `n_jobs=N` when constructing `Clusterer`)
 
 2. **Set thread env vars before importing compute-heavy libraries** (especially on Windows):
-   - `OMP_NUM_THREADS=N` for OpenMP users such as LightGBM
+   - `OMP_NUM_THREADS=N` for OpenMP phases such as Python LightGBM training;
+     production Rust scoring is controlled by `n_jobs` instead
    - Usually `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `NUMEXPR_NUM_THREADS=1`
    - Optional: `RAYON_NUM_THREADS=N` (only affects Rust code that uses Rayon’s global pool; S2AND’s Rust extension
      primarily uses explicit `num_threads` arguments instead)
 
    Why are the BLAS / NumExpr knobs usually pinned to `1` while OpenMP / Rayon may be set to `N`?
 
-   - In typical S2AND runs, the main parallel work is Rust featurization / constraint resolution and LightGBM inference.
+   - Production inference parallelizes Rust featurization, constraint resolution,
+     and model scoring through Rayon. Python LightGBM training uses OpenMP.
    - MKL, OpenBLAS, and NumExpr can create their own thread pools for helper operations inside NumPy / SciPy expressions.
    - If those helper libraries also fan out to `N` threads, a single S2AND process can end up with nested parallelism
      (`Rayon x BLAS`, `OpenMP x BLAS`, etc.), which usually hurts end-to-end throughput through oversubscription.
@@ -112,8 +116,10 @@ route.
      uv run python your_script.py --n_jobs 36
      ```
 
-     In this setup, do **not** leave `OMP_NUM_THREADS=1` if you want LightGBM / OpenMP inference to use the available
-     cores.
+     `--n_jobs 36` controls production Rust inference concurrency.
+     `OMP_NUM_THREADS=36` configures any OpenMP phases in the same job; it does
+     not increase production Rust scoring concurrency. For an inference-only
+     process, leaving `OMP_NUM_THREADS=1` does not limit the Rust scorer.
 
    - **An outer scheduler / worker pool is already parallelizing the job**:
 
@@ -146,7 +152,7 @@ Rules of thumb:
   worker.
 - Prefer **one parallelism layer per phase**:
   - Rust batch featurization: Rayon handles parallelism; avoid wrapping it in additional thread pools.
-  - LightGBM inference: scoring runs in Rust (`RustLightGBMBooster`) on the estimator's configured `n_jobs` via the
+  - Production model inference: scoring runs in Rust (`RustLightGBMBooster`) on the estimator's configured `n_jobs` via the
     shared Rayon pools; avoid concurrent `predict_proba()` calls from multiple workers.
 - BLAS / NumExpr are usually **not** the parallelism layer you want to scale first in S2AND. Leave
   `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, and `NUMEXPR_NUM_THREADS=1` unless profiling shows otherwise.

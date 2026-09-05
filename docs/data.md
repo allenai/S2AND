@@ -32,11 +32,13 @@ apostrophe variants of `O'Connor` become `oconnor`; and `Ou-Yang` and
 `first_last` when both are informative, and `last_first_initial` when both
 components exist.
 
-At comparison time, `same_prefix_tokens` is symmetric: every aligned token in
-the shorter canonical first name must prefix its counterpart, and empty input
+At comparison time, `same_prefix_tokens` checks aligned token pairs up to the
+shorter token list. In each pair, either token must prefix the other; the
+direction can differ between pairs (`ann marie` matches `anna m`). Empty input
 is missing evidence. Alias tuples are unordered. Canonical last names retain
-spaces; only documented count/block projections compact them, while
-`canonical_lasts_equivalent` treats dash/space variants as equivalent.
+spaces in storage, but `canonical_lasts_equivalent` ignores spaces when
+comparing them: `ou yang` equals `ouyang`. Dash variants become spaces during
+canonicalization, before this comparison.
 
 The live authorities are `s2and.text`, its Rust implementation, and
 [the frozen examples](../tests/fixtures/canonical_name_examples.json).

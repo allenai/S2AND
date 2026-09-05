@@ -1296,17 +1296,29 @@ def _materialize_arrow_rust_feature_bundle(
         materialized_keys.append(table_key)
         for dataset_name, dataset_rows in labels.groupby(labels["dataset"].astype(str), sort=False):
             dataset_name = str(dataset_name)
-            row_positions = dataset_rows.index.to_numpy(dtype=np.int64)
-            partial_path = partial_dir / f"{_safe_dataset_filename(dataset_name)}.parquet"
-            pending_by_dataset.setdefault(dataset_name, []).append(
-                ArrowRustPendingShard(
-                    table_key=table_key,
-                    dataset_name=dataset_name,
-                    rows=dataset_rows.reset_index(drop=True),
-                    row_positions=row_positions,
-                    partial_path=partial_path,
+            query_identities = dataset_rows[["query_signature_id", "query_view"]].astype(str)
+            group_identity_counts = query_identities.groupby(dataset_rows["query_group_id"].astype(str)).nunique()
+            inconsistent_groups = group_identity_counts.index[group_identity_counts.gt(1).any(axis=1)]
+            if len(inconsistent_groups):
+                raise ValueError(
+                    f"{table_key} {dataset_name}: query group {str(inconsistent_groups[0])!r} "
+                    "is not a single query/view"
                 )
-            )
+            # The native plan allows one view per signature. Keep each complete
+            # query together while sharing the dataset context across its views.
+            for query_view, view_rows in dataset_rows.groupby(dataset_rows["query_view"].astype(str), sort=False):
+                partial_path = partial_dir / (
+                    f"{_safe_dataset_filename(dataset_name)}__{_safe_dataset_filename(str(query_view))}.parquet"
+                )
+                pending_by_dataset.setdefault(dataset_name, []).append(
+                    ArrowRustPendingShard(
+                        table_key=table_key,
+                        dataset_name=dataset_name,
+                        rows=view_rows.reset_index(drop=True),
+                        row_positions=view_rows.index.to_numpy(dtype=np.int64),
+                        partial_path=partial_path,
+                    )
+                )
 
     for dataset_name, shards in pending_by_dataset.items():
         print(

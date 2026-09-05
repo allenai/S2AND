@@ -2282,6 +2282,8 @@ class Clusterer:
             whether to turn off the tqdm progress bars in this function
         incremental_dont_use_cluster_seeds: bool
             whether to ignore dataset cluster seeds while resolving constraints in incremental flows
+        total_ram_bytes: int | None
+            Optional RAM allowance for matrix allocation, pair-feature batches, and native scoring.
 
         Returns
         -------
@@ -2335,27 +2337,25 @@ class Clusterer:
         logger.info(f"Pairwise probas initialized with {num_pairs} elements, starting making all pairs")
 
         model_predict_seconds = 0.0
+        selected_count = _count_selected_features(self.featurizer_info)
+        nameless_count = (
+            _count_selected_features(self.nameless_featurizer_info) if self.nameless_featurizer_info is not None else 0
+        )
+        batch_chunk_plan = _compute_predict_batch_chunk_plan(
+            self.featurizer_info.number_of_features,
+            selected_feature_count=selected_count,
+            nameless_feature_count=nameless_count,
+            total_pairs=num_pairs,
+            total_ram_bytes=total_ram_bytes,
+        )
+        pair_chunk_size = max(
+            1,
+            min(
+                int(self.batch_size),
+                int(batch_chunk_plan.chunk_pairs) if batch_chunk_plan is not None else int(self.batch_size),
+            ),
+        )
         if use_rust_blockwise:
-            selected_count = _count_selected_features(self.featurizer_info)
-            nameless_count = (
-                _count_selected_features(self.nameless_featurizer_info)
-                if self.nameless_featurizer_info is not None
-                else 0
-            )
-            batch_chunk_plan = _compute_predict_batch_chunk_plan(
-                self.featurizer_info.number_of_features,
-                selected_feature_count=selected_count,
-                nameless_feature_count=nameless_count,
-                total_pairs=num_pairs,
-                total_ram_bytes=total_ram_bytes,
-            )
-            pair_chunk_size = max(
-                1,
-                min(
-                    int(self.batch_size),
-                    int(batch_chunk_plan.chunk_pairs) if batch_chunk_plan is not None else int(self.batch_size),
-                ),
-            )
             for prediction_chunk in self._iter_rust_predicted_distance_matrix_chunks(
                 block_dict,
                 dataset,
@@ -2411,6 +2411,8 @@ class Clusterer:
                 write_prediction=_write_prediction,
                 disable_tqdm=disable_tqdm,
                 tqdm_desc="Writing matrices",
+                pair_chunk_size=pair_chunk_size,
+                total_ram_bytes=total_ram_bytes,
             )
 
             if isinstance(self.cluster_model, FastCluster):

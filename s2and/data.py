@@ -199,20 +199,36 @@ def _split_train_val_test(
 
 
 def _map_fixed_pair_labels(pair_frame: pd.DataFrame, split_name: str) -> pd.DataFrame:
-    """Copy a fixed-pair frame and map its labels to binary integers.
+    """Select named pair columns in order and map labels to binary integers.
 
     Args:
-        pair_frame: Input frame containing a ``label`` column.
+        pair_frame: Input frame containing named signature IDs and ``label``.
         split_name: Human-readable split name for validation errors.
 
     Returns:
-        A copy of ``pair_frame`` with mapped integer labels.
+        A copy containing only the two signature ID columns followed by the
+        mapped integer label column.
 
     Raises:
-        ValueError: If any label is outside the fixed-pair label vocabulary.
+        ValueError: If pair columns are missing or ambiguous, or any label is
+            outside the fixed-pair label vocabulary.
     """
 
-    output = pair_frame.copy()
+    column_sets = [
+        columns
+        for columns in (
+            ("signature_id_1", "signature_id_2", "label"),
+            ("pair1", "pair2", "label"),
+            ("pairs1", "pair2", "label"),
+        )
+        if set(columns).issubset(pair_frame.columns)
+    ]
+    if not pair_frame.columns.is_unique or len(column_sets) != 1:
+        raise ValueError(
+            f"Invalid fixed-pair columns in {split_name} split: require label and exactly one of "
+            "(signature_id_1, signature_id_2), (pair1, pair2), or (pairs1, pair2), with unique column names"
+        )
+    output = pair_frame.loc[:, list(column_sets[0])].copy()
     mapped_labels = output["label"].map(_PAIR_LABEL_MAP)
     unknown_mask = mapped_labels.isna()
     if bool(unknown_mask.any()):
@@ -518,7 +534,10 @@ class ANDData:
             pairs remain hard negatives, including within a require group.
         altered_cluster_signatures: path to the signature ids \n-separated txt file (or a list or set object)
             Clusters that these signatures appear in will be marked as "altered"
-        train_pairs: path to predefined train pairs csv (or the dataframe object)
+        train_pairs: Path to predefined train pairs CSV (or the DataFrame object).
+            Named ID columns are ``signature_id_1``/``signature_id_2``,
+            ``pair1``/``pair2``, or historical ``pairs1``/``pair2``, plus ``label``.
+            Column order is ignored; additional metadata columns are excluded.
         val_pairs: path to predefined val pairs csv (or the dataframe object)
         test_pairs: path to predefined test pairs csv (or the dataframe object)
         train_blocks: path to predefined train blocks (or the json object)

@@ -226,6 +226,10 @@ dataset replaces `clusters` with `train_pairs` and `val_pairs` and has a
 same-named pairwise evaluation dataset. Model and evaluation identities must
 be disjoint.
 
+Fixed-pair training and validation CSVs use `signature_id_1`, `signature_id_2`,
+and `label` columns. Columns are selected by name, so their order does not
+matter. Labels may be `YES`/`NO` or `1`/`0`.
+
 The production trainer intentionally accepts only the full release population:
 `aminer`, `arnetminer`, `inspire`, `kisti`, `orcid`, `pubmed`, `qian`, and
 `zbmath` in random-block mode, plus `augmented` in fixed-pair mode. Replace the
@@ -299,7 +303,7 @@ uv run python scripts/production/model/linker_source_bundle.py `
   --benchmark-arrow-root path/to/benchmark_arrow `
   --replay-arrow-root path/to/replay_arrow `
   --name-counts-index path/to/name_counts_index `
-  --output-source-bundle path/to/linker_source_bundle `
+  --output-source-bundle path/to/run/stages/linker_source_bundle `
   --output-data-root path/to/public_data_root
 ```
 
@@ -320,11 +324,16 @@ uv run python scripts/production/model/train_linker_and_finalize.py `
   --source-bundle-root path/to/run/stages/linker_source_bundle `
   --target-json tests/fixtures/incremental_linker_training_target.json `
   --pairwise-model-path path/to/run/stages/calibrated/production_model_vX.Y `
-  --name-counts-index-root path/to/name_counts_index `
+  --name-counts-index-root path/to/run/stages/linker_source_bundle/name_counts_index `
   --output-dir path/to/run/stages/linker_release `
   --n-jobs REVIEWED_N_JOBS `
   --total-ram-bytes REVIEWED_LINKER_RAM_BYTES
 ```
+
+Use the name-count index inside the assembled source bundle. Assembly copies
+the reviewed index there and binds its Arrow datasets to that exact path;
+linker preflight requires the bound path even when another copy has identical
+contents.
 
 The retained 53-feature target has SHA-256
 `00e842566e339c2a8df4384f923d78aef0f51f01840c265bba5d27d0e45dbc04`.

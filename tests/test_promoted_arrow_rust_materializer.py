@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from s2and.arrow_inputs import ArrowDataset
+from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking_training.classic import OfficialBundle
 from scripts.production.model import train_linker_and_finalize as promoted_train
@@ -22,7 +23,7 @@ from scripts.production.model.train_linker_and_finalize import (
     _resolve_arrow_rust_pair_labels,
     _write_arrow_rust_partial_frame,
 )
-from tests.helpers import write_minimal_arrow_prediction_bundle
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, write_minimal_arrow_prediction_bundle
 
 
 @pytest.fixture
@@ -132,6 +133,7 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
                 "dataset": "toy",
                 "query_group_id": "q1",
                 "query_signature_id": "q1",
+                "query_view": "full",
                 "candidate_component_key": "candidate",
                 "retrieval_rank": 1,
                 "label": 0,
@@ -140,6 +142,7 @@ def test_fresh_materialization_writes_one_bundle_without_identity_sidecars(
                 "dataset": "toy",
                 "query_group_id": "q1",
                 "query_signature_id": "q1",
+                "query_view": "full",
                 "candidate_component_key": "unreachable",
                 "retrieval_rank": 30,
                 "label": 1,
@@ -258,6 +261,139 @@ def test_fresh_materialization_rejects_an_existing_output_directory(tmp_path: Pa
         promoted_train._copy_bundle_support_files(source_bundle, output_root)  # noqa: SLF001
 
     assert marker.read_text(encoding="utf-8") == "existing output"
+
+
+@pytest.mark.parametrize(
+    "invalid_group",
+    [None, "query_view", "query_signature_id"],
+    ids=["valid", "mixed_group_views", "mixed_group_signatures"],
+)
+def test_materialization_preserves_mixed_query_views_and_source_row_order(
+    tmp_path: Path, target_payload: dict[str, Any], invalid_group: str | None
+) -> None:
+    """Materialize interleaved views together with the same features as separate calls."""
+    source_root = tmp_path / "source"
+    labels_path = source_root / "labels" / "train.parquet"
+    labels_path.parent.mkdir(parents=True)
+    (source_root / "splits").mkdir()
+    rows = pd.DataFrame(
+        [
+            {
+                "dataset": "toy",
+                "query_signature_id": "0",
+                "query_group_id": f"q:{view}",
+                "base_group_id": "q",
+                "query_view": view,
+                "candidate_component_key": component,
+                "retrieval_rank": rank,
+                "label": int(component == "candidate"),
+            }
+            for view, component, rank in (
+                ("full", "other", 2),
+                ("initial_only", "candidate", 1),
+                ("auto", "candidate", 1),
+                ("full", "candidate", 1),
+                ("auto", "other", 2),
+                ("initial_only", "other", 2),
+            )
+        ]
+    )
+    if invalid_group == "query_view":
+        rows.loc[rows["query_view"] == "initial_only", "query_group_id"] = "q:full"
+    elif invalid_group == "query_signature_id":
+        rows.loc[1, "query_signature_id"] = "3"
+    rows.to_parquet(labels_path, index=False)
+    members_path = source_root / "members.parquet"
+    pd.DataFrame(
+        {
+            "candidate_component_key": ["candidate", "other"],
+            "member_index": [0, 0],
+            "signature_id": ["1", "2"],
+        }
+    ).to_parquet(members_path, index=False)
+    payload = {
+        "bundle_name": "mixed_views",
+        "assets": {
+            "featureless_rows": {"files": {"train_path": "labels/train.parquet"}},
+            "candidate_members": {"datasets": {"toy": "members.parquet"}},
+        },
+        "models": {"classic": {"retrieval_top_k": 2}},
+        "expected_metrics": {},
+    }
+    (source_root / "bundle.json").write_text(json.dumps(payload), encoding="utf-8")
+    source_bundle = promoted_train.load_bundle(source_root)
+    dataset = build_arrow_training_dataset(build_dummy_dataset("toy", mode="train"), source_root / "datasets" / "toy")
+    arrow_dataset = dataset.arrow_dataset
+    assert isinstance(arrow_dataset, ArrowDataset)
+
+    class ConstantPairwise:
+        def predict_proba_positive(self, features: np.ndarray) -> np.ndarray:
+            return np.full(len(features), 0.8)
+
+    clusterer = SimpleNamespace(
+        classifier=ConstantPairwise(),
+        featurizer_info=FeaturizationInfo(["year_diff"]),
+        nameless_classifier=None,
+        nameless_featurizer_info=None,
+        use_default_constraints_as_supervision=True,
+    )
+    options = {
+        "name_tuples": frozenset(),
+        "clusterer": clusterer,
+        "n_jobs": 1,
+        "total_ram_bytes": 100_000_000,
+        "max_exemplars": 1,
+        "pairwise_model_nan_value": np.nan,
+        "pairwise_aggregate_nan_value": 0.0,
+    }
+    output_root = tmp_path / "output"
+    feature_columns = target_payload["features"]
+    try:
+        if invalid_group is not None:
+            with pytest.raises(ValueError, match="query group .* is not a single query/view"):
+                promoted_train._materialize_arrow_rust_feature_bundle(  # noqa: SLF001
+                    source_bundle=source_bundle,
+                    output_bundle_root=output_root,
+                    target=target_payload,
+                    table_keys=("train_path",),
+                    arrow_datasets={"toy": arrow_dataset},
+                    **options,
+                )
+            return
+        context = promoted_train._build_arrow_rust_dataset_context(  # noqa: SLF001
+            source_bundle=source_bundle, dataset_name="toy", arrow_dataset=arrow_dataset
+        )
+        expected = pd.DataFrame(index=rows.index, columns=feature_columns, dtype=np.float32)
+        try:
+            for _view, view_rows in rows.groupby("query_view", sort=False):
+                features, _summary, selected = promoted_train._materialize_arrow_rust_dataset_rows(  # noqa: SLF001
+                    context=context,
+                    rows=view_rows,
+                    target_features=feature_columns,
+                    retrieval_top_k=2,
+                    **options,
+                )
+                assert selected.tolist() == list(range(len(view_rows)))
+                expected.loc[view_rows.index] = np.column_stack([features[column] for column in feature_columns])
+        finally:
+            promoted_train._release_arrow_rust_dataset_context(context)  # noqa: SLF001
+        _bundle, summaries = promoted_train._materialize_arrow_rust_feature_bundle(  # noqa: SLF001
+            source_bundle=source_bundle,
+            output_bundle_root=output_root,
+            target=target_payload,
+            table_keys=("train_path",),
+            arrow_datasets={"toy": arrow_dataset},
+            **options,
+        )
+    finally:
+        arrow_dataset.close()
+
+    output = pd.read_parquet(output_root / "features_corrected" / "train.parquet")
+    identity_columns = ["query_signature_id", "query_group_id", "query_view", "candidate_component_key", "label"]
+    pd.testing.assert_frame_equal(output[identity_columns], rows[identity_columns])
+    np.testing.assert_array_equal(output[feature_columns].to_numpy(), expected.to_numpy())
+    assert summaries[0]["rows"] == len(rows)
+    assert sum(summary["rows"] for summary in summaries[0]["datasets"]) == len(rows)
 
 
 def test_block_local_member_ids_drop_foreign_members() -> None:

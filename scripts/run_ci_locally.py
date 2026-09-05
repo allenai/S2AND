@@ -5,6 +5,7 @@ Run local CI with close parity to `.github/workflows/main.yaml`.
 With no argument, execution order is:
   1) lint job:
      - version sync check
+     - generated feature-schema sync check
      - isolated, exactly pinned ruff check / format checks
   2) typecheck-and-test job:
      - run Rust formatting, Clippy, and native unit tests
@@ -230,6 +231,7 @@ def run_lint_job() -> None:
     print("\n=== lint ===")
     ruff_requirement = exact_dev_tool_requirement("ruff")
     run_uv(["run", "--no-project", "python", "scripts/sync_version.py", "--check"])
+    run_uv(["run", "--no-project", "python", "scripts/sync_feature_schema.py", "--check"])
     run_uv(isolated_tool_args(ruff_requirement, "check", "s2and", "scripts", "tests"))
     run_uv(isolated_tool_args(ruff_requirement, "format", "--check", "s2and"))
     script_files = top_level_script_files()

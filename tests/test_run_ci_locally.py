@@ -23,6 +23,7 @@ def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
     ruff_requirement = run_ci.exact_dev_tool_requirement("ruff")
     assert calls == [
         ["run", "--no-project", "python", "scripts/sync_version.py", "--check"],
+        ["run", "--no-project", "python", "scripts/sync_feature_schema.py", "--check"],
         ["tool", "run", "--isolated", ruff_requirement, "check", "s2and", "scripts", "tests"],
         ["tool", "run", "--isolated", ruff_requirement, "format", "--check", "s2and"],
         [

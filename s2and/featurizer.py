@@ -18,10 +18,21 @@ from s2and.consts import (
     NUMPY_NAN,
 )
 from s2and.data import ANDData
+from s2and.feature_schema import (
+    DEFAULT_FEATURE_GROUPS as DEFAULT_FEATURE_GROUPS,
+)
+from s2and.feature_schema import (
+    DEFAULT_NAMELESS_FEATURE_GROUPS as DEFAULT_NAMELESS_FEATURE_GROUPS,
+)
+from s2and.feature_schema import (
+    FEATURE_SCHEMA,
+)
+from s2and.feature_schema import (
+    NAME_DEPENDENT_FEATURE_GROUPS as NAME_DEPENDENT_FEATURE_GROUPS,
+)
 from s2and.mp import UniversalPool
 from s2and.runtime import RuntimeContext, build_runtime_context, dataset_stage_uses_rust, stage_uses_rust
 from s2and.text import (
-    TEXT_FUNCTIONS,
     cosine_sim,
     counter_jaccard,
     diff,
@@ -37,29 +48,6 @@ logger = logging.getLogger("s2and")
 
 TupleOfArrays = tuple[np.ndarray, np.ndarray, np.ndarray | None]
 _PreprocessedValueT = TypeVar("_PreprocessedValueT")
-
-# This order defines persisted model columns and is shared by training,
-# evaluation, and linker aggregation.
-DEFAULT_FEATURE_GROUPS: tuple[str, ...] = (
-    "name_similarity",
-    "affiliation_similarity",
-    "email_similarity",
-    "coauthor_similarity",
-    "venue_similarity",
-    "year_diff",
-    "title_similarity",
-    "misc_features",
-    "name_counts",
-    "embedding_similarity",
-    "journal_similarity",
-    "advanced_name_similarity",
-)
-NAME_DEPENDENT_FEATURE_GROUPS: frozenset[str] = frozenset(
-    {"name_similarity", "advanced_name_similarity", "name_counts"}
-)
-DEFAULT_NAMELESS_FEATURE_GROUPS: tuple[str, ...] = tuple(
-    feature_group for feature_group in DEFAULT_FEATURE_GROUPS if feature_group not in NAME_DEPENDENT_FEATURE_GROUPS
-)
 
 _FEATURIZATION_WORKER_STATE = threading.local()
 
@@ -376,20 +364,9 @@ class FeaturizationInfo:
             features_to_use = list(DEFAULT_FEATURE_GROUPS)
         self.features_to_use = list(features_to_use)
 
-        self.feature_group_to_index = {
-            "name_similarity": [0, 1, 2, 3, 4, 5],
-            "affiliation_similarity": [6],
-            "email_similarity": [7, 8],
-            "coauthor_similarity": [9, 10, 11],
-            "venue_similarity": [12],
-            "year_diff": [13],
-            "title_similarity": [14, 15],
-            "misc_features": [16, 17, 18, 19, 20],
-            "name_counts": [21, 22, 23, 24, 25, 26],
-            "embedding_similarity": [27],
-            "journal_similarity": [28],
-            "advanced_name_similarity": [29, 30, 31, 32],
-        }
+        self.feature_group_to_index: dict[str, list[int]] = {group: [] for group in DEFAULT_FEATURE_GROUPS}
+        for index, feature in enumerate(FEATURE_SCHEMA):
+            self.feature_group_to_index[feature.group].append(index)
         unknown_feature_groups = sorted(set(self.features_to_use) - set(self.feature_group_to_index))
         if unknown_feature_groups:
             known_feature_groups = ", ".join(sorted(self.feature_group_to_index))
@@ -397,40 +374,14 @@ class FeaturizationInfo:
                 f"Unknown feature group(s): {unknown_feature_groups}. Known feature groups: {known_feature_groups}"
             )
 
-        max_feature_index = max(
-            (feature_index for group in self.feature_group_to_index.values() for feature_index in group),
-            default=-1,
-        )
-        self.number_of_features = max_feature_index + 1
-
-        lightgbm_monotone_constraints = {
-            "name_similarity": ["1", "1", "1", "0", "0", "0"],
-            "affiliation_similarity": ["0"],
-            "email_similarity": ["1", "1"],
-            "coauthor_similarity": ["1", "0", "1"],
-            "venue_similarity": ["0"],
-            "year_diff": ["-1"],
-            "title_similarity": ["1", "1"],
-            "misc_features": ["0", "0", "0", "0", "0"],
-            "name_counts": ["0", "-1", "-1", "-1", "0", "-1"],
-            "embedding_similarity": ["0"],
-            "journal_similarity": ["0"],
-            "advanced_name_similarity": ["0", "0", "0", "0"],
-        }
-
+        self.number_of_features = len(FEATURE_SCHEMA)
         self.lightgbm_monotone_constraints = ",".join(
-            [
-                ",".join(constraints)
-                for feature_category, constraints in lightgbm_monotone_constraints.items()
-                if feature_category in features_to_use
-            ]
+            str(feature.monotone_constraint) for feature in FEATURE_SCHEMA if feature.group in self.features_to_use
         )
         self.nameless_lightgbm_monotone_constraints = ",".join(
-            [
-                ",".join(constraints)
-                for feature_category, constraints in lightgbm_monotone_constraints.items()
-                if feature_category in features_to_use and feature_category not in NAME_DEPENDENT_FEATURE_GROUPS
-            ]
+            str(feature.monotone_constraint)
+            for feature in FEATURE_SCHEMA
+            if feature.group in self.features_to_use and feature.group not in NAME_DEPENDENT_FEATURE_GROUPS
         )
 
     def selected_feature_indices(self) -> list[int]:
@@ -440,89 +391,8 @@ class FeaturizationInfo:
         )
 
     def get_feature_names(self) -> list[str]:
-        """
-        Gets all of the feature names
-
-        Returns
-        -------
-        List[string]: List of all the features names
-        """
-        feature_names = []
-
-        # name features
-        if "name_similarity" in self.features_to_use:
-            feature_names.extend(
-                [
-                    "first_names_equal",
-                    "middle_initials_overlap",
-                    "middle_names_equal",
-                    "middle_one_missing",
-                    "single_char_first",
-                    "single_char_middle",
-                ]
-            )
-
-        # affiliation features
-        if "affiliation_similarity" in self.features_to_use:
-            feature_names.append("affiliation_overlap")
-
-        # email features
-        if "email_similarity" in self.features_to_use:
-            feature_names.extend(["email_prefix_equal", "email_suffix_equal"])
-
-        # co author features
-        if "coauthor_similarity" in self.features_to_use:
-            feature_names.extend(
-                [
-                    "coauthor_overlap",
-                    "coauthor_similarity",
-                    "coauthor_match",
-                ]
-            )
-
-        # venue features
-        if "venue_similarity" in self.features_to_use:
-            feature_names.append("venue_overlap")
-
-        # year features
-        if "year_diff" in self.features_to_use:
-            feature_names.append("year_diff")
-
-        # title features
-        if "title_similarity" in self.features_to_use:
-            feature_names.extend(["title_overlap_words", "title_overlap_chars"])
-
-        # position features
-        if "misc_features" in self.features_to_use:
-            feature_names.extend(
-                ["position_diff", "abstract_count", "english_count", "same_language", "language_reliability_min"]
-            )
-
-        # name count features
-        if "name_counts" in self.features_to_use:
-            feature_names.extend(
-                [
-                    "first_name_count_min",
-                    "last_first_name_count_min",
-                    "last_name_count_min",
-                    "last_first_initial_count_min",
-                    "first_name_count_max",
-                    "last_first_name_count_max",
-                ]
-            )
-
-        # specter features
-        if "embedding_similarity" in self.features_to_use:
-            feature_names.append("specter_cosine_sim")
-
-        if "journal_similarity" in self.features_to_use:
-            feature_names.append("journal_overlap")
-
-        if "advanced_name_similarity" in self.features_to_use:
-            similarity_names = [func[1] for func in TEXT_FUNCTIONS]
-            feature_names.extend(similarity_names)
-
-        return feature_names
+        """Return selected feature names in canonical model column order."""
+        return [feature.name for feature in FEATURE_SCHEMA if feature.group in self.features_to_use]
 
 
 NUM_FEATURES = FeaturizationInfo().number_of_features

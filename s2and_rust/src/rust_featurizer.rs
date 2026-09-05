@@ -1,4 +1,5 @@
 use super::*;
+use crate::feature_schema as columns;
 
 #[pyclass]
 #[derive(Clone)]
@@ -241,31 +242,21 @@ impl RustFeaturizer {
         p2: &PaperData,
     ) -> [f64; FULL_FEATURE_COUNT] {
         let mut feats = [f64::NAN; FULL_FEATURE_COUNT];
-        let mut feat_i: usize = 0;
-        macro_rules! push_feat {
-            ($value:expr) => {{
-                feats[feat_i] = $value;
-                feat_i += 1;
-            }};
-        }
 
         let first1 = s1.first_without_apostrophe();
         let first2 = s2.first_without_apostrophe();
         let middle1 = s1.middle.as_deref();
         let middle2 = s2.middle.as_deref();
 
-        push_feat!(first_names_equal(first1, first2));
-        push_feat!(middle_initials_overlap(middle1, middle2));
-        push_feat!(middle_names_equal(middle1, middle2));
-        push_feat!(middle_one_missing(middle1, middle2));
-        push_feat!(single_char_first(first1, first2));
-        push_feat!(single_char_middle(middle1, middle2));
+        feats[columns::FIRST_NAMES_EQUAL] = first_names_equal(first1, first2);
+        feats[columns::MIDDLE_INITIALS_OVERLAP] = middle_initials_overlap(middle1, middle2);
+        feats[columns::MIDDLE_NAMES_EQUAL] = middle_names_equal(middle1, middle2);
+        feats[columns::MIDDLE_ONE_MISSING] = middle_one_missing(middle1, middle2);
+        feats[columns::SINGLE_CHAR_FIRST] = single_char_first(first1, first2);
+        feats[columns::SINGLE_CHAR_MIDDLE] = single_char_middle(middle1, middle2);
 
-        push_feat!(counter_jaccard_data(
-            &s1.affiliations,
-            &s2.affiliations,
-            f64::INFINITY,
-        ));
+        feats[columns::AFFILIATION_OVERLAP] =
+            counter_jaccard_data(&s1.affiliations, &s2.affiliations, f64::INFINITY);
 
         let (email_prefix, email_suffix) =
             match email_pair_parts(s1.email.as_deref(), s2.email.as_deref()) {
@@ -275,34 +266,23 @@ impl RustFeaturizer {
                 ),
                 None => (f64::NAN, f64::NAN),
             };
-        push_feat!(email_prefix);
-        push_feat!(email_suffix);
+        feats[columns::EMAIL_PREFIX_EQUAL] = email_prefix;
+        feats[columns::EMAIL_SUFFIX_EQUAL] = email_suffix;
 
-        push_feat!(set_jaccard_data(&s1.coauthor_blocks, &s2.coauthor_blocks));
-        push_feat!(counter_jaccard_data(
-            &s1.coauthor_ngrams,
-            &s2.coauthor_ngrams,
-            5000.0,
-        ));
-        push_feat!(set_jaccard_data(&s1.coauthors, &s2.coauthors));
+        feats[columns::COAUTHOR_OVERLAP] =
+            set_jaccard_data(&s1.coauthor_blocks, &s2.coauthor_blocks);
+        feats[columns::COAUTHOR_SIMILARITY] =
+            counter_jaccard_data(&s1.coauthor_ngrams, &s2.coauthor_ngrams, 5000.0);
+        feats[columns::COAUTHOR_MATCH] = set_jaccard_data(&s1.coauthors, &s2.coauthors);
 
-        push_feat!(counter_jaccard_data(
-            &p1.venue_ngrams,
-            &p2.venue_ngrams,
-            f64::INFINITY,
-        ));
-        push_feat!(year_diff(p1.year, p2.year));
+        feats[columns::VENUE_OVERLAP] =
+            counter_jaccard_data(&p1.venue_ngrams, &p2.venue_ngrams, f64::INFINITY);
+        feats[columns::YEAR_DIFF] = year_diff(p1.year, p2.year);
 
-        push_feat!(counter_jaccard_data(
-            &p1.title_words,
-            &p2.title_words,
-            f64::INFINITY,
-        ));
-        push_feat!(counter_jaccard_data(
-            &p1.title_chars,
-            &p2.title_chars,
-            f64::INFINITY,
-        ));
+        feats[columns::TITLE_OVERLAP_WORDS] =
+            counter_jaccard_data(&p1.title_words, &p2.title_words, f64::INFINITY);
+        feats[columns::TITLE_OVERLAP_CHARS] =
+            counter_jaccard_data(&p1.title_chars, &p2.title_chars, f64::INFINITY);
 
         let english_or_unknown_count = {
             let mut count = 0i64;
@@ -319,9 +299,9 @@ impl RustFeaturizer {
             count
         };
 
-        push_feat!(position_diff(s1.position, s2.position));
-        push_feat!((p1.has_abstract as i64 + p2.has_abstract as i64) as f64);
-        push_feat!(english_or_unknown_count as f64);
+        feats[columns::POSITION_DIFF] = position_diff(s1.position, s2.position);
+        feats[columns::ABSTRACT_COUNT] = (p1.has_abstract as i64 + p2.has_abstract as i64) as f64;
+        feats[columns::ENGLISH_COUNT] = english_or_unknown_count as f64;
         let same_lang = match (
             p1.predicted_language.as_deref(),
             p2.predicted_language.as_deref(),
@@ -330,13 +310,17 @@ impl RustFeaturizer {
             (Some(a), Some(b)) => a == b,
             _ => false,
         };
-        push_feat!(if same_lang { 1.0 } else { 0.0 });
-        push_feat!(p1.language_reliability.min(p2.language_reliability));
+        feats[columns::SAME_LANGUAGE] = if same_lang { 1.0 } else { 0.0 };
+        feats[columns::LANGUAGE_RELIABILITY_MIN] =
+            p1.language_reliability.min(p2.language_reliability);
 
         let counts = compute_name_counts_data(s1.name_counts.as_ref(), s2.name_counts.as_ref());
-        for value in counts.iter() {
-            push_feat!(*value);
-        }
+        feats[columns::FIRST_NAME_COUNT_MIN] = counts[0];
+        feats[columns::LAST_FIRST_NAME_COUNT_MIN] = counts[1];
+        feats[columns::LAST_NAME_COUNT_MIN] = counts[2];
+        feats[columns::LAST_FIRST_INITIAL_COUNT_MIN] = counts[3];
+        feats[columns::FIRST_NAME_COUNT_MAX] = counts[4];
+        feats[columns::LAST_FIRST_NAME_COUNT_MAX] = counts[5];
 
         let specter_sim = if english_or_unknown_count == 2 {
             if let (Some(specter_a), Some(specter_b)) = (p1.specter.as_ref(), p2.specter.as_ref()) {
@@ -368,20 +352,16 @@ impl RustFeaturizer {
         } else {
             f64::NAN
         };
-        push_feat!(specter_sim);
+        feats[columns::SPECTER_COSINE_SIM] = specter_sim;
 
-        push_feat!(counter_jaccard_data(
-            &p1.journal_ngrams,
-            &p2.journal_ngrams,
-            f64::INFINITY,
-        ));
+        feats[columns::JOURNAL_OVERLAP] =
+            counter_jaccard_data(&p1.journal_ngrams, &p2.journal_ngrams, f64::INFINITY);
 
         let advanced = name_text_features(s1.adv_name_for_features(), s2.adv_name_for_features());
-        for value in advanced.iter() {
-            push_feat!(*value);
-        }
-
-        debug_assert_eq!(feat_i, FULL_FEATURE_COUNT);
+        feats[columns::LEVENSHTEIN] = advanced[0];
+        feats[columns::PREFIX] = advanced[1];
+        feats[columns::LCS] = advanced[2];
+        feats[columns::JARO] = advanced[3];
         feats
     }
 

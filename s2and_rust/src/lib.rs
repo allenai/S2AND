@@ -12,6 +12,7 @@ mod arrow_batch_lookup;
 mod arrow_dataset;
 mod artifact_hash;
 mod constraints;
+mod feature_schema;
 mod features;
 mod ingest_dataset;
 mod language_detection;
@@ -34,6 +35,7 @@ use arrow_dataset::{ArrowDataset, ArrowDatasetResources};
 use constraints::{
     first_names_name_compatible, lasts_equivalent_for_constraint, same_prefix_tokens,
 };
+use feature_schema::FULL_FEATURE_COUNT;
 use features::*;
 pub(crate) use ingest_dataset::*;
 use language_detection::detect_language_compat;

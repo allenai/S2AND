@@ -747,8 +747,6 @@ pub(crate) fn name_text_features(name1: Option<&str>, name2: Option<&str>) -> [f
     [lev, pref, lcs, jaro]
 }
 
-pub(crate) const FULL_FEATURE_COUNT: usize = 33;
-
 pub(crate) struct MatrixAggregateIndexSelection {
     pub(crate) matrix_indices: Vec<usize>,
     pub(crate) aggregate_indices: Vec<usize>,

@@ -64,6 +64,16 @@ featurizer without rewriting the immutable Arrow bundle.
 
 ## Featurize pairs and train the pairwise model
 
+`s2and/feature_schema.py` defines the ordered feature names, groups, and
+monotonic constraints. Python derives selection metadata from that specification;
+Rust writes calculated values to its generated named column constants. The
+existing 33 column positions and persisted model meaning remain unchanged.
+
+After a deliberate feature-contract change, regenerate native constants with
+`uv run --no-project python scripts/sync_feature_schema.py`. Shared local and
+hosted CI run the script with `--check` to reject stale generated code. Feature
+calculations remain independent across languages and are checked by parity tests.
+
 ```python
 from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import PairwiseModeler

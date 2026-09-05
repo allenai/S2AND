@@ -59,3 +59,21 @@ Full local CI passed: 1095 Python tests, 119 Rust tests, 87.26% coverage.
 Native bundle scoring avoids Hyperopt; Python and Arrow calibration match the
 explicit default search space exactly on fixed fixtures. Log:
 `scratch/deferred-calibration-local-ci.log`.
+
+## Authoritative feature metadata
+
+- [x] Capture the existing 33-column contract before replacing metadata definitions.
+- [x] Generate Rust named columns from one ordered specification with a CI freshness gate.
+- [x] Derive Python selection metadata and replace native positional writes.
+- [x] Verify all group subsets and native feature/prediction parity.
+
+Verification: the original metadata matches all 4096 group subsets; 1111 pytest
+tests and 119 native tests passed. Eight bounded component comparisons matched
+features, constraints, distances, and clusters exactly. Schema freshness, lint,
+formatting, and type checks pass for the changed feature files. Final combined
+local CI passed after the concurrent constraint fixes: 1119 Python tests,
+119 Rust tests, and 86.00% coverage.
+Logs: `scratch/feature-schema-pytest.log`,
+`scratch/feature-schema-component-parity.log`, and
+`scratch/feature-schema-local-ci-final.log`, and
+`scratch/completed-work-local-ci.log`.

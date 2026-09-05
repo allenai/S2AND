@@ -70,6 +70,11 @@ def test_bulk_labels_preserve_scalar_bits(
         return np.zeros(len(labels)), 0.0
 
     monkeypatch.setattr(model_module, "get_constraints_block_upper_triangle_indexed_rust", constraints)
+    monkeypatch.setattr(
+        model_module,
+        "_get_constraints_block_upper_triangle_values_indexed_rust",
+        lambda *args, **kwargs: constraints(*args, **kwargs)[2],
+    )
     monkeypatch.setattr(model_module, "_build_block_feature_matrices_indexed_rust", features)
     monkeypatch.setattr(model_module, "_predict_and_combine", predict)
     clusterer = Clusterer(

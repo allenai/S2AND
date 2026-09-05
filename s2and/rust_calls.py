@@ -145,6 +145,34 @@ def get_constraints_block_upper_triangle_indexed_rust(
     return left_indices, right_indices, values
 
 
+def _get_constraints_block_upper_triangle_values_indexed_rust(
+    block_signature_indices: list[int],
+    *,
+    featurizer: Any,
+    start_offset: int = 0,
+    max_pairs: int | None = None,
+    low_value: float = 0.0,
+    high_value: float = LARGE_DISTANCE,
+    dont_merge_cluster_seeds: bool = True,
+    incremental_dont_use_cluster_seeds: bool = False,
+    num_threads: int | None = None,
+    suppress_orcid: bool = False,
+) -> list[float | None]:
+    """Get ordered bulk constraints without unused square-matrix coordinates."""
+    resolved_num_threads = None if num_threads is None else resolve_n_jobs(num_threads)
+    return featurizer._get_constraints_block_upper_triangle_values_indexed(
+        block_signature_indices,
+        start_offset,
+        max_pairs,
+        low_value,
+        high_value,
+        dont_merge_cluster_seeds,
+        incremental_dont_use_cluster_seeds,
+        resolved_num_threads,
+        suppress_orcid=suppress_orcid,
+    )
+
+
 def build_linker_pair_features_and_aggregate_stats_arrays_rust(
     left_signature_indices: np.ndarray,
     right_signature_indices: np.ndarray,

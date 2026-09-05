@@ -101,9 +101,91 @@ def test_sparse_features_preserve_distances_and_classifier_calls(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(model_module, "_build_block_feature_matrices_indexed_rust", force_dense)
+    original_combine = model_module._predict_and_combine
+
+    def combine_dense(*args: Any, **kwargs: Any) -> Any:
+        kwargs.pop("compact_rows", None)
+        return original_combine(*args, **kwargs)
+
+    monkeypatch.setattr(model_module, "_predict_and_combine", combine_dense)
     dense = clusterer._make_distance_matrices_from_verified_rust_featurizer({"block": ids}, native_features, **kwargs)
     np.testing.assert_array_equal(sparse["block"].view(np.uint8), dense["block"].view(np.uint8))
     for actual, expected in zip((main.calls, nameless.calls), expected_calls, strict=True):
         assert len(actual) == len(expected)
         for actual_batch, expected_batch in zip(actual, expected, strict=True):
             np.testing.assert_array_equal(actual_batch.view(np.uint64), expected_batch.view(np.uint64))
+
+
+@pytest.mark.parametrize("rows", [[], [0], [1, 4], [0, 1, 2, 3, 4]])
+def test_compact_feature_rows_match_dense_bits(native_features: Any, rows: list[int]) -> None:
+    """Compact projection preserves duplicate columns and row order exactly."""
+    kwargs = dict(
+        featurizer=native_features,
+        start_offset=2,
+        max_pairs=5,
+        main_indices=[3, 1, 3, 0],
+        nameless_indices=[1, 0],
+        num_threads=10,
+    )
+    dense = model_module._build_block_feature_matrices_indexed_rust([3, 0, 2, 1, 4], **kwargs)
+    indices = np.asarray(rows, dtype=np.intp)
+    compact = model_module._build_block_feature_matrices_indexed_rust(
+        [3, 0, 2, 1, 4], **kwargs, scored_rows=indices, compact=True
+    )
+    for actual, expected in zip(compact, dense, strict=True):
+        np.testing.assert_array_equal(actual.view(np.uint64), expected[indices].view(np.uint64))
+
+
+@pytest.mark.parametrize("copy_budget", [1, 96, 100000])
+@pytest.mark.parametrize("rows", [[], [0], [0, 3, 5], list(range(7))])
+@pytest.mark.parametrize("with_nameless", [False, True])
+def test_compact_scoring_preserves_batches_and_owned_inputs(
+    monkeypatch: pytest.MonkeyPatch, copy_budget: int, rows: list[int], with_nameless: bool
+) -> None:
+    """Check bits, call boundaries, writable owned inputs and mutation isolation."""
+    monkeypatch.setattr(model_module, "_PREDICT_FEATURE_COPY_MAX_BYTES", copy_budget)
+    matrix = np.arange(28, dtype=np.float64).reshape(7, 4)
+    matrix[0] = [-0.0, np.nan, np.inf, -np.inf]
+    labels = np.full(7, -model_module.LARGE_INTEGER, dtype=np.float64)
+    indices = np.asarray(rows, dtype=np.intp)
+    labels[indices] = np.nan
+
+    class MutatingClassifier(RecordingClassifier):
+        def predict_proba(self, features: np.ndarray) -> np.ndarray:
+            assert features.flags.c_contiguous
+            assert features.flags.writeable
+            assert features.flags.owndata
+            result = super().predict_proba(features)
+            features[:] = 42.0
+            return result
+
+    observed = []
+    for compact in (False, True):
+        main = MutatingClassifier()
+        nameless = MutatingClassifier() if with_nameless else None
+        features = matrix[indices].copy() if compact else matrix.copy()
+        nl_features = features.copy() if with_nameless else None
+        result, _ = model_module._predict_and_combine(
+            main,
+            nameless,
+            features,
+            labels,
+            nl_features,
+            "test",
+            num_threads=10,
+            compact_rows=indices if compact else None,
+        )
+        observed.append((result, main.calls, None if nameless is None else nameless.calls))
+        if len(rows) < len(labels):
+            np.testing.assert_array_equal(
+                features.view(np.uint64), (matrix[indices] if compact else matrix).view(np.uint64)
+            )
+    for actual, expected in zip(observed[0], observed[1], strict=True):
+        if actual is None:
+            assert expected is None
+        elif isinstance(actual, list):
+            assert len(actual) == len(expected)
+            for left, right in zip(actual, expected, strict=True):
+                np.testing.assert_array_equal(left.view(np.uint64), right.view(np.uint64))
+        else:
+            np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))

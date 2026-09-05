@@ -78,6 +78,7 @@ from s2and.runtime import (
     stage_uses_rust,
 )
 from s2and.rust_calls import (
+    _get_constraints_block_upper_triangle_values_indexed_rust,
     build_block_upper_triangle_feature_matrix_indexed_rust,
     get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
@@ -632,15 +633,17 @@ def _build_block_feature_matrices_indexed_rust(
     nameless_indices: list[int] | None,
     num_threads: int,
     scored_rows: np.ndarray | None = None,
+    compact: bool = False,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Build shared pair features, optionally omitting rows fixed by supervision.
 
     Args:
         scored_rows: Chunk-relative rows consumed by the classifiers. Other
             rows retain NaN placeholders and must be masked before scoring.
+        compact: Return only scored rows when scored_rows is supplied.
 
     Returns:
-        Full-shaped main and optional nameless feature matrices.
+        Main and optional nameless matrices, compact only when requested.
     """
     union_indices = list(dict.fromkeys(main_indices + (nameless_indices or [])))
     if scored_rows is None:
@@ -665,10 +668,13 @@ def _build_block_feature_matrices_indexed_rust(
         )
         sparse_features = featurizer.featurize_pairs_matrix_indexed(pairs, union_indices, num_threads, np.nan)
         del local_i, local_j, signature_indices, pairs
-        # Keep the original matrix shapes and classifier batching. Constrained
-        # rows are masked by _predict_and_combine and never reach a classifier.
-        union_features = np.full((max_pairs, len(union_indices)), np.nan, dtype=np.float64)
-        union_features[scored_rows] = sparse_features
+        # The bulk consumer can keep scored rows compact. Other callers retain
+        # full matrix shapes and mask constrained rows before classification.
+        if compact:
+            union_features = sparse_features
+        else:
+            union_features = np.full((max_pairs, len(union_indices)), np.nan, dtype=np.float64)
+            union_features[scored_rows] = sparse_features
         del sparse_features
     position_by_index = {index: position for position, index in enumerate(union_indices)}
 
@@ -947,9 +953,10 @@ def _predict_and_combine(
     num_threads: int | None = None,
     runtime_context: RuntimeContext | None = None,
     total_ram_bytes: int | None = None,
+    compact_rows: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
     """Predict with main (and optional nameless) classifier, log telemetry, return (predictions, seconds)."""
-    row_count = int(features.shape[0])
+    row_count = int(features.shape[0] if compact_rows is None else len(labels))
     if row_count <= 0:
         return np.asarray([], dtype=np.float64), 0.0
 
@@ -1003,6 +1010,8 @@ def _predict_and_combine(
     # Boolean indexing creates a large temporary copy (often comparable to the full
     # feature matrix) when most rows are predicted. Keep each copy bounded without
     # exposing constrained sentinel rows to the classifiers.
+    # Compact inputs retain the same call boundaries and independent writable
+    # copies: arbitrary classifiers may depend on batching or mutate their input.
     would_copy_bytes = 0
     if predicted_rows > 0 and predicted_rows < row_count:
         would_copy_bytes += int(predicted_rows) * int(features.shape[1]) * int(features.dtype.itemsize)
@@ -1026,8 +1035,11 @@ def _predict_and_combine(
             rows_per_chunk = max(1, _PREDICT_FEATURE_COPY_MAX_BYTES // bytes_per_row)
             for start in range(0, predicted_rows, rows_per_chunk):
                 row_indices = predicted_indices[start : start + rows_per_chunk]
-                predict_features = features[row_indices, :]
-                predict_nameless_features = nameless_features[row_indices, :] if nameless_features is not None else None
+                feature_rows = row_indices if compact_rows is None else np.arange(start, start + len(row_indices))
+                predict_features = features[feature_rows, :]
+                predict_nameless_features = (
+                    nameless_features[feature_rows, :] if nameless_features is not None else None
+                )
                 combined_predictions, batch_seconds = _predict_rows(
                     predict_features,
                     predict_nameless_features,
@@ -1036,8 +1048,9 @@ def _predict_and_combine(
                 predictions[row_indices] = combined_predictions
                 seconds += batch_seconds
         else:
-            predict_features = features[predict_flag, :]
-            predict_nameless_features = nameless_features[predict_flag, :] if nameless_features is not None else None
+            feature_rows = predict_flag if compact_rows is None else np.arange(predicted_rows)
+            predict_features = features[feature_rows, :]
+            predict_nameless_features = nameless_features[feature_rows, :] if nameless_features is not None else None
             combined_predictions, batch_seconds = _predict_rows(
                 predict_features,
                 predict_nameless_features,
@@ -2530,7 +2543,12 @@ class Clusterer:
                 constraint_values: Sequence[Any] | None = None
                 if self.use_default_constraints_as_supervision:
                     stage_start = time.perf_counter()
-                    local_i, local_j, constraint_values = get_constraints_block_upper_triangle_indexed_rust(
+                    constraint_getter = (
+                        _get_constraints_block_upper_triangle_values_indexed_rust
+                        if uses_fastcluster
+                        else get_constraints_block_upper_triangle_indexed_rust
+                    )
+                    constraint_result = constraint_getter(
                         block_signature_indices,
                         start_offset=offset,
                         max_pairs=chunk_pair_count,
@@ -2541,6 +2559,13 @@ class Clusterer:
                         suppress_orcid=getattr(self, "suppress_orcid", False),
                     )
                     constraint_seconds += time.perf_counter() - stage_start
+                    if uses_fastcluster:
+                        constraint_values = cast(list[int | float | None], constraint_result)
+                    else:
+                        local_i, local_j, constraint_values = cast(
+                            tuple[list[int], list[int], list[int | float | None]], constraint_result
+                        )
+                    del constraint_result
                     if not uses_fastcluster:
                         stage_start = time.perf_counter()
                         local_i_array = np.asarray(local_i, dtype=np.intp)
@@ -2604,6 +2629,7 @@ class Clusterer:
                     nameless_indices=nameless_selected_indices,
                     num_threads=self.n_jobs,
                     scored_rows=scored_rows,
+                    compact=True,
                 )
                 feature_matrix_seconds += time.perf_counter() - stage_start
                 batch_predictions, batch_seconds = _predict_and_combine(
@@ -2616,6 +2642,7 @@ class Clusterer:
                     num_threads=self.n_jobs,
                     runtime_context=runtime_context,
                     total_ram_bytes=total_ram_bytes,
+                    compact_rows=scored_rows,
                 )
                 model_predict_seconds += float(batch_seconds)
                 stage_start = time.perf_counter()

@@ -214,6 +214,88 @@ impl LinkerPairDistanceAccumulator {
 }
 
 impl RustFeaturizer {
+    fn constraints_block_upper_triangle_indexed_impl(
+        &self,
+        py: Python<'_>,
+        block_signature_indices: Vec<u32>,
+        start_offset: usize,
+        max_pairs: Option<usize>,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        num_threads: Option<usize>,
+        suppress_orcid: bool,
+        include_coordinates: bool,
+    ) -> PyResult<(Vec<u32>, Vec<u32>, Vec<Option<f64>>)> {
+        if block_signature_indices.len() <= 1 {
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
+        }
+
+        let signature_ids = self.signature_id_order();
+        let signature_count = signature_ids.len();
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            if global_idx >= signature_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "block signature index out of range: index={} signature_count={}",
+                    global_idx, signature_count
+                )));
+            }
+        }
+
+        let mut block_lookup: Vec<(&String, &SignatureData)> =
+            Vec::with_capacity(block_signature_indices.len());
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            let signature_id = &signature_ids[global_idx];
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            block_lookup.push((signature_id, signature));
+        }
+
+        let local_pairs =
+            upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
+        if local_pairs.is_empty() {
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
+        }
+
+        let (left_indices, right_indices) = if include_coordinates {
+            (
+                local_pairs.iter().map(|(left, _)| *left as u32).collect(),
+                local_pairs.iter().map(|(_, right)| *right as u32).collect(),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let values = py.allow_threads(|| {
+            let compute = || {
+                local_pairs
+                    .par_iter()
+                    .map(|(left_idx, right_idx)| {
+                        let (left_id, s1) = block_lookup[*left_idx];
+                        let (right_id, s2) = block_lookup[*right_idx];
+                        self.constraint_value_from_records(
+                            left_id,
+                            right_id,
+                            s1,
+                            s2,
+                            low_value,
+                            high_value,
+                            dont_merge_cluster_seeds,
+                            incremental_dont_use_cluster_seeds,
+                            suppress_orcid,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
+        Ok((left_indices, right_indices, values))
+    }
+
     fn cluster_seeds_disallow_index(&self) -> &HashMap<String, HashSet<String>> {
         self.cluster_seeds_disallow_index.get_or_init(|| {
             let mut index: HashMap<String, HashSet<String>> = HashMap::new();
@@ -1573,66 +1655,61 @@ impl RustFeaturizer {
         num_threads: Option<usize>,
         suppress_orcid: bool,
     ) -> PyResult<(Vec<u32>, Vec<u32>, Vec<Option<f64>>)> {
-        if block_signature_indices.len() <= 1 {
-            return Ok((Vec::new(), Vec::new(), Vec::new()));
-        }
+        self.constraints_block_upper_triangle_indexed_impl(
+            py,
+            block_signature_indices,
+            start_offset,
+            max_pairs,
+            low_value,
+            high_value,
+            dont_merge_cluster_seeds,
+            incremental_dont_use_cluster_seeds,
+            num_threads,
+            suppress_orcid,
+            true,
+        )
+    }
 
-        let signature_ids = self.signature_id_order();
-        let signature_count = signature_ids.len();
-        for signature_index in block_signature_indices.iter() {
-            let global_idx = *signature_index as usize;
-            if global_idx >= signature_count {
-                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
-                    "block signature index out of range: index={} signature_count={}",
-                    global_idx, signature_count
-                )));
-            }
-        }
-
-        let mut block_lookup: Vec<(&String, &SignatureData)> =
-            Vec::with_capacity(block_signature_indices.len());
-        for signature_index in block_signature_indices.iter() {
-            let global_idx = *signature_index as usize;
-            let signature_id = &signature_ids[global_idx];
-            let signature = self
-                .signatures
-                .get(signature_id)
-                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
-            block_lookup.push((signature_id, signature));
-        }
-
-        let local_pairs =
-            upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
-        if local_pairs.is_empty() {
-            return Ok((Vec::new(), Vec::new(), Vec::new()));
-        }
-
-        let left_indices: Vec<u32> = local_pairs.iter().map(|(left, _)| *left as u32).collect();
-        let right_indices: Vec<u32> = local_pairs.iter().map(|(_, right)| *right as u32).collect();
-        let values = py.allow_threads(|| {
-            let compute = || {
-                local_pairs
-                    .par_iter()
-                    .map(|(left_idx, right_idx)| {
-                        let (left_id, s1) = block_lookup[*left_idx];
-                        let (right_id, s2) = block_lookup[*right_idx];
-                        self.constraint_value_from_records(
-                            left_id,
-                            right_id,
-                            s1,
-                            s2,
-                            low_value,
-                            high_value,
-                            dont_merge_cluster_seeds,
-                            incremental_dont_use_cluster_seeds,
-                            suppress_orcid,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            };
-            install_with_optional_rayon_pool(num_threads, compute)
-        });
-        Ok((left_indices, right_indices, values))
+    #[pyo3(
+        signature = (
+            block_signature_indices,
+            start_offset = 0,
+            max_pairs = None,
+            low_value = 0.0,
+            high_value = 10000.0,
+            dont_merge_cluster_seeds = true,
+            incremental_dont_use_cluster_seeds = false,
+            num_threads = None,
+            suppress_orcid = false
+        )
+    )]
+    fn _get_constraints_block_upper_triangle_values_indexed(
+        &self,
+        py: Python<'_>,
+        block_signature_indices: Vec<u32>,
+        start_offset: usize,
+        max_pairs: Option<usize>,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        num_threads: Option<usize>,
+        suppress_orcid: bool,
+    ) -> PyResult<Vec<Option<f64>>> {
+        let (_, _, values) = self.constraints_block_upper_triangle_indexed_impl(
+            py,
+            block_signature_indices,
+            start_offset,
+            max_pairs,
+            low_value,
+            high_value,
+            dont_merge_cluster_seeds,
+            incremental_dont_use_cluster_seeds,
+            num_threads,
+            suppress_orcid,
+            false,
+        )?;
+        Ok(values)
     }
 
     fn signature_ids(&self) -> Vec<String> {

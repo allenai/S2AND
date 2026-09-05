@@ -16,6 +16,32 @@ uv run ruff format .
 uv run ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
 ```
 
+## Scoped searches
+
+Choose the relevant source roots for the task. For a search spanning maintained code and docs, these PowerShell
+examples reuse exclusions for virtual environments, data, and generated output. The `.venv` glob also excludes
+directories such as `.venv-dev` and `project.venv-cache`, including nested paths.
+
+```powershell
+$searchRoots = @('s2and', 's2and_rust/src', 'scripts', 'tests', 'docs')
+$searchGlobs = @(
+  '--glob', '!**/*.venv*/**',
+  '--glob', '!**/.git/**',
+  '--glob', '!**/data/**',
+  '--glob', '!**/dist/**',
+  '--glob', '!**/scratch/**',
+  '--glob', '!**/target/**'
+)
+rg -n --hidden @searchGlobs 'pattern' @searchRoots
+rg --files --hidden @searchGlobs @searchRoots
+
+# When a root content search is necessary, keep the exclusions and cap file size.
+rg -n --hidden @searchGlobs --max-filesize 4M 'pattern' .
+```
+
+For intentional data inspection, choose the exact file or directory and bound the output (for example,
+`rg -n --max-count 5 --glob '!**/*.venv*/**' 'pattern' data/specific-file.json`).
+
 ## Local CI mirror
 
 Run the full local CI wrapper:

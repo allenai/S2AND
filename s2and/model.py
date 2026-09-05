@@ -71,6 +71,7 @@ from s2and.rust_calls import (
     get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
 )
+from s2and.seed_merging import merge_seed_labels, restore_seed_membership, seed_disallow_adjacency
 from s2and.subblocking import (
     GraphSubblockingConfig,
     _make_subblocks_with_telemetry_arrow_rust,
@@ -1764,7 +1765,7 @@ class Clusterer:
         block_dict: dict[str, list[str]],
         effective_cluster_model_params: dict[str, Any] | None,
         dataset: ANDData,
-        all_disallow_signature_ids: set[str],
+        disallow_adjacency: Mapping[str, set[str]],
         pred_clusters: defaultdict[str, list[str]],
         incremental_dont_use_cluster_seeds: bool,
         prediction_state: PredictionState | None = None,
@@ -1779,7 +1780,7 @@ class Clusterer:
             pairwise_proba,
             effective_cluster_model_params,
             dataset,
-            all_disallow_signature_ids,
+            disallow_adjacency,
             block_key=block_key,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             prediction_state=prediction_state,
@@ -2901,11 +2902,7 @@ class Clusterer:
             )
         if built_dists:
             pred_clusters: defaultdict[str, list[str]] = defaultdict(list)
-            all_disallow_signature_ids: set[str] = set()
-            if self.use_default_constraints_as_supervision:
-                for sig_id_a, sig_id_b in proxy_dataset.cluster_seeds_disallow:
-                    all_disallow_signature_ids.add(sig_id_a)
-                    all_disallow_signature_ids.add(sig_id_b)
+            disallow_adjacency = seed_disallow_adjacency(proxy_dataset.cluster_seeds_disallow, partial_supervision)
             effective_cluster_model_params = cluster_model_params
             if isinstance(self.cluster_model, FastCluster):
                 fastcluster_params: dict[str, Any] = dict(cluster_model_params or {})
@@ -2960,7 +2957,7 @@ class Clusterer:
                     block_dists[block_key],
                     effective_cluster_model_params,
                     cast(Any, proxy_dataset),
-                    all_disallow_signature_ids,
+                    disallow_adjacency,
                     block_key=block_key,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 )
@@ -3991,6 +3988,7 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float],
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None = None,
+        incremental_dont_use_cluster_seeds: bool = False,
     ) -> dict[str, list[str]]:
         if len(block_dict_single_letter) == 0:
             return pred_clusters
@@ -3998,14 +3996,26 @@ class Clusterer:
         logger.info("Running predict incremental on subblocks with single letter first names")
         pred_clusters_intermediate: dict[str, list[str]] = pred_clusters
         predict_times: dict[str, float] = {}
+        request_signature_ids = {
+            signature_id
+            for signatures in (*pred_clusters.values(), *block_dict_single_letter.values())
+            for signature_id in signatures
+        }
+        original_seeds = (
+            {
+                signature_id: component_id
+                for signature_id, component_id in dataset.cluster_seeds_require.items()
+                if signature_id in request_signature_ids
+            }
+            if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds
+            else {}
+        )
+        disallow_adjacency = seed_disallow_adjacency(dataset.cluster_seeds_disallow, partial_supervision)
         for block_key in sorted(block_dict_single_letter):
+            synthetic_seeds = restore_seed_membership(pred_clusters_intermediate, original_seeds, disallow_adjacency)
             # Synthetic seeds belong to this pass, not to claimed dataset profiles.
             prediction_state = PredictionState(
-                cluster_seeds_require={
-                    signature: cluster_id
-                    for cluster_id, signatures in pred_clusters_intermediate.items()
-                    for signature in signatures
-                },
+                cluster_seeds_require=synthetic_seeds,
                 cluster_seeds_disallow=set(dataset.cluster_seeds_disallow),
             )
             start_predict_time = time.time()
@@ -4096,6 +4106,7 @@ class Clusterer:
             partial_supervision=partial_supervision,
             runtime_context=runtime_context,
             total_ram_bytes=total_ram_bytes,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
         )
         return dict(pred_clusters), None
 
@@ -4208,7 +4219,7 @@ class Clusterer:
         dist_matrix: np.ndarray | None,
         cluster_model_params: dict[str, Any] | None,
         dataset: ANDData,
-        all_disallow_signature_ids: set[str],
+        disallow_adjacency: Mapping[str, set[str]],
         *,
         incremental_dont_use_cluster_seeds: bool = False,
         prediction_state: PredictionState | None = None,
@@ -4237,23 +4248,7 @@ class Clusterer:
             cluster_seeds_require = (
                 dataset.cluster_seeds_require if prediction_state is None else prediction_state.cluster_seeds_require
             )
-            disallow_signature_ids = all_disallow_signature_ids
-            inverse_id_map = defaultdict(set)
-            for signature_id, label in zip(block_signatures, labels, strict=True):
-                if signature_id in cluster_seeds_require and signature_id not in disallow_signature_ids:
-                    inverse_id_map[cluster_seeds_require[signature_id]].add(label)
-            # Clusters that should merge can still remain split after distance-based clustering.
-            # This happens when required-pair zero distances are outweighed by many large distances
-            # in average-linkage behavior. Post-hoc, merge label sets that overlap according to
-            # cluster_seeds_require (excluding signatures that appear in disallow constraints).
-            to_join_sets = [sorted(join_set) for join_set in inverse_id_map.values() if len(join_set) > 1]
-            mapped_labels = {label: label for label in labels}
-            labels = np.array(labels)
-            for join_set in to_join_sets:
-                for other_label in join_set[1:]:
-                    labels[labels == mapped_labels[other_label]] = mapped_labels[join_set[0]]
-                    mapped_labels[other_label] = mapped_labels[join_set[0]]
-            labels = list(labels)
+            labels = merge_seed_labels(block_signatures, labels, cluster_seeds_require, disallow_adjacency)
         return labels
 
     def _cluster_one_block_with_logging(
@@ -4262,7 +4257,7 @@ class Clusterer:
         dist_matrix: np.ndarray | None,
         cluster_model_params: dict[str, Any] | None,
         dataset: ANDData,
-        all_disallow_signature_ids: set[str],
+        disallow_adjacency: Mapping[str, set[str]],
         *,
         block_key: str,
         incremental_dont_use_cluster_seeds: bool,
@@ -4282,7 +4277,7 @@ class Clusterer:
             dist_matrix,
             cluster_model_params,
             dataset,
-            all_disallow_signature_ids,
+            disallow_adjacency,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             prediction_state=prediction_state,
         )
@@ -4363,16 +4358,10 @@ class Clusterer:
 
             return dict(pred_clusters), dists
 
-        # we may need this set later for post-hoc merging
-        # pre-compute disallow set for post-hoc constraint merging
-        all_disallow_signature_ids: set[str] = set()
-        if self.use_default_constraints_as_supervision:
-            cluster_seeds_disallow = (
-                dataset.cluster_seeds_disallow if prediction_state is None else prediction_state.cluster_seeds_disallow
-            )
-            for sig_id_a, sig_id_b in cluster_seeds_disallow:
-                all_disallow_signature_ids.add(sig_id_a)
-                all_disallow_signature_ids.add(sig_id_b)
+        cluster_seeds_disallow = (
+            dataset.cluster_seeds_disallow if prediction_state is None else prediction_state.cluster_seeds_disallow
+        )
+        disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
 
         effective_cluster_model_params = cluster_model_params
         fastcluster_fused_dtype = np.float16
@@ -4395,7 +4384,7 @@ class Clusterer:
                     dists[block_key],
                     effective_cluster_model_params,
                     dataset,
-                    all_disallow_signature_ids,
+                    disallow_adjacency,
                     block_key=block_key,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     prediction_state=prediction_state,
@@ -4468,7 +4457,7 @@ class Clusterer:
                         block_dict=block_dict,
                         effective_cluster_model_params=effective_cluster_model_params,
                         dataset=dataset,
-                        all_disallow_signature_ids=all_disallow_signature_ids,
+                        disallow_adjacency=disallow_adjacency,
                         pred_clusters=pred_clusters,
                         incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                         prediction_state=prediction_state,
@@ -4513,7 +4502,7 @@ class Clusterer:
                 block_dict=block_dict,
                 effective_cluster_model_params=effective_cluster_model_params,
                 dataset=dataset,
-                all_disallow_signature_ids=all_disallow_signature_ids,
+                disallow_adjacency=disallow_adjacency,
                 pred_clusters=pred_clusters,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 prediction_state=prediction_state,
@@ -4563,7 +4552,7 @@ class Clusterer:
                     block_dict=block_dict,
                     effective_cluster_model_params=effective_cluster_model_params,
                     dataset=dataset,
-                    all_disallow_signature_ids=all_disallow_signature_ids,
+                    disallow_adjacency=disallow_adjacency,
                     pred_clusters=pred_clusters,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     prediction_state=prediction_state,

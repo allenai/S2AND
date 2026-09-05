@@ -77,3 +77,14 @@ Logs: `scratch/feature-schema-pytest.log`,
 `scratch/feature-schema-component-parity.log`, and
 `scratch/feature-schema-local-ci-final.log`, and
 `scratch/completed-work-local-ci.log`.
+
+## Seed-preserving batching and cannot-link-aware merging
+
+- [x] Carry compatible original seed memberships into initial-only attachment.
+- [x] Preserve explicit hard disallows through direct and indirect seed unions.
+- [x] Verify combined overrides, ignored seeds, and unrelated profile isolation.
+
+The shared sparse merge helper adds no pair scoring. A 10,000-signature
+microbenchmark with 20 disallows remained approximately 8.4 ms before/after.
+Full combined local CI passed: 1119 Python tests and 119 Rust tests.
+Log: `scratch/completed-work-local-ci.log`.

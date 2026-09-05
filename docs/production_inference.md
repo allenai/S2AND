@@ -52,6 +52,11 @@ split-specific name checks and restores original profile IDs. The orchestrator
 resolves name aliases, logs rejections, and clusters the residual signatures.
 Name metadata is accessed lazily without copying the prepared dataset.
 
+Python subblocked prediction carries original required seed memberships into
+the initial-only attachment pass, including members not yet predicted. Explicit
+hard cannot-link supervision also constrains post-clustering seed merges;
+indirect merges cannot reconnect a forbidden pair.
+
 ## Complete model bundles
 
 The public loader accepts one format: an explicit, complete, canonical native

@@ -576,8 +576,14 @@ def _partial_supervision_plan_disallows(
             continue
         left_id = str(left)
         right_id = str(right)
-        if (left_id in query_ids and right_id in seed_ids) or (right_id in query_ids and left_id in seed_ids):
-            pairs.append((left_id, right_id))
+        if left_id in query_ids and right_id in seed_ids:
+            query_id, seed_id = left_id, right_id
+        elif right_id in query_ids and left_id in seed_ids:
+            query_id, seed_id = right_id, left_id
+        else:
+            continue
+        if runtime_module._partial_supervision_distance(partial_supervision, query_id, seed_id) == LARGE_DISTANCE:  # noqa: SLF001
+            pairs.append((query_id, seed_id))
     return set(normalize_cluster_seed_disallow_pairs(pairs))
 
 

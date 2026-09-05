@@ -44,6 +44,7 @@ from s2and.production_bundle_contract import PENDING_EPS_CALIBRATION, PENDING_PA
 from s2and.production_training_contract import (  # noqa: E402
     ModelDataset,
     ProductionArtifactAuthority,
+    block_membership_sha256,
     load_model_plan,
     load_packaged_artifact_authority,
 )
@@ -383,6 +384,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     monotone_constraints = featurizer_info.lightgbm_monotone_constraints
     nameless_monotone_constraints = nameless_featurizer_info.lightgbm_monotone_constraints
 
+    cluster_test_splits: dict[str, dict[str, Any]] = {}
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(
         prefix=f".pairwise_v{plan.release_version}_",
@@ -423,6 +425,16 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 )
             if anddata.name_tuples != canonical_name_tuples.pairs:
                 raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
+
+            if dataset_input.split_mode == "random_blocks":
+                # Resolve the same split as pair selection, before allocating feature
+                # matrices. Persist identities so Arrow row sorting cannot change it.
+                train_blocks, val_blocks, test_blocks = anddata.split_cluster_signatures()
+                cluster_test_splits[dataset_name] = {
+                    "block_membership_sha256": block_membership_sha256(anddata.get_blocks()),
+                    "test_block_ids": list(test_blocks),
+                }
+                del train_blocks, val_blocks, test_blocks
 
             train, val = _featurize_selection(
                 anddata,
@@ -489,6 +501,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         union_clusterer.feature_contract.update(artifact_hashes)
 
         training_summary: dict[str, Any] = {
+            "cluster_test_splits": cluster_test_splits,
             "main_pairwise_best_params": dict(union_classifier.best_params or {}),
             "main_train_rows": int(_load_staged_array(union_arrays["X_train"]).shape[0]),
             "main_val_rows": int(_load_staged_array(union_arrays["X_val"]).shape[0]),

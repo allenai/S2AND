@@ -140,12 +140,42 @@ def restore_seed_membership(
     disallow_adjacency: Mapping[str, set[str]],
 ) -> dict[str, int | str]:
     """Carry compatible original seeds into a subblocked incremental pass."""
+    result: dict[str, int | str] = {
+        signature_id: cluster_id for cluster_id, signatures in predicted_clusters.items() for signature_id in signatures
+    }
     if not seed_groups:
-        return {
-            signature_id: cluster_id
-            for cluster_id, signatures in predicted_clusters.items()
-            for signature_id in signatures
-        }
+        return result
+
+    # Atomic subblocking normally leaves every existing seed in one cluster.
+    # Restore that case using the output map alone; allocate union-find labels
+    # only when an actual split or a cannot-link involving a missing seed needs
+    # adjudication. Missing seeds belong to initial-only groups processed later.
+    targets: dict[int | str, int | str] = {}
+    missing: dict[str, int | str] = {}
+    for signature_id, component_id in seed_groups.items():
+        cluster_id = result.get(signature_id)
+        if cluster_id is None:
+            missing[signature_id] = component_id
+        elif targets.setdefault(component_id, cluster_id) != cluster_id:
+            break
+    else:
+        emitted_ids = set(predicted_clusters)
+        for signature_id, component_id in missing.items():
+            if component_id not in targets:
+                candidate = str(component_id)
+                while candidate in emitted_ids:
+                    candidate = f"seed={candidate}"
+                emitted_ids.add(candidate)
+                targets[component_id] = candidate
+            result[signature_id] = targets[component_id]
+        if not any(
+            result.get(partner) == result[signature_id]
+            for signature_id in missing
+            for partner in disallow_adjacency.get(signature_id, ())
+        ):
+            return result
+    del result, targets, missing
+
     cluster_ids = list(predicted_clusters)
     signature_labels = {
         signature_id: label
@@ -163,7 +193,7 @@ def restore_seed_membership(
     )
     emitted_ids = set(cluster_ids)
     synthetic_ids: dict[int, str] = {}
-    result: dict[str, int | str] = {}
+    result = {}
     for signature_id, label in zip(signature_ids, merged, strict=True):
         if label < len(cluster_ids):
             result[signature_id] = cluster_ids[label]

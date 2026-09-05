@@ -355,7 +355,6 @@ def test_arrow_rust_materialization_passes_dataset_handle_to_native_planner(
         component_members={"candidate": ("1",)},
         cluster_seeds_require={},
         cluster_seeds_disallow=frozenset(),
-        seed_constrained_signature_ids=frozenset(),
         max_block_component_size=1,
     )
     rows = pd.DataFrame(

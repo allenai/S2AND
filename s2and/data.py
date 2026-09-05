@@ -1717,13 +1717,17 @@ class ANDData:
                 elif block_id in self.test_blocks:
                     test_block_dict[block_id] = signature
         else:
+            train_blocks = set(self.train_blocks)
+            val_blocks = set(self.val_blocks)
+            test_blocks = set(self.test_blocks)
             for block_id, signature in blocks.items():
-                if block_id in self.train_blocks:
+                if block_id in train_blocks:
                     train_block_dict[block_id] = signature
-                elif block_id in self.val_blocks:
+                elif block_id in val_blocks:
                     val_block_dict[block_id] = signature
-                elif block_id in self.test_blocks:
+                elif block_id in test_blocks:
                     test_block_dict[block_id] = signature
+            del train_blocks, val_blocks, test_blocks
 
         logger.info(f"shuffled train/val/test {len(train_block_dict), len(val_block_dict), len(test_block_dict)}")
 

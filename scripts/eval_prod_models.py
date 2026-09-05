@@ -69,10 +69,10 @@ bundle explicitly with `--specter2-model-path`.
 These numbers predate the split contract: they were measured with an
 evaluator-owned seed 42 against a bundle trained under seed 1111, so their
 "test" blocks overlapped that bundle's training split at the ~80% base rate.
-Bundle evaluation now derives its split seed from the bundle's recorded
-``data_random_seed`` (the trainer's actual held-out split) and rejects an
-explicit ``--seed``, so freshly measured numbers are genuinely held out and
-will not match the values below.
+Bundle evaluation now uses recorded test block IDs and verifies complete block
+membership, so JSON and Arrow ordering select the same held-out population.
+Bundles without recorded identities require retraining or the official frozen
+release evaluator; a seed alone cannot identify the original holdout.
 
 Performance with SPECTERv2 data, on arnetminer (B3): (0.946, 0.982, 0.963)
 
@@ -109,8 +109,7 @@ Usage
     uv run python scripts/eval_prod_models.py --dataset inventors_s2and \
         --specter2-model-path /path/to/production_model_bundle
 
-    # Evaluate a bundle on mini via the ANDData/Python backend (split seed
-    # comes from the bundle's recorded data_random_seed)
+    # Evaluate a bundle on its recorded mini holdout via ANDData/Python
     S2AND_BACKEND=python uv run python scripts/eval_prod_models.py \
         --dataset mini --no-arrow \
         --specter2-model-path /path/to/production_model_bundle
@@ -127,7 +126,7 @@ Usage
         --specter-suffixes _specter.pickle _specter2.pkl
 
     # Override seed / n_jobs (--seed is --train only; bundle evaluation always
-    # uses the bundle's recorded data_random_seed)
+    # uses the bundle's recorded test block IDs)
     uv run python scripts/eval_prod_models.py --train --seed 42 --n_jobs 8
 """
 
@@ -145,6 +144,7 @@ from typing import Any, cast
 import numpy as np
 
 from s2and.arrow_inputs import ArrowDataset, read_arrow_collection_root
+from s2and.production_training_contract import frozen_test_blocks
 
 TRAIN_MODE_ANDDATA_CURRENT = "anddata-current"
 TRAIN_MODE_ANDDATA_PYTHON = "anddata-python"
@@ -177,8 +177,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Random seed for --train research runs (default: 42). Production-bundle "
-            "evaluation derives its split seed from the bundle's recorded "
-            "data_random_seed and rejects an explicit --seed."
+            "evaluation uses the bundle's recorded test block IDs and rejects an explicit --seed."
         ),
     )
     parser.add_argument("--n_jobs", type=int, default=4, help="Number of parallel jobs (default: 4)")
@@ -453,6 +452,20 @@ def bundle_data_random_seed(model_path: Path) -> int:
     return seed
 
 
+def bundle_cluster_test_splits(model_path: Path) -> Mapping[str, Any]:
+    """Read holdout identities from an already validated production bundle."""
+    summary_path = Path(model_path) / "reproducibility" / "pairwise_training_summary.json"
+    if not summary_path.is_file():
+        raise ValueError("Bundle has no recorded cluster test splits; use the frozen release evaluator or retrain")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    splits = summary.get("cluster_test_splits")
+    if not isinstance(splits, dict) or not splits:
+        raise ValueError("Bundle has no recorded cluster test splits; use the frozen release evaluator or retrain")
+    if any(not isinstance(record, dict) for record in splits.values()):
+        raise ValueError("Bundle cluster test splits must contain identity records")
+    return splits
+
+
 def resolve_arrow_dataset(
     arrow_root: str,
     dataset_name: str,
@@ -607,23 +620,28 @@ def cluster_eval_arrow(
     split: str = "test",
     total_ram_bytes: int = 1_000_000_000_000,
     batching_threshold: int | None = None,
+    test_split: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, tuple], dict[str, tuple[float, float, float]]]:
     import numpy as np
 
     from s2and.eval import b3_precision_recall_fscore, pairwise_precision_recall_fscore
 
-    train_block_dict, val_block_dict, test_block_dict = split_blocks_like_anddata(
-        read_arrow_s2_blocks(arrow_dataset),
-        random_seed=random_seed,
-    )
-    if split == "test":
-        block_dict = test_block_dict
-    elif split == "val":
-        block_dict = val_block_dict
-    elif split == "train":
-        block_dict = train_block_dict
+    blocks = read_arrow_s2_blocks(arrow_dataset)
+    if test_split is not None:
+        if split != "test":
+            raise ValueError("Recorded cluster test splits require split='test'")
+        block_dict = frozen_test_blocks(blocks, test_split)
     else:
-        raise ValueError("Split must be one of: train, val, test")
+        train_block_dict, val_block_dict, test_block_dict = split_blocks_like_anddata(blocks, random_seed=random_seed)
+        if split == "test":
+            block_dict = test_block_dict
+        elif split == "val":
+            block_dict = val_block_dict
+        elif split == "train":
+            block_dict = train_block_dict
+        else:
+            raise ValueError("Split must be one of: train, val, test")
+    del blocks
     signature_to_cluster_id = read_signature_to_cluster_id(_arrow_clusters_path(arrow_dataset))
     cluster_to_signatures = construct_cluster_to_signatures(signature_to_cluster_id, block_dict)
     pred_clusters, _ = clusterer.predict_from_arrow(
@@ -1086,7 +1104,7 @@ def main() -> None:
         if args.seed is not None:
             raise ValueError(
                 "--seed applies only to --train; production-bundle evaluation uses the bundle's "
-                "recorded data_random_seed so its test split is the trainer's held-out split"
+                "recorded test block IDs to preserve the trainer's held-out split"
             )
         random_seed = bundle_data_random_seed(cast(Path, args.specter2_model_path))
     if train_flag:
@@ -1157,12 +1175,14 @@ def main() -> None:
     for specter_suffix in active_specter_suffixes:
         for train_mode in train_modes:
             clusterer = None
+            recorded_splits: Mapping[str, Any] = {}
             if not train_flag:
                 model_path = cast(Path, args.specter2_model_path)
                 if not model_path.exists():
                     raise FileNotFoundError(f"Missing explicit model artifact at {model_path}")
                 print(f"=== specter_suffix: {specter_suffix}, model: {model_path} ===")
                 clusterer = load_production_model(model_path)
+                recorded_splits = bundle_cluster_test_splits(model_path)
                 clusterer.n_jobs = n_jobs
             else:
                 print(f"=== specter_suffix: {specter_suffix}, train_mode: {train_mode} ===")
@@ -1170,6 +1190,8 @@ def main() -> None:
             cluster_metrics_all = []
             for dataset_name in datasets:
                 print(f"-- dataset: {dataset_name} --")
+                if not train_flag and dataset_name not in recorded_splits:
+                    raise ValueError(f"Bundle records no cluster test split for {dataset_name!r}")
                 if use_arrow:
                     if clusterer is None:
                         raise RuntimeError("Arrow evaluation requires a loaded production Clusterer")
@@ -1181,6 +1203,7 @@ def main() -> None:
                             clusterer,
                             random_seed=random_seed,
                             n_jobs=n_jobs,
+                            test_split=recorded_splits[dataset_name],
                         )
                     print(cluster_metrics)
                     cluster_metrics_all.append(cluster_metrics)
@@ -1290,6 +1313,11 @@ def main() -> None:
                         clusterer = apply_fixed_cluster_eps(clusterer, args.fixed_cluster_eps)
                 else:
                     evaluation_anddata = anddata
+                    heldout_blocks = frozen_test_blocks(anddata.get_blocks(), recorded_splits[dataset_name])
+                    evaluation_anddata.train_blocks = []
+                    evaluation_anddata.val_blocks = []
+                    evaluation_anddata.test_blocks = list(heldout_blocks)
+                    del heldout_blocks
 
                 if clusterer is None:
                     raise RuntimeError("Clusterer was not initialized. Check --train flag and model artifact path.")

@@ -3151,6 +3151,7 @@ class Clusterer:
         name_tuples: frozenset[tuple[str, str]],
         cluster_seeds_disallow: set[tuple[str, str]],
         cluster_seeds_require: Mapping[str, int | str],
+        prior_blocks: Iterable[Sequence[str]] = (),
     ) -> dict[str, list[str]]:
         """Attach initial-only groups to prior Rust subblock predictions."""
 
@@ -3158,39 +3159,11 @@ class Clusterer:
             return pred_clusters
 
         pred_clusters_intermediate = pred_clusters
-        original_seed_components: defaultdict[str, list[str]] = defaultdict(list)
-        for signature_id, component_id in cluster_seeds_require.items():
-            original_seed_components[str(component_id)].append(str(signature_id))
-
-        synthetic_seed_map: dict[str, str] = {}
-
-        def refresh_synthetic_seeds_for_clusters(clusters: Mapping[str, Sequence[str]]) -> None:
-            next_seed_map = {
-                str(signature_id): str(cluster_id)
-                for cluster_id, signatures in clusters.items()
-                for signature_id in signatures
-            }
-            for component_id, component_signatures in original_seed_components.items():
-                predicted_component_cluster_ids = {
-                    next_seed_map[signature_id]
-                    for signature_id in component_signatures
-                    if signature_id in next_seed_map
-                }
-                if len(predicted_component_cluster_ids) > 1:
-                    raise RuntimeError(
-                        "Arrow subblock prediction split a required seed component "
-                        f"(component={component_id} clusters={sorted(predicted_component_cluster_ids)})"
-                    )
-                target_cluster_id = (
-                    next(iter(predicted_component_cluster_ids)) if predicted_component_cluster_ids else component_id
-                )
-                for signature_id in component_signatures:
-                    next_seed_map[signature_id] = target_cluster_id
-            synthetic_seed_map.clear()
-            synthetic_seed_map.update(next_seed_map)
-
-        refresh_synthetic_seeds_for_clusters(pred_clusters_intermediate)
+        disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision, blocks=prior_blocks)
         for block_key in sorted(block_dict_single_letter):
+            synthetic_seed_map = restore_seed_membership(
+                pred_clusters_intermediate, cluster_seeds_require, disallow_adjacency
+            )
             group_signature_ids = [str(signature_id) for signature_id in block_dict_single_letter[block_key]]
             incremental_result = self.predict_incremental_from_arrow(
                 group_signature_ids,
@@ -3221,7 +3194,6 @@ class Clusterer:
                 cluster_key = str(cluster_id)
                 normalized_signatures = [str(signature_id) for signature_id in signatures]
                 pred_clusters_intermediate[cluster_key] = normalized_signatures
-            refresh_synthetic_seeds_for_clusters(pred_clusters_intermediate)
         return pred_clusters_intermediate
 
     def _predict_from_arrow(
@@ -3391,6 +3363,7 @@ class Clusterer:
                 name_tuples=prediction_name_tuples,
                 cluster_seeds_disallow=cluster_seed_disallows,
                 cluster_seeds_require=active_cluster_seeds_require,
+                prior_blocks=block_dict_multiple_letter.values(),
             )
             result = dict(pred_clusters), None
         else:

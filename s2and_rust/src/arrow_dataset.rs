@@ -41,7 +41,17 @@ fn duplicate_os_handle(raw: isize, label: &str) -> PyResult<File> {
 #[cfg(windows)]
 fn duplicate_os_handle(raw: isize, label: &str) -> PyResult<File> {
     use std::ffi::c_void;
-    use std::os::windows::io::{BorrowedHandle, FromRawHandle, IntoRawHandle};
+    use std::os::windows::io::FromRawHandle;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn ReOpenFile(
+            original_file: *mut c_void,
+            desired_access: u32,
+            share_mode: u32,
+            flags_and_attributes: u32,
+        ) -> *mut c_void;
+    }
 
     let raw_handle = raw as *mut c_void;
     if raw_handle.is_null() || raw == -1 {
@@ -49,13 +59,29 @@ fn duplicate_os_handle(raw: isize, label: &str) -> PyResult<File> {
             "invalid Windows file handle for '{label}': {raw}"
         )));
     }
-    // Python supplies an OS HANDLE (msvcrt.get_osfhandle), not a CRT fd.
-    // The Python owner keeps it alive until this constructor returns.
-    let borrowed = unsafe { BorrowedHandle::borrow_raw(raw_handle) };
-    let owned = borrowed.try_clone_to_owned().map_err(|err| {
-        io_error_to_py("failed to duplicate retained Arrow file handle", label, err)
-    })?;
-    Ok(unsafe { File::from_raw_handle(owned.into_raw_handle()) })
+    // DuplicateHandle shares the Windows file position with Python's buffered
+    // lease streams, and FileExt::seek_read changes that shared position.
+    // ReOpenFile retains the same underlying file without resolving its path
+    // and gives native readers an independent position. Keep delete sharing so an
+    // atomic path replacement can coexist with this retained generation.
+    // Python keeps the borrowed OS HANDLE alive until this call returns.
+    let reopened = unsafe {
+        ReOpenFile(
+            raw_handle,
+            0x8000_0000,                             // GENERIC_READ
+            0x0000_0001 | 0x0000_0002 | 0x0000_0004, // SHARE_READ | WRITE | DELETE
+            0,
+        )
+    };
+    if reopened as isize == -1 {
+        return Err(io_error_to_py(
+            "failed to reopen retained Arrow file handle",
+            label,
+            io::Error::last_os_error(),
+        ));
+    }
+    // ReOpenFile returned a new owned handle; File closes it on drop.
+    Ok(unsafe { File::from_raw_handle(reopened) })
 }
 
 #[derive(Clone)]
@@ -90,9 +116,10 @@ impl RetainedFile {
 
 /// A local cursor over one retained file.
 ///
-/// `File::try_clone` shares the underlying cursor on Unix. Positional reads
-/// keep concurrent Arrow readers independent while still retaining exactly the
-/// validated open file, even if its original path is later replaced.
+/// Positional reads keep native readers independent. On Windows the retained
+/// file is reopened by handle to isolate its position from Python's buffered
+/// readers as well. Both platforms retain exactly the validated open file,
+/// even if its original path is later replaced.
 pub(crate) struct RetainedFileReader {
     file: Arc<File>,
     position: u64,

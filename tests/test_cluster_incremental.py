@@ -1069,6 +1069,52 @@ def test_partial_supervision_plan_disallows_keep_only_explicit_query_to_active_s
     }
 
 
+@pytest.mark.parametrize(
+    "direct,reverse",
+    [(0.2, LARGE_DISTANCE), (LARGE_DISTANCE, 0.2), (None, LARGE_DISTANCE), (None, 0.2), (0.2, None)],
+)
+def test_native_planner_exclusions_match_scored_supervision_direction(
+    tmp_path: Path, direct: float | None, reverse: float | None
+) -> None:
+    """Planning must retain precisely the candidates allowed by pair scoring."""
+    from s2and.consts import LARGE_INTEGER
+    from s2and.incremental_linking.feature_block import write_cluster_seed_disallows_arrow
+    from s2and.incremental_linking.retrieval import build_linker_retrieval_batch_from_raw_plan_bundle
+    from tests.test_raw_block_candidate_plan_arrow import _base_arrow_paths, _native_auto_planner
+
+    paths = _base_arrow_paths(tmp_path)
+    partial = {}
+    if direct is not None:
+        partial[("q1", "s1")] = direct
+    if reverse is not None:
+        partial[("s1", "q1")] = reverse
+    baseline = _native_auto_planner(paths, top_k=25, orcid_enabled=False, num_threads=1).plan(["q1"])
+    bundle = RawArrowPlanBundle.from_native_mapping(baseline)
+    candidate_batch = build_linker_retrieval_batch_from_raw_plan_bundle(bundle).candidate_batch
+    labels, _ = production_module.runtime_module._resolve_candidate_batch_pair_labels_rust(  # noqa: SLF001
+        candidate_batch=candidate_batch,
+        signature_ids_by_index=bundle.signature_order.signature_ids,
+        partial_supervision=partial,
+        use_default_constraints_as_supervision=False,
+        dont_merge_cluster_seeds=True,
+        n_jobs=1,
+        featurizer=None,
+    )
+    pair_offset = bundle.right_signature_ids.index("s1")
+    effective_distance = direct if direct is not None else reverse
+    assert labels[pair_offset] + LARGE_INTEGER == pytest.approx(effective_distance)
+    exclusions = production_module._partial_supervision_plan_disallows(  # noqa: SLF001
+        partial, query_signature_ids=["q1"], seed_signature_ids=["s1", "s2"]
+    )
+    disallow_path = tmp_path / "request_disallows.arrow"
+    write_cluster_seed_disallows_arrow(disallow_path, exclusions)
+    paths["cluster_seed_disallows"] = str(disallow_path)
+    current = _native_auto_planner(paths, top_k=25, orcid_enabled=False, num_threads=1).plan(["q1"])
+    assert "c_match" in bundle.row_component_keys
+    assert ("c_match" not in current["row_component_keys"]) == (effective_distance == LARGE_DISTANCE)
+    assert "c_other" in current["row_component_keys"]
+
+
 def test_promoted_linker_adds_partial_query_seed_disallows_to_planner_sidecar(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1847,10 +1893,10 @@ def test_subblocked_single_letter_groups_use_request_owned_seeds(monkeypatch) ->
     assert dataset.cluster_seeds_require == {"seed": "seed_cluster"}
 
 
-def test_arrow_subblocked_single_letter_groups_reuse_and_extend_one_seed_map(tmp_path: Path) -> None:
+def test_arrow_subblocked_single_letter_groups_carry_prior_assignments(tmp_path: Path) -> None:
     clusterer = _build_minimal_incremental_clusterer()
     arrow_dataset = _minimal_arrow_dataset(tmp_path)
-    seed_map_ids: list[int] = []
+    seed_maps: list[dict[str, str]] = []
     seed_map_snapshots: list[dict[str, str]] = []
 
     def fake_predict_incremental_from_arrow(
@@ -1860,7 +1906,7 @@ def test_arrow_subblocked_single_letter_groups_reuse_and_extend_one_seed_map(tmp
     ) -> dict[str, Any]:
         assert dataset is arrow_dataset
         seed_map = cast(dict[str, str], kwargs["cluster_seeds_require"])
-        seed_map_ids.append(id(seed_map))
+        seed_maps.append(seed_map)
         seed_map_snapshots.append(dict(seed_map))
         if block_signatures == ["q1"]:
             return {"clusters": {"seed_cluster": ["seed0", "seed1", "q1"]}}
@@ -1891,7 +1937,7 @@ def test_arrow_subblocked_single_letter_groups_reuse_and_extend_one_seed_map(tmp
         "seed_cluster": ["seed0", "seed1", "q1"],
         "new_cluster": ["q2"],
     }
-    assert seed_map_ids[0] == seed_map_ids[1]
+    assert seed_maps == seed_map_snapshots
     assert seed_map_snapshots == [
         {"seed0": "seed_cluster", "seed1": "seed_cluster"},
         {"seed0": "seed_cluster", "seed1": "seed_cluster", "q1": "seed_cluster"},

@@ -15,6 +15,83 @@ from s2and.prediction_state import PredictionState
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
+@pytest.mark.parametrize("case", ["clean", "dataset", "partial", "direct_soft", "direct_hard", "initial_only"])
+def test_public_arrow_subblocking_preserves_effective_seed_disallows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
+) -> None:
+    """Real native subblocking carries seed overrides into initial-only passes."""
+    import pyarrow as pa
+
+    from s2and.consts import LARGE_DISTANCE
+    from s2and.incremental_linking.artifact import (
+        load_incremental_linking_artifact,
+        save_incremental_linking_artifact,
+    )
+    from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
+    from tests.helpers import write_test_arrow_artifact_manifest
+    from tests.promoted_linking_helpers import build_tiny_promoted_booster, synthetic_pairwise_bundle_binding
+    from tests.test_incremental_linking_artifact import _logistic_gate_config
+
+    paths = write_minimal_arrow_prediction_bundle(tmp_path / "arrow", include_specter=True)
+    with pa.OSFile(paths["signatures"], "rb") as source:
+        table = pa.ipc.open_file(source).read_all()
+    firsts = table["author_first"].to_pylist()
+    firsts[2] = "A"
+    if case == "initial_only":
+        firsts[1] = "A"
+    table = table.set_column(table.schema.get_field_index("author_first"), "author_first", pa.array(firsts))
+    write_arrow_ipc_table(table, Path(paths["signatures"]))
+    write_arrow_batch_lookup_index(
+        Path(paths["signatures"]),
+        Path(paths["signatures_batch_index"]),
+        key_column="signature_id",
+        table_name="signatures",
+    )
+    write_test_arrow_artifact_manifest(tmp_path / "arrow", paths)
+    monkeypatch.setattr("s2and.subblocking._resolved_orcid_prefix_counts", lambda counts: {})
+
+    clusterer = Clusterer(FeaturizationInfo(["year_diff"]), classifier=None, n_jobs=1)
+    booster, _ = build_tiny_promoted_booster()
+    artifact_dir = tmp_path / "linker"
+    save_incremental_linking_artifact(
+        booster,
+        artifact_dir,
+        gate_config=_logistic_gate_config(),
+        target_spec={},
+        pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
+    )
+    clusterer.incremental_linker_artifact = load_incremental_linking_artifact(artifact_dir)
+    seeds = {"0": "claimed", "1": "claimed", "2": "initial"}
+    pair = ("0", "1")
+    if case == "initial_only":
+        seeds = {"0": "full", "1": "claimed", "2": "claimed"}
+        pair = ("1", "2")
+    disallows = {pair} if case in {"dataset", "initial_only"} else set()
+    partial: dict[tuple[str, str], int | float] = {}
+    if case == "partial":
+        partial[pair] = LARGE_DISTANCE
+    elif case in {"direct_soft", "direct_hard"}:
+        partial[pair] = 0.2 if case == "direct_soft" else LARGE_DISTANCE
+        partial[(pair[1], pair[0])] = LARGE_DISTANCE if case == "direct_soft" else 0.2
+    with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+        outputs = [
+            clusterer.predict_from_arrow(
+                {"block": ["0", "1", "2"]},
+                arrow_dataset,
+                batching_threshold=threshold,
+                cluster_seeds_require=seeds,
+                cluster_seeds_disallow=disallows,
+                partial_supervision=partial,
+                name_tuples=frozenset(),
+            )[0]
+            for threshold in (None, 2)
+        ]
+    partitions = [{frozenset(members) for members in output.values()} for output in outputs]
+    assert partitions[0] == partitions[1]
+    assert any(set(pair) <= members for members in partitions[1]) == (case in {"clean", "direct_soft"})
+    assert sorted(signature_id for members in outputs[1].values() for signature_id in members) == ["0", "1", "2"]
+
+
 def _clusterer() -> Clusterer:
     return Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),

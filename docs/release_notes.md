@@ -5,6 +5,19 @@
 The coordinated `s2and` and `s2and-rust` package version is `1.0.0`. The
 production model and public-data version is `1.3`, on a separate version axis.
 
+- Correctness audit: Arrow subblocking restores seed membership with the shared
+  cannot-link policy, including conflicting requires/disallows. Candidate
+  planning now uses the scorer's directional supervision precedence. Windows
+  retained Arrow readers reopen the validated handle to isolate Python/native
+  cursors while retaining file identity, without copying data.
+- Evaluation: linker features no longer depend on target labels; actual input
+  seed holdouts still preserve name conflicts and explicit disallows. Metrics
+  produced with label-assisted features must be regenerated. Pairwise training
+  now records test block IDs and an order-independent block membership digest
+  in its existing training summary. Standalone bundle evaluation verifies these
+  identities for both JSON and Arrow; older bundles without them require the
+  official frozen release evaluator or retraining, rather than guessing from a seed.
+
 - Correctness: JSON seed `require` pairs now form connected components, so
   overlapping declarations cannot overwrite earlier must-links. Explicit
   `disallow` pairs retain their existing precedence. Classic Python incremental

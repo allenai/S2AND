@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import pickle
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from s2and.data import ANDData
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.incremental_linking_training.classic import OfficialBundle, fit_classic
 from s2and.name_counts_index import NameCountsIndex
@@ -335,6 +337,25 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     assert summary["nameless_train_rows"] == 24
     assert summary["main_pairwise_best_params"]
     assert summary["nameless_pairwise_best_params"]
+    from s2and.production_training_contract import block_membership_sha256, frozen_test_blocks
+
+    signatures = json.loads(dataset_files["signatures"].read_text(encoding="utf-8"))
+    blocks: dict[str, list[str]] = {}
+    for signature_id, signature in signatures.items():
+        blocks.setdefault(signature["author_info"]["block"], []).append(signature_id)
+    _, _, expected_test = ANDData.split_blocks_helper(
+        SimpleNamespace(
+            random_seed=args.random_seed,
+            num_clusters_for_block_size=1,
+            train_ratio=0.8,
+            val_ratio=0.1,
+            test_ratio=0.1,
+        ),
+        blocks,
+    )
+    record = summary["cluster_test_splits"]["qian"]
+    assert record["block_membership_sha256"] == block_membership_sha256(blocks)
+    assert frozen_test_blocks(dict(reversed(list(blocks.items()))), record) == expected_test
     assert "best_clustering_params" not in summary
     assert 0.0 <= summary["main_validation_roc_auc"] <= 1.0
     assert 0.0 <= summary["nameless_validation_roc_auc"] <= 1.0

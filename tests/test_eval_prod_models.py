@@ -13,6 +13,7 @@ import pytest
 import scripts.eval_prod_models as eval_prod_models
 from s2and.arrow_inputs import ARROW_COLLECTION_KIND, ArrowDataset
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
+from s2and.production_training_contract import block_membership_sha256, frozen_test_blocks
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
@@ -268,6 +269,69 @@ def _write_bundle_training_config(bundle_dir: Path, payload: Mapping[str, Any]) 
     (reproducibility_dir / "pairwise_training_config.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
+def test_recorded_holdout_survives_arrow_order_and_rejects_population_drift() -> None:
+    blocks = {f"block {index}": [str(2 * index), str(2 * index + 1)] for index in range(40)}
+    train, _, test = eval_prod_models.split_blocks_like_anddata(blocks, random_seed=1111)
+    reordered = {key: list(reversed(blocks[key])) for key in sorted(blocks, key=lambda key: blocks[key][0])}
+    _, _, wrong_test = eval_prod_models.split_blocks_like_anddata(reordered, random_seed=1111)
+    assert set(wrong_test) & set(train), "Fixture must reproduce the seed-only holdout leak"
+    record = {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": list(test)}
+    actual = frozen_test_blocks(reordered, record)
+    assert set(actual) == set(test)
+    assert not set(actual) & set(train)
+    assert all(actual[key] is reordered[key] for key in actual)
+    reordered["block 0"] = ["replaced", "1"]
+    with pytest.raises(ValueError, match="membership differs"):
+        frozen_test_blocks(reordered, record)
+
+
+@pytest.mark.parametrize("ids", [[], ["b", "b"], [1], "b"])
+def test_recorded_holdout_rejects_invalid_ids(ids: Any) -> None:
+    blocks = {"b": ["s"]}
+    with pytest.raises(ValueError, match="unique test_block_ids"):
+        frozen_test_blocks(blocks, {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": ids})
+
+
+def test_bundle_holdout_requires_recorded_identities(tmp_path: Path) -> None:
+    _write_bundle_training_config(tmp_path, {"data_random_seed": 1111})
+    with pytest.raises(ValueError, match="no recorded cluster test splits"):
+        eval_prod_models.bundle_cluster_test_splits(tmp_path)
+
+
+def test_bundle_holdout_rejects_null_record_instead_of_falling_back_to_seed(tmp_path: Path) -> None:
+    _write_bundle_training_config(tmp_path, {"data_random_seed": 1111})
+    (tmp_path / "reproducibility" / "pairwise_training_summary.json").write_text(
+        json.dumps({"cluster_test_splits": {"pubmed": None}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="identity records"):
+        eval_prod_models.bundle_cluster_test_splits(tmp_path)
+    (tmp_path / "reproducibility" / "pairwise_training_summary.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="no recorded cluster test splits"):
+        eval_prod_models.bundle_cluster_test_splits(tmp_path)
+
+
+def test_arrow_eval_uses_recorded_holdout_without_resplitting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    blocks = {"training": ["s0"], "heldout": ["s1"]}
+    record = {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": ["heldout"]}
+    monkeypatch.setattr(eval_prod_models, "read_arrow_s2_blocks", lambda _dataset: blocks)
+    monkeypatch.setattr(
+        eval_prod_models,
+        "split_blocks_like_anddata",
+        lambda *_a, **_k: pytest.fail("Must not recreate split from seed"),
+    )
+
+    class Clusterer:
+        def predict_from_arrow(self, actual_blocks, _dataset, **_kwargs):
+            assert actual_blocks == {"heldout": ["s1"]}
+            return {"pred": ["s1"]}, None
+
+    with _open_minimal_arrow_dataset(tmp_path, clusters={"truth": ["s1"]}) as dataset:
+        metrics, _ = eval_prod_models.cluster_eval_arrow(
+            dataset, Clusterer(), random_seed=42, n_jobs=1, test_split=record
+        )
+    assert metrics["B3 (P, R, F1)"] == (1.0, 1.0, 1.0)
+
+
 def test_bundle_data_random_seed_requires_a_recorded_integer(tmp_path: Path) -> None:
     _write_bundle_training_config(tmp_path, {"data_random_seed": 1111})
     assert eval_prod_models.bundle_data_random_seed(tmp_path) == 1111
@@ -401,6 +465,10 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
     model_path = tmp_path / "explicit-model"
     model_path.mkdir()
     _write_bundle_training_config(model_path, {"data_random_seed": 1111})
+    test_split = {"block_membership_sha256": "0" * 64, "test_block_ids": ["heldout"]}
+    (model_path / "reproducibility" / "pairwise_training_summary.json").write_text(
+        json.dumps({"cluster_test_splits": {"pubmed": test_split}}), encoding="utf-8"
+    )
     monkeypatch.setattr(eval_prod_models.os.path, "exists", lambda _path: True)
     monkeypatch.setattr(
         sys,
@@ -428,7 +496,72 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
     assert arrow_dataset.closed
     assert captured["kwargs"]["n_jobs"] == 1
     assert captured["kwargs"]["random_seed"] == 1111
+    assert captured["kwargs"]["test_split"] == test_split
     assert captured["clusterer"].model_path == model_path
+
+
+def test_eval_main_json_uses_recorded_holdout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import s2and.name_tuple_artifact as name_tuple_artifact
+    import s2and.production_model as production_model
+    from s2and.data import ANDData
+
+    blocks = {"training": ["s0"], "heldout": ["s1"]}
+    record = {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": ["heldout"]}
+    model_path = tmp_path / "model"
+    _write_bundle_training_config(model_path, {"data_random_seed": 1111})
+    (model_path / "reproducibility" / "pairwise_training_summary.json").write_text(
+        json.dumps({"cluster_test_splits": {"pubmed": record}}), encoding="utf-8"
+    )
+
+    class Dataset:
+        train_blocks = None
+        val_blocks = None
+        test_blocks = None
+        split_cluster_signatures_fixed = ANDData.split_cluster_signatures_fixed
+
+        def get_blocks(self):
+            return blocks
+
+        def split_cluster_signatures(self):
+            pytest.fail("Must not recreate the test split from its seed")
+
+        def construct_cluster_to_signatures(self, actual):
+            assert actual == {"heldout": ["s1"]}
+            return {"truth": ["s1"]}
+
+    predicted = []
+
+    class Clusterer:
+        def predict(self, actual, _dataset):
+            assert actual == {"heldout": ["s1"]}
+            predicted.append(actual)
+            return {"pred": ["s1"]}, None
+
+    monkeypatch.setattr(eval_prod_models, "build_eval_anddata", lambda **_kwargs: Dataset())
+    monkeypatch.setattr(name_tuple_artifact, "load_name_tuple_artifact", lambda _path: SimpleNamespace(pairs=set()))
+    monkeypatch.setattr(production_model, "load_production_model", lambda _path: Clusterer())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_prod_models.py",
+            "--dataset",
+            "mini",
+            "--datasets",
+            "pubmed",
+            "--no-arrow",
+            "--specter2-model-path",
+            str(model_path),
+            "--json-data-root",
+            str(tmp_path),
+            "--name-counts-index-root",
+            str(tmp_path),
+            "--name-tuples-path",
+            str(tmp_path / "tuples"),
+        ],
+    )
+    eval_prod_models.main()
+    assert len(predicted) == 1
 
 
 def test_eval_main_rejects_invalid_mode_combinations(monkeypatch: pytest.MonkeyPatch) -> None:

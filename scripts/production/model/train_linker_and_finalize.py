@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -29,7 +29,6 @@ for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
 
 from s2and import feature_port  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
-from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER  # noqa: E402
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d  # noqa: E402
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact  # noqa: E402
 from s2and.incremental_linking.feature_block import (  # noqa: E402
@@ -107,7 +106,6 @@ class ArrowRustDatasetContext:
     component_members: dict[str, tuple[str, ...]]
     cluster_seeds_require: dict[str, str]
     cluster_seeds_disallow: frozenset[tuple[str, str]]
-    seed_constrained_signature_ids: frozenset[str]
     max_block_component_size: int
 
 
@@ -395,17 +393,6 @@ def _component_member_ids_by_key(path: Path) -> dict[str, tuple[str, ...]]:
     return out
 
 
-def _seed_constrained_signature_ids_from_maps(
-    cluster_seeds_require: Mapping[str, str],
-    cluster_seeds_disallow: Iterable[tuple[str, str]],
-) -> frozenset[str]:
-    signature_ids = {str(signature_id) for signature_id in cluster_seeds_require}
-    for left, right in cluster_seeds_disallow:
-        signature_ids.add(str(left))
-        signature_ids.add(str(right))
-    return frozenset(signature_ids)
-
-
 def _load_arrow_seed_constraints(
     bundle: OfficialBundle,
     dataset_name: str,
@@ -507,10 +494,6 @@ def _build_arrow_rust_dataset_context(
     )
     component_members = _component_member_ids_by_key(member_path)
     cluster_seeds_require, cluster_seeds_disallow = _load_arrow_seed_constraints(source_bundle, dataset_name)
-    seed_constrained_signature_ids = _seed_constrained_signature_ids_from_maps(
-        cluster_seeds_require,
-        cluster_seeds_disallow,
-    )
     max_block_component_size = max((len(members) for members in component_members.values()), default=0)
     print(
         json.dumps(
@@ -541,7 +524,6 @@ def _build_arrow_rust_dataset_context(
         component_members=component_members,
         cluster_seeds_require=cluster_seeds_require,
         cluster_seeds_disallow=cluster_seeds_disallow,
-        seed_constrained_signature_ids=seed_constrained_signature_ids,
         max_block_component_size=int(max_block_component_size),
     )
 
@@ -617,7 +599,6 @@ def _arrow_labeled_plan_to_batch_and_row_signals(
         pair_row_indices=pair_row_indices,
         row_query_signature_indices=np.asarray(row_group_ids, dtype=np.uint32),
         row_component_keys=row_component_keys,
-        labels=rows["label"].to_numpy(dtype=np.int8, copy=False) if "label" in rows.columns else None,
         retrieval_scores=retrieval_scores,
         retrieval_ranks=retrieval_ranks,
     )
@@ -658,8 +639,13 @@ def _resolve_arrow_rust_pair_labels(
     featurizer: Any,
     n_jobs: int,
     pair_seed_bypass: np.ndarray | None = None,
-    pair_ignore_disallow: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, int | float | str]]:
+    """Resolve input constraints without using candidate target labels.
+
+    Leave-one-out queries may suppress their input seed-group membership. Name
+    constraints and explicit disallow pairs still apply, as they do at runtime.
+    """
+
     pair_count = int(batch.pair_count)
     labels = np.full(pair_count, np.nan, dtype=np.float64)
     started = time.perf_counter()
@@ -667,18 +653,8 @@ def _resolve_arrow_rust_pair_labels(
         pair_seed_bypass = np.zeros(pair_count, dtype=bool)
     else:
         pair_seed_bypass = np.asarray(pair_seed_bypass, dtype=bool)
-    if pair_ignore_disallow is None:
-        if batch.labels is not None and pair_count:
-            positive_rows = np.asarray(batch.labels, dtype=np.int8) == 1
-            pair_ignore_disallow = positive_rows[np.asarray(batch.pair_row_indices, dtype=np.uint32)]
-        else:
-            pair_ignore_disallow = np.zeros(pair_count, dtype=bool)
-    else:
-        pair_ignore_disallow = np.asarray(pair_ignore_disallow, dtype=bool)
     if len(pair_seed_bypass) != pair_count:
         raise ValueError(f"pair_seed_bypass length {len(pair_seed_bypass)} != pair_count {pair_count}")
-    if len(pair_ignore_disallow) != pair_count:
-        raise ValueError(f"pair_ignore_disallow length {len(pair_ignore_disallow)} != pair_count {pair_count}")
 
     constraints_enabled = bool(getattr(clusterer, "use_default_constraints_as_supervision", True)) and pair_count > 0
     if constraints_enabled:
@@ -702,20 +678,11 @@ def _resolve_arrow_rust_pair_labels(
             featurizer=featurizer,
             suppress_orcid=PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
         )
-    disallow_ignored = 0
-    if np.any(pair_ignore_disallow):
-        disallowed = pair_ignore_disallow & np.asarray(
-            [_constraint_label_is_disallow(float(label)) for label in labels],
-            dtype=bool,
-        )
-        disallow_ignored = int(disallowed.sum())
-        labels[disallowed] = np.nan
     return labels, {
         "constraint_pair_count": pair_count,
         "constraint_batch_calls": int(constraints_enabled),
         "constraint_seed_bypass_pair_count": int(len(seed_bypass_indices)),
         "constraint_seed_bypass_batch_calls": int(len(seed_bypass_indices) > 0),
-        "constraint_disallow_ignored_pair_count": disallow_ignored,
         "constraint_seconds": round(float(time.perf_counter() - started), 3),
         "constraint_api_mode": "rust_index_arrays",
     }
@@ -729,129 +696,22 @@ def _feature_nan_policy_summary() -> dict[str, str]:
     }
 
 
-def _truthy_row_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, float) and math.isnan(value):
-        return False
-    if isinstance(value, bool | np.bool_):
-        return bool(value)
-    if isinstance(value, int | np.integer):
-        return int(value) != 0
-    text = str(value).strip().lower()
-    return text in {"1", "true", "t", "yes", "y"}
-
-
-def _row_text_value(row: Any, field_name: str) -> str:
-    value = getattr(row, field_name, "")
-    if value is None:
-        return ""
-    if isinstance(value, float) and math.isnan(value):
-        return ""
-    return str(value).lower()
-
-
-def _row_label_is_positive(row: Any) -> bool:
-    value = getattr(row, "label", 0)
-    if value is None:
-        return False
-    if isinstance(value, float) and math.isnan(value):
-        return False
-    try:
-        return int(value) == 1
-    except (TypeError, ValueError):
-        return str(value).strip() == "1"
-
-
-def _row_allows_seed_constraint_bypass(
-    row: Any,
-    *,
-    seed_constraint_signature_ids: frozenset[str],
-) -> bool:
-    if _truthy_row_value(getattr(row, "query_in_seed_before_holdout", None)):
-        return True
-    query_signature_id = getattr(row, "query_signature_id", None)
-    if query_signature_id is not None and str(query_signature_id) in seed_constraint_signature_ids:
-        return True
-    split = _row_text_value(row, "split")
-    source = _row_text_value(row, "source")
-    source_key = _row_text_value(row, "source_key")
-    support_type = _row_text_value(row, "support_type")
-    source_kind = _row_text_value(row, "source_kind")
-    supervision_type = _row_text_value(row, "supervision_type")
-    return (
-        "loo" in split
-        or "loo" in source
-        or "loo" in source_key
-        or "loo" in support_type
-        or "loo" in source_kind
-        or "loo" in supervision_type
-        or "self" in support_type
-        or "self" in source_kind
-        or "self" in supervision_type
-    )
-
-
-def _has_query_seed_connection_from_maps(
-    cluster_seeds_require: Mapping[str, str],
-    cluster_seeds_disallow: frozenset[tuple[str, str]],
-    *,
-    query_signature_id: str,
-    candidate_signature_ids: Sequence[str],
-) -> bool:
-    """Check a connection using canonical string maps from the dataset context."""
-    query_required_cluster = cluster_seeds_require.get(query_signature_id)
-    for candidate_signature_id in candidate_signature_ids:
-        if (query_signature_id, candidate_signature_id) in cluster_seeds_disallow or (
-            candidate_signature_id,
-            query_signature_id,
-        ) in cluster_seeds_disallow:
-            return True
-        if (
-            query_required_cluster is not None
-            and cluster_seeds_require.get(candidate_signature_id) == query_required_cluster
-        ):
-            return True
-    return False
-
-
 def _arrow_row_seed_bypass_mask(
     rows: pd.DataFrame,
-    component_members: Mapping[str, Sequence[str]],
     *,
     cluster_seeds_require: Mapping[str, str],
-    cluster_seeds_disallow: frozenset[tuple[str, str]],
-    seed_constrained_signature_ids: frozenset[str],
 ) -> np.ndarray:
-    row_seed_bypass = np.zeros(len(rows), dtype=bool)
-    if not seed_constrained_signature_ids:
-        return row_seed_bypass
-    for row_index, row in enumerate(rows.itertuples(index=False)):
-        row_any = cast(Any, row)
-        query_signature_id = str(row_any.query_signature_id)
-        component_key = str(row_any.candidate_component_key)
-        active_member_ids = [
-            str(signature_id)
-            for signature_id in component_members.get(component_key, ())
-            if str(signature_id) != query_signature_id
-        ]
-        if _row_allows_seed_constraint_bypass(
-            row_any,
-            seed_constraint_signature_ids=seed_constrained_signature_ids,
-        ) and _has_query_seed_connection_from_maps(
-            cluster_seeds_require,
-            cluster_seeds_disallow,
-            query_signature_id=query_signature_id,
-            candidate_signature_ids=active_member_ids,
-        ):
-            row_seed_bypass[row_index] = True
-    return row_seed_bypass
+    """Hold out a query's actual input membership against every candidate.
 
+    Both same-group requires and different-group disallows derive from that
+    membership. Candidate truth and source annotations cannot select holdouts.
+    """
 
-def _constraint_label_is_disallow(label: float) -> bool:
-    if math.isnan(float(label)):
-        return False
-    return float(label) + float(LARGE_INTEGER) >= float(LARGE_DISTANCE)
+    return np.fromiter(
+        (str(signature_id) in cluster_seeds_require for signature_id in rows["query_signature_id"]),
+        dtype=bool,
+        count=len(rows),
+    )
 
 
 def _validate_materialized_target_features(
@@ -1032,8 +892,21 @@ def _materialize_arrow_rust_dataset_rows(
         preprocess=True,
         num_threads=max(1, int(n_jobs)),
     )
-    featurizer_seconds = float(time.perf_counter() - featurizer_started)
     signature_id_to_index = _signature_id_to_index(featurizer)
+    # Share prepared native features and restrict request seeds to this shard.
+    featurizer = featurizer.with_cluster_seeds(
+        {
+            signature_id: context.cluster_seeds_require[signature_id]
+            for signature_id in signature_id_to_index
+            if signature_id in context.cluster_seeds_require
+        },
+        {
+            (left, right)
+            for left, right in context.cluster_seeds_disallow
+            if left in signature_id_to_index and right in signature_id_to_index
+        },
+    )
+    featurizer_seconds = float(time.perf_counter() - featurizer_started)
     batch, row_signals = _arrow_labeled_plan_to_batch_and_row_signals(
         plan=raw_plan,
         rows=dataset_rows,
@@ -1042,14 +915,7 @@ def _materialize_arrow_rust_dataset_rows(
     )
     row_seed_bypass = _arrow_row_seed_bypass_mask(
         dataset_rows,
-        context.component_members,
         cluster_seeds_require=context.cluster_seeds_require,
-        cluster_seeds_disallow=context.cluster_seeds_disallow,
-        seed_constrained_signature_ids=context.seed_constrained_signature_ids,
-    )
-    row_ignore_disallow = np.asarray(
-        [_row_label_is_positive(row) for row in dataset_rows.itertuples(index=False)],
-        dtype=bool,
     )
     pair_row_indices = np.asarray(batch.pair_row_indices, dtype=np.uint32)
     pair_labels, constraint_summary = _resolve_arrow_rust_pair_labels(
@@ -1058,7 +924,6 @@ def _materialize_arrow_rust_dataset_rows(
         featurizer=featurizer,
         n_jobs=n_jobs,
         pair_seed_bypass=row_seed_bypass[pair_row_indices],
-        pair_ignore_disallow=(row_seed_bypass | row_ignore_disallow)[pair_row_indices],
     )
     fused_pairwise_started = time.perf_counter()
     fused_pairwise = compute_candidate_batch_pairwise_model_and_aggregate_stats(

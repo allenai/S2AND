@@ -20,7 +20,6 @@ from scripts.production.model.train_linker_and_finalize import (
     _clean_arrow_rust_structural_rows,
     _load_target,
     _resolve_arrow_rust_pair_labels,
-    _row_label_is_positive,
     _write_arrow_rust_partial_frame,
 )
 from tests.helpers import write_minimal_arrow_prediction_bundle
@@ -527,13 +526,6 @@ def test_arrow_rust_structural_cleaning_drops_self_only_candidates(
     assert summary["positive_queries_changed_or_removed"] == 1
 
 
-def test_arrow_rust_positive_label_marks_training_disallow_ignore() -> None:
-    assert _row_label_is_positive(SimpleNamespace(label=1))
-    assert _row_label_is_positive(SimpleNamespace(label=1.0))
-    assert not _row_label_is_positive(SimpleNamespace(label=0))
-    assert not _row_label_is_positive(SimpleNamespace(label=np.nan))
-
-
 def test_arrow_rust_row_seed_bypass_uses_manifest_seed_constraints() -> None:
     rows = pd.DataFrame(
         [
@@ -554,43 +546,43 @@ def test_arrow_rust_row_seed_bypass_uses_manifest_seed_constraints() -> None:
 
     mask = _arrow_row_seed_bypass_mask(
         rows,
-        {"c_match": ("q", "m1"), "c_other": ("other",)},
         cluster_seeds_require={"q": "seed_cluster", "m1": "seed_cluster", "other": "different"},
-        cluster_seeds_disallow=frozenset(),
-        seed_constrained_signature_ids=frozenset({"q", "m1", "other"}),
     )
 
-    np.testing.assert_array_equal(mask, np.asarray([True, False]))
+    np.testing.assert_array_equal(mask, np.asarray([True, True]))
 
 
 @pytest.mark.parametrize(
-    ("query_id", "members", "disallows", "expected"),
+    ("query_id", "expected"),
     [
-        ("q", ("neighbor",), frozenset({("q", "neighbor")}), True),
-        ("q", ("neighbor",), frozenset({("neighbor", "q")}), True),
-        ("q", ("q",), frozenset(), False),
-        ("unseeded", ("neighbor",), frozenset(), False),
+        ("q", True),
+        ("unseeded", False),
     ],
-    ids=["forward-disallow", "reverse-disallow", "self-excluded", "unseeded-query"],
+    ids=["input-seeded-query", "unseeded-query-with-loo-annotation"],
 )
-def test_arrow_rust_row_seed_bypass_connection_boundaries(
+def test_arrow_rust_row_seed_bypass_requires_input_membership(
     query_id: str,
-    members: tuple[str, ...],
-    disallows: frozenset[tuple[str, str]],
     expected: bool,
 ) -> None:
-    rows = pd.DataFrame([{"query_signature_id": query_id, "candidate_component_key": "c", "split": "loo"}])
+    rows = pd.DataFrame(
+        [
+            {
+                "query_signature_id": query_id,
+                "candidate_component_key": "c",
+                "split": "loo",
+                "query_in_seed_before_holdout": 1,
+                "label": 1,
+            }
+        ]
+    )
     mask = _arrow_row_seed_bypass_mask(
         rows,
-        {"c": members},
         cluster_seeds_require={"q": "seed", "neighbor": "other_seed"},
-        cluster_seeds_disallow=disallows,
-        seed_constrained_signature_ids=frozenset({"q", "neighbor"}),
     )
     np.testing.assert_array_equal(mask, np.asarray([expected]))
 
 
-def test_arrow_rust_pair_label_resolution_applies_seed_bypass_and_disallow_ignore(
+def test_arrow_rust_pair_label_resolution_applies_seed_bypass_without_erasing_disallows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict[str, Any]] = []
@@ -635,15 +627,14 @@ def test_arrow_rust_pair_label_resolution_applies_seed_bypass_and_disallow_ignor
         featurizer="featurizer",
         n_jobs=2,
         pair_seed_bypass=np.asarray([False, True, True]),
-        pair_ignore_disallow=np.asarray([False, True, False]),
     )
 
     assert calls == [
         {"left": [0, 0, 0], "right": [1, 2, 3], "seed_bypass": False},
         {"left": [0, 0], "right": [2, 3], "seed_bypass": True},
     ]
-    np.testing.assert_array_equal(np.isnan(labels), np.asarray([True, True, False]))
+    np.testing.assert_array_equal(np.isnan(labels), np.asarray([True, False, False]))
+    assert labels[1] == pytest.approx(-90_000.0)
     assert labels[2] == pytest.approx(-90_000.0)
     assert summary["constraint_seed_bypass_pair_count"] == 2
     assert summary["constraint_seed_bypass_batch_calls"] == 1
-    assert summary["constraint_disallow_ignored_pair_count"] == 1

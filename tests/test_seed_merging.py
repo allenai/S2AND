@@ -267,3 +267,19 @@ def test_initial_only_seed_partitions_receive_distinct_synthetic_ids():
     assert restored["a"] != "0"
     assert restored["b"] != "0"
     assert len({restored[sig] for sig in ("a", "b", "c")}) == 2
+
+
+@pytest.mark.parametrize("disallowed", [False, True])
+def test_missing_seed_restoration_checks_unseeded_cluster_occupants(disallowed: bool) -> None:
+    """A sparse edge to an ordinary occupant can prohibit a new seed merge."""
+    from s2and.seed_merging import restore_seed_membership, seed_disallow_adjacency
+
+    clusters = {"existing": ["a", "occupant"], "collision": ["other"]}
+    seeds = {"a": "profile", "b": "profile", "c": "collision", "d": "collision"}
+    adjacency = seed_disallow_adjacency({("b", "occupant")} if disallowed else set(), {})
+    restored = restore_seed_membership(clusters, seeds, adjacency)
+    assert restored["a"] == restored["occupant"] == "existing"
+    assert (restored["b"] == restored["a"]) is not disallowed
+    assert restored["c"] == restored["d"] != restored["other"]
+    assert list(restored) == ["a", "occupant", "other", "b", "c", "d"]
+    assert clusters == {"existing": ["a", "occupant"], "collision": ["other"]}

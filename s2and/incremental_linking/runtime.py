@@ -1168,6 +1168,14 @@ def _candidate_pair_ids(
     return pair_ids
 
 
+def _partial_supervision_distance(
+    partial_supervision: Mapping[tuple[str, str], int | float], left: str, right: str
+) -> int | float | None:
+    """Resolve a scored pair's direct entry before its reverse supervision."""
+    direct = partial_supervision.get((left, right))
+    return partial_supervision.get((right, left)) if direct is None else direct
+
+
 def _resolve_candidate_batch_pair_labels_rust(
     *,
     candidate_batch: LinkerCandidateBatch,
@@ -1207,11 +1215,9 @@ def _resolve_candidate_batch_pair_labels_rust(
                 )
             left_id = str(signature_ids_by_index[left])
             right_id = str(signature_ids_by_index[right])
-            if (left_id, right_id) in partial_supervision:
-                labels[pair_offset] = float(partial_supervision[(left_id, right_id)] - LARGE_INTEGER)
-                partial_hits += 1
-            elif (right_id, left_id) in partial_supervision:
-                labels[pair_offset] = float(partial_supervision[(right_id, left_id)] - LARGE_INTEGER)
+            distance = _partial_supervision_distance(partial_supervision, left_id, right_id)
+            if distance is not None:
+                labels[pair_offset] = float(distance - LARGE_INTEGER)
                 partial_hits += 1
 
     api_mode = "rust_index_arrays" if use_default_constraints_as_supervision else "partial_only"

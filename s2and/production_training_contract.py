@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +50,49 @@ SUPPORTED_OFFICIAL_METRIC_KEYS = (
 _COMMON_MODEL_ROLES = frozenset({"papers", "signatures", "specter_embeddings"})
 _RANDOM_BLOCK_ROLES = _COMMON_MODEL_ROLES | {"clusters"}
 _FIXED_PAIR_ROLES = _COMMON_MODEL_ROLES | {"train_pairs", "val_pairs"}
+
+
+def block_membership_sha256(blocks: Mapping[str, Sequence[str]]) -> str:
+    """Hash block membership independently of row order with bounded scratch space.
+
+    Only the block keys and one block's sorted members are materialized. Length
+    prefixes distinguish IDs containing arbitrary separators without building a
+    serialized copy of the complete population.
+    """
+    digest = hashlib.sha256()
+    for block_id in sorted(blocks):
+        members = blocks[block_id]
+        encoded = block_id.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        digest.update(len(members).to_bytes(8, "big"))
+        for signature_id in sorted(members):
+            encoded = signature_id.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    return digest.hexdigest()
+
+
+def frozen_test_blocks(blocks: Mapping[str, list[str]], record: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Select recorded held-out blocks after verifying the complete population."""
+    if not isinstance(record, Mapping) or set(record) != {"block_membership_sha256", "test_block_ids"}:
+        raise ValueError("Invalid recorded cluster test split")
+    expected_digest = record["block_membership_sha256"]
+    if not is_lowercase_sha256(expected_digest):
+        raise ValueError("Recorded cluster test split requires a lowercase block_membership_sha256")
+    block_ids = record["test_block_ids"]
+    if (
+        not isinstance(block_ids, list)
+        or not block_ids
+        or any(not isinstance(block_id, str) for block_id in block_ids)
+        or len(set(block_ids)) != len(block_ids)
+    ):
+        raise ValueError("Recorded cluster test split requires unique test_block_ids")
+    if block_membership_sha256(blocks) != expected_digest:
+        raise ValueError("Evaluation block membership differs from the recorded training population")
+    if any(block_id not in blocks for block_id in block_ids):
+        raise ValueError("Recorded test block is absent from the evaluation population")
+    return {block_id: blocks[block_id] for block_id in block_ids}
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,7 +2,9 @@ import numpy as np
 from hyperopt import Trials, hp
 from sklearn.linear_model import LogisticRegression
 
-from s2and.model import PairwiseModeler
+from s2and.featurizer import FeaturizationInfo
+from s2and.model import Clusterer, PairwiseModeler
+from tests.helpers import build_dummy_dataset
 
 
 def test_pairwise_modeler_hyperopt_small():
@@ -31,6 +33,57 @@ def test_pairwise_modeler_hyperopt_small():
 
     probs = modeler.predict_proba(X_val)
     assert probs.shape == (6, 2)
+
+
+def test_clusterer_default_search_space_fits_with_extracted_metrics(monkeypatch):
+    """Exercise default Hyperopt setup, B3 scoring, and cached clustering together."""
+    dataset = build_dummy_dataset("cluster_hyperopt_imports")
+    block = {"tiny": ["0", "1", "2"]}
+    monkeypatch.setattr(dataset, "split_cluster_signatures", lambda: ({}, block, {}))
+    clusterer = Clusterer(
+        FeaturizationInfo(["year_diff"]),
+        classifier=None,
+        n_iter=2,
+        n_jobs=1,
+        random_state=0,
+    )
+    distances = {"tiny": np.array([0.0, 1.0, 1.0])}
+
+    assert clusterer.fit(dataset, val_dists_precomputed={dataset.name: distances}) is clusterer
+    assert isinstance(clusterer.hyperopt_trials_store, Trials)
+    assert len(clusterer.hyperopt_trials_store.trials) == 2
+    assert clusterer.hyperopt_trials_store.losses() == [-1.0, -1.0]
+    assert 0 <= clusterer.best_params["eps"] <= 1
+
+
+def test_deferred_calibration_matches_explicit_default_space(monkeypatch):
+    """Deferring setup preserves optimizer samples, scores, EPS, and predictions."""
+    dataset = build_dummy_dataset("deferred_cluster_calibration")
+    block = {"tiny": ["0", "1", "2"]}
+    monkeypatch.setattr(dataset, "split_cluster_signatures", lambda: ({}, block, {}))
+    distances = {"tiny": np.array([0.2, 0.8, 0.9])}
+    explicit_space = {"eps": hp.uniform("eps", 0, 1)}
+    deferred, explicit = [
+        Clusterer(
+            FeaturizationInfo(["year_diff"]),
+            classifier=None,
+            search_space=space,
+            n_iter=8,
+            n_jobs=1,
+            random_state=0,
+        )
+        for space in (None, explicit_space)
+    ]
+    assert deferred.search_space is None
+    for clusterer in (deferred, explicit):
+        clusterer.fit(dataset, val_dists_precomputed={dataset.name: distances})
+        assert isinstance(clusterer.hyperopt_trials_store, Trials)
+    assert explicit.search_space is explicit_space
+    assert deferred.hyperopt_trials_store.vals == explicit.hyperopt_trials_store.vals
+    assert deferred.hyperopt_trials_store.losses() == explicit.hyperopt_trials_store.losses()
+    assert len(set(deferred.hyperopt_trials_store.losses())) > 1
+    assert deferred.best_params == explicit.best_params
+    assert deferred.predict(block, dataset, dists=distances)[0] == explicit.predict(block, dataset, dists=distances)[0]
 
 
 def test_pairwise_modeler_resets_trials_when_search_space_empty():

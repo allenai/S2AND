@@ -1,6 +1,6 @@
 use arrow::array::{
-    Array, BooleanArray, FixedSizeListArray, Float32Array, Int64Array, LargeListArray,
-    LargeStringArray, ListArray, StringArray,
+    Array, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int64Array,
+    LargeListArray, LargeStringArray, ListArray, StringArray,
 };
 use arrow::datatypes::DataType;
 use arrow::ipc::reader::FileReader as ArrowFileReader;
@@ -95,6 +95,16 @@ impl<'a> ArrowStringColumn<'a> {
             pyo3::exceptions::PyValueError::new_err(format!("{context} is null at row {row}"))
         })
     }
+
+    pub(crate) fn required_borrowed_value(&self, row: usize, context: &str) -> PyResult<&'a str> {
+        let value = match self {
+            Self::Utf8(values) => (!values.is_null(row)).then(|| (*values).value(row)),
+            Self::LargeUtf8(values) => (!values.is_null(row)).then(|| (*values).value(row)),
+        };
+        value.ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!("{context} is null at row {row}"))
+        })
+    }
 }
 
 pub(crate) struct ArrowI64Column<'a>(&'a Int64Array);
@@ -149,6 +159,33 @@ pub(crate) fn arrow_optional_bool(
         DataType::Null => Ok(None),
         other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
             "{context} must be a boolean column, got {other:?}"
+        ))),
+    }
+}
+
+pub(crate) fn arrow_optional_f64(
+    array: &dyn Array,
+    row: usize,
+    context: &str,
+) -> PyResult<Option<f64>> {
+    if array.is_null(row) {
+        return Ok(None);
+    }
+    match array.data_type() {
+        DataType::Float64 => {
+            let values = array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyTypeError::new_err(format!(
+                        "{context} is not a Float64 array"
+                    ))
+                })?;
+            Ok(Some(values.value(row)))
+        }
+        DataType::Null => Ok(None),
+        other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{context} must be a Float64 column, got {other:?}"
         ))),
     }
 }

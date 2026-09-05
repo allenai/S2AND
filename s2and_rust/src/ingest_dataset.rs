@@ -21,42 +21,6 @@ pub(crate) fn extract_counter(obj: &Bound<'_, PyAny>) -> PyResult<Option<Counter
     Ok(Some(CounterData { entries, sum }))
 }
 
-pub(crate) fn extract_reference_details_counters(
-    py: Python<'_>,
-    ref_details_obj: &Bound<'_, PyAny>,
-) -> PyResult<(
-    Option<CounterData>,
-    Option<CounterData>,
-    Option<CounterData>,
-    Option<CounterData>,
-)> {
-    let tuple = ref_details_obj.extract::<(PyObject, PyObject, PyObject, PyObject)>()?;
-    Ok((
-        extract_counter(&tuple.0.bind(py))?,
-        extract_counter(&tuple.1.bind(py))?,
-        extract_counter(&tuple.2.bind(py))?,
-        extract_counter(&tuple.3.bind(py))?,
-    ))
-}
-
-pub(crate) fn extract_optional_string_set(
-    obj: &Bound<'_, PyAny>,
-) -> PyResult<Option<HashSet<String>>> {
-    if obj.is_none() {
-        return Ok(None);
-    }
-    let mut out = HashSet::new();
-    for item in PyIterator::from_object(obj)? {
-        let v: String = item?.extract()?;
-        out.insert(v);
-    }
-    if out.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(out))
-    }
-}
-
 pub(crate) fn canonical_signature_pair_ref<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
     if a <= b {
         (a, b)
@@ -91,20 +55,19 @@ pub(crate) fn insert_name_tuple_alias(
     a: String,
     b: String,
 ) {
-    // Directed insert to match the Python reference, which stores name tuples as a
-    // `set[tuple[str, str]]` keyed on the curated (a, b) order (see
-    // `_load_name_tuples_from_file` in s2and/data.py). The shipped
-    // `s2and_name_tuples_filtered.txt` lists both directions explicitly for every
-    // pair, so directed insertion still yields both lookups while staying faithful
-    // to any asymmetric tuples a caller might supply.
-    map.entry(a).or_insert_with(HashSet::new).insert(b);
+    map.entry(a.clone())
+        .or_insert_with(HashSet::new)
+        .insert(b.clone());
+    map.entry(b).or_insert_with(HashSet::new).insert(a);
 }
 
 pub(crate) fn extract_name_tuples_map(
     obj: &Bound<'_, PyAny>,
 ) -> PyResult<HashMap<String, HashSet<String>>> {
-    if obj.is_none() {
-        return Ok(HashMap::new());
+    if obj.extract::<String>().is_ok() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "name_tuples must be an explicit collection of pairs, not a path or string sentinel",
+        ));
     }
     let mut out: HashMap<String, HashSet<String>> = HashMap::new();
     for item in PyIterator::from_object(obj)? {
@@ -144,155 +107,6 @@ pub(crate) fn cluster_id_to_string(cluster_id: &ClusterId) -> String {
         ClusterId::Int(value) => value.to_string(),
         ClusterId::Str(value) => value.clone(),
     }
-}
-
-pub(crate) fn extract_id_string(obj: &Bound<'_, PyAny>) -> PyResult<String> {
-    if let Ok(s) = obj.extract::<String>() {
-        return Ok(s);
-    }
-    let type_name = obj.get_type().name()?;
-    if type_name == "bool" {
-        return Err(pyo3::exceptions::PyTypeError::new_err(
-            "expected id value to be str, int, or uint-compatible int; got bool",
-        ));
-    }
-    if let Ok(i) = obj.extract::<i64>() {
-        return Ok(i.to_string());
-    }
-    if let Ok(u) = obj.extract::<u64>() {
-        return Ok(u.to_string());
-    }
-    Err(pyo3::exceptions::PyTypeError::new_err(format!(
-        "expected id value to be str, int, or uint-compatible int; got {}",
-        type_name
-    )))
-}
-
-pub(crate) fn extract_set_id_string(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<PaperId>> {
-    if obj.is_none() {
-        return Ok(HashSet::new());
-    }
-    let mut out = HashSet::new();
-    for item in PyIterator::from_object(obj)? {
-        let v = extract_id_string(&item?)?;
-        out.insert(v);
-    }
-    Ok(out)
-}
-
-pub(crate) fn extract_string_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
-    if obj.is_none() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for item in PyIterator::from_object(obj)? {
-        out.push(item?.extract()?);
-    }
-    Ok(out)
-}
-
-pub(crate) fn get_namedtuple_item_or_attr<'py>(
-    obj: &Bound<'py, PyAny>,
-    allow_tuple_fastpath: bool,
-    tuple_index: usize,
-    attr_name: &str,
-) -> PyResult<Bound<'py, PyAny>> {
-    if allow_tuple_fastpath {
-        return obj.get_item(tuple_index).map_err(|_| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "NamedTuple fast-path index out of range or object not indexable: index={} attr={}",
-                tuple_index, attr_name
-            ))
-        });
-    }
-    obj.getattr(attr_name)
-}
-
-pub(crate) fn validate_namedtuple_fastpath_contract(
-    sample_obj: &Bound<'_, PyAny>,
-    required_fields: &[(usize, &str)],
-    tuple_label: &str,
-) -> PyResult<bool> {
-    let fields_obj = match sample_obj.getattr("_fields") {
-        Ok(fields_obj) => fields_obj,
-        Err(_) => return Ok(false),
-    };
-
-    let field_names: Vec<String> = fields_obj.extract().map_err(|_| {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "{} fast-path expected _fields to be a tuple/list of field names",
-            tuple_label
-        ))
-    })?;
-
-    let max_required_index = required_fields
-        .iter()
-        .map(|(index, _)| *index)
-        .max()
-        .unwrap_or(0);
-    if sample_obj.get_item(max_required_index).is_err() || field_names.len() <= max_required_index {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "{} fast-path contract mismatch: object is not indexable to required max index {} or _fields len={}",
-            tuple_label,
-            max_required_index,
-            field_names.len()
-        )));
-    }
-
-    for (field_index, expected_name) in required_fields {
-        let actual_name = field_names
-            .get(*field_index)
-            .map(|s| s.as_str())
-            .unwrap_or("<missing>");
-        if actual_name != *expected_name {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "{} fast-path contract mismatch at index {}: expected '{}' got '{}'",
-                tuple_label, field_index, expected_name, actual_name
-            )));
-        }
-    }
-
-    Ok(true)
-}
-
-pub(crate) fn validate_dict_namedtuple_fastpath_contract(
-    rows: &Bound<'_, PyDict>,
-    required_fields: &[(usize, &str)],
-    tuple_label: &str,
-) -> PyResult<bool> {
-    if let Some((_, sample_obj)) = rows.iter().next() {
-        return validate_namedtuple_fastpath_contract(&sample_obj, required_fields, tuple_label);
-    }
-    Ok(false)
-}
-
-pub(crate) fn extract_paper_authors_with_positions(
-    obj: &Bound<'_, PyAny>,
-) -> PyResult<Vec<(i64, String)>> {
-    if obj.is_none() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for item in PyIterator::from_object(obj)? {
-        let author_obj = item?;
-        let (position, author_name) = if let Ok(author_tuple) = author_obj.downcast::<PyTuple>() {
-            if author_tuple.len() >= 2 {
-                let author_name: String = author_tuple.get_item(0)?.extract()?;
-                let position: i64 = author_tuple.get_item(1)?.extract()?;
-                (position, author_name)
-            } else {
-                let position: i64 = author_obj.getattr("position")?.extract()?;
-                let author_name: String = author_obj.getattr("author_name")?.extract()?;
-                (position, author_name)
-            }
-        } else {
-            let position: i64 = author_obj.getattr("position")?.extract()?;
-            let author_name: String = author_obj.getattr("author_name")?.extract()?;
-            (position, author_name)
-        };
-        out.push((position, author_name));
-    }
-    Ok(out)
 }
 
 pub(crate) fn extract_required_string_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<String>> {
@@ -491,8 +305,7 @@ pub(crate) fn preprocess_stage_papers(
     paper_inputs
         .par_iter()
         .map(|paper_input| {
-            let title =
-                normalize_text_compat_from_map(&paper_input.raw_title, false, unidecode_char_map);
+            let title = normalize_title_compat_from_map(&paper_input.raw_title, unidecode_char_map);
             let venue = if preprocess {
                 normalize_text_compat_from_map(&paper_input.raw_venue, false, unidecode_char_map)
             } else {
@@ -513,14 +326,16 @@ pub(crate) fn preprocess_stage_papers(
                     )
                 })
                 .collect::<Vec<_>>();
-            let title_words =
-                counter_data_from_usize_map(word_ngrams_counter_python_compat(&title, stop_words));
+            let title_words = counter_data_from_usize_map(word_ngrams_counter_python_compat(
+                &title, stop_words, false,
+            ));
             let title_chars = if preprocess {
                 counter_data_from_usize_map(char_ngrams_counter_python_compat(
                     &title,
                     false,
                     true,
                     Some(stop_words),
+                    true,
                 ))
             } else {
                 None
@@ -531,6 +346,7 @@ pub(crate) fn preprocess_stage_papers(
                     false,
                     true,
                     Some(venue_stop_words),
+                    true,
                 ))
             } else {
                 None
@@ -541,6 +357,7 @@ pub(crate) fn preprocess_stage_papers(
                     false,
                     true,
                     Some(venue_stop_words),
+                    true,
                 ))
             } else {
                 None
@@ -552,7 +369,7 @@ pub(crate) fn preprocess_stage_papers(
                     year: paper_input.year,
                     has_abstract: paper_input.has_abstract,
                     predicted_language: paper_input.predicted_language.clone(),
-                    is_reliable: paper_input.is_reliable,
+                    language_reliability: paper_input.language_reliability,
                     title_words,
                     title_chars,
                     venue_ngrams,
@@ -571,20 +388,21 @@ pub(crate) fn preprocess_stage_signatures(
     affiliation_stopwords: &HashSet<String>,
     unidecode_char_map: &HashMap<char, String>,
     preprocess: bool,
-    name_counts_semantics: NameCountsLastFirstInitialSemantics,
 ) -> Vec<(String, SignatureData)> {
     signature_inputs
         .par_iter()
         .map(|entry| {
-            let (first_without_apostrophe, middle_without_apostrophe) =
-                split_first_middle_hyphen_aware_compat(
+            // Signature author-name fields are canonical_v2; paper titles,
+            // venues, affiliations, and authors-as-text keep the legacy
+            // normalize_text_compat pipeline.
+            let (canonical_first, canonical_middle, canonical_last) =
+                canonicalize_name_parts_compat(
                     &entry.raw_first,
                     &entry.raw_middle,
+                    &entry.raw_last,
                     name_prefixes,
-                    unidecode_char_map,
+                    Some(unidecode_char_map),
                 );
-            let last_normalized =
-                normalize_text_compat_from_map(&entry.raw_last, false, unidecode_char_map);
             let mut coauthor_list: Vec<String> = Vec::new();
             if let Some(preprocessed_paper) = preprocessed_papers.get(&entry.paper_id) {
                 for (author_position, author_name) in preprocessed_paper.authors.iter() {
@@ -651,18 +469,15 @@ pub(crate) fn preprocess_stage_signatures(
                 .and_then(|value| normalize_orcid_compact_owned(value));
             let name_counts = build_name_counts_data_from_artifact(
                 raw_name_counts,
-                &entry.raw_first,
-                &first_without_apostrophe,
-                &entry.raw_last,
-                &last_normalized,
-                name_counts_semantics,
+                &canonical_first,
+                &canonical_last,
             );
             (
                 entry.sig_id.clone(),
                 SignatureData {
-                    first: Some(first_without_apostrophe.clone()),
-                    middle: Some(middle_without_apostrophe),
-                    last_normalized: Some(last_normalized),
+                    first: Some(canonical_first.clone()),
+                    middle: Some(canonical_middle),
+                    last_normalized: Some(canonical_last),
                     orcid: normalized_orcid,
                     email: entry.email.clone(),
                     affiliations,
@@ -672,19 +487,11 @@ pub(crate) fn preprocess_stage_signatures(
                     position: entry.position,
                     paper_id: entry.paper_id.clone(),
                     name_counts,
-                    adv_name: Some(first_without_apostrophe),
+                    adv_name: Some(canonical_first),
                 },
             )
         })
         .collect::<Vec<_>>()
-}
-
-pub(crate) fn extract_string_opt(obj: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-    if obj.is_none() {
-        Ok(None)
-    } else {
-        Ok(Some(obj.extract()?))
-    }
 }
 
 pub(crate) fn extract_name_counts_data(obj: &Bound<'_, PyAny>) -> PyResult<Option<NameCountsData>> {
@@ -707,113 +514,34 @@ pub(crate) fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec
     if obj.is_none() {
         return Ok(None);
     }
+    // All-zero vectors are kept as present (real vectors), matching the Arrow
+    // ingest path. The missing-vector treatment for all-zero rows lives at
+    // feature time in the featurizer, so both ingest modes share the same
+    // semantics here.
     if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
         let readonly = arr.readonly();
-        let slice = readonly.as_slice()?;
-        let all_zero = slice.iter().all(|v| *v == 0.0);
-        if all_zero {
-            return Ok(None);
-        }
-        return Ok(Some(slice.to_vec()));
+        return Ok(Some(readonly.as_slice()?.to_vec()));
     }
     if let Ok(arr) = obj.downcast::<PyArray1<f64>>() {
         let readonly = arr.readonly();
-        let slice = readonly.as_slice()?;
-        let all_zero = slice.iter().all(|v| *v == 0.0);
-        if all_zero {
-            return Ok(None);
-        }
-        let mut out = Vec::with_capacity(slice.len());
-        for v in slice {
-            out.push(*v as f32);
-        }
-        return Ok(Some(out));
+        return Ok(Some(
+            readonly.as_slice()?.iter().map(|v| *v as f32).collect(),
+        ));
     }
     // Fallback: try to extract as Vec<f64>
     let vec_f64: Vec<f64> = obj.extract()?;
-    let all_zero = vec_f64.iter().all(|v| *v == 0.0);
-    if all_zero {
-        return Ok(None);
-    }
-    let mut out = Vec::with_capacity(vec_f64.len());
-    for v in vec_f64 {
-        out.push(v as f32);
-    }
-    Ok(Some(out))
+    Ok(Some(vec_f64.into_iter().map(|v| v as f32).collect()))
 }
 
 pub(crate) fn extract_name_tuples_argument(
-    py: Python<'_>,
     name_tuples: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<HashMap<String, HashSet<String>>> {
-    let Some(obj) = name_tuples else {
-        return load_name_tuples_from_text_path(py, None);
-    };
-    if obj.is_none() {
-        return Ok(HashMap::new());
-    }
-    if let Ok(value) = obj.extract::<String>() {
-        let normalized = value.trim().to_ascii_lowercase();
-        if normalized.is_empty() || normalized == "none" {
-            return Ok(HashMap::new());
-        }
-        if normalized == "filtered" {
-            return load_name_tuples_from_text_path(py, None);
-        }
-        return load_name_tuples_from_text_path(py, Some(value.as_str()));
-    }
+    let obj = name_tuples.filter(|value| !value.is_none()).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(
+            "RustFeaturizer.from_arrow_dataset requires explicit name-tuple pairs; load artifacts in Python",
+        )
+    })?;
     extract_name_tuples_map(obj)
-}
-
-pub(crate) fn extract_u32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
-    if let Ok(arr) = obj.downcast::<PyArray1<u32>>() {
-        let readonly = arr.readonly();
-        return Ok(readonly.as_slice()?.to_vec());
-    }
-    if let Ok(arr) = obj.downcast::<PyArray1<u64>>() {
-        let readonly = arr.readonly();
-        return readonly
-            .as_slice()?
-            .iter()
-            .map(|value| {
-                u32::try_from(*value).map_err(|_| {
-                    pyo3::exceptions::PyOverflowError::new_err(format!(
-                        "component member signature index exceeds u32: {value}"
-                    ))
-                })
-            })
-            .collect();
-    }
-    let values: Vec<u64> = obj.extract()?;
-    values
-        .into_iter()
-        .map(|value| {
-            u32::try_from(value).map_err(|_| {
-                pyo3::exceptions::PyOverflowError::new_err(format!(
-                    "component member signature index exceeds u32: {value}"
-                ))
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn extract_component_member_indices(
-    obj: &Bound<'_, PyAny>,
-) -> PyResult<HashMap<String, Vec<u32>>> {
-    let mut out = HashMap::new();
-    let items = obj.call_method0("items")?;
-    for item in PyIterator::from_object(&items)? {
-        let tuple = item?.downcast_into::<PyTuple>()?;
-        if tuple.len() != 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "component_member_indices_by_key.items() yielded a non-pair",
-            ));
-        }
-        let component_key: String = tuple.get_item(0)?.extract()?;
-        let members = extract_u32_vec(&tuple.get_item(1)?)?;
-        out.insert(component_key, members);
-    }
-    Ok(out)
 }
 
 pub(crate) fn extract_specter_vec_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<f32>>> {
@@ -872,133 +600,231 @@ pub(crate) fn term_token_count(value: &str) -> u8 {
         .min(u8::MAX as usize) as u8
 }
 
-pub(crate) fn default_name_tuples_path(py: Python<'_>) -> PyResult<String> {
-    let consts = py.import("s2and.consts")?;
-    let package_data_dir: String = consts.getattr("_PACKAGE_DATA_DIR")?.extract()?;
-    let pathlib = py.import("pathlib")?;
-    let path_obj = pathlib
-        .getattr("Path")?
-        .call1((package_data_dir,))?
-        .call_method1("joinpath", ("s2and_name_tuples_filtered.txt",))?;
-    path_obj.call_method0("as_posix")?.extract()
-}
-
-pub(crate) fn load_name_tuples_from_text_path(
-    py: Python<'_>,
-    path: Option<&str>,
-) -> PyResult<HashMap<String, HashSet<String>>> {
-    let effective_path = match path {
-        Some(value) => value.to_string(),
-        None => default_name_tuples_path(py)?,
-    };
-    if !Path::new(&effective_path).exists() {
-        return Ok(HashMap::new());
-    }
-    let text = fs::read_to_string(&effective_path).map_err(|err| {
-        pyo3::exceptions::PyIOError::new_err(format!(
-            "failed to read name tuples path {}: {}",
-            effective_path, err
-        ))
-    })?;
-    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some((a, b)) = trimmed.split_once(',') {
-            insert_name_tuple_alias(&mut out, a.to_string(), b.to_string());
-        }
-    }
-    Ok(out)
-}
-
 pub(crate) fn has_name_counts_artifact(raw_name_counts: &RawNameCountMaps) -> bool {
     raw_name_counts.has_data()
 }
 
-pub(crate) fn canonical_last_for_counts(raw_last: &str, normalized_last: &str) -> String {
-    if contains_name_dash(raw_last) || normalized_last.contains(' ') {
-        normalized_last.replace(' ', "")
-    } else {
-        normalized_last.to_string()
-    }
-}
-
 pub(crate) fn build_name_counts_data_from_artifact(
     raw_name_counts: &RawNameCountMaps,
-    raw_first: &str,
-    first_without_apostrophe: &str,
-    raw_last: &str,
-    last_normalized: &str,
-    semantics: NameCountsLastFirstInitialSemantics,
+    canonical_first: &str,
+    canonical_last: &str,
 ) -> Option<NameCountsData> {
     if !has_name_counts_artifact(raw_name_counts) {
         return None;
     }
 
-    let mut first_for_counts = first_without_apostrophe
-        .split(' ')
-        .next()
-        .unwrap_or("")
-        .to_string();
-    if contains_name_dash(raw_first) {
-        let joined = first_without_apostrophe.replace(' ', "");
-        if !joined.is_empty() {
-            first_for_counts = joined;
-        }
-    }
-
-    let last_for_counts = canonical_last_for_counts(raw_last, last_normalized);
-    let last_first_initial_key = match semantics {
-        NameCountsLastFirstInitialSemantics::LegacyFullFirstToken => {
-            format!("{} {}", last_for_counts, first_for_counts)
-                .trim()
-                .to_string()
-        }
-        NameCountsLastFirstInitialSemantics::InitialChar => {
-            let first_initial = first_for_counts
-                .chars()
-                .next()
-                .map(|ch| ch.to_string())
-                .unwrap_or_default();
-            format!("{} {}", last_for_counts, first_initial)
-                .trim()
-                .to_string()
-        }
+    // canonical_v2 key construction (D5/D6/D8): keys are the full canonical
+    // fields, spaced — no first-token reduction and no compact-joins. A key is
+    // looked up only when its components pass the gate; a gated-out key must
+    // yield NaN (not the sentinel default 1.0), mirroring the Python
+    // `canonical_name_count_keys` path (docs/data.md). Without the gates a genuinely
+    // missing component would be indistinguishable from a corpus count of 1,
+    // diverging from Python. A present key that misses the artifact defaults
+    // to 1.0.
+    let keys = canonical_name_count_keys_compat(canonical_first, canonical_last);
+    let lookup = |kind: RawNameCountKind, key: &Option<String>| match key {
+        Some(key) => raw_name_counts.get(kind, key).unwrap_or(1.0),
+        None => f64::NAN,
     };
-
-    let first = if py_len(&first_for_counts) > 1 {
-        match raw_name_counts.get(RawNameCountKind::First, &first_for_counts) {
-            Some(value) => value,
-            None => 1.0,
-        }
-    } else {
-        f64::NAN
-    };
-    let first_last = if py_len(&first_for_counts) > 1 {
-        let first_last_key = format!("{} {}", first_for_counts, last_for_counts);
-        match raw_name_counts.get(RawNameCountKind::FirstLast, first_last_key.trim()) {
-            Some(value) => value,
-            None => 1.0,
-        }
-    } else {
-        f64::NAN
-    };
-    let last = match raw_name_counts.get(RawNameCountKind::Last, &last_for_counts) {
-        Some(value) => value,
-        None => 1.0,
-    };
-    let last_first_initial =
-        match raw_name_counts.get(RawNameCountKind::LastFirstInitial, &last_first_initial_key) {
-            Some(value) => value,
-            None => 1.0,
-        };
 
     Some(NameCountsData {
-        first,
-        first_last,
-        last,
-        last_first_initial,
+        first: lookup(RawNameCountKind::First, &keys.first),
+        first_last: lookup(RawNameCountKind::FirstLast, &keys.first_last),
+        last: lookup(RawNameCountKind::Last, &keys.last),
+        last_first_initial: lookup(RawNameCountKind::LastFirstInitial, &keys.last_first_initial),
     })
+}
+
+#[cfg(test)]
+mod blank_paper_author_tests {
+    use super::*;
+    use crate::name_counts::RawNameCountMaps;
+
+    #[test]
+    fn classic_preprocessing_retains_legacy_blank_coauthor_sets() {
+        let signature_inputs = vec![StageSignatureInput {
+            sig_id: "s1".to_string(),
+            paper_id: "p1".to_string(),
+            raw_first: "Alice".to_string(),
+            raw_middle: String::new(),
+            raw_last: "Smith".to_string(),
+            email: None,
+            position: 0,
+            affiliation_values: Vec::new(),
+            orcid: None,
+        }];
+        let papers = HashMap::from([(
+            "p1".to_string(),
+            StagePaperPreprocessed {
+                authors: vec![(0, "alice smith".to_string()), (1, String::new())],
+                year: None,
+                has_abstract: false,
+                predicted_language: None,
+                language_reliability: 0.0,
+                title_words: None,
+                title_chars: None,
+                venue_ngrams: None,
+                journal_ngrams: None,
+            },
+        )]);
+
+        let preprocessed = preprocess_stage_signatures(
+            &signature_inputs,
+            &papers,
+            &RawNameCountMaps::default(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            true,
+        );
+        let signature = &preprocessed[0].1;
+
+        assert_eq!(signature.coauthors, Some(HashSet::from([String::new()])));
+        assert_eq!(
+            signature.coauthor_blocks,
+            Some(HashSet::from([String::new()]))
+        );
+        assert!(signature.coauthor_ngrams.is_none());
+    }
+}
+
+#[cfg(test)]
+mod name_counts_empty_surname_tests {
+    use crate::name_counts::{sha256_file, RawNameCountIndex, RawNameCountMaps};
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // A valid 32-byte name-count index header describing zero records. It opens
+    // cleanly (so `has_data()` is true) and every lookup misses, which is all
+    // the empty-surname gate needs — no hashing or name blob required.
+    fn empty_index_bytes() -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[0..8].copy_from_slice(b"S2NCI001");
+        // record_count = 0 (bytes 8..16 stay zero)
+        bytes[16..24].copy_from_slice(&32u64.to_le_bytes()); // blob_offset == header length
+                                                             // blob_len = 0 (bytes 24..32 stay zero)
+        bytes
+    }
+
+    fn write_empty_artifact() -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = format!(
+            "s2and_nc_empty_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create temp index dir");
+        let mut files = serde_json::Map::new();
+        for name in ["first", "last", "first_last", "last_first_initial"] {
+            let path = dir.join(format!("{name}.bin"));
+            let mut file = std::fs::File::create(&path).expect("create index file");
+            file.write_all(&empty_index_bytes())
+                .expect("write index header");
+            drop(file);
+            files.insert(
+                name.to_string(),
+                serde_json::json!({
+                    "byte_count": path.metadata().expect("file metadata").len(),
+                    "sha256": sha256_file(&path).expect("hash fixture"),
+                }),
+            );
+        }
+        let manifest = serde_json::json!({
+            "kind": "s2and_name_counts",
+            "format_version": 1,
+            "files": files,
+        });
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+        dir
+    }
+
+    #[test]
+    fn empty_surname_yields_nan_matching_python() {
+        // Regression for the Python<->Rust divergence found in the 2026-07-04
+        // pass: build_name_counts_data_from_artifact must return NaN for every
+        // last-dependent key when the surname is empty, exactly like the Python
+        // ANDData._compute_signature_name_counts path (D6). Before the fix these
+        // defaulted to the sentinel 1.0, so an empty surname was scored as a
+        // corpus count of 1 in Rust while Python reported NaN.
+        let dir = write_empty_artifact();
+        let maps = RawNameCountMaps::from_index(
+            RawNameCountIndex::open(dir.to_str().expect("utf-8 temp path")).expect("open index"),
+        );
+
+        let empty_last = super::build_name_counts_data_from_artifact(&maps, "alice", "")
+            .expect("artifact present -> Some");
+        let present_last = super::build_name_counts_data_from_artifact(&maps, "alice", "smith")
+            .expect("artifact present -> Some");
+        // canonical_v2 D6: an empty first suppresses the last_first_initial
+        // lookup (legacy still looked up the bare surname key).
+        let empty_first = super::build_name_counts_data_from_artifact(&maps, "", "smith")
+            .expect("artifact present -> Some");
+        // A single-initial first is uninformative for first/first_last but
+        // still contributes its initial char to last_first_initial.
+        let initial_first = super::build_name_counts_data_from_artifact(&maps, "j", "doe")
+            .expect("artifact present -> Some");
+        // D5: spaced canonical fields are looked up as-is (no compact-join).
+        let spaced = super::build_name_counts_data_from_artifact(&maps, "sang min", "ou yang")
+            .expect("artifact present -> Some");
+
+        // Drop the mmap-backed maps before removing the dir (Windows keeps
+        // memory-mapped files locked while they are open).
+        drop(maps);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Empty surname: every last-dependent key is NaN. `first` is still an
+        // informative token, so it is looked up and misses -> sentinel 1.0.
+        assert!(
+            empty_last.last.is_nan(),
+            "last must be NaN for empty surname"
+        );
+        assert!(
+            empty_last.first_last.is_nan(),
+            "first_last must be NaN for empty surname"
+        );
+        assert!(
+            empty_last.last_first_initial.is_nan(),
+            "last_first_initial must be NaN for empty surname"
+        );
+        assert_eq!(
+            empty_last.first, 1.0,
+            "informative first is still looked up (miss -> 1.0)"
+        );
+
+        // Present surname: nothing is gated to NaN; every key misses -> 1.0.
+        assert!(!present_last.last.is_nan());
+        assert_eq!(present_last.last, 1.0);
+        assert_eq!(present_last.first_last, 1.0);
+        assert_eq!(present_last.last_first_initial, 1.0);
+        assert_eq!(present_last.first, 1.0);
+
+        // Empty first: every first-dependent key is NaN, including
+        // last_first_initial (canonical_v2 change from legacy).
+        assert!(empty_first.first.is_nan());
+        assert!(empty_first.first_last.is_nan());
+        assert!(
+            empty_first.last_first_initial.is_nan(),
+            "last_first_initial must be NaN for empty first (D6)"
+        );
+        assert_eq!(empty_first.last, 1.0);
+
+        // Single-initial first: uninformative for first/first_last, but the
+        // initial-char last_first_initial key is still looked up.
+        assert!(initial_first.first.is_nan());
+        assert!(initial_first.first_last.is_nan());
+        assert_eq!(initial_first.last_first_initial, 1.0);
+        assert_eq!(initial_first.last, 1.0);
+
+        // Spaced canonical fields all pass their gates and are looked up
+        // verbatim (misses -> 1.0 against the empty artifact).
+        assert_eq!(spaced.first, 1.0);
+        assert_eq!(spaced.first_last, 1.0);
+        assert_eq!(spaced.last, 1.0);
+        assert_eq!(spaced.last_first_initial, 1.0);
+    }
 }

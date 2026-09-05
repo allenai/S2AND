@@ -1,3 +1,11 @@
+"""Build the historical legacy JSON/pickle S2AND mini datasets.
+
+Warning:
+    This provenance recipe executes and writes at import time. It expects the
+    legacy JSON/pickle release layout and must not be pointed at an Arrow
+    release root.
+"""
+
 import collections
 import json
 import os

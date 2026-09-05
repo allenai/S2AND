@@ -1,19 +1,95 @@
 from __future__ import annotations
 
-import inspect
-import warnings
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from fastcluster import linkage
-from hyperopt import Trials, fmin, hp, space_eval, tpe
-from hyperopt.pyll import scope
-from lightgbm import LGBMClassifier
+from lightgbm import Booster, LGBMClassifier
 from scipy.cluster.hierarchy import fcluster
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.metrics import roc_auc_score
 
-from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
+if TYPE_CHECKING:
+    from hyperopt import Trials
+
+
+def lightgbm_booster(model: Any) -> Booster:
+    """Return the fitted booster behind an S2AND or LightGBM model wrapper."""
+
+    if isinstance(model, Booster):
+        return model
+    inner = getattr(model, "classifier", None)
+    if inner is not None and inner is not model:
+        return lightgbm_booster(inner)
+    for attribute in ("booster_", "_Booster"):
+        booster = getattr(model, attribute, None)
+        if isinstance(booster, Booster):
+            return booster
+    raise TypeError(f"Expected a fitted LightGBM model, got {type(model)!r}")
+
+
+def _validated_classifier_features(
+    classifier: Any,
+    features: Any,
+    *,
+    feature_names: Sequence[str] | None = None,
+) -> Any:
+    """Return classifier input after validating its fitted feature schema."""
+
+    values = np.asarray(features)
+    if values.ndim != 2:
+        raise ValueError(f"Classifier features must be 2D, got shape={values.shape}")
+
+    expected_count = getattr(classifier, "n_features_in_", None)
+    if expected_count is not None and int(expected_count) != values.shape[1]:
+        raise ValueError(
+            f"Classifier feature count does not match fitted schema: {values.shape[1]} != {int(expected_count)}"
+        )
+
+    supplied_names = tuple(str(name) for name in feature_names) if feature_names is not None else None
+    if supplied_names is not None and len(supplied_names) != values.shape[1]:
+        raise ValueError(
+            f"Classifier feature names do not match matrix width: {len(supplied_names)} != {values.shape[1]}"
+        )
+
+    fitted_names_raw = getattr(classifier, "feature_names_in_", None)
+    if fitted_names_raw is None:
+        return values
+    fitted_names = tuple(str(name) for name in fitted_names_raw)
+    actual_names = supplied_names
+    if actual_names is None:
+        columns = getattr(features, "columns", None)
+        if columns is not None:
+            actual_names = tuple(str(name) for name in columns)
+    if actual_names is not None and actual_names != fitted_names:
+        raise ValueError(f"Classifier feature names do not match fitted schema: {actual_names!r} != {fitted_names!r}")
+    if getattr(features, "columns", None) is not None:
+        return features
+
+    import pandas as pd
+
+    return pd.DataFrame(values, columns=pd.Index(fitted_names), copy=False)
+
+
+def predict_pairwise_class0(classifier: Any, features: np.ndarray) -> np.ndarray:
+    """Predict class-0 probabilities with native positive-probability fast path support."""
+
+    predict_proba_positive = getattr(classifier, "predict_proba_positive", None)
+    raw_features = np.asarray(features)
+    features_2d = np.asarray(
+        raw_features,
+        dtype=np.float32 if callable(predict_proba_positive) and raw_features.dtype == np.float32 else np.float64,
+        order="C",
+    )
+    if features_2d.size == 0:
+        return np.asarray([], dtype=np.float64)
+
+    if callable(predict_proba_positive):
+        return 1.0 - np.asarray(predict_proba_positive(features_2d), dtype=np.float64).reshape(-1)
+
+    probabilities = classifier.predict_proba(_validated_classifier_features(classifier, features_2d))
+    return np.asarray(probabilities, dtype=np.float64)[:, 0]
 
 
 class PairwiseModeler:
@@ -49,6 +125,9 @@ class PairwiseModeler:
         n_jobs: int = 16,  # for the model, not the hyperopt
         random_state: int = 42,
     ):
+        from hyperopt import hp
+        from hyperopt.pyll import scope
+
         if estimator is None:
             self.estimator = LGBMClassifier(
                 objective="binary",
@@ -93,10 +172,10 @@ class PairwiseModeler:
 
     def fit(
         self,
-        X_train: np.ndarray[Any, Any] | None | Any,
-        y_train: np.ndarray[Any, Any] | None | Any,
-        X_val: np.ndarray[Any, Any] | None | Any,
-        y_val: np.ndarray[Any, Any] | None | Any,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
     ) -> Trials | dict[Any, Any]:
         """
         Fits the classifier
@@ -117,12 +196,13 @@ class PairwiseModeler:
         Trials: the Trials object from hyperparameter optimization
         """
         if len(self.search_space) > 0:
+            from hyperopt import Trials, fmin, space_eval, tpe
 
             def obj(params):
                 params = {k: intify(v) for k, v in params.items()}
                 self.estimator.set_params(**params)
                 self.estimator.fit(X_train, y_train)
-                y_pred_proba = self.estimator.predict_proba(X_val)[:, 1]
+                y_pred_proba = np.asarray(self.estimator.predict_proba(X_val), dtype=np.float64)[:, 1]
                 return -roc_auc_score(y_val, y_pred_proba)
 
             self.hyperopt_trials_store = Trials()
@@ -150,9 +230,7 @@ class PairwiseModeler:
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         assert self.classifier is not None, "You need to call fit first"
-        with warnings.catch_warnings():
-            suppress_sklearn_feature_name_warnings()
-            return self.classifier.predict_proba(X)
+        return self.classifier.predict_proba(_validated_classifier_features(self.classifier, X))
 
 
 def intify(x):
@@ -216,45 +294,6 @@ class FastCluster(TransformerMixin, BaseEstimator):
         self.input_as_observation_matrix = input_as_observation_matrix
         self.labels_ = None
 
-    # ---- new: robust get_params ----
-    def get_params(self, deep=True):
-        """
-        Return params but gracefully handle the case where an instance
-        (e.g., loaded from an old pickle) is missing attributes.
-        """
-        params = {}
-        sig = inspect.signature(self.__class__.__init__)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            # prefer the runtime attribute if present, otherwise the __init__ default
-            if hasattr(self, name):
-                params[name] = getattr(self, name)
-            else:
-                params[name] = param.default if param.default is not inspect.Parameter.empty else None
-
-        if deep:
-            # sklearn convention: include nested estimator params with __ separator
-            for key, val in list(params.items()):
-                if hasattr(val, "get_params"):
-                    for subk, subv in val.get_params(deep=True).items():
-                        params[f"{key}__{subk}"] = subv
-        return params
-
-    # ---- new: ensure defaults after unpickling ----
-    def __setstate__(self, state):
-        """
-        Called on unpickle. Populate any missing ctor attrs with their defaults.
-        """
-        self.__dict__.update(state)
-        sig = inspect.signature(self.__class__.__init__)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            if not hasattr(self, name):
-                default = param.default if param.default is not inspect.Parameter.empty else None
-                setattr(self, name, default)
-
     def fit(self, X: np.ndarray) -> FastCluster:
         """
         Fit the estimator on input data. The results are stored in self.labels_.
@@ -312,112 +351,3 @@ class FastCluster(TransformerMixin, BaseEstimator):
 
     def transform(self, X: np.ndarray):
         raise NotImplementedError("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")
-
-
-class VotingClassifier:
-    """
-    Stripped-down version of VotingClassifier that uses prefit estimators
-
-    Parameters
-    ----------
-    estimators: List[sklearn classifier]
-        A list of sklearn classifiers that support predict_proba.
-    voting: string
-        Type of voting.
-        Defaults to "hard", can also be "soft".
-        "soft" means "take the highest average probability class" and
-        "hard" means "take the class that the plurality of the models pick"
-    weights: List or np.array
-        Weights for each estimator.
-    """
-
-    def __init__(self, estimators, voting="soft", weights=None):
-        self.estimators = estimators
-        self.voting = voting
-        self.weights = weights
-
-    def fit(self, X, y, sample_weight=None):
-        raise NotImplementedError
-
-    def predict(self, X):
-        """
-        Predict class labels for X.
-
-        Parameters
-        ----------
-        X: {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        -------
-        predictions : array-like, shape = [n_samples]
-            Predicted class labels.
-        """
-        if self.voting == "soft":
-            predictions = np.argmax(self.predict_proba(X), axis=1)
-        elif self.voting == "hard":
-            predictions = np.apply_along_axis(
-                lambda x: np.argmax(np.bincount(x, weights=self.weights)),
-                axis=1,
-                arr=self._predict(X).astype("int"),
-            )
-        else:
-            raise ValueError("Voting type must be one of 'soft' or 'hard'")
-        return predictions
-
-    def _collect_probas(self, X):
-        """Collect results from clf.predict calls."""
-        with warnings.catch_warnings():
-            suppress_sklearn_feature_name_warnings()
-            return np.asarray([clf.predict_proba(X) for clf in self.estimators])
-
-    def predict_proba(self, X):
-        """
-        Compute probabilities of possible outcomes for samples in X.
-
-        Parameters
-        ----------
-        X : {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        ----------
-        avg : array-like, shape = [n_samples, n_classes]
-            Weighted average probability for each class per sample.
-        """
-        if self.voting == "hard":
-            raise AttributeError(f"predict_proba is not available when voting={self.voting!r}")
-        avg = np.average(self._collect_probas(X), axis=0, weights=self.weights)
-        return avg
-
-    def transform(self, X):
-        """
-        Return class labels or probabilities for X for each estimator.
-
-        Parameters
-        ----------
-        X : {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        -------
-        If `voting='soft'`:
-          array-like = [n_classifiers, n_samples, n_classes]
-            Class probabilities calculated by each classifier.
-        If `voting='hard'`:
-          array-like = [n_samples, n_classifiers]
-            Class labels predicted by each classifier.
-        """
-        if self.voting == "soft":
-            return self._collect_probas(X)
-        else:
-            return self._predict(X)
-
-    def _predict(self, X):
-        """Collect results from clf.predict calls."""
-        with warnings.catch_warnings():
-            suppress_sklearn_feature_name_warnings()
-            return np.asarray([clf.predict(X) for clf in self.estimators]).T

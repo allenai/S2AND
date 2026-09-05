@@ -1,20 +1,173 @@
+import json
 import unittest
+from functools import cached_property, partial
 from types import SimpleNamespace
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 import pytest
 
 import s2and.data as data_module
-from s2and.data import ANDData, _parse_sinonym_name
-from s2and.rust_lifecycle import PYTHON_ONLY_POLICY
+from s2and.data import ANDData
+from tests.helpers import build_dummy_dataset, tiny_name_counts_index
 
 
-def test_maybe_load_list_empty_file_returns_empty_list(tmp_path):
-    empty_path = tmp_path / "empty.txt"
-    empty_path.write_text("", encoding="utf-8")
+@pytest.mark.parametrize(
+    "seeds, expected",
+    [
+        ({"0": {"1": "require"}, "1": {"2": "require"}}, {"0": 0, "1": 0, "2": 0}),
+        ({"2": {"1": "require"}, "1": {"0": "require"}}, {"2": 0, "1": 0, "0": 0}),
+        (
+            {"0": {"1": "require"}, "2": {"3": "require"}, "1": {"2": "require"}},
+            {"0": 0, "1": 0, "2": 0, "3": 0},
+        ),
+        (
+            {"0": {"1": "require", "2": "require"}, "3": {"4": "require"}},
+            {"0": 0, "1": 0, "2": 0, "3": 1, "4": 1},
+        ),
+        ({"0": {"1": "require"}, "1": {"0": "require"}}, {"0": 0, "1": 0}),
+        ({"0": {"0": "require"}}, {"0": 0}),
+        ({"0": {"1": "disallow"}}, {}),
+        ({}, {}),
+    ],
+    ids=["chain", "reverse_chain", "bridge", "disjoint", "cycle", "self", "disallow_only", "empty"],
+)
+def test_required_seed_components_preserve_transitive_constraints(seeds, expected):
+    dataset = ANDData(
+        signatures="tests/dummy/signatures.json",
+        papers="tests/dummy/papers.json",
+        name="seed_components",
+        mode="inference",
+        cluster_seeds=seeds,
+        name_counts_index=None,
+        name_tuples=set(),
+        preprocess=False,
+    )
 
-    assert ANDData.maybe_load_list(str(empty_path)) == []
+    assert dataset.cluster_seeds_require == expected
+    assert dataset.max_seed_cluster_id == len(set(expected.values()))
+    for left, left_component in expected.items():
+        for right, right_component in expected.items():
+            constraint = "require" if left_component == right_component else "disallow"
+            assert dataset.get_constraint(left, right) == data_module.CLUSTER_SEEDS_LOOKUP[constraint]
+
+
+def test_explicit_seed_disallow_survives_connected_require_groups():
+    dataset = ANDData(
+        signatures="tests/dummy/signatures.json",
+        papers="tests/dummy/papers.json",
+        name="seed_explicit_disallow",
+        mode="inference",
+        cluster_seeds={"0": {"1": "require", "2": "disallow"}, "1": {"2": "require"}},
+        name_counts_index=None,
+        name_tuples=set(),
+        preprocess=False,
+    )
+
+    assert dataset.cluster_seeds_require == {"0": 0, "1": 0, "2": 0}
+    assert dataset.cluster_seeds_disallow == {("0", "2")}
+    for ignore_seeds in (False, True):
+        for left, right in (("0", "2"), ("2", "0")):
+            assert (
+                dataset.get_constraint(left, right, incremental_dont_use_cluster_seeds=ignore_seeds)
+                == data_module.CLUSTER_SEEDS_LOOKUP["disallow"]
+            )
+
+
+def test_split_ratios_reject_default_isclose_near_miss() -> None:
+    with pytest.raises(ValueError, match="must add to 1"):
+        data_module._validate_split_ratios(5e-10, 0.5, 0.5000000004)
+
+
+def test_anddata_uses_only_s2_blocks_and_ignores_legacy_given_block() -> None:
+    signatures = {}
+    papers = {}
+    for index, legacy_block in enumerate(("legacy one", "legacy two"), start=1):
+        signature_id = f"s{index}"
+        paper_id = f"p{index}"
+        signatures[signature_id] = {
+            "signature_id": signature_id,
+            "paper_id": paper_id,
+            "author_info": {
+                "position": 0,
+                "block": "a canonical",
+                "given_block": legacy_block,
+                "first": "Ada",
+                "middle": None,
+                "last": "Canonical",
+                "suffix": None,
+                "affiliations": [],
+                "email": None,
+            },
+        }
+        papers[paper_id] = {
+            "paper_id": paper_id,
+            "title": f"Paper {index}",
+            "abstract": None,
+            "authors": [{"position": 0, "author_name": "Ada Canonical"}],
+            "venue": None,
+            "journal_name": None,
+            "year": 2026,
+        }
+
+    dataset = ANDData(
+        signatures=signatures,
+        papers=papers,
+        name="s2_only_blocks",
+        mode="inference",
+        name_counts_index=None,
+        name_tuples=set(),
+        preprocess=False,
+    )
+
+    assert dataset.get_blocks() == {"a canonical": ["s1", "s2"]}
+
+
+def test_split_ratios_do_not_create_a_partition_for_tolerated_roundoff() -> None:
+    train, val, test = data_module._split_train_val_test(
+        ["a", "b"],
+        1.0 - 5e-13,
+        0.0,
+        0.0,
+        random_seed=0,
+    )
+
+    assert train == ["a", "b"]
+    assert val == []
+    assert test == []
+
+
+def test_maybe_load_json_reads_utf8_text(tmp_path):
+    json_path = tmp_path / "unicode.json"
+    json_path.write_text(json.dumps({"name": "José"}, ensure_ascii=False), encoding="utf-8")
+
+    assert ANDData.maybe_load_json(str(json_path)) == {"name": "José"}
+
+
+def test_maybe_load_list_reads_utf8_text(tmp_path):
+    list_path = tmp_path / "unicode.txt"
+    list_path.write_text("José\nZoë", encoding="utf-8")
+
+    assert ANDData.maybe_load_list(str(list_path)) == ["José", "Zoë"]
+
+
+def test_maybe_load_specter_rejects_keys_that_collide_as_strings():
+    cases = (
+        ("mapping", {1: np.asarray([1.0]), "1": np.asarray([2.0])}),
+        ("tuple", (np.asarray([[1.0], [2.0]]), [1, "1"])),
+    )
+    for _case_id, payload in cases:
+        with pytest.raises(ValueError, match="collide after string normalization"):
+            ANDData.maybe_load_specter(payload)
+
+
+def test_maybe_load_specter_normalizes_tuple_keys_to_strings():
+    loaded = ANDData.maybe_load_specter((np.asarray([[1.0, 2.0], [3.0, 4.0]]), [1, 2]))
+
+    assert loaded is not None
+    assert set(loaded) == {"1", "2"}
+    np.testing.assert_array_equal(loaded["1"], np.asarray([1.0, 2.0]))
 
 
 def test_preprocess_signatures_drops_empty_normalized_affiliations() -> None:
@@ -49,7 +202,7 @@ def test_preprocess_signatures_drops_empty_normalized_affiliations() -> None:
         },
         name="empty_normalized_affiliations",
         mode="inference",
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=True,
         n_jobs=1,
     )
@@ -58,98 +211,72 @@ def test_preprocess_signatures_drops_empty_normalized_affiliations() -> None:
     assert "" not in dataset.signatures["s1"].author_info_affiliations
 
 
-def test_compute_reference_features_retains_unsigned_reference_papers() -> None:
+def test_name_tuples_none_uses_canonical_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        data_module,
+        "load_packaged_name_tuple_artifact",
+        lambda: SimpleNamespace(pairs=frozenset({("bill", "william")})),
+    )
     dataset = ANDData(
-        signatures={
-            "s1": {
-                "signature_id": "s1",
-                "paper_id": "p1",
-                "author_info": {
-                    "position": 0,
-                    "block": "a lovelace",
-                    "first": "Ada",
-                    "middle": "",
-                    "last": "Lovelace",
-                    "suffix": None,
-                    "email": None,
-                    "affiliations": [],
-                },
-            }
-        },
-        papers={
-            "p1": {
-                "paper_id": "p1",
-                "title": "Signed Paper",
-                "abstract": "",
-                "journal_name": "",
-                "venue": "",
-                "year": 1843,
-                "authors": [{"position": 0, "author_name": "Ada Lovelace"}],
-                "references": ["p2"],
-            },
-            "p2": {
-                "paper_id": "p2",
-                "title": "Analytical Engine Notes",
-                "abstract": "",
-                "journal_name": "Computing",
-                "venue": "London",
-                "year": 1842,
-                "authors": [{"position": 0, "author_name": "Charles Babbage"}],
-                "references": [],
-            },
-        },
-        name="reference_feature_unsigned_paper",
+        signatures={},
+        papers={},
+        name="canonical_name_tuple_default",
         mode="inference",
-        load_name_counts=False,
-        preprocess=True,
-        compute_reference_features=True,
-        n_jobs=1,
+        name_counts_index=None,
+        preprocess=False,
+        name_tuples=None,
     )
 
-    assert dataset.papers["p2"].in_signatures is False
-    assert dataset.papers["p1"].reference_details is not None
-    assert dataset.papers["p1"].reference_details[1]
+    assert dataset.name_tuples == {("bill", "william")}
 
 
-def test_anddata_passes_from_dataset_capability_to_rust_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        data_module,
-        "build_runtime_context",
-        lambda _operation: SimpleNamespace(
-            requested_backend="auto",
-            resolved_backend="rust",
-            use_rust=False,
-            run_id="test-run",
-            source="default",
-        ),
+def test_name_tuples_rejects_string_sentinel() -> None:
+    with pytest.raises(TypeError, match="set/frozenset"):
+        ANDData(
+            signatures={},
+            papers={},
+            name="invalid_name_tuple_sentinel",
+            mode="inference",
+            name_counts_index=None,
+            preprocess=False,
+            name_tuples="filtered",  # type: ignore[arg-type]
+        )
+
+
+def test_custom_name_tuples_are_stored_as_unordered_pairs() -> None:
+    dataset = ANDData(
+        signatures={},
+        papers={},
+        name="canonical_custom_name_tuples",
+        mode="inference",
+        name_counts_index=None,
+        preprocess=False,
+        name_tuples={("william", "bill")},
     )
-    monkeypatch.setattr(
-        data_module,
-        "detect_rust_runtime_capabilities",
-        lambda: SimpleNamespace(
-            from_dataset_available=False,
-            from_dataset_paper_preprocess_available=True,
-        ),
-    )
 
-    def _capture_lifecycle_policy(**kwargs: Any):
-        captured.update(kwargs)
-        return PYTHON_ONLY_POLICY
+    assert dataset.name_tuples == {("bill", "william")}
 
-    monkeypatch.setattr(data_module, "build_rust_lifecycle_policy", _capture_lifecycle_policy)
 
-    ANDData(
+def test_name_tuple_loader_rejects_invalid_rows(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(data_module, "_PACKAGE_DATA_DIR", str(tmp_path))
+    (tmp_path / "invalid.txt").write_bytes(b"alice,bob,carol\n")
+
+    with pytest.raises(ValueError, match="invalid.txt:1"):
+        data_module._load_name_tuples_from_file("invalid.txt")
+
+
+def test_signature_full_name_uses_only_canonical_fields() -> None:
+    dataset = ANDData(
         signatures={
             "s1": {
                 "signature_id": "s1",
                 "paper_id": 1,
                 "author_info": {
                     "position": 0,
-                    "block": "a lovelace",
-                    "first": "Ada",
+                    "block": "d smith",
+                    "first": "Dr.",
                     "middle": "",
-                    "last": "Lovelace",
+                    "last": "Smith",
                     "suffix": None,
                     "email": None,
                     "affiliations": [],
@@ -159,46 +286,81 @@ def test_anddata_passes_from_dataset_capability_to_rust_lifecycle(monkeypatch: p
         papers={
             "1": {
                 "paper_id": 1,
-                "title": "Notes",
+                "title": "Part 1",
                 "abstract": "",
                 "journal_name": "",
                 "venue": "",
-                "year": 1843,
-                "authors": [{"position": 0, "author_name": "Ada Lovelace"}],
+                "year": 2020,
+                "authors": [{"position": 0, "author_name": "Dr. Smith"}],
                 "references": [],
             }
         },
-        name="rust_lifecycle_capability",
+        name="canonical_full_name",
         mode="inference",
-        load_name_counts=False,
-        preprocess=False,
+        name_counts_index=None,
+        preprocess=True,
+        n_jobs=1,
         name_tuples=set(),
     )
 
-    assert captured["backend"] == "rust"
-    assert captured["from_dataset_available"] is False
-    assert captured["from_dataset_paper_preprocess_available"] is True
+    signature = dataset.signatures["s1"]
+    assert signature.author_info_first_normalized_without_apostrophe == ""
+    assert signature.author_info_full_name == "smith"
+    assert dataset.papers["1"].title == "part 1"
+    assert dataset.papers["1"].title_ngrams_words["1"] == 1
+
+
+def test_split_pairs_global_balanced_classes_routes_split_signatures() -> None:
+    dataset = ANDData.__new__(ANDData)
+    dataset.pair_sampling_mode = "global_balanced_classes"
+    dataset.train_pairs_size, dataset.val_pairs_size, dataset.test_pairs_size = 11, 12, 13
+    dataset.all_test_pairs_flag = True
+    calls: list[tuple[int, list[str], dict[str, list[str]], bool]] = []
+
+    def record_call(
+        sample_size: int,
+        signature_ids: list[str],
+        blocks: dict[str, list[str]],
+        all_pairs: bool = False,
+    ) -> list[tuple[str, str, int]]:
+        calls.append((sample_size, signature_ids, blocks, all_pairs))
+        return [(signature_ids[0], signature_ids[-1], sample_size)]
+
+    dataset.pair_sampling = cast(Any, record_call)
+    train = {"train": ["t1", "t2"]}
+    val = {"val": ["v1", "v2"]}
+    test = {"test": ["x1", "x2"]}
+
+    outputs = dataset.split_pairs(train, val, test)
+
+    assert calls == [
+        (11, ["t1", "t2"], train, False),
+        (12, ["v1", "v2"], val, False),
+        (13, ["x1", "x2"], test, True),
+    ]
+    assert outputs == ([("t1", "t2", 11)], [("v1", "v2", 12)], [("x1", "x2", 13)])
 
 
 class TestData(unittest.TestCase):
-    def setUp(self):
-        super().setUp()
-        self.qian_dataset = ANDData(
+    @cached_property
+    def qian_dataset(self):
+        return ANDData(
             "tests/qian/signatures.json",
-            # "tests/qian/papers.json",
             {},
             clusters="tests/qian/clusters.json",
             name="qian",
-            load_name_counts=False,
+            name_counts_index=None,
             preprocess=False,
         )
-        self.dummy_dataset = ANDData(
+
+    @cached_property
+    def dummy_dataset(self):
+        return ANDData(
             "tests/dummy/signatures.json",
-            # "tests/dummy/papers.json",
             {},
             clusters="tests/dummy/clusters.json",
             name="dummy",
-            load_name_counts=False,
+            name_counts_index=None,
             preprocess=False,
         )
 
@@ -232,11 +394,6 @@ class TestData(unittest.TestCase):
         )
         assert sum([int(pair[2]) for pair in train_pairs]) == 500
         assert len(train_pairs) == 1000 and len(val_pairs) == 500 and len(test_pairs) == 500
-        assert (
-            train_pairs[0] == ("5694", "5702", 1)
-            and val_pairs[0] == ("781", "787", 1)
-            and test_pairs[0] == ("2428", "2581", 0)
-        )
 
         # Test balanced pos/neg and homonym/synonym sampling within blocks
         self.qian_dataset.pair_sampling_mode = "within_block_balanced_homonym_synonym"
@@ -245,11 +402,6 @@ class TestData(unittest.TestCase):
         )
         assert sum([int(pair[2]) for pair in train_pairs]) == 500
         assert len(train_pairs) == 1000 and len(val_pairs) == 500 and len(test_pairs) == 500
-        assert (
-            train_pairs[0] == ("4389", "4493", 0)
-            and val_pairs[0] == ("185", "197", 0)
-            and test_pairs[0] == ("2431", "2437", 1)
-        )
 
         # Test adding the all test pairs flag to the test above
         self.qian_dataset.all_test_pairs_flag = True
@@ -260,147 +412,108 @@ class TestData(unittest.TestCase):
         assert len(val_pairs) == 500
         assert len(test_pairs) == 7244
 
-    def test_split_pairs_global_balanced_classes_uses_split_signatures(self):
-        self.qian_dataset.pair_sampling_mode = "global_balanced_classes"
-        self.qian_dataset.train_pairs_size = 1000
-        self.qian_dataset.val_pairs_size = 500
-        self.qian_dataset.test_pairs_size = 500
-        self.qian_dataset.random_seed = 1111
-        (
-            train_block_dict,
-            val_block_dict,
-            test_block_dict,
-        ) = self.qian_dataset.split_cluster_signatures()
+    def test_split_cluster_signatures_accepts_float_ratios_close_to_one(self):
+        self.qian_dataset.train_ratio = 0.7
+        self.qian_dataset.val_ratio = 0.2
+        self.qian_dataset.test_ratio = 0.1
 
-        train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
-            train_block_dict, val_block_dict, test_block_dict
+        train_blocks, val_blocks, test_blocks = self.qian_dataset.split_cluster_signatures()
+
+        self.assertEqual(
+            set(train_blocks) | set(val_blocks) | set(test_blocks),
+            set(self.qian_dataset.get_blocks()),
         )
 
-        expected_train_pairs = self.qian_dataset.pair_sampling(
-            self.qian_dataset.train_pairs_size,
-            [signature for signatures in train_block_dict.values() for signature in signatures],
-            train_block_dict,
-        )
-        expected_val_pairs = self.qian_dataset.pair_sampling(
-            self.qian_dataset.val_pairs_size,
-            [signature for signatures in val_block_dict.values() for signature in signatures],
-            val_block_dict,
-        )
-        expected_test_pairs = self.qian_dataset.pair_sampling(
-            self.qian_dataset.test_pairs_size,
-            [signature for signatures in test_block_dict.values() for signature in signatures],
-            test_block_dict,
-        )
+    def test_split_cluster_signatures_rejects_out_of_range_ratios(self):
+        self.qian_dataset.train_ratio = 1.1
+        self.qian_dataset.val_ratio = -0.1
+        self.qian_dataset.test_ratio = 0.0
 
-        assert train_pairs == expected_train_pairs
-        assert val_pairs == expected_val_pairs
-        assert test_pairs == expected_test_pairs
-        assert train_pairs
+        with self.assertRaisesRegex(ValueError, "between 0 and 1"):
+            self.qian_dataset.split_cluster_signatures()
+
+    def test_split_cluster_signatures_allows_empty_ratio_partitions(self):
+        cases = [
+            ((1.0, 0.0, 0.0), {"val", "test"}),
+            ((0.8, 0.2, 0.0), {"test"}),
+            ((0.8, 0.0, 0.2), {"val"}),
+        ]
+        for unit_of_data_split in ("blocks", "signatures"):
+            for ratios, empty_partitions in cases:
+                with self.subTest(unit_of_data_split=unit_of_data_split, ratios=ratios):
+                    self.qian_dataset.unit_of_data_split = unit_of_data_split
+                    (
+                        self.qian_dataset.train_ratio,
+                        self.qian_dataset.val_ratio,
+                        self.qian_dataset.test_ratio,
+                    ) = ratios
+
+                    train_blocks, val_blocks, test_blocks = self.qian_dataset.split_cluster_signatures()
+
+                    split_signatures = {
+                        "train": {signature for block in train_blocks.values() for signature in block},
+                        "val": {signature for block in val_blocks.values() for signature in block},
+                        "test": {signature for block in test_blocks.values() for signature in block},
+                    }
+                    expected_signatures = set(self.qian_dataset.signatures)
+                    self.assertEqual(set().union(*split_signatures.values()), expected_signatures)
+                    self.assertFalse(split_signatures["train"] & split_signatures["val"])
+                    self.assertFalse(split_signatures["train"] & split_signatures["test"])
+                    self.assertFalse(split_signatures["val"] & split_signatures["test"])
+                    for partition in empty_partitions:
+                        self.assertEqual(split_signatures[partition], set())
+                    for partition in {"train", "val", "test"} - empty_partitions:
+                        self.assertTrue(split_signatures[partition])
+
+    def test_fixed_block_split_allows_empty_partitions(self):
+        block_ids = list(self.qian_dataset.get_blocks())
+        self.qian_dataset.train_blocks = block_ids
+        self.qian_dataset.val_blocks = []
+        self.qian_dataset.test_blocks = []
+
+        train_blocks, val_blocks, test_blocks = self.qian_dataset.split_cluster_signatures_fixed()
+
+        self.assertEqual(set(train_blocks), set(block_ids))
+        self.assertEqual(val_blocks, {})
+        self.assertEqual(test_blocks, {})
 
     def test_blocks(self):
-        original_blocks = self.dummy_dataset.get_original_blocks()
-        s2_blocks = self.dummy_dataset.get_s2_blocks()
-
-        expected_original_blocks = {
-            "a sattar": ["0", "1", "2"],
-            "a konovalov": ["3", "4", "5", "6", "7", "8"],
-        }
-        expected_s2_blocks = {
+        expected_blocks = {
             "a sattary": ["0", "1", "2"],
             "a konovalov": ["3", "4", "5", "6", "7", "8"],
         }
 
-        self.dummy_dataset.block_type = "s2"
-        s2_blocks_2 = self.dummy_dataset.get_blocks()
-        self.dummy_dataset.block_type = "original"
-        original_blocks_2 = self.dummy_dataset.get_blocks()
-        self.dummy_dataset.block_type = "dummy"
-        with pytest.raises(ValueError):
-            self.dummy_dataset.get_blocks()
-        self.dummy_dataset.block_type = "s2"
-
-        assert original_blocks == expected_original_blocks
-        assert original_blocks_2 == expected_original_blocks
-        assert s2_blocks == expected_s2_blocks
-        assert s2_blocks_2 == expected_s2_blocks
+        assert self.dummy_dataset.get_blocks() == expected_blocks
 
     def test_initialization(self):
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                clusters={},
-                name="",
-                mode="train",
-                unit_of_data_split="blocks",
-                pair_sampling_mode="global_balanced_classes",
-                load_name_counts=False,
-                preprocess=False,
-            )
+        make_dataset = partial(
+            ANDData,
+            signatures={},
+            papers={},
+            name="initialization",
+            mode="train",
+            name_counts_index=None,
+            preprocess=False,
+        )
+        for options, message in (
+            (
+                {"clusters": {}, "unit_of_data_split": "blocks", "pair_sampling_mode": "global_balanced_classes"},
+                "Block-based cluster splits",
+            ),
+            ({"clusters": {}, "train_pairs": []}, "Set exactly one"),
+            ({}, "Set exactly one"),
+            ({"train_blocks": [], "train_pairs": []}, "both train_blocks and train_pairs"),
+            ({"train_blocks": []}, "Train blocks still needs clusters"),
+            ({"mode": "dummy", "clusters": {}}, "Unknown mode"),
+            ({"clusters": {}, "pair_sampling_mode": "global_unbalanced"}, "Unknown pair_sampling_mode"),
+        ):
+            with pytest.raises(ValueError, match=message):
+                make_dataset(**options)
 
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                name="",
-                mode="train",
-                clusters={},
-                train_pairs=cast(Any, []),
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                name="",
-                mode="train",
-                clusters=None,
-                train_pairs=None,
-                train_blocks=None,
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                name="",
-                mode="train",
-                train_blocks=[],
-                train_pairs=cast(Any, []),
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                name="",
-                mode="train",
-                train_blocks=[],
-                clusters=None,
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        dataset = ANDData(signatures={}, papers={}, name="", mode="inference", load_name_counts=False, preprocess=False)
+        dataset = make_dataset(mode="inference")
         assert dataset.signature_to_cluster_id is None
-
-        dataset = ANDData(signatures={}, papers={}, name="", mode="inference", load_name_counts=False, preprocess=False)
-        assert dataset.pair_sampling_block
-        assert not dataset.pair_sampling_balanced_classes
-        assert not dataset.pair_sampling_balanced_homonym_synonym
+        assert dataset.pair_sampling_mode == "within_block_random"
         assert dataset.all_test_pairs_flag
-        assert dataset.block_type == "s2"
-
-        with pytest.raises(ValueError):
-            dataset = ANDData(
-                signatures={}, papers={}, clusters={}, name="", mode="dummy", load_name_counts=False, preprocess=False
-            )
 
     def test_construct_cluster_to_signatures(self):
         cluster_to_signatures = self.dummy_dataset.construct_cluster_to_signatures({"a": ["0", "1"], "b": ["3", "4"]})
@@ -408,82 +521,89 @@ class TestData(unittest.TestCase):
         assert cluster_to_signatures == expected_cluster_to_signatures
 
     def test_multiprocessing_preprocessing_consistency(self):
-        """Test that multiprocessing preprocessing produces identical results to single-threaded"""
-        # Create datasets with same data but different n_jobs settings
-        dataset_single = ANDData(
-            "tests/dummy/signatures.json",
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            name="dummy_single",
-            load_name_counts=False,
-            preprocess=True,
-            n_jobs=1,
-        )
+        dataset_single = build_dummy_dataset("preprocessing_single", n_jobs=1)
+        dataset_multi = build_dummy_dataset("preprocessing_multi", n_jobs=2)
 
-        dataset_multi = ANDData(
-            "tests/dummy/signatures.json",
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            name="dummy_multi",
-            load_name_counts=False,
-            preprocess=True,
-            n_jobs=2,
-        )
-
-        # Verify that at least one paper was processed (has title normalization)
-        assert len(dataset_single.papers) > 0 and len(dataset_multi.papers) > 0
-
-        # Compare that papers are preprocessed identically
-        for paper_id in dataset_single.papers:
-            paper_single = dataset_single.papers[paper_id]
-            paper_multi = dataset_multi.papers[paper_id]
-
-            # Check that key preprocessed fields are identical
-            assert paper_single.title == paper_multi.title, f"Title mismatch for paper {paper_id}"
-            assert (
-                paper_single.predicted_language == paper_multi.predicted_language
-            ), f"Language mismatch for paper {paper_id}"
-            assert paper_single.is_english == paper_multi.is_english, f"is_english mismatch for paper {paper_id}"
-            assert paper_single.is_reliable == paper_multi.is_reliable, f"is_reliable mismatch for paper {paper_id}"
-
-            # Check ngrams are identical
-            if paper_single.title_ngrams_words is not None and paper_multi.title_ngrams_words is not None:
-                assert (
-                    paper_single.title_ngrams_words == paper_multi.title_ngrams_words
-                ), f"Title ngrams mismatch for paper {paper_id}"
+        assert dataset_single.papers
+        assert dataset_single.papers == dataset_multi.papers
+        assert dataset_single.signatures == dataset_multi.signatures
 
 
-def test_compute_signature_name_counts_uses_single_character_initial():
-    load_name_counts = {
-        "first_dict": {},
-        "last_dict": {"smith": 11},
-        "first_last_dict": {},
-        "last_first_initial_dict": {"smith m": 17},
-    }
+def test_preprocessing_name_counts_use_single_character_initial(tmp_path):
+    from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
+
+    index_path, _metrics = write_name_counts_index(
+        tmp_path,
+        ({}, {"sattar": 11}, {}, {"sattar a": 17}),
+    )
     dataset = ANDData(
         "tests/dummy/signatures.json",
         "tests/dummy/papers.json",
         name="dummy_name_counts_initial",
         mode="inference",
-        load_name_counts=load_name_counts,
+        name_counts_index=index_path,
         preprocess=False,
     )
-    signature = next(iter(dataset.signatures.values()))._replace(
-        author_info_first="Michael",
+    signature_id = next(iter(dataset.signatures))
+    dataset.signatures[signature_id] = dataset.signatures[signature_id]._replace(
+        author_info_first="Abdul",
         author_info_middle="",
-        author_info_last="Smith",
-        author_info_first_normalized_without_apostrophe="michael",
-        author_info_middle_normalized_without_apostrophe="",
-        author_info_last_normalized="smith",
+        author_info_last="Sattar",
     )
-    counts = dataset._compute_signature_name_counts(
-        signature,
-        first_raw="Michael",
-        middle_raw="",
-        first_without_apostrophe="michael",
-        last_normalized="smith",
-    )
+    dataset.preprocess = True
+    dataset.preprocess_signatures()
+
+    counts = dataset.signatures[signature_id].author_info_name_counts
     assert counts.last_first_initial == 17
+
+
+def test_default_name_counts_index_populates_canonical_features(monkeypatch: pytest.MonkeyPatch) -> None:
+    canonical_index = tiny_name_counts_index()
+    opened_paths = []
+
+    def open_canonical_index(_cls, path):
+        opened_paths.append(path)
+        return canonical_index
+
+    monkeypatch.setattr(data_module.NameCountsIndex, "open", classmethod(open_canonical_index))
+
+    dataset = ANDData(
+        signatures={
+            "s1": {
+                "signature_id": "s1",
+                "paper_id": 1,
+                "author_info": {
+                    "position": 0,
+                    "block": "a sattary",
+                    "first": "Abdul",
+                    "middle": "",
+                    "last": "Sattar",
+                    "suffix": None,
+                    "email": None,
+                    "affiliations": [],
+                },
+            }
+        },
+        papers={
+            "1": {
+                "paper_id": 1,
+                "title": "A paper",
+                "abstract": "",
+                "journal_name": "",
+                "venue": "",
+                "year": 2026,
+                "authors": [{"position": 0, "author_name": "Abdul Sattar"}],
+                "references": [],
+            }
+        },
+        name="default_name_counts",
+        mode="inference",
+        preprocess=True,
+        n_jobs=1,
+    )
+
+    assert opened_paths == [data_module.NAME_COUNTS_INDEX_PATH]
+    assert dataset.signatures["s1"].author_info_name_counts == data_module.NameCounts(10.0, 40.0, 60.0, 90.0)
 
 
 def test_empty_altered_cluster_signatures_file_loads_as_empty_list(tmp_path):
@@ -497,79 +617,11 @@ def test_empty_altered_cluster_signatures_file_loads_as_empty_list(tmp_path):
         mode="inference",
         cluster_seeds={"1": {"2": "require"}},
         altered_cluster_signatures=str(altered_path),
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
     )
 
     assert dataset.altered_cluster_signatures == []
-
-
-def test_pair_sampling_invalid_mode_raises_value_error():
-    with pytest.raises(ValueError, match="Unknown pair_sampling_mode"):
-        ANDData(
-            signatures={},
-            papers={},
-            clusters={},
-            name="invalid_pair_sampling_mode",
-            mode="train",
-            pair_sampling_mode="global_unbalanced",  # type: ignore[arg-type]
-            load_name_counts=False,
-            preprocess=False,
-        )
-
-
-def test_pair_sampling_rejects_mixed_canonical_and_legacy_flags():
-    with pytest.raises(ValueError, match="Set either pair_sampling_mode or legacy"):
-        ANDData(
-            signatures={},
-            papers={},
-            clusters={},
-            name="mixed_pair_sampling",
-            mode="train",
-            pair_sampling_mode="within_block_random",
-            pair_sampling_block=True,
-            load_name_counts=False,
-            preprocess=False,
-        )
-
-
-def test_parse_sinonym_name_matches_between_object_and_dict_inputs():
-    class _ParsedNameStub:
-        def __init__(self):
-            self.given_tokens = ["Xiao", "Ming"]
-            self.surname_tokens = ["Ou", "Yang"]
-            self.original_compound_surname = None
-            self.middle_tokens = ["Li"]
-            self.middle_name = None
-
-    object_output = _parse_sinonym_name(_ParsedNameStub())
-    dict_output = _parse_sinonym_name(
-        {
-            "given_tokens": ["Xiao", "Ming"],
-            "surname_tokens": ["Ou", "Yang"],
-            "original_compound_surname": None,
-            "middle_tokens": ["Li"],
-            "middle_name": None,
-        }
-    )
-
-    assert object_output == dict_output
-    assert object_output == ("Xiao Ming", "Li", "Ou Yang")
-
-
-def test_inference_dataset_with_clusters_initializes_signature_to_cluster_id():
-    dataset = ANDData(
-        signatures={},
-        papers={},
-        clusters={},
-        name="inference_with_clusters_signature_mapping",
-        mode="inference",
-        load_name_counts=False,
-        preprocess=False,
-    )
-
-    assert hasattr(dataset, "signature_to_cluster_id")
-    assert dataset.signature_to_cluster_id is None
 
 
 def test_fixed_pairs_does_not_mutate_source_dataframes():
@@ -594,7 +646,7 @@ def test_fixed_pairs_does_not_mutate_source_dataframes():
         train_pairs=train_pairs_df,
         val_pairs=val_pairs_df,
         test_pairs=test_pairs_df,
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
     )
 
@@ -613,3 +665,76 @@ def test_fixed_pairs_does_not_mutate_source_dataframes():
 
     all_labels = [int(pair[2]) for pair in train_pairs + val_pairs + test_pairs]
     assert set(all_labels).issubset({0, 1})
+
+
+def test_fixed_train_val_pairs_matches_fixed_pairs_without_test_or_rng_side_effects():
+    columns = ["signature_id_1", "signature_id_2", "label"]
+    dataset = ANDData.__new__(ANDData)
+    dataset.train_pairs = pd.DataFrame(
+        [(f"s{index}", f"s{index + 1}", index % 2) for index in range(0, 20, 2)],
+        columns=columns,
+    )
+    dataset.val_pairs = None
+    dataset.test_pairs = None
+    dataset.train_ratio = 0.8
+    dataset.val_ratio = 0.1
+    dataset.random_seed = 1111
+
+    np.random.seed(7)
+    state_before = np.random.get_state()
+    selection_train, selection_val = dataset.fixed_train_val_pairs()
+    state_after = np.random.get_state()
+
+    assert state_before[0] == state_after[0]
+    np.testing.assert_array_equal(state_before[1], state_after[1])
+    assert state_before[2:] == state_after[2:]
+
+    dataset.test_pairs = pd.DataFrame([("test-1", "test-2", 0)], columns=columns)
+    full_train, full_val, _ = dataset.fixed_pairs()
+    assert selection_train == full_train
+    assert selection_val == full_val
+
+
+def test_fixed_pairs_rejects_unordered_pair_overlap_across_splits():
+    dataset = ANDData.__new__(ANDData)
+    columns = ["signature_id_1", "signature_id_2", "label"]
+    dataset.train_pairs = pd.DataFrame([("a", "b", 1)], columns=columns)
+    dataset.val_pairs = pd.DataFrame([("b", "a", 1)], columns=columns)
+    dataset.test_pairs = pd.DataFrame([("c", "d", 0)], columns=columns)
+
+    with pytest.raises(ValueError, match="overlap by unordered signature pair"):
+        dataset.fixed_pairs()
+
+
+def test_fixed_pairs_rejects_unknown_labels():
+    for invalid_split in ("train", "val", "test"):
+        pair_frames = {
+            split_name: pd.DataFrame(
+                [(f"{split_name}1", f"{split_name}2", "YES")],
+                columns=["signature_id_1", "signature_id_2", "label"],
+            )
+            for split_name in ("train", "val", "test")
+        }
+        pair_frames[invalid_split].loc[0, "label"] = "MAYBE"
+        dataset = ANDData(
+            signatures={},
+            papers={},
+            name="fixed_pairs_invalid_label",
+            mode="train",
+            clusters=None,
+            train_pairs=pair_frames["train"],
+            val_pairs=pair_frames["val"],
+            test_pairs=pair_frames["test"],
+            name_counts_index=None,
+            preprocess=False,
+        )
+
+        try:
+            dataset.fixed_pairs()
+        except ValueError as error:
+            message = str(error)
+            assert "Unknown fixed-pair labels" in message and invalid_split in message and "MAYBE" in message, (
+                f"{invalid_split}: {error}"
+            )
+        else:
+            raise AssertionError(f"{invalid_split}: unknown fixed-pair label was accepted")

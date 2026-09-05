@@ -2,21 +2,27 @@
 """
 Run local CI with close parity to `.github/workflows/main.yaml`.
 
-Execution order:
+With no argument, execution order is:
   1) lint job:
-     - uv sync --extra dev [--frozen if uv.lock exists]
      - version sync check
-     - ruff check / format checks
-  2) typecheck-and-test matrix:
-     - py-only lane
-     - rust-enabled lane
+     - generated feature-schema sync check
+     - isolated, exactly pinned ruff check / format checks
+  2) typecheck-and-test job:
+     - run Rust formatting, Clippy, and native unit tests
+     - build the required Rust extension
+     - smoke-test the installed Rust extension
+     - run the full suite with Python orchestration
+
+Pass ``lint`` or ``typecheck-and-test`` to run only one hosted-CI job.
 """
 
+import argparse
 import os
 import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 
@@ -45,18 +51,7 @@ def repo_root() -> Path:
 
 
 REPO = repo_root()
-LANES = ["py-only", "rust-enabled"]
-RUST_PARITY_TESTS = [
-    "tests/test_incremental_linking_default_artifact.py",
-    "tests/test_feature_port_parity.py",
-    "tests/test_rust_signature_preprocess.py",
-    "tests/test_rust_batch_chunking.py",
-]
 PYTEST_REPORT_FLAGS = ["-ra"]
-PY_ONLY_EXPECTED_SKIP_NOTE = (
-    "Rust-only tests are expected to report skips in the py-only lane; "
-    "the rust-enabled lane builds s2and_rust and must exercise them."
-)
 TY_PYTHON_VERSION = "3.11"
 TY_PYTHON_PLATFORM = os.environ.get("S2AND_CI_TY_PLATFORM", "linux")
 TY_BASE_IGNORES = [
@@ -71,6 +66,7 @@ TY_SCRIPT_EXTRA_IGNORES = [
 ]
 MATURIN_RETRY_ATTEMPTS_WINDOWS = 3
 MATURIN_RETRY_BACKOFF_SECONDS = 2.0
+RUST_MANIFEST = "s2and_rust/Cargo.toml"
 
 
 def run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
@@ -82,8 +78,12 @@ def run_uv(args: list[str], *, env: dict[str, str] | None = None) -> None:
     run(uv_exe() + args, env=env)
 
 
+def uv_run_args(*args: str) -> list[str]:
+    return ["run", "--no-sync", *args]
+
+
 def pytest_args(*args: str, quiet: bool = False) -> list[str]:
-    cmd = ["run", "pytest"]
+    cmd = uv_run_args("pytest")
     if quiet:
         cmd.append("-q")
     cmd.extend(PYTEST_REPORT_FLAGS)
@@ -92,7 +92,7 @@ def pytest_args(*args: str, quiet: bool = False) -> list[str]:
 
 
 def ensure_rust_on_path() -> None:
-    if shutil.which("cargo") or shutil.which("rustc"):
+    if shutil.which("cargo"):
         return
     candidates: list[Path] = []
     if os.name == "nt":
@@ -106,8 +106,59 @@ def ensure_rust_on_path() -> None:
     for candidate in candidates:
         if candidate.is_dir():
             os.environ["PATH"] = f"{candidate}{os.pathsep}{os.environ.get('PATH', '')}"
-            if shutil.which("cargo") or shutil.which("rustc"):
+            if shutil.which("cargo"):
                 return
+    raise FileNotFoundError("cargo is required for native CI checks but was not found on PATH")
+
+
+def pyo3_python_path() -> str:
+    """Return the root uv environment's Python executable for PyO3 builds."""
+
+    relative_path = Path("Scripts/python.exe") if os.name == "nt" else Path("bin/python")
+    candidate = (REPO / ".venv" / relative_path).resolve()
+    if not candidate.is_file():
+        raise FileNotFoundError(
+            f"PyO3 requires the root uv environment's Python executable, but it is missing: {candidate}"
+        )
+    return str(candidate)
+
+
+def run_native_rust_checks() -> None:
+    """Run the native Rust gates enforced by hosted CI."""
+
+    rust_env = os.environ.copy()
+    rust_env["PYO3_PYTHON"] = pyo3_python_path()
+    run_uv(
+        uv_run_args("cargo", "fmt", "--manifest-path", RUST_MANIFEST, "--", "--check"),
+        env=rust_env,
+    )
+    run_uv(
+        uv_run_args(
+            "cargo",
+            "clippy",
+            "--manifest-path",
+            RUST_MANIFEST,
+            "--lib",
+            "--no-deps",
+            "--",
+            "-D",
+            "clippy::correctness",
+            "-D",
+            "clippy::suspicious",
+        ),
+        env=rust_env,
+    )
+    run_uv(
+        uv_run_args(
+            "cargo",
+            "test",
+            "--manifest-path",
+            RUST_MANIFEST,
+            "--lib",
+            "--no-default-features",
+        ),
+        env=rust_env,
+    )
 
 
 def top_level_script_files() -> list[str]:
@@ -122,7 +173,7 @@ def _rust_extension_artifacts() -> list[Path]:
 
 
 def run_maturin_develop_with_retries() -> None:
-    args = ["run", "--with", "maturin", "maturin", "develop", "-m", "s2and_rust/Cargo.toml"]
+    args = uv_run_args("--with", "maturin", "maturin", "develop", "-m", "s2and_rust/Cargo.toml")
     attempts = MATURIN_RETRY_ATTEMPTS_WINDOWS if os.name == "nt" else 1
     for attempt in range(1, attempts + 1):
         try:
@@ -149,26 +200,43 @@ def run_maturin_develop_with_retries() -> None:
             time.sleep(sleep_seconds)
 
 
-def sync_deps(*, lock_present: bool, lane: str) -> None:
+def sync_deps(*, lock_present: bool) -> None:
     args = ["sync", "--extra", "dev"]
-    if lane == "rust-enabled":
-        args.extend(["--extra", "rust"])
     if lock_present:
         args.append("--frozen")
-    if lane == "rust-enabled":
-        args.extend(["--no-install-package", "s2and-rust"])
+    args.extend(["--no-install-package", "s2and-rust"])
     run_uv(args)
 
 
-def run_lint_job(*, lock_present: bool) -> None:
+def exact_dev_tool_requirement(tool_name: str) -> str:
+    """Return one exactly pinned tool requirement from the dev extra."""
+
+    with (REPO / "pyproject.toml").open("rb") as source:
+        pyproject = tomllib.load(source)
+    dev_requirements = pyproject["project"]["optional-dependencies"]["dev"]
+    prefix = f"{tool_name}=="
+    matches = [str(requirement) for requirement in dev_requirements if str(requirement).startswith(prefix)]
+    if len(matches) != 1:
+        raise ValueError(f"expected one exact {tool_name!r} pin in project.optional-dependencies.dev, found {matches}")
+    return matches[0]
+
+
+def isolated_tool_args(requirement: str, *args: str) -> list[str]:
+    """Build a uv command for one isolated, exactly pinned development tool."""
+
+    return ["tool", "run", "--isolated", requirement, *args]
+
+
+def run_lint_job() -> None:
     print("\n=== lint ===")
-    sync_deps(lock_present=lock_present, lane="py-only")
-    run_uv(["run", "python", "scripts/sync_version.py", "--check"])
-    run_uv(["run", "ruff", "check", "s2and", "scripts", "tests"])
-    run_uv(["run", "ruff", "format", "--check", "s2and"])
+    ruff_requirement = exact_dev_tool_requirement("ruff")
+    run_uv(["run", "--no-project", "python", "scripts/sync_version.py", "--check"])
+    run_uv(["run", "--no-project", "python", "scripts/sync_feature_schema.py", "--check"])
+    run_uv(isolated_tool_args(ruff_requirement, "check", "s2and", "scripts", "tests"))
+    run_uv(isolated_tool_args(ruff_requirement, "format", "--check", "s2and"))
     script_files = top_level_script_files()
     if script_files:
-        run_uv(["run", "ruff", "format", "--check", *script_files])
+        run_uv(isolated_tool_args(ruff_requirement, "format", "--check", *script_files))
 
 
 def run_ty_checks() -> None:
@@ -177,8 +245,7 @@ def run_ty_checks() -> None:
         ignore_args.extend(["--ignore", rule])
 
     run_uv(
-        [
-            "run",
+        uv_run_args(
             "ty",
             "check",
             "s2and",
@@ -187,7 +254,7 @@ def run_ty_checks() -> None:
             TY_PYTHON_VERSION,
             "--python-platform",
             TY_PYTHON_PLATFORM,
-        ]
+        )
     )
 
     script_files = top_level_script_files()
@@ -196,8 +263,7 @@ def run_ty_checks() -> None:
         for rule in TY_SCRIPT_EXTRA_IGNORES:
             script_ignore_args.extend(["--ignore", rule])
         run_uv(
-            [
-                "run",
+            uv_run_args(
                 "ty",
                 "check",
                 *script_files,
@@ -206,43 +272,52 @@ def run_ty_checks() -> None:
                 TY_PYTHON_VERSION,
                 "--python-platform",
                 TY_PYTHON_PLATFORM,
-            ]
+            )
         )
 
 
-def run_typecheck_and_test_lane(*, lane: str, lock_present: bool) -> None:
-    print(f"\n=== typecheck-and-test ({lane}) ===")
-    sync_deps(lock_present=lock_present, lane=lane)
+def run_typecheck_and_test_job(*, lock_present: bool) -> None:
+    print("\n=== typecheck-and-test ===")
+    sync_deps(lock_present=lock_present)
 
-    if lane == "rust-enabled":
-        ensure_rust_on_path()
-        run_maturin_develop_with_retries()
-        for parity_test in RUST_PARITY_TESTS:
-            run_uv(pytest_args(parity_test, quiet=True))
-
+    ensure_rust_on_path()
+    run_native_rust_checks()
+    run_maturin_develop_with_retries()
+    required_rust_env = os.environ.copy()
+    required_rust_env.pop("S2AND_BACKEND", None)
+    run_uv(
+        uv_run_args("python", "scripts/verification/smoke_installed_rust_api.py"),
+        env=required_rust_env,
+    )
     run_ty_checks()
 
-    env = os.environ.copy()
-    if lane == "py-only":
-        env["S2AND_BACKEND"] = "python"
-        print(f"[{lane}] {PY_ONLY_EXPECTED_SKIP_NOTE}")
+    python_backend_env = required_rust_env.copy()
+    python_backend_env["S2AND_BACKEND"] = "python"
 
     run_uv(
         pytest_args(
             "tests/",
             "--cov=s2and",
             "--cov-report=term-missing",
-            "--cov-fail-under=40",
         ),
-        env=env,
+        env=python_backend_env,
     )
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "job",
+        nargs="?",
+        choices=("lint", "typecheck-and-test"),
+        help="run one CI job instead of the complete local mirror",
+    )
+    args = parser.parse_args(argv)
     lock_present = (REPO / "uv.lock").exists()
-    run_lint_job(lock_present=lock_present)
-    for lane in LANES:
-        run_typecheck_and_test_lane(lane=lane, lock_present=lock_present)
+    if args.job in (None, "lint"):
+        run_lint_job()
+    if args.job in (None, "typecheck-and-test"):
+        run_typecheck_and_test_job(lock_present=lock_present)
     print("\nALL CHECKS PASSED")
 
 

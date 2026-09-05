@@ -1,45 +1,88 @@
 # Training and Evaluation
 
-This document expands the root README's training example with the main steps for training, evaluating, saving, and reloading a model.
+This document expands the root README's Arrow-native training example with the
+main steps for training, evaluating, and publishing a model.
 
-## Load a dataset in training mode
+The examples are research/API examples and intentionally make a test split
+available for immediate inspection. They are not the v1.3 release protocol.
+Release training must keep pairwise, clustering, and linker test identities
+sealed until the one-shot Stage 5 evaluation. Follow
+[release.md](release.md), not the example order below, for
+production work.
+
+## Build a Rust-backed training dataset
+
+The maintained training constructor consumes an open, manifest-backed
+`ArrowDataset`. Ground-truth clusters remain JSON by design, but signatures,
+papers, paper authors, embeddings, batch indexes, and name counts come from the
+same immutable Arrow bundle.
+
+The example below expects a canonical training root produced by
+`scripts/convert_to_arrow.py`. This migration branch does not bundle one.
 
 ```python
-from os.path import join
+import json
+from pathlib import Path
 
-from s2and.data import ANDData
+from s2and.arrow_inputs import ArrowDataset
+from s2and.arrow_training import build_training_anddata_from_arrow
 
-dataset_name = "pubmed"
-parent_dir = f"s2and/data/{dataset_name}"
+bundle_dir = Path("/path/to/canonical_arrow_training_bundle/pubmed")
+manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+manifest_paths = manifest["paths"]
+arrow_dataset = ArrowDataset.open(
+    bundle_dir,
+    require_name_counts_index=True,
+)
 
-dataset = ANDData(
-    signatures=join(parent_dir, f"{dataset_name}_signatures.json"),
-    papers=join(parent_dir, f"{dataset_name}_papers.json"),
-    clusters=join(parent_dir, f"{dataset_name}_clusters.json"),
-    specter_embeddings=join(parent_dir, f"{dataset_name}_specter.pickle"),
-    mode="train",
-    block_type="s2",
-    train_pairs_size=100000,
-    val_pairs_size=10000,
-    test_pairs_size=10000,
-    name=dataset_name,
-    n_jobs=8,
+dataset = build_training_anddata_from_arrow(
+    arrow_dataset,
+    "pubmed",
+    clusters=str((bundle_dir / manifest_paths["clusters"]).resolve()),
+    train_pairs_size=1000,
+    val_pairs_size=200,
+    test_pairs_size=200,
+    n_jobs=4,
 )
 ```
 
-Training-mode preprocessing can take a while, especially on larger datasets.
+Set `bundle_dir` to a canonical training root. Opening the handle validates
+required tables, raw-planner batch indexes, checksums, public format `1`, and
+the name-count index before any pairs are sampled. Keep `arrow_dataset`
+open while the returned dataset is used, then close it. The constructor always
+selects the Rust training runtime and pins canonical preprocessing, regardless
+of `S2AND_BACKEND`. The requested pair counts are upper bounds when a split
+contains fewer eligible within-block pairs.
+The returned dataset's Python-visible signatures and papers are reconstructed
+from the validated Arrow bundle; the constructor never injects pre-conversion
+source objects. Keep source and reconstructed datasets separate in parity
+checks.
+
+Pass `use_orcid_id=False` when a benchmark must remove ORCID evidence. The
+policy applies to both reconstructed signatures and the native Rust
+featurizer without rewriting the immutable Arrow bundle.
 
 ## Featurize pairs and train the pairwise model
+
+`s2and/feature_schema.py` defines the ordered feature names, groups, and
+monotonic constraints. Python derives selection metadata from that specification;
+Rust writes calculated values to its generated named column constants. The
+existing 33 column positions and persisted model meaning remain unchanged.
+
+After a deliberate feature-contract change, regenerate native constants with
+`uv run --no-project python scripts/sync_feature_schema.py`. Shared local and
+hosted CI run the script with `--check` to reject stale generated code. Feature
+calculations remain independent across languages and are checked by parity tests.
 
 ```python
 from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import PairwiseModeler
 
 featurization_info = FeaturizationInfo()
-train, val, test = featurize(dataset, featurization_info, n_jobs=8, use_cache=True)
-X_train, y_train = train
-X_val, y_val = val
-X_test, y_test = test
+train, val, test = featurize(dataset, featurization_info, n_jobs=4)
+X_train, y_train, _ = train
+X_val, y_val, _ = val
+X_test, y_test, _ = test
 
 pairwise_model = PairwiseModeler(
     n_iter=25,
@@ -48,12 +91,10 @@ pairwise_model = PairwiseModeler(
 pairwise_model.fit(X_train, y_train, X_val, y_val)
 ```
 
-Why `use_cache=True` is often useful here:
-
-- repeated training or evaluation runs often revisit the same pair sets
-- the pair-feature cache avoids recomputing those rows
-
-See [caching.md](caching.md) for the exact cache semantics.
+The production `train_pairwise.py` command always featurizes from its frozen
+`model_plan.json` and has no cache or smoke mode. Programmatic research callers
+use `featurize(...)` directly; there is no second persistent feature-snapshot
+format to coordinate with the runtime.
 
 ## Evaluate the pairwise classifier
 
@@ -72,6 +113,9 @@ print(pairwise_metrics)
 ```
 
 This writes useful diagnostic plots such as ROC, PR, and SHAP outputs under `figs/`.
+SHAP diagnostics support directly fitted tree and LightGBM classifiers. For
+calibrated, voting, stacking, or non-tree classifiers, pass `skip_shap=True` to
+`pairwise_eval`.
 
 ## Fit the clusterer
 
@@ -93,6 +137,33 @@ clusterer.fit(dataset)
 
 S2AND uses agglomerative clustering with average linkage on top of the pairwise model.
 
+Omitting `search_space` leaves `clusterer.search_space` as `None` during
+construction and inference. `fit()` creates the same uniform EPS space shown
+above when calibration starts. Custom calibration code can explicitly call
+`s2and.calibration.default_cluster_search_space()`; supplied search spaces are
+retained unchanged. Loading a fitted production bundle does not initialize
+Hyperopt.
+
+FastCluster's condensed distance matrices use `float64` in both Python and
+Rust, including matrices retained for EPS calibration. This matches streaming
+inference and prevents cache rounding from changing merges near the threshold.
+Storage is eight bytes per pair, or `8 * n * (n - 1) / 2` bytes for a block of
+`n` signatures. Python's stored matrices previously used two bytes per pair;
+the allocation guard now budgets the full eight bytes.
+
+When supplying `val_dists_precomputed` or prediction `dists`, generate the
+distances at `float64` precision. Recompute any previously rounded `float16`
+cache; casting it to `float64` cannot recover the original scores.
+
+Pairwise training, `Clusterer.fit()`, and clustering evaluation resolve the
+same signature splits: explicit block lists take precedence over explicit
+signature lists, followed by the configured block, signature, or time split.
+Default split ordering and random seeds are preserved. Recompute validation
+distance matrices if the selected signatures or their order change, including
+when moving from the former random calibration population to an explicit
+validation split. The precomputed matrix mapping does not record signature
+identities and cannot detect an obsolete matrix merely from its dimensions.
+
 ## Evaluate clustering
 
 ```python
@@ -104,43 +175,57 @@ print(metrics)
 
 `metrics_per_signature` is useful when you want to slice performance by signature properties.
 
-## Save and reload a trained model
+`cluster_eval()` predicts and scores the selected split. In
+`incremental_cluster_eval()`, validation prediction also includes observed
+training signatures, and test prediction includes observed training and
+validation signatures in the tested blocks. Only signatures belonging to the
+requested evaluation split contribute per-signature scores. Records outside
+explicit split lists are excluded from prediction context. B3 retains its
+existing context-aware calculation; pairwise metrics use evaluation-only
+memberships.
 
-Save:
+## Publish and reload a trained model
+
+The public loader requires a complete native bundle; it rejects pickles and
+pairwise-only training stages. The research example above trains the pairwise
+model and clusterer, but a publishable bundle also needs the promoted linker
+and validated release artifacts. See the
+[bundle contract](production_inference.md#complete-model-bundles) for required
+files, feature provenance, checksums, and staged publication. Follow the
+[v1.3 release runbook](release.md) for pairwise training, validation-only EPS
+selection, linker finalization, and evaluation through the reloaded bundle.
+
+Linker training excludes complete holdout query and base identities before
+feature materialization, using identity columns from the source tables even
+when only calibration rows are materialized for fitting. An overlap excludes
+the whole training query. Candidate component context remains complete so
+retrieval statistics for retained queries stay unchanged. The same identity
+authority is checked again before fitting, and diagnostics retain the early
+exclusion counts. Frozen test labels and features are not needed for this check.
+
+After a complete bundle passes the release gates, reload it explicitly:
 
 ```python
-import pickle
+from s2and.arrow_inputs import ArrowDataset
+from s2and.production_model import load_production_model
 
-with open("saved_model.pkl", "wb") as handle:
-    pickle.dump(clusterer, handle)
+clusterer = load_production_model("/path/to/production_model_vX.Y")
+with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
+    pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow(
+        blocks,
+        arrow_dataset,
+        total_ram_bytes=32 * 1024**3,
+    )
 ```
 
-Reload and predict:
-
-```python
-import pickle
-
-from s2and.data import ANDData
-
-with open("saved_model.pkl", "rb") as handle:
-    clusterer = pickle.load(handle)
-
-anddata = ANDData(
-    signatures="path/to/signatures.json",
-    papers="path/to/papers.json",
-    specter_embeddings="path/to/specter_embeddings.pkl",
-    name="your_name_here",
-    mode="inference",
-    block_type="s2",
-)
-
-pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), anddata)
-```
-
-`pred_distance_matrices` may be `None` when memory-optimized fused clustering paths are active.
+`pred_distance_matrices` may be `None` when the fused clustering path is active.
 
 ## Reference scripts
 
-- `scripts/transfer_experiment_seed_paper.py`: fuller transfer and evaluation workflow
+- `scripts/production/model/train_pairwise.py`: pairwise production-bundle stage
+- `scripts/production/model/release_pairwise.py`: EPS calibration, measurement
+  components, and `evaluate-release` aggregation into one report
+- `scripts/production/model/train_linker_and_finalize.py`: one-fit
+  complete-bundle finalization, reload, and evaluation
 - `scripts/tutorial_for_predicting_with_the_prod_model.py`: released-model inference example
 - `scripts/README.md`: script catalog

@@ -1,155 +1,147 @@
 use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::record_batch::RecordBatch;
+use memmap2::Mmap;
 use pyo3::PyResult;
 use std::collections::HashSet;
-use std::fs::{self, File};
 use std::io::Read;
 
+use crate::arrow_dataset::{RetainedFile, RetainedFileReader};
 use crate::raw_arrow::arrow_io::{arrow_error_to_py, io_error_to_py};
 use crate::{fnv64, fnv64_update};
 
-const ARROW_BATCH_LOOKUP_INDEX_MAGIC: &[u8; 8] = b"S2ABI002";
-const ARROW_BATCH_LOOKUP_INDEX_HEADER_LEN: usize = 40;
-const ARROW_BATCH_LOOKUP_INDEX_RECORD_LEN: usize = 16;
-const ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN: &[u8] =
-    b"s2and-arrow-batch-lookup-index-source\0";
+pub(crate) const MAGIC: &[u8; 8] = b"S2ABI002";
+const HEADER_LEN: usize = 40;
+const RECORD_LEN: usize = 16;
+pub(crate) const SOURCE_HASH_DOMAIN: &[u8] = b"s2and-arrow-batch-lookup-index-source\0";
 
-fn source_file_fingerprint(path: &str, source_size: u64) -> PyResult<u64> {
-    let mut file = File::open(path).map_err(|err| {
-        io_error_to_py(
-            "failed to open Arrow IPC file for fingerprinting",
-            path,
-            err,
-        )
-    })?;
-    let mut digest = fnv64(ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN);
+fn source_fingerprint(
+    mut reader: RetainedFileReader,
+    label: &str,
+    source_size: u64,
+) -> PyResult<u64> {
+    let mut digest = fnv64(SOURCE_HASH_DOMAIN);
     digest = fnv64_update(digest, &source_size.to_le_bytes());
     let mut buffer = [0u8; 1024 * 1024];
     loop {
-        let read_len = file.read(&mut buffer).map_err(|err| {
-            io_error_to_py("failed to read Arrow IPC file fingerprint bytes", path, err)
-        })?;
-        if read_len == 0 {
-            break;
-        }
-        digest = fnv64_update(digest, &buffer[..read_len]);
-    }
-    Ok(digest)
-}
-
-struct ArrowBatchLookupIndex {
-    bytes: Box<[u8]>,
-    record_count: usize,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SourceValidationMode {
-    StrictFingerprint,
-    RequestTimeSourceSize,
-}
-
-impl ArrowBatchLookupIndex {
-    #[allow(dead_code)]
-    fn open(path: &str, source_arrow_path: &str, key_column: &str) -> PyResult<Self> {
-        Self::open_with_source_validation(
-            path,
-            source_arrow_path,
-            key_column,
-            SourceValidationMode::StrictFingerprint,
-        )
-    }
-
-    fn open_for_request(path: &str, source_arrow_path: &str, key_column: &str) -> PyResult<Self> {
-        Self::open_with_source_validation(
-            path,
-            source_arrow_path,
-            key_column,
-            SourceValidationMode::RequestTimeSourceSize,
-        )
-    }
-
-    fn open_with_source_validation(
-        path: &str,
-        source_arrow_path: &str,
-        key_column: &str,
-        source_validation: SourceValidationMode,
-    ) -> PyResult<Self> {
-        let bytes = fs::read(path)
-            .map_err(|err| io_error_to_py("failed to read Arrow batch lookup index", path, err))?
-            .into_boxed_slice();
-        if bytes.len() < ARROW_BATCH_LOOKUP_INDEX_HEADER_LEN {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Arrow batch lookup index '{path}' is shorter than its header"
-            )));
-        }
-        let magic = &bytes[0..8];
-        if magic != ARROW_BATCH_LOOKUP_INDEX_MAGIC {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Arrow batch lookup index '{path}' has invalid magic bytes"
-            )));
-        }
-        let source_metadata = fs::metadata(source_arrow_path).map_err(|err| {
+        let read_len = reader.read(&mut buffer).map_err(|err| {
             io_error_to_py(
-                "failed to stat Arrow IPC file for batch lookup index validation",
-                source_arrow_path,
+                "failed to read Arrow IPC file fingerprint bytes",
+                label,
                 err,
             )
         })?;
-        let source_size = source_metadata.len();
-        let record_count = u64::from_le_bytes(
-            bytes[8..16]
+        if read_len == 0 {
+            return Ok(digest);
+        }
+        digest = fnv64_update(digest, &buffer[..read_len]);
+    }
+}
+
+pub(crate) struct ArrowBatchLookupIndex {
+    bytes: Mmap,
+    record_count: usize,
+    max_batch_index: Option<u32>,
+    label: String,
+}
+
+impl ArrowBatchLookupIndex {
+    pub(crate) fn open_retained(
+        index_file: &RetainedFile,
+        source: &RetainedFile,
+        key_column: &str,
+        source_batch_count: usize,
+    ) -> PyResult<Self> {
+        let index_len = index_file
+            .file()
+            .metadata()
+            .map_err(|err| {
+                io_error_to_py(
+                    "failed to stat Arrow batch lookup index",
+                    index_file.label(),
+                    err,
+                )
+            })?
+            .len();
+        if index_len < HEADER_LEN as u64 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Arrow batch lookup index '{}' is shorter than its header",
+                index_file.label()
+            )));
+        }
+        // The retained OS handle pins this exact file even if its path is
+        // atomically replaced after the dataset opens.
+        let bytes = unsafe { Mmap::map(index_file.file()) }.map_err(|err| {
+            io_error_to_py(
+                "failed to memory-map Arrow batch lookup index",
+                index_file.label(),
+                err,
+            )
+        })?;
+        if &bytes[0..8] != MAGIC {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Arrow batch lookup index '{}' has invalid magic bytes",
+                index_file.label()
+            )));
+        }
+
+        let source_size = source
+            .file()
+            .metadata()
+            .map_err(|err| {
+                io_error_to_py(
+                    "failed to stat retained Arrow IPC file",
+                    source.label(),
+                    err,
+                )
+            })?
+            .len();
+        let record_count: usize =
+            u64::from_le_bytes(bytes[8..16].try_into().expect("fixed header"))
                 .try_into()
-                .expect("slice length is checked by fixed header length"),
-        ) as usize;
-        let indexed_source_size = u64::from_le_bytes(
-            bytes[16..24]
-                .try_into()
-                .expect("indexed source-size slice has fixed length"),
-        );
-        let indexed_key_column_hash = u64::from_le_bytes(
-            bytes[24..32]
-                .try_into()
-                .expect("indexed key-column hash slice has fixed length"),
-        );
+                .map_err(|_| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "Arrow batch lookup index record count overflows usize",
+                    )
+                })?;
+        let indexed_source_size =
+            u64::from_le_bytes(bytes[16..24].try_into().expect("fixed header"));
+        let indexed_key_column_hash =
+            u64::from_le_bytes(bytes[24..32].try_into().expect("fixed header"));
+        let indexed_source_fingerprint =
+            u64::from_le_bytes(bytes[32..40].try_into().expect("fixed header"));
         let expected_key_column_hash = fnv64(key_column.as_bytes());
         if indexed_key_column_hash != expected_key_column_hash {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Arrow batch lookup index '{path}' was built for a different key column: \
+                "Arrow batch lookup index '{}' was built for a different key column: \
                  indexed hash={indexed_key_column_hash} expected hash={expected_key_column_hash} \
-                 key_column='{key_column}'"
+                 key_column='{key_column}'",
+                index_file.label()
             )));
         }
-        let indexed_source_fingerprint = u64::from_le_bytes(
-            bytes[32..40]
-                .try_into()
-                .expect("indexed source fingerprint slice has fixed length"),
-        );
         if indexed_source_size != source_size {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Arrow batch lookup index '{path}' is stale for '{source_arrow_path}': \
-                 indexed size={indexed_source_size} current size={source_size}"
+                "Arrow batch lookup index '{}' is stale for '{}': \
+                 indexed size={indexed_source_size} current size={source_size}",
+                index_file.label(),
+                source.label()
             )));
         }
-        if source_validation == SourceValidationMode::StrictFingerprint {
-            let source_fingerprint = source_file_fingerprint(source_arrow_path, source_size)?;
-            if indexed_source_fingerprint != source_fingerprint {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Arrow batch lookup index '{path}' is stale for '{source_arrow_path}': \
-                     indexed size/fingerprint=({indexed_source_size}, {indexed_source_fingerprint}) \
-                     current size/fingerprint=({source_size}, {source_fingerprint})"
-                )));
-            }
+        let actual_fingerprint = source_fingerprint(source.reader(), source.label(), source_size)?;
+        if indexed_source_fingerprint != actual_fingerprint {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Arrow batch lookup index '{}' is stale for '{}': \
+                 indexed size/fingerprint=({indexed_source_size}, {indexed_source_fingerprint}) \
+                 current size/fingerprint=({source_size}, {actual_fingerprint})",
+                index_file.label(),
+                source.label()
+            )));
         }
-        let expected_len = ARROW_BATCH_LOOKUP_INDEX_HEADER_LEN
-            .checked_add(
-                record_count
-                    .checked_mul(ARROW_BATCH_LOOKUP_INDEX_RECORD_LEN)
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyOverflowError::new_err(
-                            "Arrow batch lookup index record count overflows usize",
-                        )
-                    })?,
-            )
+        let expected_len = HEADER_LEN
+            .checked_add(record_count.checked_mul(RECORD_LEN).ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "Arrow batch lookup index record count overflows usize",
+                )
+            })?)
             .ok_or_else(|| {
                 pyo3::exceptions::PyOverflowError::new_err(
                     "Arrow batch lookup index length overflows usize",
@@ -157,20 +149,44 @@ impl ArrowBatchLookupIndex {
             })?;
         if bytes.len() != expected_len {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Arrow batch lookup index '{path}' length {} does not match expected length {expected_len} \
-                 (record_count={record_count}, header_len={ARROW_BATCH_LOOKUP_INDEX_HEADER_LEN}, \
-                 record_len={ARROW_BATCH_LOOKUP_INDEX_RECORD_LEN})",
+                "Arrow batch lookup index '{}' length {} does not match expected length {expected_len} \
+                 (record_count={record_count}, header_len={HEADER_LEN}, record_len={RECORD_LEN})",
+                index_file.label(),
                 bytes.len()
             )));
         }
-        Ok(Self {
+
+        let mut index = Self {
             bytes,
             record_count,
-        })
+            max_batch_index: None,
+            label: index_file.label().to_string(),
+        };
+        let mut previous_hash = None;
+        for record_index in 0..record_count {
+            let record_hash = index.record_hash(record_index);
+            if previous_hash.is_some_and(|previous| record_hash < previous) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Arrow batch lookup index '{}' record hashes are not monotonic at \
+                     records {} and {record_index}",
+                    index_file.label(),
+                    record_index - 1
+                )));
+            }
+            previous_hash = Some(record_hash);
+            let batch_index = index.record_batch_index(record_index);
+            index.max_batch_index = Some(
+                index
+                    .max_batch_index
+                    .map_or(batch_index, |current| current.max(batch_index)),
+            );
+        }
+        index.validate_batch_indices(source.label(), source_batch_count)?;
+        Ok(index)
     }
 
     fn record_offset(&self, index: usize) -> usize {
-        ARROW_BATCH_LOOKUP_INDEX_HEADER_LEN + index * ARROW_BATCH_LOOKUP_INDEX_RECORD_LEN
+        HEADER_LEN + index * RECORD_LEN
     }
 
     fn record_hash(&self, index: usize) -> u64 {
@@ -178,7 +194,7 @@ impl ArrowBatchLookupIndex {
         u64::from_le_bytes(
             self.bytes[offset..offset + 8]
                 .try_into()
-                .expect("record hash slice has fixed length"),
+                .expect("fixed record"),
         )
     }
 
@@ -187,25 +203,27 @@ impl ArrowBatchLookupIndex {
         u32::from_le_bytes(
             self.bytes[offset..offset + 4]
                 .try_into()
-                .expect("record batch-index slice has fixed length"),
+                .expect("fixed record"),
         )
     }
 
     fn lower_bound(&self, hash: u64) -> usize {
-        let mut lo = 0usize;
-        let mut hi = self.record_count;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if self.record_hash(mid) < hash {
-                lo = mid + 1;
+        let mut low = 0usize;
+        let mut high = self.record_count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.record_hash(middle) < hash {
+                low = middle + 1;
             } else {
-                hi = mid;
+                high = middle;
             }
         }
-        lo
+        low
     }
 
-    fn batch_indices_for_keys(&self, keys: &HashSet<String>) -> HashSet<usize> {
+    /// Return a superset of needed batches. Consumers must still exact-filter
+    /// ids because the compact index stores only 64-bit hashes.
+    pub(crate) fn sorted_batch_indices(&self, keys: &HashSet<String>) -> Vec<usize> {
         let mut out = HashSet::new();
         for key in keys {
             let hash = fnv64(key.as_bytes());
@@ -215,146 +233,81 @@ impl ArrowBatchLookupIndex {
                 index += 1;
             }
         }
+        let mut out = out.into_iter().collect::<Vec<_>>();
+        out.sort_unstable();
         out
     }
-}
 
-pub(crate) fn validate_arrow_batch_lookup_index(
-    path: &str,
-    source_arrow_path: &str,
-    key_column: &str,
-) -> PyResult<()> {
-    ArrowBatchLookupIndex::open(path, source_arrow_path, key_column).map(|_| ())
+    fn validate_batch_indices(
+        &self,
+        source_label: &str,
+        source_batch_count: usize,
+    ) -> PyResult<()> {
+        if let Some(batch_index) = self.max_batch_index {
+            if batch_index as usize >= source_batch_count {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Arrow batch lookup index '{}' references record batch {batch_index}, \
+                     but Arrow IPC file '{source_label}' contains {source_batch_count} record batches",
+                    self.label
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_retained_batches(
+        &self,
+        source: &RetainedFile,
+        keep_ids: &HashSet<String>,
+    ) -> PyResult<(Vec<RecordBatch>, IndexedArrowReadStats)> {
+        if keep_ids.is_empty() {
+            return Ok((Vec::new(), IndexedArrowReadStats::default()));
+        }
+        let batch_indices = self.sorted_batch_indices(keep_ids);
+        let mut reader = ArrowFileReader::try_new(source.reader(), None).map_err(|err| {
+            arrow_error_to_py("failed to read Arrow IPC schema from", source.label(), err)
+        })?;
+        let mut batches = Vec::with_capacity(batch_indices.len());
+        let mut rows_scanned = 0usize;
+        for batch_index in batch_indices {
+            reader.set_index(batch_index).map_err(|err| {
+                arrow_error_to_py(
+                    "failed to seek Arrow IPC record batch in",
+                    source.label(),
+                    err,
+                )
+            })?;
+            let batch = reader
+                .next()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Arrow IPC file '{}' is missing indexed record batch {batch_index}",
+                        source.label()
+                    ))
+                })?
+                .map_err(|err| {
+                    arrow_error_to_py(
+                        "failed to read Arrow IPC record batch from",
+                        source.label(),
+                        err,
+                    )
+                })?;
+            rows_scanned += batch.num_rows();
+            batches.push(batch);
+        }
+        let batches_read = batches.len();
+        Ok((
+            batches,
+            IndexedArrowReadStats {
+                batches_read,
+                rows_scanned,
+            },
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct IndexedArrowReadStats {
     pub(crate) batches_read: usize,
     pub(crate) rows_scanned: usize,
-}
-
-pub(crate) fn read_indexed_arrow_batches(
-    path: &str,
-    index_path: &str,
-    key_column: &str,
-    keep_ids: &HashSet<String>,
-) -> PyResult<(Vec<RecordBatch>, IndexedArrowReadStats)> {
-    if keep_ids.is_empty() {
-        return Ok((Vec::new(), IndexedArrowReadStats::default()));
-    }
-    let index = ArrowBatchLookupIndex::open_for_request(index_path, path, key_column)?;
-    let mut batch_indices: Vec<usize> =
-        index.batch_indices_for_keys(keep_ids).into_iter().collect();
-    batch_indices.sort_unstable();
-    let file = File::open(path)
-        .map_err(|err| io_error_to_py("failed to open Arrow IPC file", path, err))?;
-    let mut reader = ArrowFileReader::try_new(file, None)
-        .map_err(|err| arrow_error_to_py("failed to read Arrow IPC schema from", path, err))?;
-    let mut batches = Vec::with_capacity(batch_indices.len());
-    let mut rows_scanned = 0usize;
-    for batch_index in batch_indices {
-        reader.set_index(batch_index).map_err(|err| {
-            arrow_error_to_py("failed to seek Arrow IPC record batch in", path, err)
-        })?;
-        let batch = reader
-            .next()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Arrow IPC file '{path}' is missing indexed record batch {batch_index}"
-                ))
-            })?
-            .map_err(|err| {
-                arrow_error_to_py("failed to read Arrow IPC record batch from", path, err)
-            })?;
-        rows_scanned += batch.num_rows();
-        batches.push(batch);
-    }
-    let batches_read = batches.len();
-    Ok((
-        batches,
-        IndexedArrowReadStats {
-            batches_read,
-            rows_scanned,
-        },
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pyo3::types::{PyAnyMethods, PyStringMethods};
-    use pyo3::{PyErr, Python};
-
-    fn prepare_python_for_test() {
-        #[cfg(windows)]
-        if let Some(python_home) = option_env!("S2AND_RUST_PYTHONHOME") {
-            std::env::set_var("PYTHONHOME", python_home);
-        }
-        pyo3::prepare_freethreaded_python();
-    }
-
-    fn py_err_message(err: PyErr) -> String {
-        prepare_python_for_test();
-        Python::with_gil(|py| {
-            err.value(py)
-                .str()
-                .expect("PyErr value should stringify")
-                .to_str()
-                .expect("test error messages are ASCII")
-                .to_string()
-        })
-    }
-
-    #[test]
-    fn arrow_batch_lookup_index_rejects_same_size_middle_rewrite() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "s2and_arrow_index_digest_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock should be after Unix epoch")
-                .as_nanos()
-        ));
-        fs::create_dir_all(&temp_root).expect("create temp test dir");
-        let source_path = temp_root.join("source.arrow");
-        let index_path = temp_root.join("source.index.bin");
-        let mut source_bytes = vec![b'a'; 200_000];
-        source_bytes[100_000..100_016].copy_from_slice(b"middle-key-00000");
-        fs::write(&source_path, &source_bytes).expect("write source bytes");
-        let source_path_str = source_path
-            .to_str()
-            .expect("temp path should be valid unicode")
-            .to_string();
-        let source_fingerprint =
-            source_file_fingerprint(&source_path_str, source_bytes.len() as u64)
-                .expect("hash source");
-        fs::write(
-            &index_path,
-            ARROW_BATCH_LOOKUP_INDEX_MAGIC
-                .iter()
-                .copied()
-                .chain(0_u64.to_le_bytes())
-                .chain((source_bytes.len() as u64).to_le_bytes())
-                .chain(fnv64(b"signature_id").to_le_bytes())
-                .chain(source_fingerprint.to_le_bytes())
-                .collect::<Vec<u8>>(),
-        )
-        .expect("write index bytes");
-        source_bytes[100_000..100_016].copy_from_slice(b"middle-key-99999");
-        fs::write(&source_path, &source_bytes).expect("rewrite source bytes");
-
-        let index_path_str = index_path
-            .to_str()
-            .expect("temp path should be valid unicode");
-        let error =
-            match ArrowBatchLookupIndex::open(index_path_str, &source_path_str, "signature_id") {
-                Ok(_) => panic!("same-size middle rewrite must stale the index"),
-                Err(err) => err,
-            };
-        assert!(py_err_message(error).contains("is stale"));
-        ArrowBatchLookupIndex::open_for_request(index_path_str, &source_path_str, "signature_id")
-            .expect("request-time source-size validation should avoid full-file fingerprinting");
-
-        fs::remove_dir_all(&temp_root).ok();
-    }
 }

@@ -1,11 +1,10 @@
-"""Benchmark preprocessing phases (papers 1/2, papers 2/2, signatures).
+"""Benchmark preprocessing phases (papers, signatures).
 
 Focus: compare serial vs threads vs processes via UniversalPool across OSes.
 
 Phases:
-  1) Papers 1/2: `preprocess_paper_1` across papers
-  2) Papers 2/2: `preprocess_paper_2` reference-details computation
-  3) Signatures: `ANDData.preprocess_signatures` with swappable Python ngram backend
+  1) Papers: `preprocess_paper_1` across papers
+  2) Signatures: `ANDData.preprocess_signatures` with swappable Python ngram backend
 
 Notes:
   - Default `--limit-signatures` keeps the run small; set `--limit-signatures 0` for full dataset.
@@ -25,15 +24,13 @@ import platform
 import sys
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from functools import partial
 from typing import Any, TypeVar
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
-
-DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
 T = TypeVar("T")
 PaperStageInputT = TypeVar("PaperStageInputT")
@@ -57,9 +54,9 @@ def _paper_id_from_raw_signature(sig: dict[str, Any]) -> str:
     return str(paper_id) if paper_id is not None else ""
 
 
-def load_dataset(*, dataset: str, limit_signatures: int) -> tuple[dict[str, Any], dict[str, Any]]:
-    sig_path = os.path.join(DATA_DIR, dataset, f"{dataset}_signatures.json")
-    paper_path = os.path.join(DATA_DIR, dataset, f"{dataset}_papers.json")
+def load_dataset(*, data_dir: str, dataset: str, limit_signatures: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    sig_path = os.path.join(data_dir, dataset, f"{dataset}_signatures.json")
+    paper_path = os.path.join(data_dir, dataset, f"{dataset}_papers.json")
 
     raw_sigs: dict[str, Any] = _load_json(sig_path)
     raw_papers: dict[str, Any] = _load_json(paper_path)
@@ -94,7 +91,6 @@ def build_namedtuples(
             author_info_last=author_info["last"],
             author_info_suffix_normalized=None,
             author_info_suffix=author_info["suffix"],
-            author_info_first_normalized=None,
             author_info_coauthors=None,
             author_info_coauthor_blocks=None,
             author_info_full_name=None,
@@ -110,7 +106,6 @@ def build_namedtuples(
             author_info_name_counts=None,
             author_info_position=author_info["position"],
             author_info_block=author_info["block"],
-            author_info_given_block=author_info.get("given_block", None),
             author_info_estimated_gender=author_info.get("estimated_gender", None),
             author_info_estimated_ethnicity=author_info.get("estimated_ethnicity", None),
             paper_id=signature.get("paper_id", signature.get("paperId")),
@@ -149,16 +144,15 @@ def build_namedtuples(
             venue=paper.get("venue", "") or "",
             journal_name=paper.get("journal_name", "") or "",
             year=paper.get("year"),
-            references=paper.get("references"),
             has_abstract=bool(paper.get("abstract", "") or paper.get("has_abstract", False)),
             predicted_language=None,
             is_english=None,
             is_reliable=None,
+            language_reliability=None,
             title_ngrams_words=None,
             title_ngrams_chars=None,
             venue_ngrams=None,
             journal_ngrams=None,
-            reference_details=None,
             in_signatures=True,
         )
 
@@ -191,7 +185,11 @@ def _signature_ngrams_one(pair: tuple[str, str]) -> tuple[Counter, Counter]:
     from s2and.text import get_text_ngrams, get_text_ngrams_words
 
     coauthor_text, affiliation_text = pair
-    coauthor_counter = get_text_ngrams(coauthor_text, stopwords=None, use_bigrams=True) if coauthor_text else Counter()
+    coauthor_counter = (
+        get_text_ngrams(coauthor_text, stopwords=None, use_bigrams=True, drop_short_tokens=False)
+        if coauthor_text
+        else Counter()
+    )
     affiliation_counter = get_text_ngrams_words(affiliation_text, stopwords=set()) if affiliation_text else Counter()
     return coauthor_counter, affiliation_counter
 
@@ -229,33 +227,13 @@ def _run_paper_stage(
     return pool_create, work, out_count
 
 
-def _build_reference_inputs(*, papers: dict[str, Any]) -> list[tuple[str, Any, list[Any]]]:
-    from s2and.data import MiniPaper
-
-    input_2: list[tuple[str, Any, list[Any]]] = []
-    for key, value in papers.items():
-        refs = value.references or []
-        reference_papers = [
-            MiniPaper(
-                title=p.title,
-                venue=p.venue,
-                journal_name=p.journal_name,
-                authors=[a.author_name for a in p.authors],
-            )
-            for p in (papers.get(str(rid)) for rid in refs)
-            if p is not None
-        ]
-        input_2.append((key, value, reference_papers))
-    return input_2
-
-
 def _bench_phase(
     *,
     phase_name: str,
     run_once: Callable[[bool | None], tuple[float, float, int]],
     n_jobs: int,
     rounds: int,
-    configs: list[tuple[str, bool | None]] | None = None,
+    configs: Sequence[tuple[str, bool | None]] | None = None,
 ) -> None:
     resolved_configs = configs or [
         ("serial", None),
@@ -301,21 +279,26 @@ def _bench_signatures_preprocess(
     n_jobs: int,
     rounds: int,
     ngram_chunk_size: int,
+    name_counts_index: Any = None,
     show_breakdown: bool = False,
+    configs: Sequence[tuple[str, bool | None]] | None = None,
 ) -> None:
     import s2and.data as data_mod
     from s2and.data import ANDData
     from s2and.mp import UniversalPool
     from s2and.runtime import build_runtime_context
-    from s2and.rust_lifecycle import PYTHON_ONLY_POLICY
+    from s2and.text import compute_block
 
     def _make_ds(signatures: dict[str, Any]) -> Any:
         ds = ANDData.__new__(ANDData)
-        ds.runtime_context = build_runtime_context("bench_preprocess_signatures", emit_startup_warning=False)
-        ds.rust_lifecycle_policy = PYTHON_ONLY_POLICY
+        ds.runtime_context = build_runtime_context("bench_preprocess_signatures")
+        ds.arrow_dataset = None
         ds.preprocess = True
         ds.signatures = signatures
         ds.papers = papers
+        ds.compute_block_fn = compute_block
+        ds.name_counts_index = name_counts_index
+        ds.name_counts_loaded = name_counts_index is not None
         return ds
 
     def _tqdm_wrapper(orig_tqdm):
@@ -345,7 +328,7 @@ def _bench_signatures_preprocess(
         t0 = time.perf_counter()
         with _patch_attr(data_mod, "_python_signature_ngrams_batch", _timed_batch):
             with _patch_attr(data_mod, "tqdm", _tqdm_wrapper(data_mod.tqdm)):
-                ds.preprocess_signatures(load_name_counts=False)
+                ds.preprocess_signatures()
         work = time.perf_counter() - t0
         if show_breakdown:
             frac = (ngram_time / work * 100) if work > 0 else 0.0
@@ -386,7 +369,7 @@ def _bench_signatures_preprocess(
             with _patch_attr(data_mod, "_python_signature_ngrams_batch", _batch_parallel):
                 with _patch_attr(data_mod, "tqdm", _tqdm_wrapper(data_mod.tqdm)):
                     t1 = time.perf_counter()
-                    ds.preprocess_signatures(load_name_counts=False)
+                    ds.preprocess_signatures()
                     work = time.perf_counter() - t1
 
         if show_breakdown:
@@ -407,12 +390,18 @@ def _bench_signatures_preprocess(
         run_once=run_once,
         n_jobs=n_jobs,
         rounds=rounds,
+        configs=configs,
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark preprocessing phases across OS / pool modes.")
     parser.add_argument("--dataset", default="kisti", help="Dataset name (default: kisti)")
+    parser.add_argument(
+        "--data-dir",
+        default=os.path.join(PROJECT_ROOT, "data"),
+        help="Directory containing dataset subdirectories",
+    )
     parser.add_argument("--n-jobs", type=int, default=8, help="Number of workers (default: 8)")
     parser.add_argument("--rounds", type=int, default=1, help="Rounds per config (default: 1)")
     parser.add_argument(
@@ -422,7 +411,6 @@ def main() -> None:
         help="Limit signatures (and thus papers) for quicker runs; 0 = full dataset (default: 5000)",
     )
     parser.add_argument("--chunk-size-paper1", type=int, default=1000, help="Paper stage 1 imap chunk size")
-    parser.add_argument("--chunk-size-paper2", type=int, default=100, help="Paper stage 2 imap chunk size")
     parser.add_argument(
         "--signature-ngram-chunk-size",
         type=int,
@@ -441,14 +429,24 @@ def main() -> None:
         help="Set S2AND_BACKEND for this run (default: python)",
     )
     parser.add_argument(
-        "--skip-paper2",
-        action="store_true",
-        help="Skip papers 2/2 (reference-details) benchmarking",
-    )
-    parser.add_argument(
         "--skip-signatures",
         action="store_true",
         help="Skip signatures preprocessing benchmarking",
+    )
+    parser.add_argument(
+        "--skip-paper-benchmark",
+        action="store_true",
+        help="Preprocess papers once serially without benchmarking that phase",
+    )
+    parser.add_argument(
+        "--signature-config",
+        choices=["all", "serial", "threads", "processes"],
+        default="all",
+        help="Signature-preprocessing configuration(s) to benchmark",
+    )
+    parser.add_argument(
+        "--name-counts-index",
+        help="Optional canonical name_counts_index path to include in signature preprocessing",
     )
     args = parser.parse_args()
 
@@ -458,12 +456,24 @@ def main() -> None:
     print(f"Python:   {sys.version}")
     print(f"Backend:  {args.backend}")
     print(f"Dataset:  {args.dataset}")
+    print(f"Data dir: {args.data_dir}")
     print(f"Workers:  {args.n_jobs}    Rounds: {args.rounds}")
     print(f"Limit:    signatures={args.limit_signatures} (0 = full)")
+    print(f"Counts:   {args.name_counts_index or 'disabled'}")
     print(flush=True)
 
+    name_counts_index = None
+    if args.name_counts_index:
+        from s2and.name_counts_index import NameCountsIndex
+
+        name_counts_index = NameCountsIndex.open(args.name_counts_index)
+
     print(f"Loading dataset '{args.dataset}'...")
-    raw_sigs, raw_papers = load_dataset(dataset=args.dataset, limit_signatures=args.limit_signatures)
+    raw_sigs, raw_papers = load_dataset(
+        data_dir=args.data_dir,
+        dataset=args.dataset,
+        limit_signatures=args.limit_signatures,
+    )
     print(f"  raw: {len(raw_papers):,} papers | {len(raw_sigs):,} signatures")
 
     base_signatures, base_papers = build_namedtuples(
@@ -475,12 +485,12 @@ def main() -> None:
     print(f"  namedtuples: {len(base_papers):,} papers | {len(base_signatures):,} signatures")
     print(flush=True)
 
-    # --- Papers 1/2 ---
-    from s2and.data import preprocess_paper_1, preprocess_paper_2
+    # --- Papers ---
+    from s2and.data import preprocess_paper_1
 
     paper1_func = partial(preprocess_paper_1, preprocess=True)
 
-    need_papers_preprocessed = not args.skip_paper2 or not args.skip_signatures
+    need_papers_preprocessed = not args.skip_signatures
     papers_preprocessed: dict[str, Any] | None = None
 
     def run_paper1(use_threads: bool | None) -> tuple[float, float, int]:
@@ -496,7 +506,7 @@ def main() -> None:
             return 0.0, elapsed, len(out)
 
         return _run_paper_stage(
-            label="papers 1/2",
+            label="papers",
             items=paper_items,
             func=paper1_func,
             n_jobs=args.n_jobs,
@@ -504,56 +514,41 @@ def main() -> None:
             chunk_size=args.chunk_size_paper1,
         )
 
-    _bench_phase(
-        phase_name="Papers 1/2: preprocess_paper_1",
-        run_once=run_paper1,
-        n_jobs=args.n_jobs,
-        rounds=args.rounds,
-        configs=[
-            (f"threads x{args.n_jobs}", True),
-            (f"processes x{args.n_jobs}", False),
-            ("serial", None),
-        ],
-    )
-
-    if need_papers_preprocessed and papers_preprocessed is None:
-        raise RuntimeError("Expected papers_preprocessed to be materialized during serial papers 1/2 run.")
-
-    # --- Papers 2/2 (reference_details) ---
-    if not args.skip_paper2:
-        print()
-        print("Building papers 2/2 input (reference-details)...", flush=True)
-        t_build0 = time.perf_counter()
-        input_2 = _build_reference_inputs(papers=papers_preprocessed or {})
-        build_input_2 = time.perf_counter() - t_build0
-        print(f"  input_2: {_fmt(build_input_2)} ({len(input_2):,} items)", flush=True)
-
-        def run_paper2(use_threads: bool | None) -> tuple[float, float, int]:
-            return _run_paper_stage(
-                label="papers 2/2",
-                items=input_2,
-                func=preprocess_paper_2,
-                n_jobs=args.n_jobs,
-                use_threads=use_threads,
-                chunk_size=args.chunk_size_paper2,
-            )
-
+    if args.skip_paper_benchmark:
+        papers_preprocessed = {key: value for key, value in map(paper1_func, paper_items)}
+    else:
         _bench_phase(
-            phase_name=f"Papers 2/2: preprocess_paper_2 (reference_details) [build input: {_fmt(build_input_2)}]",
-            run_once=run_paper2,
+            phase_name="Papers: preprocess_paper_1",
+            run_once=run_paper1,
             n_jobs=args.n_jobs,
             rounds=args.rounds,
+            configs=[
+                (f"threads x{args.n_jobs}", True),
+                (f"processes x{args.n_jobs}", False),
+                ("serial", None),
+            ],
         )
+
+    if need_papers_preprocessed and papers_preprocessed is None:
+        raise RuntimeError("Expected papers_preprocessed to be materialized during serial papers run.")
 
     # --- Signatures ---
     if not args.skip_signatures:
+        signature_configs: Sequence[tuple[str, bool | None]] | None = {
+            "all": None,
+            "serial": [("serial", None)],
+            "threads": [(f"threads x{args.n_jobs}", True)],
+            "processes": [(f"processes x{args.n_jobs}", False)],
+        }[args.signature_config]
         _bench_signatures_preprocess(
             base_signatures=base_signatures,
             papers=papers_preprocessed or {},
             n_jobs=args.n_jobs,
             rounds=args.rounds,
             ngram_chunk_size=args.signature_ngram_chunk_size,
+            name_counts_index=name_counts_index,
             show_breakdown=args.signature_breakdown,
+            configs=signature_configs,
         )
 
 

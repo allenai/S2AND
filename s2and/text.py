@@ -1,13 +1,9 @@
 import logging
-import os
 import re
-import threading
-import warnings
 from collections import Counter
 from collections.abc import Set
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-import fasttext
 import jellyfish
 import numpy as np
 import pycld2 as cld2
@@ -16,102 +12,29 @@ from numpy.linalg import norm
 from strsimpy.metric_lcs import MetricLCS
 from text_unidecode import unidecode
 
-from s2and.consts import FASTTEXT_PATH, NUMPY_NAN
-from s2and.file_cache import cached_path
+from s2and.consts import NUMPY_NAN
 
 if TYPE_CHECKING:
     from s2and.data import NameCounts
 
 logger = logging.getLogger("s2and")
 
-# Lazily-loaded fastText model to avoid heavy import-time cost
-_FASTTEXT_MODEL = None
-_FASTTEXT_MODEL_INITIALIZED = False
-_FASTTEXT_LOADING_ENABLED = True
-_FASTTEXT_LOAD_FAILED = False
-_FASTTEXT_MODEL_LOCK = threading.Lock()
-
-
-def set_fasttext_loading_enabled(enabled: bool) -> None:
-    """Configure whether language detection may load the fastText model."""
-
-    global _FASTTEXT_LOADING_ENABLED
-    global _FASTTEXT_MODEL
-    global _FASTTEXT_MODEL_INITIALIZED
-    global _FASTTEXT_LOAD_FAILED
-    with _FASTTEXT_MODEL_LOCK:
-        resolved_enabled = bool(enabled)
-        if _FASTTEXT_LOADING_ENABLED == resolved_enabled:
-            if not resolved_enabled:
-                _FASTTEXT_MODEL = None
-                _FASTTEXT_MODEL_INITIALIZED = True
-                _FASTTEXT_LOAD_FAILED = False
-            elif (
-                _FASTTEXT_MODEL is None
-                and _FASTTEXT_MODEL_INITIALIZED
-                and not _FASTTEXT_LOAD_FAILED
-                and os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() not in {"1", "true", "yes"}
-            ):
-                _FASTTEXT_MODEL_INITIALIZED = False
-            return
-        _FASTTEXT_LOADING_ENABLED = resolved_enabled
-        if resolved_enabled:
-            if _FASTTEXT_MODEL is not None or not _FASTTEXT_LOAD_FAILED:
-                _FASTTEXT_MODEL_INITIALIZED = False
-            return
-        _FASTTEXT_MODEL = None
-        _FASTTEXT_MODEL_INITIALIZED = True
-        _FASTTEXT_LOAD_FAILED = False
-
-
-def fasttext_loading_enabled() -> bool:
-    """Return whether language detection may load the fastText model."""
-
-    with _FASTTEXT_MODEL_LOCK:
-        return bool(_FASTTEXT_LOADING_ENABLED)
-
-
-def _get_fasttext_model():
-    """Return a cached fastText model instance, loading on first use."""
-
-    global _FASTTEXT_MODEL
-    global _FASTTEXT_MODEL_INITIALIZED
-    global _FASTTEXT_LOAD_FAILED
-    if os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() in {"1", "true", "yes"}:
-        with _FASTTEXT_MODEL_LOCK:
-            _FASTTEXT_MODEL = None
-            _FASTTEXT_MODEL_INITIALIZED = True
-            _FASTTEXT_LOAD_FAILED = False
-        return None
-    with _FASTTEXT_MODEL_LOCK:
-        if not _FASTTEXT_LOADING_ENABLED:
-            _FASTTEXT_MODEL = None
-            _FASTTEXT_MODEL_INITIALIZED = True
-            return None
-        if _FASTTEXT_MODEL_INITIALIZED:
-            return _FASTTEXT_MODEL
-        try:
-            _FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
-            _FASTTEXT_LOAD_FAILED = False
-        except (OSError, RuntimeError, ValueError):
-            logger.exception("Failed to load fastText language model; language detection will skip fastText")
-            _FASTTEXT_MODEL = None
-            _FASTTEXT_LOAD_FAILED = True
-        _FASTTEXT_MODEL_INITIALIZED = True
-        return _FASTTEXT_MODEL
-
 
 RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z\s]+")
+RE_NORMALIZE_TITLE = re.compile(r"[^a-zA-Z0-9\s]+")
 
 DASH_CHARS = "-\u2010\u2011\u2012\u2013\u2014\u2212\ufe58\ufe63\uff0d"
 NAME_DASH_CHARS = frozenset(DASH_CHARS)
 ORCID_DASH_CLASS = re.escape(DASH_CHARS)
+# Digit groups are matched with the explicit ASCII class [0-9] (not \d) so that
+# Unicode digit code points (Arabic-Indic, etc.) are rejected, matching the Rust
+# is_ascii_digit() behavior in s2and_rust/src/orcid.rs.
 ORCID_PATTERN = re.compile(
     rf"(?i)(?<![0-9x])"
-    rf"\d{{4}}[{ORCID_DASH_CLASS}]?"
-    rf"\d{{4}}[{ORCID_DASH_CLASS}]?"
-    rf"\d{{4}}[{ORCID_DASH_CLASS}]?"
-    rf"\d{{3}}[0-9x](?![0-9x])"
+    rf"[0-9]{{4}}[{ORCID_DASH_CLASS}]?"
+    rf"[0-9]{{4}}[{ORCID_DASH_CLASS}]?"
+    rf"[0-9]{{4}}[{ORCID_DASH_CLASS}]?"
+    rf"[0-9]{{3}}[0-9x](?![0-9x])"
 )
 
 DROPPED_AFFIXES = {
@@ -330,7 +253,7 @@ VENUE_STOP_WORDS = STOPWORDS.union(
     }
 )
 
-NAME_PREFIXES = {"dr", "prof", "professor", "mr", "miss", "mrs", "ms", "mx", "sir", "phd", "md", "doctor"}
+NAME_PREFIXES = {"dr", "prof", "professor", "mr", "miss", "mrs", "ms", "mx", "sir", "phd", "doctor"}
 
 
 def prefix_dist(string_1: str, string_2: str) -> float:
@@ -353,55 +276,58 @@ TEXT_FUNCTIONS = [
 ]
 
 
-def detect_language(text: str):
+class LanguageDetection(NamedTuple):
+    """CLD2 language detection result used by pairwise language features."""
+
+    is_reliable: bool
+    is_english: bool
+    predicted_language: str
+    language_reliability: float
+
+
+def _unknown_language_detection() -> LanguageDetection:
+    """Return the normalized unknown-language detection result."""
+
+    return LanguageDetection(False, False, "un", 0.0)
+
+
+def detect_language(text: str | None) -> LanguageDetection:
+    """Detect title language with CLD2 only.
+
+    `predicted_language` is CLD2's top language code when known, even if CLD2
+    does not mark the detection reliable. `language_reliability` is the CLD2
+    top-language percent divided by 100, but only when CLD2 reports the top
+    language as reliable and known; otherwise it is 0.0.
+    """
+
+    text = text or ""
     if len(text.split()) <= 1:
-        return (False, False, "un")
+        return _unknown_language_detection()
 
-    # fasttext (optional if available)
-    isuppers = [c.isupper() for c in text if c.isalpha()]
-    if len(isuppers) == 0:
-        return (False, False, "un")
-    ft_model = _get_fasttext_model()
-    if ft_model is not None:
-        if sum(isuppers) / len(isuppers) > 0.9:
-            fasttext_pred = ft_model.predict(text.lower().replace("\n", " "))
-            predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
-        else:
-            fasttext_pred = ft_model.predict(text.replace("\n", " "))
-            predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
-    else:
-        predicted_language_ft = "un_ft"
+    if not [character.isupper() for character in text if character.isalpha()]:
+        return _unknown_language_detection()
 
-    # cld2
     try:
-        cld2_pred = cld2.detect(text)
-        predicted_language_2 = cld2_pred[2][0][1]
-        if predicted_language_2 == "un":
-            predicted_language_2 = "un_2"
+        # Titles are plain text. Pin the mode explicitly so Python matches the
+        # Rust detector instead of inheriting pycld2's HTML-aware default.
+        cld2_pred = cld2.detect(text, isPlainText=True)
     except (UnicodeError, cld2.error):
         logger.exception("cld2 language detection failed; using unknown language marker")
-        predicted_language_2 = "un_2"
+        return _unknown_language_detection()
 
-    if predicted_language_ft == "un_ft" and predicted_language_2 == "un_2":
-        predicted_language = "un"
-        is_reliable = False
-    elif predicted_language_ft == "un_ft":
-        predicted_language = predicted_language_2
-        is_reliable = True
-    elif predicted_language_2 == "un_2":
-        predicted_language = predicted_language_ft
-        is_reliable = True
-    elif predicted_language_2 != predicted_language_ft:
-        predicted_language = "un"
-        is_reliable = False
-    else:
-        predicted_language = predicted_language_2
-        is_reliable = True
+    top_language = cld2_pred[2][0]
+    predicted_language = str(top_language[1])
+    if predicted_language == "un":
+        return _unknown_language_detection()
 
-    # is_english can now be obtained
-    is_english = predicted_language == "en"
-
-    return is_reliable, is_english, predicted_language
+    is_reliable = bool(cld2_pred[0])
+    language_reliability = float(top_language[2]) / 100.0 if is_reliable else 0.0
+    return LanguageDetection(
+        is_reliable=is_reliable,
+        is_english=predicted_language == "en",
+        predicted_language=predicted_language,
+        language_reliability=language_reliability,
+    )
 
 
 def normalize_text(text: str | None, special_case_apostrophes: bool = False) -> str:
@@ -433,6 +359,28 @@ def normalize_text(text: str | None, special_case_apostrophes: bool = False) -> 
     return norm_text
 
 
+def normalize_title(text: str | None) -> str:
+    """Normalize publication titles while preserving identifying digits.
+
+    Person-name normalization intentionally removes digits. Titles have a
+    different contract: section numbers, years, and formula subscripts such as
+    ``Co3O4`` are evidence and must survive normalization.
+
+    Args:
+        text: Raw publication title, or ``None``.
+
+    Returns:
+        Lowercase transliterated title containing only ASCII letters, digits,
+        and single spaces.
+    """
+
+    if not text:
+        return ""
+    normalized = unidecode(text).lower()
+    normalized = RE_NORMALIZE_TITLE.sub(" ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 def normalize_orcid(value: Any) -> str | None:
     """Return a canonical hyphenated ORCID, or None when no valid ORCID is present."""
 
@@ -458,35 +406,161 @@ def has_name_dash(value: str | None) -> bool:
     return any(character in NAME_DASH_CHARS for character in value or "")
 
 
-def split_first_middle_hyphen_aware(first_raw: str | None, middle_raw: str | None) -> tuple[str, str]:
-    """Normalize and split first/middle with hyphen awareness for canonical fields.
+# ------------------------ canonical_v2 name canonicalization ------------------------
+# These functions are the live canonical normalization surface used by ingestion,
+# feature extraction, subblocking, and query adaptation. The durable contract is in
+# docs/data.md; decisions D1-D8 are recorded in the fixture's decisions registry.
 
-    Rules:
-    - Apostrophes in first are removed (no spaces introduced).
-    - If a hyphen exists in the raw first name, keep all first tokens together (no spill into middle).
-    - Otherwise, first token stays in first; remaining first tokens spill into middle.
-    - A single leading prefix from NAME_PREFIXES is dropped if present.
+# D3 apostrophe-like marks: ASCII apostrophe, backtick, spacing acute, curly quotes,
+# modifier letters (okina/apostrophe), primes, saltillo, U+FE4D (classified with
+# apostrophe-like marks by issue #39 despite its Unicode name), fullwidth apostrophe.
+NAME_APOSTROPHE_LIKE_CHARS = frozenset("'`\u00b4\u2018\u2019\u02bb\u02bc\u2032\u2035\ua78c\ufe4d\uff07")
 
-    Returns (first_without_apostrophe, middle_without_apostrophe), both already normalized.
+# Invisible formatting controls deleted before tokenization: soft hyphen (not a dash
+# separator) and zero-width joiner.
+_NAME_INVISIBLE_FORMAT_CHARS = "\u00ad\u200d"
+
+_CANONICAL_NAME_TRANSLATION = str.maketrans(
+    {
+        **{character: None for character in _NAME_INVISIBLE_FORMAT_CHARS},
+        **{character: "'" for character in NAME_APOSTROPHE_LIKE_CHARS},
+        **{character: "-" for character in DASH_CHARS},
+    }
+)
+
+_RE_CANONICAL_NON_LETTER = re.compile(r"[^a-z]+")
+
+
+class CanonicalNameParts(NamedTuple):
+    """Canonical (canonical_v2) first/middle/last name fields."""
+
+    first: str
+    middle: str
+    last: str
+
+
+def _canonical_name_pretranslate(raw: str | None) -> str:
+    """Delete invisible format controls, unify apostrophe-like marks to ASCII
+    apostrophe, and unify dash-like characters to ASCII hyphen — all on the raw
+    code points, before transliteration."""
+
+    return (raw or "").translate(_CANONICAL_NAME_TRANSLATION)
+
+
+def _canonical_name_tokens(pretranslated: str) -> list[str]:
+    """Transliterate, lowercase, delete apostrophes/backticks, and split on
+    everything that is not a letter (dashes included: binding is decided by the
+    caller before this runs)."""
+
+    ascii_text = unidecode(pretranslated).lower().replace("'", "").replace("`", "")
+    return _RE_CANONICAL_NON_LETTER.sub(" ", ascii_text).split()
+
+
+def canonicalize_name_text(raw: str | None) -> str:
+    """Canonicalize a whole name string to spaced canonical_v2 tokens.
+
+    Applies the canonical_v2 character pipeline (invisible-format deletion,
+    apostrophe-like deletion, uniform dash separators, transliteration) without
+    the first/middle split or title-prefix drop. This is the normalization used
+    for canonical middle and last fields, and for artifact generators that
+    operate on complete name strings (name tuples, ORCID prefix counts).
     """
-    first_raw = first_raw or ""
-    middle_raw = middle_raw or ""
 
-    has_dash_in_first = has_name_dash(first_raw)
-    first_noapos = normalize_text(first_raw, special_case_apostrophes=True)
-    middle_norm = normalize_text(middle_raw)
+    return " ".join(_canonical_name_tokens(_canonical_name_pretranslate(raw)))
 
-    f_parts = first_noapos.split()
-    m_parts = middle_norm.split()
-    if f_parts and f_parts[0] in NAME_PREFIXES:
-        f_parts = f_parts[1:]
 
-    if not f_parts:
-        return "", " ".join(m_parts)
-    if has_dash_in_first:
-        return " ".join(f_parts), " ".join(m_parts)
-    # Legacy spill behavior
-    return f_parts[0], " ".join(f_parts[1:] + m_parts)
+def canonicalize_name_parts(
+    first_raw: str | None,
+    middle_raw: str | None,
+    last_raw: str | None,
+) -> CanonicalNameParts:
+    """Canonicalize raw first/middle/last per the canonical_v2 pipeline.
+
+    Pipeline (docs/data.md):
+    - None is missing/empty; NBSP is whitespace; soft hyphen and zero-width
+      joiner are deleted, not separators.
+    - Apostrophe-like marks are deleted globally (D2/D3); dash-like characters
+      are uniform separators (D4).
+    - At most one leading title-prefix token is dropped from first; ``md`` is
+      retained as a given-name abbreviation (D7).
+    - First/middle split (D1): a leading dash-bound group stays together in
+      first as spaced tokens; otherwise the first token stays and later tokens
+      spill into middle ahead of existing middle tokens. Space tokens after a
+      dash-bound group still spill.
+    - Last keeps normalized spaces with particles preserved (D5); suffix
+      stripping is outside canonical_v2.
+    """
+
+    first_clean = _canonical_name_pretranslate(first_raw)
+    middle_tokens = _canonical_name_tokens(_canonical_name_pretranslate(middle_raw))
+    last_tokens = _canonical_name_tokens(_canonical_name_pretranslate(last_raw))
+
+    # Whitespace chunks of the raw first field, each normalized to tokens and
+    # tagged with whether a dash bound it together.
+    flattened: list[tuple[str, int]] = []
+    dash_bound: list[bool] = []
+    for group_index, chunk in enumerate(first_clean.split()):
+        dash_bound.append("-" in chunk)
+        for token in _canonical_name_tokens(chunk.replace("-", " ")):
+            flattened.append((token, group_index))
+
+    if flattened and flattened[0][0] in NAME_PREFIXES:
+        flattened = flattened[1:]
+
+    if not flattened:
+        first_field_tokens: list[str] = []
+        spilled_tokens: list[str] = []
+    else:
+        lead_group = flattened[0][1]
+        if dash_bound[lead_group]:
+            first_field_tokens = [token for token, group in flattened if group == lead_group]
+            spilled_tokens = [token for token, group in flattened if group != lead_group]
+        else:
+            first_field_tokens = [flattened[0][0]]
+            spilled_tokens = [token for token, _ in flattened[1:]]
+
+    return CanonicalNameParts(
+        first=" ".join(first_field_tokens),
+        middle=" ".join(spilled_tokens + middle_tokens),
+        last=" ".join(last_tokens),
+    )
+
+
+def canonical_name_count_keys(parts: CanonicalNameParts) -> dict[str, str | None]:
+    """Build canonical_v2 count keys from canonical fields after gating (D6/D8).
+
+    A None key means no lookup (NaN feature), never a sentinel count. ``first``
+    and ``first_last`` require an informative first (string length > 1);
+    ``last_first_initial`` requires first and last present and stays
+    initial-char semantics.
+    """
+
+    first_informative = len(parts.first) > 1
+    first_key = parts.first if first_informative else None
+    last_key = parts.last if parts.last else None
+    return {
+        "first": first_key,
+        "last": last_key,
+        "first_last": f"{parts.first} {parts.last}" if (first_informative and last_key) else None,
+        "last_first_initial": f"{parts.last} {parts.first[0]}" if (parts.first and last_key) else None,
+    }
+
+
+def canonical_lasts_equivalent(last_a: str, last_b: str) -> bool:
+    """Compare-time equivalence for canonical last names (space-insensitive).
+
+    Canonical surnames are STORED spaced with particles preserved (D5:
+    ``ou yang``, ``van der berg``); at compare time, joined and spaced
+    spellings of the same surname are treated as equivalent (``ou yang`` ==
+    ``ouyang``). This is deliberate compare-time policy, not an artifact shim:
+    upstream blocking groups surname spelling variants under one block key, and
+    the within-block last-name constraint must not veto pairs that blocking
+    deliberately grouped (ruled 2026-07-09 with the canonical_v2 cutover).
+    """
+
+    if last_a == last_b:
+        return True
+    return last_a.replace(" ", "") == last_b.replace(" ", "")
 
 
 def name_text_features(
@@ -547,8 +621,38 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
         return inner(a, b) / (a_norm * b_norm)
 
 
+def email_prefix_suffix(email: str) -> tuple[str | None, str | None]:
+    """Return normalized email components, or missing values when malformed.
+
+    A valid feature input has exactly one ``@``, nonempty local and domain
+    components after edge-dot normalization, and no whitespace. Malformed
+    values return ``(None, None)`` so neither exact-match feature can become
+    positive evidence. This mirrors Rust ``email_parts``.
+    """
+    prefix_raw, separator, suffix_raw = email.partition("@")
+    whitespace_parts = email.split()
+    if (
+        not separator
+        or not prefix_raw
+        or not suffix_raw
+        or "@" in suffix_raw
+        or len(whitespace_parts) != 1
+        or whitespace_parts[0] != email
+    ):
+        return None, None
+    prefix = prefix_raw.strip(".").lower()
+    suffix = suffix_raw.strip(".").lower()
+    if not prefix or not suffix:
+        return None, None
+    return prefix, suffix
+
+
 def get_text_ngrams(
-    text: str | None, use_unigrams: bool = False, use_bigrams: bool = True, stopwords: set[str] | None = STOPWORDS
+    text: str | None,
+    use_unigrams: bool = False,
+    use_bigrams: bool = True,
+    stopwords: set[str] | None = STOPWORDS,
+    drop_short_tokens: bool = True,
 ) -> Counter:
     """
     Get character bigrams, trigrams, quadgrams, and optionally unigrams for a piece of text.
@@ -562,6 +666,8 @@ def get_text_ngrams(
         whether or not to include unigrams
     stopwords: Set
         The set of stopwords to filter out before computing character ngrams
+    drop_short_tokens: bool
+        Whether to drop word tokens of length <= 2 before computing character ngrams.
 
     Returns
     -------
@@ -570,8 +676,13 @@ def get_text_ngrams(
     if text is None or len(text) == 0:
         return Counter()
 
+    # The short-token filter is independent of stopword removal. Reference-author
+    # ngrams use it with stopwords=None, while coauthor ngrams explicitly keep
+    # short names like "li" and "wu".
+    words = [word for word in text.split(" ") if not drop_short_tokens or len(word) > 2]
     if stopwords is not None:
-        text = " ".join([word for word in text.split(" ") if word not in stopwords and len(word) > 2])
+        words = [word for word in words if word not in stopwords]
+    text = " ".join(words)
 
     unigrams = []
     if use_unigrams:
@@ -601,7 +712,12 @@ def get_text_ngrams(
     return ngrams
 
 
-def get_text_ngrams_words(text: str | None, stopwords: set[str] = STOPWORDS) -> Counter:
+def get_text_ngrams_words(
+    text: str | None,
+    stopwords: set[str] = STOPWORDS,
+    *,
+    drop_short_tokens: bool = True,
+) -> Counter:
     """
     Get word unigrams, bigrams, and trigrams for a piece of text.
 
@@ -611,6 +727,9 @@ def get_text_ngrams_words(text: str | None, stopwords: set[str] = STOPWORDS) -> 
         the text to get ngrams for
     stopwords: Set
         The set of stopwords to filter out before computing word ngrams
+    drop_short_tokens: bool
+        Whether to drop one-character tokens. Titles disable this so section
+        and formula digits remain evidence.
 
     Returns
     -------
@@ -618,7 +737,7 @@ def get_text_ngrams_words(text: str | None, stopwords: set[str] = STOPWORDS) -> 
     """
     if text is None or len(text) == 0:
         return Counter()
-    text_split = [word for word in text.split() if word not in stopwords and len(word) > 1]
+    text_split = [word for word in text.split() if word not in stopwords and (not drop_short_tokens or len(word) > 1)]
     unigrams = Counter(text_split)
     bigrams = map(
         lambda x: " ".join(x),
@@ -644,35 +763,39 @@ def same_prefix_tokens(a: str, b: str) -> bool:
            one token is a prefix of the other.
     """
     ta, tb = a.split(), b.split()
+    if not ta or not tb:
+        return False
     for x, y in zip(ta, tb, strict=False):
         if not (x.startswith(y) or y.startswith(x)):
             return False
     return True
 
 
-def first_names_name_compatible(first_a: str, first_b: str, name_tuples: Set[tuple[str, str]]) -> bool:
-    """Return current legacy-compatible first-name compatibility.
+def canonical_name_tuple_pair(first_a: str, first_b: str) -> tuple[str, str]:
+    """Return the order-independent storage key for one first-name alias."""
 
-    This keeps the normalization migration shim in one place: legacy
-    `name_tuples` were curated over single-token names, while Sinonym-aware
-    first names can be multi-token. Remove the joined/first-token probes only
-    after canonical name-tuple artifacts are regenerated.
+    return (first_a, first_b) if first_a <= first_b else (first_b, first_a)
+
+
+def first_names_name_compatible(first_a: str, first_b: str, name_tuples: Set[tuple[str, str]]) -> bool:
+    """Return canonical first-name compatibility.
+
+    Two canonical first fields are compatible when either is missing (unknown is
+    not an incompatibility signal), when they are prefix-compatible per
+    ``same_prefix_tokens``, or when the pair is a curated alias in the canonical
+    name-tuple artifact. The legacy joined/first-token probing forms were retired
+    with the canonical_v2 cutover.
     """
+
+    if not first_a.split() or not first_b.split():
+        # Missing first-name evidence is unknown, not an incompatibility signal.
+        return True
 
     if same_prefix_tokens(first_a, first_b):
         return True
 
-    first_a_parts = first_a.split()
-    first_b_parts = first_b.split()
-    first_a_joined = "".join(first_a_parts)
-    first_b_joined = "".join(first_b_parts)
-    first_a_token = first_a_parts[0] if first_a_parts else first_a
-    first_b_token = first_b_parts[0] if first_b_parts else first_b
-    return (
-        (first_a, first_b) in name_tuples
-        or (first_a_joined, first_b_joined) in name_tuples
-        or (first_a_token, first_b_token) in name_tuples
-    )
+    pair = canonical_name_tuple_pair(first_a, first_b)
+    return pair in name_tuples or (pair[1], pair[0]) in name_tuples
 
 
 def equal(
@@ -696,16 +819,20 @@ def equal(
     -------
     int: 0 (if unequal) or 1 (if equal)
     """
-    if name_1 is None or name_2 is None or len(name_1) == 0 or len(name_2) == 0:
+    if name_1 is None or name_2 is None:
         return default_val
 
-    if name_1 == "-" or name_2 == "-":
+    # Strip/lower first, then test emptiness, so whitespace-only inputs are
+    # treated as empty (return default) rather than comparing equal as "".
+    norm_1 = name_1.lower().strip()
+    norm_2 = name_2.lower().strip()
+    if len(norm_1) == 0 or len(norm_2) == 0:
         return default_val
 
-    if name_1.lower().strip() == name_2.lower().strip():
-        return 1
-    else:
-        return 0
+    if norm_1 == "-" or norm_2 == "-":
+        return default_val
+
+    return 1 if norm_1 == norm_2 else 0
 
 
 def equal_middle(
@@ -733,14 +860,20 @@ def equal_middle(
     if name_1 is None or name_2 is None or len(name_1) == 0 or len(name_2) == 0:
         return default_val
 
+    # When either side is a single-character initial, compare the sets of
+    # token initials so a joined multi-token middle ("james lee") matches the
+    # other side's initial for ANY of its tokens, not just the first one.
     if len(name_1) == 1 or len(name_2) == 1:
-        if name_1[0] == name_2[0]:
-            return 1
+        for left_token in name_1.split():
+            if not left_token:
+                continue
+            left_initial = left_token[0]
+            for right_token in name_2.split():
+                if right_token and right_token[0] == left_initial:
+                    return 1
+        return 0
 
-    elif name_1 == name_2:
-        return 1
-
-    return 0
+    return 1 if name_1 == name_2 else 0
 
 
 def equal_initial(
@@ -912,11 +1045,8 @@ def name_counts(
             counts_2.last_first_initial,
         ]
     )
-    # using nanmin so as to catch the min of counts, but regular max to propagate the nan
-    with warnings.catch_warnings():
-        # np.max of 2 nans causes annoying warnings
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        counts_array = np.array(counts, dtype=float)
-        counts_min_max = list(np.nanmin(counts_array, axis=0)) + list(np.max(counts_array[:, :2], axis=0))
+    # fmin ignores one missing count but preserves NaN when both counts are missing.
+    counts_array = np.array(counts, dtype=float)
+    counts_min_max = list(np.fmin.reduce(counts_array, axis=0)) + list(np.max(counts_array[:, :2], axis=0))
 
     return counts_min_max

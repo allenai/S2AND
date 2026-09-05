@@ -6,14 +6,16 @@ import json
 import os
 import pickle
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from s2and.consts import NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.incremental_linking_training.name_counts import LoadNameCountsMode, resolve_load_name_counts
 from s2and.model import _ensure_lightgbm_fitted
-from s2and.production_model import load_production_model
-from s2and.text import fasttext_loading_enabled, set_fasttext_loading_enabled
+from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION
+from s2and.production_model import _load_pairwise_staging_model
 from s2and.thread_config import resolve_n_jobs
 
 
@@ -152,12 +154,9 @@ def load_giant_block_dataset(
     filtered_cluster_seeds = _filter_cluster_seeds(cluster_seeds, set(selected_signature_ids))
     filtered_altered = _filter_altered_signatures(altered_cluster_signatures, set(selected_signature_ids))
 
-    previous_fasttext_loading_enabled = fasttext_loading_enabled()
-    env_keys = ("S2AND_SKIP_FASTTEXT", "S2AND_BACKEND", "OMP_NUM_THREADS", "RAYON_NUM_THREADS")
+    env_keys = ("S2AND_BACKEND", "OMP_NUM_THREADS", "RAYON_NUM_THREADS")
     previous_env = {key: os.environ.get(key) for key in env_keys}
-    set_fasttext_loading_enabled(False)
     try:
-        os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
         os.environ["S2AND_BACKEND"] = "rust"
         thread_count = str(resolve_n_jobs(n_jobs))
         os.environ["OMP_NUM_THREADS"] = thread_count
@@ -172,7 +171,6 @@ def load_giant_block_dataset(
             clusters=None,
             cluster_seeds=filtered_cluster_seeds,
             altered_cluster_signatures=filtered_altered,
-            block_type="s2",
             train_pairs=None,
             val_pairs=None,
             test_pairs=None,
@@ -180,13 +178,15 @@ def load_giant_block_dataset(
             val_pairs_size=1000,
             test_pairs_size=1000,
             n_jobs=int(n_jobs),
-            load_name_counts=resolve_load_name_counts(load_name_counts=load_name_counts, clusterer=clusterer),
+            name_counts_index=(
+                NAME_COUNTS_INDEX_PATH
+                if resolve_load_name_counts(load_name_counts=load_name_counts, clusterer=clusterer)
+                else None
+            ),
             preprocess=True,
             random_seed=int(meta.get("random_seed", 0) if isinstance(meta, dict) else 0),
-            name_tuples="filtered",
+            name_tuples=None,
             use_orcid_id=False,
-            use_sinonym_overwrite=False,
-            compute_reference_features=False,
         )
     finally:
         for key, value in previous_env.items():
@@ -194,7 +194,6 @@ def load_giant_block_dataset(
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        set_fasttext_loading_enabled(previous_fasttext_loading_enabled)
 
     load_info = {
         "target_block": resolved_block_key,
@@ -205,13 +204,21 @@ def load_giant_block_dataset(
     return dataset, load_info
 
 
-def load_clusterer(model_path: Path, *, n_jobs: int) -> Any:
+def load_clusterer(
+    model_path: Path,
+    *,
+    n_jobs: int,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
+) -> Any:
     """Load the production clusterer and prepare it for inference."""
 
-    clusterer = load_production_model(model_path, require_incremental_linker=False)
+    clusterer = _load_pairwise_staging_model(
+        model_path,
+        expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
+        expected_artifact_hashes=expected_artifact_hashes,
+    )
     _ensure_lightgbm_fitted(clusterer.classifier)
     _ensure_lightgbm_fitted(clusterer.nameless_classifier)
-    clusterer.use_cache = False
     clusterer.n_jobs = int(n_jobs)
     return clusterer
 

@@ -7,15 +7,21 @@ Rust extension module for `s2and`.
 Use the PyPI install path only for versions that have actually been published:
 
 ```bash
-uv pip install "s2and[rust]"
+uv pip install s2and
 ```
 
-As of 2026-05-23, PyPI latest for both `s2and` and `s2and-rust` is `0.49.0`.
-This checkout is `0.51.1`, so use a local build when working from this tree
-until the matching packages are published.
+`s2and-rust` is now a required dependency of `s2and`; the historical
+`s2and[rust]` extra no longer exists. The unreleased `1.0.0` worktree
+currently pins `s2and-rust==1.0.0`; use a local same-checkout build until the
+coordinated Python/Rust release is published. At runtime the two installed
+package versions must match exactly.
+
+When working from a checkout, use a local build so `s2and` and `s2and-rust`
+come from the same tree.
 
 ## Local dev build
 
 ```bash
-uvx --from maturin maturin develop -m s2and_rust/Cargo.toml
+uv sync --active --extra dev
+uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 ```

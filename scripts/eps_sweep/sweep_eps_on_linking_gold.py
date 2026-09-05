@@ -34,14 +34,13 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.ipc as ipc
 
+from s2and._sha256 import sha256_file as _hash_file
+from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training.classic import _drop_unlabeled_singleton_orcid_rows
 from scripts.eps_sweep.common import (
-    DEFAULT_ARROW_ROOT,
     DEFAULT_GOLD_ROOT,
-    DEFAULT_LINKER_BUNDLE_ROOT,
-    DEFAULT_MODEL_PATH,
     DEFAULT_OUTPUT_ROOT,
-    load_arrow_paths,
+    arrow_dataset_dir,
     sha1_text,
     write_json,
 )
@@ -62,7 +61,6 @@ class ArrowPlanningState:
     signatures: dict[str, Any]
     block_dict: dict[str, list[str]]
     random_seed: int = 42
-    block_type: str = "s2"
 
     def get_blocks(self) -> dict[str, list[str]]:
         """Return a copy of the raw S2 block mapping."""
@@ -86,12 +84,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description="Cache Arrow/Rust pairwise distances, sweep EPS, and score linker-derived pair gold."
     )
     parser.add_argument("--dataset", required=True)
-    parser.add_argument("--bundle-root", type=Path, default=DEFAULT_LINKER_BUNDLE_ROOT)
-    parser.add_argument("--arrow-root", type=Path, default=DEFAULT_ARROW_ROOT)
-    parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--arrow-root", type=Path, required=True)
+    parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--gold-path", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--backend", choices=["auto", "rust"], default="rust")
     parser.add_argument("--n-jobs", type=int, default=8)
     parser.add_argument("--batching-threshold", type=int, default=5000)
     parser.add_argument("--pair-chunk-size", type=int, default=1_000_000)
@@ -100,17 +96,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Use ORCID values during subblock merging. Defaults off for EPS selection.",
     )
-    orcid_constraint_group = parser.add_mutually_exclusive_group()
-    orcid_constraint_group.add_argument(
-        "--suppress-orcid-constraints",
-        action="store_true",
-        default=True,
-        help="Disable same-ORCID hard-link distance constraints. This is the default for EPS selection.",
-    )
-    orcid_constraint_group.add_argument(
+    parser.add_argument(
         "--use-orcid-constraints",
         dest="suppress_orcid_constraints",
         action="store_false",
+        default=True,
         help="Enable same-ORCID hard-link distance constraints for old-artifact parity checks.",
     )
     parser.add_argument("--eps-start", type=float, default=0.40)
@@ -262,14 +252,14 @@ def _optional_str(value: Any) -> str | None:
 
 def _read_arrow_signatures_for_planning(
     args: argparse.Namespace,
-    arrow_paths: Mapping[str, str],
+    arrow_dataset: ArrowDataset,
     target_signature_ids: set[str],
 ) -> ArrowPlanningState:
     """Read Arrow signature metadata needed for target-bearing base blocks."""
 
-    signatures_path = Path(arrow_paths["signatures"])
-    with signatures_path.open("rb") as infile:
-        table = ipc.open_file(infile).read_all()
+    with arrow_dataset.use() as lease, lease.open_file("signatures") as infile:
+        with pa.PythonFile(infile, mode="r") as source:
+            table = ipc.open_file(source).read_all()
     required = {
         "signature_id",
         "paper_id",
@@ -277,7 +267,6 @@ def _read_arrow_signatures_for_planning(
         "author_middle",
         "author_last",
         "author_suffix",
-        "author_orcid",
         "author_position",
         "author_block",
     }
@@ -285,7 +274,8 @@ def _read_arrow_signatures_for_planning(
     if missing:
         raise ValueError(f"Arrow signatures table is missing planning columns: {missing}")
 
-    table = table.select(sorted(required))
+    selected_columns = required.union({"author_orcid"}.intersection(table.column_names))
+    table = table.select(sorted(selected_columns))
     target_values = pa.array(sorted(target_signature_ids), type=table["signature_id"].type)
     pc_any = cast(Any, pc)
     target_table = table.filter(pc_any.is_in(table["signature_id"], value_set=target_values))
@@ -316,8 +306,7 @@ def _read_arrow_signatures_for_planning(
             author_info_last_normalized=None,
             author_info_suffix=_optional_str(data["author_suffix"][index]),
             author_info_suffix_normalized=None,
-            author_info_first_normalized=None,
-            author_info_orcid=_optional_str(data["author_orcid"][index]),
+            author_info_orcid=_optional_str(data.get("author_orcid", [None] * row_count)[index]),
             author_info_position=data["author_position"][index],
         )
 
@@ -360,25 +349,18 @@ def _select_subblock_rows(
 
 def _make_arrow_specter_cluster_fn(
     clusterer: Any,
-    arrow_paths: Mapping[str, str],
-    signature_ids: Sequence[str],
+    arrow_dataset: ArrowDataset,
 ) -> Any:
     """Return the Arrow-backed graph fallback used by S2AND subblocking."""
 
-    from s2and.subblocking import GraphSubblockingConfig, make_arrow_graph_subblocking_cluster_fn
+    from s2and.subblocking import (
+        _resolve_graph_subblocking_config,
+        make_arrow_graph_subblocking_cluster_fn,
+    )
 
-    raw_config = getattr(clusterer, "subblocking_graph_config", None)
-    if raw_config is None and hasattr(clusterer, "_subblocking_graph_config"):
-        config = clusterer._subblocking_graph_config()  # noqa: SLF001
-    elif isinstance(raw_config, GraphSubblockingConfig):
-        config = raw_config
-    elif isinstance(raw_config, Mapping):
-        config = GraphSubblockingConfig(**dict(raw_config))
-    else:
-        config = GraphSubblockingConfig()
+    config = _resolve_graph_subblocking_config(getattr(clusterer, "subblocking_graph_config", None))
     return make_arrow_graph_subblocking_cluster_fn(
-        arrow_paths,
-        signature_ids,
+        arrow_dataset,
         config=config,
         random_seed=int(getattr(clusterer, "random_state", 0) or 0),
     )
@@ -391,7 +373,7 @@ def _build_arrow_subblocked_block_dict(
     planning_state: ArrowPlanningState,
     block_dict: Mapping[str, list[str]],
     target_signature_ids: set[str],
-    arrow_paths: Mapping[str, str],
+    arrow_dataset: ArrowDataset,
 ) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
     """Subblock only target-bearing base blocks using Arrow-backed fallback."""
 
@@ -409,7 +391,7 @@ def _build_arrow_subblocked_block_dict(
             continue
 
         started = time.perf_counter()
-        specter_cluster_fn = _make_arrow_specter_cluster_fn(clusterer, arrow_paths, signature_ids)
+        specter_cluster_fn = _make_arrow_specter_cluster_fn(clusterer, arrow_dataset)
         subblocks, telemetry = make_subblocks_with_telemetry(
             signature_ids,
             planning_state,
@@ -446,7 +428,7 @@ def _plan_subblocks(
     clusterer: Any,
     planning_state: ArrowPlanningState,
     gold: pd.DataFrame,
-    arrow_paths: Mapping[str, str],
+    arrow_dataset: ArrowDataset,
 ) -> tuple[dict[str, list[str]], dict[str, Any]]:
     """Plan target subblocks from Arrow metadata and Arrow-backed subblocking."""
 
@@ -458,7 +440,7 @@ def _plan_subblocks(
         planning_state=planning_state,
         block_dict=block_dict,
         target_signature_ids=target_signature_ids,
-        arrow_paths=arrow_paths,
+        arrow_dataset=arrow_dataset,
     )
     selected: dict[str, list[str]] = {}
     subblock_rows: list[dict[str, Any]] = []
@@ -534,7 +516,7 @@ def _cache_metadata(
     args: argparse.Namespace,
     block_key: str,
     signature_ids: list[str],
-    arrow_paths_digest: str,
+    arrow_generation_id: str,
 ) -> dict[str, Any]:
     """Return metadata that must match for a cached distance vector."""
 
@@ -543,7 +525,7 @@ def _cache_metadata(
         "dataset": args.dataset,
         **model_fingerprint,
         "arrow_root": str(args.arrow_root.resolve()),
-        "arrow_paths_digest": arrow_paths_digest,
+        "arrow_generation_id": arrow_generation_id,
         "block_key": block_key,
         "signature_count": len(signature_ids),
         "signature_ids_digest": _signature_ids_digest(signature_ids),
@@ -554,16 +536,6 @@ def _cache_metadata(
         "suppress_orcid_constraints": bool(args.suppress_orcid_constraints),
         "distance_source": "arrow-rust",
     }
-
-
-def _hash_file(path: Path) -> str:
-    """Return a SHA256 digest for one file."""
-
-    digest = hashlib.sha256()
-    with path.open("rb") as infile:
-        for chunk in iter(lambda: infile.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _path_stat_cache_key(path: Path) -> tuple[Any, ...]:
@@ -605,34 +577,6 @@ def _hash_directory(path: Path) -> tuple[int, int, str]:
             for chunk in iter(lambda: infile.read(1024 * 1024), b""):
                 digest.update(chunk)
     return total_size, max_mtime_ns, digest.hexdigest()
-
-
-def _arrow_paths_content_digest(arrow_paths: Mapping[str, str]) -> str:
-    """Digest Arrow path identity and file metadata for cache invalidation."""
-
-    digest = hashlib.sha256()
-    digest.update(b"s2and-eps-arrow-paths-v2\0")
-    for key, raw_path in sorted((str(key), str(value)) for key, value in arrow_paths.items()):
-        path = Path(raw_path)
-        resolved = path.resolve() if path.exists() else path
-        key_bytes = key.encode("utf-8")
-        path_bytes = str(resolved).encode("utf-8")
-        digest.update(len(key_bytes).to_bytes(8, "little", signed=False))
-        digest.update(key_bytes)
-        digest.update(len(path_bytes).to_bytes(8, "little", signed=False))
-        digest.update(path_bytes)
-        if path.is_file():
-            stat = path.stat()
-            digest.update(b"file\0")
-            digest.update(int(stat.st_size).to_bytes(8, "little", signed=False))
-            digest.update(int(stat.st_mtime_ns).to_bytes(8, "little", signed=False))
-        elif path.is_dir():
-            stat_key = _path_stat_cache_key(path)
-            digest.update(b"dir\0")
-            digest.update(repr(stat_key).encode("utf-8"))
-        else:
-            digest.update(b"missing\0")
-    return digest.hexdigest()
 
 
 def _model_fingerprint(args: argparse.Namespace) -> dict[str, Any]:
@@ -684,7 +628,7 @@ def _load_cached_distance(path: Path, expected_metadata: Mapping[str, Any]) -> A
         "model_mtime_ns",
         "model_sha256",
         "arrow_root",
-        "arrow_paths_digest",
+        "arrow_generation_id",
         "distance_source",
         "block_key",
         "signature_count",
@@ -697,16 +641,19 @@ def _load_cached_distance(path: Path, expected_metadata: Mapping[str, Any]) -> A
     return payload["dist"]
 
 
-def _build_arrow_featurizer(clusterer: Any, arrow_paths: Mapping[str, str], signature_ids: Sequence[str]) -> Any:
-    """Build a Rust featurizer from Arrow paths for the requested signatures."""
+def _build_arrow_featurizer(
+    clusterer: Any,
+    arrow_dataset: ArrowDataset,
+    signature_ids: Sequence[str],
+) -> Any:
+    """Build a Rust featurizer from the retained Arrow dataset."""
 
-    from s2and.feature_port import build_rust_featurizer_from_arrow_paths
+    from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
 
-    return build_rust_featurizer_from_arrow_paths(
-        arrow_paths,
+    return build_rust_featurizer_from_arrow_dataset(
+        arrow_dataset,
         signature_ids=signature_ids,
-        name_tuples="filtered",
-        load_name_counts="name_counts_index" in arrow_paths,
+        name_tuples=None,
         preprocess=True,
         num_threads=int(clusterer.n_jobs),
     )
@@ -717,20 +664,20 @@ def _ensure_distance_caches(
     clusterer: Any,
     selected_subblocks: dict[str, list[str]],
     cache_dir: Path,
-    arrow_paths: Mapping[str, str],
+    arrow_dataset: ArrowDataset,
 ) -> list[dict[str, Any]]:
     """Ensure Arrow/Rust distance caches exist for selected subblocks."""
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     original_batch_size = clusterer.batch_size
     clusterer.batch_size = int(args.pair_chunk_size)
-    arrow_paths_digest = _arrow_paths_content_digest(arrow_paths)
+    arrow_generation_id = arrow_dataset.generation_id
     cache_rows: list[dict[str, Any]] = []
     rows_by_block: dict[str, dict[str, Any]] = {}
     blocks_to_compute: dict[str, list[str]] = {}
     try:
         for index, (block_key, signature_ids) in enumerate(sorted(selected_subblocks.items())):
-            metadata = _cache_metadata(args, block_key, signature_ids, arrow_paths_digest)
+            metadata = _cache_metadata(args, block_key, signature_ids, arrow_generation_id)
             cache_path = _distance_cache_path(cache_dir, args.dataset, index, block_key)
             row = {
                 **metadata,
@@ -762,7 +709,7 @@ def _ensure_distance_caches(
                 )
             )
             featurizer_started = time.perf_counter()
-            rust_featurizer = _build_arrow_featurizer(clusterer, arrow_paths, featurizer_signature_ids)
+            rust_featurizer = _build_arrow_featurizer(clusterer, arrow_dataset, featurizer_signature_ids)
             featurizer_seconds = time.perf_counter() - featurizer_started
             logging.info(
                 "built Arrow/Rust featurizer signatures=%d blocks=%d seconds=%.3f",
@@ -779,7 +726,7 @@ def _ensure_distance_caches(
                 pair_chunk_size=int(args.pair_chunk_size),
             )
             seconds = time.perf_counter() - started
-            metadata = _cache_metadata(args, block_key, signature_ids, arrow_paths_digest)
+            metadata = _cache_metadata(args, block_key, signature_ids, arrow_generation_id)
             cache_path = Path(rows_by_block[block_key]["cache_path"])
             with cache_path.open("wb") as outfile:
                 pickle.dump({"metadata": metadata, "dist": dists[block_key]}, outfile, protocol=pickle.HIGHEST_PROTOCOL)
@@ -826,11 +773,8 @@ def _linkage_from_cached_distance(
 ) -> Any | None:
     """Build the FastCluster linkage tree once for a cached distance vector."""
 
-    import warnings
-
     import numpy as np
     from fastcluster import linkage
-    from sklearn.exceptions import EfficiencyWarning
 
     from s2and.model_pairwise import FastCluster
 
@@ -858,9 +802,7 @@ def _linkage_from_cached_distance(
         len(signature_ids),
     )
     started = time.perf_counter()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=EfficiencyWarning)
-        linkage_matrix = linkage(dist_array, linkage_method, preserve_input=True)
+    linkage_matrix = linkage(dist_array, linkage_method, preserve_input=True)
     logging.info(
         "Finished linkage build for block %s using %s in %.3fs",
         block_key,
@@ -894,19 +836,19 @@ def _build_linkage_blocks(
     clusterer: Any,
     selected_subblocks: dict[str, list[str]],
     cache_dir: Path,
-    arrow_paths: Mapping[str, str],
+    arrow_dataset: ArrowDataset,
 ) -> tuple[dict[str, CachedLinkageBlock], list[dict[str, Any]]]:
     """Load cached distances once and build reusable linkage trees."""
 
     linkage_blocks: dict[str, CachedLinkageBlock] = {}
     linkage_rows: list[dict[str, Any]] = []
-    arrow_paths_digest = _arrow_paths_content_digest(arrow_paths)
+    arrow_generation_id = arrow_dataset.generation_id
     for index, (block_key, signature_ids) in enumerate(sorted(selected_subblocks.items())):
         started = time.perf_counter()
         signature_ids = [str(signature_id) for signature_id in signature_ids]
         pair_count = len(signature_ids) * (len(signature_ids) - 1) // 2
         linkage_matrix = None
-        metadata = _cache_metadata(args, block_key, signature_ids, arrow_paths_digest)
+        metadata = _cache_metadata(args, block_key, signature_ids, arrow_generation_id)
         if len(signature_ids) > 1:
             cache_path = _distance_cache_path(cache_dir, args.dataset, index, block_key)
             dist = _load_cached_distance(cache_path, metadata)
@@ -1091,15 +1033,11 @@ def _loggable_metric(value: Any) -> float:
 
 
 def _configure_runtime_environment(args: argparse.Namespace) -> None:
-    """Configure backend/thread env vars and disable optional fastText loading."""
+    """Configure backend/thread environment variables."""
 
-    os.environ["S2AND_BACKEND"] = args.backend
+    os.environ["S2AND_BACKEND"] = "rust"
     os.environ["OMP_NUM_THREADS"] = str(args.n_jobs)
     os.environ["RAYON_NUM_THREADS"] = str(args.n_jobs)
-    os.environ["S2AND_SKIP_FASTTEXT"] = "1"
-    from s2and.text import set_fasttext_loading_enabled
-
-    set_fasttext_loading_enabled(False)
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -1121,14 +1059,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     from s2and.production_model import load_production_model
 
-    arrow_paths = load_arrow_paths(args.arrow_root, args.dataset)
+    dataset_root = arrow_dataset_dir(args.arrow_root.resolve(), args.dataset)
     gold = _load_gold(_gold_path(args))
     gold = gold[gold["dataset"].astype(str) == str(args.dataset)].copy()
     if gold.empty:
         raise ValueError(f"No gold rows for dataset={args.dataset}")
 
-    clusterer = load_production_model(args.model_path, require_incremental_linker=False)
-    clusterer.use_cache = False
+    clusterer = load_production_model(args.model_path)
     clusterer.n_jobs = int(args.n_jobs)
     clusterer.suppress_orcid = bool(args.suppress_orcid_constraints)
     model_eps = None
@@ -1136,34 +1073,41 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if isinstance(best_params, Mapping) and "eps" in best_params:
         model_eps = float(best_params["eps"])
 
-    target_signature_ids = set(gold["query_signature_id"].astype(str)) | set(gold["member_signature_id"].astype(str))
-    planning_state = _read_arrow_signatures_for_planning(args, arrow_paths, target_signature_ids)
-    selected_subblocks, plan = _plan_subblocks(args, clusterer, planning_state, gold, arrow_paths)
-    plan["model_eps"] = model_eps
-    plan["eps_values"] = _eps_values(args, model_eps)
-    plan["gold_path"] = str(_gold_path(args).resolve())
-    plan["model_path"] = str(args.model_path.resolve())
-    plan["bundle_root"] = str(args.bundle_root.resolve())
-    plan["arrow_root"] = str(args.arrow_root.resolve())
-    plan["arrow_manifest"] = arrow_paths["manifest"]
-    plan["distance_source"] = "arrow-rust"
-    plan["planning_source"] = "Arrow signatures with Arrow graph subblocking"
-    write_json(output_dir / "plan.json", plan)
-    pd.DataFrame(plan["subblocks"]).to_csv(output_dir / "target_subblocks.tsv", sep="\t", index=False)
+    with ArrowDataset.open(
+        dataset_root,
+        require_specter=True,
+        require_name_counts_index=True,
+    ) as arrow_dataset:
+        target_signature_ids = set(gold["query_signature_id"].astype(str)) | set(
+            gold["member_signature_id"].astype(str)
+        )
+        planning_state = _read_arrow_signatures_for_planning(args, arrow_dataset, target_signature_ids)
+        selected_subblocks, plan = _plan_subblocks(args, clusterer, planning_state, gold, arrow_dataset)
+        plan["model_eps"] = model_eps
+        plan["eps_values"] = _eps_values(args, model_eps)
+        plan["gold_path"] = str(_gold_path(args).resolve())
+        plan["model_path"] = str(args.model_path.resolve())
+        plan["arrow_root"] = str(args.arrow_root.resolve())
+        plan["arrow_manifest"] = str(dataset_root / "manifest.json")
+        plan["arrow_generation_id"] = arrow_dataset.generation_id
+        plan["distance_source"] = "arrow-rust"
+        plan["planning_source"] = "Arrow signatures with Arrow graph subblocking"
+        write_json(output_dir / "plan.json", plan)
+        pd.DataFrame(plan["subblocks"]).to_csv(output_dir / "target_subblocks.tsv", sep="\t", index=False)
 
-    if args.dry_run:
-        return {"plan": plan, "outputs": {"plan": str(output_dir / "plan.json")}}
+        if args.dry_run:
+            return {"plan": plan, "outputs": {"plan": str(output_dir / "plan.json")}}
 
-    cache_dir = output_dir / "distance_caches"
-    cache_rows = _ensure_distance_caches(args, clusterer, selected_subblocks, cache_dir, arrow_paths)
-    pd.DataFrame(cache_rows).to_csv(output_dir / "distance_caches.tsv", sep="\t", index=False)
-    linkage_blocks, linkage_rows = _build_linkage_blocks(
-        args=args,
-        clusterer=clusterer,
-        selected_subblocks=selected_subblocks,
-        cache_dir=cache_dir,
-        arrow_paths=arrow_paths,
-    )
+        cache_dir = output_dir / "distance_caches"
+        cache_rows = _ensure_distance_caches(args, clusterer, selected_subblocks, cache_dir, arrow_dataset)
+        pd.DataFrame(cache_rows).to_csv(output_dir / "distance_caches.tsv", sep="\t", index=False)
+        linkage_blocks, linkage_rows = _build_linkage_blocks(
+            args=args,
+            clusterer=clusterer,
+            selected_subblocks=selected_subblocks,
+            cache_dir=cache_dir,
+            arrow_dataset=arrow_dataset,
+        )
     pd.DataFrame(linkage_rows).to_csv(output_dir / "linkage_builds.tsv", sep="\t", index=False)
 
     signature_to_subblock = _signature_to_subblock(selected_subblocks)

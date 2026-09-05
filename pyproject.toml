@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=78.1.1,<82", "wheel"]
+requires = ["setuptools>=83,<84"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,58 +7,62 @@ name = "s2and"
 dynamic = ["version"]
 description = "S2AND"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
-license = { text = "MIT" }
+requires-python = ">=3.11,<3.14"
+license = "MIT"
 authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 
 # --- Runtime dependencies ---
 dependencies = [
   "setuptools>=78.1.1,<82",
-  "awscli>=1.44.38",
-  "fasttext-wheel>=0.9.2",
-  "pillow>=12.2.0",
+  # Matplotlib accepts older Pillow releases, so keep an explicit security floor.
+  "pillow>=12.3,<13",
   "pycld2>=0.41",
-  "scikit-learn==1.7.1",
+  "scikit-learn==1.9.0",
   "text-unidecode==1.3",
-  "requests>=2.33.0,<3",
-  "urllib3>=2.7.0",
-  "hyperopt==0.2.7",
-  "pandas>=1.5,<2.2",
-  "lightgbm==4.6.0",
-  "fastcluster>=1.2.6,<2",
-  "genieclust>=1.1.4,<2",
-  "matplotlib>=3.7,<3.9",
-  "fonttools>=4.60.2",
+  "hyperopt==0.3.0",
+  "pandas>=2.2.2,<3",
+  "lightgbm==4.7.0",
+  "fastcluster>=1.3,<2",
+  # Keep the faster 1.1.6 implementation where its common-platform wheels
+  # exist; use 1.2 on architectures for which 1.1.6 only ships an sdist.
+  "genieclust>=1.1.6,<1.2; platform_system == 'Darwin' or (platform_system == 'Windows' and platform_machine == 'AMD64') or (platform_system == 'Linux' and platform_machine == 'x86_64')",
+  "genieclust>=1.2,<1.3; platform_system != 'Darwin' and (platform_system != 'Windows' or platform_machine != 'AMD64') and (platform_system != 'Linux' or platform_machine != 'x86_64')",
+  # quitefastmst 0.9.1 changed mst_euclid's return shape incompatibly with
+  # genieclust 1.2.0; constrain only the fallback environments that install it.
+  "quitefastmst==0.9.0; platform_system != 'Darwin' and (platform_system != 'Windows' or platform_machine != 'AMD64') and (platform_system != 'Linux' or platform_machine != 'x86_64')",
+  "matplotlib>=3.11.1,<4",
   "seaborn>=0.12,<0.14",
-  "tqdm>=4.64,<5",
+  "tqdm>=4.69,<5",
   "strsimpy>=0.2,<0.3",
-  "jellyfish>=0.9,<2",
-  "numpy>=1.24,<2",
-  "orjson>=3.11.6,<4",
-  "pyasn1>=0.6.3",
-  "shap>=0.45",
-  "sinonym>=0.2.2",
-  "pyarrow>=16,<19",
+  "jellyfish>=1.2.1,<2",
+  "numpy>=2,<2.3",
+  "shap>=0.51,<1",
+  # PyArrow 21+ no longer publishes manylinux2014 wheels; our release target is glibc 2.17.
+  "pyarrow>=20,<21",
+  "s2and-rust==1.0.0",
 ]
 
 [project.optional-dependencies]
+orcid-counts = [
+  "orjson>=3.11.9,<4",
+]
 dev = [
   # Test stack
-  "pytest==8.4.1",
-  "pytest-cov>=4,<6",
+  "pytest==9.1.1",
+  "pytest-cov>=7.1,<8",
+  "pyyaml>=6.0.3,<7",
   # Type checking
-  "ty==0.0.18",
+  "ty==0.0.61",
   # Linters/formatters
-  "ruff==0.6.9",
+  "ruff==0.15.22",
   # Local Rust extension build tooling
-  "maturin>=1.12.4",
-  # CLI helpers used in some repos
-  "click>=8,<9",
-  "ipykernel",
+  "maturin>=1.14.1",
+  # Test the optional ORCID count producer without making orjson a core dependency.
+  "orjson>=3.11.9,<4",
 ]
-rust = [
-  "s2and-rust==0.51.1",
-]
+
+[tool.setuptools]
+include-package-data = false
 
 [tool.setuptools.packages.find]
 include = ["s2and*"]
@@ -66,24 +70,11 @@ exclude = ["s2and_rust*"]
 
 [tool.setuptools.package-data]
 s2and = [
-  "data/path_config.json",
+  "arrow_schema_contract.json",
   "data/first_k_letter_counts_from_orcid.json",
-  "data/s2and_name_tuples.txt",
-  "data/s2and_name_tuples_filtered.txt",
-  "data/s2and_unnormalized_filtered_name_tuples.txt",
-  "data/production_model_v1.0.pickle",
-  "data/production_model_v1.1.pickle",
-  "data/production_model_v1.2.pickle",
-  "data/production_model_v*/manifest.json",
-  "data/production_model_v*/clusterer.json",
-  "data/production_model_v*/pairwise/metadata.json",
-  "data/production_model_v*/pairwise/main.lgb",
-  "data/production_model_v*/pairwise/nameless.lgb",
-  "data/production_model_v*/pairwise/main_prediction_fixture.json",
-  "data/production_model_v*/pairwise/nameless_prediction_fixture.json",
-  "data/production_model_v*/incremental_linker/booster.lgb",
-  "data/production_model_v*/incremental_linker/metadata.json",
-  "data/production_model_v*/reproducibility/*.json",
+  "data/first_k_letter_counts_from_orcid.manifest.json",
+  "data/path_config.json",
+  "data/s2and_name_tuples_canonical.txt",
 ]
 
 [tool.setuptools.dynamic]
@@ -94,10 +85,17 @@ version = { file = "VERSION" }
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
-markers = [
-    "heavy: opt-in stress / integration tests; run with -m heavy",
-    "requires_lfs: tests that require Git LFS artifacts to be materialized",
-]
+addopts = ["--strict-config", "--strict-markers", "-ra"]
+
+[tool.coverage.run]
+# pytest-cov 7 delegates subprocess measurement to coverage.py.
+patch = ["subprocess"]
+branch = true
+
+[tool.coverage.report]
+# The bounded suite measures about 85% combined line/branch coverage on Windows.
+# Leave platform headroom while rejecting substantial coverage loss in CI.
+fail_under = 80
 
 # Ruff config (used for lint + format)
 [tool.ruff]
@@ -110,38 +108,3 @@ ignore = []
 
 [tool.uv.sources]
 s2and-rust = { path = "s2and_rust" }
-
-# ------------------------
-# If you must replicate the *exact* legacy pins you sent, use this block instead
-# of the loosened dependencies above (comment out the dependencies list above and
-# paste these into it). This is *not* recommended long-term:
-#
-# "scikit-learn==1.2.2",
-# "text-unidecode==1.3",
-# "requests==2.24.0",
-# "hyperopt==0.2.4",
-# "pandas>=1.2",
-# "lightgbm==3.0.0",
-# "fastcluster==1.2.6",
-# "genieclust==1.1.4",
-# "matplotlib==3.7.1",
-# "seaborn==0.12.2",
-# "tqdm==4.49.0",
-# "strsimpy==0.2.0",
-# "jellyfish==0.8.2",
-# "numpy==1.24.3",
-# "orjson",
-# "shap",
-# "sinonym",
-# "click>=7.1.2",
-#
-# And dev tools (old pins):
-# dev = [
-#   "pytest==8.4.1",
-#   "pytest-cov==2.10.1",
-#   "ruff==0.6.9",
-#   "ty==0.0.18",
-#   'importlib-metadata==4.13.0; python_version < "3.10"',
-#   "click>=7.1.2",
-# ]
-# ------------------------

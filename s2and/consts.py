@@ -3,7 +3,6 @@ import logging
 import os
 import threading
 from collections.abc import Iterator, MutableMapping
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -22,8 +21,6 @@ _PACKAGE_DATA_DIR = os.path.join(_PACKAGE_DIR, "data")
 CONFIG_LOCATION_ENV = "S2AND_PATH_CONFIG"
 CONFIG_LOCATION = os.path.join(_PACKAGE_DATA_DIR, "path_config.json")
 _MAIN_DATA_DIR_PLACEHOLDER = "absolute path of wherever you downloaded the data to"
-_NAME_COUNTS_FALLBACK_URL = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and-release/name_counts.pickle"
-_FASTTEXT_FALLBACK_URL = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and-release/lid.176.bin"
 _CONFIG: dict[str, Any] | None = None
 _CONFIG_LOCK = threading.Lock()
 
@@ -66,7 +63,7 @@ def _load_config() -> dict[str, Any]:
     resolved_main_data_dir = os.path.abspath(str(main_data_dir))
     if not os.path.exists(resolved_main_data_dir):
         raise FileNotFoundError(
-            "The `main_data_dir` specified in path_config.json doesn't exist: " f"{resolved_main_data_dir!r}."
+            f"The `main_data_dir` specified in path_config.json doesn't exist: {resolved_main_data_dir!r}."
         )
     config["main_data_dir"] = resolved_main_data_dir
     return config
@@ -102,16 +99,12 @@ class _LazyConfig(MutableMapping[str, Any]):
 
 
 class _LazyDataPath(os.PathLike[str]):
-    def __init__(self, filename: str, *, fallback_url: str | None = None):
+    def __init__(self, filename: str):
         self._filename = filename
-        self._fallback_url = fallback_url
 
     def _resolve(self) -> str:
         main_data_dir = str(CONFIG["main_data_dir"])
-        candidate = os.path.join(main_data_dir, self._filename)
-        if self._fallback_url and not os.path.exists(candidate):
-            return self._fallback_url
-        return candidate
+        return os.path.join(main_data_dir, self._filename)
 
     def __fspath__(self) -> str:
         return self._resolve()
@@ -120,25 +113,17 @@ class _LazyDataPath(os.PathLike[str]):
         return self._resolve()
 
     def __repr__(self) -> str:
-        return f"_LazyDataPath(filename={self._filename!r}, fallback_url={self._fallback_url!r})"
+        return f"_LazyDataPath(filename={self._filename!r})"
 
 
 # Lazily-loaded path config to avoid import-time file I/O.
 CONFIG: MutableMapping[str, Any] = _LazyConfig()
 
 # Lazily-resolved artifact paths
-NAME_COUNTS_PATH = _LazyDataPath("name_counts.pickle", fallback_url=_NAME_COUNTS_FALLBACK_URL)
-FASTTEXT_PATH = _LazyDataPath("lid.176.bin", fallback_url=_FASTTEXT_FALLBACK_URL)
+NAME_COUNTS_INDEX_PATH = _LazyDataPath("name_counts_index")
 
-# feature caching related consts
-CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and"))).resolve()
-"""
-Incrementation history
-1 - initial version
-2 - changed to SPECTERv2, subblocking etc
-3 - name-count semantics contract and inference compatibility gating
-"""
-FEATURIZER_VERSION = 3
+# Independently consumed Arrow and name-count data format.
+PUBLIC_DATA_FORMAT_VERSION = 1
 
 # important constant values
 NUMPY_NAN = np.nan

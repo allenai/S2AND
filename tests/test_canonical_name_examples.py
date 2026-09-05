@@ -1,0 +1,228 @@
+"""Frozen canonical name-normalization example table.
+
+This test module enforces ``tests/fixtures/canonical_name_examples.json`` and
+the ``docs/data.md`` canonical-name contract in four layers. The live pipeline
+and the fixture both use canonical_v2. The pure contract and live pipeline are
+each batched once, with case IDs in assertion messages:
+
+- Canonical contract: the fixture's ``canonical`` values are asserted against
+  ``s2and.text.canonicalize_name_parts`` and
+  ``s2and.text.canonical_name_count_keys``.
+- Live count-key wiring: the canonical count keys are asserted through the
+  LIVE batched ``ANDData.preprocess_signatures`` count path with seeded count
+  dicts, so drift between the pure functions and the real method fails here.
+- Compare-time contract: canonical first fields across variant groups
+  (``Jo`` / ``Jo Ann`` / ``JoAnn`` etc.) must be pairwise compatible under the
+  live ``same_prefix_tokens`` — issue #39's real invariant after the D1
+  ruling (spill on space, keep together on dash).
+- Table coherence: equivalence groups, decision references, and
+  normalized-form invariants of the ``canonical`` values.
+
+The pure contract checks every frozen row in one batch, with case IDs in each
+assertion, to avoid per-example pytest collection overhead. The JSON fixture is
+the frozen source of truth; decided values must not be
+regenerated silently. Add new cases by hand-writing them into the fixture.
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+import math
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+from s2and.data import ANDData, Signature
+from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
+from s2and.name_counts_index import NameCountsIndex
+from s2and.runtime import build_runtime_context
+from s2and.text import canonical_name_count_keys, canonicalize_name_parts, same_prefix_tokens
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "canonical_name_examples.json"
+FIXTURE = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+CASES = FIXTURE["cases"]
+CASES_BY_ID = {case["id"]: case for case in CASES}
+
+
+def _skeleton_signature(author_info_last: str | None) -> Signature:
+    return Signature(
+        author_info_first=None,
+        author_info_first_normalized_without_apostrophe=None,
+        author_info_middle=None,
+        author_info_middle_normalized_without_apostrophe=None,
+        author_info_last_normalized=None,
+        author_info_last=cast(str, author_info_last),
+        author_info_suffix_normalized=None,
+        author_info_suffix=None,
+        author_info_coauthors=None,
+        author_info_coauthor_blocks=None,
+        author_info_full_name=None,
+        author_info_affiliations=[],
+        author_info_affiliations_n_grams=None,
+        author_info_coauthor_n_grams=None,
+        author_info_email=None,
+        author_info_orcid=None,
+        author_info_name_counts=None,
+        author_info_position=0,
+        author_info_block="",
+        author_info_estimated_gender=None,
+        author_info_estimated_ethnicity=None,
+        paper_id=0,
+        sourced_author_source=None,
+        sourced_author_ids=[],
+        author_id=None,
+        signature_id="",
+    )
+
+
+# Sentinel count values, one per key, so a wrong-key lookup returns the default
+# (1) or NaN rather than the sentinel and fails the assertion.
+_COUNT_SENTINELS = {"first": 7.0, "last": 11.0, "first_last": 13.0, "last_first_initial": 17.0}
+
+
+@pytest.fixture(scope="module")
+def canonical_name_counts_index(tmp_path_factory) -> NameCountsIndex:
+    mappings = []
+    for key_name in ("first", "last", "first_last", "last_first_initial"):
+        mappings.append(
+            {
+                keys[key_name]: _COUNT_SENTINELS[key_name]
+                for case in CASES
+                if (keys := case["canonical"]["count_keys"])[key_name] is not None
+            }
+        )
+    path, _metrics = write_name_counts_index(
+        tmp_path_factory.mktemp("canonical-name-counts"),
+        tuple(mappings),
+    )
+    return NameCountsIndex.open(path)
+
+
+def _live_canonical_name_counts(index: NameCountsIndex):
+    """Run the real batched ANDData preprocessing count path with a seeded index.
+
+    Each dict maps only the fixture's expected canonical key (when non-None) to
+    a sentinel value, so if ``preprocess_signatures`` ever builds a different
+    key string the lookup falls back to the default (1) and the assertions
+    fail. A None fixture key means the batch should do no lookup and return
+    NaN. The skeleton signature carries only raw name fields, forcing the
+    batch to recompute the canonical fields itself.
+    """
+    dataset = ANDData.__new__(ANDData)
+    dataset.signatures = {}
+    for case in CASES:
+        raw = case["input"]
+        case_id = case["id"]
+        dataset.signatures[case_id] = _skeleton_signature(raw["last"])._replace(
+            author_info_first=raw["first"],
+            author_info_middle=raw["middle"],
+            signature_id=case_id,
+        )
+    dataset.papers = {}
+    dataset.preprocess = True
+    dataset.arrow_dataset = None
+    dataset.name_counts_index = index
+    dataset.runtime_context = build_runtime_context("canonical-name-example-test", backend="python")
+    dataset.preprocess_signatures()
+    return {case_id: signature.author_info_name_counts for case_id, signature in dataset.signatures.items()}
+
+
+def test_canonical_count_keys_via_live_anddata_path(canonical_name_counts_index):
+    counts_by_id = _live_canonical_name_counts(canonical_name_counts_index)
+    for case in CASES:
+        counts = counts_by_id[case["id"]]
+        keys = case["canonical"]["count_keys"]
+        for name, count_value in [
+            ("first", counts.first),
+            ("last", counts.last),
+            ("first_last", counts.first_last),
+            ("last_first_initial", counts.last_first_initial),
+        ]:
+            if keys[name] is None:
+                assert math.isnan(count_value), f"{case['id']}: {name} should be NaN (no lookup) but was {count_value}"
+            else:
+                assert count_value == _COUNT_SENTINELS[name], (
+                    f"{case['id']}: {name} lookup did not hit the seeded key {keys[name]!r}"
+                )
+
+
+def test_compare_time_first_name_compatibility():
+    groups = FIXTURE["compare_compatibility"]["compatible_groups"]
+    assert groups, "fixture must define compare-compatible groups"
+    for group in groups:
+        firsts = {case_id: CASES_BY_ID[case_id]["canonical"]["first"] for case_id in group}
+        for (id_a, first_a), (id_b, first_b) in itertools.combinations(firsts.items(), 2):
+            assert same_prefix_tokens(first_a, first_b), (
+                f"{id_a} ({first_a!r}) and {id_b} ({first_b!r}) must be compare-time compatible"
+            )
+
+
+def test_compare_time_first_name_incompatibility():
+    pairs = FIXTURE["compare_compatibility"]["incompatible_pairs"]
+    assert pairs, "fixture must define incompatible pairs"
+    for first_a, first_b in pairs:
+        assert not same_prefix_tokens(first_a, first_b), f"{first_a!r} vs {first_b!r} must NOT be compatible"
+
+
+def test_compare_time_first_name_truth_table():
+    rows = FIXTURE["compare_compatibility"]["truth_table"]
+    assert rows, "fixture must define the compare-time truth table"
+    for row in rows:
+        actual = same_prefix_tokens(row["a"], row["b"])
+        actual_reversed = same_prefix_tokens(row["b"], row["a"])
+        assert actual is row["compatible"], f"{row['a']!r} vs {row['b']!r}: {row['notes']}"
+        assert actual_reversed is row["compatible"], f"truth table must be symmetric for {row['a']!r}/{row['b']!r}"
+
+
+def test_equivalence_groups_share_canonical_fields():
+    groups: dict[str, list[dict]] = {}
+    for case in CASES:
+        group = case["equivalence_group"]
+        if group is not None:
+            groups.setdefault(group, []).append(case)
+    assert groups, "fixture must define at least one equivalence group"
+    for group, members in groups.items():
+        assert len(members) >= 2, f"equivalence group {group!r} has fewer than two members"
+        triples = {(m["canonical"]["first"], m["canonical"]["middle"], m["canonical"]["last"]) for m in members}
+        assert len(triples) == 1, f"equivalence group {group!r} disagrees on canonical fields: {triples}"
+
+
+def test_decision_references_are_wellformed():
+    registry = FIXTURE["decisions"]
+    assert registry, "fixture must carry the decisions registry"
+    for decision_id, decision in registry.items():
+        assert decision["status"] in {"open", "decided"}, f"{decision_id}: bad status {decision['status']!r}"
+        assert decision["title"] and decision["description"]
+    referenced = {decision_id for case in CASES for decision_id in case["decisions"]}
+    unknown = referenced - set(registry)
+    assert not unknown, f"cases reference unknown decisions: {sorted(unknown)}"
+    unreferenced = set(registry) - referenced
+    assert not unreferenced, f"decisions never exercised by any case: {sorted(unreferenced)}"
+
+
+def test_canonical_pure_contract():
+    for case in CASES:
+        case_id = case["id"]
+        raw = case["input"]
+        canonical = case["canonical"]
+        for field in ("first", "middle", "last"):
+            value = canonical[field]
+            assert value == " ".join(value.split()), f"{case_id}: {field} not whitespace-normalized: {value!r}"
+            assert all(ch.islower() or ch == " " for ch in value), f"{case_id}: {field} has non [a-z ] chars: {value!r}"
+        for key_name, key_value in canonical["count_keys"].items():
+            if key_value is not None:
+                assert key_value == " ".join(key_value.split()), (
+                    f"{case_id}: count key {key_name} malformed: {key_value!r}"
+                )
+                assert key_value != "", f"{case_id}: count key {key_name} must be null instead of empty"
+
+        parts = canonicalize_name_parts(raw["first"], raw["middle"], raw["last"])
+        actual_parts = (parts.first, parts.middle, parts.last)
+        expected_parts = (canonical["first"], canonical["middle"], canonical["last"])
+        assert actual_parts == expected_parts, f"{case_id}: canonical parts {actual_parts!r} != {expected_parts!r}"
+        actual_keys = canonical_name_count_keys(parts)
+        assert actual_keys == canonical["count_keys"], (
+            f"{case_id}: canonical count keys {actual_keys!r} != {canonical['count_keys']!r}"
+        )

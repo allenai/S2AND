@@ -1,25 +1,23 @@
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
-use pyo3::Bound;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::constraints::same_prefix_tokens;
 use crate::features::{compute_name_counts_data, word_ngrams_counter};
-use crate::name_counts::{NameCountsData, NameCountsLastFirstInitialSemantics, RawNameCountMaps};
+use crate::name_counts::{NameCountsData, RawNameCountMaps};
 use crate::orcid::normalize_orcid_owned;
 use crate::raw_arrow::readers::{
     RawArrowAuthorSignalData, RawArrowFeature, RawArrowNameCountRarityRow, RawArrowPaper,
     RawArrowPaperEvidenceRow, RawArrowSignature, RawArrowSummarySignalData,
 };
 use crate::text_compat::{
-    compute_block_compat, normalize_text_compat_from_map, split_first_middle_hyphen_aware_compat,
+    canonicalize_name_parts_compat, compute_block_compat, normalize_text_compat_from_map,
+    normalize_title_compat_from_map,
 };
 use crate::{
-    build_name_counts_data_from_artifact, counter_data_from_hash_count_map, extract_specter_vec,
-    fnv64, hash_string_values, prefilter_affiliation_text, py_len, query_terms_from_values,
+    build_name_counts_data_from_artifact, counter_data_from_hash_count_map, fnv64,
+    hash_string_values, prefilter_affiliation_text, py_len, query_terms_from_values,
     raw_arrow_year_mean, term_set_from_normalized_text, validate_row_signal_year, vector_norm_f32,
-    RetrievalQueryData, RetrievalSummaryData, RETRIEVAL_MEGA_AUTHOR_THRESHOLD,
+    RetrievalError, RetrievalQueryData, RetrievalSummaryData, RETRIEVAL_MEGA_AUTHOR_THRESHOLD,
 };
 pub(crate) fn build_raw_arrow_feature(
     signature: &RawArrowSignature,
@@ -32,24 +30,18 @@ pub(crate) fn build_raw_arrow_feature(
     unidecode_char_map: &HashMap<char, String>,
     orcid_enabled: bool,
 ) -> RawArrowFeature {
-    let (first, middle) = split_first_middle_hyphen_aware_compat(
+    // Signature author-name fields are canonical_v2; paper titles, venues,
+    // affiliations, and authors-as-text keep the legacy normalize_text_compat
+    // pipeline below.
+    let (first, middle, last_normalized) = canonicalize_name_parts_compat(
         &signature.author_first,
         &signature.author_middle,
-        name_prefixes,
-        unidecode_char_map,
-    );
-    let last_normalized =
-        normalize_text_compat_from_map(&signature.author_last, false, unidecode_char_map);
-    let name_counts = build_name_counts_data_from_artifact(
-        raw_name_counts,
-        &signature.author_first,
-        &first,
         &signature.author_last,
-        &last_normalized,
-        // Arrow datasets always use the current `<last> <first-initial>` lookup-key form;
-        // legacy `<last> <full-first-token>` semantics only apply to Python ANDData ingest.
-        NameCountsLastFirstInitialSemantics::InitialChar,
+        name_prefixes,
+        Some(unidecode_char_map),
     );
+    let name_counts =
+        build_name_counts_data_from_artifact(raw_name_counts, &first, &last_normalized);
     let middle_initials: HashSet<char> = middle
         .split_whitespace()
         .filter_map(|token| token.chars().next())
@@ -99,11 +91,11 @@ pub(crate) fn build_raw_arrow_feature(
         let normalized_venue =
             normalize_text_compat_from_map(&venue_text, false, unidecode_char_map);
         let normalized_title =
-            normalize_text_compat_from_map(&paper_data.title, false, unidecode_char_map);
+            normalize_title_compat_from_map(&paper_data.title, unidecode_char_map);
         (
             term_set_from_normalized_text(&normalized_venue),
             term_set_from_normalized_text(&normalized_title),
-            paper_data.year,
+            paper_data.year.filter(|year| *year > 0),
         )
     } else {
         (HashSet::new(), HashSet::new(), None)
@@ -130,12 +122,12 @@ pub(crate) fn build_raw_arrow_feature(
         hashes.dedup();
         hashes
     };
-    // ORCID enablement has two equivalent control surfaces and they should always agree:
+    // ORCID enablement has two distinct control scopes:
     //   1. Per-request: `orcid_enabled` here, derived from `not clusterer.suppress_orcid`
     //      in [s2and/incremental_linking/production.py] and threaded through the planner.
-    //   2. Per-ingest: Python `ANDData(use_orcid_id=False)` strips ORCIDs at signature
-    //      build time (see s2and/data.py author_info_orcid handling), used by offline
-    //      training data prep only.
+    //   2. Per-ingest: `use_orcid_id=false` strips ORCIDs while JSON `ANDData`
+    //      signatures or Arrow-backed Rust featurizer records are constructed,
+    //      as used by offline benchmark/training data prep.
     // When `orcid_enabled=false`, the kernel suppresses ORCID at hash time so the
     // signature.orcid value is irrelevant. When `orcid_enabled=true`, the kernel honors
     // whatever the ingest layer produced — a None signature.orcid is "no ORCID for this
@@ -152,11 +144,13 @@ pub(crate) fn build_raw_arrow_feature(
         .and_then(|values| values.get(&signature.paper_id))
         .map(Arc::clone);
     let specter_norm = specter.as_ref().map(|values| vector_norm_f32(values));
+    let canonical_suffix =
+        normalize_text_compat_from_map(&signature.author_suffix, false, unidecode_char_map);
     let query_author = [
-        signature.author_first.as_str(),
-        signature.author_middle.as_str(),
-        signature.author_last.as_str(),
-        signature.author_suffix.as_str(),
+        first.as_str(),
+        middle.as_str(),
+        last_normalized.as_str(),
+        canonical_suffix.as_str(),
     ]
     .iter()
     .filter(|value| !value.trim().is_empty())
@@ -269,19 +263,19 @@ pub(crate) fn euclidean_distance_f32(left: &[f32], right: &[f32]) -> f64 {
 pub(crate) fn validate_raw_arrow_specter_dimensions(
     component_key: &str,
     vectors: &[&[f32]],
-) -> Result<(), String> {
+) -> Result<(), RetrievalError> {
     let Some(first) = vectors.first() else {
         return Ok(());
     };
     let expected_dim = first.len();
     for vector in vectors.iter().skip(1) {
         if vector.len() != expected_dim {
-            return Err(format!(
+            return Err(RetrievalError::InvalidValue(format!(
                 "component_key '{}' has mixed SPECTER dimensions: expected {}, got {}",
                 component_key,
                 expected_dim,
                 vector.len()
-            ));
+            )));
         }
     }
     Ok(())
@@ -361,12 +355,12 @@ pub(crate) fn select_raw_arrow_exemplars(
         .collect()
 }
 
-pub(crate) fn build_raw_arrow_summary(
+pub(crate) fn build_raw_arrow_summary<S: AsRef<str>>(
     component_key: &str,
-    signature_ids: &[String],
+    signature_ids: &[S],
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     max_exemplars: usize,
-) -> Result<RetrievalSummaryData, String> {
+) -> Result<RetrievalSummaryData, RetrievalError> {
     let mut first_name_counts: HashMap<String, usize> = HashMap::new();
     let mut middle_initial_counts: HashMap<u64, usize> = HashMap::new();
     let mut coauthor_counts: HashMap<u64, usize> = HashMap::new();
@@ -380,11 +374,12 @@ pub(crate) fn build_raw_arrow_summary(
     let mut max_paper_author_count = 0usize;
 
     for signature_id in signature_ids {
+        let signature_id = signature_id.as_ref();
         let feature = features_by_signature_id.get(signature_id).ok_or_else(|| {
-            format!(
+            RetrievalError::MissingKey(format!(
                 "cluster seed signature_id '{}' is missing from computed raw Arrow features",
                 signature_id
-            )
+            ))
         })?;
         if py_len(&feature.query.first) > 1 {
             *first_name_counts
@@ -483,8 +478,8 @@ pub(crate) fn build_raw_arrow_summary(
     })
 }
 
-pub(crate) fn build_raw_arrow_summary_signals(
-    signature_ids: &[String],
+pub(crate) fn build_raw_arrow_summary_signals<S: AsRef<str>>(
+    signature_ids: &[S],
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     signatures: &HashMap<String, RawArrowSignature>,
     paper_authors: &HashMap<String, Vec<(i64, String)>>,
@@ -498,6 +493,7 @@ pub(crate) fn build_raw_arrow_summary_signals(
     let mut member_signature_ids = Vec::<String>::with_capacity(signature_ids.len());
 
     for signature_id in signature_ids {
+        let signature_id = signature_id.as_ref();
         let feature = features_by_signature_id.get(signature_id).ok_or_else(|| {
             format!(
                 "cluster seed signature_id '{}' is missing from computed raw Arrow features",
@@ -521,7 +517,7 @@ pub(crate) fn build_raw_arrow_summary_signals(
         member_paper_author_names.push(author_signals.paper_author_names);
         member_paper_author_counts.push(feature.paper_author_count);
         member_local10_author_names.push(author_signals.local10_author_names);
-        member_signature_ids.push(signature_id.clone());
+        member_signature_ids.push(signature_id.to_string());
     }
 
     Ok(RawArrowSummarySignalData {
@@ -534,7 +530,7 @@ pub(crate) fn build_raw_arrow_summary_signals(
 }
 
 pub(crate) fn round_six(value: f64) -> f32 {
-    ((value * 1_000_000.0).round() / 1_000_000.0) as f32
+    ((value * 1_000_000.0).round_ties_even() / 1_000_000.0) as f32
 }
 
 pub(crate) fn valid_positive_finite(value: f64) -> Option<f64> {
@@ -643,9 +639,6 @@ pub(crate) fn raw_arrow_paper_evidence_row(
             .zip(summary_signals.member_local10_author_names.iter())
             .zip(summary_signals.member_signature_ids.iter())
     {
-        if query_signature_id == candidate_signature_id {
-            continue;
-        }
         let intersection =
             set_intersection_count(&query_author_signals.paper_author_names, candidate_names);
         let union =
@@ -663,6 +656,20 @@ pub(crate) fn raw_arrow_paper_evidence_row(
         }
         best_author_overlap = best_author_overlap.max(intersection as f64);
 
+        let count_delta =
+            ((query_paper_author_count as f64).ln_1p() - (*candidate_count as f64).ln_1p()).abs();
+        best_author_count_log_absdiff = Some(match best_author_count_log_absdiff {
+            Some(current) => current.min(count_delta),
+            None => count_delta,
+        });
+
+        // Match the Python reference: the query's own member row remains valid
+        // evidence for full paper-author-list features, but not for the local10
+        // window whose focal author must be excluded.
+        if query_signature_id == candidate_signature_id {
+            continue;
+        }
+
         let local10_intersection = set_intersection_count(
             &query_author_signals.local10_author_names,
             candidate_local10_names,
@@ -675,13 +682,6 @@ pub(crate) fn raw_arrow_paper_evidence_row(
                 best_local10_jaccard.max((local10_intersection as f64) / (local10_union as f64));
         }
         best_local10_overlap_count = best_local10_overlap_count.max(local10_intersection as f64);
-
-        let count_delta =
-            ((query_paper_author_count as f64).ln_1p() - (*candidate_count as f64).ln_1p()).abs();
-        best_author_count_log_absdiff = Some(match best_author_count_log_absdiff {
-            Some(current) => current.min(count_delta),
-            None => count_delta,
-        });
     }
 
     RawArrowPaperEvidenceRow {
@@ -694,22 +694,178 @@ pub(crate) fn raw_arrow_paper_evidence_row(
     }
 }
 
-pub(crate) fn extract_specter_for_paper_id(
-    spec_dict: &Bound<'_, PyDict>,
-    paper_id: &str,
-) -> PyResult<Option<Vec<f32>>> {
-    if let Ok(Some(val)) = spec_dict.get_item(paper_id) {
-        return extract_specter_vec(&val);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::name_counts::RawNameCountMaps;
+
+    #[test]
+    fn round_six_uses_ties_to_even() {
+        assert_eq!(round_six(0.0078125), 0.007812_f32);
+        assert_eq!(round_six(-0.0078125), -0.007812_f32);
+        assert_eq!(round_six(0.0078136), 0.007814_f32);
     }
-    if let Ok(i) = paper_id.parse::<i64>() {
-        if let Ok(Some(val)) = spec_dict.get_item(i) {
-            return extract_specter_vec(&val);
+
+    #[test]
+    fn self_member_contributes_full_author_evidence_but_not_local_window() {
+        let query = RawArrowAuthorSignalData {
+            paper_author_names: HashSet::from(["alice".to_string(), "bob".to_string()]),
+            local10_author_names: HashSet::from(["bob".to_string()]),
+        };
+        let summary = RawArrowSummarySignalData {
+            name_counts_values: Vec::new(),
+            member_paper_author_names: vec![HashSet::from([
+                "alice".to_string(),
+                "bob".to_string(),
+            ])],
+            member_paper_author_counts: vec![2],
+            member_local10_author_names: vec![HashSet::from(["bob".to_string()])],
+            member_signature_ids: vec!["query".to_string()],
+        };
+
+        let row = raw_arrow_paper_evidence_row("query", 2, &query, &summary);
+
+        assert_eq!(row.paper_author_list_max_jaccard, 1.0);
+        assert_eq!(row.paper_author_list_max_containment, 1.0);
+        assert_eq!(row.paper_author_list_max_overlap_count, 2.0);
+        assert_eq!(row.local_author_window10_jaccard_max, 0.0);
+        assert_eq!(row.local_author_window10_overlap_count_max, 0.0);
+        assert_eq!(row.best_author_count_log_absdiff, 0.0);
+    }
+
+    #[test]
+    fn raw_feature_uses_canonical_query_author_and_digit_preserving_title() {
+        let signature = RawArrowSignature {
+            paper_id: "p1".to_string(),
+            author_first: "...".to_string(),
+            author_middle: "B-2".to_string(),
+            author_last: "Smith".to_string(),
+            author_suffix: "PhD".to_string(),
+            author_block: None,
+            affiliations: Vec::new(),
+            email: None,
+            orcid: None,
+            position: Some(0),
+        };
+        let paper = RawArrowPaper {
+            title: "Part 1: Co3O4".to_string(),
+            abstract_text: String::new(),
+            venue: String::new(),
+            journal_name: String::new(),
+            year: None,
+            predicted_language: None,
+            is_reliable: None,
+            language_reliability: None,
+        };
+
+        let feature = build_raw_arrow_feature(
+            &signature,
+            Some(&paper),
+            None,
+            None,
+            &RawNameCountMaps::default(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            false,
+        );
+
+        assert_eq!(feature.query_author, "b smith phd");
+        assert!(feature.query.title_hashes.contains(&fnv64(b"1")));
+        assert!(feature.query.title_hashes.contains(&fnv64(b"co3o4")));
+    }
+
+    #[test]
+    fn raw_feature_counts_blank_author_rows_without_name_evidence() {
+        let signature = RawArrowSignature {
+            paper_id: "p1".to_string(),
+            author_first: "Alice".to_string(),
+            author_middle: String::new(),
+            author_last: "Smith".to_string(),
+            author_suffix: String::new(),
+            author_block: None,
+            affiliations: Vec::new(),
+            email: None,
+            orcid: None,
+            position: Some(0),
+        };
+        let paper_authors = vec![
+            (0, "Alice Smith".to_string()),
+            (1, String::new()),
+            (2, "   ".to_string()),
+            (3, "Bob Jones".to_string()),
+        ];
+
+        let feature = build_raw_arrow_feature(
+            &signature,
+            None,
+            Some(&paper_authors),
+            None,
+            &RawNameCountMaps::default(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            false,
+        );
+        let author_signals =
+            build_raw_arrow_author_signal_data(&signature, Some(&paper_authors), &HashMap::new());
+
+        assert_eq!(feature.paper_author_count, 4);
+        assert_eq!(feature.query.coauthor_hashes.len(), 1);
+        assert_eq!(
+            author_signals.paper_author_names,
+            HashSet::from(["alice smith".to_string(), "bob jones".to_string()])
+        );
+        assert_eq!(
+            author_signals.local10_author_names,
+            HashSet::from(["bob jones".to_string()])
+        );
+    }
+
+    #[test]
+    fn raw_feature_treats_none_zero_and_negative_years_as_missing() {
+        for year in [None, Some(0), Some(-1)] {
+            let signature = RawArrowSignature {
+                paper_id: "p1".to_string(),
+                author_first: "Alice".to_string(),
+                author_middle: String::new(),
+                author_last: "Smith".to_string(),
+                author_suffix: String::new(),
+                author_block: None,
+                affiliations: Vec::new(),
+                email: None,
+                orcid: None,
+                position: Some(0),
+            };
+            let paper = RawArrowPaper {
+                title: String::new(),
+                abstract_text: String::new(),
+                venue: String::new(),
+                journal_name: String::new(),
+                year,
+                predicted_language: None,
+                is_reliable: None,
+                language_reliability: None,
+            };
+            let feature = build_raw_arrow_feature(
+                &signature,
+                Some(&paper),
+                None,
+                None,
+                &RawNameCountMaps::default(),
+                &HashSet::new(),
+                &HashSet::new(),
+                &HashMap::new(),
+                false,
+            );
+
+            assert_eq!(feature.query.year, None, "raw year={year:?}");
+            let features = HashMap::from([("s1".to_string(), feature)]);
+            let summary = build_raw_arrow_summary("cluster", &["s1".to_string()], &features, 1)
+                .expect("missing years must produce a valid retrieval summary");
+            assert_eq!(summary.year_min, None, "raw year={year:?}");
+            assert_eq!(summary.year_max, None, "raw year={year:?}");
+            assert_eq!(summary.year_mean, None, "raw year={year:?}");
         }
     }
-    if let Ok(u) = paper_id.parse::<u64>() {
-        if let Ok(Some(val)) = spec_dict.get_item(u) {
-            return extract_specter_vec(&val);
-        }
-    }
-    Ok(None)
 }

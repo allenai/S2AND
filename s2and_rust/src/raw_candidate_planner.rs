@@ -1,4 +1,120 @@
 use super::*;
+use numpy::IntoPyArray;
+use pyo3::types::{PyList, PyString};
+/// Shared evidence columns emitted in the same order by both planner routes.
+#[derive(Default)]
+struct RawArrowEvidenceSignals {
+    row_orcid_match: Vec<u8>,
+    row_middle_initial_compatibility: Vec<f32>,
+    row_affiliation_overlap: Vec<f32>,
+    row_coauthor_overlap: Vec<f32>,
+    row_venue_overlap: Vec<f32>,
+    row_year_compatibility: Vec<f32>,
+    row_title_overlap: Vec<f32>,
+    row_specter_centroid_similarity: Vec<f32>,
+    row_specter_exemplar_similarity: Vec<f32>,
+    row_last_name_count_min_rarity: Vec<f32>,
+    row_candidate_last_name_count_min_rarity: Vec<f32>,
+    row_candidate_last_first_name_count_min_rarity: Vec<f32>,
+    row_last_first_name_count_min_rarity: Vec<f32>,
+    row_first_prefix_x_last_first_name_count_min_rarity: Vec<f32>,
+    row_candidate_cluster_max_paper_author_count: Vec<f32>,
+    row_paper_author_list_max_jaccard: Vec<f32>,
+    row_paper_author_list_max_containment: Vec<f32>,
+    row_paper_author_list_max_overlap_count: Vec<f32>,
+    row_local_author_window10_jaccard_max: Vec<f32>,
+    row_local_author_window10_overlap_count_max: Vec<f32>,
+    row_best_author_count_log_absdiff: Vec<f32>,
+}
+
+impl RawArrowEvidenceSignals {
+    /// Move the owned columns into NumPy without changing their native dtypes.
+    fn append_to(self, py: Python<'_>, payload: &Bound<'_, PyDict>) -> PyResult<()> {
+        payload.set_item("row_orcid_match", self.row_orcid_match.into_pyarray(py))?;
+        payload.set_item(
+            "middle_initial_compatibility",
+            self.row_middle_initial_compatibility.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "affiliation_overlap",
+            self.row_affiliation_overlap.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "coauthor_overlap",
+            self.row_coauthor_overlap.into_pyarray(py),
+        )?;
+        payload.set_item("venue_overlap", self.row_venue_overlap.into_pyarray(py))?;
+        payload.set_item(
+            "year_compatibility",
+            self.row_year_compatibility.into_pyarray(py),
+        )?;
+        payload.set_item("title_overlap", self.row_title_overlap.into_pyarray(py))?;
+        payload.set_item(
+            "specter_centroid_similarity",
+            self.row_specter_centroid_similarity.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "specter_exemplar_similarity",
+            self.row_specter_exemplar_similarity.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_last_name_count_min_rarity",
+            self.row_last_name_count_min_rarity.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_candidate_last_name_count_min_rarity",
+            self.row_candidate_last_name_count_min_rarity
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_candidate_last_first_name_count_min_rarity",
+            self.row_candidate_last_first_name_count_min_rarity
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_last_first_name_count_min_rarity",
+            self.row_last_first_name_count_min_rarity.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_first_prefix_x_last_first_name_count_min_rarity",
+            self.row_first_prefix_x_last_first_name_count_min_rarity
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_candidate_cluster_max_paper_author_count",
+            self.row_candidate_cluster_max_paper_author_count
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_paper_author_list_max_jaccard",
+            self.row_paper_author_list_max_jaccard.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_paper_author_list_max_containment",
+            self.row_paper_author_list_max_containment.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_paper_author_list_max_overlap_count",
+            self.row_paper_author_list_max_overlap_count
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_local_author_window10_jaccard_max",
+            self.row_local_author_window10_jaccard_max.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_local_author_window10_overlap_count_max",
+            self.row_local_author_window10_overlap_count_max
+                .into_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_best_author_count_log_absdiff",
+            self.row_best_author_count_log_absdiff.into_pyarray(py),
+        )?;
+        Ok(())
+    }
+}
+
 struct RawArrowPlannerBuildTelemetry {
     read_cluster_seeds_secs: f64,
     read_signatures_secs: f64,
@@ -16,6 +132,7 @@ struct RawArrowPlannerBuildTelemetry {
     paper_author_index_stats: IndexedArrowReadStats,
     specter_index_stats: IndexedArrowReadStats,
     indexed_arrow_candidate_plan: bool,
+    reused_name_counts_index: bool,
 }
 
 struct ReusableRawArrowCandidatePlanState {
@@ -55,12 +172,9 @@ struct RawArrowQueryInputReadResult {
     metadata_reads_parallel_secs: f64,
 }
 
-fn validate_raw_arrow_query_signature_ids(query_signature_ids: &[String]) -> PyResult<()> {
-    if query_signature_ids.is_empty() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "query_signature_ids must be non-empty",
-        ));
-    }
+fn validate_raw_arrow_query_signature_ids_allow_empty(
+    query_signature_ids: &[String],
+) -> PyResult<()> {
     let mut seen = HashSet::<&str>::with_capacity(query_signature_ids.len());
     for signature_id in query_signature_ids.iter() {
         if !seen.insert(signature_id.as_str()) {
@@ -72,15 +186,125 @@ fn validate_raw_arrow_query_signature_ids(query_signature_ids: &[String]) -> PyR
     Ok(())
 }
 
-fn validate_signatures_batch_index_before_missing_signature_error(
-    paths: &RawArrowPlannerPaths,
-) -> PyResult<()> {
-    if let Some(index_path) = paths.signatures_batch_index_path.as_deref() {
-        crate::arrow_batch_lookup::validate_arrow_batch_lookup_index(
-            index_path,
-            &paths.signatures_path,
-            "signature_id",
+fn validate_raw_arrow_query_signature_ids(query_signature_ids: &[String]) -> PyResult<()> {
+    if query_signature_ids.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "query_signature_ids must be non-empty",
+        ));
+    }
+    validate_raw_arrow_query_signature_ids_allow_empty(query_signature_ids)
+}
+
+fn validate_additional_cluster_seed_disallows(
+    pairs: Vec<(String, String)>,
+) -> PyResult<HashSet<(String, String)>> {
+    let mut out = HashSet::with_capacity(pairs.len());
+    for (left, right) in pairs {
+        crate::raw_arrow::readers::insert_canonical_cluster_seed_disallow(
+            &mut out,
+            left,
+            right,
+            "additional_cluster_seed_disallows",
         )?;
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod additional_cluster_seed_disallow_tests {
+    use super::{
+        raw_arrow_excluded_candidate_indices_by_query, validate_additional_cluster_seed_disallows,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn additional_pairs_are_canonicalized() {
+        let pairs = validate_additional_cluster_seed_disallows(vec![(
+            "seed-z".to_string(),
+            "query-a".to_string(),
+        )])
+        .expect("valid pair");
+
+        assert!(pairs.contains(&("query-a".to_string(), "seed-z".to_string())));
+    }
+
+    #[test]
+    fn additional_pairs_reject_invalid_and_reversed_duplicates() {
+        assert!(validate_additional_cluster_seed_disallows(vec![(
+            "same".to_string(),
+            "same".to_string(),
+        )])
+        .is_err());
+        assert!(validate_additional_cluster_seed_disallows(vec![(
+            String::new(),
+            "seed".to_string(),
+        )])
+        .is_err());
+        assert!(validate_additional_cluster_seed_disallows(vec![
+            ("query".to_string(), "seed".to_string()),
+            ("seed".to_string(), "query".to_string()),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn stored_and_additional_pairs_are_streamed_as_an_exact_union() {
+        let query_ids = vec!["query".to_string()];
+        let component_order = vec!["component".to_string()];
+        let component_keys_by_member = HashMap::from([
+            ("seed-a".to_string(), vec!["component".to_string()]),
+            ("seed-b".to_string(), vec!["component".to_string()]),
+        ]);
+        let stored = HashSet::from([("query".to_string(), "seed-a".to_string())]);
+        let additional = HashSet::from([
+            ("query".to_string(), "seed-a".to_string()),
+            ("query".to_string(), "seed-b".to_string()),
+        ]);
+
+        let (excluded, candidate_count, pair_count) =
+            raw_arrow_excluded_candidate_indices_by_query(
+                &query_ids,
+                &component_order,
+                &component_keys_by_member,
+                &stored,
+                Some(&additional),
+            )
+            .expect("valid streamed union");
+
+        assert_eq!(pair_count, 2);
+        assert_eq!(candidate_count, 1);
+        assert_eq!(
+            excluded.expect("one query exclusion")[0],
+            Some(HashSet::from([0]))
+        );
+    }
+}
+
+fn validate_required_raw_arrow_paper_metadata(
+    required_paper_ids: &HashSet<String>,
+    papers: &HashMap<String, RawArrowPaper>,
+    paper_authors: &HashMap<String, Vec<(i64, String)>>,
+) -> PyResult<()> {
+    let mut required_paper_ids = required_paper_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    required_paper_ids.sort_unstable();
+    if let Some(paper_id) = required_paper_ids
+        .iter()
+        .find(|paper_id| !papers.contains_key(**paper_id))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Arrow signatures reference missing paper_id '{paper_id}' in papers Arrow input"
+        )));
+    }
+    if let Some(paper_id) = required_paper_ids
+        .iter()
+        .find(|paper_id| !paper_authors.contains_key(**paper_id))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "paper_authors Arrow input is missing rows for paper_id '{paper_id}'"
+        )));
     }
     Ok(())
 }
@@ -93,31 +317,32 @@ fn build_retriever_from_raw_arrow_components(
     max_exemplars: usize,
     num_threads: Option<usize>,
 ) -> PyResult<RustHybridCentroidRetriever> {
-    let summary_results: Vec<Result<RetrievalSummaryData, String>> = py.allow_threads(|| {
-        let compute = || {
-            component_order
-                .par_iter()
-                .map(|component_key| {
-                    let members = members_by_component.get(component_key).ok_or_else(|| {
-                        format!(
-                            "component_key '{}' disappeared while building summaries",
-                            component_key
+    let summary_results: Vec<Result<RetrievalSummaryData, RetrievalError>> =
+        py.allow_threads(|| {
+            let compute = || {
+                component_order
+                    .par_iter()
+                    .map(|component_key| {
+                        let members = members_by_component.get(component_key).ok_or_else(|| {
+                            RetrievalError::MissingKey(format!(
+                                "component_key '{}' disappeared while building summaries",
+                                component_key
+                            ))
+                        })?;
+                        build_raw_arrow_summary(
+                            component_key,
+                            members,
+                            features_by_signature_id,
+                            max_exemplars,
                         )
-                    })?;
-                    build_raw_arrow_summary(
-                        component_key,
-                        members,
-                        features_by_signature_id,
-                        max_exemplars,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        install_with_optional_rayon_pool(num_threads, compute)
-    });
+                    })
+                    .collect::<Vec<_>>()
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
     let mut summaries = Vec::<RetrievalSummaryData>::with_capacity(summary_results.len());
     for result in summary_results {
-        summaries.push(result.map_err(retrieval_string_error_to_py)?);
+        summaries.push(result.map_err(retrieval_error_to_py)?);
     }
     let mut component_index_by_key = HashMap::with_capacity(summaries.len());
     let mut coauthor_cluster_df = HashMap::new();
@@ -180,11 +405,12 @@ fn raw_arrow_excluded_candidate_indices_by_query(
     component_order: &[String],
     component_keys_by_member: &HashMap<String, Vec<String>>,
     cluster_seed_disallows: &HashSet<(String, String)>,
-) -> PyResult<(Option<Vec<Option<HashSet<usize>>>>, usize)> {
+    additional_cluster_seed_disallows: Option<&HashSet<(String, String)>>,
+) -> PyResult<(Option<Vec<Option<HashSet<usize>>>>, usize, usize)> {
     let query_signature_id_set: HashSet<&str> =
         query_signature_ids.iter().map(String::as_str).collect();
     let mut disallowed_members_by_query = HashMap::<String, HashSet<String>>::new();
-    for (left, right) in cluster_seed_disallows.iter() {
+    let mut register_pair = |left: &String, right: &String| -> PyResult<()> {
         let left_is_query = query_signature_id_set.contains(left.as_str());
         let right_is_query = query_signature_id_set.contains(right.as_str());
         let left_is_seed = component_keys_by_member.contains_key(left);
@@ -210,6 +436,20 @@ fn raw_arrow_excluded_candidate_indices_by_query(
                 .entry(right.clone())
                 .or_default()
                 .insert(left.clone());
+        }
+        Ok(())
+    };
+    for (left, right) in cluster_seed_disallows.iter() {
+        register_pair(left, right)?;
+    }
+    let mut cluster_seed_disallow_pair_count = cluster_seed_disallows.len();
+    if let Some(additional) = additional_cluster_seed_disallows {
+        for pair in additional.iter() {
+            if cluster_seed_disallows.contains(pair) {
+                continue;
+            }
+            register_pair(&pair.0, &pair.1)?;
+            cluster_seed_disallow_pair_count += 1;
         }
     }
     let excluded_indices_by_query = if disallowed_members_by_query.is_empty() {
@@ -261,6 +501,7 @@ fn raw_arrow_excluded_candidate_indices_by_query(
     Ok((
         excluded_indices_by_query,
         cluster_seed_disallowed_candidate_count,
+        cluster_seed_disallow_pair_count,
     ))
 }
 
@@ -298,11 +539,11 @@ fn raw_arrow_summary_signals_cached<'a>(
     })
 }
 
-pub(crate) fn raw_arrow_summary_signals_for_members_cached<'a>(
+pub(crate) fn raw_arrow_summary_signals_for_members_cached<'a, S: AsRef<str>>(
     cache: &'a mut HashMap<(String, String), RawArrowSummarySignalData>,
     component_key: &str,
     excluded_query_signature_id: &str,
-    members: &[String],
+    members: &[S],
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     signatures: &HashMap<String, RawArrowSignature>,
     paper_authors: &HashMap<String, Vec<(i64, String)>>,
@@ -333,21 +574,17 @@ pub(crate) fn raw_arrow_summary_signals_for_members_cached<'a>(
 
 fn read_reusable_raw_arrow_query_inputs(
     py: Python<'_>,
-    paths: &RawArrowPlannerPaths,
+    dataset: &ArrowDatasetResources,
     query_signature_ids: &[String],
     num_threads: Option<usize>,
 ) -> PyResult<RawArrowQueryInputReadResult> {
     let query_signature_id_set: HashSet<String> = query_signature_ids.iter().cloned().collect();
     let read_signatures_start = Instant::now();
-    let (signatures, signature_index_stats) = read_raw_arrow_signatures_with_optional_index(
-        &paths.signatures_path,
-        paths.signatures_batch_index_path.as_deref(),
-        Some(&query_signature_id_set),
-    )?;
+    let (signatures, signature_index_stats) =
+        dataset.read_signatures(Some(&query_signature_id_set))?;
     let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
     for signature_id in query_signature_ids.iter() {
         if !signatures.contains_key(signature_id) {
-            validate_signatures_batch_index_before_missing_signature_error(paths)?;
             return Err(pyo3::exceptions::PyKeyError::new_err(format!(
                 "query signature_id '{}' is missing from signatures Arrow input",
                 signature_id
@@ -372,11 +609,7 @@ fn read_reusable_raw_arrow_query_inputs(
                                 f64,
                             )> {
                                 let start = Instant::now();
-                                let (loaded, stats) = read_raw_arrow_papers_with_optional_index(
-                                    &paths.papers_path,
-                                    paths.papers_batch_index_path.as_deref(),
-                                    &needed_paper_ids,
-                                )?;
+                                let (loaded, stats) = dataset.read_papers(&needed_paper_ids)?;
                                 Ok((loaded, stats, start.elapsed().as_secs_f64()))
                             },
                             || -> PyResult<(
@@ -386,11 +619,7 @@ fn read_reusable_raw_arrow_query_inputs(
                             )> {
                                 let start = Instant::now();
                                 let (loaded, stats) =
-                                    read_raw_arrow_paper_authors_with_optional_index(
-                                        &paths.paper_authors_path,
-                                        paths.paper_authors_batch_index_path.as_deref(),
-                                        &needed_paper_ids,
-                                    )?;
+                                    dataset.read_paper_authors(&needed_paper_ids)?;
                                 Ok((loaded, stats, start.elapsed().as_secs_f64()))
                             },
                         )
@@ -401,19 +630,13 @@ fn read_reusable_raw_arrow_query_inputs(
                         f64,
                     )> {
                         let start = Instant::now();
-                        let (loaded, stats) = match paths.specter_path.as_ref() {
-                            Some(path) => {
-                                let (loaded, stats) = read_raw_arrow_specter_with_optional_index(
-                                    path,
-                                    paths.specter_batch_index_path.as_deref(),
-                                    &needed_paper_ids,
-                                )?;
-                                (loaded, stats)
-                            }
-                            None => (HashMap::new(), IndexedArrowReadStats::default()),
+                        let (loaded, stats) = if dataset.has_specter() {
+                            dataset.read_specter(&needed_paper_ids)?
+                        } else {
+                            (HashMap::new(), IndexedArrowReadStats::default())
                         };
                         Ok((
-                            if paths.specter_path.is_some() {
+                            if dataset.has_specter() {
                                 Some(loaded)
                             } else {
                                 None
@@ -428,6 +651,7 @@ fn read_reusable_raw_arrow_query_inputs(
         });
     let (papers, paper_index_stats, read_papers_secs) = papers_result?;
     let (paper_authors, paper_author_index_stats, read_paper_authors_secs) = paper_authors_result?;
+    validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, &paper_authors)?;
     let (raw_specter_by_paper_id, specter_index_stats, read_specter_secs) =
         raw_specter_by_paper_id_result?;
     let specter_by_paper_id = raw_specter_by_paper_id.map(|values| {
@@ -453,14 +677,20 @@ fn read_reusable_raw_arrow_query_inputs(
     })
 }
 
+enum RawPlannerQueryMode {
+    Declared,
+    Auto,
+}
+
 #[pyclass]
 pub(crate) struct RawBlockQueryCandidatePlanner {
-    paths: RawArrowPlannerPaths,
+    dataset: ArrowDatasetResources,
     state: ReusableRawArrowCandidatePlanState,
     planner_query_signature_ids: Vec<String>,
     planner_query_signature_count: usize,
     planner_query_signature_id_set: HashSet<String>,
     planner_query_requests_by_signature_id: HashMap<String, RawArrowQuerySignatureRequest>,
+    query_mode: RawPlannerQueryMode,
     top_k: usize,
     orcid_enabled: bool,
     num_threads: Option<usize>,
@@ -470,7 +700,9 @@ pub(crate) struct RawBlockQueryCandidatePlanner {
 impl RawBlockQueryCandidatePlanner {
     fn build_from_query_signature_ids(
         py: Python<'_>,
-        paths: &Bound<'_, PyDict>,
+        dataset: ArrowDatasetResources,
+        cluster_seeds_path: &str,
+        cluster_seed_disallows_path: Option<&str>,
         query_signature_ids: Vec<String>,
         top_k: usize,
         orcid_enabled: bool,
@@ -478,15 +710,16 @@ impl RawBlockQueryCandidatePlanner {
         max_exemplars: usize,
     ) -> PyResult<Self> {
         validate_retrieval_rank_top_k(top_k)?;
-        validate_raw_arrow_query_signature_ids(&query_signature_ids)?;
+        validate_raw_arrow_query_signature_ids_allow_empty(&query_signature_ids)?;
         let planner_query_signature_id_set = query_signature_ids.iter().cloned().collect();
-        let paths = RawArrowPlannerPaths::from_py_dict(paths)?;
+        let raw_name_counts = dataset.name_counts();
+        let reused_name_counts_index = raw_name_counts.shared_index().is_some();
 
         let read_cluster_seeds_start = Instant::now();
         let (component_order, members_by_component) =
-            read_raw_arrow_cluster_seeds(&paths.cluster_seeds_path)?;
+            read_raw_arrow_cluster_seeds(cluster_seeds_path)?;
         let read_cluster_seeds_secs = read_cluster_seeds_start.elapsed().as_secs_f64();
-        let cluster_seed_disallows = match paths.cluster_seed_disallows_path.as_ref() {
+        let cluster_seed_disallows = match cluster_seed_disallows_path {
             Some(path) => read_raw_arrow_cluster_seed_disallows(path)?,
             None => HashSet::new(),
         };
@@ -513,16 +746,11 @@ impl RawBlockQueryCandidatePlanner {
         let (signatures, signature_index_stats) = if seed_signature_id_set.is_empty() {
             (HashMap::new(), IndexedArrowReadStats::default())
         } else {
-            read_raw_arrow_signatures_with_optional_index(
-                &paths.signatures_path,
-                paths.signatures_batch_index_path.as_deref(),
-                Some(&seed_signature_id_set),
-            )?
+            dataset.read_signatures(Some(&seed_signature_id_set))?
         };
         let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
         for signature_id in seed_signature_ids.iter() {
             if !signatures.contains_key(signature_id) {
-                validate_signatures_batch_index_before_missing_signature_error(&paths)?;
                 return Err(pyo3::exceptions::PyKeyError::new_err(format!(
                     "cluster seed signature_id '{}' is missing from signatures Arrow input",
                     signature_id
@@ -553,11 +781,7 @@ impl RawBlockQueryCandidatePlanner {
                                 let (loaded, stats) = if needed_paper_ids.is_empty() {
                                     (HashMap::new(), IndexedArrowReadStats::default())
                                 } else {
-                                    read_raw_arrow_papers_with_optional_index(
-                                        &paths.papers_path,
-                                        paths.papers_batch_index_path.as_deref(),
-                                        &needed_paper_ids,
-                                    )?
+                                    dataset.read_papers(&needed_paper_ids)?
                                 };
                                 Ok((loaded, stats, start.elapsed().as_secs_f64()))
                             },
@@ -570,11 +794,7 @@ impl RawBlockQueryCandidatePlanner {
                                 let (loaded, stats) = if needed_paper_ids.is_empty() {
                                     (HashMap::new(), IndexedArrowReadStats::default())
                                 } else {
-                                    read_raw_arrow_paper_authors_with_optional_index(
-                                        &paths.paper_authors_path,
-                                        paths.paper_authors_batch_index_path.as_deref(),
-                                        &needed_paper_ids,
-                                    )?
+                                    dataset.read_paper_authors(&needed_paper_ids)?
                                 };
                                 Ok((loaded, stats, start.elapsed().as_secs_f64()))
                             },
@@ -588,22 +808,14 @@ impl RawBlockQueryCandidatePlanner {
                                 f64,
                             )> {
                                 let start = Instant::now();
-                                let (loaded, stats) = match paths.specter_path.as_ref() {
-                                    Some(path) if !needed_paper_ids.is_empty() => {
-                                        let (loaded, stats) =
-                                            read_raw_arrow_specter_with_optional_index(
-                                                path,
-                                                paths.specter_batch_index_path.as_deref(),
-                                                &needed_paper_ids,
-                                            )?;
-                                        (loaded, stats)
-                                    }
-                                    Some(_) | None => {
+                                let (loaded, stats) =
+                                    if dataset.has_specter() && !needed_paper_ids.is_empty() {
+                                        dataset.read_specter(&needed_paper_ids)?
+                                    } else {
                                         (HashMap::new(), IndexedArrowReadStats::default())
-                                    }
-                                };
+                                    };
                                 Ok((
-                                    if paths.specter_path.is_some() {
+                                    if dataset.has_specter() {
                                         Some(loaded)
                                     } else {
                                         None
@@ -614,20 +826,7 @@ impl RawBlockQueryCandidatePlanner {
                             },
                             || -> PyResult<(RawNameCountMaps, f64)> {
                                 let start = Instant::now();
-                                let loaded = match paths.name_counts_index_path.as_ref() {
-                                    Some(path) => read_raw_name_counts_index(path)?,
-                                    None => match paths.name_counts_arrow_path.as_ref() {
-                                        Some(path) => {
-                                            return Err(pyo3::exceptions::PyValueError::new_err(
-                                                format!(
-                                                    "name_counts Arrow path '{path}' requires name_counts_index; refusing slow Arrow fallback"
-                                                ),
-                                            ));
-                                        }
-                                        None => RawNameCountMaps::default(),
-                                    },
-                                };
-                                Ok((loaded, start.elapsed().as_secs_f64()))
+                                Ok((raw_name_counts.clone(), start.elapsed().as_secs_f64()))
                             },
                         )
                     },
@@ -638,6 +837,7 @@ impl RawBlockQueryCandidatePlanner {
         let (papers, paper_index_stats, read_papers_secs) = papers_result?;
         let (paper_authors, paper_author_index_stats, read_paper_authors_secs) =
             paper_authors_result?;
+        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, &paper_authors)?;
         let (raw_specter_by_paper_id, specter_index_stats, read_specter_secs) =
             raw_specter_by_paper_id_result?;
         let (raw_name_counts, read_name_counts_secs) = raw_name_counts_result?;
@@ -722,13 +922,8 @@ impl RawBlockQueryCandidatePlanner {
             )?;
         let component_members_secs = component_members_start.elapsed().as_secs_f64();
 
-        let indexed_arrow_candidate_plan = paths.signatures_batch_index_path.is_some()
-            || paths.papers_batch_index_path.is_some()
-            || paths.paper_authors_batch_index_path.is_some()
-            || paths.specter_batch_index_path.is_some();
-
         Ok(Self {
-            paths,
+            dataset,
             state: ReusableRawArrowCandidatePlanState {
                 features_by_signature_id,
                 signatures,
@@ -765,13 +960,15 @@ impl RawBlockQueryCandidatePlanner {
                     paper_index_stats,
                     paper_author_index_stats,
                     specter_index_stats,
-                    indexed_arrow_candidate_plan,
+                    indexed_arrow_candidate_plan: true,
+                    reused_name_counts_index,
                 },
             },
             planner_query_signature_ids: query_signature_ids.clone(),
             planner_query_signature_count: query_signature_ids.len(),
             planner_query_signature_id_set,
             planner_query_requests_by_signature_id: HashMap::new(),
+            query_mode: RawPlannerQueryMode::Declared,
             top_k,
             orcid_enabled,
             num_threads,
@@ -784,30 +981,38 @@ impl RawBlockQueryCandidatePlanner {
 impl RawBlockQueryCandidatePlanner {
     #[staticmethod]
     #[pyo3(signature = (
-        paths,
+        dataset,
+        query_signatures_path,
+        cluster_seeds_path,
         top_k,
+        *,
+        cluster_seed_disallows_path = None,
         orcid_enabled = true,
         num_threads = None,
         max_exemplars = 4
     ))]
     fn from_query_signatures(
         py: Python<'_>,
-        paths: &Bound<'_, PyDict>,
+        dataset: PyRef<'_, ArrowDataset>,
+        query_signatures_path: String,
+        cluster_seeds_path: String,
         top_k: usize,
+        cluster_seed_disallows_path: Option<String>,
         orcid_enabled: bool,
         num_threads: Option<usize>,
         max_exemplars: usize,
     ) -> PyResult<Self> {
-        let query_signatures_path = required_path_from_py_dict(paths, "query_signatures")?;
         let query_requests = read_raw_arrow_query_signatures(&query_signatures_path)?;
         let query_signature_ids = query_requests
             .iter()
             .map(|request| request.signature_id.clone())
             .collect::<Vec<_>>();
-        validate_raw_arrow_query_signature_ids(&query_signature_ids)?;
+        validate_raw_arrow_query_signature_ids_allow_empty(&query_signature_ids)?;
         let mut planner = Self::build_from_query_signature_ids(
             py,
-            paths,
+            dataset.shared(),
+            &cluster_seeds_path,
+            cluster_seed_disallows_path.as_deref(),
             query_signature_ids.clone(),
             top_k,
             orcid_enabled,
@@ -820,6 +1025,42 @@ impl RawBlockQueryCandidatePlanner {
             .into_iter()
             .map(|request| (request.signature_id.clone(), request))
             .collect();
+        Ok(planner)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (
+        dataset,
+        cluster_seeds_path,
+        top_k,
+        *,
+        cluster_seed_disallows_path = None,
+        orcid_enabled = true,
+        num_threads = None,
+        max_exemplars = 4
+    ))]
+    fn from_auto_queries(
+        py: Python<'_>,
+        dataset: PyRef<'_, ArrowDataset>,
+        cluster_seeds_path: String,
+        top_k: usize,
+        cluster_seed_disallows_path: Option<String>,
+        orcid_enabled: bool,
+        num_threads: Option<usize>,
+        max_exemplars: usize,
+    ) -> PyResult<Self> {
+        let mut planner = Self::build_from_query_signature_ids(
+            py,
+            dataset.shared(),
+            &cluster_seeds_path,
+            cluster_seed_disallows_path.as_deref(),
+            Vec::new(),
+            top_k,
+            orcid_enabled,
+            num_threads,
+            max_exemplars,
+        )?;
+        planner.query_mode = RawPlannerQueryMode::Auto;
         Ok(planner)
     }
 
@@ -856,6 +1097,10 @@ impl RawBlockQueryCandidatePlanner {
         payload.set_item(
             "indexed_arrow_candidate_plan",
             telemetry.indexed_arrow_candidate_plan,
+        )?;
+        payload.set_item(
+            "reused_name_counts_index",
+            telemetry.reused_name_counts_index,
         )?;
         payload.set_item(
             "signature_batches_read",
@@ -896,27 +1141,50 @@ impl RawBlockQueryCandidatePlanner {
     }
 
     fn plan_query_signatures(&mut self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        self.plan(py, self.planner_query_signature_ids.clone())
+        if matches!(self.query_mode, RawPlannerQueryMode::Auto) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "RawBlockQueryCandidatePlanner.from_auto_queries requires explicit plan(query_signature_ids)",
+            ));
+        }
+        self.plan(py, self.planner_query_signature_ids.clone(), None)
     }
 
-    #[pyo3(signature = (query_signature_ids))]
-    fn plan(&mut self, py: Python<'_>, query_signature_ids: Vec<String>) -> PyResult<Py<PyDict>> {
+    fn name_counts_index(&self) -> Option<NameCountsIndex> {
+        self.state
+            .raw_name_counts
+            .shared_index()
+            .map(NameCountsIndex::from_shared)
+    }
+
+    #[pyo3(signature = (query_signature_ids, additional_cluster_seed_disallows = None))]
+    fn plan(
+        &mut self,
+        py: Python<'_>,
+        query_signature_ids: Vec<String>,
+        additional_cluster_seed_disallows: Option<Vec<(String, String)>>,
+    ) -> PyResult<Py<PyDict>> {
         validate_raw_arrow_query_signature_ids(&query_signature_ids)?;
-        let missing: Vec<&String> = query_signature_ids
-            .iter()
-            .filter(|signature_id| !self.planner_query_signature_id_set.contains(*signature_id))
-            .collect();
-        if !missing.is_empty() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "RawBlockQueryCandidatePlanner plan requested query_signature_ids outside the planner query set: {:?}",
-                missing.into_iter().take(10).collect::<Vec<_>>()
-            )));
+        let additional_cluster_seed_disallows = additional_cluster_seed_disallows
+            .map(validate_additional_cluster_seed_disallows)
+            .transpose()?
+            .unwrap_or_default();
+        if matches!(self.query_mode, RawPlannerQueryMode::Declared) {
+            let missing: Vec<&String> = query_signature_ids
+                .iter()
+                .filter(|signature_id| !self.planner_query_signature_id_set.contains(*signature_id))
+                .collect();
+            if !missing.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "RawBlockQueryCandidatePlanner plan requested query_signature_ids outside the planner query set: {:?}",
+                    missing.into_iter().take(10).collect::<Vec<_>>()
+                )));
+            }
         }
 
         let total_start = Instant::now();
         let query_inputs = read_reusable_raw_arrow_query_inputs(
             py,
-            &self.paths,
+            &self.dataset,
             &query_signature_ids,
             self.num_threads,
         )?;
@@ -982,22 +1250,25 @@ impl RawBlockQueryCandidatePlanner {
             let base = &base_feature.query;
             let request = self
                 .planner_query_requests_by_signature_id
-                .get(signature_id)
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "RawBlockQueryCandidatePlanner is missing query_signatures request row for \
-                         signature_id {signature_id:?}"
-                    ))
-                })?;
-            if !request.query_author.is_empty() && request.query_author != base_feature.query_author
-            {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "query_signatures Arrow query_author for signature_id {:?} does not match \
-                     signatures-derived query_author: {:?} != {:?}",
-                    signature_id, request.query_author, base_feature.query_author
+                .get(signature_id);
+            if let Some(request) = request {
+                if !request.query_author.is_empty()
+                    && request.query_author != base_feature.query_author
+                {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "query_signatures Arrow query_author for signature_id {:?} does not match \
+                         signatures-derived query_author: {:?} != {:?}",
+                        signature_id, request.query_author, base_feature.query_author
+                    )));
+                }
+            } else if matches!(self.query_mode, RawPlannerQueryMode::Declared) {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "RawBlockQueryCandidatePlanner is missing query_signatures request row for \
+                     signature_id {signature_id:?}"
                 )));
             }
-            let (masked, resolved_view) = mask_raw_arrow_query(base, request.query_view.as_str())
+            let query_view = request.map_or("auto", |request| request.query_view.as_str());
+            let (masked, resolved_view) = mask_raw_arrow_query(base, query_view)
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
             queries.push(masked);
             query_views.push(resolved_view);
@@ -1086,24 +1357,33 @@ impl RawBlockQueryCandidatePlanner {
             )?;
         let component_members_secs = component_members_start.elapsed().as_secs_f64();
 
-        let (excluded_candidate_indices_by_query, cluster_seed_disallowed_candidate_count) =
-            raw_arrow_excluded_candidate_indices_by_query(
-                &query_signature_ids,
-                component_order,
-                &self.state.component_keys_by_member,
-                &self.state.cluster_seed_disallows,
-            )?;
+        let (
+            excluded_candidate_indices_by_query,
+            cluster_seed_disallowed_candidate_count,
+            cluster_seed_disallow_pair_count,
+        ) = raw_arrow_excluded_candidate_indices_by_query(
+            &query_signature_ids,
+            component_order,
+            &self.state.component_keys_by_member,
+            &self.state.cluster_seed_disallows,
+            if additional_cluster_seed_disallows.is_empty() {
+                None
+            } else {
+                Some(&additional_cluster_seed_disallows)
+            },
+        )?;
 
         let retrieval_start = Instant::now();
-        let query_results: Vec<Result<RetrievalPairPlanQueryResult, String>> =
-            py.allow_threads(|| {
+        let query_results: Vec<Result<RetrievalPairPlanQueryResult, RetrievalError>> = py
+            .allow_threads(|| {
                 let compute = || {
                     queries
                         .par_iter()
                         .enumerate()
                         .map(|(query_offset, current_query)| {
-                            let query_index = u32::try_from(query_offset)
-                                .map_err(|_| "query index exceeds u32".to_string())?;
+                            let query_index = u32::try_from(query_offset).map_err(|_| {
+                                RetrievalError::Overflow("query index exceeds u32".to_string())
+                            })?;
                             let excluded_candidate_indices = excluded_candidate_indices_by_query
                                 .as_ref()
                                 .and_then(|values| values[query_offset].as_ref());
@@ -1111,14 +1391,9 @@ impl RawBlockQueryCandidatePlanner {
                                 current_query,
                                 query_first_tokens[query_offset].as_str(),
                                 query_index,
-                                None,
                                 excluded_candidate_indices,
-                                Some(query_signature_ids[query_offset].as_str()),
                                 &component_member_indices,
                                 self.top_k,
-                                None,
-                                0,
-                                true,
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1170,7 +1445,7 @@ impl RawBlockQueryCandidatePlanner {
         let mut author_signals_by_query_signature_id =
             HashMap::<String, RawArrowAuthorSignalData>::new();
         for query_result in query_results {
-            let mut query_result = query_result.map_err(retrieval_string_error_to_py)?;
+            let mut query_result = query_result.map_err(retrieval_error_to_py)?;
             let base_row_index = u32::try_from(row_component_keys.len()).map_err(|_| {
                 pyo3::exceptions::PyOverflowError::new_err(
                     "retrieved candidate row count exceeds u32",
@@ -1344,35 +1619,40 @@ impl RawBlockQueryCandidatePlanner {
         let retrieval_secs = retrieval_start.elapsed().as_secs_f64();
 
         let pair_signature_ids_start = Instant::now();
-        let mut left_signature_ids = Vec::<String>::with_capacity(left_signature_indices.len());
-        let mut right_signature_ids = Vec::<String>::with_capacity(right_signature_indices.len());
         let signature_index_count = query_signature_ids.len() + seed_signature_ids.len();
-        let signature_id_for_index = |index: u32| -> Option<&String> {
-            let offset = index as usize;
-            if offset < query_signature_ids.len() {
-                query_signature_ids.get(offset)
-            } else {
-                seed_signature_ids.get(offset - query_signature_ids.len())
-            }
-        };
         for index in left_signature_indices.iter() {
-            let Some(signature_id) = signature_id_for_index(*index) else {
+            if (*index as usize) >= signature_index_count {
                 return Err(pyo3::exceptions::PyIndexError::new_err(format!(
                     "left signature index {} is outside signature id table of length {}",
                     index, signature_index_count
                 )));
-            };
-            left_signature_ids.push(signature_id.clone());
+            }
         }
         for index in right_signature_indices.iter() {
-            let Some(signature_id) = signature_id_for_index(*index) else {
+            if (*index as usize) >= signature_index_count {
                 return Err(pyo3::exceptions::PyIndexError::new_err(format!(
                     "right signature index {} is outside signature id table of length {}",
                     index, signature_index_count
                 )));
-            };
-            right_signature_ids.push(signature_id.clone());
+            }
         }
+        let signature_id_objects: Vec<_> = query_signature_ids
+            .iter()
+            .chain(seed_signature_ids.iter())
+            .map(|signature_id| PyString::new(py, signature_id).unbind())
+            .collect();
+        let left_signature_ids = PyList::new(
+            py,
+            left_signature_indices
+                .iter()
+                .map(|index| signature_id_objects[*index as usize].clone_ref(py)),
+        )?;
+        let right_signature_ids = PyList::new(
+            py,
+            right_signature_indices
+                .iter()
+                .map(|index| signature_id_objects[*index as usize].clone_ref(py)),
+        )?;
         let pair_signature_ids_secs = pair_signature_ids_start.elapsed().as_secs_f64();
 
         let component_members_payload_start = Instant::now();
@@ -1420,40 +1700,40 @@ impl RawBlockQueryCandidatePlanner {
             "signature_count",
             query_signature_ids.len() + seed_signature_ids.len(),
         )?;
-        let mut telemetry_paper_ids = HashSet::<String>::new();
+        let mut telemetry_paper_ids = HashSet::<&str>::new();
         for signature_id in query_signature_ids.iter() {
             if let Some(signature) = query_inputs.signatures.get(signature_id) {
-                telemetry_paper_ids.insert(signature.paper_id.clone());
+                telemetry_paper_ids.insert(signature.paper_id.as_str());
             }
         }
         for signature_id in seed_signature_ids.iter() {
             if let Some(signature) = self.state.signatures.get(signature_id) {
-                telemetry_paper_ids.insert(signature.paper_id.clone());
+                telemetry_paper_ids.insert(signature.paper_id.as_str());
             }
         }
         telemetry.set_item("paper_count", telemetry_paper_ids.len())?;
-        let mut telemetry_paper_author_ids = HashSet::<String>::new();
-        for paper_id in telemetry_paper_ids.iter() {
+        let mut telemetry_paper_author_count = 0usize;
+        for &paper_id in telemetry_paper_ids.iter() {
             if self.state.paper_authors.contains_key(paper_id)
                 || query_inputs.paper_authors.contains_key(paper_id)
             {
-                telemetry_paper_author_ids.insert(paper_id.clone());
+                telemetry_paper_author_count += 1;
             }
         }
-        telemetry.set_item("paper_author_paper_count", telemetry_paper_author_ids.len())?;
+        telemetry.set_item("paper_author_paper_count", telemetry_paper_author_count)?;
         telemetry.set_item("cluster_count", component_order.len())?;
         telemetry.set_item("seed_signature_count", seed_signature_ids.len())?;
         telemetry.set_item("query_signature_count", query_signature_ids.len())?;
         telemetry.set_item("excluded_query_seed_count", excluded_query_seed_count)?;
         telemetry.set_item(
             "cluster_seed_disallow_pair_count",
-            self.state.cluster_seed_disallows.len(),
+            cluster_seed_disallow_pair_count,
         )?;
         telemetry.set_item(
             "cluster_seed_disallowed_candidate_count",
             cluster_seed_disallowed_candidate_count,
         )?;
-        let mut telemetry_specter_ids = HashSet::<String>::new();
+        let mut telemetry_specter_ids = HashSet::<&str>::new();
         for signature_id in seed_signature_ids.iter() {
             if self
                 .state
@@ -1463,14 +1743,14 @@ impl RawBlockQueryCandidatePlanner {
                 .is_some()
             {
                 if let Some(signature) = self.state.signatures.get(signature_id) {
-                    telemetry_specter_ids.insert(signature.paper_id.clone());
+                    telemetry_specter_ids.insert(signature.paper_id.as_str());
                 }
             }
         }
         if let Some(query_specter) = query_inputs.specter_by_paper_id.as_ref() {
-            for paper_id in telemetry_paper_ids.iter() {
+            for &paper_id in telemetry_paper_ids.iter() {
                 if query_specter.contains_key(paper_id) {
-                    telemetry_specter_ids.insert(paper_id.clone());
+                    telemetry_specter_ids.insert(paper_id);
                 }
             }
         }
@@ -1518,7 +1798,6 @@ impl RawBlockQueryCandidatePlanner {
 
         let payload_start = Instant::now();
         let payload = PyDict::new(py);
-        payload.set_item("schema_version", "raw_arrow_candidate_plan_v2")?;
         payload.set_item("row_count", row_component_keys.len())?;
         payload.set_item("pair_count", left_signature_indices.len())?;
         payload.set_item("query_signature_ids", query_signature_ids)?;
@@ -1528,115 +1807,70 @@ impl RawBlockQueryCandidatePlanner {
         payload.set_item("component_members", component_members)?;
         payload.set_item("left_signature_ids", left_signature_ids)?;
         payload.set_item("right_signature_ids", right_signature_ids)?;
-        payload.set_item("pair_row_indices", pair_row_indices.to_pyarray(py))?;
+        payload.set_item("pair_row_indices", pair_row_indices.into_pyarray(py))?;
         payload.set_item(
             "row_query_signature_indices",
-            row_query_signature_indices.to_pyarray(py),
+            row_query_signature_indices.into_pyarray(py),
         )?;
         payload.set_item("row_component_keys", row_component_keys)?;
-        payload.set_item("retrieval_scores", row_retrieval_scores.to_pyarray(py))?;
-        payload.set_item("retrieval_ranks", row_retrieval_ranks.to_pyarray(py))?;
-        payload.set_item("row_component_sizes", row_component_sizes.to_pyarray(py))?;
+        payload.set_item("retrieval_scores", row_retrieval_scores.into_pyarray(py))?;
+        payload.set_item("retrieval_ranks", row_retrieval_ranks.into_pyarray(py))?;
+        payload.set_item("row_component_sizes", row_component_sizes.into_pyarray(py))?;
         payload.set_item(
             "row_named_signature_counts",
-            row_named_signature_counts.to_pyarray(py),
+            row_named_signature_counts.into_pyarray(py),
         )?;
         payload.set_item("row_dominant_first_names", row_dominant_first_names)?;
         payload.set_item(
             "row_candidate_year_min",
-            row_candidate_year_min.to_pyarray(py),
+            row_candidate_year_min.into_pyarray(py),
         )?;
         payload.set_item(
             "row_candidate_year_max",
-            row_candidate_year_max.to_pyarray(py),
+            row_candidate_year_max.into_pyarray(py),
         )?;
         payload.set_item(
             "row_candidate_year_range_missing",
-            row_candidate_year_range_missing.to_pyarray(py),
+            row_candidate_year_range_missing.into_pyarray(py),
         )?;
         payload.set_item("row_query_first_tokens", row_query_first_tokens)?;
-        payload.set_item("row_query_years", row_query_years.to_pyarray(py))?;
+        payload.set_item("row_query_years", row_query_years.into_pyarray(py))?;
         payload.set_item(
             "row_query_year_missing",
-            row_query_year_missing.to_pyarray(py),
+            row_query_year_missing.into_pyarray(py),
         )?;
         payload.set_item(
             "row_query_has_affiliations",
-            row_query_has_affiliations.to_pyarray(py),
+            row_query_has_affiliations.into_pyarray(py),
         )?;
         payload.set_item(
             "row_query_has_coauthors",
-            row_query_has_coauthors.to_pyarray(py),
+            row_query_has_coauthors.into_pyarray(py),
         )?;
-        payload.set_item("row_orcid_match", row_orcid_match.to_pyarray(py))?;
-        payload.set_item(
-            "middle_initial_compatibility",
-            row_middle_initial_compatibility.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "affiliation_overlap",
-            row_affiliation_overlap.to_pyarray(py),
-        )?;
-        payload.set_item("coauthor_overlap", row_coauthor_overlap.to_pyarray(py))?;
-        payload.set_item("venue_overlap", row_venue_overlap.to_pyarray(py))?;
-        payload.set_item("year_compatibility", row_year_compatibility.to_pyarray(py))?;
-        payload.set_item("title_overlap", row_title_overlap.to_pyarray(py))?;
-        payload.set_item(
-            "specter_centroid_similarity",
-            row_specter_centroid_similarity.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "specter_exemplar_similarity",
-            row_specter_exemplar_similarity.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_last_name_count_min_rarity",
-            row_last_name_count_min_rarity.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_candidate_last_name_count_min_rarity",
-            row_candidate_last_name_count_min_rarity.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_candidate_last_first_name_count_min_rarity",
-            row_candidate_last_first_name_count_min_rarity.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_last_first_name_count_min_rarity",
-            row_last_first_name_count_min_rarity.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_first_prefix_x_last_first_name_count_min_rarity",
-            row_first_prefix_x_last_first_name_count_min_rarity.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_candidate_cluster_max_paper_author_count",
-            row_candidate_cluster_max_paper_author_count.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_paper_author_list_max_jaccard",
-            row_paper_author_list_max_jaccard.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_paper_author_list_max_containment",
-            row_paper_author_list_max_containment.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_paper_author_list_max_overlap_count",
-            row_paper_author_list_max_overlap_count.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_local_author_window10_jaccard_max",
-            row_local_author_window10_jaccard_max.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_local_author_window10_overlap_count_max",
-            row_local_author_window10_overlap_count_max.to_pyarray(py),
-        )?;
-        payload.set_item(
-            "row_best_author_count_log_absdiff",
-            row_best_author_count_log_absdiff.to_pyarray(py),
-        )?;
+        RawArrowEvidenceSignals {
+            row_orcid_match,
+            row_middle_initial_compatibility,
+            row_affiliation_overlap,
+            row_coauthor_overlap,
+            row_venue_overlap,
+            row_year_compatibility,
+            row_title_overlap,
+            row_specter_centroid_similarity,
+            row_specter_exemplar_similarity,
+            row_last_name_count_min_rarity,
+            row_candidate_last_name_count_min_rarity,
+            row_candidate_last_first_name_count_min_rarity,
+            row_last_first_name_count_min_rarity,
+            row_first_prefix_x_last_first_name_count_min_rarity,
+            row_candidate_cluster_max_paper_author_count,
+            row_paper_author_list_max_jaccard,
+            row_paper_author_list_max_containment,
+            row_paper_author_list_max_overlap_count,
+            row_local_author_window10_jaccard_max,
+            row_local_author_window10_overlap_count_max,
+            row_best_author_count_log_absdiff,
+        }
+        .append_to(py, &payload)?;
         payload.set_item("telemetry", telemetry)?;
         timings.set_item("payload_secs", payload_start.elapsed().as_secs_f64())?;
         timings.set_item("total_secs", total_start.elapsed().as_secs_f64())?;
@@ -1660,7 +1894,6 @@ fn raw_arrow_labeled_empty_plan(py: Python<'_>) -> PyResult<Py<PyDict>> {
     telemetry.set_item("timings", timings)?;
 
     let payload = PyDict::new(py);
-    payload.set_item("schema_version", "raw_arrow_labeled_candidate_plan_v1")?;
     payload.set_item("row_count", 0)?;
     payload.set_item("pair_count", 0)?;
     payload.set_item("signature_ids", Vec::<String>::new())?;
@@ -1674,113 +1907,51 @@ fn raw_arrow_labeled_empty_plan(py: Python<'_>) -> PyResult<Py<PyDict>> {
     payload.set_item("row_component_keys", Vec::<String>::new())?;
     payload.set_item("left_signature_ids", Vec::<String>::new())?;
     payload.set_item("right_signature_ids", Vec::<String>::new())?;
-    payload.set_item("pair_row_indices", Vec::<u32>::new().to_pyarray(py))?;
-    payload.set_item("retrieval_scores", Vec::<f32>::new().to_pyarray(py))?;
-    payload.set_item("retrieval_ranks", Vec::<u16>::new().to_pyarray(py))?;
-    payload.set_item("row_component_sizes", Vec::<u32>::new().to_pyarray(py))?;
+    payload.set_item("pair_row_indices", Vec::<u32>::new().into_pyarray(py))?;
+    payload.set_item("retrieval_scores", Vec::<f32>::new().into_pyarray(py))?;
+    payload.set_item("retrieval_ranks", Vec::<u16>::new().into_pyarray(py))?;
+    payload.set_item("row_component_sizes", Vec::<u32>::new().into_pyarray(py))?;
     payload.set_item(
         "row_named_signature_counts",
-        Vec::<u32>::new().to_pyarray(py),
+        Vec::<u32>::new().into_pyarray(py),
     )?;
     payload.set_item("row_dominant_first_names", Vec::<String>::new())?;
-    payload.set_item("row_candidate_year_min", Vec::<i32>::new().to_pyarray(py))?;
-    payload.set_item("row_candidate_year_max", Vec::<i32>::new().to_pyarray(py))?;
+    payload.set_item("row_candidate_year_min", Vec::<i32>::new().into_pyarray(py))?;
+    payload.set_item("row_candidate_year_max", Vec::<i32>::new().into_pyarray(py))?;
     payload.set_item(
         "row_candidate_year_range_missing",
-        Vec::<u8>::new().to_pyarray(py),
+        Vec::<u8>::new().into_pyarray(py),
     )?;
     payload.set_item("row_query_first_tokens", Vec::<String>::new())?;
-    payload.set_item("row_query_years", Vec::<i32>::new().to_pyarray(py))?;
-    payload.set_item("row_query_year_missing", Vec::<u8>::new().to_pyarray(py))?;
+    payload.set_item("row_query_years", Vec::<i32>::new().into_pyarray(py))?;
+    payload.set_item("row_query_year_missing", Vec::<u8>::new().into_pyarray(py))?;
     payload.set_item(
         "row_query_has_affiliations",
-        Vec::<u8>::new().to_pyarray(py),
+        Vec::<u8>::new().into_pyarray(py),
     )?;
-    payload.set_item("row_query_has_coauthors", Vec::<u8>::new().to_pyarray(py))?;
-    payload.set_item("row_query_has_specter", Vec::<u8>::new().to_pyarray(py))?;
-    payload.set_item("row_query_has_name_counts", Vec::<u8>::new().to_pyarray(py))?;
+    payload.set_item("row_query_has_coauthors", Vec::<u8>::new().into_pyarray(py))?;
+    payload.set_item("row_query_has_specter", Vec::<u8>::new().into_pyarray(py))?;
+    payload.set_item(
+        "row_query_has_name_counts",
+        Vec::<u8>::new().into_pyarray(py),
+    )?;
     payload.set_item(
         "row_candidate_has_affiliations",
-        Vec::<u8>::new().to_pyarray(py),
+        Vec::<u8>::new().into_pyarray(py),
     )?;
     payload.set_item(
         "row_candidate_has_coauthors",
-        Vec::<u8>::new().to_pyarray(py),
+        Vec::<u8>::new().into_pyarray(py),
     )?;
     payload.set_item(
         "row_candidate_has_specter_exemplars",
-        Vec::<u8>::new().to_pyarray(py),
+        Vec::<u8>::new().into_pyarray(py),
     )?;
     payload.set_item(
         "row_candidate_has_name_counts",
-        Vec::<u8>::new().to_pyarray(py),
+        Vec::<u8>::new().into_pyarray(py),
     )?;
-    payload.set_item("row_orcid_match", Vec::<u8>::new().to_pyarray(py))?;
-    payload.set_item(
-        "middle_initial_compatibility",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item("affiliation_overlap", Vec::<f32>::new().to_pyarray(py))?;
-    payload.set_item("coauthor_overlap", Vec::<f32>::new().to_pyarray(py))?;
-    payload.set_item("venue_overlap", Vec::<f32>::new().to_pyarray(py))?;
-    payload.set_item("year_compatibility", Vec::<f32>::new().to_pyarray(py))?;
-    payload.set_item("title_overlap", Vec::<f32>::new().to_pyarray(py))?;
-    payload.set_item(
-        "specter_centroid_similarity",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "specter_exemplar_similarity",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_last_name_count_min_rarity",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_last_name_count_min_rarity",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_last_first_name_count_min_rarity",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_last_first_name_count_min_rarity",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_first_prefix_x_last_first_name_count_min_rarity",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_cluster_max_paper_author_count",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_jaccard",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_containment",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_overlap_count",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_local_author_window10_jaccard_max",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_local_author_window10_overlap_count_max",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_best_author_count_log_absdiff",
-        Vec::<f32>::new().to_pyarray(py),
-    )?;
+    RawArrowEvidenceSignals::default().append_to(py, &payload)?;
     payload.set_item("telemetry", telemetry)?;
     Ok(payload.unbind())
 }
@@ -1793,7 +1964,7 @@ fn raw_arrow_labeled_component_members(
     let Some((block_key, _cluster_key)) = component_key.split_once("::") else {
         return raw_members.to_vec();
     };
-    let filtered = raw_members
+    raw_members
         .iter()
         .filter(|signature_id| {
             signatures
@@ -1802,34 +1973,26 @@ fn raw_arrow_labeled_component_members(
                 .is_some_and(|author_block| author_block == block_key)
         })
         .cloned()
-        .collect::<Vec<_>>();
-    if filtered.is_empty() {
-        raw_members.to_vec()
-    } else {
-        filtered
-    }
+        .collect()
 }
 
-fn raw_arrow_active_members_for_row(
+fn raw_arrow_component_members<'a>(
     component_key: &str,
-    query_signature_id: &str,
-    members_by_component: &HashMap<String, Vec<String>>,
-) -> PyResult<Vec<String>> {
-    let members = members_by_component.get(component_key).ok_or_else(|| {
-        pyo3::exceptions::PyKeyError::new_err(format!(
-            "candidate_component_key missing from members table: {component_key}"
-        ))
-    })?;
-    Ok(members
-        .iter()
-        .filter(|signature_id| signature_id.as_str() != query_signature_id)
-        .cloned()
-        .collect())
+    members_by_component: &'a HashMap<String, Vec<String>>,
+) -> PyResult<&'a [String]> {
+    members_by_component
+        .get(component_key)
+        .map(Vec::as_slice)
+        .ok_or_else(|| {
+            pyo3::exceptions::PyKeyError::new_err(format!(
+                "candidate_component_key missing from members table: {component_key}"
+            ))
+        })
 }
 
-fn raw_arrow_component_summary_for_members(
+fn raw_arrow_component_summary_for_members<S: AsRef<str>>(
     component_key: &str,
-    members: &[String],
+    members: &[S],
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     max_exemplars: usize,
 ) -> PyResult<RetrievalSummaryData> {
@@ -1839,7 +2002,7 @@ fn raw_arrow_component_summary_for_members(
         features_by_signature_id,
         max_exemplars,
     )
-    .map_err(retrieval_string_error_to_py)
+    .map_err(retrieval_error_to_py)
 }
 
 fn raw_arrow_counter_present(counter: &Option<CounterData>) -> bool {
@@ -1850,7 +2013,7 @@ fn raw_arrow_counter_present(counter: &Option<CounterData>) -> bool {
 
 #[pyfunction]
 #[pyo3(signature = (
-    paths,
+    dataset,
     row_query_signature_ids,
     row_query_views,
     row_query_group_ids,
@@ -1863,7 +2026,7 @@ fn raw_arrow_counter_present(counter: &Option<CounterData>) -> bool {
 ))]
 pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     py: Python<'py>,
-    paths: &Bound<'py, PyDict>,
+    dataset: PyRef<'py, ArrowDataset>,
     row_query_signature_ids: Vec<String>,
     row_query_views: Vec<String>,
     row_query_group_ids: Vec<String>,
@@ -1899,7 +2062,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         ));
     }
 
-    let paths = raw_arrow_feature_paths_from_py_dict(paths)?;
+    let dataset = dataset.shared();
     let mut query_signature_ids = Vec::<String>::new();
     let mut query_seen = HashSet::<String>::new();
     for signature_id in row_query_signature_ids.iter() {
@@ -1958,18 +2121,9 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     }
 
     let query_inputs =
-        read_reusable_raw_arrow_query_inputs(py, &paths, &needed_signature_ids, num_threads)?;
-    let raw_name_counts = match paths.name_counts_index_path.as_ref() {
-        Some(path) => read_raw_name_counts_index(path)?,
-        None => match paths.name_counts_arrow_path.as_ref() {
-            Some(path) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "name_counts Arrow path '{path}' requires name_counts_index; refusing slow Arrow fallback"
-                )));
-            }
-            None => RawNameCountMaps::default(),
-        },
-    };
+        read_reusable_raw_arrow_query_inputs(py, &dataset, &needed_signature_ids, num_threads)?;
+    let raw_name_counts = dataset.name_counts();
+    let reused_name_counts_index = raw_name_counts.shared_index().is_some();
 
     let text_context_start = Instant::now();
     let text_module = py.import("s2and.text")?;
@@ -2107,22 +2261,16 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
             })?;
         let (query, resolved_view) = mask_raw_arrow_query(&query_feature.query, requested_view)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let weights = RustHybridCentroidRetriever::default_hybrid_weights_for_query(&query);
-        let config = RustHybridCentroidRetriever::default_experimental_config_for_query(&query);
         let mut scored_rows = Vec::<(usize, f32, u16, String)>::with_capacity(row_indices.len());
         for row_index in row_indices.iter().copied() {
             resolved_row_query_views[row_index] = resolved_view.clone();
             let component_key = row_component_keys[row_index].as_str();
-            let active_members = raw_arrow_active_members_for_row(
-                component_key,
-                query_signature_id,
-                &members_by_component,
-            )?;
-            let summary = if active_members.len()
-                == members_by_component
-                    .get(component_key)
-                    .map_or(usize::MAX, Vec::len)
-            {
+            let component_members =
+                raw_arrow_component_members(component_key, &members_by_component)?;
+            let query_is_component_member = component_members
+                .iter()
+                .any(|signature_id| signature_id == query_signature_id);
+            let summary = if !query_is_component_member {
                 let component_index = retriever
                     .component_index_by_key
                     .get(component_key)
@@ -2133,6 +2281,11 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
                     })?;
                 retriever.summaries[*component_index].clone()
             } else {
+                let active_members: Vec<&str> = component_members
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|signature_id| *signature_id != query_signature_id)
+                    .collect();
                 raw_arrow_component_summary_for_members(
                     component_key,
                     &active_members,
@@ -2140,11 +2293,9 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
                     max_exemplars,
                 )?
             };
-            let score = round_six(score_experimental_hybrid_centroid_query(
+            let score = round_six(score_hybrid_centroid_query(
                 &query,
                 &summary,
-                weights,
-                config,
                 &retriever.coauthor_cluster_df,
                 &retriever.non_mega_coauthor_cluster_df,
                 &retriever.affiliation_cluster_df,
@@ -2172,36 +2323,56 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
                 rank_offset,
                 "raw_arrow_labeled_candidate_plan",
             )
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(retrieval_error_to_py)?;
         }
     }
 
     let mut signature_ids = Vec::<String>::new();
-    let mut signature_seen = HashSet::<String>::new();
+    let mut signature_index_by_id = HashMap::<String, u32>::new();
     for signature_id in row_query_signature_ids.iter() {
-        if signature_seen.insert(signature_id.clone()) {
+        if !signature_index_by_id.contains_key(signature_id) {
+            let signature_index = u32::try_from(signature_ids.len()).map_err(|_| {
+                pyo3::exceptions::PyOverflowError::new_err("signature id table exceeds u32")
+            })?;
+            signature_index_by_id.insert(signature_id.clone(), signature_index);
             signature_ids.push(signature_id.clone());
         }
     }
-    let mut left_signature_ids = Vec::<String>::new();
-    let mut right_signature_ids = Vec::<String>::new();
+    let mut left_signature_indices = Vec::<u32>::new();
+    let mut right_signature_indices = Vec::<u32>::new();
     let mut pair_row_indices = Vec::<u32>::new();
     for (row_index, (query_signature_id, component_key)) in row_query_signature_ids
         .iter()
         .zip(row_component_keys.iter())
         .enumerate()
     {
-        let active_members = raw_arrow_active_members_for_row(
-            component_key,
-            query_signature_id,
-            &members_by_component,
-        )?;
-        for member_signature_id in active_members {
-            if signature_seen.insert(member_signature_id.clone()) {
-                signature_ids.push(member_signature_id.clone());
-            }
-            left_signature_ids.push(query_signature_id.clone());
-            right_signature_ids.push(member_signature_id);
+        let query_signature_index =
+            *signature_index_by_id
+                .get(query_signature_id)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyKeyError::new_err(format!(
+                        "query signature_id '{}' is missing from signature id table",
+                        query_signature_id
+                    ))
+                })?;
+        let component_members = raw_arrow_component_members(component_key, &members_by_component)?;
+        for member_signature_id in component_members
+            .iter()
+            .filter(|signature_id| signature_id.as_str() != query_signature_id)
+        {
+            let member_signature_index =
+                if let Some(index) = signature_index_by_id.get(member_signature_id) {
+                    *index
+                } else {
+                    let index = u32::try_from(signature_ids.len()).map_err(|_| {
+                        pyo3::exceptions::PyOverflowError::new_err("signature id table exceeds u32")
+                    })?;
+                    signature_index_by_id.insert(member_signature_id.clone(), index);
+                    signature_ids.push(member_signature_id.clone());
+                    index
+                };
+            left_signature_indices.push(query_signature_index);
+            right_signature_indices.push(member_signature_index);
             pair_row_indices.push(u32::try_from(row_index).map_err(|_| {
                 pyo3::exceptions::PyOverflowError::new_err(
                     "labeled candidate row index exceeds u32",
@@ -2270,15 +2441,11 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
             mask_raw_arrow_query(&query_feature.query, row_query_views[row_index].as_str())
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
         resolved_row_query_views[row_index] = resolved_view;
-        let active_members = raw_arrow_active_members_for_row(
-            component_key,
-            query_signature_id,
-            &members_by_component,
-        )?;
-        let full_member_count = members_by_component
-            .get(component_key)
-            .map_or(usize::MAX, Vec::len);
-        let (summary, summary_signals) = if active_members.len() == full_member_count {
+        let component_members = raw_arrow_component_members(component_key, &members_by_component)?;
+        let query_is_component_member = component_members
+            .iter()
+            .any(|signature_id| signature_id == query_signature_id);
+        let (summary, summary_signals) = if !query_is_component_member {
             let component_index = retriever
                 .component_index_by_key
                 .get(component_key)
@@ -2299,6 +2466,11 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
             )?;
             (summary, signals)
         } else {
+            let active_members: Vec<&str> = component_members
+                .iter()
+                .map(String::as_str)
+                .filter(|signature_id| *signature_id != query_signature_id)
+                .collect();
             let summary = raw_arrow_component_summary_for_members(
                 component_key,
                 &active_members,
@@ -2370,17 +2542,16 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         }
         let (candidate_year_min, candidate_year_min_missing) =
             year_signal_value(summary.year_min, "candidate year_min")
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                .map_err(retrieval_error_to_py)?;
         let (candidate_year_max, candidate_year_max_missing) =
             year_signal_value(summary.year_max, "candidate year_max")
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let (query_year, query_year_missing) = year_signal_value(query.year, "query year")
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                .map_err(retrieval_error_to_py)?;
+        let (query_year, query_year_missing) =
+            year_signal_value(query.year, "query year").map_err(retrieval_error_to_py)?;
         row_query_authors.push(query_feature.query_author.clone());
         row_component_sizes.push(summary.size.min(u32::MAX as usize) as u32);
         row_named_signature_counts.push(
-            row_named_signature_count(&summary.first_name_counts)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?,
+            row_named_signature_count(&summary.first_name_counts).map_err(retrieval_error_to_py)?,
         );
         row_dominant_first_names.push(dominant_first_name.to_string());
         row_candidate_year_min.push(candidate_year_min);
@@ -2508,6 +2679,29 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     timings.set_item("summary_secs", summary_secs)?;
     timings.set_item("total_secs", total_start.elapsed().as_secs_f64())?;
 
+    let signature_id_objects: Vec<_> = signature_ids
+        .iter()
+        .map(|signature_id| PyString::new(py, signature_id).unbind())
+        .collect();
+    let signature_ids_payload = PyList::new(
+        py,
+        signature_id_objects
+            .iter()
+            .map(|signature_id| signature_id.clone_ref(py)),
+    )?;
+    let left_signature_ids = PyList::new(
+        py,
+        left_signature_indices
+            .iter()
+            .map(|index| signature_id_objects[*index as usize].clone_ref(py)),
+    )?;
+    let right_signature_ids = PyList::new(
+        py,
+        right_signature_indices
+            .iter()
+            .map(|index| signature_id_objects[*index as usize].clone_ref(py)),
+    )?;
+    let pair_count = left_signature_indices.len();
     let telemetry = PyDict::new(py);
     telemetry.set_item("signature_count", signature_ids.len())?;
     telemetry.set_item("paper_count", query_inputs.papers.len())?;
@@ -2515,9 +2709,10 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     telemetry.set_item("component_count", component_order.len())?;
     telemetry.set_item("query_signature_count", query_signature_ids.len())?;
     telemetry.set_item("row_count", row_count)?;
-    telemetry.set_item("pair_count", left_signature_ids.len())?;
+    telemetry.set_item("pair_count", pair_count)?;
     telemetry.set_item("component_scope", "block-local")?;
     telemetry.set_item("orcid_enabled", orcid_enabled)?;
+    telemetry.set_item("reused_name_counts_index", reused_name_counts_index)?;
     telemetry.set_item(
         "signature_batches_read",
         query_inputs.signature_index_stats.batches_read,
@@ -2554,10 +2749,9 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     telemetry.set_item("timings", &timings)?;
 
     let payload = PyDict::new(py);
-    payload.set_item("schema_version", "raw_arrow_labeled_candidate_plan_v1")?;
     payload.set_item("row_count", row_count)?;
-    payload.set_item("pair_count", left_signature_ids.len())?;
-    payload.set_item("signature_ids", signature_ids)?;
+    payload.set_item("pair_count", pair_count)?;
+    payload.set_item("signature_ids", signature_ids_payload)?;
     payload.set_item("query_signature_ids", query_signature_ids)?;
     payload.set_item("row_query_signature_ids", row_query_signature_ids)?;
     payload.set_item("row_query_views", resolved_row_query_views.clone())?;
@@ -2568,134 +2762,89 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     payload.set_item("query_authors", query_authors)?;
     payload.set_item("left_signature_ids", left_signature_ids)?;
     payload.set_item("right_signature_ids", right_signature_ids)?;
-    payload.set_item("pair_row_indices", pair_row_indices.to_pyarray(py))?;
-    payload.set_item("retrieval_scores", row_retrieval_scores.to_pyarray(py))?;
-    payload.set_item("retrieval_ranks", row_retrieval_ranks.to_pyarray(py))?;
-    payload.set_item("row_component_sizes", row_component_sizes.to_pyarray(py))?;
+    payload.set_item("pair_row_indices", pair_row_indices.into_pyarray(py))?;
+    payload.set_item("retrieval_scores", row_retrieval_scores.into_pyarray(py))?;
+    payload.set_item("retrieval_ranks", row_retrieval_ranks.into_pyarray(py))?;
+    payload.set_item("row_component_sizes", row_component_sizes.into_pyarray(py))?;
     payload.set_item(
         "row_named_signature_counts",
-        row_named_signature_counts.to_pyarray(py),
+        row_named_signature_counts.into_pyarray(py),
     )?;
     payload.set_item("row_dominant_first_names", row_dominant_first_names)?;
     payload.set_item(
         "row_candidate_year_min",
-        row_candidate_year_min.to_pyarray(py),
+        row_candidate_year_min.into_pyarray(py),
     )?;
     payload.set_item(
         "row_candidate_year_max",
-        row_candidate_year_max.to_pyarray(py),
+        row_candidate_year_max.into_pyarray(py),
     )?;
     payload.set_item(
         "row_candidate_year_range_missing",
-        row_candidate_year_range_missing.to_pyarray(py),
+        row_candidate_year_range_missing.into_pyarray(py),
     )?;
     payload.set_item("row_query_first_tokens", row_query_first_tokens)?;
-    payload.set_item("row_query_years", row_query_years.to_pyarray(py))?;
+    payload.set_item("row_query_years", row_query_years.into_pyarray(py))?;
     payload.set_item(
         "row_query_year_missing",
-        row_query_year_missing.to_pyarray(py),
+        row_query_year_missing.into_pyarray(py),
     )?;
     payload.set_item(
         "row_query_has_affiliations",
-        row_query_has_affiliations.to_pyarray(py),
+        row_query_has_affiliations.into_pyarray(py),
     )?;
     payload.set_item(
         "row_query_has_coauthors",
-        row_query_has_coauthors.to_pyarray(py),
+        row_query_has_coauthors.into_pyarray(py),
     )?;
     payload.set_item(
         "row_query_has_specter",
-        row_query_has_specter.to_pyarray(py),
+        row_query_has_specter.into_pyarray(py),
     )?;
     payload.set_item(
         "row_query_has_name_counts",
-        row_query_has_name_counts.to_pyarray(py),
+        row_query_has_name_counts.into_pyarray(py),
     )?;
     payload.set_item(
         "row_candidate_has_affiliations",
-        row_candidate_has_affiliations.to_pyarray(py),
+        row_candidate_has_affiliations.into_pyarray(py),
     )?;
     payload.set_item(
         "row_candidate_has_coauthors",
-        row_candidate_has_coauthors.to_pyarray(py),
+        row_candidate_has_coauthors.into_pyarray(py),
     )?;
     payload.set_item(
         "row_candidate_has_specter_exemplars",
-        row_candidate_has_specter_exemplars.to_pyarray(py),
+        row_candidate_has_specter_exemplars.into_pyarray(py),
     )?;
     payload.set_item(
         "row_candidate_has_name_counts",
-        row_candidate_has_name_counts.to_pyarray(py),
+        row_candidate_has_name_counts.into_pyarray(py),
     )?;
-    payload.set_item("row_orcid_match", row_orcid_match.to_pyarray(py))?;
-    payload.set_item(
-        "middle_initial_compatibility",
-        row_middle_initial_compatibility.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "affiliation_overlap",
-        row_affiliation_overlap.to_pyarray(py),
-    )?;
-    payload.set_item("coauthor_overlap", row_coauthor_overlap.to_pyarray(py))?;
-    payload.set_item("venue_overlap", row_venue_overlap.to_pyarray(py))?;
-    payload.set_item("year_compatibility", row_year_compatibility.to_pyarray(py))?;
-    payload.set_item("title_overlap", row_title_overlap.to_pyarray(py))?;
-    payload.set_item(
-        "specter_centroid_similarity",
-        row_specter_centroid_similarity.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "specter_exemplar_similarity",
-        row_specter_exemplar_similarity.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_last_name_count_min_rarity",
-        row_last_name_count_min_rarity.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_last_name_count_min_rarity",
-        row_candidate_last_name_count_min_rarity.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_last_first_name_count_min_rarity",
-        row_candidate_last_first_name_count_min_rarity.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_last_first_name_count_min_rarity",
-        row_last_first_name_count_min_rarity.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_first_prefix_x_last_first_name_count_min_rarity",
-        row_first_prefix_x_last_first_name_count_min_rarity.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_candidate_cluster_max_paper_author_count",
-        row_candidate_cluster_max_paper_author_count.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_jaccard",
-        row_paper_author_list_max_jaccard.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_containment",
-        row_paper_author_list_max_containment.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_paper_author_list_max_overlap_count",
-        row_paper_author_list_max_overlap_count.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_local_author_window10_jaccard_max",
-        row_local_author_window10_jaccard_max.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_local_author_window10_overlap_count_max",
-        row_local_author_window10_overlap_count_max.to_pyarray(py),
-    )?;
-    payload.set_item(
-        "row_best_author_count_log_absdiff",
-        row_best_author_count_log_absdiff.to_pyarray(py),
-    )?;
+    RawArrowEvidenceSignals {
+        row_orcid_match,
+        row_middle_initial_compatibility,
+        row_affiliation_overlap,
+        row_coauthor_overlap,
+        row_venue_overlap,
+        row_year_compatibility,
+        row_title_overlap,
+        row_specter_centroid_similarity,
+        row_specter_exemplar_similarity,
+        row_last_name_count_min_rarity,
+        row_candidate_last_name_count_min_rarity,
+        row_candidate_last_first_name_count_min_rarity,
+        row_last_first_name_count_min_rarity,
+        row_first_prefix_x_last_first_name_count_min_rarity,
+        row_candidate_cluster_max_paper_author_count,
+        row_paper_author_list_max_jaccard,
+        row_paper_author_list_max_containment,
+        row_paper_author_list_max_overlap_count,
+        row_local_author_window10_jaccard_max,
+        row_local_author_window10_overlap_count_max,
+        row_best_author_count_log_absdiff,
+    }
+    .append_to(py, &payload)?;
     payload.set_item("telemetry", telemetry)?;
     Ok(payload.unbind())
 }

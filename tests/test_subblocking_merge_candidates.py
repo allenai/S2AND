@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from itertools import combinations
 from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
 import pytest
 
-from s2and.arrow_inputs import MissingArrowArtifactError
+from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
 from s2and.subblocking import (
     GraphSubblockingConfig,
+    _pack_component_ids_greedy,
     _projection_neighbor_edge_scores,
     _prune_edge_scores,
     _score_candidate_edge,
@@ -20,67 +20,12 @@ from s2and.subblocking import (
     make_dataset_graph_subblocking_cluster_fn,
     make_subblocks_with_telemetry,
 )
-from s2and.text import same_prefix_tokens
-
-
-def _legacy_sorted_subblock_merge_candidates(output, maximum_size, first_k_letter_counts_sorted):
-    small_enough_keys = [k for k, v in output.items() if len(v) < maximum_size]
-    small_enough_pairs_counts = []
-    for pair in list(combinations(small_enough_keys, 2)):
-        if len(output[pair[0]]) + len(output[pair[1]]) <= maximum_size:
-            pair_0_split = pair[0].split("|")
-            pair_1_split = pair[1].split("|")
-
-            first_name_1 = pair_0_split[0]
-            first_name_2 = pair_1_split[0]
-
-            if len(pair_0_split) > 1:
-                middle_name_1 = pair_0_split[1].split("=")[1]
-            else:
-                middle_name_1 = None
-
-            if len(pair_1_split) > 1:
-                middle_name_2 = pair_1_split[1].split("=")[1]
-            else:
-                middle_name_2 = None
-
-            if len(first_name_1) > 1 and len(first_name_2) > 1:
-                name_for_splits_1 = first_name_1
-                name_for_splits_2 = first_name_2
-            elif (
-                len(first_name_1) == 1
-                and len(first_name_2) == 1
-                and middle_name_1 is not None
-                and middle_name_2 is not None
-            ):
-                name_for_splits_1 = middle_name_1
-                name_for_splits_2 = middle_name_2
-            else:
-                continue
-
-            if name_for_splits_1 == name_for_splits_2:
-                if middle_name_1 is not None and middle_name_2 is not None:
-                    score = 0
-                    for i in range(1, len(middle_name_1)):
-                        if middle_name_1[:i] == middle_name_2[:i]:
-                            score = i
-                else:
-                    score = 0
-                small_enough_pairs_counts.append((pair, 1e10 + score))
-            elif same_prefix_tokens(name_for_splits_1, name_for_splits_2):
-                score = min(len(name_for_splits_1), len(name_for_splits_2))
-                small_enough_pairs_counts.append((pair, 1e5 + score))
-            else:
-                lookup_1 = name_for_splits_1.split(" ")[0]
-                lookup_2 = name_for_splits_2.split(" ")[0]
-                if lookup_1 in first_k_letter_counts_sorted and lookup_2 in first_k_letter_counts_sorted[lookup_1]:
-                    small_enough_pairs_counts.append((pair, first_k_letter_counts_sorted[lookup_1][lookup_2]))
-
-    return sorted(small_enough_pairs_counts, key=lambda x: (x[1], x[0][0], x[0][1]), reverse=True)
+from tests.helpers import write_test_arrow_artifact_manifest
 
 
 def _write_arrow_ipc_batches(path, batches) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with pa.OSFile(str(path), "wb") as sink:
         with pa.ipc.new_file(sink, batches[0].schema) as writer:
@@ -88,21 +33,104 @@ def _write_arrow_ipc_batches(path, batches) -> None:
                 writer.write_batch(batch)
 
 
-def _add_graph_batch_indexes(paths: dict[str, Any], tmp_path) -> dict[str, Any]:
-    specter_key = "specter2" if "specter2" in paths and "specter" not in paths else "specter"
+def _open_graph_dataset(paths: dict[str, Any], tmp_path) -> ArrowDataset:
+    import pyarrow as pa
+
+    with pa.memory_map(str(paths["signatures"]), "r") as source:
+        signatures = pa.ipc.open_file(source).read_all()
+    for column_name, value in (
+        ("author_last", ""),
+        ("author_suffix", ""),
+        ("author_block", "h test"),
+    ):
+        if column_name not in signatures.column_names:
+            signatures = signatures.append_column(
+                column_name,
+                pa.array([value] * signatures.num_rows, type=pa.string()),
+            )
+    signatures_path = tmp_path / "signatures.complete.arrow"
+    write_arrow_ipc_table(signatures, signatures_path)
+    paths["signatures"] = signatures_path
+    paper_ids = {str(value) for value in signatures["paper_id"].to_pylist() if value is not None and str(value)}
+    papers_path = tmp_path / "papers.arrow"
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(sorted(paper_ids) or ["p1"], type=pa.string()),
+                "title": pa.array([""] * max(1, len(paper_ids)), type=pa.string()),
+                "venue": pa.array([""] * max(1, len(paper_ids)), type=pa.string()),
+                "journal_name": pa.array([""] * max(1, len(paper_ids)), type=pa.string()),
+            }
+        ),
+        papers_path,
+    )
+    paths["papers"] = papers_path
     index_specs = (
         ("signatures", "signatures_batch_index", "signature_id"),
+        ("papers", "papers_batch_index", "paper_id"),
         ("paper_authors", "paper_authors_batch_index", "paper_id"),
-        (specter_key, f"{specter_key}_batch_index", "paper_id"),
+        ("specter", "specter_batch_index", "paper_id"),
     )
     for table_key, index_key, key_column in index_specs:
         index_path = tmp_path / f"{table_key}.{index_key}.bin"
         write_arrow_batch_lookup_index(paths[table_key], index_path, key_column=key_column, table_name=table_key)
         paths[index_key] = index_path
-    return paths
+    write_test_arrow_artifact_manifest(tmp_path, {key: str(path) for key, path in paths.items()})
+    return ArrowDataset.open(tmp_path, require_specter=True)
 
 
-def test_sorted_subblock_merge_candidates_matches_legacy_edge_cases() -> None:
+def _single_signature_graph_dataset(
+    tmp_path,
+    *,
+    paper_id: str | None = "p1",
+    author_affiliations: tuple[str | None, ...] = ("lab",),
+    author_position: int | None = 0,
+) -> ArrowDataset:
+    import pyarrow as pa
+
+    signatures_path = tmp_path / "signatures.arrow"
+    paper_authors_path = tmp_path / "paper_authors.arrow"
+    specter_path = tmp_path / "specter.arrow"
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "signature_id": pa.array(["s1"], type=pa.string()),
+                "paper_id": pa.array([paper_id], type=pa.string()),
+                "author_first": pa.array(["hui"], type=pa.string()),
+                "author_middle": pa.array([""], type=pa.string()),
+                "author_affiliations": pa.array([author_affiliations], type=pa.list_(pa.string())),
+                "author_orcid": pa.array([None], type=pa.string()),
+                "author_position": pa.array([author_position], type=pa.int64()),
+            }
+        ),
+        signatures_path,
+    )
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(["p1"], type=pa.string()),
+                "position": pa.array([0], type=pa.int64()),
+                "author_name": pa.array(["Hui Wang"], type=pa.string()),
+            }
+        ),
+        paper_authors_path,
+    )
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(["p1"], type=pa.string()),
+                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([1.0, 0.0], type=pa.float32()), 2),
+            }
+        ),
+        specter_path,
+    )
+    return _open_graph_dataset(
+        {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter": specter_path},
+        tmp_path,
+    )
+
+
+def test_sorted_subblock_merge_candidates_handles_edge_cases() -> None:
     output = {
         "alex": ["a1", "a2"],
         "alex|middle=w": ["a3"],
@@ -117,15 +145,13 @@ def test_sorted_subblock_merge_candidates_matches_legacy_edge_cases() -> None:
     }
     counts = {
         "alex": {"bo": 7},
-        "bo": {"alex": 99},
-        "wei": {"li": 5},
         "li": {"wei": 11},
     }
 
     observed = _sorted_subblock_merge_candidates(output, maximum_size=5, first_k_letter_counts_sorted=counts)
-    expected = _legacy_sorted_subblock_merge_candidates(output, maximum_size=5, first_k_letter_counts_sorted=counts)
 
-    assert observed == expected
+    assert (("alex", "bo"), 7) in observed
+    assert (("a|middle=wei", "a|middle=li"), 11) in observed
     assert (("carol", "david"), 0) not in observed
     assert any(pair == ("a|middle=wei", "a|middle=weijun") for pair, _score in observed)
 
@@ -148,6 +174,25 @@ def test_sorted_subblock_merge_candidates_middle_prefix_score_is_order_invariant
     assert score_for(short_first) == score_for(long_first) == 1e10 + 2
 
 
+def test_sorted_subblock_merge_candidates_orcid_counts_are_order_invariant() -> None:
+    counts = {"li": {"wei": 7}}
+    forward = _sorted_subblock_merge_candidates(
+        {"a|middle=wei": ["s1"], "a|middle=li": ["s2"]},
+        maximum_size=3,
+        first_k_letter_counts_sorted=counts,
+    )
+    reverse = _sorted_subblock_merge_candidates(
+        {"a|middle=li": ["s2"], "a|middle=wei": ["s1"]},
+        maximum_size=3,
+        first_k_letter_counts_sorted=counts,
+    )
+
+    assert [(frozenset(pair), score) for pair, score in forward] == [
+        (frozenset(pair), score) for pair, score in reverse
+    ]
+    assert forward[0][1] == 7
+
+
 def test_sorted_subblock_merge_candidates_keeps_exact_maximum_size_pair() -> None:
     output = {
         "alex|middle=a": ["s1", "s2"],
@@ -159,7 +204,8 @@ def test_sorted_subblock_merge_candidates_keeps_exact_maximum_size_pair() -> Non
     ]
 
 
-def test_projection_neighbor_edge_scores_match_slow_reference() -> None:
+@pytest.mark.parametrize("row_count", [1, 6], ids=["singleton-no-self-edges", "overlapping-neighborhoods"])
+def test_projection_neighbor_edge_scores_match_slow_reference(row_count: int) -> None:
     matrix = np.asarray(
         [
             [1.0, 0.0, 0.0],
@@ -171,6 +217,7 @@ def test_projection_neighbor_edge_scores_match_slow_reference() -> None:
         ],
         dtype=np.float32,
     )
+    matrix = matrix[:row_count]
     matrix /= np.linalg.norm(matrix, axis=1)[:, None]
     evidences = [
         SimpleNamespace(coauthor_blocks=frozenset({"a"}), affiliation_keys=frozenset({"lab1"})),
@@ -180,6 +227,7 @@ def test_projection_neighbor_edge_scores_match_slow_reference() -> None:
         SimpleNamespace(coauthor_blocks=frozenset({"c"}), affiliation_keys=frozenset({"lab3"})),
         SimpleNamespace(coauthor_blocks=frozenset({"c"}), affiliation_keys=frozenset({"lab1"})),
     ]
+    evidences = evidences[:row_count]
     config = GraphSubblockingConfig(
         projection_count=4,
         projection_window=3,
@@ -224,29 +272,29 @@ def test_prune_edge_scores_tie_breaker_is_independent_of_insertion_order() -> No
     assert tuple(reverse) == tuple(forward)
 
 
-def test_sorted_subblock_merge_candidates_matches_legacy_many_keys() -> None:
-    output = {}
-    counts = {}
-    for index in range(80):
-        if index % 3 == 0:
-            key = f"al{index}"
-        elif index % 3 == 1:
-            key = f"a|middle=mi{index}"
-        else:
-            key = f"bo {index}"
-        output[key] = [f"s{index}_{j}" for j in range(index % 4 + 1)]
-    for left in range(0, 80, 5):
-        counts.setdefault(f"al{left}", {})["bo"] = left + 1
-
-    assert _sorted_subblock_merge_candidates(output, 7, counts) == _legacy_sorted_subblock_merge_candidates(
-        output,
-        7,
-        counts,
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [("edge-greedy", [[0, 2], [1, 3]]), ("aggregate-greedy", [[0, 3], [1, 2]])],
+)
+def test_component_packing_uses_selected_affinity_within_capacity(strategy, expected) -> None:
+    # A and B cannot share a bin. C favors A's best edge (.8), but B's total (1.1).
+    components = [["a0", "a1"], ["b0", "b1"], ["c"], ["d"]]
+    edges = {(0, 1): 100.0, (0, 4): 0.8, (1, 4): 0.1, (2, 4): 0.5, (3, 4): 0.6}
+    bins = _pack_component_ids_greedy(
+        components,
+        edges,
+        root_by_index=[0, 0, 2, 2, 4, 5],
+        component_id_by_root={0: 0, 2: 1, 4: 2, 5: 3},
+        target_subblock_size=3,
+        config=GraphSubblockingConfig(component_pack_strategy=strategy),
     )
 
+    assert bins == expected
+    assert [sum(len(components[index]) for index in bucket) for bucket in bins] == [3, 3]
 
-def test_arrow_graph_subblocking_fallback_loads_arrow_evidence_and_packs_components(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
+
+def test_arrow_graph_subblocking_fallback_accepts_missing_orcid_and_packs_components(tmp_path) -> None:
+    import pyarrow as pa
 
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
@@ -267,7 +315,6 @@ def test_arrow_graph_subblocking_fallback_loads_arrow_evidence_and_packs_compone
                         ["Department of Robotics, Other University"],
                     ]
                 ),
-                "author_orcid": pa.array([None, None, None, None], type=pa.string()),
                 "author_position": pa.array([0, 0, 0, 0], type=pa.int64()),
             }
         ),
@@ -317,14 +364,13 @@ def test_arrow_graph_subblocking_fallback_loads_arrow_evidence_and_packs_compone
         specter_path,
     )
 
-    paths = _add_graph_batch_indexes(
+    arrow_dataset = _open_graph_dataset(
         {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter": specter_path},
         tmp_path,
     )
 
     fallback = make_arrow_graph_subblocking_cluster_fn(
-        paths,
-        ["s1", "s2", "s3", "s4"],
+        arrow_dataset,
         config=GraphSubblockingConfig(
             neighbor_mode="exact",
             neighbors=1,
@@ -350,161 +396,39 @@ def test_arrow_graph_subblocking_fallback_loads_arrow_evidence_and_packs_compone
     s1_affiliation_keys = fallback._dataset.signatures["s1"].author_info_affiliations_n_grams
     assert s1_affiliation_keys is not None
     assert "artificial intelligence" in s1_affiliation_keys
+    arrow_dataset.close()
 
 
 def test_arrow_graph_subblocking_rejects_null_author_position(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    signatures_path = tmp_path / "signatures.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter_path = tmp_path / "specter.arrow"
-
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(["s1"], type=pa.string()),
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "author_first": pa.array(["hui"], type=pa.string()),
-                "author_middle": pa.array([""], type=pa.string()),
-                "author_affiliations": pa.array([["lab"]], type=pa.list_(pa.string())),
-                "author_orcid": pa.array([None], type=pa.string()),
-                "author_position": pa.array([None], type=pa.int64()),
-            }
-        ),
-        signatures_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "position": pa.array([0], type=pa.int64()),
-                "author_name": pa.array(["Hui Wang"], type=pa.string()),
-            }
-        ),
-        paper_authors_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([1.0, 0.0], type=pa.float32()), 2),
-            }
-        ),
-        specter_path,
-    )
-    paths = _add_graph_batch_indexes(
-        {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter": specter_path},
-        tmp_path,
-    )
-    fallback = make_arrow_graph_subblocking_cluster_fn(paths, ["s1"])
+    arrow_dataset = _single_signature_graph_dataset(tmp_path, author_position=None)
+    fallback = make_arrow_graph_subblocking_cluster_fn(arrow_dataset)
 
     with pytest.raises(ValueError, match="null author_position"):
         fallback(["s1"], object(), target_subblock_size=2)
+    arrow_dataset.close()
 
 
 def test_arrow_graph_subblocking_rejects_null_affiliation_items(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    signatures_path = tmp_path / "signatures.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter_path = tmp_path / "specter.arrow"
-
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(["s1"], type=pa.string()),
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "author_first": pa.array(["hui"], type=pa.string()),
-                "author_middle": pa.array([""], type=pa.string()),
-                "author_affiliations": pa.array([["lab", None]], type=pa.list_(pa.string())),
-                "author_orcid": pa.array([None], type=pa.string()),
-                "author_position": pa.array([0], type=pa.int64()),
-            }
-        ),
-        signatures_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "position": pa.array([0], type=pa.int64()),
-                "author_name": pa.array(["Hui Wang"], type=pa.string()),
-            }
-        ),
-        paper_authors_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([1.0, 0.0], type=pa.float32()), 2),
-            }
-        ),
-        specter_path,
-    )
-    paths = _add_graph_batch_indexes(
-        {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter": specter_path},
-        tmp_path,
-    )
-    fallback = make_arrow_graph_subblocking_cluster_fn(paths, ["s1"])
+    arrow_dataset = _single_signature_graph_dataset(tmp_path, author_affiliations=("lab", None))
+    fallback = make_arrow_graph_subblocking_cluster_fn(arrow_dataset)
 
     with pytest.raises(ValueError, match="cannot contain null values"):
         fallback(["s1"], object(), target_subblock_size=2)
+    arrow_dataset.close()
 
 
 @pytest.mark.parametrize("paper_id", [None, ""])
 def test_arrow_graph_subblocking_rejects_null_or_empty_paper_id(tmp_path, paper_id) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    signatures_path = tmp_path / "signatures.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter_path = tmp_path / "specter.arrow"
-
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(["s1"], type=pa.string()),
-                "paper_id": pa.array([paper_id], type=pa.string()),
-                "author_first": pa.array(["hui"], type=pa.string()),
-                "author_middle": pa.array([""], type=pa.string()),
-                "author_affiliations": pa.array([["lab"]], type=pa.list_(pa.string())),
-                "author_orcid": pa.array([None], type=pa.string()),
-                "author_position": pa.array([0], type=pa.int64()),
-            }
-        ),
-        signatures_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "position": pa.array([0], type=pa.int64()),
-                "author_name": pa.array(["Hui Wang"], type=pa.string()),
-            }
-        ),
-        paper_authors_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([1.0, 0.0], type=pa.float32()), 2),
-            }
-        ),
-        specter_path,
-    )
-    paths = _add_graph_batch_indexes(
-        {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter": specter_path},
-        tmp_path,
-    )
-    fallback = make_arrow_graph_subblocking_cluster_fn(paths, ["s1"])
+    arrow_dataset = _single_signature_graph_dataset(tmp_path, paper_id=paper_id)
+    fallback = make_arrow_graph_subblocking_cluster_fn(arrow_dataset)
 
     with pytest.raises(ValueError, match="null/empty paper_id"):
         fallback(["s1"], object(), target_subblock_size=2)
+    arrow_dataset.close()
 
 
 def test_arrow_graph_subblocking_prepare_limits_loaded_evidence_to_fallback_union(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
@@ -595,13 +519,12 @@ def test_arrow_graph_subblocking_prepare_limits_loaded_evidence_to_fallback_unio
         ],
     )
 
-    paths = _add_graph_batch_indexes(
+    arrow_dataset = _open_graph_dataset(
         {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter": specter_path},
         tmp_path,
     )
     fallback = make_arrow_graph_subblocking_cluster_fn(
-        paths,
-        ["s1", "s2", "s3", "s4"],
+        arrow_dataset,
         config=GraphSubblockingConfig(neighbor_mode="exact", neighbors=1, min_edge_score=0.8),
         random_seed=7,
     )
@@ -620,117 +543,11 @@ def test_arrow_graph_subblocking_prepare_limits_loaded_evidence_to_fallback_unio
     assert fallback.load_metrics["specter_record_batches_scanned"] == 1
     assert fallback.load_metrics["specter_rows_scanned"] == 2
     assert fallback.load_metrics["specter_rows_loaded"] == 2
-
-
-def test_arrow_graph_subblocking_requires_batch_indexes(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    signatures_path = tmp_path / "signatures.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter_path = tmp_path / "specter.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(["s1"], type=pa.string()),
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "author_first": pa.array(["hui"], type=pa.string()),
-                "author_middle": pa.array([""], type=pa.string()),
-                "author_affiliations": pa.array([["lab"]]),
-                "author_orcid": pa.array([None], type=pa.string()),
-                "author_position": pa.array([0], type=pa.int64()),
-            }
-        ),
-        signatures_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "position": pa.array([0], type=pa.int64()),
-                "author_name": pa.array(["Hui Wang"], type=pa.string()),
-            }
-        ),
-        paper_authors_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([1.0, 0.0], type=pa.float32()), 2),
-            }
-        ),
-        specter_path,
-    )
-    fallback = make_arrow_graph_subblocking_cluster_fn(
-        {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter": specter_path},
-        ["s1"],
-    )
-
-    with pytest.raises(MissingArrowArtifactError, match="signatures_batch_index"):
-        fallback.prepare([["s1"]])
-
-
-def test_arrow_graph_subblocking_accepts_specter2_with_matching_batch_index(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    signatures_path = tmp_path / "signatures.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter2_path = tmp_path / "specter2.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(["s1", "s2"], type=pa.string()),
-                "paper_id": pa.array(["p1", "p2"], type=pa.string()),
-                "author_first": pa.array(["hui", "hui"], type=pa.string()),
-                "author_middle": pa.array(["", ""], type=pa.string()),
-                "author_affiliations": pa.array([["lab"], ["lab"]], type=pa.list_(pa.string())),
-                "author_orcid": pa.array([None, None], type=pa.string()),
-                "author_position": pa.array([0, 0], type=pa.int64()),
-            }
-        ),
-        signatures_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1", "p2"], type=pa.string()),
-                "position": pa.array([0, 0], type=pa.int64()),
-                "author_name": pa.array(["Hui Wang", "Hui Wang"], type=pa.string()),
-            }
-        ),
-        paper_authors_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1", "p2"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([1.0, 0.0, 0.99, 0.01], type=pa.float32()), 2),
-            }
-        ),
-        specter2_path,
-    )
-    paths = _add_graph_batch_indexes(
-        {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter2": specter2_path},
-        tmp_path,
-    )
-    assert "specter2_batch_index" in paths
-    assert "specter_batch_index" not in paths
-
-    fallback = make_arrow_graph_subblocking_cluster_fn(
-        paths,
-        ["s1", "s2"],
-        config=GraphSubblockingConfig(neighbor_mode="exact", neighbors=1, min_edge_score=0.8),
-        random_seed=7,
-    )
-
-    subblocks = fallback(["s1", "s2"], object(), target_subblock_size=2)
-
-    assert {frozenset(values) for values in subblocks.values()} == {frozenset({"s1", "s2"})}
-    assert fallback.load_metrics["specter_rows_loaded"] == 2
+    arrow_dataset.close()
 
 
 def test_arrow_graph_subblocking_tolerates_sparse_evidence_and_reports_load_metrics(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
 
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
@@ -779,14 +596,13 @@ def test_arrow_graph_subblocking_tolerates_sparse_evidence_and_reports_load_metr
         specter_path,
     )
 
-    paths = _add_graph_batch_indexes(
+    arrow_dataset = _open_graph_dataset(
         {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter": specter_path},
         tmp_path,
     )
 
     fallback = make_arrow_graph_subblocking_cluster_fn(
-        paths,
-        ["s1", "s2", "s3", "s4"],
+        arrow_dataset,
         config=GraphSubblockingConfig(
             neighbor_mode="projection",
             projection_count=2,
@@ -814,6 +630,7 @@ def test_arrow_graph_subblocking_tolerates_sparse_evidence_and_reports_load_metr
     assert fallback.stats[0]["candidate_edge_count"] == 0
     assert fallback.stats[0]["raw_component_count"] == 4
     assert fallback.stats[0]["packed_component_count"] == 2
+    arrow_dataset.close()
 
 
 def test_graph_subblocking_packs_micro_components_before_legacy_merge() -> None:
@@ -855,6 +672,7 @@ def test_graph_subblocking_packs_micro_components_before_legacy_merge() -> None:
         signature_ids,
         dataset,
         maximum_size=2,
+        first_k_letter_counts_sorted={},
         specter_cluster_fn=fallback,
     )
 
@@ -909,7 +727,7 @@ def test_graph_subblocking_uses_raw_paper_coauthors_when_signature_blocks_are_mi
     dataset = SimpleNamespace(
         signatures=signatures,
         papers=papers,
-        specter_embeddings={f"p{index}": np.zeros(2, dtype=np.float32) for index in range(4)},
+        specter_embeddings={},
         random_seed=0,
     )
     hidden_stats: list[dict[str, object]] = []

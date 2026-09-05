@@ -1,146 +1,144 @@
-use cld2::{detect_language_ext as cld2_detect_language_ext, Format as Cld2Format};
-use fasttext::FastText;
-use pyo3::prelude::*;
+use cld2::{
+    detect_language_ext as cld2_detect_language_ext, Format as Cld2Format,
+    Reliability as Cld2Reliability,
+};
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 
-fn parse_fasttext_label(label: &str) -> String {
-    label.rsplit("__").next().unwrap_or(label).to_string()
+/// Python `str.isalpha` counts only general-category Letter (L*) characters,
+/// while Rust's `char::is_alphabetic` is the wider derived `Alphabetic`
+/// property (L* plus Nl plus `Other_Alphabetic`, e.g. Indic combining vowel
+/// signs). Keep this precheck aligned with Python `s2and.text.detect_language`.
+pub(crate) fn is_python_alpha(ch: char) -> bool {
+    ch.general_category_group() == GeneralCategoryGroup::Letter
 }
 
-fn resolve_fasttext_model_path(py: Python<'_>) -> PyResult<String> {
-    let consts = py.import("s2and.consts")?;
-    let fasttext_path = consts.getattr("FASTTEXT_PATH")?;
-    let file_cache = py.import("s2and.file_cache")?;
-    let cached_path = file_cache.getattr("cached_path")?;
-    cached_path.call1((&fasttext_path,))?.extract()
+pub(crate) fn python_alpha_count(text: &str) -> usize {
+    text.chars().filter(|ch| is_python_alpha(*ch)).count()
 }
 
-fn python_fasttext_loading_enabled(py: Python<'_>) -> bool {
-    if let Ok(value) = std::env::var("S2AND_SKIP_FASTTEXT") {
-        if matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes"
-        ) {
-            return false;
-        }
-    }
-    py.import("s2and.text")
-        .and_then(|text_module| text_module.getattr("fasttext_loading_enabled"))
-        .and_then(|enabled_fn| enabled_fn.call0())
-        .and_then(|enabled| enabled.extract::<bool>())
-        .unwrap_or(true)
-}
-
-pub(crate) struct LanguageDetectorCompat {
-    fasttext: Option<FastText>,
+fn is_pycld2_rejected_control(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0000}'..='\u{0008}'
+            | '\u{000B}'
+            | '\u{000E}'..='\u{001F}'
+            | '\u{007F}'..='\u{009F}'
+    )
 }
 
 pub(crate) struct LanguageDetectionAudit {
     pub(crate) predicted_language: String,
-    pub(crate) is_reliable: bool,
-    pub(crate) is_english: bool,
+    pub(crate) language_reliability: f64,
 }
 
-impl LanguageDetectorCompat {
-    pub(crate) fn new(py: Python<'_>) -> PyResult<Self> {
-        if !python_fasttext_loading_enabled(py) {
-            return Ok(Self { fasttext: None });
-        }
-        let model_path = resolve_fasttext_model_path(py)?;
-        let mut model = FastText::new();
-        model.load_model(&model_path).map_err(|err| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "s2and_rust: failed to load fastText language model at '{model_path}' ({err})"
-            ))
-        })?;
-        Ok(Self {
-            fasttext: Some(model),
-        })
+pub(crate) fn detect_language_compat(text: &str) -> LanguageDetectionAudit {
+    // pycld2 rejects these C0/C1 controls while Rust cld2 accepts them.
+    // Python catches that binding error and returns "un"/0.0, so reject the
+    // same inputs before applying Rust's word and alphabetic gates.
+    if text.chars().any(is_pycld2_rejected_control) {
+        return unknown_language_detection();
     }
 
-    pub(crate) fn detect(&self, text: &str) -> PyResult<(bool, bool, String)> {
-        let audit = self.audit(text)?;
-        Ok((
-            audit.is_reliable,
-            audit.is_english,
-            audit.predicted_language,
-        ))
+    if text.split_whitespace().count() <= 1 || python_alpha_count(text) == 0 {
+        return unknown_language_detection();
     }
 
-    pub(crate) fn audit(&self, text: &str) -> PyResult<LanguageDetectionAudit> {
-        if text.split_whitespace().count() <= 1 {
-            return Ok(LanguageDetectionAudit {
-                predicted_language: "un".to_string(),
-                is_reliable: false,
-                is_english: false,
-            });
+    let cld2_result = cld2_detect_language_ext(text, Cld2Format::Text, &Default::default());
+    let top_score = cld2_result.scores[0];
+    let predicted_language = match top_score.language {
+        Some(lang) if lang.0 != "un" => lang.0.to_string(),
+        _ => return unknown_language_detection(),
+    };
+
+    let is_reliable = cld2_result.reliability == Cld2Reliability::Reliable;
+    let language_reliability = if is_reliable {
+        top_score.percent as f64 / 100.0
+    } else {
+        0.0
+    };
+    LanguageDetectionAudit {
+        predicted_language,
+        language_reliability,
+    }
+}
+
+fn unknown_language_detection() -> LanguageDetectionAudit {
+    LanguageDetectionAudit {
+        predicted_language: "un".to_string(),
+        language_reliability: 0.0,
+    }
+}
+
+#[cfg(test)]
+mod alpha_gate_tests {
+    use super::{
+        detect_language_compat, is_pycld2_rejected_control, is_python_alpha, python_alpha_count,
+    };
+
+    #[test]
+    fn letter_categories_are_python_alpha() {
+        for ch in ['a', 'Z', '\u{00E9}', '\u{6C49}', '\u{02B0}', '\u{01C5}'] {
+            assert!(is_python_alpha(ch), "{ch:?}");
         }
+    }
 
-        let mut alpha_count = 0usize;
-        let mut uppercase_count = 0usize;
-        for ch in text.chars() {
-            if ch.is_alphabetic() {
-                alpha_count += 1;
-                if ch.is_uppercase() {
-                    uppercase_count += 1;
-                }
-            }
+    #[test]
+    fn other_alphabetic_and_letter_number_are_not_python_alpha() {
+        // U+093F DEVANAGARI VOWEL SIGN I (Mn, Other_Alphabetic) and
+        // U+2160 ROMAN NUMERAL ONE (Nl) are `Alphabetic` in Rust but
+        // isalpha() == False in Python.
+        for ch in ['\u{093F}', '\u{2160}'] {
+            assert!(ch.is_alphabetic(), "{ch:?} lost its Alphabetic property");
+            assert!(!is_python_alpha(ch), "{ch:?}");
         }
-        if alpha_count == 0 {
-            return Ok(LanguageDetectionAudit {
-                predicted_language: "un".to_string(),
-                is_reliable: false,
-                is_english: false,
-            });
+    }
+
+    #[test]
+    fn text_of_only_combining_marks_counts_zero_alpha() {
+        assert_eq!(python_alpha_count("\u{093F}\u{0941} \u{093F}"), 0);
+    }
+
+    #[test]
+    fn pycld2_rejected_control_set_is_exact() {
+        let observed = (0..=0x009F)
+            .filter_map(char::from_u32)
+            .filter(|ch| is_pycld2_rejected_control(*ch))
+            .collect::<Vec<_>>();
+        let expected = (0..=0x0008)
+            .chain([0x000B])
+            .chain(0x000E..=0x001F)
+            .chain(0x007F..=0x009F)
+            .filter_map(char::from_u32)
+            .collect::<Vec<_>>();
+
+        assert_eq!(observed, expected);
+        assert_eq!(observed.len(), 61);
+    }
+
+    #[test]
+    fn pycld2_accepted_ascii_whitespace_is_not_rejected() {
+        for ch in ['\t', '\n', '\u{000C}', '\r'] {
+            assert!(!is_pycld2_rejected_control(ch), "{ch:?}");
         }
+    }
 
-        let predicted_language_ft = if let Some(fasttext_model) = &self.fasttext {
-            let uppercase_ratio = uppercase_count as f64 / alpha_count as f64;
-            let mut fasttext_input = text.replace('\n', " ");
-            if uppercase_ratio > 0.9 {
-                fasttext_input = fasttext_input.to_lowercase();
-            }
-            match fasttext_model.predict(&fasttext_input, 1, 0.0) {
-                Ok(predictions) => predictions
-                    .first()
-                    .map(|prediction| parse_fasttext_label(&prediction.label))
-                    .unwrap_or_else(|| "un_ft".to_string()),
-                Err(err) => {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "s2and_rust: fastText language prediction failed ({err})"
-                    )));
-                }
-            }
-        } else {
-            "un_ft".to_string()
-        };
-
-        let cld2_result = cld2_detect_language_ext(text, Cld2Format::Text, &Default::default());
-        let mut predicted_language_2 = match cld2_result.scores[0].language {
-            Some(lang) => lang.0.to_string(),
-            None => "un_2".to_string(),
-        };
-        if predicted_language_2 == "un" {
-            predicted_language_2 = "un_2".to_string();
+    #[test]
+    fn pycld2_rejected_controls_return_unknown() {
+        for ch in ['\u{0000}', '\u{001C}', '\u{007F}', '\u{0080}', '\u{009F}'] {
+            let result = detect_language_compat(&format!(
+                "This is a detailed English research title {ch} about neural systems and scientific evaluation."
+            ));
+            assert_eq!(result.predicted_language, "un", "{ch:?}");
+            assert_eq!(result.language_reliability, 0.0, "{ch:?}");
         }
+    }
 
-        let (predicted_language, is_reliable) =
-            if predicted_language_ft == "un_ft" && predicted_language_2 == "un_2" {
-                ("un".to_string(), false)
-            } else if predicted_language_ft == "un_ft" {
-                (predicted_language_2.clone(), true)
-            } else if predicted_language_2 == "un_2" {
-                (predicted_language_ft.clone(), true)
-            } else if predicted_language_2 != predicted_language_ft {
-                ("un".to_string(), false)
-            } else {
-                (predicted_language_2.clone(), true)
-            };
-
-        let is_english = predicted_language == "en";
-        Ok(LanguageDetectionAudit {
-            predicted_language,
-            is_reliable,
-            is_english,
-        })
+    #[test]
+    fn markup_title_uses_plain_text_cld2_mode_matching_python() {
+        let result = detect_language_compat(
+            "<div>This is a detailed English research title about neural systems and scientific evaluation.</div>",
+        );
+        assert_eq!(result.predicted_language, "en");
+        assert_eq!(result.language_reliability, 0.98);
     }
 }

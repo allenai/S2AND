@@ -1,0 +1,2465 @@
+{
+  "description": "Canonical name-normalization examples. canonical values are the reviewed policy; equivalence_group identifies cases that must share canonical fields, and decisions reference the migration decision registry.",
+  "decisions": {
+    "D1": {
+      "status": "decided",
+      "title": "Spill on space, keep together on dash",
+      "description": "Canonical first keeps dash-bound tokens together, while separate space tokens after the dashed compound still spill into middle; otherwise the first token stays and tokens 2..n spill into middle. This intentionally differs from the current helper's broader keep-all-on-any-dash behavior for mixed dash+space input. Confirms the dash-aware canonical policy (ruled 2026-07-04, per the issue #39 findings: spaced Western firsts are usually first+middle, spaced Chinese compounds are handled upstream, and cross-variant compatibility of Jo / Jo Ann / JoAnn is compare-time via same_prefix_tokens, not canonicalization-identity)."
+    },
+    "D2": {
+      "status": "decided",
+      "title": "Apostrophes stripped globally",
+      "description": "Apostrophes are removed (not turned into separators) in first, middle, AND last. Legacy strips them only in first; middle/last turn apostrophes into token breaks (O'Brien last -> 'o brien')."
+    },
+    "D3": {
+      "status": "decided",
+      "title": "Uniform apostrophe-like marks",
+      "description": "All apostrophe-like marks (ASCII ', backtick `, acute, curly quotes, modifier letters, primes, saltillo, fullwidth, and U+FE4D as intentionally inherited from issue #39's apostrophe-like map despite its Unicode name) normalize to nothing in name fields (ruled 2026-07-04). Implementation: unify apostrophe-like code points to ASCII ' before unidecode, then delete ' and ` after unidecode."
+    },
+    "D4": {
+      "status": "decided",
+      "title": "Dash uniformity",
+      "description": "All dash-like characters behave identically to one another; no ASCII vs Unicode dash distinction anywhere. For given names dash-bound tokens stay together (see D1); for surnames dash and space variants canonicalize to the same spaced form (see D5)."
+    },
+    "D5": {
+      "status": "decided",
+      "title": "Spaced canonical surnames, spaced count keys",
+      "description": "Canonical last names are stored as normalized space-separated tokens with particles preserved ('ou yang', 'van der berg'). Canonical count keys use the spaced forms; the compact-join shims (ouyang/vanderberg) are retired."
+    },
+    "D6": {
+      "status": "decided",
+      "title": "Count keys use canonical fields after gating",
+      "description": "Count keys use the canonical fields after missing and informativeness gating (no compaction), and keys with a missing component are null (no lookup / NaN feature). This changes live feature values for missing-first examples: legacy still looks up last_first_initial when first is empty (for example lfi key 'smith'), while canonical_v2 suppresses that lookup. Empty-last/null-last are already pinned to null last-dependent legacy keys in the live code, so they are regression guards rather than headline feature changes. The change lands inside the single re-baseline/retrain cycle and is gated by its end-metric non-regression eval. The informative threshold is string-level: first and first_last are suppressed only when the canonical first key has length <= 1. Multi-initial compounds such as 'h g' and joined initials such as 'hg' are intentionally informative; a lone initial such as 'h' is not."
+    },
+    "D7": {
+      "status": "decided",
+      "title": "Leading title prefixes dropped",
+      "description": "A single leading title prefix token (dr, prof, ...) is dropped from first, as today. The common South Asian given-name abbreviation 'md' is not a title prefix and is retained. A prefix-only first therefore canonicalizes to empty, and its first-dependent count keys are null per D6 (matches current field behavior)."
+    },
+    "D8": {
+      "status": "decided",
+      "title": "last_first_initial stays initial-char",
+      "description": "The last_first_initial count key remains '<canonical last> <first initial char>' (initial_char semantics, matching the current default and Arrow contract)."
+    }
+  },
+  "compare_compatibility": {
+    "compatible_groups": [
+      [
+        "joann-spaced",
+        "joann-dashed",
+        "joann-joined"
+      ],
+      [
+        "yuzhong-spaced",
+        "yuzhong-dashed",
+        "yuzhong-joined",
+        "yz-initials"
+      ],
+      [
+        "sangmin-ascii-dash",
+        "sangmin-u2010-dash",
+        "sangmin-u2011-dash",
+        "sangmin-u2012-dash",
+        "sangmin-u2013-dash",
+        "sangmin-u2014-dash",
+        "sangmin-u2212-dash",
+        "sangmin-ufe58-dash",
+        "sangmin-ufe63-dash",
+        "sangmin-uff0d-dash",
+        "sangmin-spaced",
+        "sangmin-joined"
+      ],
+      [
+        "qixin-ascii-dash",
+        "qixin-u2010-dash",
+        "qixin-spaced",
+        "qixin-joined"
+      ],
+      [
+        "hg-initials",
+        "hg-dashed-initials",
+        "hg-close-dotted-initials",
+        "hg-space-initials",
+        "hg-joined-initials"
+      ],
+      [
+        "jp-spaced-initials",
+        "jp-dashed-initials"
+      ]
+    ],
+    "incompatible_pairs": [
+      [
+        "jon david",
+        "john david"
+      ],
+      [
+        "john david",
+        "j f"
+      ],
+      [
+        "yu",
+        "wei"
+      ]
+    ],
+    "truth_table": [
+      {
+        "a": "jo",
+        "b": "joann",
+        "compatible": true,
+        "notes": "A one-token first can be a prefix of a joined expansion."
+      },
+      {
+        "a": "jon",
+        "b": "john",
+        "compatible": false,
+        "notes": "The aligned tokens must have an exact prefix relation, not edit-distance similarity."
+      },
+      {
+        "a": "j p",
+        "b": "jean pierre",
+        "compatible": true,
+        "notes": "Each aligned token may be an initial-style prefix."
+      },
+      {
+        "a": "j p",
+        "b": "john paul",
+        "compatible": true,
+        "notes": "The predicate is prefix compatibility, not semantic identity."
+      },
+      {
+        "a": "yu zhong",
+        "b": "y z",
+        "compatible": true,
+        "notes": "Initials are compatible when every aligned token is a prefix."
+      },
+      {
+        "a": "yu",
+        "b": "yusuf",
+        "compatible": true,
+        "notes": "A short first name can be a prefix of a longer token; callers must rely on other features too."
+      },
+      {
+        "a": "john david",
+        "b": "j f",
+        "compatible": false,
+        "notes": "A later aligned token mismatch makes the pair incompatible."
+      },
+      {
+        "a": "yu",
+        "b": "wei",
+        "compatible": false,
+        "notes": "No aligned prefix relation."
+      },
+      {
+        "a": "",
+        "b": "alice",
+        "compatible": false,
+        "notes": "An empty first field is missing evidence, not positive prefix evidence."
+      },
+      {
+        "a": "",
+        "b": "",
+        "compatible": false,
+        "notes": "Two empty first fields are still missing evidence, not compare-time compatibility."
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "joann-spaced",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "Jo Ann",
+        "middle": "",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "jo",
+        "middle": "ann",
+        "last": "smith",
+        "count_keys": {
+          "first": "jo",
+          "last": "smith",
+          "first_last": "jo smith",
+          "last_first_initial": "smith j"
+        }
+      },
+      "decisions": [
+        "D1"
+      ],
+      "notes": "Spaced first spills; compare-time same_prefix_tokens keeps 'jo' compatible with 'jo ann'/'joann'."
+    },
+    {
+      "id": "joann-dashed",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "Jo-Ann",
+        "middle": "",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "jo ann",
+        "middle": "",
+        "last": "smith",
+        "count_keys": {
+          "first": "jo ann",
+          "last": "smith",
+          "first_last": "jo ann smith",
+          "last_first_initial": "smith j"
+        }
+      },
+      "decisions": [
+        "D1",
+        "D4"
+      ],
+      "notes": "Dashed first stays together; count key is the spaced field, not compacted 'joann'."
+    },
+    {
+      "id": "joann-joined",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "JoAnn",
+        "middle": "",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "joann",
+        "middle": "",
+        "last": "smith",
+        "count_keys": {
+          "first": "joann",
+          "last": "smith",
+          "first_last": "joann smith",
+          "last_first_initial": "smith j"
+        }
+      },
+      "decisions": [],
+      "notes": "Joined form is a distinct canonical string; equivalence to 'jo'/'jo ann' is a compare-time concern."
+    },
+    {
+      "id": "yuzhong-spaced",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "Yu Zhong",
+        "middle": "",
+        "last": "Wang"
+      },
+      "canonical": {
+        "first": "yu",
+        "middle": "zhong",
+        "last": "wang",
+        "count_keys": {
+          "first": "yu",
+          "last": "wang",
+          "first_last": "yu wang",
+          "last_first_initial": "wang y"
+        }
+      },
+      "decisions": [
+        "D1"
+      ],
+      "notes": "The splitter itself spills; upstream normalization may rewrite detected Chinese spaced compounds before the splitter runs."
+    },
+    {
+      "id": "yuzhong-dashed",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "Yu-Zhong",
+        "middle": "",
+        "last": "Wang"
+      },
+      "canonical": {
+        "first": "yu zhong",
+        "middle": "",
+        "last": "wang",
+        "count_keys": {
+          "first": "yu zhong",
+          "last": "wang",
+          "first_last": "yu zhong wang",
+          "last_first_initial": "wang y"
+        }
+      },
+      "decisions": [
+        "D1",
+        "D4"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "yuzhong-joined",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "YuZhong",
+        "middle": "",
+        "last": "Wang"
+      },
+      "canonical": {
+        "first": "yuzhong",
+        "middle": "",
+        "last": "wang",
+        "count_keys": {
+          "first": "yuzhong",
+          "last": "wang",
+          "first_last": "yuzhong wang",
+          "last_first_initial": "wang y"
+        }
+      },
+      "decisions": [],
+      "notes": ""
+    },
+    {
+      "id": "yz-initials",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Y. Z.",
+        "middle": "",
+        "last": "Wang"
+      },
+      "canonical": {
+        "first": "y",
+        "middle": "z",
+        "last": "wang",
+        "count_keys": {
+          "first": null,
+          "last": "wang",
+          "first_last": null,
+          "last_first_initial": "wang y"
+        }
+      },
+      "decisions": [
+        "D1",
+        "D6"
+      ],
+      "notes": "Bare initials spill like any spaced first; single-char first stays uninformative for first/first_last count keys."
+    },
+    {
+      "id": "sangmin-ascii-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-sangmin",
+      "input": {
+        "first": "Sang-Min",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang min",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang min",
+          "last": "lee",
+          "first_last": "sang min lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "sangmin-u2010-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-sangmin",
+      "input": {
+        "first": "Sang\u2010Min",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang min",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang min",
+          "last": "lee",
+          "first_last": "sang min lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "U+2010 hyphen; must match the ASCII-dash case exactly (no subblocking-style ASCII/non-ASCII split)."
+    },
+    {
+      "id": "sangmin-u2011-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-sangmin",
+      "input": {
+        "first": "Sang\u2011Min",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang min",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang min",
+          "last": "lee",
+          "first_last": "sang min lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "U+2011 non-breaking hyphen; must match the ASCII-dash case exactly."
+    },
+    {
+      "id": "sangmin-u2012-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-sangmin",
+      "input": {
+        "first": "Sang\u2012Min",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang min",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang min",
+          "last": "lee",
+          "first_last": "sang min lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "U+2012 figure dash; must match the ASCII-dash case exactly."
+    },
+    {
+      "id": "sangmin-u2013-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-sangmin",
+      "input": {
+        "first": "Sang\u2013Min",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang min",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang min",
+          "last": "lee",
+          "first_last": "sang min lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "U+2013 en dash; must match the ASCII-dash case exactly."
+    },
+    {
+      "id": "sangmin-u2014-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-sangmin",
+      "input": {
+        "first": "Sang\u2014Min",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang min",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang min",
+          "last": "lee",
+          "first_last": "sang min lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "U+2014 em dash; must match the ASCII-dash case exactly."
+    },
+    {
+      "id": "sangmin-u2212-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-sangmin",
+      "input": {
+        "first": "Sang\u2212Min",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang min",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang min",
+          "last": "lee",
+          "first_last": "sang min lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "U+2212 minus sign; must match the ASCII-dash case exactly."
+    },
+    {
+      "id": "sangmin-ufe58-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-sangmin",
+      "input": {
+        "first": "Sang\ufe58Min",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang min",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang min",
+          "last": "lee",
+          "first_last": "sang min lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "U+FE58 small em dash; must match the ASCII-dash case exactly."
+    },
+    {
+      "id": "sangmin-ufe63-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-sangmin",
+      "input": {
+        "first": "Sang\ufe63Min",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang min",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang min",
+          "last": "lee",
+          "first_last": "sang min lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "U+FE63 small hyphen-minus; must match the ASCII-dash case exactly."
+    },
+    {
+      "id": "sangmin-uff0d-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-sangmin",
+      "input": {
+        "first": "Sang\uff0dMin",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang min",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang min",
+          "last": "lee",
+          "first_last": "sang min lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "U+FF0D fullwidth hyphen-minus; must match the ASCII-dash case exactly."
+    },
+    {
+      "id": "sangmin-spaced",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "Sang Min",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sang",
+        "middle": "min",
+        "last": "lee",
+        "count_keys": {
+          "first": "sang",
+          "last": "lee",
+          "first_last": "sang lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [
+        "D1"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "sangmin-joined",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "SangMin",
+        "middle": "",
+        "last": "Lee"
+      },
+      "canonical": {
+        "first": "sangmin",
+        "middle": "",
+        "last": "lee",
+        "count_keys": {
+          "first": "sangmin",
+          "last": "lee",
+          "first_last": "sangmin lee",
+          "last_first_initial": "lee s"
+        }
+      },
+      "decisions": [],
+      "notes": "Joined spelling is compare-compatible with split/dashed forms but is not canonicalization-identical."
+    },
+    {
+      "id": "qixin-ascii-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-qixin",
+      "input": {
+        "first": "Qi-Xin",
+        "middle": "",
+        "last": "Zhou"
+      },
+      "canonical": {
+        "first": "qi xin",
+        "middle": "",
+        "last": "zhou",
+        "count_keys": {
+          "first": "qi xin",
+          "last": "zhou",
+          "first_last": "qi xin zhou",
+          "last_first_initial": "zhou q"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "qixin-u2010-dash",
+      "family": "given-hyphen-space",
+      "equivalence_group": "g-qixin",
+      "input": {
+        "first": "Qi\u2010Xin",
+        "middle": "",
+        "last": "Zhou"
+      },
+      "canonical": {
+        "first": "qi xin",
+        "middle": "",
+        "last": "zhou",
+        "count_keys": {
+          "first": "qi xin",
+          "last": "zhou",
+          "first_last": "qi xin zhou",
+          "last_first_initial": "zhou q"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "qixin-spaced",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "Qi Xin",
+        "middle": "",
+        "last": "Zhou"
+      },
+      "canonical": {
+        "first": "qi",
+        "middle": "xin",
+        "last": "zhou",
+        "count_keys": {
+          "first": "qi",
+          "last": "zhou",
+          "first_last": "qi zhou",
+          "last_first_initial": "zhou q"
+        }
+      },
+      "decisions": [
+        "D1"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "qixin-joined",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "QiXin",
+        "middle": "",
+        "last": "Zhou"
+      },
+      "canonical": {
+        "first": "qixin",
+        "middle": "",
+        "last": "zhou",
+        "count_keys": {
+          "first": "qixin",
+          "last": "zhou",
+          "first_last": "qixin zhou",
+          "last_first_initial": "zhou q"
+        }
+      },
+      "decisions": [],
+      "notes": "Joined spelling is compare-compatible with split/dashed forms but is not canonicalization-identical."
+    },
+    {
+      "id": "amin-ul-haq",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "Amin-ul-Haq",
+        "middle": "",
+        "last": "Khan"
+      },
+      "canonical": {
+        "first": "amin ul haq",
+        "middle": "",
+        "last": "khan",
+        "count_keys": {
+          "first": "amin ul haq",
+          "last": "khan",
+          "first_last": "amin ul haq khan",
+          "last_first_initial": "khan a"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "Three-token dashed given name stays together."
+    },
+    {
+      "id": "arif-ullah-u2010",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "Arif\u2010ullah",
+        "middle": "",
+        "last": "Khan"
+      },
+      "canonical": {
+        "first": "arif ullah",
+        "middle": "",
+        "last": "khan",
+        "count_keys": {
+          "first": "arif ullah",
+          "last": "khan",
+          "first_last": "arif ullah khan",
+          "last_first_initial": "khan a"
+        }
+      },
+      "decisions": [
+        "D4"
+      ],
+      "notes": "Poster child of the subblocking non-ASCII-dash spill repair; canonical keeps it together."
+    },
+    {
+      "id": "dangelo-first",
+      "family": "apostrophe",
+      "equivalence_group": "g-dangelo",
+      "input": {
+        "first": "D'Angelo",
+        "middle": "",
+        "last": "Russell"
+      },
+      "canonical": {
+        "first": "dangelo",
+        "middle": "",
+        "last": "russell",
+        "count_keys": {
+          "first": "dangelo",
+          "last": "russell",
+          "first_last": "dangelo russell",
+          "last_first_initial": "russell d"
+        }
+      },
+      "decisions": [
+        "D2"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "dangelo-first-backtick",
+      "family": "apostrophe",
+      "equivalence_group": "g-dangelo",
+      "input": {
+        "first": "D`Angelo",
+        "middle": "",
+        "last": "Russell"
+      },
+      "canonical": {
+        "first": "dangelo",
+        "middle": "",
+        "last": "russell",
+        "count_keys": {
+          "first": "dangelo",
+          "last": "russell",
+          "first_last": "dangelo russell",
+          "last_first_initial": "russell d"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "Backtick in first is NOT stripped today (only ASCII apostrophe is), so legacy first splits into 'd' + middle 'angelo'."
+    },
+    {
+      "id": "dangelo-first-joined",
+      "family": "apostrophe-space",
+      "equivalence_group": "g-dangelo",
+      "input": {
+        "first": "DAngelo",
+        "middle": "",
+        "last": "Russell"
+      },
+      "canonical": {
+        "first": "dangelo",
+        "middle": "",
+        "last": "russell",
+        "count_keys": {
+          "first": "dangelo",
+          "last": "russell",
+          "first_last": "dangelo russell",
+          "last_first_initial": "russell d"
+        }
+      },
+      "decisions": [],
+      "notes": "Joined spelling canonicalizes identically to apostrophe deletion."
+    },
+    {
+      "id": "dangelo-first-spaced",
+      "family": "apostrophe-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "D Angelo",
+        "middle": "",
+        "last": "Russell"
+      },
+      "canonical": {
+        "first": "d",
+        "middle": "angelo",
+        "last": "russell",
+        "count_keys": {
+          "first": null,
+          "last": "russell",
+          "first_last": null,
+          "last_first_initial": "russell d"
+        }
+      },
+      "decisions": [
+        "D1",
+        "D6"
+      ],
+      "notes": "Human-entered space is not treated as apostrophe deletion; it follows the normal first-to-middle spill rule."
+    },
+    {
+      "id": "obrien-last-ascii",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O'Brien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2"
+      ],
+      "notes": "Legacy last_normalized is 'o brien' (apostrophe becomes separator)."
+    },
+    {
+      "id": "obrien-last-joined",
+      "family": "apostrophe-space",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "OBrien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [],
+      "notes": "Joined spelling canonicalizes identically to apostrophe deletion."
+    },
+    {
+      "id": "obrien-last-spaced",
+      "family": "apostrophe-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O Brien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "o brien",
+        "count_keys": {
+          "first": "conor",
+          "last": "o brien",
+          "first_last": "conor o brien",
+          "last_first_initial": "o brien c"
+        }
+      },
+      "decisions": [
+        "D5"
+      ],
+      "notes": "Human-entered space is preserved in the canonical surname; aliasing to 'obrien' is outside canonicalization."
+    },
+    {
+      "id": "obrien-last-curly",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O\u2019Brien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "U+2019; unidecode maps it to ASCII apostrophe."
+    },
+    {
+      "id": "obrien-last-backtick",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O`Brien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "Backtick is currently a separator everywhere; D3 rules apostrophe treatment."
+    },
+    {
+      "id": "obrien-last-acute",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O\u00b4Brien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "U+00B4 spacing acute accent; D3 treats apostrophe-like marks as deletion, not separators."
+    },
+    {
+      "id": "obrien-last-okina",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O\u02bbBrien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "U+02BB modifier letter turned comma / okina; D3 treats apostrophe-like marks as deletion."
+    },
+    {
+      "id": "obrien-last-modifier-apostrophe",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O\u02bcBrien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "U+02BC modifier letter apostrophe; D3 treats apostrophe-like marks as deletion."
+    },
+    {
+      "id": "obrien-last-saltillo",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O\ua78cBrien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "U+A78C Latin small letter saltillo; D3 treats apostrophe-like marks as deletion."
+    },
+    {
+      "id": "obrien-last-prime",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O\u2032Brien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "U+2032 prime; D3 treats apostrophe-like marks as deletion."
+    },
+    {
+      "id": "obrien-last-reversed-prime",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O\u2035Brien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "U+2035 reversed prime; D3 treats apostrophe-like marks as deletion."
+    },
+    {
+      "id": "obrien-last-fe4d",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O\ufe4dBrien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "Intentionally included despite Unicode name 'dashed low line' because issue #39's apostrophe-like map classified U+FE4D with apostrophe-like marks; D3 treats it as deletion, not a dash or separator."
+    },
+    {
+      "id": "obrien-last-fullwidth-apostrophe",
+      "family": "apostrophe",
+      "equivalence_group": "g-obrien",
+      "input": {
+        "first": "Conor",
+        "middle": "",
+        "last": "O\uff07Brien"
+      },
+      "canonical": {
+        "first": "conor",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "conor",
+          "last": "obrien",
+          "first_last": "conor obrien",
+          "last_first_initial": "obrien c"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "U+FF07 fullwidth apostrophe; D3 treats apostrophe-like marks as deletion."
+    },
+    {
+      "id": "oneil-middle",
+      "family": "apostrophe",
+      "equivalence_group": "g-oneil-middle",
+      "input": {
+        "first": "Mary",
+        "middle": "O'Neil",
+        "last": "Adams"
+      },
+      "canonical": {
+        "first": "mary",
+        "middle": "oneil",
+        "last": "adams",
+        "count_keys": {
+          "first": "mary",
+          "last": "adams",
+          "first_last": "mary adams",
+          "last_first_initial": "adams m"
+        }
+      },
+      "decisions": [
+        "D2"
+      ],
+      "notes": "Legacy middle keeps the apostrophe-as-separator split ('o neil')."
+    },
+    {
+      "id": "oneil-middle-curly",
+      "family": "apostrophe",
+      "equivalence_group": "g-oneil-middle",
+      "input": {
+        "first": "Mary",
+        "middle": "O\u2019Neil",
+        "last": "Adams"
+      },
+      "canonical": {
+        "first": "mary",
+        "middle": "oneil",
+        "last": "adams",
+        "count_keys": {
+          "first": "mary",
+          "last": "adams",
+          "first_last": "mary adams",
+          "last_first_initial": "adams m"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D3"
+      ],
+      "notes": "Curly apostrophe in middle follows D3 deletion canonically; legacy keeps the separator split."
+    },
+    {
+      "id": "jean-luc-obrien",
+      "family": "combined",
+      "equivalence_group": null,
+      "input": {
+        "first": "Jean-Luc",
+        "middle": "",
+        "last": "O'Brien"
+      },
+      "canonical": {
+        "first": "jean luc",
+        "middle": "",
+        "last": "obrien",
+        "count_keys": {
+          "first": "jean luc",
+          "last": "obrien",
+          "first_last": "jean luc obrien",
+          "last_first_initial": "obrien j"
+        }
+      },
+      "decisions": [
+        "D2",
+        "D4"
+      ],
+      "notes": "Given-name dash and surname apostrophe policies compose in one name."
+    },
+    {
+      "id": "anne-marie-claire",
+      "family": "given-hyphen-space",
+      "equivalence_group": null,
+      "input": {
+        "first": "Anne-Marie Claire",
+        "middle": "",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "anne marie",
+        "middle": "claire",
+        "last": "smith",
+        "count_keys": {
+          "first": "anne marie",
+          "last": "smith",
+          "first_last": "anne marie smith",
+          "last_first_initial": "smith a"
+        }
+      },
+      "decisions": [
+        "D1",
+        "D4"
+      ],
+      "notes": "Mixed dash+space input narrows D1: the dash-bound compound stays first, while the following space token spills to middle."
+    },
+    {
+      "id": "hg-initials",
+      "family": "initials",
+      "equivalence_group": "g-hg-spilled",
+      "input": {
+        "first": "H. G.",
+        "middle": "",
+        "last": "Wells"
+      },
+      "canonical": {
+        "first": "h",
+        "middle": "g",
+        "last": "wells",
+        "count_keys": {
+          "first": null,
+          "last": "wells",
+          "first_last": null,
+          "last_first_initial": "wells h"
+        }
+      },
+      "decisions": [
+        "D1",
+        "D6"
+      ],
+      "notes": "Spaced initials spill: first is 'h'; the single-char gate keeps first/first_last count keys null, as today."
+    },
+    {
+      "id": "hg-dashed-initials",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "H.-G.",
+        "middle": "",
+        "last": "Wells"
+      },
+      "canonical": {
+        "first": "h g",
+        "middle": "",
+        "last": "wells",
+        "count_keys": {
+          "first": "h g",
+          "last": "wells",
+          "first_last": "h g wells",
+          "last_first_initial": "wells h"
+        }
+      },
+      "decisions": [
+        "D4",
+        "D6"
+      ],
+      "notes": "Dashed initials stay together; count key is the spaced field 'h g' (legacy compacted to 'hg')."
+    },
+    {
+      "id": "hg-close-dotted-initials",
+      "family": "initials",
+      "equivalence_group": "g-hg-spilled",
+      "input": {
+        "first": "H.G.",
+        "middle": "",
+        "last": "Wells"
+      },
+      "canonical": {
+        "first": "h",
+        "middle": "g",
+        "last": "wells",
+        "count_keys": {
+          "first": null,
+          "last": "wells",
+          "first_last": null,
+          "last_first_initial": "wells h"
+        }
+      },
+      "decisions": [
+        "D1",
+        "D6"
+      ],
+      "notes": "Punctuation without spaces still spills into first initial plus middle initial."
+    },
+    {
+      "id": "hg-space-initials",
+      "family": "initials",
+      "equivalence_group": "g-hg-spilled",
+      "input": {
+        "first": "H G",
+        "middle": "",
+        "last": "Wells"
+      },
+      "canonical": {
+        "first": "h",
+        "middle": "g",
+        "last": "wells",
+        "count_keys": {
+          "first": null,
+          "last": "wells",
+          "first_last": null,
+          "last_first_initial": "wells h"
+        }
+      },
+      "decisions": [
+        "D1",
+        "D6"
+      ],
+      "notes": "Space-separated bare initials spill like any spaced first."
+    },
+    {
+      "id": "hg-joined-initials",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "HG",
+        "middle": "",
+        "last": "Wells"
+      },
+      "canonical": {
+        "first": "hg",
+        "middle": "",
+        "last": "wells",
+        "count_keys": {
+          "first": "hg",
+          "last": "wells",
+          "first_last": "hg wells",
+          "last_first_initial": "wells h"
+        }
+      },
+      "decisions": [
+        "D6"
+      ],
+      "notes": "Joined initials stay a single informative first token."
+    },
+    {
+      "id": "jp-spaced-initials",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "J. P.",
+        "middle": "",
+        "last": "Sartre"
+      },
+      "canonical": {
+        "first": "j",
+        "middle": "p",
+        "last": "sartre",
+        "count_keys": {
+          "first": null,
+          "last": "sartre",
+          "first_last": null,
+          "last_first_initial": "sartre j"
+        }
+      },
+      "decisions": [
+        "D1",
+        "D6"
+      ],
+      "notes": "Spaced initials spill and keep first/first_last count keys null."
+    },
+    {
+      "id": "jp-dashed-initials",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "J.-P.",
+        "middle": "",
+        "last": "Sartre"
+      },
+      "canonical": {
+        "first": "j p",
+        "middle": "",
+        "last": "sartre",
+        "count_keys": {
+          "first": "j p",
+          "last": "sartre",
+          "first_last": "j p sartre",
+          "last_first_initial": "sartre j"
+        }
+      },
+      "decisions": [
+        "D4",
+        "D6"
+      ],
+      "notes": "Dashed initials stay together and become an informative spaced first count key."
+    },
+    {
+      "id": "single-initial",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "J.",
+        "middle": "",
+        "last": "Doe"
+      },
+      "canonical": {
+        "first": "j",
+        "middle": "",
+        "last": "doe",
+        "count_keys": {
+          "first": null,
+          "last": "doe",
+          "first_last": null,
+          "last_first_initial": "doe j"
+        }
+      },
+      "decisions": [
+        "D6"
+      ],
+      "notes": "Single initial: first key and first_last key are null."
+    },
+    {
+      "id": "ouyang-dashed-last",
+      "family": "surname",
+      "equivalence_group": "g-ouyang",
+      "input": {
+        "first": "Qi",
+        "middle": "",
+        "last": "Ou-Yang"
+      },
+      "canonical": {
+        "first": "qi",
+        "middle": "",
+        "last": "ou yang",
+        "count_keys": {
+          "first": "qi",
+          "last": "ou yang",
+          "first_last": "qi ou yang",
+          "last_first_initial": "ou yang q"
+        }
+      },
+      "decisions": [
+        "D5",
+        "D8"
+      ],
+      "notes": "Legacy count key compacts to 'ouyang'; last_first_initial uses the spaced last + initial char."
+    },
+    {
+      "id": "ouyang-u2013-last",
+      "family": "surname",
+      "equivalence_group": "g-ouyang",
+      "input": {
+        "first": "Qi",
+        "middle": "",
+        "last": "Ou\u2013Yang"
+      },
+      "canonical": {
+        "first": "qi",
+        "middle": "",
+        "last": "ou yang",
+        "count_keys": {
+          "first": "qi",
+          "last": "ou yang",
+          "first_last": "qi ou yang",
+          "last_first_initial": "ou yang q"
+        }
+      },
+      "decisions": [
+        "D4",
+        "D5",
+        "D8"
+      ],
+      "notes": "Unicode dash in surname canonicalizes to the same spaced last name as ASCII dash and space."
+    },
+    {
+      "id": "ouyang-spaced-last",
+      "family": "surname",
+      "equivalence_group": "g-ouyang",
+      "input": {
+        "first": "Qi",
+        "middle": "",
+        "last": "Ou Yang"
+      },
+      "canonical": {
+        "first": "qi",
+        "middle": "",
+        "last": "ou yang",
+        "count_keys": {
+          "first": "qi",
+          "last": "ou yang",
+          "first_last": "qi ou yang",
+          "last_first_initial": "ou yang q"
+        }
+      },
+      "decisions": [
+        "D5",
+        "D8"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "ouyang-joined-last",
+      "family": "surname",
+      "equivalence_group": null,
+      "input": {
+        "first": "Qi",
+        "middle": "",
+        "last": "Ouyang"
+      },
+      "canonical": {
+        "first": "qi",
+        "middle": "",
+        "last": "ouyang",
+        "count_keys": {
+          "first": "qi",
+          "last": "ouyang",
+          "first_last": "qi ouyang",
+          "last_first_initial": "ouyang q"
+        }
+      },
+      "decisions": [],
+      "notes": "Joined surname stays a single token."
+    },
+    {
+      "id": "van-der-berg",
+      "family": "surname",
+      "equivalence_group": "g-van-der-berg",
+      "input": {
+        "first": "Anna",
+        "middle": "",
+        "last": "van der Berg"
+      },
+      "canonical": {
+        "first": "anna",
+        "middle": "",
+        "last": "van der berg",
+        "count_keys": {
+          "first": "anna",
+          "last": "van der berg",
+          "first_last": "anna van der berg",
+          "last_first_initial": "van der berg a"
+        }
+      },
+      "decisions": [
+        "D5"
+      ],
+      "notes": "Particles preserved; legacy count key compacts to 'vanderberg'."
+    },
+    {
+      "id": "van-der-berg-dashed",
+      "family": "surname",
+      "equivalence_group": "g-van-der-berg",
+      "input": {
+        "first": "Anna",
+        "middle": "",
+        "last": "van-der-Berg"
+      },
+      "canonical": {
+        "first": "anna",
+        "middle": "",
+        "last": "van der berg",
+        "count_keys": {
+          "first": "anna",
+          "last": "van der berg",
+          "first_last": "anna van der berg",
+          "last_first_initial": "van der berg a"
+        }
+      },
+      "decisions": [
+        "D4",
+        "D5"
+      ],
+      "notes": "Dashed surname particles canonicalize to spaced surname tokens."
+    },
+    {
+      "id": "vanderberg-joined",
+      "family": "surname",
+      "equivalence_group": null,
+      "input": {
+        "first": "Anna",
+        "middle": "",
+        "last": "Vanderberg"
+      },
+      "canonical": {
+        "first": "anna",
+        "middle": "",
+        "last": "vanderberg",
+        "count_keys": {
+          "first": "anna",
+          "last": "vanderberg",
+          "first_last": "anna vanderberg",
+          "last_first_initial": "vanderberg a"
+        }
+      },
+      "decisions": [],
+      "notes": "Joined particle surname remains one token; compare-time or alias handling is outside canonicalization."
+    },
+    {
+      "id": "de-la-cruz",
+      "family": "surname",
+      "equivalence_group": "g-de-la-cruz",
+      "input": {
+        "first": "Maria",
+        "middle": "",
+        "last": "de la Cruz"
+      },
+      "canonical": {
+        "first": "maria",
+        "middle": "",
+        "last": "de la cruz",
+        "count_keys": {
+          "first": "maria",
+          "last": "de la cruz",
+          "first_last": "maria de la cruz",
+          "last_first_initial": "de la cruz m"
+        }
+      },
+      "decisions": [
+        "D5"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "de-la-cruz-dashed",
+      "family": "surname",
+      "equivalence_group": "g-de-la-cruz",
+      "input": {
+        "first": "Maria",
+        "middle": "",
+        "last": "de-la-Cruz"
+      },
+      "canonical": {
+        "first": "maria",
+        "middle": "",
+        "last": "de la cruz",
+        "count_keys": {
+          "first": "maria",
+          "last": "de la cruz",
+          "first_last": "maria de la cruz",
+          "last_first_initial": "de la cruz m"
+        }
+      },
+      "decisions": [
+        "D4",
+        "D5"
+      ],
+      "notes": "Dashed surname particles canonicalize to spaced surname tokens."
+    },
+    {
+      "id": "delacruz-joined",
+      "family": "surname",
+      "equivalence_group": null,
+      "input": {
+        "first": "Maria",
+        "middle": "",
+        "last": "DelaCruz"
+      },
+      "canonical": {
+        "first": "maria",
+        "middle": "",
+        "last": "delacruz",
+        "count_keys": {
+          "first": "maria",
+          "last": "delacruz",
+          "first_last": "maria delacruz",
+          "last_first_initial": "delacruz m"
+        }
+      },
+      "decisions": [],
+      "notes": "Joined particle surname remains one token."
+    },
+    {
+      "id": "bin-salman",
+      "family": "surname",
+      "equivalence_group": null,
+      "input": {
+        "first": "Mohammed",
+        "middle": "",
+        "last": "bin Salman"
+      },
+      "canonical": {
+        "first": "mohammed",
+        "middle": "",
+        "last": "bin salman",
+        "count_keys": {
+          "first": "mohammed",
+          "last": "bin salman",
+          "first_last": "mohammed bin salman",
+          "last_first_initial": "bin salman m"
+        }
+      },
+      "decisions": [
+        "D5"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "al-sayed",
+      "family": "surname",
+      "equivalence_group": null,
+      "input": {
+        "first": "Omar",
+        "middle": "",
+        "last": "al Sayed"
+      },
+      "canonical": {
+        "first": "omar",
+        "middle": "",
+        "last": "al sayed",
+        "count_keys": {
+          "first": "omar",
+          "last": "al sayed",
+          "first_last": "omar al sayed",
+          "last_first_initial": "al sayed o"
+        }
+      },
+      "decisions": [
+        "D5"
+      ],
+      "notes": "Surname particles are preserved in canonical surname form."
+    },
+    {
+      "id": "de-souza-spaced",
+      "family": "surname-alias",
+      "equivalence_group": null,
+      "input": {
+        "first": "Ana",
+        "middle": "",
+        "last": "de Souza"
+      },
+      "canonical": {
+        "first": "ana",
+        "middle": "",
+        "last": "de souza",
+        "count_keys": {
+          "first": "ana",
+          "last": "de souza",
+          "first_last": "ana de souza",
+          "last_first_initial": "de souza a"
+        }
+      },
+      "decisions": [
+        "D5"
+      ],
+      "notes": "Spaced particle surname remains spaced canonically; joined alias handling is outside canonicalization."
+    },
+    {
+      "id": "desouza-joined",
+      "family": "surname-alias",
+      "equivalence_group": null,
+      "input": {
+        "first": "Ana",
+        "middle": "",
+        "last": "DeSouza"
+      },
+      "canonical": {
+        "first": "ana",
+        "middle": "",
+        "last": "desouza",
+        "count_keys": {
+          "first": "ana",
+          "last": "desouza",
+          "first_last": "ana desouza",
+          "last_first_initial": "desouza a"
+        }
+      },
+      "decisions": [],
+      "notes": "Joined particle surname remains one token."
+    },
+    {
+      "id": "la-salle-spaced",
+      "family": "surname-alias",
+      "equivalence_group": null,
+      "input": {
+        "first": "Robert",
+        "middle": "",
+        "last": "La Salle"
+      },
+      "canonical": {
+        "first": "robert",
+        "middle": "",
+        "last": "la salle",
+        "count_keys": {
+          "first": "robert",
+          "last": "la salle",
+          "first_last": "robert la salle",
+          "last_first_initial": "la salle r"
+        }
+      },
+      "decisions": [
+        "D5"
+      ],
+      "notes": "Spaced particle surname remains spaced canonically; joined alias handling is outside canonicalization."
+    },
+    {
+      "id": "lasalle-joined",
+      "family": "surname-alias",
+      "equivalence_group": null,
+      "input": {
+        "first": "Robert",
+        "middle": "",
+        "last": "LaSalle"
+      },
+      "canonical": {
+        "first": "robert",
+        "middle": "",
+        "last": "lasalle",
+        "count_keys": {
+          "first": "robert",
+          "last": "lasalle",
+          "first_last": "robert lasalle",
+          "last_first_initial": "lasalle r"
+        }
+      },
+      "decisions": [],
+      "notes": "Joined particle surname remains one token."
+    },
+    {
+      "id": "smith-jr-last",
+      "family": "suffix",
+      "equivalence_group": null,
+      "input": {
+        "first": "John",
+        "middle": "",
+        "last": "Smith Jr."
+      },
+      "canonical": {
+        "first": "john",
+        "middle": "",
+        "last": "smith jr",
+        "count_keys": {
+          "first": "john",
+          "last": "smith jr",
+          "first_last": "john smith jr",
+          "last_first_initial": "smith jr j"
+        }
+      },
+      "decisions": [
+        "D5"
+      ],
+      "notes": "Suffix-like tokens already present in last are retained; suffix stripping is outside canonical_v2."
+    },
+    {
+      "id": "doe-phd-last",
+      "family": "suffix",
+      "equivalence_group": null,
+      "input": {
+        "first": "Jane",
+        "middle": "",
+        "last": "Doe PhD"
+      },
+      "canonical": {
+        "first": "jane",
+        "middle": "",
+        "last": "doe phd",
+        "count_keys": {
+          "first": "jane",
+          "last": "doe phd",
+          "first_last": "jane doe phd",
+          "last_first_initial": "doe phd j"
+        }
+      },
+      "decisions": [
+        "D5"
+      ],
+      "notes": "Postnominal-like tokens already present in last are retained; suffix stripping is outside canonical_v2."
+    },
+    {
+      "id": "dr-prefix",
+      "family": "prefix",
+      "equivalence_group": null,
+      "input": {
+        "first": "Dr. John",
+        "middle": "",
+        "last": "Watson"
+      },
+      "canonical": {
+        "first": "john",
+        "middle": "",
+        "last": "watson",
+        "count_keys": {
+          "first": "john",
+          "last": "watson",
+          "first_last": "john watson",
+          "last_first_initial": "watson j"
+        }
+      },
+      "decisions": [
+        "D7"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "md-given-abbrev",
+      "family": "prefix",
+      "equivalence_group": null,
+      "input": {
+        "first": "Md Karim",
+        "middle": "",
+        "last": "Ahmed"
+      },
+      "canonical": {
+        "first": "md",
+        "middle": "karim",
+        "last": "ahmed",
+        "count_keys": {
+          "first": "md",
+          "last": "ahmed",
+          "first_last": "md ahmed",
+          "last_first_initial": "ahmed m"
+        }
+      },
+      "decisions": [
+        "D7"
+      ],
+      "notes": "Md is retained as a given-name abbreviation, not dropped as a title prefix."
+    },
+    {
+      "id": "md-only",
+      "family": "prefix",
+      "equivalence_group": null,
+      "input": {
+        "first": "Md",
+        "middle": "",
+        "last": "Rahman"
+      },
+      "canonical": {
+        "first": "md",
+        "middle": "",
+        "last": "rahman",
+        "count_keys": {
+          "first": "md",
+          "last": "rahman",
+          "first_last": "md rahman",
+          "last_first_initial": "rahman m"
+        }
+      },
+      "decisions": [
+        "D7"
+      ],
+      "notes": "A bare Md first name is retained rather than canonicalized to empty."
+    },
+    {
+      "id": "dr-md-given-abbrev",
+      "family": "prefix",
+      "equivalence_group": null,
+      "input": {
+        "first": "Dr Md Karim",
+        "middle": "",
+        "last": "Ahmed"
+      },
+      "canonical": {
+        "first": "md",
+        "middle": "karim",
+        "last": "ahmed",
+        "count_keys": {
+          "first": "md",
+          "last": "ahmed",
+          "first_last": "md ahmed",
+          "last_first_initial": "ahmed m"
+        }
+      },
+      "decisions": [
+        "D7"
+      ],
+      "notes": "The leading title is dropped, then Md is retained as the first-name token."
+    },
+    {
+      "id": "prefix-only",
+      "family": "prefix",
+      "equivalence_group": null,
+      "input": {
+        "first": "Prof",
+        "middle": "",
+        "last": "Higgins"
+      },
+      "canonical": {
+        "first": "",
+        "middle": "",
+        "last": "higgins",
+        "count_keys": {
+          "first": null,
+          "last": "higgins",
+          "first_last": null,
+          "last_first_initial": null
+        }
+      },
+      "decisions": [
+        "D7"
+      ],
+      "notes": "Prefix-only first canonicalizes to empty; all first-dependent keys are null."
+    },
+    {
+      "id": "jose",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "Jos\u00e9",
+        "middle": "",
+        "last": "Garc\u00eda"
+      },
+      "canonical": {
+        "first": "jose",
+        "middle": "",
+        "last": "garcia",
+        "count_keys": {
+          "first": "jose",
+          "last": "garcia",
+          "first_last": "jose garcia",
+          "last_first_initial": "garcia j"
+        }
+      },
+      "decisions": [],
+      "notes": ""
+    },
+    {
+      "id": "lukasz",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "\u0141ukasz",
+        "middle": "",
+        "last": "Kowalski"
+      },
+      "canonical": {
+        "first": "lukasz",
+        "middle": "",
+        "last": "kowalski",
+        "count_keys": {
+          "first": "lukasz",
+          "last": "kowalski",
+          "first_last": "lukasz kowalski",
+          "last_first_initial": "kowalski l"
+        }
+      },
+      "decisions": [],
+      "notes": ""
+    },
+    {
+      "id": "anne-nbsp-marie",
+      "family": "invisible",
+      "equivalence_group": null,
+      "input": {
+        "first": "Anne\u00a0Marie",
+        "middle": "",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "anne",
+        "middle": "marie",
+        "last": "smith",
+        "count_keys": {
+          "first": "anne",
+          "last": "smith",
+          "first_last": "anne smith",
+          "last_first_initial": "smith a"
+        }
+      },
+      "decisions": [
+        "D1"
+      ],
+      "notes": "Non-breaking space is whitespace, so this follows the normal spaced-first spill rule."
+    },
+    {
+      "id": "jean-soft-hyphen-luc",
+      "family": "invisible",
+      "equivalence_group": "g-jeanluc-invisible",
+      "input": {
+        "first": "Jean\u00adLuc",
+        "middle": "",
+        "last": "Picard"
+      },
+      "canonical": {
+        "first": "jeanluc",
+        "middle": "",
+        "last": "picard",
+        "count_keys": {
+          "first": "jeanluc",
+          "last": "picard",
+          "first_last": "jeanluc picard",
+          "last_first_initial": "picard j"
+        }
+      },
+      "decisions": [],
+      "notes": "Soft hyphen is an invisible format control, not a canonical dash; it is deleted before tokenization."
+    },
+    {
+      "id": "jean-zwj-luc",
+      "family": "invisible",
+      "equivalence_group": "g-jeanluc-invisible",
+      "input": {
+        "first": "Jean\u200dLuc",
+        "middle": "",
+        "last": "Picard"
+      },
+      "canonical": {
+        "first": "jeanluc",
+        "middle": "",
+        "last": "picard",
+        "count_keys": {
+          "first": "jeanluc",
+          "last": "picard",
+          "first_last": "jeanluc picard",
+          "last_first_initial": "picard j"
+        }
+      },
+      "decisions": [],
+      "notes": "Zero-width joiner is deleted as invisible formatting before tokenization."
+    },
+    {
+      "id": "nguyen",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "Th\u1ecb Minh",
+        "middle": "",
+        "last": "Nguy\u1ec5n"
+      },
+      "canonical": {
+        "first": "thi",
+        "middle": "minh",
+        "last": "nguyen",
+        "count_keys": {
+          "first": "thi",
+          "last": "nguyen",
+          "first_last": "thi nguyen",
+          "last_first_initial": "nguyen t"
+        }
+      },
+      "decisions": [
+        "D1"
+      ],
+      "notes": "Spaced Vietnamese first spills like any spaced first; upstream rewriting is the place for language-aware compounds."
+    },
+    {
+      "id": "muller",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "Hans",
+        "middle": "",
+        "last": "M\u00fcller"
+      },
+      "canonical": {
+        "first": "hans",
+        "middle": "",
+        "last": "muller",
+        "count_keys": {
+          "first": "hans",
+          "last": "muller",
+          "first_last": "hans muller",
+          "last_first_initial": "muller h"
+        }
+      },
+      "decisions": [],
+      "notes": ""
+    },
+    {
+      "id": "empty-first",
+      "family": "missing",
+      "equivalence_group": null,
+      "input": {
+        "first": "",
+        "middle": "",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "",
+        "middle": "",
+        "last": "smith",
+        "count_keys": {
+          "first": null,
+          "last": "smith",
+          "first_last": null,
+          "last_first_initial": null
+        }
+      },
+      "decisions": [
+        "D6"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "whitespace-only",
+      "family": "missing",
+      "equivalence_group": null,
+      "input": {
+        "first": "  ",
+        "middle": " ",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "",
+        "middle": "",
+        "last": "smith",
+        "count_keys": {
+          "first": null,
+          "last": "smith",
+          "first_last": null,
+          "last_first_initial": null
+        }
+      },
+      "decisions": [
+        "D6"
+      ],
+      "notes": "Covers the whitespace-only equal() case after canonicalization produces empty given-name fields."
+    },
+    {
+      "id": "empty-last",
+      "family": "missing",
+      "equivalence_group": null,
+      "input": {
+        "first": "John",
+        "middle": "",
+        "last": ""
+      },
+      "canonical": {
+        "first": "john",
+        "middle": "",
+        "last": "",
+        "count_keys": {
+          "first": "john",
+          "last": null,
+          "first_last": null,
+          "last_first_initial": null
+        }
+      },
+      "decisions": [
+        "D6"
+      ],
+      "notes": "Regression guard for the live empty-last fix: last-dependent keys stay null rather than falling back to count 1."
+    },
+    {
+      "id": "null-first",
+      "family": "missing",
+      "equivalence_group": null,
+      "input": {
+        "first": null,
+        "middle": "",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "",
+        "middle": "",
+        "last": "smith",
+        "count_keys": {
+          "first": null,
+          "last": "smith",
+          "first_last": null,
+          "last_first_initial": null
+        }
+      },
+      "decisions": [
+        "D6"
+      ],
+      "notes": "Null first is canonical missing and does not produce first-dependent count keys."
+    },
+    {
+      "id": "null-middle",
+      "family": "missing",
+      "equivalence_group": null,
+      "input": {
+        "first": "John",
+        "middle": null,
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "john",
+        "middle": "",
+        "last": "smith",
+        "count_keys": {
+          "first": "john",
+          "last": "smith",
+          "first_last": "john smith",
+          "last_first_initial": "smith j"
+        }
+      },
+      "decisions": [
+        "D6"
+      ],
+      "notes": "Null middle is equivalent to missing middle."
+    },
+    {
+      "id": "null-last",
+      "family": "missing",
+      "equivalence_group": null,
+      "input": {
+        "first": "John",
+        "middle": "",
+        "last": null
+      },
+      "canonical": {
+        "first": "john",
+        "middle": "",
+        "last": "",
+        "count_keys": {
+          "first": "john",
+          "last": null,
+          "first_last": null,
+          "last_first_initial": null
+        }
+      },
+      "decisions": [
+        "D6"
+      ],
+      "notes": "Null last is canonical missing and does not produce last-dependent count keys."
+    },
+    {
+      "id": "multi-token-middle",
+      "family": "middle",
+      "equivalence_group": null,
+      "input": {
+        "first": "Robert",
+        "middle": "James Lee",
+        "last": "Brown"
+      },
+      "canonical": {
+        "first": "robert",
+        "middle": "james lee",
+        "last": "brown",
+        "count_keys": {
+          "first": "robert",
+          "last": "brown",
+          "first_last": "robert brown",
+          "last_first_initial": "brown r"
+        }
+      },
+      "decisions": [],
+      "notes": ""
+    },
+    {
+      "id": "spaced-first-with-middle",
+      "family": "middle",
+      "equivalence_group": null,
+      "input": {
+        "first": "Robert James",
+        "middle": "Lee",
+        "last": "Brown"
+      },
+      "canonical": {
+        "first": "robert",
+        "middle": "james lee",
+        "last": "brown",
+        "count_keys": {
+          "first": "robert",
+          "last": "brown",
+          "first_last": "robert brown",
+          "last_first_initial": "brown r"
+        }
+      },
+      "decisions": [
+        "D1"
+      ],
+      "notes": "Matches legacy spill: 'james' joins the middle ahead of 'lee'."
+    }
+  ]
+}

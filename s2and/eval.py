@@ -1,7 +1,6 @@
 import json
 import logging
 import pickle
-import warnings
 from collections import Counter
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -10,29 +9,39 @@ if TYPE_CHECKING:  # need this for circular import issues
     from s2and.model import Clusterer
 
 import copy
-import itertools
 import os
 from collections import defaultdict
 from os.path import join
 
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 from sklearn.metrics import (
     auc,
     average_precision_score,
     precision_recall_curve,
     precision_recall_fscore_support,
+    roc_auc_score,
     roc_curve,
 )
 from tqdm import tqdm
 
+from s2and.data import _assemble_full_name, _resolve_signature_splits
 from s2and.featurizer import many_pairs_featurize
-from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
+from s2and.metrics import (
+    b3_precision_recall_fscore as b3_precision_recall_fscore,
+)
+from s2and.metrics import (
+    cluster_precision_recall_fscore as cluster_precision_recall_fscore,
+)
+from s2and.metrics import (
+    f1_score as f1_score,
+)
+from s2and.metrics import (
+    pairwise_precision_recall_fscore as pairwise_precision_recall_fscore,
+)
+from s2and.model_pairwise import _validated_classifier_features
+from s2and.text import canonicalize_name_parts, normalize_text
 
 logger = logging.getLogger("s2and")
-
-sns.set(context="talk")
 
 
 class FacetEvalResult(NamedTuple):
@@ -49,7 +58,6 @@ class FacetEvalResult(NamedTuple):
     email_f1: dict[int, list]
     abstract_f1: dict[int, list]
     venue_f1: dict[int, list]
-    references_f1: dict[int, list]
     coauthors_f1: dict[int, list]
     signature_lookup: list[dict]
 
@@ -58,7 +66,6 @@ def cluster_eval(
     dataset: "ANDData",
     clusterer: "Clusterer",
     split: str = "test",
-    use_s2_clusters: bool = False,
 ) -> tuple[dict[str, tuple], dict[str, tuple[float, float, float]]]:
     """
     Performs clusterwise evaluation.
@@ -78,7 +85,7 @@ def cluster_eval(
     Dict: Dictionary of clusterwise metrics.
     Dict: Same as above but broken down by signature.
     """
-    train_block_dict, val_block_dict, test_block_dict = dataset.split_blocks_helper(dataset.get_blocks())
+    train_block_dict, val_block_dict, test_block_dict = _resolve_signature_splits(dataset)
     if split == "test":
         block_dict = test_block_dict
     elif split == "val":
@@ -92,7 +99,7 @@ def cluster_eval(
     cluster_to_signatures = dataset.construct_cluster_to_signatures(block_dict)
 
     # predict
-    pred_clusters, _ = clusterer.predict(block_dict, dataset, use_s2_clusters=use_s2_clusters)
+    pred_clusters, _ = clusterer.predict(block_dict, dataset)
 
     # get metrics
     (
@@ -155,7 +162,7 @@ def incremental_cluster_eval(
         train_block_dict,
         val_block_dict,
         test_block_dict,
-    ) = dataset.split_cluster_signatures()
+    ) = _resolve_signature_splits(dataset)
     # evaluation must happen only on test-signatures in blocks, so remove train/val signatures
     observed_signatures = set()
     for _, signatures in train_block_dict.items():
@@ -167,8 +174,16 @@ def incremental_cluster_eval(
     eval_block_dict_full = {}
     eval_block_dict_for_metrics: dict[str, list[str]]
     if split == "test":
+        selected_signatures = {
+            signature
+            for blocks in (train_block_dict, val_block_dict, test_block_dict)
+            for signatures in blocks.values()
+            for signature in signatures
+        }
         for block_key, _ in test_block_dict.items():
-            eval_block_dict_full[block_key] = block_dict[block_key]
+            eval_block_dict_full[block_key] = [
+                signature for signature in block_dict[block_key] if signature in selected_signatures
+            ]
         cluster_to_signatures = dataset.construct_cluster_to_signatures(test_block_dict)
         eval_block_dict_for_metrics = test_block_dict
         for _, signatures in val_block_dict.items():
@@ -209,9 +224,10 @@ def incremental_cluster_eval(
     # to avoid sparsity in b3 computation, we use all the signatures' ground-truth
     full_cluster_to_signatures = dataset.construct_cluster_to_signatures(pred_clusters)
 
+    scored_signatures = {signature for signatures in eval_block_dict_for_metrics.values() for signature in signatures}
     eval_only_pred_clusters = {}
     for cluster_key, signatures in pred_clusters.items():
-        test_signatures = list(set(signatures).difference(observed_signatures))
+        test_signatures = [signature for signature in signatures if signature in scored_signatures]
         assert len(set(test_signatures).intersection(observed_signatures)) == 0
         if len(test_signatures) > 0:
             eval_only_pred_clusters[cluster_key] = test_signatures
@@ -234,13 +250,16 @@ def incremental_cluster_eval(
 def facet_eval(
     dataset: "ANDData",
     metrics_per_signature: dict[str, tuple[float, float, float]],
-    block_type: str = "original",
 ) -> FacetEvalResult:
     """
     Extracts B3 per facets.
     The returned dictionaries are keyed by the metric itself. For example, the keys of the
     homonymity_f1 variable are floating points between 0 and 1 indicating the amount
     of homonymity. The values are the per-signature B3s that have this amount of homonymity.
+    ``facet_eval`` no longer accepts ``block_type``; block-size, homonymity,
+    and synonymity facets use the canonical S2 block in ``author_info.block``.
+    Deferred full names on Arrow-backed datasets are canonicalized once per
+    evaluated signature without modifying the dataset.
 
     Parameters
     ----------
@@ -248,9 +267,6 @@ def facet_eval(
     metrics_per_signature: Dict
         B3 P/R/F1 per signature.
         Second output of cluster_eval function.
-    block_type: string
-        Whether to use Semantic Scholar ("s2") or "original" blocks
-
     Returns
     -------
     Dict: B3 F1 broken down by perceived estimated gender.
@@ -265,13 +281,7 @@ def facet_eval(
           Definition (per signature): Fraction of different names but within same clusters.
     """
     block_len_dict = {}
-    if block_type == "original":
-        blocks = dataset.get_original_blocks()
-    elif block_type == "s2":
-        blocks = dataset.get_s2_blocks()
-    else:
-        raise Exception("block_type must one of: {'original', 's2'}!")
-
+    blocks = dataset.get_blocks()
     for block_key, signature_ids in blocks.items():
         block_len_dict[block_key] = len(signature_ids)
 
@@ -289,17 +299,26 @@ def facet_eval(
     synonymity: dict[str, int] = defaultdict(int)
     denominator: dict[str, int] = defaultdict(int)
     signature_keys = list(metrics_per_signature.keys())
+    full_names: dict[str, str] = {}
+    for signature_key in signature_keys:
+        signature = dataset.signatures[signature_key]
+        full_name = signature.author_info_full_name
+        if full_name is None:
+            parts = canonicalize_name_parts(
+                signature.author_info_first, signature.author_info_middle, signature.author_info_last
+            )
+            full_name = _assemble_full_name(
+                [parts.first, parts.middle, parts.last, normalize_text(signature.author_info_suffix or "")]
+            )
+        full_names[signature_key] = full_name
     for i, signature_key_a in enumerate(signature_keys):
         for signature_key_b in signature_keys[i + 1 :]:
             signature_a = dataset.signatures[signature_key_a]
             signature_b = dataset.signatures[signature_key_b]
             # these counts only make sense within blocks
-            if block_type == "original":
-                same_block = signature_a.author_info_given_block == signature_b.author_info_given_block
-            elif block_type == "s2":
-                same_block = signature_a.author_info_block == signature_b.author_info_block
+            same_block = signature_a.author_info_block == signature_b.author_info_block
             if same_block:
-                same_name = signature_a.author_info_full_name == signature_b.author_info_full_name
+                same_name = full_names[signature_key_a] == full_names[signature_key_b]
                 same_cluster = signature_to_cluster_id[signature_key_a] == signature_to_cluster_id[signature_key_b]
                 if same_name and not same_cluster:
                     homonymity[signature_key_a] += 1
@@ -325,7 +344,6 @@ def facet_eval(
     email_f1 = defaultdict(list)
     abstract_f1 = defaultdict(list)
     venue_f1 = defaultdict(list)
-    references_f1 = defaultdict(list)
     coauthors_f1 = defaultdict(list)
 
     signature_lookup = list()
@@ -386,13 +404,6 @@ def facet_eval(
             venue_f1[0].append(f1)
             _signature_dict["venue"] = 0
 
-        if paper.references and len(paper.references) > 0:
-            references_f1[1].append(f1)
-            _signature_dict["references"] = 1
-        else:
-            references_f1[0].append(f1)
-            _signature_dict["references"] = 0
-
         has_coauthors = (
             len(signature.author_info_coauthors) > 0
             if signature.author_info_coauthors is not None
@@ -405,23 +416,21 @@ def facet_eval(
             coauthors_f1[0].append(f1)
             _signature_dict["multiple_authors"] = 0
 
-        if block_type == "original":
-            block_len_f1[block_len_dict[signature.author_info_given_block]].append(f1)
-            _signature_dict["block size"] = block_len_dict[signature.author_info_given_block]
-        elif block_type == "s2":
-            block_len_f1[block_len_dict[signature.author_info_block]].append(f1)
-            _signature_dict["block size"] = block_len_dict[signature.author_info_block]
+        block_len_f1[block_len_dict[signature.author_info_block]].append(f1)
+        _signature_dict["block size"] = block_len_dict[signature.author_info_block]
 
         if homonymity[signature_key] > 0:
             homonymity_f1[np.round(homonymity[signature_key] / denominator[signature_key], 2)].append(f1)
             _signature_dict["homonymity"] = np.round(homonymity[signature_key] / denominator[signature_key], 2)
         else:
+            homonymity_f1[0].append(f1)
             _signature_dict["homonymity"] = 0
 
         if synonymity[signature_key] > 0:
             synonymity_f1[np.round(synonymity[signature_key] / denominator[signature_key], 2)].append(f1)
             _signature_dict["synonymity"] = np.round(synonymity[signature_key] / denominator[signature_key], 2)
         else:
+            synonymity_f1[0].append(f1)
             _signature_dict["synonymity"] = 0
 
         _signature_dict["signature_id"] = signature_key
@@ -448,7 +457,6 @@ def facet_eval(
         email_f1,
         abstract_f1,
         venue_f1,
-        references_f1,
         coauthors_f1,
         signature_lookup,
     )
@@ -480,6 +488,8 @@ def pairwise_eval(
         Feature matrix of labels to do eval on.
     classifier: sklearn compatible classifier
         Classifier to do eval on.
+        SHAP plots require a directly fitted tree or LightGBM classifier;
+        pass ``skip_shap=True`` for calibrated, voting, stacking, or non-tree classifiers.
     figs_path: string
         Where to put the resulting evaluation figures.
     title: string
@@ -498,7 +508,8 @@ def pairwise_eval(
     nameless_feature_names: List[str]
         List of feature names for the SHAP plots excluding name features.
     skip_shap: bool
-        Whether to skip SHAP entirely.
+        Whether to skip SHAP entirely. Set this for classifiers that are not
+        directly fitted tree or LightGBM models.
 
     Returns
     -------
@@ -515,67 +526,83 @@ def pairwise_eval(
     if nameless_classifier is not None and hasattr(nameless_classifier, "classifier"):
         nameless_classifier = nameless_classifier.classifier
 
-    with warnings.catch_warnings():
-        suppress_sklearn_feature_name_warnings()
-        if nameless_classifier is not None:
-            y_prob = (classifier.predict_proba(X)[:, 1] + nameless_classifier.predict_proba(nameless_X)[:, 1]) / 2
-        else:
-            y_prob = classifier.predict_proba(X)[:, 1]
-
-    # plot AUROC
-    fpr, tpr, _ = roc_curve(y, y_prob)
-    roc_auc = auc(fpr, tpr)
-
-    plt.figure(0, figsize=(15, 15))
-    plt.plot(fpr, tpr, lw=2, label=f"ROC curve (area = {roc_auc:0.2f})")
-    plt.xlim([-0.01, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title(f"ROC Curve for {title}")
-    plt.legend(loc="lower right")
-    plt.savefig(join(figs_path, base_name + "_roc.png"))
-    plt.clf()
-    plt.close()
-
-    # plot AUPR
-    precision, recall, _ = precision_recall_curve(y, y_prob)
-    avg_precision = average_precision_score(y, y_prob)
-
-    plt.figure(1, figsize=(15, 15))
-    # Standard: recall on x-axis, precision on y-axis
-    plt.plot(
-        recall,
-        precision,
-        lw=2,
-        label=f"PR curve (AP = {avg_precision:.2f})",
+    classifier_input = _validated_classifier_features(
+        classifier,
+        X,
+        feature_names=shap_feature_names,
     )
-    plt.xlabel("Recall")
-    plt.ylabel("Precision")
-    plt.title(f"PR Curve for {title}")
-    plt.legend(loc="lower left")
-    plt.savefig(join(figs_path, base_name + "_pr.png"))
-    plt.clf()
-    plt.close()
-
-    # plot SHAP -- delegate to central helper that normalizes across SHAP/NumPy versions
-    if not skip_shap and shap_plot_type is not None:
-        from s2and.shap_utils import compute_shap_summary_plots
-
-        # compute_shap_summary_plots will write the same PNGs that the old inline
-        # code produced (names and behavior preserved) and is defensive against
-        # SHAP API changes and NumPy alias removals.
-        compute_shap_summary_plots(
-            classifier=classifier,
-            X=X,
-            shap_feature_names=shap_feature_names,
-            shap_plot_type=shap_plot_type,
-            base_name=base_name,
-            figs_path=figs_path,
-            nameless_classifier=nameless_classifier,
-            nameless_X=nameless_X,
-            nameless_feature_names=nameless_feature_names,
+    if nameless_classifier is not None:
+        if nameless_X is None or nameless_feature_names is None:
+            raise ValueError("nameless_X and nameless_feature_names are required with nameless_classifier")
+        nameless_input = _validated_classifier_features(
+            nameless_classifier,
+            nameless_X,
+            feature_names=nameless_feature_names,
         )
+        y_prob = (
+            classifier.predict_proba(classifier_input)[:, 1] + nameless_classifier.predict_proba(nameless_input)[:, 1]
+        ) / 2
+    else:
+        y_prob = classifier.predict_proba(classifier_input)[:, 1]
+
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    with sns.axes_style("darkgrid"), sns.plotting_context("talk"), sns.color_palette("deep"):
+        # plot AUROC
+        fpr, tpr, _ = roc_curve(y, y_prob)
+        roc_auc = auc(fpr, tpr)
+
+        plt.figure(0, figsize=(15, 15))
+        plt.plot(fpr, tpr, lw=2, label=f"ROC curve (area = {roc_auc:0.2f})")
+        plt.xlim((-0.01, 1.0))
+        plt.ylim((0.0, 1.05))
+        plt.xlabel("False Positive Rate")
+        plt.ylabel("True Positive Rate")
+        plt.title(f"ROC Curve for {title}")
+        plt.legend(loc="lower right")
+        plt.savefig(join(figs_path, base_name + "_roc.png"))
+        plt.clf()
+        plt.close()
+
+        # plot AUPR
+        precision, recall, _ = precision_recall_curve(y, y_prob)
+        avg_precision = average_precision_score(y, y_prob)
+
+        plt.figure(1, figsize=(15, 15))
+        # Standard: recall on x-axis, precision on y-axis
+        plt.plot(
+            recall,
+            precision,
+            lw=2,
+            label=f"PR curve (AP = {avg_precision:.2f})",
+        )
+        plt.xlabel("Recall")
+        plt.ylabel("Precision")
+        plt.title(f"PR Curve for {title}")
+        plt.legend(loc="lower left")
+        plt.savefig(join(figs_path, base_name + "_pr.png"))
+        plt.clf()
+        plt.close()
+
+        # plot SHAP -- delegate to central helper that normalizes across SHAP/NumPy versions
+        if not skip_shap and shap_plot_type is not None:
+            from s2and.shap_utils import compute_shap_summary_plots
+
+            # compute_shap_summary_plots will write the same PNGs that the old inline
+            # code produced (names and behavior preserved) and is defensive against
+            # SHAP API changes and NumPy alias removals.
+            compute_shap_summary_plots(
+                classifier=classifier,
+                X=X,
+                shap_feature_names=shap_feature_names,
+                shap_plot_type=shap_plot_type,
+                base_name=base_name,
+                figs_path=figs_path,
+                nameless_classifier=nameless_classifier,
+                nameless_X=nameless_X,
+                nameless_feature_names=nameless_feature_names,
+            )
 
     # collect metrics and return
     pr, rc, f1, _ = precision_recall_fscore_support(
@@ -592,278 +619,68 @@ def pairwise_eval(
     return metrics
 
 
-def f1_score(precision: float, recall: float) -> float:
-    if precision == 0 or recall == 0:
-        return 0
-    return 2 * precision * recall / (precision + recall)
+def pairwise_probability_metrics(
+    labels: np.ndarray,
+    main_positive: np.ndarray,
+    nameless_positive: np.ndarray,
+    *,
+    include_average_precision: bool = False,
+) -> tuple[dict[str, float | int], np.ndarray]:
+    """Compute the single pairwise metric contract shared by smoke and release runs.
 
+    Both the pairwise-only smoke path in ``train_pairwise.py`` and the sealed
+    release evaluator in ``release_pairwise.py`` must report identical keys
+    computed identically, so that smoke evidence actually exercises the release
+    report schema. Positive probabilities from the main and nameless models are
+    averaged exactly once, and the F1 threshold is strict ``> 0.5``.
 
-def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
-    """
-    Compute the B^3 variant of precision, recall and F-score.
-    Modified from: https://github.com/glouppe/beard/blob/master/beard/metrics/clustering.py
+    Args:
+        labels: Binary ground-truth labels, one per pair.
+        main_positive: Positive-class probabilities from the main model.
+        nameless_positive: Positive-class probabilities from the nameless model.
+        include_average_precision: Whether to add ``average_precision``. Release
+            reports omit it; smoke reports include it as diagnostic evidence.
 
-    Parameters
-    ----------
-    true_clus: Dict
-        dictionary with cluster id as keys and 1d array containing
-        the ground-truth signature id assignments as values.
-    pred_clus: Dict
-        dictionary with cluster id as keys and 1d array containing
-        the predicted signature id assignments as values.
-    skip_signatures: List[string]
-        in the incremental setting blocks can be partially supervised,
-        hence those instances are not used for evaluation.
+    Returns:
+        The metric mapping and the averaged positive probabilities.
 
-    Returns
-    -------
-    float: calculated precision
-    float: calculated recall
-    float: calculated F1
-    Dict: P/R/F1 per signature
-
-    Reference
-    ---------
-    Amigo, Enrique, et al. "A comparison of extrinsic clustering evaluation
-    metrics based on formal constraints." Information retrieval 12.4
-    (2009): 461-486.
+    Raises:
+        ValueError: If shapes disagree, labels are empty, or only one class is
+            present.
+        RuntimeError: If any computed metric is non-finite.
     """
 
-    true_clusters = true_clus.copy()
-    pred_clusters = pred_clus.copy()
-
-    tcset = set(itertools.chain.from_iterable(true_clusters.values()))
-    pcset = set(itertools.chain.from_iterable(pred_clusters.values()))
-
-    if tcset != pcset:
-        raise ValueError("Predictions do not cover all the signatures!")
-
-    # incremental evaluation contains partially observed signatures
-    # skip_signatures are observed signatures, which we skip for b3 calc.
-    if skip_signatures is not None:
-        tcset = tcset.difference(skip_signatures)
-
-    for cluster_id, cluster in true_clusters.items():
-        true_clusters[cluster_id] = frozenset(cluster)
-    for cluster_id, cluster in pred_clusters.items():
-        pred_clusters[cluster_id] = frozenset(cluster)
-
-    precision = 0.0
-    recall = 0.0
-
-    rev_true_clusters = {}
-    for k, v in true_clusters.items():
-        for vi in v:
-            rev_true_clusters[vi] = k
-
-    rev_pred_clusters = {}
-    for k, v in pred_clusters.items():
-        for vi in v:
-            rev_pred_clusters[vi] = k
-
-    intersections = {}
-    per_signature_metrics = {}
-    n_samples = len(tcset)
-    if n_samples == 0:
-        return (
-            np.round(0.0, 3),
-            np.round(0.0, 3),
-            np.round(0.0, 3),
-            per_signature_metrics,
-            [],
-            [],
+    y = np.asarray(labels).reshape(-1)
+    main = np.asarray(main_positive, dtype=np.float64).reshape(-1)
+    nameless = np.asarray(nameless_positive, dtype=np.float64).reshape(-1)
+    if y.shape != main.shape or y.shape != nameless.shape:
+        raise ValueError(
+            "Pair labels and both probability vectors must have equal shape: "
+            f"labels={y.shape} main={main.shape} nameless={nameless.shape}"
         )
-
-    true_bigger_ratios, pred_bigger_ratios = [], []
-    for item in list(tcset):
-        pred_cluster_id = rev_pred_clusters[item]
-        true_cluster_id = rev_true_clusters[item]
-        pred_cluster_i = pred_clusters[pred_cluster_id]
-        true_cluster_i = true_clusters[true_cluster_id]
-
-        if len(pred_cluster_i) >= len(true_cluster_i):
-            pred_bigger_ratios.append(len(pred_cluster_i) / len(true_cluster_i))
-        else:
-            true_bigger_ratios.append(len(true_cluster_i) / len(pred_cluster_i))
-
-        memo_key = (pred_cluster_id, true_cluster_id)
-        if memo_key in intersections:
-            intersection = intersections[memo_key]
-        else:
-            intersection = pred_cluster_i.intersection(true_cluster_i)
-            intersections[memo_key] = intersection
-        _precision = len(intersection) / len(pred_cluster_i)
-        _recall = len(intersection) / len(true_cluster_i)
-        precision += _precision
-        recall += _recall
-        per_signature_metrics[item] = (
-            _precision,
-            _recall,
-            f1_score(_precision, _recall),
-        )
-
-    precision /= n_samples
-    recall /= n_samples
-
-    f_score = f1_score(precision, recall)
-
-    return (
-        np.round(precision, 3),
-        np.round(recall, 3),
-        np.round(f_score, 3),
-        per_signature_metrics,
-        pred_bigger_ratios,
-        true_bigger_ratios,
+    if y.size == 0 or np.unique(y).size != 2:
+        raise ValueError("Pair evaluation requires nonempty labels with both classes")
+    probabilities = (main + nameless) / 2.0
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y,
+        probabilities > 0.5,
+        beta=1.0,
+        average="macro",
+        zero_division=0,
     )
-
-
-def cluster_precision_recall_fscore(
-    true_clus: dict[str, list[str]], pred_clus: dict[str, list[str]]
-) -> tuple[float, float, float]:
-    """
-    Compute cluster-wise pair-wise precision, recall and F-score.
-
-    The function also contains the fix proposed in
-    https://arxiv.org/pdf/1808.04216.pdf to handle singleton clusters.
-
-    Parameters
-    ----------
-    true_clus: Dict
-        dictionary with cluster id as keys and 1d array
-        containing the ground-truth signature id assignments as values.
-    pred_clus: Dict
-        dictionary with cluster id as keys and 1d array
-        containing the predicted signature id assignments as values.
-
-    Returns
-    -------
-    float: calculated precision
-    float: calculated recall
-    float: calculated F1
-
-    Reference
-    ---------
-    Levin, Michael, et al. "Citation‐based bootstrapping for
-    large‐scale author disambiguation." Journal of the American Society for Information
-    Science and Technology (2012): 1030-1047.
-    """
-
-    goldpairs = set()
-    syspairs = set()
-
-    for _, signatures in true_clus.items():
-        if len(signatures) == 1:
-            goldpairs.add((signatures[0], signatures[0]))
-            continue
-
-        sort_sign = sorted(signatures)
-
-        for i in range(len(sort_sign) - 1):
-            for j in range(i + 1, len(sort_sign)):
-                goldpairs.add((sort_sign[i], sort_sign[j]))
-
-    for _, signatures in pred_clus.items():
-        if len(signatures) == 1:
-            syspairs.add((signatures[0], signatures[0]))
-            continue
-
-        sort_sign = sorted(signatures)
-
-        for i in range(len(sort_sign) - 1):
-            for j in range(i + 1, len(sort_sign)):
-                syspairs.add((sort_sign[i], sort_sign[j]))
-
-    overlap = len(goldpairs.intersection(syspairs))
-    precision = overlap / len(syspairs) if len(syspairs) > 0 else 0.0
-    recall = overlap / len(goldpairs) if len(goldpairs) > 0 else 0.0
-
-    return precision, recall, f1_score(precision, recall)
-
-
-def pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy="cmacro"):
-    """
-    Compute the Pairwise precision, recall and F-score.
-
-    Parameters
-    ----------
-    true_clusters: Dict
-        dictionary with cluster id as keys and
-        1d array containing the ground-truth signature id assignments as values.
-    pred_clusters: Dict
-        dictionary with cluster id as keys and
-        1d array containing the predicted signature id assignments as values.
-    test_block: Dict
-        dictionary with block id as keys and 1d array
-        containing signature ids as values (block assignment).
-    strategy: string
-        'clusters' is cluster-wise pairwise precision, recall
-        and f1 scores. It is computed over all possible pairs in true and predicted
-        clusters. 'cmacro' is computed over each block, and averaged finally.
-
-    Returns
-    -------
-    float: calculated precision
-    float: calculated recall
-    float: calculated F1
-    """
-
-    true_clusters = true_clus.copy()
-    pred_clusters = pred_clus.copy()
-
-    tcset = set(itertools.chain.from_iterable(true_clusters.values()))
-    pcset = set(itertools.chain.from_iterable(pred_clusters.values()))
-
-    if tcset != pcset:
-        raise ValueError("predictions do not cover all the signatures.")
-
-    if strategy == "clusters":
-        precision, recall, f1 = cluster_precision_recall_fscore(true_clus, pred_clus)
-        return np.round(precision, 3), np.round(recall, 3), np.round(f1, 3)
-
-    elif strategy == "cmacro":
-        rev_true_clusters = {}
-        for k, v in true_clusters.items():
-            for vi in v:
-                rev_true_clusters[vi] = k
-
-        rev_pred_clusters = {}
-        for k, v in pred_clusters.items():
-            for vi in v:
-                rev_pred_clusters[vi] = k
-
-        if len(test_block) == 0:
-            return np.round(0.0, 3), np.round(0.0, 3), np.round(0.0, 3)
-        mprecision = 0
-        mrecall = 0
-        mf1 = 0
-
-        for _, signatures in test_block.items():
-            gtruth_block = {}
-            prediction_block = {}
-
-            for sign in signatures:
-                tclus = rev_true_clusters[sign]
-                pclus = rev_pred_clusters[sign]
-                if tclus not in gtruth_block:
-                    gtruth_block[tclus] = list()
-                gtruth_block[tclus].append(sign)
-                if pclus not in prediction_block:
-                    prediction_block[pclus] = list()
-                prediction_block[pclus].append(sign)
-
-            _mprecision, _mrecall, _mf1 = cluster_precision_recall_fscore(gtruth_block, prediction_block)
-
-            mprecision += _mprecision
-            mrecall += _mrecall
-            mf1 += _mf1
-
-        mprecision = mprecision / len(test_block)
-        mrecall = mrecall / len(test_block)
-        mf1 = mf1 / len(test_block)
-
-        return np.round(mprecision, 3), np.round(mrecall, 3), np.round(mf1, 3)
-    else:
-        raise ValueError(f"Unknown strategy: {strategy!r}")
+    metrics: dict[str, float | int] = {
+        "rows": int(y.size),
+        "auroc": float(roc_auc_score(y, probabilities)),
+        "macro_f1": float(f1),
+        "macro_precision": float(precision),
+        "macro_recall": float(recall),
+    }
+    if include_average_precision:
+        metrics["average_precision"] = float(average_precision_score(y, probabilities))
+    non_finite = sorted(key for key, value in metrics.items() if key != "rows" and not np.isfinite(float(value)))
+    if non_finite:
+        raise RuntimeError(f"Pair evaluation produced non-finite metrics: {non_finite}")
+    return metrics, probabilities
 
 
 def _claims_eval_prediction_output(
@@ -892,16 +709,17 @@ def _shap_values_for_tree_model_preserving_booster_params(
 ) -> np.ndarray:
     import s2and.shap_utils as shap_utils
 
-    base_estimator = shap_utils._base_estimator(classifier)
-    booster = getattr(base_estimator, "booster_", None)
+    booster = getattr(classifier, "booster_", None)
+    shap_model = booster if getattr(classifier, "prediction_backend", None) == "rust_lightgbm" else classifier
     booster_params = getattr(booster, "params", None)
-    original_params = dict(booster_params) if isinstance(booster_params, dict) else None
+    booster_params_dict = booster_params if isinstance(booster_params, dict) else None
+    original_params = dict(booster_params_dict) if booster_params_dict is not None else None
     try:
-        return shap_utils._shap_values_for_tree_model(base_estimator, features, class_index=1)
+        return shap_utils._shap_values_for_tree_model(shap_model, features, class_index=1)
     finally:
-        if original_params is not None:
-            booster_params.clear()
-            booster_params.update(original_params)
+        if booster_params_dict is not None and original_params is not None:
+            booster_params_dict.clear()
+            booster_params_dict.update(original_params)
 
 
 def _write_claims_eval_shap_plots(
@@ -917,43 +735,40 @@ def _write_claims_eval_shap_plots(
         dataset,
         clusterer.featurizer_info,
         n_jobs=10,
-        use_cache=True,
         chunk_size=100,
         nameless_featurizer_info=clusterer.nameless_featurizer_info,
     )
     if nameless_features is None:
         raise ValueError("output_shap=True requires clusterer.nameless_featurizer_info to produce nameless features")
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        import s2and.shap_utils as shap_utils
+    import s2and.shap_utils as shap_utils
 
-        shap_output = _shap_values_for_tree_model_preserving_booster_params(
-            clusterer.classifier,
-            features,
-        )
-        shap_output_nameless = _shap_values_for_tree_model_preserving_booster_params(
-            clusterer.nameless_classifier,
-            nameless_features,
-        )
+    shap_output = _shap_values_for_tree_model_preserving_booster_params(
+        clusterer.classifier,
+        features,
+    )
+    shap_output_nameless = _shap_values_for_tree_model_preserving_booster_params(
+        clusterer.nameless_classifier,
+        nameless_features,
+    )
 
-        title = f"{id1}-{id2}"
-        shap_utils._safe_summary_plot(
-            shap_output,
-            features,
-            clusterer.featurizer_info.get_feature_names(),
-            "dot",
-            join(directory_for_caching, f"{title}_shap.png"),
-            fig_num=1,
-        )
-        shap_utils._safe_summary_plot(
-            shap_output_nameless,
-            nameless_features,
-            clusterer.nameless_featurizer_info.get_feature_names(),  # type: ignore
-            "dot",
-            join(directory_for_caching, f"{title}_shap_nameless.png"),
-            fig_num=2,
-        )
+    title = f"{id1}-{id2}"
+    shap_utils._safe_summary_plot(
+        shap_output,
+        features,
+        clusterer.featurizer_info.get_feature_names(),
+        "dot",
+        join(directory_for_caching, f"{title}_shap.png"),
+        fig_num=1,
+    )
+    shap_utils._safe_summary_plot(
+        shap_output_nameless,
+        nameless_features,
+        clusterer.nameless_featurizer_info.get_feature_names(),  # type: ignore
+        "dot",
+        join(directory_for_caching, f"{title}_shap_nameless.png"),
+        fig_num=2,
+    )
 
 
 def claims_eval(
@@ -1080,19 +895,15 @@ def claims_eval(
 
     if directory_for_caching is not None:
         logger.info("Writing predictions to disk")
-        suffix: int | str
-        if optional_name is None:
-            suffix = clusterer.featurizer_info.featurizer_version
-        else:
-            suffix = optional_name
-        with open(join(directory_for_caching, f"preds_{suffix}.json"), "w") as _json_file:
+        suffix = f"_{optional_name}" if optional_name is not None else ""
+        with open(join(directory_for_caching, f"preds{suffix}.json"), "w") as _json_file:
             json.dump(output_to_write, _json_file)
 
         if dists is None:
             logger.info("Skipping distance matrix dump because clusterer.predict returned dists=None")
         else:
             logger.info("Writing dists to disk")
-            with open(join(directory_for_caching, f"dists_{suffix}.pkl"), "wb") as _pkl_file:
+            with open(join(directory_for_caching, f"dists{suffix}.pkl"), "wb") as _pkl_file:
                 pickle.dump(dists, _pkl_file)
         logger.info("Done dumping")
 

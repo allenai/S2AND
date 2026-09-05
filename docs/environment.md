@@ -4,21 +4,12 @@ Centralized reference for supported S2AND environment variables.
 
 ---
 
-## Runtime Backend
+## Runtime and telemetry
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `S2AND_BACKEND` | `python`, `rust`, `auto` | `auto` | Controls the default runtime backend for featurization, constraints, promoted incremental linking, and indexed Arrow subblocking. `auto` resolves to Rust when the extension is available and core-capable; otherwise Python. |
-
----
-
-## Cache Configuration
-
-| Variable | Values | Default | Description |
-|----------|--------|---------|-------------|
-| `S2AND_CACHE` | `<path>` | `~/.s2and` | Cache root directory for the pair-feature cache and artifact downloads. |
-
-See [caching.md](caching.md) for cache semantics and on-disk layout.
+| `S2AND_BACKEND` | `python`, `rust` | `python` | Backend used when a caller builds a runtime context without an explicit backend. Invalid values raise `ValueError`; requesting a missing or mismatched Rust extension raises `RuntimeError`. Public APIs have fixed routes: classic `ANDData` construction and prediction use Python, while APIs taking an open `ArrowDataset` use Rust. Rust requires the exact version pinned by the project metadata; there is no silent fallback. |
+| `S2AND_MEMORY_TELEMETRY_JSONL` | `<path>` | unset | Sole library authority for appending structured memory-telemetry JSONL. Parent directories are created. Prefer a fresh run-specific path; records append under an in-process lock. |
 
 ---
 
@@ -27,17 +18,10 @@ See [caching.md](caching.md) for cache semantics and on-disk layout.
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `S2AND_PATH_CONFIG` | `<path>` | `s2and/data/path_config.json` | Path to the JSON data-path config. Use when data lives outside the package default path. |
-| `S2AND_NORMALIZATION_VERSION` | `<version>` | code default | Expected normalization contract for Rust feature-port inputs. Use only when validating regenerated normalization-sensitive artifacts. |
 
----
-
-## Import & Model Loading
-
-| Variable | Values | Default | Description |
-|----------|--------|---------|-------------|
-| `S2AND_SKIP_FASTTEXT` | `1`, `true`, `yes` to skip | unset | Disables fastText model loading for scripts/tests that do not need language detection. Set before importing `s2and.text`. |
-
----
+Artifact compatibility is not configurable through the environment. Model
+bundles record the exact generating runtime, and independently readable Arrow
+and name-count data declares public format `1`.
 
 ## Threading & Parallelism
 
@@ -60,6 +44,10 @@ See `docs/threading.md` for detailed guidance on avoiding nested parallelism and
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `S2AND_CI_TY_PLATFORM` | `linux`, `windows`, etc. | `linux` | Override platform emulation for local `ty` checks. By default, local CI runs use `--python-platform linux` to match GitHub Linux runners. |
+
+The full test suite requires the matching Rust extension and PyArrow without an
+environment opt-in. Tests default to Python orchestration; native cases select
+their runtime explicitly. See [the test suite guide](../tests/README.md).
 
 ---
 

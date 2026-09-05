@@ -189,9 +189,9 @@ def plot_histogram_from_freq(
 
     max_x = int(x.max())
     if max_x <= 1:
-        bins = np.array([0.5, 1.5], dtype=float)
+        bins = [0.5, 1.5]
     else:
-        bins = np.geomspace(1.0, float(max_x) + 1.0, num=80)
+        bins = np.geomspace(1.0, float(max_x) + 1.0, num=80).tolist()
 
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.hist(x, bins=bins, weights=weights, color="#2C7FB8", alpha=0.9)

@@ -1,176 +1,406 @@
-"""
-Note: This script won't run because it relies on an internal Semantic Scholar package
-called pys2, and is here for documentation of how the prefix counts for subblocking were built.
+"""Generate one immutable canonical ORCID first-name prefix-count artifact."""
 
-TODO(s2and): This JSON was generated with legacy normalization (single-token first, apostrophes handled via
-             special_case_apostrophes=True for first). When we finalize the new unified normalization
-             (hyphen-aware, consistent apostrophe handling), rewrite this script to call
-             s2and.text.split_first_middle_hyphen_aware (or its eventual unified equivalent) and regenerate
-             s2and/data/first_k_letter_counts_from_orcid.json. Until then, runtime lookups use a first-token fallback
-             for compatibility.
-"""
+from __future__ import annotations
 
+import argparse
+import csv
 import json
 import os
+import re
+import shutil
+import tempfile
 from collections import Counter
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from itertools import combinations
+from pathlib import Path
+from typing import Any
 
-from pys2.pys2 import _evaluate_redshift_query  # type: ignore
+import orjson
 
-from s2and.consts import _PACKAGE_DATA_DIR
-from s2and.text import NAME_PREFIXES, normalize_text, same_prefix_tokens
+from s2and._atomic_io import exclusive_file_lock, fsync_directory
+from s2and.name_tuple_artifact import NameTupleArtifact, load_packaged_name_tuple_artifact
+from s2and.orcid_prefix_counts import (
+    ORCID_PREFIX_DATA_FILENAME,
+    ORCID_PREFIX_MANIFEST_FILENAME,
+    LoadedOrcidPrefixCounts,
+    load_canonical_orcid_prefix_counts,
+    validate_orcid_prefix_counts,
+)
+from s2and.text import canonicalize_name_parts, normalize_orcid, same_prefix_tokens
 
-"""
-Step 1: Get orcid name pairs from our internal databases
-"""
+from ._run_support import (
+    emit_jsonl,
+    load_guardrails,
+    validate_input_file,
+    validate_output_container,
+)
 
-query = """
- select p.year, p.inserted paper_inserted,
-      pae.corpus_paper_id, pae.source, pae.orcid,  pae.position, pae.first_name, pa.middle, pae.last_name,
-      pa.corpus_author_id,
-      au.ai2_id,
-      pa.inserted pa_inserted,
-      pa.updated pa_updated,
-      pa.cluster_block_key,
-      pa.model_version,
-      pa.clusterer
- from content_ext.paper_authors_orcids pae
- join content_ext.papers p
-      on pae.corpus_paper_id=p.corpus_paper_id
-join content_ext.paper_authors pa
-     on pae.corpus_paper_id=pa.corpus_paper_id
-     and pae.position=pa.position+1 and lower(pae.last_name)=lower(pa.last)
-join content_ext.authors au
-   on pa.corpus_author_id=au.corpus_author_id
-where pae.source in ('Crossref')
-;
-"""
-
-df_all = _evaluate_redshift_query(query)
-
-cache = {}
+K_VALUES = (2, 3, 4, 5)
+MIN_ORCID_COUNT = 10
+MIN_ALIAS_COUNT = 2
+DEFAULT_MAX_NAMES_PER_ORCID = 100
+PROGRESS_EVERY = 100_000
+GUARDRAIL_FIELDS = frozenset(
+    {
+        "max_source_rows",
+        "min_source_rows",
+        "max_names_per_orcid",
+        "max_pair_keys",
+        "min_orcid_pair_keys",
+    }
+)
+_CANONICAL_SOURCE_ORCID_PATTERN = re.compile(r"[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9Xx]")
 
 
-def normalize_names(row):
-    """Legacy normalization used when building ORCID prefix counts.
+def _canonical_source_orcid(value: Any) -> str | None:
+    """Normalize source ORCIDs with a cheap path for the warehouse shape."""
 
-    TODO(s2and): Align with s2and.text.split_first_middle_hyphen_aware when regenerating counts.
-    Currently kept to document how the existing JSON was produced.
-    """
-    first = row["first_name"]
-    middle = row["middle"]
+    if value is None:
+        return None
+    text = str(value).strip()
+    if _CANONICAL_SOURCE_ORCID_PATTERN.fullmatch(text) is not None:
+        return text if text[18] != "x" else f"{text[:18]}X"
+    return normalize_orcid(text)
 
-    if (first, middle) in cache:
-        return cache[(first, middle)]
 
-    first_normalized_without_apostrophe = normalize_text(first or "", special_case_apostrophes=True)
+def canonical_prefix_pair(first: str, second: str) -> tuple[str, str]:
+    """Return an order-independent prefix-pair key."""
 
-    middle_normalized = normalize_text(middle or "")
+    return (first, second) if first <= second else (second, first)
 
-    first_middle_normalized_split_without_apostrophe = (
-        first_normalized_without_apostrophe + " " + middle_normalized
-    ).split(" ")
-    if first_middle_normalized_split_without_apostrophe[0] in NAME_PREFIXES:
-        first_middle_normalized_split_without_apostrophe = first_middle_normalized_split_without_apostrophe[1:]
 
-    author_info_first_normalized_without_apostrophe = first_middle_normalized_split_without_apostrophe[0]
-    author_info_middle_normalized_without_apostrophe = " ".join(first_middle_normalized_split_without_apostrophe[1:])
-    cache[(first, middle)] = (
-        author_info_first_normalized_without_apostrophe,
-        author_info_middle_normalized_without_apostrophe,
+def prefix_pairs_for_names(
+    first_name: str,
+    second_name: str,
+    *,
+    k_values: Sequence[int] = K_VALUES,
+) -> set[tuple[str, str]]:
+    """Return canonical unequal prefix pairs for two nonempty names."""
+
+    if not first_name or not second_name or first_name[0] != second_name[0]:
+        return set()
+    pairs: set[tuple[str, str]] = set()
+    for first_prefix in {first_name[:k] for k in k_values}:
+        for second_prefix in {second_name[:k] for k in k_values}:
+            left, right = canonical_prefix_pair(first_prefix, second_prefix)
+            if left != right and not same_prefix_tokens(left, right):
+                pairs.add((left, right))
+    return pairs
+
+
+def _merge_prefix_counts(
+    orcid_counts: Counter[tuple[str, str]],
+    name_tuples: Iterable[tuple[str, str]],
+    *,
+    min_orcid_count: int,
+    min_alias_count: int,
+    max_pair_keys: int | None,
+) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
+    """Threshold and merge ORCID/alias counts under one live pair bound."""
+
+    canonical_name_tuples: set[tuple[str, str]] = set()
+    for pair in name_tuples:
+        if (
+            not isinstance(pair, tuple | list)
+            or len(pair) != 2
+            or not all(isinstance(name, str) and name for name in pair)
+        ):
+            raise ValueError("name_tuples must contain pairs of nonempty canonical strings")
+        canonical_name_tuples.add(canonical_prefix_pair(*pair))
+
+    alias_counts: Counter[tuple[str, str]] = Counter()
+    for first_name, second_name in sorted(canonical_name_tuples):
+        alias_counts.update(prefix_pairs_for_names(first_name, second_name))
+        if max_pair_keys is not None and len(alias_counts) > max_pair_keys:
+            raise ValueError(f"alias prefix pairs exceeded guardrail max_pair_keys={max_pair_keys}")
+
+    nested: dict[str, dict[str, int]] = {}
+    orcid_pair_keys_after_threshold = 0
+    for (left, right), count in sorted(orcid_counts.items()):
+        if count >= min_orcid_count:
+            nested.setdefault(left, {})[right] = int(count)
+            orcid_pair_keys_after_threshold += 1
+    for (left, right), count in sorted(alias_counts.items()):
+        if count >= min_alias_count:
+            nested.setdefault(left, {}).setdefault(right, int(count))
+    output_pair_keys = sum(len(counts) for counts in nested.values())
+    if max_pair_keys is not None and output_pair_keys > max_pair_keys:
+        raise ValueError(f"published prefix pairs exceeded guardrail max_pair_keys={max_pair_keys}")
+    return nested, {
+        "orcid_pair_keys_before_threshold": len(orcid_counts),
+        "orcid_pair_keys_after_threshold": orcid_pair_keys_after_threshold,
+        "alias_pair_keys_before_threshold": len(alias_counts),
+        "selected_name_tuple_pairs": len(canonical_name_tuples),
+        "output_pair_keys": output_pair_keys,
+        "output_outer_keys": len(nested),
+    }
+
+
+def build_prefix_counts_from_sorted_rows(
+    rows: Iterable[Mapping[str, Any]],
+    name_tuples: Iterable[tuple[str, str]],
+    *,
+    min_orcid_count: int = MIN_ORCID_COUNT,
+    min_alias_count: int = MIN_ALIAS_COUNT,
+    max_names_per_orcid: int = DEFAULT_MAX_NAMES_PER_ORCID,
+    max_source_rows: int | None = None,
+    max_pair_keys: int | None = None,
+    progress_callback: Callable[[dict[str, int]], None] | None = None,
+) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
+    """Stream sorted rows one ORCID at a time under explicit expansion bounds."""
+
+    if max_names_per_orcid < 2:
+        raise ValueError("max_names_per_orcid must be at least 2")
+    metrics = Counter[str]()
+    orcid_counts: Counter[tuple[str, str]] = Counter()
+    current_orcid: str | None = None
+    current_names: set[str] = set()
+    previous_orcid: str | None = None
+    previous_source_orcid: str | None = None
+    previous_normalized_orcid: str | None = None
+    canonical_first_cache: dict[tuple[str | None, str | None], str] = {}
+
+    def flush_group() -> None:
+        if current_orcid is None:
+            return
+        unique_name_count = len(current_names)
+        metrics["orcid_groups"] += 1
+        metrics["unique_orcid_names"] += unique_name_count
+        metrics["max_unique_names_per_orcid"] = max(metrics["max_unique_names_per_orcid"], unique_name_count)
+        sorted_names = sorted(current_names)
+        metrics["selected_canonical_rows"] += unique_name_count
+        # Keep the existing event-count semantics until release policy explicitly
+        # decides otherwise: one ORCID may contribute the same prefix pair through
+        # multiple distinct name combinations. These counts affect merge ordering
+        # as well as thresholding, so changing them is not a producer-only cleanup.
+        for first_name, second_name in combinations(sorted_names, 2):
+            orcid_counts.update(prefix_pairs_for_names(first_name, second_name))
+        if max_pair_keys is not None and len(orcid_counts) > max_pair_keys:
+            raise ValueError(f"ORCID prefix pairs exceeded guardrail max_pair_keys={max_pair_keys}")
+
+    for row in rows:
+        metrics["source_rows"] += 1
+        if max_source_rows is not None and metrics["source_rows"] > max_source_rows:
+            raise ValueError(f"source rows exceeded guardrail max_source_rows={max_source_rows}")
+        if progress_callback is not None and metrics["source_rows"] % PROGRESS_EVERY == 0:
+            progress_callback(
+                {
+                    "source_rows": metrics["source_rows"],
+                    "accepted_rows": metrics["accepted_rows"],
+                    "orcid_groups_completed": metrics["orcid_groups"],
+                    "orcid_pair_keys": len(orcid_counts),
+                }
+            )
+
+        raw_orcid = row.get("raw_orcid", row.get("orcid"))
+        source_orcid = row.get("orcid")
+        raw_first_value = row.get("first_name")
+        raw_middle_value = row.get("middle")
+        raw_first = None if raw_first_value is None else str(raw_first_value)
+        raw_middle = None if raw_middle_value is None else str(raw_middle_value)
+        source_orcid_text = None if source_orcid is None else str(source_orcid)
+        if source_orcid_text == previous_source_orcid:
+            orcid = previous_normalized_orcid
+        else:
+            orcid = _canonical_source_orcid(source_orcid_text)
+            previous_source_orcid = source_orcid_text
+            previous_normalized_orcid = orcid
+        if orcid is None:
+            metric = "rejected_missing_orcid" if not str(raw_orcid or "").strip() else "rejected_invalid_orcid"
+            metrics[metric] += 1
+            continue
+        if previous_orcid is not None and orcid < previous_orcid:
+            raise ValueError("ORCID source rows must be sorted by canonical orcid")
+        previous_orcid = orcid
+
+        name_key = (raw_first, raw_middle)
+        normalized_first = canonical_first_cache.get(name_key)
+        if normalized_first is None:
+            normalized_first = canonicalize_name_parts(raw_first, raw_middle, None).first
+            if len(canonical_first_cache) >= 100_000:
+                canonical_first_cache.clear()
+            canonical_first_cache[name_key] = normalized_first
+        if not normalized_first:
+            metrics["rejected_empty_canonical_first"] += 1
+            continue
+        if current_orcid is None:
+            current_orcid = orcid
+        elif orcid != current_orcid:
+            flush_group()
+            current_names.clear()
+            current_orcid = orcid
+        if normalized_first not in current_names and len(current_names) >= max_names_per_orcid:
+            raise ValueError(f"ORCID {orcid!r} has more than max_names_per_orcid={max_names_per_orcid} unique names")
+        current_names.add(normalized_first)
+        metrics["accepted_rows"] += 1
+    flush_group()
+
+    counts, count_metrics = _merge_prefix_counts(
+        orcid_counts,
+        name_tuples,
+        min_orcid_count=min_orcid_count,
+        min_alias_count=min_alias_count,
+        max_pair_keys=max_pair_keys,
+    )
+    metrics["max_names_per_orcid_limit"] = max_names_per_orcid
+    return counts, {**dict(metrics), **count_metrics}
+
+
+def _publication_payloads(
+    counts: Mapping[str, Mapping[str, int]],
+    *,
+    name_tuples_sha256: str,
+) -> dict[str, bytes]:
+    """Serialize the trusted runtime data and its tuple dependency."""
+
+    validate_orcid_prefix_counts(counts, context="counts")
+    data_payload = orjson.dumps(counts, option=orjson.OPT_SORT_KEYS)
+    manifest = {"name_tuples_sha256": name_tuples_sha256}
+    return {
+        ORCID_PREFIX_DATA_FILENAME: data_payload,
+        ORCID_PREFIX_MANIFEST_FILENAME: (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode(),
+    }
+
+
+def _publish(
+    payloads: Mapping[str, bytes],
+    *,
+    output_dir: Path,
+) -> LoadedOrcidPrefixCounts:
+    """Validate once in a sibling directory, then atomically publish it."""
+
+    output_parent = output_dir.parent
+    output_parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_parent))
+    lock_path = output_parent / f".{output_dir.name}.publish.lock"
+    try:
+        for filename, payload in payloads.items():
+            with (staging_dir / filename).open("wb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+        fsync_directory(staging_dir)
+        loaded = load_canonical_orcid_prefix_counts(staging_dir)
+        with exclusive_file_lock(lock_path):
+            if output_dir.exists():
+                raise FileExistsError(f"publication target already exists: {output_dir}")
+            staging_dir.rename(output_dir)
+        fsync_directory(output_parent)
+        return loaded
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+
+
+def write_publication(
+    counts: Mapping[str, Mapping[str, int]],
+    *,
+    output_dir: Path,
+    name_tuples: NameTupleArtifact,
+) -> LoadedOrcidPrefixCounts:
+    """Serialize, validate, and atomically publish one fresh artifact."""
+
+    return _publish(
+        _publication_payloads(
+            counts,
+            name_tuples_sha256=name_tuples.data_sha256,
+        ),
+        output_dir=output_dir,
     )
 
-    return author_info_first_normalized_without_apostrophe, author_info_middle_normalized_without_apostrophe
+
+def _load_reviewed_csv_rows(path: Path) -> Iterator[Mapping[str, Any]]:
+    """Stream one reviewed, query-ordered warehouse export."""
+
+    with path.open(encoding="utf-8-sig", newline="") as input_file:
+        reader = csv.DictReader(input_file)
+        fields = reader.fieldnames or []
+        expected = ["raw_orcid", "orcid", "first_name", "middle"]
+        if fields != expected:
+            raise ValueError(f"Reviewed ORCID export must have exact header: {expected}")
+        for row in reader:
+            if None in row:
+                raise ValueError("Reviewed ORCID export row has more values than columns")
+            yield row
 
 
-normed_first_second = df_all.apply(normalize_names, axis=1, result_type="expand")
-df_all.loc[:, ["first_norm", "middle_norm"]] = normed_first_second.values
-orcids = df_all[["cluster_block_key", "orcid", "first_norm", "middle_norm"]]
-
-"""
-Step 2: Get name pairs that are included in S2AND
-"""
-name_tuples = set()
-with open(os.path.join(_PACKAGE_DATA_DIR, "s2and_name_tuples_filtered.txt")) as f2:
-    for line in f2:
-        line_split = line.strip().split(",")
-        name_tuples.add((line_split[0], line_split[1]))
-
-"""
-Step 3: Compute first k letter pair and how often they occur for both data sources
-and combine them
-"""
-
-# orcid data
-k_values = (2, 3, 4, 5)  # only care up to first 5 letters
-orcid_first_k_letter_counts = Counter()
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input-csv", type=Path, required=True, help="Reviewed query-ordered warehouse export")
+    parser.add_argument("--guardrails-json", type=Path, required=True, help="Reviewed run bounds")
+    parser.add_argument("--output-dir", type=Path, required=True)
+    return parser
 
 
-# in each group, take all pairs of unique names and then count the number of
-# times each first k letter combination occurs
-# (name_1[:k], name_2[:k]) for k in range(2, 6) where k is the outer dictionary key
-def group_update(group, k_values=k_values):
-    names = [i for i in group["first_norm"].unique() if isinstance(i, str)]
-    if len(names) > 1:
-        for name1, name2 in combinations(names, 2):
-            if name1[0] == name2[0]:
-                pairs = set()
-                for k in k_values:
-                    for j in k_values:
-                        pair = (name1[:k], name2[:j])
-                        if pair[0] != pair[1]:
-                            pairs.add(pair)
-                orcid_first_k_letter_counts.update(list(pairs))
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the guarded producer."""
+
+    args = _parser().parse_args(argv)
+    source = validate_input_file(args.input_csv, option="--input-csv")
+    output_dir = validate_output_container(args.output_dir, publication_path=args.output_dir)
+    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS)
+    if guardrails["min_source_rows"] > guardrails["max_source_rows"]:
+        raise ValueError("guardrail min_source_rows must not exceed max_source_rows")
+    if guardrails["min_orcid_pair_keys"] > guardrails["max_pair_keys"]:
+        raise ValueError("guardrail min_orcid_pair_keys must not exceed max_pair_keys")
+    if guardrails["max_names_per_orcid"] < 2:
+        raise ValueError("guardrail max_names_per_orcid must be at least 2")
+
+    name_tuples = load_packaged_name_tuple_artifact()
+
+    plan = {
+        "source": str(source),
+        "output_dir": str(output_dir),
+        "guardrails": guardrails,
+        "name_tuples_sha256": name_tuples.data_sha256,
+    }
+    emit_jsonl({"event": "orcid_prefix_plan", "plan": plan})
+    rows = _load_reviewed_csv_rows(source)
+
+    def report_progress(metrics: dict[str, int]) -> None:
+        emit_jsonl({"event": "orcid_prefix_progress", **metrics})
+
+    counts, metrics = build_prefix_counts_from_sorted_rows(
+        rows,
+        name_tuples.pairs,
+        max_names_per_orcid=guardrails["max_names_per_orcid"],
+        max_source_rows=guardrails["max_source_rows"],
+        max_pair_keys=guardrails["max_pair_keys"],
+        progress_callback=report_progress,
+    )
+    if int(metrics.get("source_rows", 0)) == 0:
+        raise RuntimeError("ORCID prefix-count generation selected zero source rows")
+    if int(metrics.get("accepted_rows", 0)) == 0 or int(metrics.get("orcid_groups", 0)) == 0:
+        raise RuntimeError("ORCID prefix-count generation selected no usable ORCID/name groups")
+    if int(metrics.get("output_pair_keys", 0)) == 0:
+        raise RuntimeError("ORCID prefix-count generation produced zero output pair keys")
+    source_rows = int(metrics["source_rows"])
+    orcid_pair_keys = int(metrics["orcid_pair_keys_after_threshold"])
+    if source_rows < guardrails["min_source_rows"]:
+        raise RuntimeError(
+            f"source rows {source_rows} are below guardrail min_source_rows={guardrails['min_source_rows']}"
+        )
+    if orcid_pair_keys < guardrails["min_orcid_pair_keys"]:
+        raise RuntimeError(
+            "ORCID-derived pair keys "
+            f"{orcid_pair_keys} are below guardrail min_orcid_pair_keys={guardrails['min_orcid_pair_keys']}"
+        )
+
+    write_publication(
+        counts,
+        output_dir=output_dir,
+        name_tuples=name_tuples,
+    )
+    emit_jsonl(
+        {
+            "event": "orcid_prefix_result",
+            "data": str(output_dir / ORCID_PREFIX_DATA_FILENAME),
+            "manifest": str(output_dir / ORCID_PREFIX_MANIFEST_FILENAME),
+            "metrics": metrics,
+        }
+    )
+    return 0
 
 
-groups = orcids.groupby("orcid")
-groups.apply(group_update)
-
-# name tuples data
-name_tuples_first_k_letter_counts = Counter()
-for name1, name2 in name_tuples:
-    if name1[0] == name2[0] and (name1, name2):
-        pairs = set()
-        for k in k_values:
-            for j in k_values:
-                pair = (name1[:k], name2[:j])
-                if pair[0] != pair[1] and not same_prefix_tokens(pair[0], pair[1]):
-                    pairs.add(pair)
-        name_tuples_first_k_letter_counts.update(list(pairs))
-
-# we will have a special subblock merge rule for a.starts_with(b) and b.starts_with(a)
-# where a and b are names so we can just remove all of those from the orcid_first_k_letter_counts
-# to save space
-orcid_first_k_letter_counts_filtered = {}
-for (name1, name2), count in orcid_first_k_letter_counts.items():
-    if not same_prefix_tokens(name1, name2):
-        # we also have a filter on this one where count has to be greater than 10
-        if count >= 10:
-            orcid_first_k_letter_counts_filtered[(name1, name2)] = count
-
-# can't save a json where the keys are tuples so make a nested dict:
-# outer key: tuple[0], inner key: tuple[1], value: count
-# remove everything with count < 10 as it is too noisy
-merged_first_k_letter_counts_sorted = {}
-for name_tuple, count in orcid_first_k_letter_counts_filtered.items():
-    if name_tuple[0] not in merged_first_k_letter_counts_sorted:
-        merged_first_k_letter_counts_sorted[name_tuple[0]] = {}
-    merged_first_k_letter_counts_sorted[name_tuple[0]][name_tuple[1]] = count
-
-print(len(merged_first_k_letter_counts_sorted))
-
-# now add from the name_tuples but the count has to change a bit
-# as these are just not as high numbers as the orcid ones
-already_in = 0
-for name_tuple, count in name_tuples_first_k_letter_counts.items():
-    if count >= 2:
-        if name_tuple[0] not in merged_first_k_letter_counts_sorted:
-            merged_first_k_letter_counts_sorted[name_tuple[0]] = {}
-        if name_tuple[1] not in merged_first_k_letter_counts_sorted[name_tuple[0]]:
-            merged_first_k_letter_counts_sorted[name_tuple[0]][name_tuple[1]] = count
-        else:
-            already_in += 1
-
-# save it
-with open(os.path.join(_PACKAGE_DATA_DIR, "first_k_letter_counts_from_orcid.json"), "w") as f:
-    json.dump(merged_first_k_letter_counts_sorted, f)
+if __name__ == "__main__":
+    raise SystemExit(main())

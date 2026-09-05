@@ -1,10 +1,10 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+requires = ["maturin>=1.14.1,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "s2and-rust"
-version = "0.51.1"
+version = "1.0.0"
 description = "Rust extension for s2and"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -15,3 +15,4 @@ authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 bindings = "pyo3"
 python-source = "."
 module-name = "s2and_rust._s2and_rust"
+include = [{ path = "vendor/cld2/**/*", format = "sdist" }]

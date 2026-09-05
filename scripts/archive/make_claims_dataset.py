@@ -1,5 +1,12 @@
 # ruff: noqa: E402
 
+"""Build historical block-local Semantic Scholar corrections datasets.
+
+Warning:
+    This provenance recipe requires private warehouse helpers and data that are
+    not part of this repository. It is not a supported public entrypoint.
+"""
+
 import json
 import os
 from typing import Any
@@ -26,8 +33,6 @@ ch.setLevel(logging.DEBUG)
 logger.addHandler(ch)
 
 from tqdm import tqdm
-
-os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
 DATA_DIR = CONFIG["internal_data_dir"]
 

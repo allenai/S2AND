@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import pickle
 from types import SimpleNamespace
 from typing import Any, cast
@@ -7,8 +9,20 @@ from typing import Any, cast
 import pandas as pd
 import pytest
 
-from s2and import text as s2and_text
-from scripts.eps_sweep import sweep_eps_on_linking_gold
+import s2and.subblocking as subblocking
+from scripts.eps_sweep import common, sweep_eps_on_linking_gold
+
+
+def _cli(*extra: str) -> list[str]:
+    return [
+        "--dataset",
+        "dummy",
+        "--arrow-root",
+        "arrow",
+        "--model-path",
+        "model",
+        *extra,
+    ]
 
 
 def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
@@ -54,21 +68,23 @@ def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
     assert loaded["supervision_type"].tolist() == ["positive_repeat_orcid"]
 
 
-def test_eps_sweep_runtime_environment_disables_fasttext(monkeypatch) -> None:
-    previous_enabled = s2and_text.fasttext_loading_enabled()
-    s2and_text.set_fasttext_loading_enabled(True)
-    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "0")
+def test_eps_sweep_runtime_environment_sets_backend_and_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("RAYON_NUM_THREADS", "1")
+    sweep_eps_on_linking_gold._configure_runtime_environment(cast(Any, SimpleNamespace(n_jobs=2)))
 
-    try:
-        sweep_eps_on_linking_gold._configure_runtime_environment(cast(Any, SimpleNamespace(backend="python", n_jobs=2)))
+    assert sweep_eps_on_linking_gold.os.environ["S2AND_BACKEND"] == "rust"
+    assert sweep_eps_on_linking_gold.os.environ["OMP_NUM_THREADS"] == "2"
+    assert sweep_eps_on_linking_gold.os.environ["RAYON_NUM_THREADS"] == "2"
 
-        assert s2and_text.fasttext_loading_enabled() is False
-        assert sweep_eps_on_linking_gold.os.environ["S2AND_BACKEND"] == "python"
-        assert sweep_eps_on_linking_gold.os.environ["OMP_NUM_THREADS"] == "2"
-        assert sweep_eps_on_linking_gold.os.environ["RAYON_NUM_THREADS"] == "2"
-        assert sweep_eps_on_linking_gold.os.environ["S2AND_SKIP_FASTTEXT"] == "1"
-    finally:
-        s2and_text.set_fasttext_loading_enabled(previous_enabled)
+
+def test_eps_sweep_cli_has_one_real_orcid_constraint_switch() -> None:
+    default_args = sweep_eps_on_linking_gold.parse_args(_cli())
+    enabled_args = sweep_eps_on_linking_gold.parse_args(_cli("--use-orcid-constraints"))
+
+    assert default_args.suppress_orcid_constraints is True
+    assert enabled_args.suppress_orcid_constraints is False
 
 
 def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path, monkeypatch) -> None:
@@ -95,7 +111,7 @@ def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path
         clusterer,
         {"singleton": ["s1"]},
         tmp_path / "cache",
-        {"signatures": "signatures.arrow"},
+        cast(Any, SimpleNamespace(generation_id="test-generation")),
     )
 
     assert rows[0]["block_key"] == "singleton"
@@ -104,45 +120,22 @@ def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path
     assert clusterer.batch_size == 99
 
 
-def test_distance_cache_metadata_rejects_overwritten_model_path(tmp_path) -> None:
-    model_path = tmp_path / "model.pkl"
-    model_path.write_bytes(b"first model")
-    args = SimpleNamespace(
-        arrow_root=tmp_path / "arrow",
-        batching_threshold=10,
-        dataset="dummy",
-        model_path=model_path,
-        pair_chunk_size=3,
-        suppress_orcid_constraints=False,
-        use_orcid_subblocking=False,
-    )
-    metadata = sweep_eps_on_linking_gold._cache_metadata(
-        cast(Any, args),
-        "block",
-        ["s1", "s2"],
-        "arrow-digest",
-    )
-    cache_path = tmp_path / "cache.pkl"
-    with cache_path.open("wb") as outfile:
-        pickle.dump({"metadata": metadata, "dist": [0.25]}, outfile)
-
-    model_path.write_bytes(b"second model with different contents")
-    expected_metadata = sweep_eps_on_linking_gold._cache_metadata(
-        cast(Any, args),
-        "block",
-        ["s1", "s2"],
-        "arrow-digest",
-    )
-
-    with pytest.raises(ValueError, match="model_"):
-        sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected_metadata)
-
-
-def test_distance_cache_metadata_rejects_overwritten_arrow_path(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("replacement_model", "expected_generation", "message"),
+    (
+        (b"second model with different contents", "first-generation", "model_"),
+        (None, "second-generation", "arrow_generation_id"),
+    ),
+    ids=("model-content", "arrow-generation"),
+)
+def test_distance_cache_metadata_rejects_changed_inputs(
+    tmp_path,
+    replacement_model: bytes | None,
+    expected_generation: str,
+    message: str,
+) -> None:
     model_path = tmp_path / "model.pkl"
     model_path.write_bytes(b"model")
-    arrow_path = tmp_path / "signatures.arrow"
-    arrow_path.write_bytes(b"first arrow")
     args = SimpleNamespace(
         arrow_root=tmp_path / "arrow",
         batching_threshold=10,
@@ -152,31 +145,31 @@ def test_distance_cache_metadata_rejects_overwritten_arrow_path(tmp_path) -> Non
         suppress_orcid_constraints=False,
         use_orcid_subblocking=False,
     )
-    arrow_paths = {"signatures": str(arrow_path)}
     metadata = sweep_eps_on_linking_gold._cache_metadata(
         cast(Any, args),
         "block",
         ["s1", "s2"],
-        sweep_eps_on_linking_gold._arrow_paths_content_digest(arrow_paths),  # noqa: SLF001
+        "first-generation",
     )
     cache_path = tmp_path / "cache.pkl"
     with cache_path.open("wb") as outfile:
         pickle.dump({"metadata": metadata, "dist": [0.25]}, outfile)
 
-    arrow_path.write_bytes(b"second arrow")
+    if replacement_model is not None:
+        model_path.write_bytes(replacement_model)
     expected_metadata = sweep_eps_on_linking_gold._cache_metadata(
         cast(Any, args),
         "block",
         ["s1", "s2"],
-        sweep_eps_on_linking_gold._arrow_paths_content_digest(arrow_paths),  # noqa: SLF001
+        expected_generation,
     )
 
-    with pytest.raises(ValueError, match="arrow_paths_digest"):
+    with pytest.raises(ValueError, match=message):
         sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected_metadata)
 
 
-def test_model_fingerprint_accepts_directory_model_path(tmp_path) -> None:
-    model_path = tmp_path / "production_model_v1.21"
+def test_eps_sweep_resolves_bound_model_and_arrow_inputs(tmp_path) -> None:
+    model_path = tmp_path / "production_model_v9.9"
     (model_path / "pairwise").mkdir(parents=True)
     (model_path / "manifest.json").write_text("{}", encoding="utf-8")
     (model_path / "pairwise" / "main.lgb").write_bytes(b"model")
@@ -189,19 +182,89 @@ def test_model_fingerprint_accepts_directory_model_path(tmp_path) -> None:
     assert isinstance(fingerprint["model_sha256"], str)
     assert len(fingerprint["model_sha256"]) == 64
 
+    arrow_root = tmp_path / "arrow"
+    dataset_manifest = arrow_root / "dummy" / "manifest.json"
+    dataset_manifest.parent.mkdir(parents=True)
+    dataset_manifest.write_text("{}", encoding="utf-8")
+    digest = hashlib.sha256(dataset_manifest.read_bytes()).hexdigest()
+    (arrow_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "kind": "s2and_arrow_collection",
+                "format_version": 1,
+                "dataset_manifests": {
+                    "dummy": {
+                        "path": "dummy/manifest.json",
+                        "sha256": digest,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert common.arrow_dataset_dir(arrow_root, "dummy") == dataset_manifest.parent.resolve()
+    with pytest.raises(ValueError, match="does not declare"):
+        common.arrow_dataset_dir(arrow_root, "other")
+
+    undeclared_root = tmp_path / "undeclared"
+    (undeclared_root / "dummy").mkdir(parents=True)
+    (undeclared_root / "dummy" / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
+        common.arrow_dataset_dir(undeclared_root, "dummy")
+
 
 def test_validate_args_requires_limit_or_full_run_for_compute_missing() -> None:
-    args = sweep_eps_on_linking_gold.parse_args(["--dataset", "dummy", "--compute-missing-dists"])
+    args = sweep_eps_on_linking_gold.parse_args(_cli("--compute-missing-dists"))
 
     with pytest.raises(ValueError, match="--max-subblocks"):
         sweep_eps_on_linking_gold._validate_args(args)  # noqa: SLF001
 
-    limited_args = sweep_eps_on_linking_gold.parse_args(
-        ["--dataset", "dummy", "--compute-missing-dists", "--max-subblocks", "1"]
-    )
+    limited_args = sweep_eps_on_linking_gold.parse_args(_cli("--compute-missing-dists", "--max-subblocks", "1"))
     sweep_eps_on_linking_gold._validate_args(limited_args)  # noqa: SLF001
 
-    full_run_args = sweep_eps_on_linking_gold.parse_args(
-        ["--dataset", "dummy", "--compute-missing-dists", "--allow-full-run"]
-    )
+    full_run_args = sweep_eps_on_linking_gold.parse_args(_cli("--compute-missing-dists", "--allow-full-run"))
     sweep_eps_on_linking_gold._validate_args(full_run_args)  # noqa: SLF001
+
+
+def test_eps_sweep_uses_strict_shared_graph_config_resolver(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_factory(
+        arrow_dataset: object,
+        *,
+        config: subblocking.GraphSubblockingConfig,
+        random_seed: int,
+    ) -> object:
+        del arrow_dataset, random_seed
+        captured["config"] = config
+        return object()
+
+    monkeypatch.setattr(subblocking, "make_arrow_graph_subblocking_cluster_fn", fake_factory)
+    cases = (
+        ("default", None, 16, False),
+        ("mapping", {"neighbors": 7}, 7, False),
+        ("instance", subblocking.GraphSubblockingConfig(neighbors=5), 5, True),
+    )
+    for case_id, raw_config, expected_neighbors, expect_same_instance in cases:
+        clusterer = SimpleNamespace(subblocking_graph_config=raw_config, random_state=3)
+
+        sweep_eps_on_linking_gold._make_arrow_specter_cluster_fn(
+            clusterer,
+            object(),
+        )
+
+        config = captured["config"]
+        assert config.neighbors == expected_neighbors, case_id
+        if expect_same_instance:
+            assert config is raw_config, case_id
+
+
+def test_eps_sweep_rejects_invalid_graph_config_type() -> None:
+    clusterer = SimpleNamespace(subblocking_graph_config="invalid")
+
+    with pytest.raises(ValueError, match="GraphSubblockingConfig, mapping, or None"):
+        sweep_eps_on_linking_gold._make_arrow_specter_cluster_fn(
+            clusterer,
+            object(),
+        )

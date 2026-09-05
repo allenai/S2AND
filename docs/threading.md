@@ -1,6 +1,6 @@
 # Threading and parallelism
 
-Status date: 2026-05-22
+Status date: 2026-09-04
 
 S2AND uses multiple libraries that can each create their own thread pools (Rust Rayon, LightGBM/OpenMP, BLAS, etc.).
 If those pools are configured independently, runs can oversubscribe CPU cores and show higher-than-expected CPU usage.
@@ -11,54 +11,64 @@ This doc describes the intended “single knob” behavior and the practical rul
 
 Within the Python API, treat `n_jobs` as the canonical concurrency setting for a run:
 
-- **Rust backend**: Python passes `num_threads=n_jobs` into the Rust extension for batch constraints + featurization.
-- **LightGBM inference**: `Clusterer.n_jobs` propagates into the underlying estimators; prediction uses the
-  estimator's configured threading rather than passing a separate `num_threads` override to `predict_proba()`.
+`n_jobs=None` selects one worker. Negative integers follow sklearn semantics
+(`-1` means all CPUs); zero, booleans, strings, and floats are rejected.
+
+- **Rust Arrow routes**: Python passes `num_threads=n_jobs` into the Rust extension for batch constraints + featurization.
+- **Production model scoring**: `Clusterer.n_jobs` propagates into the underlying
+  estimators. `NativeLightGBMBinaryClassifier` passes its configured `n_jobs` to
+  `RustLightGBMBooster`, which scores through Rayon. OpenMP does not control this
+  inference path.
 - **Python preprocessing**: `ANDData(n_jobs=...)` controls the limited (and platform-dependent) pooling used in some
   preprocessing phases (see “Python preprocessing parallelism” below).
 
 ## Python preprocessing parallelism
 
-S2AND has three main Python preprocessing phases that can dominate end-to-end runtime:
+S2AND has two main Python preprocessing phases that can dominate end-to-end runtime:
 
-1. **Papers 1/2**: `preprocess_paper_1` (title/author normalization + word ngrams; and venue/journal normalization when `preprocess=True`)
-2. **Papers 2/2**: `preprocess_paper_2` (reference-details ngrams + block counts)
-3. **Signatures**: `ANDData.preprocess_signatures` (normalization + feature creation)
+1. **Papers**: `preprocess_paper_1` (title/author normalization + word ngrams; and venue/journal normalization when `preprocess=True`)
+2. **Signatures**: `ANDData.preprocess_signatures` (normalization + feature creation)
 
 **Production default behavior (as of 2026-02-27):**
 
-- **Linux / WSL2**: use a process pool for **Papers 1/2** when `n_jobs > 1`; run **Papers 2/2** serial; run **Signatures** serial.
-- **Windows/macOS (native)**: run **Papers 1/2** serial (even if `n_jobs > 1`); run **Papers 2/2** serial; run **Signatures** serial.
+- **Linux / WSL2**: use a process pool for **Papers** when `n_jobs > 1`; run **Signatures** serial.
+- **Windows/macOS (native)**: run **Papers** serial (even if `n_jobs > 1`); run **Signatures** serial.
 
 Rationale (high level): `preprocess_paper_1` is CPU-bound and benefits from `fork` multiprocessing on Linux, while
-`spawn` platforms (Windows/macOS) pay heavy import/pickle overhead. For `preprocess_paper_2` and signature preprocessing,
+`spawn` platforms (Windows/macOS) pay heavy import/pickle overhead. For signature preprocessing,
 the overhead of shipping large Python objects around dominates, so pooling is net negative.
 
 Implementation notes:
 
 - `preprocess_paper_1` takes an explicit `preprocess=...` flag (spawn-safe; no worker globals).
-- `preprocess_papers_parallel` uses `UniversalPool` only for the **Papers 1/2** phase on Linux; **Papers 2/2** always runs serial.
+- `preprocess_papers_parallel` uses `UniversalPool` only on Linux.
 - Production `UniversalPool` call sites pass explicit `use_threads=...` so pool mode does not rely on implicit defaults.
 - `UniversalPool` remains platform-aware for helpers/callers that do not pass `use_threads`: processes on Linux (`fork`), threads on Windows/macOS by default.
 
 Benchmark script:
 
-- `scripts/bench_preprocess_phases.py` benchmarks the three phases separately.
+- `scripts/bench_preprocess_phases.py` benchmarks the phases separately.
 
-Rust `from_dataset` bypass (Bundle 1):
+Arrow-backed Rust training:
 
-When training/eval runs use the Rust backend, paper preprocessing can be deferred to Rust (see
-`docs/rust/runtime.md` section "Training-mode deferred paper preprocessing"). In that mode,
-`preprocess_papers_parallel` is **skipped entirely**, and Rust’s `from_dataset` handles paper
-normalization, ngrams, and language detection via Rayon parallelism, making the Python parallelism
-discussion above moot for Rust-enabled training runs.
+When training/eval runs use Arrow-backed Rust featurization, paper preprocessing can be deferred to Rust
+(see [the Arrow training constructor](training.md#build-a-rust-backed-training-dataset)). The fixed constructor
+binds an open `ArrowDataset` before preprocessing; no lifecycle flag controls
+this route. In that mode,
+`preprocess_papers_parallel` is **skipped entirely**, and Rust Arrow readers handle paper normalization,
+ngrams, and language detection via Rayon parallelism, making the Python parallelism discussion above moot
+for those runs.
 
 Conditions for the bypass:
 
-- Backend resolves to Rust (`S2AND_BACKEND=rust` or `auto` resolved to Rust)
-- `preprocess=True`
-- Rust extension supports `SUPPORTS_FROM_DATASET_PAPER_PREPROCESS`
-- `compute_reference_features=False`
+- The dataset is constructed by the fixed Rust-training constructor,
+  `build_training_anddata_from_arrow(...)`.
+- The constructor pins `preprocess=True`; callers cannot select a partial
+  preprocessing lifecycle for this route.
+
+The constructor selects Rust explicitly and retains the caller's open dataset
+handle. Classic `ANDData` construction remains on the Python preprocessing
+route.
 
 ## Recommended run setup
 
@@ -67,14 +77,16 @@ Conditions for the bypass:
    - `clusterer.n_jobs = N` (or pass `n_jobs=N` when constructing `Clusterer`)
 
 2. **Set thread env vars before importing compute-heavy libraries** (especially on Windows):
-   - `OMP_NUM_THREADS=N` for OpenMP users such as LightGBM
+   - `OMP_NUM_THREADS=N` for OpenMP phases such as Python LightGBM training;
+     production Rust scoring is controlled by `n_jobs` instead
    - Usually `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `NUMEXPR_NUM_THREADS=1`
    - Optional: `RAYON_NUM_THREADS=N` (only affects Rust code that uses Rayon’s global pool; S2AND’s Rust extension
      primarily uses explicit `num_threads` arguments instead)
 
    Why are the BLAS / NumExpr knobs usually pinned to `1` while OpenMP / Rayon may be set to `N`?
 
-   - In typical S2AND runs, the main parallel work is Rust featurization / constraint resolution and LightGBM inference.
+   - Production inference parallelizes Rust featurization, constraint resolution,
+     and model scoring through Rayon. Python LightGBM training uses OpenMP.
    - MKL, OpenBLAS, and NumExpr can create their own thread pools for helper operations inside NumPy / SciPy expressions.
    - If those helper libraries also fan out to `N` threads, a single S2AND process can end up with nested parallelism
      (`Rayon x BLAS`, `OpenMP x BLAS`, etc.), which usually hurts end-to-end throughput through oversubscription.
@@ -84,13 +96,17 @@ Conditions for the bypass:
    Many OpenMP runtimes read environment variables at first use / first load; setting them after importing `lightgbm`
    is not reliable.
 
+   For v1.3 jobs, set this envelope in the parent before detached launch,
+   require children to inherit it, and retain the values in the durable job
+   log. Operational logs are not release authorities. See
+   [release.md](release.md#stage-0-freeze-external-choices-and-source).
+
 3. **Choose the env pattern that matches your deployment shape**:
 
    - **One S2AND process should use the machine**:
 
      ```bash
      export PYTHONUNBUFFERED=1
-     export S2AND_BACKEND=rust
      export OMP_NUM_THREADS=36
      export MKL_NUM_THREADS=1
      export OPENBLAS_NUM_THREADS=1
@@ -100,14 +116,15 @@ Conditions for the bypass:
      uv run python your_script.py --n_jobs 36
      ```
 
-     In this setup, do **not** leave `OMP_NUM_THREADS=1` if you want LightGBM / OpenMP inference to use the available
-     cores.
+     `--n_jobs 36` controls production Rust inference concurrency.
+     `OMP_NUM_THREADS=36` configures any OpenMP phases in the same job; it does
+     not increase production Rust scoring concurrency. For an inference-only
+     process, leaving `OMP_NUM_THREADS=1` does not limit the Rust scorer.
 
    - **An outer scheduler / worker pool is already parallelizing the job**:
 
      ```bash
      export PYTHONUNBUFFERED=1
-     export S2AND_BACKEND=rust
      export OMP_NUM_THREADS=1
      export MKL_NUM_THREADS=1
      export OPENBLAS_NUM_THREADS=1
@@ -135,15 +152,18 @@ Rules of thumb:
   worker.
 - Prefer **one parallelism layer per phase**:
   - Rust batch featurization: Rayon handles parallelism; avoid wrapping it in additional thread pools.
-  - LightGBM inference: let LightGBM/OpenMP use threads; avoid concurrent `predict_proba()` calls from multiple workers.
+  - Production model inference: scoring runs in Rust (`RustLightGBMBooster`) on the estimator's configured `n_jobs` via the
+    shared Rayon pools; avoid concurrent `predict_proba()` calls from multiple workers.
 - BLAS / NumExpr are usually **not** the parallelism layer you want to scale first in S2AND. Leave
   `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, and `NUMEXPR_NUM_THREADS=1` unless profiling shows otherwise.
 
 ## Rust Rayon pool lifetime
 
-The Rust extension caches Rayon thread pools by thread count for reuse. Those worker threads stay alive for the process
-lifetime, even between calls. This should not consume CPU when idle, but it does mean “thread count” tools may show more
-threads than expected. This thread-pool reuse is unrelated to the public `use_cache` flag.
+The Rust extension caches up to eight Rayon thread pools, keyed by thread count.
+Adding a ninth cached thread count evicts the least recently used entry.
+Worker threads stay alive while their pool is retained by the cache or an active
+call, including between calls for cached pools. Idle workers should not consume
+CPU, but thread-count tools may show more threads than the current call requests.
 
 If you need to guarantee that all worker threads fully exit between runs, use process boundaries (run each workload in a
 fresh Python process).

@@ -2,58 +2,59 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
+import os
 import shutil
-from collections.abc import Mapping
-from dataclasses import dataclass
+import tempfile
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-import lightgbm as lgb
 import numpy as np
 
+from s2and import __version__
+from s2and._sha256 import sha256_file as _sha256_file
 from s2and.featurizer import FeaturizationInfo
+from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.model import Clusterer, _selected_feature_indices
+from s2and.model_pairwise import _validated_classifier_features, lightgbm_booster
+from s2and.production_bundle_contract import (
+    CALIBRATED_EPS_CALIBRATION,
+    COMPLETE_BUNDLE_KIND,
+    PAIRWISE_ONLY_BUNDLE_KIND,
+    PAIRWISE_ONLY_MANIFEST_FILES,
+    PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
+    PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
+    PENDING_EPS_CALIBRATION,
+    PENDING_PAIRWISE_EPS,
+    PRODUCTION_MODEL_KIND,
+    BundleKind,
+    EpsCalibration,
+    production_manifest_files,
+    require_bundle_state,
+)
 from s2and.production_model import (
-    PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
-    PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION,
+    _load_pairwise_staging_model,
     load_production_model,
+    pairwise_bundle_binding,
+    require_canonical_artifact_hashes,
+    require_expected_artifact_hashes,
 )
 
-PAIRWISE_METADATA_SCHEMA_VERSION = "s2and_pairwise_native_lightgbm_v1"
-CLUSTERER_CONFIG_SCHEMA_VERSION = "s2and_clusterer_config_v1"
 PAIRWISE_FIXTURE_SEED = 921
 PAIRWISE_FIXTURE_ROWS = 8
 
 
 @dataclass(frozen=True)
 class ProductionBundleSummary:
-    """Files and status for a written production bundle."""
+    """Location and status of a written production bundle."""
 
     bundle_dir: Path
-    bundle_version: str
-    bundle_status: str
+    release_version: str
+    eps_calibration: EpsCalibration
     manifest_path: Path
-    files: tuple[str, ...]
-
-
-def production_version_from_bundle_dir(bundle_dir: Path) -> str | None:
-    """Infer ``X.Y`` from a ``production_model_vX.Y`` directory name."""
-
-    prefix = "production_model_v"
-    name = Path(bundle_dir).name
-    if name.startswith(prefix):
-        return name[len(prefix) :]
-    return None
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -68,28 +69,16 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _booster_from_model(model: Any) -> lgb.Booster:
-    if isinstance(model, lgb.Booster):
-        return model
-    inner = getattr(model, "classifier", None)
-    if inner is not None and inner is not model:
-        return _booster_from_model(inner)
-    booster = getattr(model, "booster_", None)
-    if isinstance(booster, lgb.Booster):
-        return booster
-    booster = getattr(model, "_Booster", None)
-    if isinstance(booster, lgb.Booster):
-        return booster
-    raise TypeError(f"Expected a fitted LightGBM model, got {type(model)!r}")
-
-
 def _predict_proba(model: Any, features: np.ndarray) -> np.ndarray:
     matrix = np.asarray(features, dtype=np.float64, order="C")
     predict_proba = getattr(model, "predict_proba", None)
     if callable(predict_proba):
-        probabilities = np.asarray(predict_proba(matrix), dtype=np.float64)
+        probabilities = np.asarray(
+            predict_proba(_validated_classifier_features(model, matrix)),
+            dtype=np.float64,
+        )
     else:
-        positive = np.asarray(_booster_from_model(model).predict(matrix), dtype=np.float64).reshape(-1)
+        positive = np.asarray(lightgbm_booster(model).predict(matrix), dtype=np.float64).reshape(-1)
         probabilities = np.column_stack((1.0 - positive, positive))
     if probabilities.ndim == 1:
         probabilities = np.column_stack((1.0 - probabilities, probabilities))
@@ -99,50 +88,37 @@ def _predict_proba(model: Any, features: np.ndarray) -> np.ndarray:
 
 
 def _featurization_info_payload(featurizer_info: FeaturizationInfo) -> dict[str, Any]:
-    return {
-        "features_to_use": [str(feature) for feature in featurizer_info.features_to_use],
-        "featurizer_version": int(featurizer_info.featurizer_version),
-    }
+    return {"features_to_use": [str(feature) for feature in featurizer_info.features_to_use]}
 
 
 def _cluster_model_payload(clusterer: Clusterer) -> dict[str, Any]:
     cluster_model = clusterer.cluster_model
     return {
         "eps": float(cluster_model.eps),
-        "family": type(cluster_model).__name__,
-        "input_as_observation_matrix": bool(getattr(cluster_model, "input_as_observation_matrix", False)),
         "linkage": str(cluster_model.linkage),
-        "preserve_input": bool(getattr(cluster_model, "preserve_input", True)),
     }
 
 
 def _clusterer_config_payload(
     clusterer: Clusterer,
     *,
-    bundle_version: str,
-    source_model_version: str,
     nameless_featurizer_info: FeaturizationInfo,
-    main_feature_count: int,
-    nameless_feature_count: int,
+    expected_artifact_hashes: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    feature_contract = dict(
-        getattr(clusterer, "feature_contract", {"name_counts_last_first_initial_semantics": "initial_char"})
-    )
-    if not feature_contract:
-        feature_contract = {"name_counts_last_first_initial_semantics": "initial_char"}
+    raw_feature_contract = getattr(clusterer, "feature_contract", None)
+    if not isinstance(raw_feature_contract, Mapping):
+        raise ValueError("Production bundle export requires an explicit source feature_contract")
+    feature_contract = dict(raw_feature_contract)
+    if expected_artifact_hashes is None:
+        require_canonical_artifact_hashes(feature_contract, context="Production bundle export feature_contract")
+    else:
+        require_expected_artifact_hashes(
+            feature_contract,
+            expected_artifact_hashes,
+            context="Production bundle export feature_contract",
+        )
     return {
         "batch_size": int(getattr(clusterer, "batch_size", 1_000_000)),
-        "best_params": dict(
-            getattr(
-                clusterer,
-                "best_params",
-                {
-                    "eps": float(clusterer.cluster_model.eps),
-                    "linkage": str(clusterer.cluster_model.linkage),
-                },
-            )
-        ),
-        "bundle_version": str(bundle_version),
         "cluster_model": _cluster_model_payload(clusterer),
         "dont_merge_cluster_seeds": bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
         "feature_contract": feature_contract,
@@ -152,184 +128,118 @@ def _clusterer_config_payload(
             getattr(clusterer, "incremental_precluster_broadcast_mode", "always")
         ),
         "incremental_seed_score_mode": str(getattr(clusterer, "incremental_seed_score_mode", "mean")),
-        "n_iter": int(getattr(clusterer, "n_iter", 25)),
         "n_jobs": 1,
         "nameless_featurizer_info": _featurization_info_payload(nameless_featurizer_info),
-        "pairwise": {
-            "main_feature_count": int(main_feature_count),
-            "nameless_feature_count": int(nameless_feature_count),
-        },
         "random_state": int(getattr(clusterer, "random_state", 42)),
-        "schema_version": CLUSTERER_CONFIG_SCHEMA_VERSION,
-        "source_model_version": str(source_model_version),
         "suppress_orcid": bool(getattr(clusterer, "suppress_orcid", False)),
-        "use_cache": bool(getattr(clusterer, "use_cache", False)),
         "use_default_constraints_as_supervision": bool(
             getattr(clusterer, "use_default_constraints_as_supervision", True)
         ),
-        "val_blocks_size": getattr(clusterer, "val_blocks_size", None),
-    }
-
-
-def _pairwise_metadata_payload(
-    clusterer: Clusterer,
-    *,
-    source_model_version: str,
-    nameless_featurizer_info: FeaturizationInfo,
-    main_feature_count: int,
-    nameless_feature_count: int,
-) -> dict[str, Any]:
-    return {
-        "class_labels": [0.0, 1.0],
-        "distance_probability_column": "class_0",
-        "main": {
-            **_featurization_info_payload(clusterer.featurizer_info),
-            "model_file": "main.lgb",
-            "selected_feature_count": int(main_feature_count),
-            "selected_feature_indices": list(_selected_feature_indices(clusterer.featurizer_info)),
-        },
-        "model_family": "binary_lightgbm_pairwise_distance",
-        "nameless": {
-            **_featurization_info_payload(nameless_featurizer_info),
-            "model_file": "nameless.lgb",
-            "selected_feature_count": int(nameless_feature_count),
-            "selected_feature_indices": list(_selected_feature_indices(nameless_featurizer_info)),
-        },
-        "positive_probability_column": "class_1",
-        "schema_version": PAIRWISE_METADATA_SCHEMA_VERSION,
-        "source_model_version": str(source_model_version),
     }
 
 
 def _write_pairwise_model(model: Any, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    _booster_from_model(model).save_model(str(path))
+    lightgbm_booster(model).save_model(str(path))
 
 
 def _write_pairwise_fixture(model: Any, path: Path, *, width: int, seed: int) -> None:
     rng = np.random.default_rng(int(seed))
     features = rng.normal(size=(PAIRWISE_FIXTURE_ROWS, int(width)))
     payload = {
-        "atol": 1e-10,
+        "atol": PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
         "expected_probabilities": _predict_proba(model, features).tolist(),
         "feature_source": "numpy_default_rng_normal",
         "features": features.tolist(),
-        "rtol": 1e-10,
-        "schema_version": PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
+        "rtol": PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
         "seed": int(seed),
     }
     _write_json(path, payload)
 
 
-def _manifest_files(*, include_incremental_linker: bool) -> dict[str, str]:
-    files = {
-        "clusterer_config": "clusterer.json",
-        "pairwise_main_fixture": "pairwise/main_prediction_fixture.json",
-        "pairwise_main_model": "pairwise/main.lgb",
-        "pairwise_metadata": "pairwise/metadata.json",
-        "pairwise_nameless_fixture": "pairwise/nameless_prediction_fixture.json",
-        "pairwise_nameless_model": "pairwise/nameless.lgb",
-    }
-    if include_incremental_linker:
-        files.update(
-            {
-                "incremental_linker_booster": "incremental_linker/booster.lgb",
-                "incremental_linker_dir": "incremental_linker",
-                "incremental_linker_metadata": "incremental_linker/metadata.json",
-                "incremental_linker_training_target": "reproducibility/incremental_linker_training_target.json",
-            }
-        )
-    return files
+def _pairwise_reproducibility_present(bundle_dir: Path) -> bool:
+    paths = [bundle_dir / relpath for relpath in PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES.values()]
+    present = [path.is_file() for path in paths]
+    if any(present) and not all(present):
+        raise ValueError("Production bundles require both pairwise training reproducibility files or neither")
+    return all(present)
 
 
 def write_production_manifest(
     bundle_dir: Path,
     *,
-    bundle_version: str,
-    pairwise_model_version: str,
-    include_incremental_linker: bool,
-    incremental_linker_version: str | None = None,
+    release_version: str,
+    bundle_kind: BundleKind,
+    eps_calibration: EpsCalibration,
 ) -> ProductionBundleSummary:
     """Write the bundle manifest for either pairwise-only or complete bundles."""
 
     bundle_dir = Path(bundle_dir)
-    files = _manifest_files(include_incremental_linker=include_incremental_linker)
+    if not isinstance(release_version, str) or not release_version or release_version.strip() != release_version:
+        raise ValueError("Production model bundle release_version must be a nonempty trimmed string")
+    bundle_kind, eps_calibration = require_bundle_state(bundle_kind, eps_calibration)
+    files = production_manifest_files(
+        bundle_kind=bundle_kind,
+        include_pairwise_reproducibility=_pairwise_reproducibility_present(bundle_dir),
+    )
     sha256: dict[str, str] = {}
     for relpath in sorted(set(files.values())):
         path = bundle_dir / relpath
-        if path.is_dir():
-            continue
-        if not path.exists():
-            raise FileNotFoundError(f"Production bundle file is missing: {path}")
+        if not path.is_file():
+            raise FileNotFoundError(f"Production bundle file is missing or not a regular file: {path}")
         sha256[relpath] = _sha256_file(path)
 
-    status = "complete" if include_incremental_linker else "pairwise_only"
     manifest = {
-        "bundle_status": status,
-        "bundle_version": str(bundle_version),
-        "default_runtime_contract": (
-            "load this directory once; normal prediction and Rust incremental prediction use artifacts from this bundle"
-            if include_incremental_linker
-            else "pairwise bundle stage; run linker training/finalization before using as the production runtime"
-        ),
-        "description": (
-            f"Native production bundle: v{pairwise_model_version} pairwise model"
-            + (
-                f" plus v{incremental_linker_version} promoted incremental linker."
-                if include_incremental_linker
-                else "."
-            )
-        ),
-        "files": files,
-        "format": "native_lightgbm_json",
-        "incremental_linker_version": str(incremental_linker_version) if include_incremental_linker else None,
-        "pairwise_model_version": str(pairwise_model_version),
-        "schema_version": PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION,
+        "eps_calibration": eps_calibration,
+        "generated_by_runtime": __version__,
+        "kind": PRODUCTION_MODEL_KIND,
+        "release_version": release_version,
         "sha256": sha256,
     }
     manifest_path = bundle_dir / "manifest.json"
     _write_json(manifest_path, manifest)
     return ProductionBundleSummary(
         bundle_dir=bundle_dir,
-        bundle_version=str(bundle_version),
-        bundle_status=status,
+        release_version=release_version,
+        eps_calibration=eps_calibration,
         manifest_path=manifest_path,
-        files=tuple(sorted(sha256)),
     )
 
 
-def write_pairwise_production_bundle(
+def _write_pairwise_production_bundle_stage(
     clusterer: Clusterer,
     bundle_dir: Path,
     *,
-    bundle_version: str,
-    source_model_version: str | None = None,
+    release_version: str,
+    eps_calibration: EpsCalibration,
     pairwise_training_config: Mapping[str, Any] | None = None,
     pairwise_training_summary: Mapping[str, Any] | None = None,
 ) -> ProductionBundleSummary:
-    """Write the pairwise stage of a native production model bundle."""
+    """Write a pairwise bundle into a private staging directory."""
 
+    if (pairwise_training_config is None) != (pairwise_training_summary is None):
+        raise ValueError("Pairwise training config and summary must be provided together")
     nameless_featurizer_info = clusterer.nameless_featurizer_info
     if clusterer.nameless_classifier is None or nameless_featurizer_info is None:
         raise ValueError("Production bundles require a nameless pairwise model")
 
     bundle_dir = Path(bundle_dir)
-    stale_incremental_paths = [
-        bundle_dir / "incremental_linker",
-        bundle_dir / "reproducibility" / "incremental_linker_training_target.json",
-    ]
-    existing_stale_paths = [path for path in stale_incremental_paths if path.exists()]
-    if existing_stale_paths:
-        joined = ", ".join(str(path) for path in existing_stale_paths)
-        raise ValueError(
-            "Refusing to write a pairwise-only production bundle over existing incremental linker artifacts: "
-            f"{joined}"
-        )
     pairwise_dir = bundle_dir / "pairwise"
-    source_version = str(source_model_version or bundle_version)
+    expected_artifact_hashes: Mapping[str, Any] | None = None
+    if pairwise_training_config is not None:
+        expected_artifact_hashes = pairwise_training_config.get("input_artifact_hashes")
+        if not isinstance(expected_artifact_hashes, Mapping) or not expected_artifact_hashes:
+            raise ValueError(
+                "Pairwise training config must contain nonempty input_artifact_hashes "
+                "when it is used to publish a production bundle"
+            )
     main_width = len(_selected_feature_indices(clusterer.featurizer_info))
     nameless_width = len(_selected_feature_indices(nameless_featurizer_info))
-
+    clusterer_payload = _clusterer_config_payload(
+        clusterer,
+        nameless_featurizer_info=nameless_featurizer_info,
+        expected_artifact_hashes=expected_artifact_hashes,
+    )
     _write_pairwise_model(clusterer.classifier, pairwise_dir / "main.lgb")
     _write_pairwise_model(clusterer.nameless_classifier, pairwise_dir / "nameless.lgb")
     _write_pairwise_fixture(
@@ -344,27 +254,7 @@ def write_pairwise_production_bundle(
         width=nameless_width,
         seed=PAIRWISE_FIXTURE_SEED + 1,
     )
-    _write_json(
-        pairwise_dir / "metadata.json",
-        _pairwise_metadata_payload(
-            clusterer,
-            source_model_version=source_version,
-            nameless_featurizer_info=nameless_featurizer_info,
-            main_feature_count=main_width,
-            nameless_feature_count=nameless_width,
-        ),
-    )
-    _write_json(
-        bundle_dir / "clusterer.json",
-        _clusterer_config_payload(
-            clusterer,
-            bundle_version=str(bundle_version),
-            source_model_version=source_version,
-            nameless_featurizer_info=nameless_featurizer_info,
-            main_feature_count=main_width,
-            nameless_feature_count=nameless_width,
-        ),
-    )
+    _write_json(bundle_dir / "clusterer.json", clusterer_payload)
 
     reproducibility_dir = bundle_dir / "reproducibility"
     if pairwise_training_config is not None:
@@ -374,9 +264,120 @@ def write_pairwise_production_bundle(
 
     return write_production_manifest(
         bundle_dir,
-        bundle_version=str(bundle_version),
-        pairwise_model_version=source_version,
-        include_incremental_linker=False,
+        release_version=release_version,
+        bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+        eps_calibration=eps_calibration,
+    )
+
+
+def write_pairwise_production_bundle(
+    clusterer: Clusterer,
+    bundle_dir: Path,
+    *,
+    release_version: str,
+    eps_calibration: EpsCalibration,
+    pairwise_training_config: Mapping[str, Any] | None = None,
+    pairwise_training_summary: Mapping[str, Any] | None = None,
+) -> ProductionBundleSummary:
+    """Atomically publish one pairwise stage."""
+
+    bundle_dir = Path(bundle_dir)
+    if bundle_dir.exists():
+        raise FileExistsError(f"Production bundle output already exists; choose a new directory: {bundle_dir}")
+
+    bundle_dir.parent.mkdir(parents=True, exist_ok=True)
+    with _staged_production_bundle(bundle_dir) as staging_dir:
+        staged_summary = _write_pairwise_production_bundle_stage(
+            clusterer,
+            staging_dir,
+            release_version=release_version,
+            eps_calibration=eps_calibration,
+            pairwise_training_config=pairwise_training_config,
+            pairwise_training_summary=pairwise_training_summary,
+        )
+        expected_artifact_hashes = (
+            pairwise_training_config.get("input_artifact_hashes") if pairwise_training_config is not None else None
+        )
+        _load_pairwise_staging_model(
+            staging_dir,
+            expected_eps_calibration=eps_calibration,
+            expected_artifact_hashes=expected_artifact_hashes,
+        )
+    return replace(
+        staged_summary,
+        bundle_dir=bundle_dir,
+        manifest_path=bundle_dir / "manifest.json",
+    )
+
+
+def finalize_pairwise_eps(
+    *,
+    source_bundle_dir: Path,
+    output_bundle_dir: Path,
+    expected_manifest_sha256: str,
+    new_eps: float,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
+) -> ProductionBundleSummary:
+    """Write a fresh pairwise stage whose only semantic change is clustering EPS."""
+
+    source_bundle_dir = Path(source_bundle_dir)
+    output_bundle_dir = Path(output_bundle_dir)
+    if output_bundle_dir.exists():
+        raise FileExistsError(f"Pairwise EPS output already exists: {output_bundle_dir}")
+    manifest_path = source_bundle_dir / "manifest.json"
+    observed_manifest_sha256 = _sha256_file(manifest_path)
+    if observed_manifest_sha256 != expected_manifest_sha256:
+        raise ValueError(
+            "Pairwise source manifest SHA-256 mismatch: "
+            f"expected={expected_manifest_sha256} observed={observed_manifest_sha256}"
+        )
+    _load_pairwise_staging_model(
+        source_bundle_dir,
+        expected_eps_calibration=PENDING_EPS_CALIBRATION,
+        expected_artifact_hashes=expected_artifact_hashes,
+    )
+    manifest = _read_json(manifest_path)
+    config_path = source_bundle_dir / "clusterer.json"
+    config = _read_json(config_path)
+    observed_eps = float(config["cluster_model"]["eps"])
+    if observed_eps != PENDING_PAIRWISE_EPS:
+        raise ValueError(f"Pending pairwise source EPS must be {PENDING_PAIRWISE_EPS}, got {observed_eps}")
+    if not np.isfinite(float(new_eps)) or not 0.0 <= float(new_eps) <= 1.0:
+        raise ValueError(f"new_eps must be finite and in [0, 1], got {new_eps!r}")
+
+    output_bundle_dir.parent.mkdir(parents=True, exist_ok=True)
+    with _staged_production_bundle(output_bundle_dir) as staging_dir:
+        _copy_path(source_bundle_dir, staging_dir)
+        config["cluster_model"]["eps"] = float(new_eps)
+        _write_json(staging_dir / "clusterer.json", config)
+        staged_summary = write_production_manifest(
+            staging_dir,
+            release_version=manifest["release_version"],
+            bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+            eps_calibration=CALIBRATED_EPS_CALIBRATION,
+        )
+        source_files = {
+            path.relative_to(source_bundle_dir).as_posix(): path
+            for path in source_bundle_dir.rglob("*")
+            if path.is_file()
+        }
+        staged_files = {
+            path.relative_to(staging_dir).as_posix(): path for path in staging_dir.rglob("*") if path.is_file()
+        }
+        if set(source_files) != set(staged_files):
+            raise RuntimeError("EPS finalization changed the pairwise bundle file inventory")
+        for relpath in sorted(set(source_files) - {"clusterer.json", "manifest.json"}):
+            if source_files[relpath].read_bytes() != staged_files[relpath].read_bytes():
+                raise RuntimeError(f"EPS finalization changed immutable file {relpath}")
+        _load_pairwise_staging_model(
+            staging_dir,
+            expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
+            expected_artifact_hashes=expected_artifact_hashes,
+        )
+    return replace(
+        staged_summary,
+        bundle_dir=output_bundle_dir,
+        manifest_path=output_bundle_dir / "manifest.json",
     )
 
 
@@ -390,23 +391,45 @@ def _copy_path(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
-def _copy_pairwise_stage(source_bundle_dir: Path, output_bundle_dir: Path) -> None:
-    for relpath in ("clusterer.json", "pairwise"):
+def _copy_pairwise_stage(
+    source_bundle_dir: Path,
+    output_bundle_dir: Path,
+    source_manifest: Mapping[str, Any],
+) -> None:
+    declared_paths = set(source_manifest["sha256"])
+    for relpath in PAIRWISE_ONLY_MANIFEST_FILES.values():
         _copy_path(source_bundle_dir / relpath, output_bundle_dir / relpath)
-    source_reproducibility = source_bundle_dir / "reproducibility"
-    if source_reproducibility.exists():
-        for path in source_reproducibility.iterdir():
-            if path.name == "incremental_linker_training_target.json":
-                continue
-            _copy_path(path, output_bundle_dir / "reproducibility" / path.name)
+    for relpath in PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES.values():
+        if relpath in declared_paths:
+            _copy_path(source_bundle_dir / relpath, output_bundle_dir / relpath)
 
 
-def _rewrite_linker_target_spec(metadata_path: Path, *, target_spec: str) -> None:
-    metadata = _read_json(metadata_path)
-    audit_metadata = dict(metadata.get("audit_metadata", {}))
-    audit_metadata["target_spec"] = str(target_spec)
-    metadata["audit_metadata"] = audit_metadata
-    _write_json(metadata_path, metadata)
+def _publish_staged_bundle(staging_dir: Path, destination: Path) -> None:
+    """Rename one complete staging directory into a new destination."""
+
+    if destination.exists():
+        raise FileExistsError(f"Production bundle output already exists; choose a new directory: {destination}")
+    try:
+        os.replace(staging_dir, destination)
+    except OSError:
+        if destination.exists():
+            raise FileExistsError(
+                f"Production bundle output already exists; choose a new directory: {destination}"
+            ) from None
+        raise
+
+
+@contextmanager
+def _staged_production_bundle(destination: Path) -> Iterator[Path]:
+    """Create, publish, and clean up one same-parent staging directory."""
+
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{destination.name}.staging-", dir=destination.parent))
+    try:
+        yield staging_dir
+        _publish_staged_bundle(staging_dir, destination)
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
 
 
 def finalize_production_bundle(
@@ -415,12 +438,9 @@ def finalize_production_bundle(
     output_bundle_dir: Path,
     incremental_linker_artifact_dir: Path,
     target_json: Path,
-    bundle_version: str | None = None,
-    pairwise_model_version: str | None = None,
-    incremental_linker_version: str | None = None,
-    validate: bool = True,
+    expected_artifact_hashes: Mapping[str, Any] | None = None,
 ) -> ProductionBundleSummary:
-    """Assemble a complete production bundle from pairwise and linker artifacts."""
+    """Assemble a complete bundle using the pairwise manifest as version authority."""
 
     pairwise_bundle_dir = Path(pairwise_bundle_dir)
     output_bundle_dir = Path(output_bundle_dir)
@@ -428,6 +448,10 @@ def finalize_production_bundle(
     target_json = Path(target_json)
     if not pairwise_bundle_dir.is_dir():
         raise FileNotFoundError(f"Pairwise bundle directory does not exist: {pairwise_bundle_dir}")
+    if output_bundle_dir.exists():
+        raise FileExistsError(
+            f"Production bundle output already exists; finalization requires a new directory: {output_bundle_dir}"
+        )
     if not incremental_linker_artifact_dir.is_dir():
         raise FileNotFoundError(
             f"Incremental linker artifact directory does not exist: {incremental_linker_artifact_dir}"
@@ -435,32 +459,42 @@ def finalize_production_bundle(
     if not target_json.exists():
         raise FileNotFoundError(f"Incremental linker target JSON does not exist: {target_json}")
 
-    inferred_version = production_version_from_bundle_dir(output_bundle_dir)
-    resolved_bundle_version = str(
-        bundle_version or inferred_version or production_version_from_bundle_dir(pairwise_bundle_dir) or ""
+    pairwise_binding = pairwise_bundle_binding(
+        pairwise_bundle_dir,
+        expected_artifact_hashes=expected_artifact_hashes,
     )
-    if not resolved_bundle_version:
-        raise ValueError("bundle_version is required when output_bundle_dir is not named production_model_vX.Y")
+    pairwise_manifest = _read_json(pairwise_bundle_dir / "manifest.json")
+    release_version = pairwise_manifest["release_version"]
 
-    _copy_pairwise_stage(pairwise_bundle_dir, output_bundle_dir)
-    _copy_path(incremental_linker_artifact_dir, output_bundle_dir / "incremental_linker")
-    target_destination = output_bundle_dir / "reproducibility" / "incremental_linker_training_target.json"
-    _copy_path(target_json, target_destination)
-    _rewrite_linker_target_spec(
-        output_bundle_dir / "incremental_linker" / "metadata.json",
-        target_spec=f"s2and/data/production_model_v{resolved_bundle_version}/reproducibility/"
-        "incremental_linker_training_target.json",
-    )
+    linker_metadata = _read_json(incremental_linker_artifact_dir / "metadata.json")
+    if linker_metadata.get("pairwise_bundle_binding_digest") != canonical_json_digest(pairwise_binding):
+        raise ValueError("Incremental linker pairwise_bundle_binding_digest does not match pairwise bundle")
+    target_spec_digest = canonical_json_digest(_read_json(target_json))
+    if linker_metadata.get("target_spec_digest") != target_spec_digest:
+        raise ValueError("Incremental linker target_spec_digest does not match target JSON")
 
-    summary = write_production_manifest(
-        output_bundle_dir,
-        bundle_version=resolved_bundle_version,
-        pairwise_model_version=str(
-            pairwise_model_version or production_version_from_bundle_dir(pairwise_bundle_dir) or resolved_bundle_version
-        ),
-        include_incremental_linker=True,
-        incremental_linker_version=str(incremental_linker_version or resolved_bundle_version),
+    output_bundle_dir.parent.mkdir(parents=True, exist_ok=True)
+    with _staged_production_bundle(output_bundle_dir) as staging_dir:
+        _copy_pairwise_stage(pairwise_bundle_dir, staging_dir, pairwise_manifest)
+        for filename in ("booster.lgb", "metadata.json"):
+            _copy_path(
+                incremental_linker_artifact_dir / filename,
+                staging_dir / "incremental_linker" / filename,
+            )
+        target_destination = staging_dir / "reproducibility" / "incremental_linker_training_target.json"
+        _copy_path(target_json, target_destination)
+        staged_summary = write_production_manifest(
+            staging_dir,
+            release_version=release_version,
+            bundle_kind=COMPLETE_BUNDLE_KIND,
+            eps_calibration=CALIBRATED_EPS_CALIBRATION,
+        )
+        load_production_model(
+            staging_dir,
+            expected_artifact_hashes=expected_artifact_hashes,
+        )
+    return replace(
+        staged_summary,
+        bundle_dir=output_bundle_dir,
+        manifest_path=output_bundle_dir / "manifest.json",
     )
-    if validate:
-        load_production_model(output_bundle_dir)
-    return summary

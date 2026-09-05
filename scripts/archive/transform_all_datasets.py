@@ -1,3 +1,11 @@
+"""Convert the old raw dataset schema to the legacy released JSON layout.
+
+Warning:
+    This utility is retained for historical data lineage. It defaults to a
+    dry-run, and its output still requires the maintained canonical conversion
+    and validation steps before current Arrow/production runtime use.
+"""
+
 import argparse
 import json
 import os
@@ -41,10 +49,10 @@ EMAIL_SPECIAL_CASES = {
     '{"njzhaxm@qq.com ws0801@hotmail.com"}': "ws0801@hotmail.com",
     '{"wangzy@nju.edu.cn sunping@nju.edu.cn"}': "sunping@nju.edu.cn",
     (
-        '{"preecer@uah.edu James.Burgess@uah.edu charles.dermer@nrl.navy.mil ' 'nicola.omodei@stanford.edu azk@mpe"}'
+        '{"preecer@uah.edu James.Burgess@uah.edu charles.dermer@nrl.navy.mil nicola.omodei@stanford.edu azk@mpe"}'
     ): "charles.dermer@nrl.navy.mil",
     (
-        '{"sjzhu@umd.edu jchiang@slac.stanford.edu charles.dermer@nrl.navy.mil ' 'nicola.omodei@stanford.edu giaco"}'
+        '{"sjzhu@umd.edu jchiang@slac.stanford.edu charles.dermer@nrl.navy.mil nicola.omodei@stanford.edu giaco"}'
     ): "charles.dermer@nrl.navy.mil",
     '{"bjbohr@nbi,dk"}': "bjbohr@nbi.dk",
     '{"31848346@qq.com xiaofangsun@hotmail.com yongfan011@gzhmu.edu.cn"}': "yongfan011@gzhmu.edu.cn",
@@ -181,9 +189,6 @@ def transform_signature_file(full_file_name_source: str):
                 print(f"WARNING: affiliation has a quote {affiliations_list}")
             output_author_info["affiliations"] = affiliations_list
 
-        output_author_info["given_block"] = (
-            author_info.get("given-block", None) if not is_empty_value(author_info.get("given-block", None)) else None
-        )
         output_author_info["given_name"] = (
             signature_info.get("actual_name", None)
             if not is_empty_value(signature_info.get("actual_name", None))

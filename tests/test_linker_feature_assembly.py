@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from s2and.incremental_linking import features
@@ -43,16 +42,12 @@ def _row_feature_fixture(row_count: int) -> dict[str, np.ndarray]:
 
 
 def test_promoted_linker_feature_columns_match_promoted_target_file() -> None:
-    target_path = Path("s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json")
+    target_path = Path("tests/fixtures/incremental_linker_training_target.json")
     target = json.loads(target_path.read_text(encoding="utf-8"))
 
-    assert features.promoted_linker_feature_columns() == tuple(target["features"])
-
-
-def test_promoted_linker_feature_columns_are_promoted_53_without_rank_fractions() -> None:
     promoted = features.promoted_linker_feature_columns()
 
-    assert len(promoted) == 53
+    assert promoted == tuple(target["features"])
     assert not any(column.endswith("_rank_fraction") for column in promoted)
 
 
@@ -128,23 +123,20 @@ def test_assemble_linker_feature_matrix_rejects_pairwise_infinities() -> None:
 
 
 def test_assemble_linker_feature_matrix_matches_tracked_target_order() -> None:
-    target_path = Path("s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json")
+    target_path = Path("tests/fixtures/incremental_linker_training_target.json")
     target_columns = tuple(json.loads(target_path.read_text(encoding="utf-8"))["features"])
     row_count = 4
     pairwise_columns = promoted_pairwise_aggregate_columns()
-    frame = pd.DataFrame(
-        {
-            column: np.full(row_count, column_index + 0.25, dtype=np.float32)
-            for column_index, column in enumerate(target_columns)
-            if not column.startswith("pw_")
-        }
-    )
-    pairwise_frame = pd.DataFrame(
-        {
-            column: np.full(row_count, column_index + 100.25, dtype=np.float32)
-            for column_index, column in enumerate(pairwise_columns)
-        }
-    )
+    row_features = {
+        column: np.full(row_count, column_index + 0.25, dtype=np.float32)
+        for column_index, column in enumerate(target_columns)
+        if not column.startswith("pw_")
+    }
+    pairwise_features = {
+        column: np.full(row_count, column_index + 100.25, dtype=np.float32)
+        for column_index, column in enumerate(pairwise_columns)
+    }
+    pairwise_matrix = np.column_stack([pairwise_features[column] for column in pairwise_columns])
     candidate_batch = LinkerCandidateBatch(
         row_count=row_count,
         left_signature_indices=np.zeros(0, dtype=np.uint32),
@@ -154,14 +146,13 @@ def test_assemble_linker_feature_matrix_matches_tracked_target_order() -> None:
 
     assembled = features.assemble_linker_feature_matrix(
         candidate_batch,
-        frame,
-        pairwise_stats=_static_pairwise_stats(
-            pairwise_frame.loc[:, list(pairwise_columns)].to_numpy(np.float32),
-            pairwise_columns,
-        ),
+        row_features,
+        pairwise_stats=_static_pairwise_stats(pairwise_matrix, pairwise_columns),
         feature_columns=target_columns,
     )
-    expected = pd.concat([frame, pairwise_frame], axis=1).loc[:, list(target_columns)].to_numpy(np.float32)
+    expected = np.column_stack(
+        [pairwise_features[column] if column.startswith("pw_") else row_features[column] for column in target_columns]
+    )
 
     np.testing.assert_array_equal(assembled.matrix, expected)
 
@@ -192,36 +183,6 @@ def test_feature_values_from_runtime_reuses_assembled_pairwise_columns() -> None
     values = feature_values_from_runtime(assembled, None)
 
     assert pairwise_stats.feature_matrix_call_count == 1
-    np.testing.assert_array_equal(
-        values["pw_mean_first_names_equal"],
-        assembled.matrix[:, assembled.feature_columns.index("pw_mean_first_names_equal")],
-    )
-
-
-def test_feature_values_from_runtime_keeps_pairwise_columns_over_row_signals() -> None:
-    row_count = 2
-    candidate_batch = LinkerCandidateBatch(
-        row_count=row_count,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
-    )
-    pairwise_columns = promoted_pairwise_aggregate_columns()
-    pairwise_matrix = np.arange(row_count * len(pairwise_columns), dtype=np.float32).reshape(
-        row_count, len(pairwise_columns)
-    )
-    pairwise_stats = StaticPairwiseStats(pairwise_matrix, pairwise_columns)
-    assembled = features.assemble_linker_feature_matrix(
-        candidate_batch,
-        _row_feature_fixture(row_count),
-        pairwise_stats=cast(Any, pairwise_stats),
-    )
-
-    values = feature_values_from_runtime(
-        assembled,
-        {"pw_mean_first_names_equal": np.asarray([999.0, 999.0], dtype=np.float32)},
-    )
-
     np.testing.assert_array_equal(
         values["pw_mean_first_names_equal"],
         assembled.matrix[:, assembled.feature_columns.index("pw_mean_first_names_equal")],

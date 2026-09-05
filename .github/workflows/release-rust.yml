@@ -1,40 +1,19 @@
-name: build-and-publish
+name: release artifacts (build, test, publish)
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
-  push:
-    branches: [main]
   workflow_dispatch:
-    inputs:
-      force_build:
-        description: "Force build jobs (manual/PR testing)"
-        required: false
-        type: boolean
-      publish_s2and:
-        description: "Publish s2and to PyPI (manual run)"
-        required: false
-        type: boolean
-      publish_rust:
-        description: "Publish s2and-rust to PyPI (manual run)"
-        required: false
-        type: boolean
 
 jobs:
-  detect-versions:
-    name: detect version changes
+  validate:
+    name: validate exact commit
     runs-on: ubuntu-latest
-    outputs:
-      s2and_changed: ${{ steps.detect.outputs.s2and_changed }}
-      rust_changed: ${{ steps.detect.outputs.rust_changed }}
-      publish_any: ${{ steps.detect.outputs.publish_any }}
-      publish_s2and: ${{ steps.detect.outputs.publish_s2and }}
-      publish_rust: ${{ steps.detect.outputs.publish_rust }}
-      force_build: ${{ steps.detect.outputs.force_build }}
     steps:
+      - name: Require main release ref
+        run: test "$GITHUB_REF" = "refs/heads/main"
+
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0
+          lfs: true
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
@@ -42,136 +21,16 @@ jobs:
       - name: Version sync check
         run: uv run --no-project python scripts/sync_version.py --check
 
-      - name: Detect version changes
-        id: detect
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          import subprocess
-          import sys
-          import tomllib
+      - name: Install exact source environment
+        run: uv sync --frozen --extra dev
 
-          event_name = os.environ.get("GITHUB_EVENT_NAME") or ""
-          event_path = os.environ.get("GITHUB_EVENT_PATH") or ""
-          event = None
-          if event_path and os.path.exists(event_path):
-            with open(event_path, "r", encoding="utf-8") as f:
-              event = json.load(f)
+      - name: Run release test suite
+        run: uv run pytest -q
 
-          force_build = False
-          publish_s2and = False
-          publish_rust = False
-          if event_name == "workflow_dispatch":
-            inputs = (event or {}).get("inputs", {})
-            force_build = str(inputs.get("force_build", "")).lower() in {"1", "true", "yes", "on"}
-            publish_s2and = str(inputs.get("publish_s2and", "")).lower() in {"1", "true", "yes", "on"}
-            publish_rust = str(inputs.get("publish_rust", "")).lower() in {"1", "true", "yes", "on"}
-          elif event_name == "pull_request":
-            labels = (event or {}).get("pull_request", {}).get("labels", [])
-            force_build = any((label or {}).get("name", "").lower() == "force-build" for label in labels)
-
-          before = os.environ.get("BEFORE_SHA") or ""
-          if event_name == "pull_request" and event:
-            before = (event.get("pull_request", {}).get("base", {}).get("sha", "")) or ""
-          if before.startswith("0000000"):
-            before = ""
-
-          def read_toml_at(path, rev=None):
-            if rev:
-              try:
-                data = subprocess.check_output(["git", "show", f"{rev}:{path}"], text=True)
-              except subprocess.CalledProcessError:
-                return None
-              return tomllib.loads(data)
-            with open(path, "rb") as f:
-              return tomllib.load(f)
-
-          def read_version_file(rev=None):
-            version_path = "VERSION"
-            if rev:
-              try:
-                data = subprocess.check_output(["git", "show", f"{rev}:{version_path}"], text=True)
-              except subprocess.CalledProcessError:
-                return None
-              return data.strip()
-            if not os.path.exists(version_path):
-              return None
-            with open(version_path, "r", encoding="utf-8") as f:
-              return f.read().strip()
-
-          def get_project_version(toml_obj, path, rev=None):
-            if toml_obj is None:
-              return None
-            try:
-              return toml_obj["project"]["version"]
-            except KeyError:
-              # Allow dynamic version from VERSION for the root pyproject.toml.
-              if path == "pyproject.toml":
-                version = read_version_file(rev)
-                if version:
-                  return version
-              raise SystemExit(f"Missing [project].version in {path}")
-
-          def get_cargo_version(toml_obj, path):
-            if toml_obj is None:
-              return None
-            try:
-              return toml_obj["package"]["version"]
-            except KeyError:
-              raise SystemExit(f"Missing [package].version in {path}")
-
-          cur_py = read_toml_at("pyproject.toml")
-          cur_rust_py = read_toml_at("s2and_rust/pyproject.toml")
-          cur_rust_cargo = read_toml_at("s2and_rust/Cargo.toml")
-
-          cur_py_ver = get_project_version(cur_py, "pyproject.toml")
-          cur_rust_py_ver = get_project_version(cur_rust_py, "s2and_rust/pyproject.toml")
-          cur_rust_cargo_ver = get_cargo_version(cur_rust_cargo, "s2and_rust/Cargo.toml")
-
-          if cur_rust_py_ver != cur_rust_cargo_ver:
-            raise SystemExit(
-              f"Rust version mismatch: pyproject={cur_rust_py_ver} cargo={cur_rust_cargo_ver}"
-            )
-
-          before_py_ver = (
-            get_project_version(read_toml_at("pyproject.toml", before), "pyproject.toml", before)
-            if before
-            else None
-          )
-          before_rust_py_ver = (
-            get_project_version(read_toml_at("s2and_rust/pyproject.toml", before), "s2and_rust/pyproject.toml")
-            if before
-            else None
-          )
-
-          s2and_changed = before_py_ver != cur_py_ver
-          rust_changed = before_rust_py_ver != cur_rust_py_ver
-          publish_any = s2and_changed or rust_changed or publish_s2and or publish_rust
-
-          out_path = os.environ["GITHUB_OUTPUT"]
-          with open(out_path, "a", encoding="utf-8") as f:
-            f.write(f"s2and_changed={'true' if s2and_changed else 'false'}\n")
-            f.write(f"rust_changed={'true' if rust_changed else 'false'}\n")
-            f.write(f"publish_any={'true' if publish_any else 'false'}\n")
-            f.write(f"publish_s2and={'true' if publish_s2and else 'false'}\n")
-            f.write(f"publish_rust={'true' if publish_rust else 'false'}\n")
-            f.write(f"force_build={'true' if force_build else 'false'}\n")
-
-          print(f"s2and: {before_py_ver} -> {cur_py_ver} changed={s2and_changed}")
-          print(f"rust:  {before_rust_py_ver} -> {cur_rust_py_ver} changed={rust_changed}")
-          print(f"force_build: {force_build}")
-          print(f"publish_s2and: {publish_s2and}")
-          print(f"publish_rust: {publish_rust}")
-          PY
-
-  s2and-dist:
-    name: s2and sdist+wheel
+  source-distributions:
+    name: source distributions
     runs-on: ubuntu-latest
-    needs: [detect-versions]
-    if: needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'
+    needs: [validate]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -184,108 +43,58 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Hydrate production model LFS files
-        run: git lfs pull --include="s2and/data/production_model_v*.pickle,s2and/data/production_model_v*/**"
-
-      - name: Verify hydrated production model files
-        run: |
-          uv run --no-project python - <<'PY'
-          from pathlib import Path
-
-          pointer_prefix = b"version https://git-lfs.github.com/spec/v1"
-          required_paths = [
-              Path("s2and/data/production_model_v1.0.pickle"),
-              Path("s2and/data/production_model_v1.1.pickle"),
-              Path("s2and/data/production_model_v1.2.pickle"),
-          ]
-          required_paths.extend(
-              sorted(path for path in Path("s2and/data/production_model_v1.21").rglob("*") if path.is_file())
-          )
-
-          failures = []
-          for path in required_paths:
-              if not path.exists():
-                  failures.append(f"missing: {path}")
-                  continue
-              head = path.read_bytes()[: len(pointer_prefix)]
-              if head == pointer_prefix:
-                  failures.append(f"LFS pointer was not hydrated: {path}")
-
-          if failures:
-              raise SystemExit("\n".join(failures))
-          print(f"Verified {len(required_paths)} hydrated production model files.")
-          PY
-
       - name: Build s2and distributions
+        run: uv build --sdist --wheel --out-dir dist --clear
+
+      - name: Verify built release asset contract
+        run: >-
+          uv run --no-project python
+          scripts/verification/verify_production_model_distributions.py
+          --dist-dir dist --source-root .
+
+      - name: Build s2and-rust sdist
+        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
+        with:
+          maturin-version: v1.14.1
+          command: sdist
+          args: --out dist
+          working-directory: s2and_rust
+
+      # Building from sdist compiles the extension, which is a distinct path from
+      # installing a wheel. Exercise it on every supported interpreter.
+      - name: Install and exercise s2and-rust sdist
+        shell: bash
         run: |
-          rm -rf build
-          uv build --sdist --wheel --out-dir dist --clear
-
-      - name: Verify built distributions contain hydrated models
-        run: |
-          uv run --no-project python - <<'PY'
-          import tarfile
-          import zipfile
-          from pathlib import Path
-
-          pointer_prefix = b"version https://git-lfs.github.com/spec/v1"
-          required = [
-              "s2and/data/production_model_v1.0.pickle",
-              "s2and/data/production_model_v1.1.pickle",
-              "s2and/data/production_model_v1.2.pickle",
-          ]
-          required.extend(
-              path.as_posix()
-              for path in sorted(Path("s2and/data/production_model_v1.21").rglob("*"))
-              if path.is_file()
-          )
-
-          def fail(message: str) -> None:
-              raise SystemExit(message)
-
-          wheels = sorted(Path("dist").glob("s2and-*.whl"))
-          if len(wheels) != 1:
-              fail(f"expected exactly one s2and wheel, found {len(wheels)}")
-          with zipfile.ZipFile(wheels[0]) as wheel:
-              wheel_names = set(wheel.namelist())
-              for path in required:
-                  if path not in wheel_names:
-                      fail(f"wheel missing production model file: {path}")
-                  if wheel.read(path).startswith(pointer_prefix):
-                      fail(f"wheel contains an unhydrated LFS pointer: {path}")
-
-          sdists = sorted(Path("dist").glob("s2and-*.tar.gz"))
-          if len(sdists) != 1:
-              fail(f"expected exactly one s2and sdist, found {len(sdists)}")
-          with tarfile.open(sdists[0], "r:gz") as sdist:
-              members = {member.name: member for member in sdist.getmembers()}
-              for path in required:
-                  matches = [name for name in members if name.endswith(f"/{path}")]
-                  if len(matches) != 1:
-                      fail(f"sdist missing production model file: {path}")
-                  extracted = sdist.extractfile(members[matches[0]])
-                  if extracted is None:
-                      fail(f"sdist production model file is not readable: {path}")
-                  if extracted.read(len(pointer_prefix)) == pointer_prefix:
-                      fail(f"sdist contains an unhydrated LFS pointer: {path}")
-
-          print(f"Verified hydrated production models in {wheels[0].name} and {sdists[0].name}.")
-          PY
+          sdist="$(find s2and_rust/dist -type f -name '*.tar.gz' -print -quit)"
+          test -n "$sdist"
+          for py in 3.11 3.12 3.13; do
+            echo "::group::s2and-rust sdist smoke (py${py})"
+            smoke_venv="$RUNNER_TEMP/s2and-rust-sdist-smoke-${py}"
+            uv venv --python "$py" "$smoke_venv"
+            uv pip install --python "$smoke_venv/bin/python" "$sdist"
+            uv run --no-project --python "$smoke_venv/bin/python" python \
+              scripts/verification/smoke_installed_rust_api.py
+            echo "::endgroup::"
+          done
 
       - uses: actions/upload-artifact@v6
         with:
           name: dist-s2and
           path: dist/*
 
+      - uses: actions/upload-artifact@v6
+        with:
+          name: dist-s2and-rust-sdist
+          path: s2and_rust/dist/*
+
   wheels-windows:
     name: wheels (windows, py${{ matrix.py }})
     runs-on: windows-latest
-    needs: [detect-versions]
-    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true'
+    needs: [validate]
     strategy:
       fail-fast: false
       matrix:
-        py: ["3.10", "3.11", "3.12"]
+        py: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v5
@@ -294,13 +103,26 @@ jobs:
         with:
           python-version: ${{ matrix.py }}
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Build wheels
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
         with:
-          maturin-version: v1.11.5
+          maturin-version: v1.14.1
           command: build
           args: --release --locked --compatibility pypi --out dist
           working-directory: s2and_rust
+
+      - name: Install and exercise Windows wheel
+        shell: pwsh
+        run: |
+          $smokeVenv = Join-Path $env:RUNNER_TEMP "s2and-rust-wheel-smoke"
+          $wheel = (Get-ChildItem s2and_rust/dist/*.whl | Select-Object -First 1).FullName
+          uv venv --python "${{ matrix.py }}" $smokeVenv
+          $python = Join-Path $smokeVenv "Scripts/python.exe"
+          uv pip install --python $python $wheel
+          uv run --no-project --python $python python scripts/verification/smoke_installed_rust_api.py
 
       - uses: actions/upload-artifact@v6
         with:
@@ -310,12 +132,11 @@ jobs:
   wheels-macos:
     name: wheels (macos universal2, py${{ matrix.py }})
     runs-on: macos-latest
-    needs: [detect-versions]
-    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true'
+    needs: [validate]
     strategy:
       fail-fast: false
       matrix:
-        py: ["3.10", "3.11", "3.12"]
+        py: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v5
@@ -323,6 +144,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.py }}
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
 
       - name: Install Rust targets (universal2)
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
@@ -332,10 +156,21 @@ jobs:
         env:
           ARCHFLAGS: "-arch x86_64 -arch arm64"
         with:
-          maturin-version: v1.11.5
+          maturin-version: v1.14.1
           command: build
           args: --release --locked --compatibility pypi --out dist
           working-directory: s2and_rust
+
+      - name: Install and exercise macOS wheel
+        shell: bash
+        run: |
+          smoke_venv="$RUNNER_TEMP/s2and-rust-wheel-smoke"
+          wheel="$(find s2and_rust/dist -type f -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          uv venv --python "${{ matrix.py }}" "$smoke_venv"
+          uv pip install --python "$smoke_venv/bin/python" "$wheel"
+          uv run --no-project --python "$smoke_venv/bin/python" python \
+            scripts/verification/smoke_installed_rust_api.py
 
       - uses: actions/upload-artifact@v6
         with:
@@ -345,8 +180,7 @@ jobs:
   wheels-linux:
     name: wheels (linux ${{ matrix.platform.name }})
     runs-on: ubuntu-latest
-    needs: [detect-versions]
-    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true'
+    needs: [validate]
     strategy:
       fail-fast: false
       matrix:
@@ -354,7 +188,6 @@ jobs:
           - name: manylinux2014-x86_64
             target: x86_64-unknown-linux-gnu
             manylinux: "2_17"
-          # Optional: enable when you want aarch64 wheels.
           - name: manylinux2014-aarch64
             target: aarch64-unknown-linux-gnu
             manylinux: "2_17"
@@ -368,13 +201,13 @@ jobs:
       - name: Build wheels (manylinux/musllinux)
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
         with:
-          maturin-version: v1.11.5
+          maturin-version: v1.14.1
           command: build
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
           args: >
             --release --locked --compatibility pypi --out dist
-            -i python3.10 -i python3.11 -i python3.12
+            -i python3.11 -i python3.12 -i python3.13
           working-directory: s2and_rust
 
       - uses: actions/upload-artifact@v6
@@ -382,70 +215,125 @@ jobs:
           name: dist-s2and-rust-linux-${{ matrix.platform.name }}
           path: s2and_rust/dist/*
 
-  sdist:
-    name: sdist
+  release-smoke:
+    name: clean installed-artifact smoke (py${{ matrix.py }})
+    needs: [source-distributions, wheels-windows, wheels-macos, wheels-linux]
     runs-on: ubuntu-latest
-    needs: [detect-versions]
-    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v5
 
-      - name: Build sdist
-        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
-        with:
-          maturin-version: v1.11.5
-          command: sdist
-          args: --out dist
-          working-directory: s2and_rust
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
 
-      - uses: actions/upload-artifact@v6
-        with:
-          name: dist-s2and-rust-sdist
-          path: s2and_rust/dist/*
-
-  # Publish is split so skipped build jobs don't block unrelated publishes.
-  # Manual runs can publish by setting workflow_dispatch inputs.
-  publish-s2and:
-    name: publish s2and to PyPI
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.s2and_changed == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.publish_s2and == 'true')
-    needs: [detect-versions, s2and-dist]
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-    permissions:
-      id-token: write
-
-    steps:
-      - name: Download s2and dists
+      - name: Download s2and distributions
         uses: actions/download-artifact@v7
         with:
           name: dist-s2and
-          path: dist/s2and
+          path: release/s2and
 
-      - name: Publish s2and
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/s2and
-
-  publish-rust:
-    name: publish s2and-rust to PyPI
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.rust_changed == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.publish_rust == 'true')
-    needs: [detect-versions, wheels-windows, wheels-macos, wheels-linux, sdist]
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-    permissions:
-      id-token: write
-
-    steps:
-      - name: Download s2and-rust dists
+      - name: Download s2and-rust distributions
         uses: actions/download-artifact@v7
         with:
           pattern: dist-s2and-rust-*
           merge-multiple: true
-          path: dist/s2and-rust
+          path: release/s2and-rust
+
+      - name: Clean-install release artifacts
+        run: |
+          SMOKE_VENV="$RUNNER_TEMP/s2and-release-smoke"
+          PY_TAG="cp$(echo '${{ matrix.py }}' | tr -d .)"
+          RUST_WHEEL="$(find release/s2and-rust -type f -name "*${PY_TAG}*manylinux*x86_64.whl" -print -quit)"
+          PY_WHEEL="$(find release/s2and -type f -name 's2and-*.whl' -print -quit)"
+          test -n "$RUST_WHEEL"
+          test -n "$PY_WHEEL"
+          uv venv --python '${{ matrix.py }}' "$SMOKE_VENV"
+          uv pip install --python "$SMOKE_VENV/bin/python" "$RUST_WHEEL" "$PY_WHEEL"
+
+      - name: Exercise installed synthetic bulk and incremental Arrow paths
+        run: |
+          SMOKE_VENV="$RUNNER_TEMP/s2and-release-smoke"
+          cd "$RUNNER_TEMP"
+          uv run --no-project --python "$SMOKE_VENV/bin/python" python \
+            "$GITHUB_WORKSPACE/scripts/verification/smoke_installed_incremental_arrow.py"
+
+      # All matrix legs download identical artifacts; publish the tested set once
+      # so the artifact name stays unique. `needs: [release-smoke]` still waits
+      # for every leg, so publication requires all three versions to pass.
+      - uses: actions/upload-artifact@v6
+        if: matrix.py == '3.11'
+        with:
+          name: release-distributions
+          path: release
+
+  publish-rust:
+    name: publish s2and-rust to PyPI
+    needs: [release-smoke]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download tested release artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: release-distributions
+          path: release
 
       - name: Publish s2and-rust
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: dist/s2and-rust
+          packages-dir: release/s2and-rust
+
+  publish-s2and:
+    name: publish s2and to PyPI
+    needs: [publish-rust]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Download tested release artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: release-distributions
+          path: release
+
+      - name: Wait for exact Rust dependency
+        run: |
+          RUST_VERSION="$(uv run --no-project python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          payload = tomllib.loads(Path('s2and_rust/pyproject.toml').read_text(encoding='utf-8'))
+          print(payload['project']['version'])
+          PY
+          )"
+          for attempt in $(seq 1 10); do
+            echo "Rust install probe attempt $attempt/10 for s2and-rust==$RUST_VERSION"
+            if uv run --no-project --isolated --with "s2and-rust==$RUST_VERSION" python -c "import s2and_rust"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 10 ]; then
+              sleep 15
+            fi
+          done
+          echo "s2and-rust==$RUST_VERSION was not installable after 10 attempts" >&2
+          exit 1
+
+      - name: Publish s2and
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: release/s2and

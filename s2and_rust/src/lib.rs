@@ -1,21 +1,22 @@
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, ToPyArray};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyIterator, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyIterator, PyModule};
 use pyo3::Bound;
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
-use std::fs;
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 mod arrow_batch_lookup;
+mod arrow_dataset;
+mod artifact_hash;
 mod constraints;
+mod feature_schema;
 mod features;
 mod ingest_dataset;
 mod language_detection;
+mod lightgbm_booster;
 mod name_counts;
 mod orcid;
 mod pair_indexing;
@@ -30,34 +31,26 @@ mod subblocking;
 mod text_compat;
 
 use arrow_batch_lookup::IndexedArrowReadStats;
+use arrow_dataset::{ArrowDataset, ArrowDatasetResources};
 use constraints::{
-    first_names_name_compatible, lasts_equivalent_for_constraint, name_tuple_contains,
-    same_prefix_tokens,
+    first_names_name_compatible, lasts_equivalent_for_constraint, same_prefix_tokens,
 };
+use feature_schema::FULL_FEATURE_COUNT;
 use features::*;
 pub(crate) use ingest_dataset::*;
-use language_detection::LanguageDetectorCompat;
-use name_counts::{
-    NameCountsData, NameCountsLastFirstInitialSemantics, RawNameCountKind, RawNameCountMaps,
-};
+use language_detection::detect_language_compat;
+use name_counts::{NameCountsData, NameCountsIndex, RawNameCountKind, RawNameCountMaps};
 use orcid::{normalize_orcid_compact_owned, normalize_orcid_owned};
 use pair_indexing::upper_triangle_pairs_for_range;
-use raw_arrow::paths::{
-    extract_name_counts_index_path, extract_path_mapping_string,
-    raw_arrow_feature_paths_from_py_dict, required_path_from_py_dict, RawArrowPlannerPaths,
-};
 use raw_arrow::readers::{
     read_raw_arrow_cluster_seed_disallows, read_raw_arrow_cluster_seeds,
-    read_raw_arrow_paper_authors_with_optional_index, read_raw_arrow_papers_with_optional_index,
-    read_raw_arrow_query_signatures, read_raw_arrow_signatures_with_optional_index,
-    read_raw_arrow_specter_with_optional_index, read_raw_name_counts_index,
-    RawArrowAuthorSignalData, RawArrowFeature, RawArrowPaper, RawArrowQuerySignatureRequest,
-    RawArrowSignature, RawArrowSummarySignalData,
+    read_raw_arrow_query_signatures, RawArrowAuthorSignalData, RawArrowFeature, RawArrowPaper,
+    RawArrowQuerySignatureRequest, RawArrowSignature, RawArrowSummarySignalData,
 };
 use raw_arrow_features::{
     build_raw_arrow_author_signal_data, build_raw_arrow_feature, build_raw_arrow_summary,
-    build_raw_arrow_summary_signals, extract_specter_for_paper_id, mask_raw_arrow_query,
-    raw_arrow_name_count_rarity_row, raw_arrow_paper_evidence_row, round_six,
+    build_raw_arrow_summary_signals, mask_raw_arrow_query, raw_arrow_name_count_rarity_row,
+    raw_arrow_paper_evidence_row, round_six,
 };
 #[cfg(test)]
 use raw_candidate_planner::raw_arrow_summary_signals_for_members_cached;
@@ -67,8 +60,8 @@ pub(crate) use retrieval::*;
 pub(crate) use rust_featurizer::RustFeaturizer;
 use subblocking::*;
 use text_compat::{
-    compute_block_compat, contains_name_dash, ensure_unidecode_for_text,
-    normalize_text_compat_from_map, split_first_middle_hyphen_aware_compat,
+    canonical_name_count_keys_compat, canonicalize_name_parts_compat, compute_block_compat,
+    ensure_unidecode_for_text, normalize_text_compat_from_map, normalize_title_compat_from_map,
 };
 
 fn py_len(s: &str) -> usize {
@@ -89,7 +82,7 @@ fn is_dropped_affix(token: &str) -> bool {
     DROPPED_AFFIXES.contains(&token)
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 struct CounterData {
     // FNV-1a 64-bit hashes of original string keys, sorted ascending.
     // Values are f32 counts. Binary search replaces HashMap lookup.
@@ -151,7 +144,7 @@ fn read_f64_le_unchecked(bytes: &[u8], offset: usize) -> f64 {
     f64::from_le_bytes(raw)
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum ClusterId {
     Int(i64),
     Str(String),
@@ -159,7 +152,7 @@ enum ClusterId {
 
 type PaperId = String;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 struct SignatureData {
     // Python author_info_first_normalized_without_apostrophe.
     first: Option<String>,
@@ -188,24 +181,17 @@ impl SignatureData {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 struct PaperData {
     venue_ngrams: Option<CounterData>,
     title_words: Option<CounterData>,
     title_chars: Option<CounterData>,
-    ref_authors: Option<CounterData>,
-    ref_titles: Option<CounterData>,
-    ref_venues: Option<CounterData>,
-    ref_blocks: Option<CounterData>,
-    ref_details_present: bool,
-    references: HashSet<PaperId>,
     year: Option<i64>,
     has_abstract: bool,
     predicted_language: Option<String>,
-    is_reliable: bool,
+    language_reliability: f64,
     journal_ngrams: Option<CounterData>,
     specter: Option<Vec<f32>>,
-    #[serde(default)]
     specter_norm: Option<f64>,
 }
 
@@ -232,7 +218,7 @@ struct StagePaperInput {
     year: Option<i64>,
     has_abstract: bool,
     predicted_language: Option<String>,
-    is_reliable: bool,
+    language_reliability: f64,
 }
 
 #[derive(Clone)]
@@ -241,7 +227,7 @@ struct StagePaperPreprocessed {
     year: Option<i64>,
     has_abstract: bool,
     predicted_language: Option<String>,
-    is_reliable: bool,
+    language_reliability: f64,
     title_words: Option<CounterData>,
     title_chars: Option<CounterData>,
     venue_ngrams: Option<CounterData>,
@@ -277,40 +263,6 @@ fn get_build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyo3::types::{PyList, PyString};
-
-    const ARROW_SCHEMA_CONTRACT_COLUMNS: &[(&str, &str, &str, bool)] = &[
-        ("altered_cluster_signatures", "signature_id", "string", true),
-        ("cluster_seed_disallows", "signature_id_1", "string", true),
-        ("cluster_seed_disallows", "signature_id_2", "string", true),
-        ("cluster_seeds", "signature_id", "string", true),
-        ("cluster_seeds", "cluster_id", "string", true),
-        ("paper_authors", "paper_id", "string", true),
-        ("paper_authors", "position", "int64", true),
-        ("paper_authors", "author_name", "string", true),
-        ("papers", "paper_id", "string", true),
-        ("papers", "title", "string", true),
-        ("papers", "abstract", "string", false),
-        ("papers", "venue", "string", true),
-        ("papers", "journal_name", "string", true),
-        ("papers", "year", "int64", false),
-        ("papers", "predicted_language", "string", false),
-        ("papers", "is_reliable", "bool", false),
-        ("signatures", "signature_id", "string", true),
-        ("signatures", "paper_id", "string", true),
-        ("signatures", "author_first", "string", true),
-        ("signatures", "author_middle", "string", true),
-        ("signatures", "author_last", "string", true),
-        ("signatures", "author_suffix", "string", true),
-        ("signatures", "author_affiliations", "list<string>", true),
-        ("signatures", "author_orcid", "string", true),
-        ("signatures", "author_position", "int64", true),
-        ("signatures", "author_block", "string", false),
-        ("signatures", "author_email", "string", false),
-        ("signatures", "source_author_ids", "list<string>", false),
-        ("specter", "paper_id", "string", true),
-        ("specter", "embedding", "fixed_size_list<float32>", true),
-    ];
 
     fn raw_arrow_feature_for_test(first: &str, year: Option<i64>) -> RawArrowFeature {
         RawArrowFeature {
@@ -371,50 +323,6 @@ mod tests {
     }
 
     #[test]
-    fn arrow_schema_contract_json_matches_rust_column_contract() {
-        let payload: serde_json::Value =
-            serde_json::from_str(include_str!("../../s2and/arrow_schema_contract.json"))
-                .expect("schema contract JSON should parse");
-        assert_eq!(
-            payload
-                .get("schema_version")
-                .and_then(serde_json::Value::as_str),
-            Some("s2and_arrow_schema_contract_v1")
-        );
-        let tables = payload
-            .get("tables")
-            .and_then(serde_json::Value::as_object)
-            .expect("schema contract should contain a tables object");
-        let mut observed = Vec::new();
-        for (table_name, columns) in tables {
-            for column in columns
-                .as_array()
-                .expect("schema contract table columns should be arrays")
-            {
-                observed.push((
-                    table_name.as_str(),
-                    column
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .expect("schema contract column should contain name"),
-                    column
-                        .get("datatype")
-                        .and_then(serde_json::Value::as_str)
-                        .expect("schema contract column should contain datatype"),
-                    column
-                        .get("required")
-                        .and_then(serde_json::Value::as_bool)
-                        .expect("schema contract column should contain required"),
-                ));
-            }
-        }
-        observed.sort_unstable();
-        let mut expected = ARROW_SCHEMA_CONTRACT_COLUMNS.to_vec();
-        expected.sort_unstable();
-        assert_eq!(observed, expected);
-    }
-
-    #[test]
     fn validate_retrieval_top_k_rejects_uint16_rank_overflow() {
         let error = validate_retrieval_rank_top_k((u16::MAX as usize) + 1).unwrap_err();
         assert!(py_err_message(error).contains("retrieval_ranks are stored as uint16"));
@@ -427,7 +335,29 @@ mod tests {
             1
         );
         let error = retrieval_rank_from_zero_based_offset(u16::MAX as usize, "test").unwrap_err();
-        assert!(error.contains("retrieval_ranks are stored as uint16"));
+        assert!(matches!(error, RetrievalError::Overflow(_)));
+        assert!(error
+            .to_string()
+            .contains("retrieval_ranks are stored as uint16"));
+    }
+
+    #[test]
+    fn retrieval_errors_map_by_variant_instead_of_message_text() {
+        prepare_python_for_test();
+        Python::with_gil(|py| {
+            assert!(retrieval_error_to_py(RetrievalError::InvalidValue(
+                "missing-looking message".to_string()
+            ))
+            .is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(retrieval_error_to_py(RetrievalError::MissingKey(
+                "value-looking message".to_string()
+            ))
+            .is_instance_of::<pyo3::exceptions::PyKeyError>(py));
+            assert!(retrieval_error_to_py(RetrievalError::Overflow(
+                "arbitrary message".to_string()
+            ))
+            .is_instance_of::<pyo3::exceptions::PyOverflowError>(py));
+        });
     }
 
     #[test]
@@ -483,34 +413,6 @@ mod tests {
     }
 
     #[test]
-    fn reference_details_extraction_errors_are_not_silenced() {
-        prepare_python_for_test();
-        Python::with_gil(|py| {
-            let non_tuple = PyString::new(py, "not-a-tuple");
-            let result = extract_reference_details_counters(py, non_tuple.as_any());
-            assert!(result.is_err(), "non-tuple reference_details should raise");
-            let err = result
-                .err()
-                .unwrap_or_else(|| unreachable!("assert above guarantees error"));
-            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
-        });
-    }
-
-    #[test]
-    fn extract_id_string_rejects_non_scalar_ids() {
-        prepare_python_for_test();
-        Python::with_gil(|py| {
-            let value = PyList::empty(py);
-            let result = extract_id_string(value.as_any());
-            assert!(result.is_err(), "non-scalar ids should raise");
-            let err = result
-                .err()
-                .unwrap_or_else(|| unreachable!("assert above guarantees error"));
-            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
-        });
-    }
-
-    #[test]
     fn year_signal_value_rejects_out_of_range_and_reserved_sentinel() {
         assert_eq!(
             year_signal_value(None, "query year").expect("missing year"),
@@ -545,6 +447,35 @@ mod tests {
                 ("alex|middle=a".to_string(), "alex|middle=b".to_string()),
                 1e10
             )]
+        );
+    }
+
+    #[test]
+    fn sorted_subblock_merge_candidates_orcid_counts_are_order_independent() {
+        let counts = HashMap::from([("wei".to_string(), HashMap::from([("li".to_string(), 7.0)]))]);
+        let mut forward = OrderedSubblocks::default();
+        forward.insert("a|middle=wei".to_string(), vec!["s1".to_string()]);
+        forward.insert("a|middle=li".to_string(), vec!["s2".to_string()]);
+        let mut reverse = OrderedSubblocks::default();
+        reverse.insert("a|middle=li".to_string(), vec!["s2".to_string()]);
+        reverse.insert("a|middle=wei".to_string(), vec!["s1".to_string()]);
+
+        let forward_candidates =
+            sorted_subblock_merge_candidates(&forward, 3, &counts).expect("forward candidates");
+        let reverse_candidates =
+            sorted_subblock_merge_candidates(&reverse, 3, &counts).expect("reverse candidates");
+
+        assert_eq!(forward_candidates[0].1, 7.0);
+        assert_eq!(reverse_candidates[0].1, 7.0);
+        assert_eq!(
+            HashSet::from([
+                forward_candidates[0].0 .0.clone(),
+                forward_candidates[0].0 .1.clone()
+            ]),
+            HashSet::from([
+                reverse_candidates[0].0 .0.clone(),
+                reverse_candidates[0].0 .1.clone()
+            ])
         );
     }
 
@@ -606,7 +537,8 @@ mod tests {
         ]);
         let mut telemetry = SubblockingTelemetry::default();
 
-        apply_orcid_subblocking(&mut output, &rows, 3, &mut telemetry);
+        apply_orcid_subblocking(&mut output, &rows, 3, &mut telemetry)
+            .expect("orcid subblocking succeeds on a valid partition");
 
         assert_eq!(
             output.to_hashmap(),
@@ -621,6 +553,24 @@ mod tests {
             telemetry.orcid_merge_skipped_due_to_capacity_signature_count,
             4
         );
+    }
+
+    #[test]
+    fn orcid_subblocking_rejects_duplicate_signature_id_instead_of_binding_last_wins() {
+        let mut output = OrderedSubblocks::default();
+        output.insert("a".to_string(), vec!["s1".to_string()]);
+        output.insert("b".to_string(), vec!["s1".to_string(), "s2".to_string()]);
+        let rows = HashMap::new();
+        let mut telemetry = SubblockingTelemetry::default();
+
+        let error = apply_orcid_subblocking(&mut output, &rows, 3, &mut telemetry)
+            .expect_err("duplicate signature_id across subblocks must fail loudly");
+
+        pyo3::Python::with_gil(|py| {
+            let message = error.value(py).to_string();
+            assert!(message.contains("duplicate signature_id"), "{message}");
+            assert!(message.contains("s1"), "{message}");
+        });
     }
 
     #[test]
@@ -672,7 +622,10 @@ mod tests {
             },
         ];
         let prefixes = HashSet::new();
-        let unidecode_char_map = HashMap::from([('\u{2010}', "-".to_string())]);
+        // canonical_v2 pretranslation maps every dash-like code point (here
+        // U+2010) to '-' before transliteration, so no unidecode entry is
+        // needed for the dash.
+        let unidecode_char_map = HashMap::new();
 
         normalize_subblocking_signature_rows(&mut rows, &prefixes, &unidecode_char_map);
 
@@ -680,8 +633,10 @@ mod tests {
         assert_eq!(rows[1].first, "alice");
         assert_eq!(rows[2].first, "qi xin");
         assert_eq!(rows[2].middle, "a");
-        assert_eq!(rows[3].first, "arif");
-        assert_eq!(rows[3].middle, "ullah");
+        // Dash-bound given names stay together canonically (D1/D4); the legacy
+        // non-ASCII-dash spill shim is retired.
+        assert_eq!(rows[3].first, "arif ullah");
+        assert_eq!(rows[3].middle, "");
     }
 
     #[test]
@@ -695,6 +650,16 @@ mod tests {
         assert_eq!(
             normalize_text_compat_from_map("O'Neil2", true, &unidecode_char_map),
             "oneil"
+        );
+    }
+
+    #[test]
+    fn normalize_title_compat_preserves_identifying_digits() {
+        let unidecode_char_map = HashMap::new();
+
+        assert_eq!(
+            normalize_title_compat_from_map("Part 1: Co3O4 in 2025", &unidecode_char_map),
+            "part 1 co3o4 in 2025"
         );
     }
 
@@ -727,14 +692,14 @@ mod tests {
     fn stage_papers_normalize_title_and_authors_without_full_preprocess() {
         let input = StagePaperInput {
             paper_id: "p1".to_string(),
-            raw_title: "Some Title".to_string(),
+            raw_title: "Part 1: Co3O4".to_string(),
             raw_venue: "My Venue".to_string(),
             raw_journal: "My Journal".to_string(),
             raw_authors: vec![(0, "ALICE-1".to_string()), (1, "Bob O'Neil".to_string())],
             year: Some(2024),
             has_abstract: false,
             predicted_language: None,
-            is_reliable: false,
+            language_reliability: 0.0,
         };
 
         let papers = preprocess_stage_papers(
@@ -751,6 +716,13 @@ mod tests {
             vec![(0, "alice".to_string()), (1, "bob o neil".to_string())]
         );
         assert!(paper.title_words.is_some());
+        assert!(paper
+            .title_words
+            .as_ref()
+            .expect("title words")
+            .entries
+            .iter()
+            .any(|(hash, _count)| *hash == fnv64(b"1")));
         assert!(paper.title_chars.is_none());
         assert!(paper.venue_ngrams.is_none());
         assert!(paper.journal_ngrams.is_none());
@@ -768,7 +740,10 @@ mod tests {
             Err(err) => err,
         };
 
-        assert!(err.contains("raw Arrow summary year is outside the supported i32 range"));
+        assert!(matches!(err, RetrievalError::InvalidValue(_)));
+        assert!(err
+            .to_string()
+            .contains("raw Arrow summary year is outside the supported i32 range"));
     }
 
     #[test]
@@ -842,35 +817,14 @@ mod tests {
         assert_eq!(first_member_ids, vec!["m1".to_string()]);
         assert_eq!(second_member_ids, vec!["m2".to_string()]);
     }
-
-    #[test]
-    fn subblock_token_fallback_matches_python_case_preserving_parse() {
-        assert_eq!(
-            subblock_tokens_from_key("Ali|3,bob|2,a|1"),
-            vec!["Ali".to_string(), "bob".to_string()]
-        );
-    }
 }
 
 #[pymodule]
 fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    m.add("RETRIEVAL_FEATURE_ORDER", RETRIEVAL_FEATURE_ORDER.to_vec())?;
     m.add(
         "DEFAULT_HYBRID_CENTROID_POLICY_NAME",
         DEFAULT_HYBRID_CENTROID_POLICY_NAME,
-    )?;
-    m.add(
-        "DEFAULT_HYBRID_CENTROID_WEIGHTS",
-        DEFAULT_HYBRID_CENTROID_WEIGHTS.to_vec(),
-    )?;
-    m.add(
-        "DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS",
-        DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS.to_vec(),
-    )?;
-    m.add(
-        "DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS",
-        DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS.to_vec(),
     )?;
     m.add(
         "RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE",
@@ -889,10 +843,6 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         RETRIEVAL_YEAR_SCORE_RANGE_PENALTY,
     )?;
     m.add(
-        "RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP",
-        RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
-    )?;
-    m.add(
         "INCREMENTAL_LINKING_PAIR_PLAN_ROW_SIGNALS",
         INCREMENTAL_LINKING_PAIR_PLAN_ROW_SIGNALS.to_vec(),
     )?;
@@ -901,13 +851,17 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         RAW_ARROW_QUERY_SIGNATURE_PLANNER_METHODS.to_vec(),
     )?;
     m.add_function(wrap_pyfunction!(get_build_info, m)?)?;
+    artifact_hash::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(raw_arrow_labeled_candidate_plan, m)?)?;
     promoted_linker::add_to_module(m)?;
+    lightgbm_booster::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(
         make_subblocks_with_telemetry_arrow_native_graph,
         m
     )?)?;
     m.add_class::<RustFeaturizer>()?;
+    m.add_class::<ArrowDataset>()?;
+    m.add_class::<NameCountsIndex>()?;
     m.add_class::<RustHybridCentroidRetriever>()?;
     m.add_class::<RawBlockQueryCandidatePlanner>()?;
     Ok(())

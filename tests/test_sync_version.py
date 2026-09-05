@@ -1,14 +1,78 @@
+"""Check version updates and the complete pre-commit hook's failure boundaries."""
+
 from pathlib import Path
 
 import pytest
 
 from scripts import sync_version
+from tests.shell_helpers import run_bash
+
+
+@pytest.mark.parametrize(
+    ("staged", "check_status", "sync_status", "expected_status", "updates"),
+    [
+        ("README.md", "1", "0", 0, False),
+        ("VERSION", "0", "0", 0, False),
+        ("VERSION", "1", "0", 0, True),
+        ("VERSION", "1", "9", 9, False),
+    ],
+    ids=["unrelated-change", "already-synchronized", "update-and-stage", "sync-failure"],
+)
+def test_pre_commit_hook_only_stages_successfully_synchronized_targets(
+    tmp_path: Path, staged: str, check_status: str, sync_status: str, expected_status: int, updates: bool
+) -> None:
+    """Run the whole hook with command boundaries stubbed, never touching real Git."""
+    hook = (sync_version.ROOT / ".githooks" / "pre-commit").read_text(encoding="utf-8")
+    commands = r"""
+git() {
+    case "$1" in
+        rev-parse) pwd ;;
+        diff) printf '%s\n' "$STAGED_FILES" ;;
+        add) printf '<%s>\n' "${@:2}" > staged-files ;;
+        *) return 97 ;;
+    esac
+}
+uv() {
+    printf '%s\n' "$*" >> commands
+    case "$*" in
+        'run python scripts/sync_version.py --print-targets')
+            printf 'VERSION\r\nfolder with spaces/manifest.toml\r\nuv.lock\r\n' ;;
+        'run python scripts/sync_version.py --check') return "$CHECK_STATUS" ;;
+        'run python scripts/sync_version.py') return "$SYNC_STATUS" ;;
+        'sync --extra dev') return 0 ;;
+        'run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml') return 0 ;;
+        'run --active --no-project ruff format scripts/sync_version.py') return 0 ;;
+        *) return 98 ;;
+    esac
+}
+"""
+    completed = run_bash(
+        commands + hook,
+        cwd=tmp_path,
+        env={"STAGED_FILES": staged, "CHECK_STATUS": check_status, "SYNC_STATUS": sync_status},
+    )
+    assert completed.returncode == expected_status, completed.stdout + completed.stderr
+    staged_files = tmp_path / "staged-files"
+    if updates:
+        assert staged_files.read_text().splitlines() == ["<VERSION>", "<folder with spaces/manifest.toml>", "<uv.lock>"]
+    else:
+        assert not staged_files.exists()
+    log = tmp_path / "commands"
+    if staged != "VERSION":
+        assert not log.exists(), "Unrelated commits must not run version tooling"
+    elif check_status == "0":
+        assert log.read_text().splitlines() == [
+            "run python scripts/sync_version.py --print-targets",
+            "run python scripts/sync_version.py --check",
+        ]
+    elif sync_status != "0":
+        assert log.read_text().splitlines()[-1] == "run python scripts/sync_version.py"
+    else:
+        assert "sync --extra dev" in log.read_text().splitlines()
 
 
 def _write_version_fixture(root: Path) -> None:
-    (root / "s2and").mkdir()
     (root / "s2and_rust").mkdir()
-    (root / "docs").mkdir()
     (root / "VERSION").write_text("0.50.0\n", encoding="utf-8")
     (root / "pyproject.toml").write_text(
         "\n".join(
@@ -44,37 +108,6 @@ def _write_version_fixture(root: Path) -> None:
         ),
         encoding="utf-8",
     )
-    (root / "s2and" / "runtime.py").write_text(
-        "MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 49, 0)\n",
-        encoding="utf-8",
-    )
-    (root / "README.md").write_text("echo 0.49.0 > VERSION\n", encoding="utf-8")
-    (root / "docs" / "development.md").write_text("echo 0.40.0 > VERSION\n", encoding="utf-8")
-    (root / "docs" / "release_notes.md").write_text(
-        "\n".join(
-            [
-                "# Release Notes",
-                "",
-                "## 0.49.0",
-                "",
-                "- Ships the package as `0.49.0` and pins optional Rust installs to `s2and-rust==0.49.0`.",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (root / "s2and_rust" / "README.md").write_text(
-        "\n".join(
-            [
-                "# s2and-rust",
-                "",
-                "This checkout is `0.49.0`, so use a local build when working from this tree",
-                "until the matching packages are published.",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
     (root / "s2and_rust" / "Cargo.lock").write_text(
         "\n".join(
             [
@@ -99,7 +132,7 @@ def _write_version_fixture(root: Path) -> None:
     )
 
 
-def test_sync_version_updates_rust_manifests_runtime_guard_and_lockfiles(tmp_path: Path) -> None:
+def test_sync_version_updates_rust_manifests_and_lockfiles(tmp_path: Path) -> None:
     _write_version_fixture(tmp_path)
 
     with pytest.raises(SystemExit, match="Version mismatch"):
@@ -111,39 +144,16 @@ def test_sync_version_updates_rust_manifests_runtime_guard_and_lockfiles(tmp_pat
     assert '"s2and-rust==0.50.0"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "Cargo.toml").read_text(encoding="utf-8")
-    assert "MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 50, 0)" in (tmp_path / "s2and" / "runtime.py").read_text(
-        encoding="utf-8"
-    )
-    assert "echo 0.50.0 > VERSION" in (tmp_path / "README.md").read_text(encoding="utf-8")
-    assert "echo 0.50.0 > VERSION" in (tmp_path / "docs" / "development.md").read_text(encoding="utf-8")
-    release_notes = (tmp_path / "docs" / "release_notes.md").read_text(encoding="utf-8")
-    assert "## 0.49.0" in release_notes
-    assert "package as `0.49.0` and pins optional Rust installs to `s2and-rust==0.49.0`" in release_notes
-    assert "This checkout is `0.50.0`" in (tmp_path / "s2and_rust" / "README.md").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "Cargo.lock").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "uv.lock").read_text(encoding="utf-8")
 
 
 def test_sync_version_rejects_ambiguous_targets(tmp_path: Path) -> None:
     _write_version_fixture(tmp_path)
-    (tmp_path / "s2and" / "runtime.py").write_text(
-        "\n".join(
-            [
-                "MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 50, 0)",
-                "MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 50, 0)",
-                "",
-            ]
-        ),
+    (tmp_path / "s2and_rust" / "Cargo.toml").write_text(
+        '[package]\nname = "s2and_rust"\nversion = "0.49.0"\nversion = "0.49.0"\n',
         encoding="utf-8",
     )
 
     with pytest.raises(SystemExit, match="Expected one version match"):
         sync_version.sync_version("0.50.0", root=tmp_path)
-
-
-def test_pre_commit_stages_sync_version_targets() -> None:
-    hook_text = (sync_version.ROOT / ".githooks" / "pre-commit").read_text(encoding="utf-8")
-
-    for target in sync_version.version_targets():
-        assert target.relative_path.as_posix() in hook_text
-    assert "docs/release_notes.md" not in hook_text

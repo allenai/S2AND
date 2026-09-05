@@ -1,17 +1,15 @@
 import hashlib
-import json
 import logging
-import os
 import random
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from itertools import combinations
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import genieclust
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import TruncatedSVD
@@ -19,24 +17,88 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import MultiLabelBinarizer
 
-from s2and.arrow_inputs import require_arrow_artifacts
+from s2and.arrow_inputs import ArrowDataset
+from s2and.arrow_schema import validate_arrow_schema
 from s2and.consts import _PACKAGE_DATA_DIR, SPECTER_DIM
-from s2and.incremental_linking.feature_block_arrow import read_arrow_batch_lookup_index_batch_indices_for_request
+from s2and.orcid_prefix_counts import (
+    load_canonical_orcid_prefix_counts,
+)
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
+    canonicalize_name_parts,
     compute_block,
     get_text_ngrams_words,
     normalize_orcid,
     normalize_text,
     same_prefix_tokens,
-    split_first_middle_hyphen_aware,
 )
 
 logger = logging.getLogger("s2and")
 
 
-with open(os.path.join(_PACKAGE_DATA_DIR, "first_k_letter_counts_from_orcid.json")) as f:
-    FIRST_K_LETTER_COUNTS = json.load(f)
+def _canonical_orcid_prefix_pair(first: str, second: str) -> tuple[str, str]:
+    """Return the order-independent key for an ORCID prefix pair."""
+
+    return (first, second) if first <= second else (second, first)
+
+
+def _orcid_prefix_pair_count(counts: Mapping[str, Mapping[str, int]], first: str, second: str) -> int | None:
+    """Look up a count in the canonical lexicographically ordered mapping."""
+
+    left, right = _canonical_orcid_prefix_pair(first, second)
+    nested = counts.get(left)
+    return None if nested is None else nested.get(right)
+
+
+class _LazyCanonicalOrcidPrefixCounts(Mapping[str, Mapping[str, int]]):
+    """Defer canonical artifact I/O until subblocking actually needs the priors."""
+
+    def __init__(self, data_dir: str | Path) -> None:
+        self._data_dir = Path(data_dir)
+        self._loaded: Mapping[str, Mapping[str, int]] | None = None
+        self._data_sha256: str | None = None
+
+    def load(self) -> Mapping[str, Mapping[str, int]]:
+        loaded = self._loaded
+        if loaded is None:
+            artifact = load_canonical_orcid_prefix_counts(self._data_dir)
+            loaded = artifact.counts
+            self._data_sha256 = artifact.data_sha256
+            self._loaded = artifact.counts
+        return loaded
+
+    def data_sha256(self) -> str:
+        """Return the verified count-data content hash."""
+
+        self.load()
+        data_sha256 = self._data_sha256
+        if data_sha256 is None:
+            raise RuntimeError("Canonical ORCID prefix-count data hash was not retained after loading")
+        return data_sha256
+
+    def __getitem__(self, key: str) -> Mapping[str, int]:
+        return self.load()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.load())
+
+    def __len__(self) -> int:
+        return len(self.load())
+
+
+def _resolved_orcid_prefix_counts(
+    counts: Mapping[str, Mapping[str, int]],
+) -> Mapping[str, Mapping[str, int]]:
+    return counts.load() if isinstance(counts, _LazyCanonicalOrcidPrefixCounts) else counts
+
+
+FIRST_K_LETTER_COUNTS = _LazyCanonicalOrcidPrefixCounts(_PACKAGE_DATA_DIR)
+
+
+def canonical_orcid_prefix_counts_data_sha256() -> str:
+    """Return the content hash of the verified packaged ORCID priors."""
+
+    return FIRST_K_LETTER_COUNTS.data_sha256()
 
 
 def normalize_orcid_for_subblocking(value: Any) -> str | None:
@@ -77,6 +139,20 @@ class GraphSubblockingConfig:
     adaptive_projection_max_group_size: int = 5_000
     adaptive_projection_count: int = 24
     adaptive_projection_window: int = 24
+
+
+def _resolve_graph_subblocking_config(raw_config: object) -> GraphSubblockingConfig:
+    """Resolve one strict graph-subblocking configuration value."""
+
+    if raw_config is None:
+        return GraphSubblockingConfig()
+    if isinstance(raw_config, GraphSubblockingConfig):
+        return raw_config
+    if isinstance(raw_config, Mapping):
+        return GraphSubblockingConfig(**dict(raw_config))
+    raise ValueError(
+        f"subblocking_graph_config must be a GraphSubblockingConfig, mapping, or None; got {type(raw_config).__name__}"
+    )
 
 
 class _UnionFind:
@@ -781,12 +857,13 @@ def cluster_with_graph_fallback(
 
 
 def _read_arrow_rows_by_values(
-    path: Any,
-    index_path: Any,
+    arrow_dataset: Any,
+    table_key: str,
     key_column: str,
     values: Sequence[str],
     *,
     required_columns: set[str],
+    optional_columns: Sequence[str] = (),
     table_name: str,
     load_metrics: dict[str, int] | None = None,
 ) -> list[Mapping[str, Any]]:
@@ -794,29 +871,20 @@ def _read_arrow_rows_by_values(
     keep_values = {str(value) for value in values}
     if not keep_values:
         return []
-    batch_indices = sorted(
-        read_arrow_batch_lookup_index_batch_indices_for_request(
-            path,
-            index_path,
-            key_column=key_column,
-            values=keep_values,
-        )
-    )
+    batch_indices = sorted(arrow_dataset.native.batch_indices(table_key, list(keep_values)))
     rows: list[Mapping[str, Any]] = []
     record_batches_scanned = 0
     rows_scanned = 0
-    with pa.memory_map(str(path), "r") as source:
+    with arrow_dataset.open_file(table_key) as source_file, pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
         required_columns = set(required_columns)
         required_columns.add(key_column)
-        missing = sorted(required_columns.difference(reader.schema.names))
-        if missing:
-            raise ValueError(f"{table_name} Arrow is missing required columns for graph subblocking: {missing}")
-        _validate_arrow_graph_schema(reader.schema, table_name)
+        selected_columns = required_columns.union(set(optional_columns).intersection(reader.schema.names))
+        validate_arrow_schema(reader.schema, table_name=table_name, columns=selected_columns)
         key_column_index = reader.schema.get_field_index(key_column)
         if key_column_index < 0:
             raise ValueError(f"{table_name} Arrow is missing key column for graph subblocking: {key_column!r}")
-        selected_column_names = [name for name in reader.schema.names if name in required_columns]
+        selected_column_names = [name for name in reader.schema.names if name in selected_columns]
         selected_column_indices = [reader.schema.get_field_index(name) for name in selected_column_names]
         for batch_index in batch_indices:
             batch = reader.get_batch(batch_index)
@@ -843,49 +911,6 @@ def _read_arrow_rows_by_values(
         _add_load_metric(load_metrics, f"{table_name}_rows_scanned", rows_scanned)
         _add_load_metric(load_metrics, f"{table_name}_rows_loaded", len(rows))
     return rows
-
-
-def _require_arrow_column_type(
-    schema: Any, column_name: str, table_name: str, predicate: Callable[[Any], bool], expected: str
-) -> None:
-    field_index = schema.get_field_index(column_name)
-    if field_index < 0:
-        raise ValueError(f"{table_name} Arrow is missing required column for graph subblocking: {column_name!r}")
-    column_type = schema.field(field_index).type
-    if not predicate(column_type):
-        raise ValueError(
-            f"{table_name} Arrow column {column_name!r} expected {expected} for graph subblocking; "
-            f"got {column_type}"
-        )
-
-
-def _validate_arrow_graph_schema(schema: Any, table_name: str) -> None:
-    pa = __import__("pyarrow")
-    if table_name == "signatures":
-        for column_name in ("signature_id", "paper_id", "author_first", "author_middle", "author_orcid"):
-            _require_arrow_column_type(schema, column_name, table_name, pa.types.is_string, "string")
-        _require_arrow_column_type(schema, "author_position", table_name, pa.types.is_int64, "int64")
-        _require_arrow_column_type(
-            schema,
-            "author_affiliations",
-            table_name,
-            lambda column_type: pa.types.is_list(column_type) and pa.types.is_string(column_type.value_type),
-            "list<string>",
-        )
-    elif table_name == "paper_authors":
-        for column_name in ("paper_id", "author_name"):
-            _require_arrow_column_type(schema, column_name, table_name, pa.types.is_string, "string")
-        _require_arrow_column_type(schema, "position", table_name, pa.types.is_int64, "int64")
-    elif table_name == "specter":
-        _require_arrow_column_type(schema, "paper_id", table_name, pa.types.is_string, "string")
-        field = schema.field(schema.get_field_index("embedding"))
-        if not pa.types.is_fixed_size_list(field.type) or not pa.types.is_float32(field.type.value_type):
-            raise ValueError(
-                "specter Arrow column 'embedding' expected fixed_size_list<float32> for graph subblocking; "
-                f"got {field.type}"
-            )
-        if int(field.type.list_size) <= 0:
-            raise ValueError("specter Arrow embedding column must have positive dimension for graph subblocking")
 
 
 def _add_load_metric(load_metrics: dict[str, int], key: str, value: int) -> None:
@@ -930,36 +955,24 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
 
 
 def _coauthor_blocks_by_paper_from_arrow(
-    paths: Mapping[str, Any],
+    arrow_dataset: Any,
     paper_ids: Sequence[str],
     *,
     load_metrics: dict[str, int],
 ) -> dict[str, list[tuple[int, str]]]:
     pa = __import__("pyarrow")
-    paper_authors_path = paths.get("paper_authors")
-    if paper_authors_path is None:
+    if not arrow_dataset.has("paper_authors"):
         return {}
-    paper_authors_index_path = paths["paper_authors_batch_index"]
     keep_values = {str(value) for value in paper_ids}
-    batch_indices = sorted(
-        read_arrow_batch_lookup_index_batch_indices_for_request(
-            paper_authors_path,
-            paper_authors_index_path,
-            key_column="paper_id",
-            values=keep_values,
-        )
-    )
+    batch_indices = sorted(arrow_dataset.native.batch_indices("paper_authors", list(keep_values)))
     out: dict[str, list[tuple[int, str]]] = defaultdict(list)
     record_batches_scanned = 0
     rows_scanned = 0
     rows_loaded = 0
-    with pa.memory_map(str(paper_authors_path), "r") as source:
+    with arrow_dataset.open_file("paper_authors") as source_file, pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
         required_columns = {"paper_id", "position", "author_name"}
-        missing = sorted(required_columns.difference(reader.schema.names))
-        if missing:
-            raise ValueError(f"paper_authors Arrow is missing required columns for graph subblocking: {missing}")
-        _validate_arrow_graph_schema(reader.schema, "paper_authors")
+        validate_arrow_schema(reader.schema, table_name="paper_authors", columns=required_columns)
         paper_id_index = reader.schema.get_field_index("paper_id")
         position_index = reader.schema.get_field_index("position")
         author_name_index = reader.schema.get_field_index("author_name")
@@ -998,14 +1011,14 @@ def _coauthor_blocks_by_paper_from_arrow(
                 if author_name_value is None:
                     raise ValueError("paper_authors Arrow cannot contain null author_name values")
                 author_name = str(author_name_value).strip()
-                if not author_name:
-                    raise ValueError("paper_authors Arrow cannot contain empty author_name values")
                 position_key = int(position)
                 if position_key in seen_positions_by_paper[paper_id]:
                     raise ValueError(
                         f"paper_authors Arrow contains duplicate (paper_id, position): ({paper_id!r}, {position_key})"
                     )
                 seen_positions_by_paper[paper_id].add(position_key)
+                if not author_name:
+                    continue
                 block = _coauthor_block_from_arrow_author_name(author_name)
                 if block:
                     out[paper_id].append((position_key, block))
@@ -1016,37 +1029,27 @@ def _coauthor_blocks_by_paper_from_arrow(
 
 
 def _specter_embeddings_from_arrow(
-    paths: Mapping[str, Any],
+    arrow_dataset: Any,
     paper_ids: Sequence[str],
     *,
     load_metrics: dict[str, int],
 ) -> dict[str, np.ndarray]:
     pa = __import__("pyarrow")
-    specter_path_key, specter_index_key = _arrow_graph_specter_path_keys(paths)
-    if specter_path_key is None:
-        raise ValueError("Graph subblocking requires a 'specter' or 'specter2' Arrow path")
-    specter_path = paths[specter_path_key]
-    specter_index_path = paths[specter_index_key]
+    if not arrow_dataset.has("specter"):
+        raise ValueError("Graph subblocking requires SPECTER Arrow data")
     keep_values = {str(value) for value in paper_ids}
-    batch_indices = sorted(
-        read_arrow_batch_lookup_index_batch_indices_for_request(
-            specter_path,
-            specter_index_path,
-            key_column="paper_id",
-            values=keep_values,
-        )
-    )
+    batch_indices = sorted(arrow_dataset.native.batch_indices("specter", list(keep_values)))
     embeddings: dict[str, np.ndarray] = {}
     record_batches_scanned = 0
     rows_scanned = 0
     rows_loaded = 0
-    with pa.memory_map(str(specter_path), "r") as source:
+    with arrow_dataset.open_file("specter") as source_file, pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
         required_columns = {"paper_id", "embedding"}
-        missing = sorted(required_columns.difference(reader.schema.names))
-        if missing:
-            raise ValueError(f"specter Arrow is missing required columns for graph subblocking: {missing}")
-        _validate_arrow_graph_schema(reader.schema, "specter")
+        validate_arrow_schema(reader.schema, table_name="specter", columns=required_columns)
+        embedding_type = reader.schema.field("embedding").type
+        if int(embedding_type.list_size) <= 0:
+            raise ValueError("specter Arrow embedding column must have positive dimension for graph subblocking")
         paper_id_index = reader.schema.get_field_index("paper_id")
         embedding_index = reader.schema.get_field_index("embedding")
         for batch_index in batch_indices:
@@ -1084,48 +1087,17 @@ def _specter_embeddings_from_arrow(
     return embeddings
 
 
-def _arrow_graph_specter_path_keys(paths: Mapping[str, Any]) -> tuple[str | None, str]:
-    if "specter" in paths:
-        return "specter", "specter_batch_index"
-    if "specter2" in paths:
-        return "specter2", "specter2_batch_index" if "specter2_batch_index" in paths else "specter_batch_index"
-    return None, "specter_batch_index"
-
-
-def _require_arrow_graph_subblocking_artifacts(paths: Mapping[str, Any]) -> dict[str, str]:
-    specter_key, specter_index_key = _arrow_graph_specter_path_keys(paths)
-    if specter_key is None:
-        specter_key = "specter"
-    return require_arrow_artifacts(
-        paths,
-        required_keys=(
-            "signatures",
-            "signatures_batch_index",
-            "paper_authors",
-            "paper_authors_batch_index",
-            specter_key,
-            specter_index_key,
-        ),
-        context="Arrow graph subblocking",
-        producer_hint=(
-            "include signatures, paper_authors, specter, and matching raw-planner batch indexes; "
-            "Arrow graph subblocking refuses filtered full scans"
-        ),
-    )
-
-
 def _load_arrow_graph_subblocking_dataset(
-    paths: Mapping[str, Any],
+    arrow_dataset: Any,
     signature_ids: Sequence[str],
     *,
     random_seed: int,
     load_metrics: dict[str, int],
 ) -> SimpleNamespace:
-    paths = _require_arrow_graph_subblocking_artifacts(paths)
     signature_ids = tuple(dict.fromkeys(str(signature_id) for signature_id in signature_ids))
     signature_rows = _read_arrow_rows_by_values(
-        paths["signatures"],
-        paths["signatures_batch_index"],
+        arrow_dataset,
+        "signatures",
         "signature_id",
         signature_ids,
         required_columns={
@@ -1134,9 +1106,9 @@ def _load_arrow_graph_subblocking_dataset(
             "author_first",
             "author_middle",
             "author_affiliations",
-            "author_orcid",
             "author_position",
         },
+        optional_columns=("author_orcid",),
         table_name="signatures",
         load_metrics=load_metrics,
     )
@@ -1155,8 +1127,16 @@ def _load_arrow_graph_subblocking_dataset(
             )
         paper_id_by_signature[signature_id] = str(raw_paper_id)
     paper_ids = tuple(dict.fromkeys(paper_id_by_signature.values()))
-    coauthors_by_paper = _coauthor_blocks_by_paper_from_arrow(paths, paper_ids, load_metrics=load_metrics)
-    specter_embeddings = _specter_embeddings_from_arrow(paths, paper_ids, load_metrics=load_metrics)
+    coauthors_by_paper = _coauthor_blocks_by_paper_from_arrow(
+        arrow_dataset,
+        paper_ids,
+        load_metrics=load_metrics,
+    )
+    specter_embeddings = _specter_embeddings_from_arrow(
+        arrow_dataset,
+        paper_ids,
+        load_metrics=load_metrics,
+    )
 
     signature_objects: dict[str, SimpleNamespace] = {}
     for signature_id in signature_ids:
@@ -1207,14 +1187,14 @@ class ArrowGraphSubblockingFallback:
 
     def __init__(
         self,
-        paths: Mapping[str, Any],
-        signature_ids: Sequence[str],
+        arrow_dataset: ArrowDataset,
         *,
         config: GraphSubblockingConfig | None = None,
         random_seed: int = 0,
     ) -> None:
-        self.paths = dict(paths)
-        self.signature_ids = tuple(dict.fromkeys(str(signature_id) for signature_id in signature_ids))
+        if not isinstance(arrow_dataset, ArrowDataset):
+            raise TypeError("ArrowGraphSubblockingFallback requires an open ArrowDataset")
+        self.arrow_dataset = arrow_dataset
         self.config = config or GraphSubblockingConfig()
         self.random_seed = int(random_seed)
         self.stats: list[dict[str, Any]] = []
@@ -1225,12 +1205,15 @@ class ArrowGraphSubblockingFallback:
     def _load_signature_ids(self, signature_ids: Sequence[str]) -> None:
         signature_ids = tuple(dict.fromkeys(str(signature_id) for signature_id in signature_ids))
         start = time.perf_counter()
-        self._dataset = _load_arrow_graph_subblocking_dataset(
-            self.paths,
-            signature_ids,
-            random_seed=self.random_seed,
-            load_metrics=self.load_metrics,
-        )
+        with self.arrow_dataset.use(
+            require_specter=True,
+        ) as arrow_lease:
+            self._dataset = _load_arrow_graph_subblocking_dataset(
+                arrow_lease,
+                signature_ids,
+                random_seed=self.random_seed,
+                load_metrics=self.load_metrics,
+            )
         self.load_seconds = float(time.perf_counter() - start)
 
     def prepare(self, signature_groups: Iterable[Iterable[str]]) -> None:
@@ -1254,7 +1237,7 @@ class ArrowGraphSubblockingFallback:
         ]
         if missing_signature_ids:
             raise ValueError(
-                "Arrow graph subblocking evidence is missing required signatures: " f"{missing_signature_ids[:10]}"
+                f"Arrow graph subblocking evidence is missing required signatures: {missing_signature_ids[:10]}"
             )
         return dataset
 
@@ -1278,8 +1261,7 @@ class ArrowGraphSubblockingFallback:
 
 
 def make_arrow_graph_subblocking_cluster_fn(
-    paths: Mapping[str, Any],
-    signature_ids: Sequence[str],
+    arrow_dataset: ArrowDataset,
     *,
     config: GraphSubblockingConfig | None = None,
     random_seed: int = 0,
@@ -1287,8 +1269,7 @@ def make_arrow_graph_subblocking_cluster_fn(
     """Return a lazy Arrow-backed graph fallback callable for subblocking."""
 
     return ArrowGraphSubblockingFallback(
-        paths,
-        signature_ids,
+        arrow_dataset,
         config=config,
         random_seed=random_seed,
     )
@@ -1330,33 +1311,20 @@ def make_dataset_graph_subblocking_cluster_fn(
 
 
 def signature_name_parts_for_subblocking(signature) -> tuple[str, str]:
-    raw_first = signature.author_info_first
-    raw_middle = signature.author_info_middle
+    """Canonical (canonical_v2) first/middle for subblocking keys.
+
+    Dash handling is uniform (D4): every dash-like character binds given-name
+    compounds identically, replacing the retired ASCII-kept/non-ASCII-spilled
+    legacy repair.
+    """
+
     first = signature.author_info_first_normalized_without_apostrophe
     middle = signature.author_info_middle_normalized_without_apostrophe
     if first is not None and middle is not None:
-        return _spill_non_ascii_dash_first_for_subblocking(raw_first, first, middle)
+        return first, middle
     # Rust preprocessing can defer normalized name fields; reconstruct with Python-equivalent logic.
-    first, middle = split_first_middle_hyphen_aware(raw_first, raw_middle)
-    return _spill_non_ascii_dash_first_for_subblocking(raw_first, first, middle)
-
-
-def _spill_non_ascii_dash_first_for_subblocking(
-    raw_first: str | None,
-    first: str,
-    middle: str,
-) -> tuple[str, str]:
-    """Spill non-ASCII dash compounds to match legacy subblocking keys."""
-
-    raw_first = raw_first or ""
-    non_ascii_dashes = "\u2010\u2011\u2012\u2013\u2014\u2212\ufe58\ufe63\uff0d"
-    if "-" in raw_first or not any(character in raw_first for character in non_ascii_dashes):
-        return first, middle
-    first_parts = first.split()
-    if len(first_parts) <= 1:
-        return first, middle
-    middle_parts = middle.split()
-    return first_parts[0], " ".join(first_parts[1:] + middle_parts)
+    parts = canonicalize_name_parts(signature.author_info_first, signature.author_info_middle, None)
+    return parts.first, parts.middle
 
 
 def _signature_coauthor_blocks_for_specter(signature, anddata, compute_block_fn=compute_block) -> list[str]:
@@ -1395,7 +1363,7 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000, com
     """
     if len(signature_ids) == 0:
         return {}
-    elif len(signature_ids) < target_subblock_size:
+    elif len(signature_ids) <= target_subblock_size:
         return {"0": signature_ids}
 
     # extract all the specter stuff in order of the signatures
@@ -1406,36 +1374,56 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000, com
         ]
     )
 
-    try:
-        # same for the co-author blocks
-        X = MultiLabelBinarizer(sparse_output=True).fit_transform(
-            [
-                _signature_coauthor_blocks_for_specter(anddata.signatures[i], anddata, compute_block_fn)
-                for i in signature_ids
-            ]
+    coauthor_values = [
+        _signature_coauthor_blocks_for_specter(anddata.signatures[i], anddata, compute_block_fn) for i in signature_ids
+    ]
+    affiliation_values = [signature_affiliation_feature_keys(anddata.signatures[i]) for i in signature_ids]
+    if not any(coauthor_values) or not any(affiliation_values):
+        logger.warning(
+            "SPECTER subblocking auxiliary features are unavailable; using embeddings only "
+            "(signature_count=%d has_coauthor_evidence=%s has_affiliation_evidence=%s)",
+            len(signature_ids),
+            any(coauthor_values),
+            any(affiliation_values),
         )
-        X_svd = TruncatedSVD(n_components=SPECTER_DIM).fit_transform(X)
-
-        # same for affiliations
-        X = TfidfVectorizer(preprocessor=None, analyzer=lambda x: x).fit_transform(
-            [signature_affiliation_feature_keys(anddata.signatures[i]) for i in signature_ids]
-        )
-        X_svd2 = TruncatedSVD(n_components=SPECTER_DIM).fit_transform(X)
-
-        # all together now
-        X = X_specter + np.mean([X_svd, X_svd2], axis=0)
-    except Exception:
         X = X_specter
+    else:
+        coauthor_matrix = MultiLabelBinarizer(sparse_output=True).fit_transform(coauthor_values)
+        affiliation_matrix = TfidfVectorizer(preprocessor=None, analyzer=lambda x: x).fit_transform(affiliation_values)
+        if min(coauthor_matrix.shape) < SPECTER_DIM or min(affiliation_matrix.shape) < SPECTER_DIM:
+            logger.warning(
+                "SPECTER subblocking auxiliary matrices are too small; using embeddings only "
+                "(signature_count=%d coauthor_shape=%s affiliation_shape=%s required_components=%d)",
+                len(signature_ids),
+                coauthor_matrix.shape,
+                affiliation_matrix.shape,
+                SPECTER_DIM,
+            )
+            X = X_specter
+        else:
+            coauthor_svd = TruncatedSVD(n_components=SPECTER_DIM).fit_transform(coauthor_matrix)
+            affiliation_svd = TruncatedSVD(n_components=SPECTER_DIM).fit_transform(affiliation_matrix)
+            X = X_specter + np.mean([coauthor_svd, affiliation_svd], axis=0)
 
     # how many subblocks do we want given this data and target subblock size?
     # should be at least 2 if we end up here otherwise there is no point
-    num_desired_subblocks = int(np.ceil(len(signature_ids) / target_subblock_size))
+    num_desired_subblocks = min(
+        int(np.ceil(len(signature_ids) / target_subblock_size)),
+        len(signature_ids) - 1,
+    )
 
-    # this can fail when X are all zeros
-    try:
+    if np.any(X):
+        import genieclust
+
         g = genieclust.Genie(n_clusters=num_desired_subblocks, gini_threshold=0.01)
         labels = g.fit_predict(X)
-    except Exception:
+    else:
+        logger.warning(
+            "SPECTER subblocking has no nonzero evidence; using deterministic capacity splitting "
+            "(signature_count=%d target_subblock_size=%d)",
+            len(signature_ids),
+            target_subblock_size,
+        )
         labels = np.zeros(len(signature_ids), dtype=int)
 
     subblocks = defaultdict(list)
@@ -1462,9 +1450,9 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000, com
 def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
     """Helper function to subdivide a list of names into subblocks of maximum_size.
     Uses the first k letters of the names to subdivide. If the subblocks are still too big,
-    then it will subdivide further by increasing k. Keeps going until the maximum_size is reached.
-    If the maximum_size is reached and there are still some names left over, then those names
-    will be put into their own subblock and returned separately.
+    then it will subdivide further by increasing k. It keeps going until each prefix bucket fits
+    ``maximum_size`` or every available name character has been consumed. Remaining identical
+    full-name groups are returned separately for the next fallback stage.
 
     Args:
         names (list of strings): the names to subdivide
@@ -1484,9 +1472,7 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         return {}, {}
     output = {}
     output_cant_subdivide = {}
-    k = starting_k
     max_len = max([len(name) for name in names])
-    clean_break = False
     for k in range(starting_k, max_len + 1):
         # note: any time we take something like XYZ and make it into XYZA, XYZB, ...
         # we will have some leftover ones that are just XYZ. those will end up in their own subblock
@@ -1496,27 +1482,22 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         # find the ones that are a good size, and then take the rest and subdivide further
         good_size_flag = counts_up_to_k <= maximum_size
         counts_up_to_k_good_size = counts_up_to_k[good_size_flag]
-        # the case where at this point *all* the newly made subblocks are too big
-        # so it is a dead-end
-        if counts_up_to_k_good_size.empty:
-            for name in counts_up_to_k.index:
-                flag = names_up_to_k == name
-                output_cant_subdivide[name] = signature_ids[flag]
-            clean_break = True
-            break
         # store each subblock in output
         for name in counts_up_to_k_good_size.index:
             flag = names_up_to_k == name
             output[name] = signature_ids[flag]
         # take the rest and subdivide further
         bad_names = set(counts_up_to_k[counts_up_to_k > maximum_size].index)
-        bad_size_flag = np.array([i[0:k] in bad_names for i in names])
+        bad_size_flag = np.array([i[0:k] in bad_names for i in names], dtype=bool)
         names = names[bad_size_flag]
         signature_ids = signature_ids[bad_size_flag]
-        k += 1
+        if len(names) == 0:
+            break
     # last ditch clean-up in case things didn't work out
-    if len(names) > 0 and not clean_break:
-        output_cant_subdivide["final"] = signature_ids
+    if len(names) > 0:
+        for full_name in pd.Series(names).value_counts().index:
+            flag = names == full_name
+            output_cant_subdivide[full_name] = signature_ids[flag]
     # assert that the combo of the output and output_cant_subdivide is a complete clustering of the input signature_ids
     assert (
         sum(len(subblock) for subblock in output.values())
@@ -1550,25 +1531,31 @@ def _subblock_merge_candidate_metadata(key: str, size: int) -> tuple[int, str, s
         name_for_splits = middle_name
     else:
         name_for_splits = None
-    lookup = None if name_for_splits is None else name_for_splits.split(" ")[0]
+    # canonical_v2: prefix-count lookups use the full canonical name string; the
+    # legacy first-token reduction for multi-token names is retired with the
+    # regenerated ORCID prefix-count artifact.
+    lookup = name_for_splits
     return size, first_name, middle_name, name_for_splits, lookup
 
 
 def _sorted_subblock_merge_candidates(
     output: dict[str, list[str]],
     maximum_size: int,
-    first_k_letter_counts_sorted: dict,
+    first_k_letter_counts_sorted: Mapping[str, Mapping[str, int]],
 ) -> list[tuple[tuple[str, str], float]]:
     """Return legacy subblock merge candidates with key metadata parsed once."""
 
     small_enough_keys = [key for key, value in output.items() if len(value) < maximum_size]
-    metadata = {}
-    mergeable_keys = []
+    metadata: dict[str, tuple[int, str, str | None, str, str | None]] = {}
+    mergeable_keys: list[str] = []
     for key in small_enough_keys:
-        row = _subblock_merge_candidate_metadata(key, len(output[key]))
-        if row[3] is None:
+        size, first_name, middle_name, name_for_splits, lookup = _subblock_merge_candidate_metadata(
+            key,
+            len(output[key]),
+        )
+        if name_for_splits is None:
             continue
-        metadata[key] = row
+        metadata[key] = (size, first_name, middle_name, name_for_splits, lookup)
         mergeable_keys.append(key)
     candidates: list[tuple[tuple[str, str], float]] = []
     for pair in combinations(mergeable_keys, 2):
@@ -1598,33 +1585,30 @@ def _sorted_subblock_merge_candidates(
         elif same_prefix_tokens(name_for_splits_1, name_for_splits_2):
             score = min(len(name_for_splits_1), len(name_for_splits_2))
             candidates.append((pair, 1e5 + score))
-        elif (
-            lookup_1 is not None
-            and lookup_2 is not None
-            and lookup_1 in first_k_letter_counts_sorted
-            and lookup_2 in first_k_letter_counts_sorted[lookup_1]
-        ):
-            candidates.append((pair, first_k_letter_counts_sorted[lookup_1][lookup_2]))
+        elif lookup_1 is not None and lookup_2 is not None:
+            pair_count = _orcid_prefix_pair_count(first_k_letter_counts_sorted, lookup_1, lookup_2)
+            if pair_count is not None:
+                candidates.append((pair, pair_count))
     return sorted(candidates, key=lambda x: (x[1], x[0][0], x[0][1]), reverse=True)
 
 
-def _rust_arrow_native_graph_subblocking_callable():
-    from s2and.runtime import load_s2and_rust_extension
+def _require_unique_subblocking_signature_ids(signature_ids: Iterable[Any]) -> list[Any]:
+    """Preserve subblocking IDs while rejecting duplicate canonical identities."""
 
-    rust_module = load_s2and_rust_extension()
-    return (
-        None if rust_module is None else getattr(rust_module, "make_subblocks_with_telemetry_arrow_native_graph", None)
-    )
-
-
-def rust_arrow_subblocking_available() -> bool:
-    """Return whether the loaded Rust extension can run Arrow-backed subblocking."""
-
-    return callable(_rust_arrow_native_graph_subblocking_callable())
+    original_signature_ids = list(signature_ids)
+    seen_signature_ids: set[str] = set()
+    for signature_id in original_signature_ids:
+        normalized_signature_id = str(signature_id)
+        if normalized_signature_id in seen_signature_ids:
+            raise ValueError(
+                f"Subblocking signature_ids must be unique after string coercion: {normalized_signature_id!r}"
+            )
+        seen_signature_ids.add(normalized_signature_id)
+    return original_signature_ids
 
 
 def _make_subblocks_with_telemetry_arrow_rust(
-    arrow_paths: Mapping[str, Any],
+    arrow_dataset: Any,
     signature_ids,
     maximum_size=15000,
     first_k_letter_counts_sorted=FIRST_K_LETTER_COUNTS,
@@ -1634,19 +1618,16 @@ def _make_subblocks_with_telemetry_arrow_rust(
 ):
     """Run native Rust graph subblocking with signature rows loaded from Arrow."""
 
-    rust_make_subblocks = _rust_arrow_native_graph_subblocking_callable()
-    if not callable(rust_make_subblocks):
-        raise RuntimeError(
-            "Rust Arrow subblocking requires an s2and_rust extension with "
-            "make_subblocks_with_telemetry_arrow_native_graph; rebuild with "
-            "`uv run maturin develop -m s2and_rust/Cargo.toml`."
-        )
+    from s2and.runtime import load_s2and_rust_extension
 
+    first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
+    rust_prefix_counts = {prefix: dict(nested_counts) for prefix, nested_counts in first_k_letter_counts_sorted.items()}
+    rust_make_subblocks = load_s2and_rust_extension().make_subblocks_with_telemetry_arrow_native_graph
     subblocks, telemetry = rust_make_subblocks(
-        dict(arrow_paths),
-        [str(signature_id) for signature_id in signature_ids],
+        arrow_dataset.native,
+        [str(signature_id) for signature_id in _require_unique_subblocking_signature_ids(signature_ids)],
         int(maximum_size),
-        first_k_letter_counts_sorted,
+        rust_prefix_counts,
         graph_subblocking_config,
         int(graph_subblocking_random_seed),
         bool(use_orcid_subblocking),
@@ -1689,7 +1670,8 @@ def make_subblocks_with_telemetry(
         subblock counts/signatures.
     """
     logger.info("Beginning subblocking...")
-    signature_ids = np.array(signature_ids)
+    first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
+    signature_ids = np.asarray(_require_unique_subblocking_signature_ids(signature_ids), dtype=object)
     first_middle_names = [signature_name_parts_for_subblocking(anddata.signatures[i]) for i in signature_ids]
     first_names = np.array([name_parts[0] for name_parts in first_middle_names])
     middle_names = np.array([name_parts[1] for name_parts in first_middle_names])
@@ -1907,7 +1889,8 @@ def make_subblocks_with_telemetry(
         for k in keys_to_merge:
             counter_of_keys[k] += 1
 
-    assert all(v == 1 for v in counter_of_keys.values())
+    if not all(value == 1 for value in counter_of_keys.values()):
+        raise RuntimeError("Subblocking merge invariant failed: a key belongs to multiple merge components")
 
     # now perform the actual merges
     for merge_cluster_id in sorted(merging_log):
@@ -2027,8 +2010,15 @@ def make_subblocks_with_telemetry(
                 del output[subblock_id]
             output[key_of_keys] = signature_ids_stacked
 
-    # let's assert that we have done a complete partition
-    assert set(np.hstack([output[k] for k in output])) == set(signature_ids)
+    # let's assert that we have done a complete partition. Multiset equality, not
+    # set equality: a signature_id duplicated across subblocks would pass a set
+    # check but bind nondeterministically in the downstream ORCID merge (Python
+    # dict insertion order vs Rust last-subblock-wins), silently diverging the
+    # two implementations.
+    output_signature_ids = sorted(str(signature_id) for k in output for signature_id in output[k])
+    expected_signature_ids = sorted(str(signature_id) for signature_id in signature_ids)
+    if output_signature_ids != expected_signature_ids:
+        raise RuntimeError("Subblocking output is not a complete one-to-one partition of signature_ids")
 
     # before the end, makes sure everything is a standard list
     for k in list(output.keys()):

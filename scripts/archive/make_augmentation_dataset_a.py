@@ -1,5 +1,13 @@
 # ruff: noqa: E402
 
+"""Create the historical pair and embedding inputs for augmentation step B.
+
+Warning:
+    This provenance recipe is incompatible with canonical-v2 as written and
+    invokes a remote SPECTER service at import time without a full-run guard.
+    Do not run it without an explicit bounded migration plan.
+"""
+
 import json
 import json as json_module
 import os
@@ -91,7 +99,6 @@ for dataset_name in DATASETS_TO_TRAIN:
         mode="train",
         specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
         clusters=clusters_path,
-        block_type="s2",
         train_pairs=train_pairs_path,
         val_pairs=val_pairs_path,
         test_pairs=test_pairs_path,
@@ -99,7 +106,7 @@ for dataset_name in DATASETS_TO_TRAIN:
         val_pairs_size=N_VAL_TEST_SIZE,
         test_pairs_size=N_VAL_TEST_SIZE,
         n_jobs=N_JOBS,
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
     )
 

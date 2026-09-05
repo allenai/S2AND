@@ -4,9 +4,15 @@ This document covers the fuller install and setup options for S2AND.
 
 ## Requirements
 
-- Python `3.11.x`
+- Python `3.11`, `3.12`, or `3.13`
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
-- Rust, if you want to build the native extension from source: [`rustup`](https://www.rust-lang.org/tools/install)
+- Git LFS for the Arrow fixtures in a source checkout
+- Rust, if you are working from a source checkout or building the native extension from source:
+  [`rustup`](https://www.rust-lang.org/tools/install)
+
+As of this version, `s2and-rust` is a required runtime dependency. Package
+installs get the matching wheel when one is available; source checkouts should
+build the local extension.
 
 If you are building the Rust extension from source, install OS prerequisites first.
 
@@ -31,24 +37,31 @@ cargo --version
 
 ## Package install
 
-Python-only runtime:
+Runtime install:
 
 ```bash
 uv pip install s2and
 ```
 
-Rust-enabled runtime when wheels are available:
-
-```bash
-uv pip install "s2and[rust]"
-```
+This installs the latest version available from the configured package index,
+not the unreleased `1.0.0` worktree. That worktree targets coordinated
+`s2and==1.0.0` and `s2and-rust==1.0.0` packages with model/public-data version
+`1.3`; use the checkout flow for pre-release validation.
 
 ## Repo checkout
 
-Create and activate a Python 3.11 environment:
+Hydrate the LFS-managed realistic LightGBM parity fixture after cloning and
+after switching to a branch that changes it:
 
 ```bash
-uv venv --python 3.11.13
+git lfs install
+git lfs pull
+```
+
+Create and activate a supported Python environment (3.11, 3.12, or 3.13):
+
+```bash
+uv venv --python 3.11
 ```
 
 Activation examples:
@@ -84,7 +97,8 @@ Notes:
 
 - This installs the compiled module into `site-packages`.
 - If you just installed Rust with `rustup` in the current shell, load its environment first if needed.
-- If you prefer a non-editable repo install, you can `uv pip install .` and then run the `maturin develop` step.
+- Keep the Python and Rust packages from the same checkout. Do not rely on a
+  public `s2and-rust` wheel for unreleased source behavior.
 
 ## Running repo scripts
 

@@ -1,48 +1,21 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyIterator};
-use pyo3::Bound;
 use std::collections::{HashMap, HashSet};
 
 use crate::constraints::count_initials;
 use crate::name_counts::NameCountsData;
+use crate::text_compat::is_python_whitespace_compat;
 use crate::{py_len, CounterData};
-
-pub(crate) fn extract_string_string_map(
-    obj: &Bound<'_, PyAny>,
-) -> PyResult<HashMap<String, String>> {
-    let dict = obj.downcast::<PyDict>()?;
-    let mut out = HashMap::with_capacity(dict.len());
-    for (key, value) in dict.iter() {
-        out.insert(key.extract()?, value.extract()?);
-    }
-    Ok(out)
-}
-
-pub(crate) fn extract_string_vec_map(
-    obj: &Bound<'_, PyAny>,
-) -> PyResult<HashMap<String, Vec<String>>> {
-    let dict = obj.downcast::<PyDict>()?;
-    let mut out = HashMap::with_capacity(dict.len());
-    for (key, value) in dict.iter() {
-        let key_text: String = key.extract()?;
-        let mut values = Vec::new();
-        for item in PyIterator::from_object(&value)? {
-            values.push(item?.extract()?);
-        }
-        out.insert(key_text, values);
-    }
-    Ok(out)
-}
 
 pub(crate) fn filter_text_for_char_ngrams(
     text: &str,
     stopwords: Option<&HashSet<String>>,
+    drop_short_tokens: bool,
 ) -> String {
-    let Some(stopwords_set) = stopwords else {
-        return text.to_string();
-    };
     text.split(' ')
-        .filter(|word| !stopwords_set.contains(*word) && py_len(word) > 2)
+        .filter(|word| {
+            (!drop_short_tokens || py_len(word) > 2)
+                && stopwords.map_or(true, |stopwords_set| !stopwords_set.contains(*word))
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -52,11 +25,12 @@ pub(crate) fn char_ngrams_counter_python_compat(
     use_unigrams: bool,
     use_bigrams: bool,
     stopwords: Option<&HashSet<String>>,
+    drop_short_tokens: bool,
 ) -> HashMap<String, usize> {
     if text.is_empty() {
         return HashMap::new();
     }
-    let filtered_text = filter_text_for_char_ngrams(text, stopwords);
+    let filtered_text = filter_text_for_char_ngrams(text, stopwords, drop_short_tokens);
     if filtered_text.is_empty() {
         return HashMap::new();
     }
@@ -116,13 +90,14 @@ pub(crate) fn char_ngrams_counter_python_compat(
 pub(crate) fn word_ngrams_counter_python_compat(
     text: &str,
     stopwords: &HashSet<String>,
+    drop_short_tokens: bool,
 ) -> HashMap<String, usize> {
     if text.is_empty() {
         return HashMap::new();
     }
     let text_split: Vec<&str> = text
         .split_whitespace()
-        .filter(|word| !stopwords.contains(*word) && py_len(word) > 1)
+        .filter(|word| !stopwords.contains(*word) && (!drop_short_tokens || py_len(word) > 1))
         .collect();
     if text_split.is_empty() {
         return HashMap::new();
@@ -201,6 +176,23 @@ pub(crate) fn word_ngrams_counter(text: &str) -> HashMap<String, usize> {
     out
 }
 
+#[cfg(test)]
+mod char_ngram_tests {
+    use super::char_ngrams_counter_python_compat;
+
+    #[test]
+    fn explicit_short_token_filter_applies_without_stopwords() {
+        let filtered = char_ngrams_counter_python_compat("li wu abcd", false, true, None, true);
+        assert!(!filtered.contains_key("li"));
+        assert!(filtered.contains_key("ab"));
+
+        let unfiltered = char_ngrams_counter_python_compat("li wu abcd", false, true, None, false);
+        assert!(unfiltered.contains_key("li"));
+        assert!(unfiltered.contains_key("wu"));
+        assert!(unfiltered.contains_key("ab"));
+    }
+}
+
 pub(crate) fn counter_jaccard_data(
     counter1: &Option<CounterData>,
     counter2: &Option<CounterData>,
@@ -276,18 +268,6 @@ pub(crate) fn set_jaccard_data<T: Eq + std::hash::Hash>(
     (intersection as f64) / (union as f64)
 }
 
-pub(crate) fn refs_jaccard<T: Eq + std::hash::Hash>(set1: &HashSet<T>, set2: &HashSet<T>) -> f64 {
-    if set1.is_empty() || set2.is_empty() {
-        return f64::NAN;
-    }
-    let intersection = set1.intersection(set2).count();
-    let union = set1.len() + set2.len() - intersection;
-    if union == 0 {
-        return f64::NAN;
-    }
-    (intersection as f64) / (union as f64)
-}
-
 pub(crate) fn nanmin(a: f64, b: f64) -> f64 {
     if a.is_nan() && b.is_nan() {
         f64::NAN
@@ -335,14 +315,16 @@ pub(crate) fn first_names_equal(name1: Option<&str>, name2: Option<&str>) -> f64
     let (Some(n1), Some(n2)) = (name1, name2) else {
         return f64::NAN;
     };
-    if py_len(n1) == 0 || py_len(n2) == 0 {
-        return f64::NAN;
-    }
-    if n1 == "-" || n2 == "-" {
-        return f64::NAN;
-    }
+    // Trim/lowercase first, then test emptiness, so whitespace-only inputs are
+    // treated as empty (NaN) rather than comparing equal as "".
     let n1_norm = n1.trim().to_lowercase();
     let n2_norm = n2.trim().to_lowercase();
+    if n1_norm.is_empty() || n2_norm.is_empty() {
+        return f64::NAN;
+    }
+    if n1_norm == "-" || n2_norm == "-" {
+        return f64::NAN;
+    }
     if n1_norm == n2_norm {
         1.0
     } else {
@@ -385,11 +367,18 @@ pub(crate) fn middle_names_equal(name1: Option<&str>, name2: Option<&str>) -> f6
     if py_len(n1) == 0 || py_len(n2) == 0 {
         return f64::NAN;
     }
+    // When either side is a single-character initial, compare the sets of token
+    // initials so a joined multi-token middle ("james lee") matches the other
+    // side's initial for ANY of its tokens, not just the first one.
     if py_len(n1) == 1 || py_len(n2) == 1 {
-        let (Some(c1), Some(c2)) = (n1.chars().next(), n2.chars().next()) else {
-            return f64::NAN;
-        };
-        return if c1 == c2 { 1.0 } else { 0.0 };
+        for initial_1 in n1.split(' ').filter_map(|t| t.chars().next()) {
+            for initial_2 in n2.split(' ').filter_map(|t| t.chars().next()) {
+                if initial_1 == initial_2 {
+                    return 1.0;
+                }
+            }
+        }
+        return 0.0;
     }
     if n1 == n2 {
         1.0
@@ -447,21 +436,21 @@ pub(crate) fn single_char_middle(name1: Option<&str>, name2: Option<&str>) -> f6
     }
 }
 
-pub(crate) fn email_parts(email: &str) -> (String, String) {
-    let (prefix_raw, suffix_raw) = if let Some((before_last, after_last)) = email.rsplit_once('@') {
-        let mut merged_prefix = String::with_capacity(before_last.len());
-        for ch in before_last.chars() {
-            if ch != '@' {
-                merged_prefix.push(ch);
-            }
-        }
-        (merged_prefix, after_last.to_string())
-    } else {
-        (email.to_string(), "MISSING".to_string())
-    };
+pub(crate) fn email_parts(email: &str) -> Option<(String, String)> {
+    let (prefix_raw, suffix_raw) = email.split_once('@')?;
+    if prefix_raw.is_empty()
+        || suffix_raw.is_empty()
+        || suffix_raw.contains('@')
+        || email.chars().any(is_python_whitespace_compat)
+    {
+        return None;
+    }
     let prefix = prefix_raw.trim_matches('.').to_lowercase();
     let suffix = suffix_raw.trim_matches('.').to_lowercase();
-    (prefix, suffix)
+    if prefix.is_empty() || suffix.is_empty() {
+        return None;
+    }
+    Some((prefix, suffix))
 }
 
 pub(crate) fn email_pair_parts(
@@ -474,7 +463,7 @@ pub(crate) fn email_pair_parts(
     if py_len(e1) == 0 || py_len(e2) == 0 {
         return None;
     }
-    Some((email_parts(e1), email_parts(e2)))
+    Some((email_parts(e1)?, email_parts(e2)?))
 }
 
 pub(crate) fn year_diff(year1: Option<i64>, year2: Option<i64>) -> f64 {
@@ -758,84 +747,6 @@ pub(crate) fn name_text_features(name1: Option<&str>, name2: Option<&str>) -> [f
     [lev, pref, lcs, jaro]
 }
 
-pub(crate) const PAPER_IDX_TITLE: usize = 0;
-pub(crate) const PAPER_IDX_HAS_ABSTRACT: usize = 1;
-pub(crate) const PAPER_IDX_IN_SIGNATURES: usize = 2;
-pub(crate) const PAPER_IDX_IS_RELIABLE: usize = 4;
-pub(crate) const PAPER_IDX_PREDICTED_LANGUAGE: usize = 5;
-pub(crate) const PAPER_IDX_TITLE_NGRAMS_WORDS: usize = 6;
-pub(crate) const PAPER_IDX_AUTHORS: usize = 7;
-pub(crate) const PAPER_IDX_VENUE: usize = 8;
-pub(crate) const PAPER_IDX_JOURNAL_NAME: usize = 9;
-pub(crate) const PAPER_IDX_TITLE_NGRAMS_CHARS: usize = 10;
-pub(crate) const PAPER_IDX_VENUE_NGRAMS: usize = 11;
-pub(crate) const PAPER_IDX_JOURNAL_NGRAMS: usize = 12;
-pub(crate) const PAPER_IDX_REFERENCE_DETAILS: usize = 13;
-pub(crate) const PAPER_IDX_YEAR: usize = 14;
-pub(crate) const PAPER_IDX_REFERENCES: usize = 15;
-pub(crate) const PAPER_IDX_PAPER_ID: usize = 16;
-pub(crate) const FROM_DATASET_PAPER_PREPROCESS_CHUNK_SIZE: usize = 4096;
-pub(crate) const PAPER_FASTPATH_REQUIRED_FIELDS: [(usize, &str); 16] = [
-    (PAPER_IDX_TITLE, "title"),
-    (PAPER_IDX_HAS_ABSTRACT, "has_abstract"),
-    (PAPER_IDX_IN_SIGNATURES, "in_signatures"),
-    (PAPER_IDX_IS_RELIABLE, "is_reliable"),
-    (PAPER_IDX_PREDICTED_LANGUAGE, "predicted_language"),
-    (PAPER_IDX_TITLE_NGRAMS_WORDS, "title_ngrams_words"),
-    (PAPER_IDX_AUTHORS, "authors"),
-    (PAPER_IDX_VENUE, "venue"),
-    (PAPER_IDX_JOURNAL_NAME, "journal_name"),
-    (PAPER_IDX_TITLE_NGRAMS_CHARS, "title_ngrams_chars"),
-    (PAPER_IDX_VENUE_NGRAMS, "venue_ngrams"),
-    (PAPER_IDX_JOURNAL_NGRAMS, "journal_ngrams"),
-    (PAPER_IDX_REFERENCE_DETAILS, "reference_details"),
-    (PAPER_IDX_YEAR, "year"),
-    (PAPER_IDX_REFERENCES, "references"),
-    (PAPER_IDX_PAPER_ID, "paper_id"),
-];
-
-pub(crate) const SIG_IDX_FIRST_RAW: usize = 0;
-pub(crate) const SIG_IDX_FIRST_NORMALIZED_NO_APOSTROPHE: usize = 1;
-pub(crate) const SIG_IDX_MIDDLE_RAW: usize = 2;
-pub(crate) const SIG_IDX_MIDDLE_NORMALIZED_NO_APOSTROPHE: usize = 3;
-pub(crate) const SIG_IDX_LAST_NORMALIZED: usize = 4;
-pub(crate) const SIG_IDX_LAST_RAW: usize = 5;
-pub(crate) const SIG_IDX_COAUTHORS: usize = 9;
-pub(crate) const SIG_IDX_COAUTHOR_BLOCKS: usize = 10;
-pub(crate) const SIG_IDX_AFFILIATIONS: usize = 12;
-pub(crate) const SIG_IDX_AFFILIATIONS_NGRAMS: usize = 13;
-pub(crate) const SIG_IDX_COAUTHOR_NGRAMS: usize = 14;
-pub(crate) const SIG_IDX_EMAIL: usize = 15;
-pub(crate) const SIG_IDX_ORCID: usize = 16;
-pub(crate) const SIG_IDX_NAME_COUNTS: usize = 17;
-pub(crate) const SIG_IDX_POSITION: usize = 18;
-pub(crate) const SIG_IDX_PAPER_ID: usize = 23;
-pub(crate) const FULL_FEATURE_COUNT: usize = 39;
-pub(crate) const SIGNATURE_FASTPATH_REQUIRED_FIELDS: [(usize, &str); 13] = [
-    (
-        SIG_IDX_FIRST_NORMALIZED_NO_APOSTROPHE,
-        "author_info_first_normalized_without_apostrophe",
-    ),
-    (
-        SIG_IDX_MIDDLE_NORMALIZED_NO_APOSTROPHE,
-        "author_info_middle_normalized_without_apostrophe",
-    ),
-    (SIG_IDX_LAST_NORMALIZED, "author_info_last_normalized"),
-    (SIG_IDX_COAUTHORS, "author_info_coauthors"),
-    (SIG_IDX_COAUTHOR_BLOCKS, "author_info_coauthor_blocks"),
-    (SIG_IDX_AFFILIATIONS, "author_info_affiliations"),
-    (
-        SIG_IDX_AFFILIATIONS_NGRAMS,
-        "author_info_affiliations_n_grams",
-    ),
-    (SIG_IDX_COAUTHOR_NGRAMS, "author_info_coauthor_n_grams"),
-    (SIG_IDX_EMAIL, "author_info_email"),
-    (SIG_IDX_ORCID, "author_info_orcid"),
-    (SIG_IDX_NAME_COUNTS, "author_info_name_counts"),
-    (SIG_IDX_POSITION, "author_info_position"),
-    (SIG_IDX_PAPER_ID, "paper_id"),
-];
-
 pub(crate) struct MatrixAggregateIndexSelection {
     pub(crate) matrix_indices: Vec<usize>,
     pub(crate) aggregate_indices: Vec<usize>,
@@ -933,4 +844,50 @@ pub(crate) fn resolve_matrix_aggregate_indices(
         aggregate_indices: resolved_aggregate_indices,
         aggregate_matrix_positions,
     })
+}
+
+#[cfg(test)]
+mod email_tests {
+    use super::{email_pair_parts, email_parts};
+
+    #[test]
+    fn malformed_emails_are_missing_evidence() {
+        for malformed in [
+            "jsmith",
+            "a@b@c",
+            "@",
+            "a@",
+            "@b",
+            "a b@c",
+            "a@b c",
+            " a@b",
+            "a@b ",
+            "a\u{00a0}@b",
+            ".@b",
+        ] {
+            assert_eq!(email_parts(malformed), None, "{malformed:?}");
+        }
+        assert_eq!(
+            email_parts("J.Smith@MIT.EDU."),
+            Some(("j.smith".into(), "mit.edu".into()))
+        );
+        assert_eq!(email_pair_parts(Some("a@b@c"), Some("ab@c")), None);
+    }
+
+    #[test]
+    fn python_whitespace_in_emails_is_missing_evidence() {
+        for separator in ['\u{001c}', '\u{001d}', '\u{001e}', '\u{001f}'] {
+            let malformed = format!("a{separator}@b");
+            assert_eq!(
+                email_parts(&malformed),
+                None,
+                "separator U+{:04X}",
+                separator as u32
+            );
+        }
+        for malformed in ["a\u{001c}\u{001d}\u{001e}\u{001f}@b", "a\u{00a0}@b"] {
+            assert_eq!(email_parts(malformed), None, "{malformed:?}");
+        }
+        assert_eq!(email_parts("A@B"), Some(("a".into(), "b".into())));
+    }
 }

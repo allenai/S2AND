@@ -1,5 +1,12 @@
 # ruff: noqa: E402
 
+"""Historical state-of-the-art experiment and result-table workflow.
+
+Warning:
+    This workflow expects private legacy JSON/SPECTER inputs. It is retained as
+    post-paper provenance, not as a canonical-v2 or exact paper reproducer.
+"""
+
 import json
 import os
 from typing import Any
@@ -11,25 +18,20 @@ os.environ["OMP_NUM_THREADS"] = "8"
 import argparse
 import copy
 import logging
-import pickle
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger("s2and")
 
-from tqdm import tqdm
-
-os.environ["S2AND_CACHE"] = os.path.join(CONFIG["main_data_dir"], ".feature_cache")
-
 from hyperopt import hp
 from sklearn.cluster import DBSCAN
+from tqdm import tqdm
 
-from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_PATH
+from s2and.consts import DEFAULT_CHUNK_SIZE, NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.eval import cluster_eval, pairwise_eval
 from s2and.featurizer import FeaturizationInfo, featurize
-from s2and.file_cache import cached_path
 from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
 search_space = {
@@ -51,7 +53,6 @@ FEATURES_TO_USE = [
     "venue_similarity",
     "year_diff",
     "title_similarity",
-    "reference_features",
     "misc_features",
     "name_counts",
     "embedding_similarity",
@@ -65,17 +66,13 @@ NAMELESS_FEATURES_TO_USE = [
     if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
 ]
 
-FEATURIZER_INFO = FeaturizationInfo(features_to_use=FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION)
-NAMELESS_FEATURIZER_INFO = FeaturizationInfo(
-    features_to_use=NAMELESS_FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION
-)
+FEATURIZER_INFO = FeaturizationInfo(features_to_use=FEATURES_TO_USE)
+NAMELESS_FEATURIZER_INFO = FeaturizationInfo(features_to_use=NAMELESS_FEATURES_TO_USE)
 
 PAIRWISE_ONLY_DATASETS = {"medline"}
-BLOCK_TYPE = "original"
 N_TRAIN_PAIRS_SIZE = 100000
 N_VAL_TEST_SIZE = 10000
 N_ITER = 25
-USE_CACHE = False  # turn on if you aren't planning on changing the features and have lots of RAM
 PREPROCESS = True
 
 
@@ -191,21 +188,6 @@ def main(
         NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
         NAN_VALUE = np.nan
 
-    with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-        (
-            first_dict,
-            last_dict,
-            first_last_dict,
-            last_first_initial_dict,
-        ) = pickle.load(f)
-    name_counts = {
-        "first_dict": first_dict,
-        "last_dict": last_dict,
-        "first_last_dict": first_last_dict,
-        "last_first_initial_dict": last_first_initial_dict,
-    }
-    logger.info("loaded name counts")
-
     datasets: dict[str, Any] = {}
 
     for dataset_name in tqdm(DATASET_NAMES, desc="Processing datasets and fitting base models"):
@@ -286,7 +268,6 @@ def main(
             mode="train",
             specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
             clusters=clusters_path,
-            block_type=BLOCK_TYPE,
             train_pairs=train_pairs_path,
             val_pairs=val_pairs_path,
             test_pairs=test_pairs_path,
@@ -294,7 +275,7 @@ def main(
             val_pairs_size=N_VAL_TEST_SIZE,
             test_pairs_size=N_VAL_TEST_SIZE,
             n_jobs=N_JOBS,
-            load_name_counts=name_counts,
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=PREPROCESS,
             random_seed=random_seed,
             train_blocks=train_blocks,
@@ -315,7 +296,6 @@ def main(
             anddata,
             FEATURIZER_INFO,
             n_jobs=N_JOBS,
-            use_cache=USE_CACHE,
             chunk_size=DEFAULT_CHUNK_SIZE,
             nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
             nan_value=NAN_VALUE,
@@ -340,6 +320,8 @@ def main(
 
         if USE_NAMELESS_MODEL:
             logger.info(f"nameless fitting pairwise for {dataset_name}")
+            if nameless_X_train is None or nameless_X_val is None:
+                raise RuntimeError("nameless model training requires nameless train and validation features")
             nameless_pairwise_modeler = PairwiseModeler(
                 n_iter=N_ITER,
                 monotone_constraints=NAMELESS_MONOTONE_CONSTRAINTS if USE_MONOTONE_CONSTRAINTS else None,
@@ -362,7 +344,6 @@ def main(
                 ),
                 search_space=search_space,
                 n_jobs=N_JOBS,
-                use_cache=USE_CACHE,
                 nameless_classifier=(
                     nameless_pairwise_modeler.classifier if nameless_pairwise_modeler is not None else None
                 ),

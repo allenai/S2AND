@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import os
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -11,153 +11,61 @@ from typing import Any, cast
 import pytest
 
 import scripts.eval_prod_models as eval_prod_models
-from s2and.incremental_linking.feature_block import write_name_counts_index
-from tests.helpers import patch_tiny_name_counts_loader
-
-_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec"
-
-
-def _is_lfs_pointer(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    return path.read_bytes()[: len(_LFS_POINTER_PREFIX)] == _LFS_POINTER_PREFIX
+from s2and.arrow_inputs import ARROW_COLLECTION_KIND, ArrowDataset
+from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
+from s2and.production_training_contract import block_membership_sha256, frozen_test_blocks
+from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
-def _skip_if_missing_or_lfs_pointer(paths: list[Path]) -> None:
-    missing = [str(path) for path in paths if not path.exists()]
-    if missing:
-        if os.environ.get("CI"):
-            raise pytest.fail.Exception(f"missing LFS-backed artifact(s) in CI: {missing}")
-        raise pytest.skip.Exception(f"missing LFS-backed artifact(s): {missing}")
-    pointers = [str(path) for path in paths if _is_lfs_pointer(path)]
-    if pointers:
-        if os.environ.get("CI"):
-            raise pytest.fail.Exception(f"Git LFS artifact(s) not materialized in CI: {pointers}")
-        raise pytest.skip.Exception(f"Git LFS artifact(s) not materialized: {pointers}")
-
-
-def _cluster_partition(clusters: Mapping[str, Sequence[str]]) -> frozenset[frozenset[str]]:
-    return frozenset(frozenset(str(signature_id) for signature_id in signatures) for signatures in clusters.values())
-
-
-def _touch_eval_batch_indexes(dataset_root: Path, *, specter_stem: str = "specter") -> None:
-    for index_name in (
-        "signatures.signatures_batch_index.bin",
-        "papers.papers_batch_index.bin",
-        "paper_authors.paper_authors_batch_index.bin",
-        f"{specter_stem}.specter_batch_index.bin",
-    ):
-        (dataset_root / index_name).touch()
-
-
-def test_first_missing_arrow_dataset_error_reports_failing_pair(monkeypatch) -> None:
-    def fake_resolve(_arrow_root: str, dataset_name: str, specter_suffix: str) -> dict[str, str]:
-        if dataset_name == "second" and specter_suffix == "_specter2.pkl":
-            raise FileNotFoundError("missing specter2.arrow")
-        return {}
-
-    monkeypatch.setattr(eval_prod_models, "resolve_arrow_dataset_paths", fake_resolve)
-
-    error = eval_prod_models.first_missing_arrow_dataset_error(
-        "arrow-root",
-        ["first", "second"],
-        ["_specter.pickle", "_specter2.pkl"],
-    )
-
-    assert error is not None
-    assert "dataset='second'" in str(error)
-    assert "specter_suffix='_specter2.pkl'" in str(error)
-
-
-def test_empty_optional_dataset_and_specter_lists_fall_back_to_defaults() -> None:
-    assert eval_prod_models._resolve_requested_datasets(["pubmed", "qian"], [], "mini") == ["pubmed", "qian"]
-    assert eval_prod_models._resolve_requested_specter_suffixes(["s1", "s2"], []) == ["s1", "s2"]
-
-
-def test_arrow_eval_defaults_include_full_release_root() -> None:
-    project_root = str(Path("repo").resolve())
-
-    assert eval_prod_models._supports_arrow_eval("mini") is True
-    assert eval_prod_models._supports_arrow_eval("full") is True
-    assert eval_prod_models._supports_arrow_eval("inventors_s2and") is False
-    assert eval_prod_models._default_arrow_data_root(project_root, "mini") == str(
-        Path(project_root) / "s2and" / "data" / "s2and_mini_arrow"
-    )
-    assert eval_prod_models._default_arrow_data_root(project_root, "full") == str(Path(project_root) / "s2and" / "data")
-
-
-def test_arrow_eval_auto_selects_any_available_supported_bundle() -> None:
-    assert (
-        eval_prod_models._should_use_arrow_eval(
-            force_arrow=False,
-            no_arrow=False,
-            arrow_available=True,
+def _open_minimal_arrow_dataset(
+    root: Path,
+    *,
+    clusters: Mapping[str, Sequence[str]] | None = None,
+) -> ArrowDataset:
+    write_minimal_arrow_prediction_bundle(root)
+    if clusters is not None:
+        (root / f"{root.name}_clusters.json").write_text(
+            json.dumps(
+                {
+                    str(cluster_id): {"signature_ids": [str(signature_id) for signature_id in signature_ids]}
+                    for cluster_id, signature_ids in clusters.items()
+                }
+            ),
+            encoding="utf-8",
         )
-        is True
-    )
-    assert (
-        eval_prod_models._should_use_arrow_eval(
-            force_arrow=False,
-            no_arrow=True,
-            arrow_available=True,
-        )
-        is False
-    )
-    assert (
-        eval_prod_models._should_use_arrow_eval(
-            force_arrow=True,
-            no_arrow=True,
-            arrow_available=False,
-        )
-        is True
-    )
+    return ArrowDataset.open(root)
 
 
-def test_train_mode_resolution_preserves_default_and_comparison() -> None:
-    assert eval_prod_models._resolve_requested_train_modes(None, compare_train_modes=False) == ["anddata-current"]
-    assert eval_prod_models._resolve_requested_train_modes(["json-rust"], compare_train_modes=False) == ["json-rust"]
+def test_train_mode_validation_rejects_conflicting_request_or_wrong_dataset() -> None:
     assert eval_prod_models._resolve_requested_train_modes(None, compare_train_modes=True) == [
         "anddata-python",
-        "json-rust",
         "arrow-rust",
     ]
     with pytest.raises(ValueError, match="either --compare-train-modes or --train-modes"):
-        eval_prod_models._resolve_requested_train_modes(["json-rust"], compare_train_modes=True)
-
-
-def test_non_default_train_modes_are_qian_only_for_now() -> None:
-    eval_prod_models._validate_train_mode_scope(["anddata-current"], ["pubmed"])
-    eval_prod_models._validate_train_mode_scope(["json-rust", "arrow-rust"], ["qian"])
-
+        eval_prod_models._resolve_requested_train_modes(["arrow-rust"], compare_train_modes=True)
     with pytest.raises(ValueError, match="qian-only"):
         eval_prod_models._validate_train_mode_scope(["arrow-rust"], ["pubmed"])
 
 
-def test_training_mode_metric_assertion_accepts_identical_metrics() -> None:
+def test_training_mode_metric_assertion_accepts_identical_and_rejects_different_metrics() -> None:
     results = {
         ("_specter2.pkl", "anddata-python"): [{"B3 (P, R, F1)": (0.1, 0.2, 0.3)}],
-        ("_specter2.pkl", "json-rust"): [{"B3 (P, R, F1)": (0.1, 0.2, 0.3)}],
+        ("_specter2.pkl", "arrow-rust"): [{"B3 (P, R, F1)": (0.1, 0.2, 0.3)}],
     }
 
     eval_prod_models._assert_training_mode_metrics_identical(
         results,
         specter_suffixes_to_check=["_specter2.pkl"],
-        train_modes=["anddata-python", "json-rust"],
+        train_modes=["anddata-python", "arrow-rust"],
         datasets=["qian"],
     )
-
-
-def test_training_mode_metric_assertion_rejects_different_metrics() -> None:
-    results = {
-        ("_specter2.pkl", "anddata-python"): [{"B3 (P, R, F1)": (0.1, 0.2, 0.3)}],
-        ("_specter2.pkl", "json-rust"): [{"B3 (P, R, F1)": (0.1, 0.2, 0.4)}],
-    }
+    results[("_specter2.pkl", "arrow-rust")][0]["B3 (P, R, F1)"] = (0.1, 0.2, 0.4)
 
     with pytest.raises(AssertionError, match="Training mode metrics differ"):
         eval_prod_models._assert_training_mode_metrics_identical(
             results,
             specter_suffixes_to_check=["_specter2.pkl"],
-            train_modes=["anddata-python", "json-rust"],
+            train_modes=["anddata-python", "arrow-rust"],
             datasets=["qian"],
         )
 
@@ -206,40 +114,17 @@ def test_build_pairwise_clusterer_can_disable_hyperopt(monkeypatch: pytest.Monke
     assert captured_cluster_kwargs["cluster_model"].eps == 0.5
 
 
-def test_read_arrow_s2_blocks_reads_columns_without_row_dicts(tmp_path: Path) -> None:
-    import pyarrow as pa
-
-    table = pa.table(
-        {
-            "signature_id": pa.array(["s1", "s2", "s3"], type=pa.string()),
-            "author_block": pa.array(["a smith", "a smith", "b jones"], type=pa.string()),
+def test_read_arrow_s2_blocks_reads_from_open_dataset(tmp_path: Path) -> None:
+    with _open_minimal_arrow_dataset(tmp_path) as arrow_dataset:
+        assert eval_prod_models.read_arrow_s2_blocks(arrow_dataset) == {
+            "a lovelace": [*[str(index) for index in range(10)], "q1", "q2", "seed1"]
         }
-    )
-    path = tmp_path / "signatures.arrow"
-    with pa.OSFile(str(path), "wb") as sink:
-        with pa.ipc.new_file(sink, table.schema) as writer:
-            writer.write_table(table)
-
-    assert eval_prod_models.read_arrow_s2_blocks(str(path)) == {
-        "a smith": ["s1", "s2"],
-        "b jones": ["s3"],
-    }
 
 
-def test_pair_splits_from_arrow_paths_samples_within_block_random_pairs(
+def test_pair_splits_from_arrow_dataset_samples_within_block_random_pairs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    clusters_path = tmp_path / "qian_clusters.json"
-    clusters_path.write_text(
-        json.dumps(
-            {
-                "c1": {"signature_ids": ["s1", "s2"]},
-                "c2": {"signature_ids": ["s3"]},
-            }
-        ),
-        encoding="utf-8",
-    )
     monkeypatch.setattr(eval_prod_models, "read_arrow_s2_blocks", lambda _path: {"block": ["s1", "s2", "s3"]})
     monkeypatch.setattr(
         eval_prod_models,
@@ -247,13 +132,14 @@ def test_pair_splits_from_arrow_paths_samples_within_block_random_pairs(
         lambda blocks, *, random_seed: (dict(blocks), {}, {}),
     )
 
-    splits = eval_prod_models.pair_splits_from_arrow_paths(
-        {"signatures": "signatures.arrow", "clusters": str(clusters_path)},
-        random_seed=42,
-        train_pairs_size=10,
-        val_pairs_size=10,
-        test_pairs_size=10,
-    )
+    with _open_minimal_arrow_dataset(tmp_path, clusters={"c1": ["s1", "s2"], "c2": ["s3"]}) as arrow_dataset:
+        splits = eval_prod_models.pair_splits_from_arrow_dataset(
+            arrow_dataset,
+            random_seed=42,
+            train_pairs_size=10,
+            val_pairs_size=10,
+            test_pairs_size=10,
+        )
 
     assert set(splits.train_pairs) == {
         ("s1", "s2", 1),
@@ -264,263 +150,236 @@ def test_pair_splits_from_arrow_paths_samples_within_block_random_pairs(
     assert splits.test_pairs == []
 
 
-def test_feature_tuple_from_rust_featurizer_uses_selected_feature_groups() -> None:
+def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_path, monkeypatch) -> None:
+    from s2and import feature_port
+
+    calls: list[dict[str, Any]] = []
+
     class FakeRustFeaturizer:
         def signature_ids(self) -> list[str]:
-            return ["s1", "s2"]
+            return ["s1", "s2", "s3"]
 
         def featurize_pairs_matrix_indexed(
             self,
             indexed_pairs: list[tuple[int, int]],
             selected_indices: list[int],
-            _n_jobs: int,
-            _nan_value: float,
+            n_jobs: int,
+            nan_value: float,
         ) -> list[list[float]]:
-            assert indexed_pairs == [(0, 1)]
-            return [[float(index) for index in selected_indices]]
+            calls.append(
+                {
+                    "indexed_pairs": indexed_pairs,
+                    "selected_indices": selected_indices,
+                    "n_jobs": n_jobs,
+                    "nan_value": nan_value,
+                }
+            )
+            return [[float(row * 100 + index) for index in selected_indices] for row in range(len(indexed_pairs))]
 
-    main_info = SimpleNamespace(features_to_use=["main"], feature_group_to_index={"main": [2, 0]})
-    nameless_info = SimpleNamespace(features_to_use=["nameless"], feature_group_to_index={"nameless": [1]})
+    main_info = SimpleNamespace(
+        features_to_use=["main_b", "main_a"],
+        feature_group_to_index={"main_a": [3], "main_b": [4, 1]},
+    )
+    nameless_info = SimpleNamespace(features_to_use=["nameless"], feature_group_to_index={"nameless": [4, 2]})
 
-    features, labels, nameless = eval_prod_models._feature_tuple_from_rust_featurizer(
-        FakeRustFeaturizer(),
-        [("s1", "s2", 1)],
-        featurizer_info=main_info,
-        nameless_featurizer_info=nameless_info,
-        n_jobs=1,
-        nan_value=float("nan"),
+    def build(dataset, **kwargs):
+        assert dataset is arrow_dataset
+        assert kwargs == {"name_tuples": None, "num_threads": 3}
+        return FakeRustFeaturizer()
+
+    monkeypatch.setattr(feature_port, "build_rust_featurizer_from_arrow_dataset", build)
+    pairs = [("s3", "s1", 0.25), ("s1", "s2", 1)]
+    splits = eval_prod_models.PairwiseTrainingSplits(pairs, [], [], {}, {}, {}, {})
+    with _open_minimal_arrow_dataset(tmp_path) as arrow_dataset:
+        train, val, test, _ = eval_prod_models.arrow_training_feature_splits(
+            arrow_dataset,
+            splits,
+            featurizer_info=main_info,
+            nameless_featurizer_info=nameless_info,
+            n_jobs=3,
+            nan_value=-7.5,
+        )
+    features, labels, nameless = train
+    assert val[0].shape == test[0].shape == (0, 3)
+
+    assert calls == [
+        {
+            "indexed_pairs": [(2, 0), (0, 1)],
+            "selected_indices": [1, 2, 3, 4],
+            "n_jobs": 3,
+            "nan_value": -7.5,
+        }
+    ]
+    assert features.tolist() == [[1.0, 3.0, 4.0], [101.0, 103.0, 104.0]]
+    assert labels.tolist() == [0.25, 1.0]
+    assert nameless is not None
+    assert nameless.tolist() == [[2.0, 4.0], [102.0, 104.0]]
+
+
+def test_split_blocks_like_anddata_matches_anddata_and_rejects_tiny_inputs() -> None:
+    for block_count in (1, 2, 4):
+        blocks = {f"b{index}": [f"s{index}"] for index in range(block_count)}
+        with pytest.raises(ValueError):
+            eval_prod_models.split_blocks_like_anddata(blocks, random_seed=1)
+
+    from s2and.data import ANDData
+
+    blocks = {
+        f"block {index}": [f"s{index}_{position}" for position in range((index * 7) % 13 + 1)] for index in range(40)
+    }
+    for seed in (42, 1111):
+        fake_anddata = SimpleNamespace(
+            num_clusters_for_block_size=1,
+            random_seed=seed,
+            train_ratio=0.8,
+            val_ratio=0.1,
+            test_ratio=0.1,
+        )
+
+        expected = ANDData.split_blocks_helper(cast(Any, fake_anddata), blocks)
+        actual = eval_prod_models.split_blocks_like_anddata(blocks, random_seed=seed)
+
+        assert actual == expected, f"seed-{seed}"
+
+
+def _write_bundle_training_config(bundle_dir: Path, payload: Mapping[str, Any]) -> None:
+    reproducibility_dir = bundle_dir / "reproducibility"
+    reproducibility_dir.mkdir(parents=True, exist_ok=True)
+    (reproducibility_dir / "pairwise_training_config.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_recorded_holdout_survives_arrow_order_and_rejects_population_drift() -> None:
+    blocks = {f"block {index}": [str(2 * index), str(2 * index + 1)] for index in range(40)}
+    train, _, test = eval_prod_models.split_blocks_like_anddata(blocks, random_seed=1111)
+    reordered = {key: list(reversed(blocks[key])) for key in sorted(blocks, key=lambda key: blocks[key][0])}
+    _, _, wrong_test = eval_prod_models.split_blocks_like_anddata(reordered, random_seed=1111)
+    assert set(wrong_test) & set(train), "Fixture must reproduce the seed-only holdout leak"
+    record = {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": list(test)}
+    actual = frozen_test_blocks(reordered, record)
+    assert set(actual) == set(test)
+    assert not set(actual) & set(train)
+    assert all(actual[key] is reordered[key] for key in actual)
+    reordered["block 0"] = ["replaced", "1"]
+    with pytest.raises(ValueError, match="membership differs"):
+        frozen_test_blocks(reordered, record)
+
+
+@pytest.mark.parametrize("ids", [[], ["b", "b"], [1], "b"])
+def test_recorded_holdout_rejects_invalid_ids(ids: Any) -> None:
+    blocks = {"b": ["s"]}
+    with pytest.raises(ValueError, match="unique test_block_ids"):
+        frozen_test_blocks(blocks, {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": ids})
+
+
+def test_bundle_holdout_requires_recorded_identities(tmp_path: Path) -> None:
+    _write_bundle_training_config(tmp_path, {"data_random_seed": 1111})
+    with pytest.raises(ValueError, match="no recorded cluster test splits"):
+        eval_prod_models.bundle_cluster_test_splits(tmp_path)
+
+
+def test_bundle_holdout_rejects_null_record_instead_of_falling_back_to_seed(tmp_path: Path) -> None:
+    _write_bundle_training_config(tmp_path, {"data_random_seed": 1111})
+    (tmp_path / "reproducibility" / "pairwise_training_summary.json").write_text(
+        json.dumps({"cluster_test_splits": {"pubmed": None}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="identity records"):
+        eval_prod_models.bundle_cluster_test_splits(tmp_path)
+    (tmp_path / "reproducibility" / "pairwise_training_summary.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="no recorded cluster test splits"):
+        eval_prod_models.bundle_cluster_test_splits(tmp_path)
+
+
+def test_arrow_eval_uses_recorded_holdout_without_resplitting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    blocks = {"training": ["s0"], "heldout": ["s1"]}
+    record = {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": ["heldout"]}
+    monkeypatch.setattr(eval_prod_models, "read_arrow_s2_blocks", lambda _dataset: blocks)
+    monkeypatch.setattr(
+        eval_prod_models,
+        "split_blocks_like_anddata",
+        lambda *_a, **_k: pytest.fail("Must not recreate split from seed"),
     )
 
-    assert features.tolist() == [[0.0, 2.0]]
-    assert labels.tolist() == [1.0]
-    assert nameless is not None
-    assert nameless.tolist() == [[1.0]]
+    class Clusterer:
+        def predict_from_arrow(self, actual_blocks, _dataset, **_kwargs):
+            assert actual_blocks == {"heldout": ["s1"]}
+            return {"pred": ["s1"]}, None
 
-
-@pytest.mark.parametrize("block_count", [1, 2, 4])
-def test_split_blocks_like_anddata_rejects_tiny_smoke_datasets_like_anddata(block_count: int) -> None:
-    blocks = {f"b{index}": [f"s{index}"] for index in range(block_count)}
-
-    with pytest.raises(ValueError):
-        eval_prod_models.split_blocks_like_anddata(blocks, random_seed=1)
-
-
-def _read_minimal_incremental_signatures(signatures_path: Path) -> dict[str, Any]:
-    import pyarrow as pa
-
-    with pa.memory_map(str(signatures_path), "r") as source:
-        table = pa.ipc.open_file(source).read_all()
-    signatures: dict[str, Any] = {}
-    for row in table.to_pylist():
-        signature_id = str(row["signature_id"])
-        signatures[signature_id] = SimpleNamespace(
-            signature_id=signature_id,
-            paper_id=str(row["paper_id"]),
-            author_info_first=row["author_first"],
-            author_info_first_normalized_without_apostrophe=row["author_first"],
-            author_info_last=row["author_last"],
-            author_info_orcid=row["author_orcid"],
+    with _open_minimal_arrow_dataset(tmp_path, clusters={"truth": ["s1"]}) as dataset:
+        metrics, _ = eval_prod_models.cluster_eval_arrow(
+            dataset, Clusterer(), random_seed=42, n_jobs=1, test_split=record
         )
-    return signatures
+    assert metrics["B3 (P, R, F1)"] == (1.0, 1.0, 1.0)
 
 
-class _ArrowIncrementalFixtureDataset:
-    def __init__(
-        self,
-        arrow_paths: Mapping[str, str],
-        signatures: dict[str, Any],
-        cluster_seeds_path: Path,
-    ) -> None:
-        self.arrow_paths = {str(key): str(value) for key, value in arrow_paths.items() if key != "clusters"}
-        self.arrow_paths["cluster_seeds"] = str(cluster_seeds_path)
-        self.signatures = signatures
-        self.cluster_seeds_require: dict[str, str] = {}
-        self.cluster_seeds_disallow: set[tuple[str, str]] = set()
-        self.altered_cluster_signatures: list[str] = []
-        self.name_tuples = "filtered"
-        self.max_seed_cluster_id = 0
-        self.name = "pubmed_specter2_arrow_incremental_fixture"
-        self.name_counts_last_first_initial_semantics: str | None = None
+def test_bundle_data_random_seed_requires_a_recorded_integer(tmp_path: Path) -> None:
+    _write_bundle_training_config(tmp_path, {"data_random_seed": 1111})
+    assert eval_prod_models.bundle_data_random_seed(tmp_path) == 1111
 
-    def set_name_counts_last_first_initial_semantics(self, semantics: str) -> None:
-        self.name_counts_last_first_initial_semantics = semantics
+    missing_root = tmp_path / "missing"
+    with pytest.raises(FileNotFoundError, match="records no training split seed"):
+        eval_prod_models.bundle_data_random_seed(missing_root)
+
+    for case_id, bad_seed in (
+        ("none", None),
+        ("string", "1111"),
+        ("boolean", True),
+        ("float", 1111.0),
+    ):
+        invalid_root = tmp_path / case_id
+        _write_bundle_training_config(invalid_root, {"data_random_seed": bad_seed})
+        with pytest.raises(ValueError, match="integer data_random_seed"):
+            eval_prod_models.bundle_data_random_seed(invalid_root)
 
 
-def test_resolve_arrow_dataset_paths_includes_name_counts_index_from_manifest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_resolve_arrow_dataset_root_requires_explicit_collection_root(tmp_path: Path) -> None:
     dataset_root = tmp_path / "arrow" / "dummy"
     dataset_root.mkdir(parents=True)
-    patch_tiny_name_counts_loader(monkeypatch)
-    name_counts_index, _metrics = write_name_counts_index(tmp_path)
-    for filename in (
-        "signatures.arrow",
-        "papers.arrow",
-        "paper_authors.arrow",
-        "specter.arrow",
-        "dummy_clusters.json",
-    ):
-        (dataset_root / filename).touch()
-    _touch_eval_batch_indexes(dataset_root)
-    (dataset_root / "manifest.json").write_text(
-        json.dumps({"paths": {"name_counts_index": str(name_counts_index)}}),
-        encoding="utf-8",
-    )
+    (dataset_root / "manifest.json").write_text("{}\n", encoding="utf-8")
 
-    resolved = eval_prod_models.resolve_arrow_dataset_paths(str(tmp_path / "arrow"), "dummy", "_specter.pickle")
-
-    assert resolved["name_counts_index"] == str(name_counts_index)
-
-
-def test_resolve_arrow_dataset_paths_supports_nested_datasets_layout(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset_root = tmp_path / "arrow" / "datasets" / "dummy"
-    dataset_root.mkdir(parents=True)
-    patch_tiny_name_counts_loader(monkeypatch)
-    name_counts_index, _metrics = write_name_counts_index(tmp_path / "arrow")
-    for filename in (
-        "signatures.arrow",
-        "papers.arrow",
-        "paper_authors.arrow",
-        "specter.arrow",
-        "dummy_clusters.json",
-    ):
-        (dataset_root / filename).touch()
-    _touch_eval_batch_indexes(dataset_root)
-    (dataset_root / "manifest.json").write_text(
-        json.dumps({"paths": {"name_counts_index": "../../name_counts_index"}}),
-        encoding="utf-8",
-    )
-
-    resolved = eval_prod_models.resolve_arrow_dataset_paths(str(tmp_path / "arrow"), "dummy", "_specter.pickle")
-
-    assert resolved["signatures"] == str(dataset_root / "signatures.arrow")
-    assert resolved["name_counts_index"] == str(name_counts_index)
-
-
-def test_resolve_arrow_dataset_paths_supports_release_parent_layout(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset_root = tmp_path / "arrow" / "release_parent" / "datasets" / "dummy"
-    dataset_root.mkdir(parents=True)
-    patch_tiny_name_counts_loader(monkeypatch)
-    name_counts_index, _metrics = write_name_counts_index(tmp_path / "arrow" / "release_parent")
-    for filename in (
-        "signatures.arrow",
-        "papers.arrow",
-        "paper_authors.arrow",
-        "specter2.arrow",
-        "dummy_clusters.json",
-    ):
-        (dataset_root / filename).touch()
-    _touch_eval_batch_indexes(dataset_root, specter_stem="specter2")
-    (dataset_root / "manifest.json").write_text(
-        json.dumps({"paths": {"name_counts_index": "../../name_counts_index"}}),
-        encoding="utf-8",
-    )
-    (tmp_path / "arrow" / "release_parent" / "manifest.json").write_text(
-        json.dumps({"dataset_manifests": [{"manifest_path": "datasets/dummy/manifest.json"}]}),
-        encoding="utf-8",
-    )
-
-    resolved = eval_prod_models.resolve_arrow_dataset_paths(str(tmp_path / "arrow"), "dummy", "_specter2.pkl")
-
-    assert resolved["signatures"] == str(dataset_root / "signatures.arrow")
-    assert resolved["name_counts_index"] == str(Path(name_counts_index).resolve())
-
-
-def test_resolve_arrow_dataset_root_rejects_ambiguous_release_parent(tmp_path: Path) -> None:
-    for release_name in ("release_20260525", "release_20260526"):
-        release_root = tmp_path / "arrow" / release_name
-        dataset_root = release_root / "datasets" / "dummy"
-        dataset_root.mkdir(parents=True)
-        (release_root / "manifest.json").write_text(
-            json.dumps({"dataset_manifests": [{"manifest_path": "datasets/dummy/manifest.json"}]}),
-            encoding="utf-8",
-        )
-        (dataset_root / "manifest.json").write_text("{}", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="Ambiguous Arrow release parent"):
+    with pytest.raises(FileNotFoundError, match="Arrow root manifest does not exist"):
         eval_prod_models.resolve_arrow_dataset_root(str(tmp_path / "arrow"), "dummy")
 
 
-def test_resolve_arrow_dataset_paths_requires_eval_name_counts_index(tmp_path: Path) -> None:
-    dataset_root = tmp_path / "arrow" / "dummy"
-    dataset_root.mkdir(parents=True)
-    for filename in (
-        "signatures.arrow",
-        "papers.arrow",
-        "paper_authors.arrow",
-        "specter.arrow",
-        "dummy_clusters.json",
-    ):
-        (dataset_root / filename).touch()
-
-    with pytest.raises(FileNotFoundError, match="Missing Arrow name_counts_index"):
-        eval_prod_models.resolve_arrow_dataset_paths(str(tmp_path / "arrow"), "dummy", "_specter.pickle")
-
-
-def test_resolve_arrow_dataset_paths_rejects_bad_manifest_name_counts_index(tmp_path: Path) -> None:
-    dataset_root = tmp_path / "arrow" / "dummy"
-    dataset_root.mkdir(parents=True)
-    (tmp_path / "arrow" / "name_counts_index").mkdir()
-    for filename in (
-        "signatures.arrow",
-        "papers.arrow",
-        "paper_authors.arrow",
-        "specter.arrow",
-        "dummy_clusters.json",
-    ):
-        (dataset_root / filename).touch()
-    (dataset_root / "manifest.json").write_text(
-        json.dumps({"paths": {"name_counts_index": "missing/name_counts_index"}}),
+def test_resolve_arrow_dataset_root_does_not_bypass_its_manifest(tmp_path: Path) -> None:
+    root = tmp_path / "arrow"
+    declared = root / "declared"
+    undeclared = root / "undeclared"
+    declared.mkdir(parents=True)
+    undeclared.mkdir()
+    declared_manifest = declared / "manifest.json"
+    declared_manifest.write_text("{}\n", encoding="utf-8")
+    (undeclared / "manifest.json").write_text("{}\n", encoding="utf-8")
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "kind": ARROW_COLLECTION_KIND,
+                "format_version": PUBLIC_DATA_FORMAT_VERSION,
+                "dataset_manifests": {
+                    "declared": {
+                        "path": "declared/manifest.json",
+                        "sha256": hashlib.sha256(declared_manifest.read_bytes()).hexdigest(),
+                    }
+                },
+            }
+        ),
         encoding="utf-8",
     )
 
-    with pytest.raises(FileNotFoundError, match="specifies name_counts_index path that does not exist"):
-        eval_prod_models.resolve_arrow_dataset_paths(str(tmp_path / "arrow"), "dummy", "_specter.pickle")
+    assert eval_prod_models.resolve_arrow_dataset_root(str(root), "declared") == str(declared.resolve())
+    with pytest.raises(FileNotFoundError, match="does not declare dataset 'undeclared'"):
+        eval_prod_models.resolve_arrow_dataset_root(str(root), "undeclared")
 
 
-def test_resolve_arrow_dataset_paths_supports_repo_relative_manifest_name_counts_index(
+def test_cluster_eval_arrow_passes_open_dataset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dataset_root = tmp_path / "arrow" / "dummy"
-    dataset_root.mkdir(parents=True)
-    index_root = tmp_path / "repo" / "s2and" / "data" / "name_counts_index"
-    patch_tiny_name_counts_loader(monkeypatch)
-    write_name_counts_index(index_root.parent)
-    for filename in (
-        "signatures.arrow",
-        "papers.arrow",
-        "paper_authors.arrow",
-        "specter.arrow",
-        "dummy_clusters.json",
-    ):
-        (dataset_root / filename).touch()
-    _touch_eval_batch_indexes(dataset_root)
-    (dataset_root / "manifest.json").write_text(
-        json.dumps({"paths": {"name_counts_index": "s2and/data/name_counts_index"}}),
-        encoding="utf-8",
-    )
-    monkeypatch.chdir(tmp_path / "repo")
-
-    resolved = eval_prod_models.resolve_arrow_dataset_paths(str(tmp_path / "arrow"), "dummy", "_specter.pickle")
-
-    assert resolved["name_counts_index"] == str(index_root.resolve())
-
-
-def test_cluster_eval_arrow_passes_name_counts_index_and_batch_indexes(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     class FakeClusterer:
-        def predict_from_arrow_paths(self, block_dict, arrow_paths, **kwargs):
+        def predict_from_arrow(self, block_dict, arrow_dataset, **kwargs):
             captured["block_dict"] = dict(block_dict)
-            captured["arrow_paths"] = dict(arrow_paths)
+            captured["arrow_dataset"] = arrow_dataset
             captured["kwargs"] = dict(kwargs)
             return {"pred": ["s1"]}, None
 
@@ -532,30 +391,25 @@ def test_cluster_eval_arrow_passes_name_counts_index_and_batch_indexes(monkeypat
     )
     monkeypatch.setattr(eval_prod_models, "read_signature_to_cluster_id", lambda _path: {"s1": "truth"})
 
-    arrow_paths = {
-        "signatures": "signatures.arrow",
-        "papers": "papers.arrow",
-        "paper_authors": "paper_authors.arrow",
-        "specter": "specter.arrow",
-        "clusters": "clusters.json",
-        "name_counts_index": "name_counts_index",
-        "signatures_batch_index": "signatures.signatures_batch_index.bin",
-    }
-    eval_prod_models.cluster_eval_arrow(
-        arrow_paths,
-        SimpleNamespace(predict_from_arrow_paths=FakeClusterer().predict_from_arrow_paths),
-        random_seed=42,
-        n_jobs=1,
-    )
+    with _open_minimal_arrow_dataset(tmp_path, clusters={"truth": ["s1"]}) as arrow_dataset:
+        eval_prod_models.cluster_eval_arrow(
+            arrow_dataset,
+            FakeClusterer(),
+            random_seed=42,
+            n_jobs=1,
+            batching_threshold=7,
+        )
 
+        assert captured["arrow_dataset"] is arrow_dataset
     assert captured["block_dict"] == {"block": ["s1"]}
-    assert captured["kwargs"]["load_name_counts"] is True
-    assert captured["arrow_paths"]["name_counts_index"] == "name_counts_index"
-    assert captured["arrow_paths"]["signatures_batch_index"] == "signatures.signatures_batch_index.bin"
-    assert "clusters" not in captured["arrow_paths"]
+    assert "load_name_counts" not in captured["kwargs"]
+    assert captured["kwargs"]["batching_threshold"] == 7
 
 
-def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     import s2and.data as data_module
     import s2and.production_model as production_model
 
@@ -565,28 +419,34 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(monkeypatch: pytes
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             raise AssertionError("ANDData should not be constructed for --use-arrow eval")
 
-    def fake_cluster_eval_arrow(arrow_paths: dict[str, str], clusterer: Any, **kwargs: Any):
-        captured["arrow_paths"] = dict(arrow_paths)
+    dataset_root = tmp_path / "arrow" / "pubmed"
+    arrow_dataset = _open_minimal_arrow_dataset(dataset_root)
+
+    def fake_resolve_arrow_dataset(arrow_root: str, dataset_name: str, specter_suffix: str) -> ArrowDataset:
+        captured["resolve"] = (arrow_root, dataset_name, specter_suffix)
+        return arrow_dataset
+
+    def fake_cluster_eval_arrow(actual_dataset: ArrowDataset, clusterer: Any, **kwargs: Any):
+        captured["arrow_dataset"] = actual_dataset
         captured["clusterer"] = clusterer
         captured["kwargs"] = dict(kwargs)
         return {"B3 (P, R, F1)": (1.0, 1.0, 1.0)}, {}
 
     monkeypatch.setattr(data_module, "ANDData", RaisingANDData)
     monkeypatch.setattr(eval_prod_models, "first_missing_arrow_dataset_error", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        eval_prod_models,
-        "resolve_arrow_dataset_paths",
-        lambda arrow_root, dataset_name, specter_suffix: {
-            "dataset": dataset_name,
-            "specter_suffix": specter_suffix,
-            "root": arrow_root,
-        },
-    )
+    monkeypatch.setattr(eval_prod_models, "resolve_arrow_dataset", fake_resolve_arrow_dataset)
     monkeypatch.setattr(eval_prod_models, "cluster_eval_arrow", fake_cluster_eval_arrow)
     monkeypatch.setattr(
         production_model,
         "load_production_model",
         lambda model_path: SimpleNamespace(model_path=model_path),
+    )
+    model_path = tmp_path / "explicit-model"
+    model_path.mkdir()
+    _write_bundle_training_config(model_path, {"data_random_seed": 1111})
+    test_split = {"block_membership_sha256": "0" * 64, "test_block_ids": ["heldout"]}
+    (model_path / "reproducibility" / "pairwise_training_summary.json").write_text(
+        json.dumps({"cluster_test_splits": {"pubmed": test_split}}), encoding="utf-8"
     )
     monkeypatch.setattr(eval_prod_models.os.path, "exists", lambda _path: True)
     monkeypatch.setattr(
@@ -598,8 +458,8 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(monkeypatch: pytes
             "mini",
             "--datasets",
             "pubmed",
-            "--specter-suffixes",
-            "_specter2.pkl",
+            "--specter2-model-path",
+            str(model_path),
             "--use-arrow",
             "--arrow-data-root",
             "arrow-root",
@@ -610,27 +470,137 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(monkeypatch: pytes
 
     eval_prod_models.main()
 
-    assert captured["arrow_paths"] == {
-        "dataset": "pubmed",
-        "specter_suffix": "_specter2.pkl",
-        "root": "arrow-root",
-    }
+    assert captured["resolve"] == (str(Path("arrow-root").resolve()), "pubmed", "_specter2.pkl")
+    assert captured["arrow_dataset"] is arrow_dataset
+    assert arrow_dataset.closed
     assert captured["kwargs"]["n_jobs"] == 1
-    assert captured["kwargs"]["random_seed"] == 42
+    assert captured["kwargs"]["random_seed"] == 1111
+    assert captured["kwargs"]["test_split"] == test_split
+    assert captured["clusterer"].model_path == model_path
 
 
-def test_eval_main_use_arrow_rejects_train(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", "--dataset", "mini", "--use-arrow", "--train"])
+def test_eval_main_json_uses_recorded_holdout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import s2and.name_tuple_artifact as name_tuple_artifact
+    import s2and.production_model as production_model
+    from s2and.data import ANDData
 
-    with pytest.raises(ValueError, match="cannot be combined with --train"):
-        eval_prod_models.main()
+    blocks = {"training": ["s0"], "heldout": ["s1"]}
+    record = {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": ["heldout"]}
+    model_path = tmp_path / "model"
+    _write_bundle_training_config(model_path, {"data_random_seed": 1111})
+    (model_path / "reproducibility" / "pairwise_training_summary.json").write_text(
+        json.dumps({"cluster_test_splits": {"pubmed": record}}), encoding="utf-8"
+    )
+
+    class Dataset:
+        train_blocks = None
+        val_blocks = None
+        test_blocks = None
+        split_cluster_signatures_fixed = ANDData.split_cluster_signatures_fixed
+
+        def get_blocks(self):
+            return blocks
+
+        def split_cluster_signatures(self):
+            pytest.fail("Must not recreate the test split from its seed")
+
+        def construct_cluster_to_signatures(self, actual):
+            assert actual == {"heldout": ["s1"]}
+            return {"truth": ["s1"]}
+
+    predicted = []
+
+    class Clusterer:
+        def predict(self, actual, _dataset):
+            assert actual == {"heldout": ["s1"]}
+            predicted.append(actual)
+            return {"pred": ["s1"]}, None
+
+    monkeypatch.setattr(eval_prod_models, "build_eval_anddata", lambda **_kwargs: Dataset())
+    monkeypatch.setattr(name_tuple_artifact, "load_name_tuple_artifact", lambda _path: SimpleNamespace(pairs=set()))
+    monkeypatch.setattr(production_model, "load_production_model", lambda _path: Clusterer())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_prod_models.py",
+            "--dataset",
+            "mini",
+            "--datasets",
+            "pubmed",
+            "--no-arrow",
+            "--specter2-model-path",
+            str(model_path),
+            "--json-data-root",
+            str(tmp_path),
+            "--name-counts-index-root",
+            str(tmp_path),
+            "--name-tuples-path",
+            str(tmp_path / "tuples"),
+        ],
+    )
+    eval_prod_models.main()
+    assert len(predicted) == 1
 
 
-def test_eval_main_use_arrow_rejects_unsupported_dataset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", "--dataset", "inventors_s2and", "--use-arrow"])
+def test_eval_main_rejects_invalid_mode_combinations(monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = (
+        (["--dataset", "mini", "--specter-suffixes", "_specter2.pkl"], "requires an explicit model path"),
+        (
+            ["--dataset", "mini", "--specter-suffixes", "_specter.pickle"],
+            "SPECTER1 production evaluation was removed",
+        ),
+        (["--train", "--specter2-model-path", "unused-model"], "cannot be combined with --train"),
+        (["--dataset", "mini", "--use-arrow", "--train"], "cannot be combined with --train"),
+        (["--dataset", "inventors_s2and", "--use-arrow"], "supports --dataset mini and --dataset full only"),
+        (
+            ["--dataset", "mini", "--specter2-model-path", "some-model", "--seed", "42"],
+            "--seed applies only to --train",
+        ),
+    )
+    for argv, message in cases:
+        monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", *argv])
+        with pytest.raises(ValueError, match=message):
+            eval_prod_models.main()
 
-    with pytest.raises(ValueError, match="supports --dataset mini and --dataset full only"):
-        eval_prod_models.main()
+
+def test_eval_main_requires_explicit_data_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = (
+        ("json-training-root", ["--train", "--dataset", "mini"], "requires an explicit --json-data-root"),
+        (
+            "arrow-training-root",
+            [
+                "--train",
+                "--dataset",
+                "mini",
+                "--datasets",
+                "qian",
+                "--train-modes",
+                eval_prod_models.TRAIN_MODE_ARROW_RUST,
+            ],
+            "requires an explicit --arrow-data-root",
+        ),
+        (
+            "evaluation-data-root",
+            ["--dataset", "mini", "--specter2-model-path", "model"],
+            "requires --arrow-data-root or --json-data-root",
+        ),
+        (
+            "name-assets",
+            ["--train", "--dataset", "mini", "--json-data-root", "json"],
+            "require explicit --name-counts-index-root and --name-tuples-path",
+        ),
+    )
+    monkeypatch.setattr(eval_prod_models, "bundle_data_random_seed", lambda _path: 42)
+    for case_id, argv, message in cases:
+        monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", *argv])
+
+        try:
+            eval_prod_models.main()
+        except ValueError as error:
+            assert message in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: incomplete data roots were accepted")
 
 
 def test_construct_cluster_to_signatures_reports_missing_assignments() -> None:
@@ -638,169 +608,54 @@ def test_construct_cluster_to_signatures_reports_missing_assignments() -> None:
         eval_prod_models.construct_cluster_to_signatures({"s1": "c1"}, {"block": ["s1", "s2"]})
 
 
-@pytest.mark.requires_lfs
-def test_pubmed_specter2_arrow_fixture_matches_production_eval() -> None:
-    pytest.importorskip("s2and_rust")
+def test_arrow_calibration_deferred_search_matches_explicit_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+    from hyperopt import hp
 
-    from s2and.production_model import load_production_model
+    from s2and.featurizer import FeaturizationInfo
+    from s2and.model import Clusterer
 
-    fixture_root = Path("tests/fixtures/arrow/pubmed_specter2")
-    fixture_dataset = fixture_root / "pubmed"
-    production_model = Path("s2and/data/production_model_v1.21")
-    _skip_if_missing_or_lfs_pointer(
-        [
-            fixture_dataset / "signatures.arrow",
-            fixture_dataset / "papers.arrow",
-            fixture_dataset / "paper_authors.arrow",
-            fixture_dataset / "specter2.arrow",
-            fixture_dataset / "signatures.signatures_batch_index.bin",
-            fixture_dataset / "papers.papers_batch_index.bin",
-            fixture_dataset / "paper_authors.paper_authors_batch_index.bin",
-            fixture_dataset / "specter2.specter_batch_index.bin",
-            fixture_dataset / "name_counts_index/generations/pubmed-specter2/first.bin",
-            fixture_dataset / "name_counts_index/generations/pubmed-specter2/last.bin",
-            fixture_dataset / "name_counts_index/generations/pubmed-specter2/first_last.bin",
-            fixture_dataset / "name_counts_index/generations/pubmed-specter2/last_first_initial.bin",
-            production_model / "manifest.json",
-            production_model / "clusterer.json",
-            production_model / "pairwise/main.lgb",
-            production_model / "pairwise/nameless.lgb",
-            production_model / "pairwise/metadata.json",
-        ]
+    blocks = {"block": ["s1", "s2", "s3"]}
+    distances = {"block": np.array([0.2, 0.8, 0.8], dtype=np.float64)}
+    splits = eval_prod_models.PairwiseTrainingSplits(
+        [], [], [], {}, blocks, {}, {"s1": "together", "s2": "together", "s3": "apart"}
     )
+    rust_featurizer = SimpleNamespace(cluster_seeds_require=lambda: [])
+    distance_calls = []
 
-    arrow_paths = eval_prod_models.resolve_arrow_dataset_paths(str(fixture_root), "pubmed", "_specter2.pkl")
-    assert Path(arrow_paths["specter"]).name == "specter2.arrow"
-    assert Path(arrow_paths["name_counts_index"]).resolve() == (fixture_dataset / "name_counts_index").resolve()
+    def cached_distances(self, block_dict, actual_featurizer):
+        assert block_dict == blocks
+        assert actual_featurizer is rust_featurizer
+        distance_calls.append(self)
+        return distances
 
-    clusterer = load_production_model(str(production_model))
-    clusterer.use_cache = False
-    clusterer.n_jobs = 4
-    cluster_metrics, _ = eval_prod_models.cluster_eval_arrow(
-        arrow_paths,
-        clusterer,
-        random_seed=42,
-        n_jobs=4,
+    monkeypatch.setattr(Clusterer, "make_distance_matrices_from_rust_featurizer", cached_distances)
+    deferred = Clusterer(FeaturizationInfo(), classifier=None, n_jobs=1, n_iter=8)
+    explicit = Clusterer(
+        FeaturizationInfo(), classifier=None, n_jobs=1, n_iter=8, search_space={"eps": hp.uniform("eps", 0, 1)}
     )
+    assert deferred.search_space is None
 
-    assert cluster_metrics["B3 (P, R, F1)"] == pytest.approx((1.0, 0.9, 0.948), abs=5e-4)
-
-
-@pytest.mark.requires_lfs
-def test_pubmed_specter2_arrow_fixture_incremental_smoke_matches_expected_b3(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    s2and_rust = pytest.importorskip("s2and_rust")
-    if not hasattr(s2and_rust, "RawBlockQueryCandidatePlanner"):
-        raise pytest.skip.Exception("raw Arrow incremental candidate planning is unavailable")
-
-    from s2and.eval import b3_precision_recall_fscore
-    from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
-    from s2and.production_model import load_production_model
-
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
-    fixture_root = Path("tests/fixtures/arrow/pubmed_specter2")
-    fixture_dataset = fixture_root / "pubmed"
-    production_model = Path("s2and/data/production_model_v1.21")
-    _skip_if_missing_or_lfs_pointer(
-        [
-            fixture_dataset / "signatures.arrow",
-            fixture_dataset / "papers.arrow",
-            fixture_dataset / "paper_authors.arrow",
-            fixture_dataset / "specter2.arrow",
-            fixture_dataset / "signatures.signatures_batch_index.bin",
-            fixture_dataset / "papers.papers_batch_index.bin",
-            fixture_dataset / "paper_authors.paper_authors_batch_index.bin",
-            fixture_dataset / "specter2.specter_batch_index.bin",
-            fixture_dataset / "name_counts_index/generations/pubmed-specter2/first.bin",
-            fixture_dataset / "name_counts_index/generations/pubmed-specter2/last.bin",
-            fixture_dataset / "name_counts_index/generations/pubmed-specter2/first_last.bin",
-            fixture_dataset / "name_counts_index/generations/pubmed-specter2/last_first_initial.bin",
-            production_model / "manifest.json",
-            production_model / "clusterer.json",
-            production_model / "pairwise/main.lgb",
-            production_model / "pairwise/nameless.lgb",
-            production_model / "pairwise/metadata.json",
-            production_model / "incremental_linker/booster.lgb",
-            production_model / "incremental_linker/metadata.json",
-        ]
-    )
-
-    arrow_paths = eval_prod_models.resolve_arrow_dataset_paths(str(fixture_root), "pubmed", "_specter2.pkl")
-    signatures = _read_minimal_incremental_signatures(fixture_dataset / "signatures.arrow")
-    _train_block_dict, _val_block_dict, test_block_dict = eval_prod_models.split_blocks_like_anddata(
-        eval_prod_models.read_arrow_s2_blocks(arrow_paths["signatures"]),
-        random_seed=42,
-    )
-    signature_to_cluster_id = eval_prod_models.read_signature_to_cluster_id(arrow_paths["clusters"])
-    cluster_to_signatures = eval_prod_models.construct_cluster_to_signatures(signature_to_cluster_id, test_block_dict)
-
-    clusterer = load_production_model(str(production_model))
-    clusterer.use_cache = False
-    clusterer.n_jobs = 4
-    predicted_clusters: dict[str, list[str]] = {}
-    total_query_count = 0
-    total_candidate_row_count = 0
-
-    for block_index, (block_key, block_signatures) in enumerate(sorted(test_block_dict.items())):
-        seed_signature_to_cluster: dict[str, str] = {}
-        seen_cluster_ids: set[str] = set()
-        for signature_id in block_signatures:
-            cluster_id = signature_to_cluster_id[signature_id]
-            if cluster_id in seen_cluster_ids:
-                continue
-            seed_signature_to_cluster[signature_id] = cluster_id
-            seen_cluster_ids.add(cluster_id)
-
-        cluster_seeds_path = tmp_path / f"cluster_seeds_{block_index}.arrow"
-        write_cluster_seeds_arrow(cluster_seeds_path, seed_signature_to_cluster)
-        dataset = _ArrowIncrementalFixtureDataset(arrow_paths, signatures, cluster_seeds_path)
-        result = cast(
-            dict[str, Any],
-            clusterer.predict_incremental(
-                list(block_signatures),
-                cast(Any, dataset),
-                prevent_new_incompatibilities=False,
-                batching_threshold=None,
-                total_ram_bytes=1_000_000_000_000,
-            ),
+    for clusterer in (deferred, explicit):
+        result = eval_prod_models.fit_clusterer_from_arrow_validation(
+            clusterer, splits, rust_featurizer, random_seed=42
         )
-        if block_index == 0:
-            direct_result = cast(
-                dict[str, Any],
-                clusterer.predict_incremental_from_arrow_paths(
-                    list(block_signatures),
-                    {**arrow_paths, "cluster_seeds": str(cluster_seeds_path)},
-                    prevent_new_incompatibilities=False,
-                    batching_threshold=None,
-                    total_ram_bytes=1_000_000_000_000,
-                ),
-            )
-            assert _cluster_partition(
-                cast(Mapping[str, Sequence[str]], direct_result["clusters"])
-            ) == _cluster_partition(cast(Mapping[str, Sequence[str]], result["clusters"]))
-            direct_telemetry = cast(Mapping[str, Any], direct_result["incremental_linker_telemetry"])
-            assert direct_result["incremental_linker_query_view"] == "raw_arrow"
-            assert direct_telemetry["arrow_promoted_incremental"] == 1
-            assert direct_telemetry["seed_setup_cluster_seeds_source"] == "arrow"
-        telemetry = cast(Mapping[str, Any], result["incremental_linker_telemetry"])
-        query_count = len(block_signatures) - len(seed_signature_to_cluster)
-        assert result["incremental_linker_query_view"] == "raw_arrow"
-        assert telemetry["arrow_promoted_incremental"] == 1
-        assert telemetry["seed_setup_cluster_seeds_source"] == "arrow"
-        assert telemetry["seed_arrow_reused_source"] == 1
-        assert telemetry["query_count"] == query_count
-        total_query_count += int(telemetry["query_count"])
-        total_candidate_row_count += int(telemetry["candidate_row_count"])
+        assert result is clusterer
 
-        block_signature_set = set(block_signatures)
-        for cluster_id, members in cast(Mapping[str, Sequence[str]], result["clusters"]).items():
-            kept_members = [str(member) for member in members if str(member) in block_signature_set]
-            if kept_members:
-                predicted_clusters[f"{block_index}:{block_key}:{cluster_id}"] = kept_members
-
-    cluster_metrics = b3_precision_recall_fscore(cluster_to_signatures, predicted_clusters)
-    assert total_query_count == 127
-    assert total_candidate_row_count > 0
-    assert cluster_metrics[:3] == pytest.approx((1.0, 0.816, 0.899), abs=5e-4)
+    assert distance_calls == [deferred, explicit]
+    assert deferred.best_params == explicit.best_params
+    deferred_trials = deferred.hyperopt_trials_store
+    explicit_trials = explicit.hyperopt_trials_store
+    assert deferred_trials is not None and explicit_trials is not None
+    assert deferred_trials.losses() == explicit_trials.losses()
+    assert [trial["misc"]["vals"] for trial in deferred_trials.trials] == [
+        trial["misc"]["vals"] for trial in explicit_trials.trials
+    ]
+    assert min(deferred_trials.losses()) == -1.0
+    for clusterer in (deferred, explicit):
+        predictions, _ = clusterer.predict_from_rust_featurizer(blocks, rust_featurizer, dists=distances)
+        assert {frozenset(signatures) for signatures in predictions.values()} == {
+            frozenset({"s1", "s2"}),
+            frozenset({"s3"}),
+        }
+    np.testing.assert_array_equal(distances["block"], [0.2, 0.8, 0.8])

@@ -1,3 +1,12 @@
+"""Historical provenance for the curated name-tuple source artifact.
+
+Warning:
+    Do not run this module to regenerate canonical artifacts. It executes paid,
+    nondeterministic Gemini requests at import time without a cost bound. The
+    supported deterministic publication step is
+    ``scripts/production/generate_canonical_name_tuples.py``.
+"""
+
 # To run this code you need to install the following dependencies:
 # uv pip install google-genai
 

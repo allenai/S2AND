@@ -1,5 +1,13 @@
 # ruff: noqa: E402
 
+"""Create the historical feature-corrupted augmentation dataset.
+
+Warning:
+    This provenance recipe uses private data, a paid Google Translate client,
+    and fields removed by canonical-v2. It creates the client at import time
+    and is not a supported current entrypoint.
+"""
+
 import json
 import os
 from typing import Any
@@ -8,7 +16,6 @@ from s2and.consts import CONFIG
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "<fill me in>"
-os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
 import argparse
 import copy
@@ -94,9 +101,8 @@ def main(
             name=dataset_name,
             mode="inference",
             specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
-            block_type="s2",
             n_jobs=25,
-            load_name_counts=False,
+            name_counts_index=None,
             preprocess=False,
         )
         logger.info(f"dataset {dataset_name} loaded")
@@ -227,7 +233,6 @@ def main(
             author_info_first=new_first,
             author_info_affiliations=new_affiliations,
             signature_id=new_signature_id,
-            author_info_first_normalized=None,
             author_info_first_normalized_without_apostrophe=None,
             author_info_middle_normalized_without_apostrophe=None,
             author_info_last_normalized=None,

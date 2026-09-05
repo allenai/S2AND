@@ -1,22 +1,29 @@
-"""
-Generate SPECTER embeddings for papers referenced by
-`scratch/inventors_s2and/inventors_s2and_signatures.json`.
+"""Generate one SPECTER embedding set for the selected inventors papers.
 
-Outputs:
-- `inventors_s2and_specter.pickle`: embeddings from `allenai/specter`
-- `inventors_s2and_specter2.pkl`: embeddings from `allenai/specter2_base` with
-  the `allenai/specter2` proximity adapter activated.
+Each process loads exactly one model selected by ``--model``:
+
+- ``specter`` loads ``allenai/specter``.
+- ``specter2`` loads ``allenai/specter2_base`` with the ``allenai/specter2``
+  proximity adapter activated.
 
 Pickle format matches S2AND expectations: `(X, keys)`, where
 `X` is `float32` NumPy array with shape `(N, 768)` and `keys` is a list of paper ids.
 
-Example:
+Examples:
 uv run --with torch --with transformers --with adapters \
   python scripts/make_inventors_hf_specter_embeddings.py \
+  --model specter \
   --signatures-path scratch/inventors_s2and/inventors_s2and_signatures.json \
   --papers-path scratch/inventors_s2and/inventors_s2and_papers.json \
-  --output-specter-path scratch/inventors_s2and/inventors_s2and_specter.pickle \
-  --output-specter2-path scratch/inventors_s2and/inventors_s2and_specter2.pkl \
+  --output-path scratch/inventors_s2and/inventors_s2and_specter.pickle \
+  --limit 20105 --batch-size 16
+
+uv run --with torch --with transformers --with adapters \
+  python scripts/make_inventors_hf_specter_embeddings.py \
+  --model specter2 \
+  --signatures-path scratch/inventors_s2and/inventors_s2and_signatures.json \
+  --papers-path scratch/inventors_s2and/inventors_s2and_papers.json \
+  --output-path scratch/inventors_s2and/inventors_s2and_specter2.pkl \
   --limit 20105 --batch-size 16
 """
 
@@ -26,7 +33,7 @@ import argparse
 import json
 import logging
 import pickle
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,8 +53,14 @@ class PaperRecord:
     abstract: str
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate SPECTER and SPECTER2-proximity embeddings.")
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model",
+        choices=["specter", "specter2"],
+        required=True,
+        help="The single embedding model to load in this process.",
+    )
     parser.add_argument(
         "--signatures-path",
         type=Path,
@@ -61,16 +74,10 @@ def parse_args() -> argparse.Namespace:
         help="Path to papers.json dictionary keyed by paper id.",
     )
     parser.add_argument(
-        "--output-specter-path",
+        "--output-path",
         type=Path,
-        default=_PROJECT_ROOT / "scratch" / "inventors_s2and" / "inventors_s2and_specter.pickle",
-        help="Output path for allenai/specter embeddings.",
-    )
-    parser.add_argument(
-        "--output-specter2-path",
-        type=Path,
-        default=_PROJECT_ROOT / "scratch" / "inventors_s2and" / "inventors_s2and_specter2.pkl",
-        help="Output path for allenai/specter2 proximity embeddings.",
+        default=None,
+        help="Output pickle path. Defaults to a model-specific file under scratch/inventors_s2and.",
     )
     parser.add_argument(
         "--batch-size",
@@ -102,12 +109,6 @@ def parse_args() -> argparse.Namespace:
         help="Overwrite output files if they already exist.",
     )
     parser.add_argument(
-        "--models",
-        choices=["both", "specter", "specter2"],
-        default="both",
-        help="Which embedding set(s) to generate.",
-    )
-    parser.add_argument(
         "--disable-autocast",
         action="store_true",
         help="Disable CUDA autocast mixed precision. Enabled by default when --device resolves to cuda.",
@@ -117,7 +118,7 @@ def parse_args() -> argparse.Namespace:
         default="DEBUG",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def clean_text(value: Any) -> str:
@@ -313,8 +314,7 @@ def main() -> None:
     if args.limit is None and missing_required:
         example_missing = sorted(missing_required)[:5]
         raise ValueError(
-            f"{len(missing_required)} signature paper ids were not found in papers.json. "
-            f"Examples: {example_missing}"
+            f"{len(missing_required)} signature paper ids were not found in papers.json. Examples: {example_missing}"
         )
     if args.limit is not None and missing_required:
         LOGGER.info(
@@ -329,51 +329,35 @@ def main() -> None:
     use_autocast = (not args.disable_autocast) and device == "cuda"
     LOGGER.info("CUDA autocast enabled: %s", use_autocast)
 
-    specter_keys: list[str] | None = None
-    specter2_keys: list[str] | None = None
-    specter_dim: int | None = None
-    specter2_dim: int | None = None
-
-    if args.models in {"both", "specter"}:
+    if args.model == "specter":
+        output_path = args.output_path or (
+            _PROJECT_ROOT / "scratch" / "inventors_s2and" / "inventors_s2and_specter.pickle"
+        )
         LOGGER.info("Loading `allenai/specter`...")
-        specter_tokenizer, specter_model = load_specter_model(device)
-        specter_embeddings, specter_keys = embed_records(
-            records=records,
-            tokenizer=specter_tokenizer,
-            model=specter_model,
-            batch_size=args.batch_size,
-            max_length=args.max_length,
-            device=device,
-            progress_desc="Embedding allenai/specter",
-            use_autocast=use_autocast,
+        tokenizer, model = load_specter_model(device)
+        progress_desc = "Embedding allenai/specter"
+    else:
+        output_path = args.output_path or (
+            _PROJECT_ROOT / "scratch" / "inventors_s2and" / "inventors_s2and_specter2.pkl"
         )
-        specter_dim = int(specter_embeddings.shape[1])
-        LOGGER.info("`allenai/specter` output shape: %s", tuple(specter_embeddings.shape))
-        dump_pickle(args.output_specter_path, specter_embeddings, specter_keys, overwrite=args.overwrite)
-        LOGGER.info("Wrote %s", args.output_specter_path)
-
-    if args.models in {"both", "specter2"}:
         LOGGER.info("Loading `allenai/specter2_base` + `allenai/specter2` proximity adapter...")
-        specter2_tokenizer, specter2_model = load_specter2_proximity_model(device)
-        specter2_embeddings, specter2_keys = embed_records(
-            records=records,
-            tokenizer=specter2_tokenizer,
-            model=specter2_model,
-            batch_size=args.batch_size,
-            max_length=args.max_length,
-            device=device,
-            progress_desc="Embedding specter2 proximity",
-            use_autocast=use_autocast,
-        )
-        specter2_dim = int(specter2_embeddings.shape[1])
-        LOGGER.info("`specter2 proximity` output shape: %s", tuple(specter2_embeddings.shape))
-        dump_pickle(args.output_specter2_path, specter2_embeddings, specter2_keys, overwrite=args.overwrite)
-        LOGGER.info("Wrote %s", args.output_specter2_path)
+        tokenizer, model = load_specter2_proximity_model(device)
+        progress_desc = "Embedding specter2 proximity"
 
-    if args.models == "both" and specter_keys != specter2_keys:
-        raise RuntimeError("Key ordering mismatch between specter and specter2 runs")
-
-    LOGGER.info("Done. papers=%d dim_specter=%s dim_specter2=%s", len(records), specter_dim, specter2_dim)
+    embeddings, keys = embed_records(
+        records=records,
+        tokenizer=tokenizer,
+        model=model,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        device=device,
+        progress_desc=progress_desc,
+        use_autocast=use_autocast,
+    )
+    LOGGER.info("%s output shape: %s", args.model, tuple(embeddings.shape))
+    dump_pickle(output_path, embeddings, keys, overwrite=args.overwrite)
+    LOGGER.info("Wrote %s", output_path)
+    LOGGER.info("Done. model=%s papers=%d dimensions=%d", args.model, len(records), int(embeddings.shape[1]))
 
 
 if __name__ == "__main__":

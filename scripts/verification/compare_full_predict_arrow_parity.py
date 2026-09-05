@@ -3,7 +3,7 @@
 This is the reusable gate for the complete Arrow inference schema. It builds a
 bounded incumbent ``ANDData`` first, writes Arrow IPC tables and current
 raw-planner batch-index sidecars from the same bounded payload, builds
-``RustFeaturizer.from_arrow_paths(...)``, and compares features, constraints,
+one retained ``ArrowDataset``, and compares features, constraints,
 distances, and clusters.
 """
 
@@ -24,6 +24,22 @@ import numpy as np
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+
+from s2and._sha256 import sha256_file  # noqa: E402
+from scripts.production.model.release_pairwise import _load_evaluation_plan  # noqa: E402
+from scripts.production.model.run_binding import load_run_binding, require_run_binding_matches  # noqa: E402
+
+
+def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
+    if path.exists():
+        raise FileExistsError(f"Report output already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        staging.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.link(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def _load_json(path: str | Path) -> Any:
@@ -48,7 +64,7 @@ def _jsonable(value: Any) -> Any:
         return value.tolist()
     if isinstance(value, np.generic):
         return value.item()
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, list | tuple):
         return [_jsonable(item) for item in value]
@@ -105,7 +121,7 @@ def _load_cluster_seeds_require(
     selected_signature_ids: Sequence[str],
     *,
     enabled: bool,
-) -> dict[str, str]:
+) -> dict[str, int | str]:
     if not enabled:
         return {}
     path = meta.get("paths", {}).get("cluster_seeds_require")
@@ -122,7 +138,15 @@ def _load_cluster_seeds_require(
     }
 
 
-def _numeric_report(left: np.ndarray, right: np.ndarray, *, treat_nan_as_mismatch: bool) -> dict[str, Any]:
+def _numeric_report(
+    left: np.ndarray,
+    right: np.ndarray,
+    *,
+    treat_nan_as_mismatch: bool,
+    atol: float = 0.0,
+    rtol: float = 0.0,
+    exact_integer_reference: bool = False,
+) -> dict[str, Any]:
     left_array = np.asarray(left, dtype=np.float64)
     right_array = np.asarray(right, dtype=np.float64)
     if left_array.shape != right_array.shape:
@@ -135,12 +159,23 @@ def _numeric_report(left: np.ndarray, right: np.ndarray, *, treat_nan_as_mismatc
     right_nan = np.isnan(right_array)
     comparable_mask = ~(left_nan | right_nan)
     diff = np.abs(left_array[comparable_mask] - right_array[comparable_mask])
+    close = np.isclose(left_array, right_array, rtol=float(rtol), atol=float(atol), equal_nan=True)
+    exact_integer_mask = np.isfinite(left_array) & (left_array == np.trunc(left_array))
+    exact_integer_mismatch_count = 0
+    if exact_integer_reference:
+        exact_integer_matches = left_array[exact_integer_mask] == right_array[exact_integer_mask]
+        close[exact_integer_mask] = exact_integer_matches
+        exact_integer_mismatch_count = int(np.count_nonzero(~exact_integer_matches))
     return {
         "shape_match": True,
         "nan_mismatch_count": int(np.count_nonzero(left_nan != right_nan)) if treat_nan_as_mismatch else 0,
         "max_absdiff": float(diff.max()) if diff.size else 0.0,
         "nonzero_absdiff_count": int(np.count_nonzero(diff > 0.0)),
-        "allclose_equal_nan": bool(np.allclose(left_array, right_array, rtol=0.0, atol=0.0, equal_nan=True)),
+        "atol": float(atol),
+        "rtol": float(rtol),
+        "exact_integer_reference": bool(exact_integer_reference),
+        "exact_integer_mismatch_count": exact_integer_mismatch_count,
+        "allclose_equal_nan": bool(np.all(close)),
     }
 
 
@@ -176,7 +211,7 @@ def _constraint_values_equal(left: list[Any], right: list[Any]) -> bool:
 
 
 def _constraint_report(
-    incumbent_featurizer: Any,
+    dataset: Any,
     arrow_featurizer: Any,
     signature_ids: Sequence[str],
     *,
@@ -184,31 +219,36 @@ def _constraint_report(
 ) -> dict[str, Any]:
     from s2and.rust_calls import get_constraints_block_upper_triangle_indexed_rust
 
-    incumbent_indices = _block_signature_indices(incumbent_featurizer, signature_ids)
     arrow_indices = _block_signature_indices(arrow_featurizer, signature_ids)
-    inc_left, inc_right, inc_values = get_constraints_block_upper_triangle_indexed_rust(
-        None,
-        incumbent_indices,
-        start_offset=0,
-        max_pairs=None,
-        dont_merge_cluster_seeds=True,
-        incremental_dont_use_cluster_seeds=False,
-        num_threads=n_jobs,
-        featurizer=incumbent_featurizer,
-    )
+    signature_pairs = [
+        (str(signature_ids[left]), str(signature_ids[right]))
+        for left in range(len(signature_ids))
+        for right in range(left + 1, len(signature_ids))
+    ]
+    python_values = [
+        dataset.get_constraint(
+            left,
+            right,
+            dont_merge_cluster_seeds=True,
+            incremental_dont_use_cluster_seeds=False,
+        )
+        for left, right in signature_pairs
+    ]
     arrow_left, arrow_right, arrow_values = get_constraints_block_upper_triangle_indexed_rust(
-        None,
         arrow_indices,
+        featurizer=arrow_featurizer,
         start_offset=0,
         max_pairs=None,
         dont_merge_cluster_seeds=True,
         incremental_dont_use_cluster_seeds=False,
         num_threads=n_jobs,
-        featurizer=arrow_featurizer,
     )
+    expected_index_pairs = _upper_triangle_index_pairs(arrow_indices)
+    expected_left = [left for left, _right in expected_index_pairs]
+    expected_right = [right for _left, right in expected_index_pairs]
     value_mismatch_count = 0
-    if len(inc_values) == len(arrow_values):
-        for left_value, right_value in zip(inc_values, arrow_values, strict=True):
+    if len(python_values) == len(arrow_values):
+        for left_value, right_value in zip(python_values, arrow_values, strict=True):
             if left_value is None or right_value is None:
                 value_mismatch_count += int(left_value is not None or right_value is not None)
             else:
@@ -222,27 +262,49 @@ def _constraint_report(
                     )
                 )
     else:
-        value_mismatch_count = abs(len(inc_values) - len(arrow_values))
+        value_mismatch_count = abs(len(python_values) - len(arrow_values))
     return {
-        "left_indices_equal": inc_left == arrow_left,
-        "right_indices_equal": inc_right == arrow_right,
-        "value_count": int(len(inc_values)),
-        "values_equal": _constraint_values_equal(inc_values, arrow_values),
+        "left_indices_equal": expected_left == arrow_left,
+        "right_indices_equal": expected_right == arrow_right,
+        "value_count": int(len(python_values)),
+        "values_equal": _constraint_values_equal(python_values, arrow_values),
         "value_mismatch_count": int(value_mismatch_count),
+        "reference_backend": "python_anddata",
+        "candidate_backend": "rust_arrow",
     }
 
 
 def _feature_constraint_report(
-    incumbent_featurizer: Any,
+    dataset: Any,
     arrow_featurizer: Any,
     signature_ids: Sequence[str],
     *,
     n_jobs: int,
 ) -> dict[str, Any]:
-    incumbent_pairs = _upper_triangle_index_pairs(_block_signature_indices(incumbent_featurizer, signature_ids))
+    from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+    from s2and.runtime import RuntimeContext
+
+    signature_pairs = [
+        (str(signature_ids[left]), str(signature_ids[right]))
+        for left in range(len(signature_ids))
+        for right in range(left + 1, len(signature_ids))
+    ]
     arrow_pairs = _upper_triangle_index_pairs(_block_signature_indices(arrow_featurizer, signature_ids))
-    incumbent_features = np.asarray(
-        incumbent_featurizer.featurize_pairs_matrix_indexed(incumbent_pairs, None, n_jobs, np.nan),
+    python_features, _labels, _nameless_features = many_pairs_featurize(
+        [(left, right, 0) for left, right in signature_pairs],
+        dataset,
+        FeaturizationInfo(),
+        n_jobs=int(n_jobs),
+        chunk_size=max(1, len(signature_pairs)),
+        nan_value=np.nan,
+        runtime_context=RuntimeContext(
+            operation="verification_full_predict_arrow_python_features",
+            backend="python",
+            run_id="verification-full-predict-arrow-python-features",
+        ),
+    )
+    python_features = np.asarray(
+        python_features,
         dtype=np.float64,
     )
     arrow_features = np.asarray(
@@ -250,10 +312,18 @@ def _feature_constraint_report(
         dtype=np.float64,
     )
     return {
-        "pair_count": int(len(incumbent_pairs)),
-        "feature_matrix": _numeric_report(incumbent_features, arrow_features, treat_nan_as_mismatch=True),
+        "pair_count": int(len(signature_pairs)),
+        "reference_backend": "python_anddata",
+        "candidate_backend": "rust_arrow",
+        "feature_matrix": _numeric_report(
+            python_features,
+            arrow_features,
+            treat_nan_as_mismatch=True,
+            atol=1e-6,
+            exact_integer_reference=True,
+        ),
         "constraints": _constraint_report(
-            incumbent_featurizer,
+            dataset,
             arrow_featurizer,
             signature_ids,
             n_jobs=n_jobs,
@@ -298,30 +368,93 @@ def _write_raw_planner_indexes_and_layout(
     return indexed_paths, index_metrics, raw_planner_arrow_physical_layout(indexed_paths)
 
 
+def _resolve_parity_name_counts_index(
+    signatures: Mapping[str, Any],
+    *,
+    output_dir: Path,
+    supplied_index: Path | None,
+) -> tuple[str, str]:
+    """Resolve one current name-count index shared by both parity routes."""
+
+    if supplied_index is not None:
+        from s2and.arrow_inputs import require_name_counts_index_artifact
+
+        index_path = require_name_counts_index_artifact(
+            supplied_index,
+            context="full prediction Arrow parity name counts",
+            producer_hint="pass a public-format-1 manifest-backed --name-counts-index",
+        )
+        return index_path, "supplied"
+
+    from scripts.arrow_conversion_helpers import write_bounded_name_counts_index
+
+    index_path, _logical_sha256 = write_bounded_name_counts_index(signatures, output_dir)
+    return index_path, "bounded_generated"
+
+
+def _validated_release_parity_inputs(args: argparse.Namespace, plan: Mapping[str, Any]) -> dict[str, Any]:
+    fixture_dir = Path(args.fixture_dir).resolve()
+    if fixture_dir != plan["fixture_dir"]:
+        raise ValueError("Parity fixture directory does not match the frozen evaluation plan")
+    observed_workload = {
+        "block_size": int(args.block_size),
+        "compare_features": bool(args.compare_features),
+        "include_specter": not bool(args.no_specter),
+        "n_jobs": int(args.n_jobs),
+        "total_ram_bytes": int(args.total_ram_bytes),
+        "use_cluster_seeds": bool(args.use_cluster_seeds),
+    }
+    if observed_workload != plan["workload"]:
+        raise ValueError("Parity workload does not match the frozen evaluation plan")
+
+    meta = _load_json(fixture_dir / "meta.json")
+    if not isinstance(meta, Mapping) or set(meta) != {"block", "dataset", "paths"}:
+        raise ValueError("Parity meta.json must contain exactly block, dataset, and paths")
+    if meta["dataset"] != plan["dataset"] or meta["block"] != plan["block"]:
+        raise ValueError("Parity fixture dataset or block does not match the frozen evaluation plan")
+    raw_paths = meta["paths"]
+    if not isinstance(raw_paths, Mapping) or set(raw_paths) != set(plan["files"]):
+        raise ValueError("Parity fixture file roles do not match the frozen evaluation plan")
+    for role, (expected_path, expected_sha256) in plan["files"].items():
+        observed_path = _resolve_fixture_path(fixture_dir, raw_paths[role]).resolve()
+        if observed_path != expected_path or sha256_file(observed_path) != expected_sha256:
+            raise ValueError(f"Parity fixture {role} does not match the frozen evaluation plan")
+    return dict(meta)
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     os.environ.setdefault("S2AND_BACKEND", "rust")
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
-    os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
+    evaluation_plan_path = Path(args.evaluation_plan).resolve()
+    evaluation_plan = _load_evaluation_plan(evaluation_plan_path)
+    binding = load_run_binding(Path(args.run_binding).resolve())
+    require_run_binding_matches(
+        binding,
+        evaluation_plan=evaluation_plan_path,
+        candidate_model_dir=Path(args.model_path).resolve(),
+    )
+    meta = _validated_release_parity_inputs(args, evaluation_plan.parity)
 
+    from s2and.arrow_inputs import (
+        ArrowDataset,
+        build_arrow_artifact_manifest,
+        write_arrow_artifact_manifest,
+    )
     from s2and.data import ANDData
     from s2and.feature_port import (
-        _get_rust_featurizer,
-        build_rust_featurizer_from_arrow_paths,
-        clear_rust_featurizer_cache,
-    )
-    from s2and.incremental_linking.feature_block import (
-        write_name_counts_arrow,
-        write_name_counts_index,
+        build_rust_featurizer_from_arrow_dataset,
+        evict_rust_featurizer,
     )
     from s2and.production_model import load_production_model
-    from s2and.text import set_fasttext_loading_enabled
-    from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
-
-    set_fasttext_loading_enabled(False)
+    from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
     timings: dict[str, float] = {}
-    meta = _load_json(args.fixture_dir / "meta.json")
     block_name = str(meta["block"])
+
+    start = time.perf_counter()
+    clusterer = load_production_model(args.model_path)
+    clusterer.n_jobs = int(args.n_jobs)
+    timings["load_model_seconds"] = time.perf_counter() - start
 
     start = time.perf_counter()
     signatures = _load_json(_fixture_meta_path(meta, args.fixture_dir, "signatures"))
@@ -352,6 +485,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     start = time.perf_counter()
+    name_counts_index_path, name_counts_source = _resolve_parity_name_counts_index(
+        filtered_signatures,
+        output_dir=args.output_dir / "name_artifacts",
+        supplied_index=args.name_counts_index,
+    )
+    timings["prepare_name_counts_index_seconds"] = time.perf_counter() - start
+
+    start = time.perf_counter()
     dataset = ANDData(
         signatures=filtered_signatures,
         papers=filtered_papers,
@@ -359,17 +500,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         mode="inference",
         specter_embeddings=filtered_specter,
         clusters=None,
-        block_type="s2",
         train_pairs=None,
         val_pairs=None,
         test_pairs=None,
         n_jobs=int(args.n_jobs),
-        load_name_counts=True,
+        name_counts_index=name_counts_index_path,
         preprocess=True,
         random_seed=42,
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
     )
     if cluster_seeds_require:
         dataset.cluster_seeds_require = cluster_seeds_require
@@ -377,7 +516,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     timings["anddata_subset_seconds"] = time.perf_counter() - start
 
     start = time.perf_counter()
-    arrow_paths = write_feature_block_arrow_from_anddata(
+    arrow_paths = write_raw_planner_arrow_from_anddata(
         dataset,
         args.output_dir,
         signature_ids=selected_signature_ids,
@@ -392,26 +531,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     timings["write_raw_planner_indexes_seconds"] = time.perf_counter() - start
 
-    start = time.perf_counter()
-    name_artifact_dir = args.name_artifact_dir or args.output_dir
-    name_counts_artifact_dir = name_artifact_dir
-    name_counts_arrow_path, name_counts_arrow_metrics = write_name_counts_arrow(name_counts_artifact_dir)
-    arrow_paths["name_counts"] = name_counts_arrow_path
-    timings["write_name_counts_arrow_seconds"] = time.perf_counter() - start
-
-    start = time.perf_counter()
-    name_counts_index_path, name_counts_index_metrics = write_name_counts_index(name_counts_artifact_dir)
     arrow_paths["name_counts_index"] = name_counts_index_path
-    timings["write_name_counts_index_seconds"] = time.perf_counter() - start
+    name_counts_index_metrics = {"source": name_counts_source}
+    timings["write_name_counts_index_seconds"] = 0.0
 
     start = time.perf_counter()
-    clusterer = load_production_model(args.model_path)
-    clusterer.n_jobs = int(args.n_jobs)
-    clusterer.use_cache = False
-    timings["load_model_seconds"] = time.perf_counter() - start
+    arrow_manifest = build_arrow_artifact_manifest(arrow_paths, args.output_dir)
+    arrow_paths["manifest"] = str(write_arrow_artifact_manifest(arrow_manifest, args.output_dir))
+    timings["write_arrow_manifest_seconds"] = time.perf_counter() - start
 
     block_dict = {block_name: selected_signature_ids}
-    clear_rust_featurizer_cache()
     start = time.perf_counter()
     incumbent_dists = clusterer.make_distance_matrices(
         block_dict,
@@ -421,42 +550,52 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         disable_tqdm=True,
     )
     timings["incumbent_make_dists_seconds"] = time.perf_counter() - start
-    incumbent_featurizer = _get_rust_featurizer(dataset) if args.compare_features else None
 
-    clear_rust_featurizer_cache()
-    start = time.perf_counter()
-    arrow_featurizer = build_rust_featurizer_from_arrow_paths(
-        arrow_paths,
-        signature_ids=selected_signature_ids,
-        name_tuples=getattr(dataset, "name_tuples", "filtered"),
-        load_name_counts=True,
-        preprocess=True,
-        num_threads=int(args.n_jobs),
-    )
-    timings["arrow_featurizer_seconds"] = time.perf_counter() - start
-
-    start = time.perf_counter()
-    arrow_dists = clusterer.make_distance_matrices_from_rust_featurizer(
-        block_dict,
-        arrow_featurizer,
-        partial_supervision={},
-        incremental_dont_use_cluster_seeds=False,
-        total_ram_bytes=int(args.total_ram_bytes),
-    )
-    timings["arrow_make_dists_seconds"] = time.perf_counter() - start
-
-    feature_constraint_comparison: dict[str, Any] | None = None
-    if args.compare_features:
-        if incumbent_featurizer is None:
-            raise RuntimeError("missing incumbent featurizer for feature comparison")
+    evict_rust_featurizer(dataset)
+    with ArrowDataset.open(
+        args.output_dir,
+        require_specter=not args.no_specter,
+        require_name_counts_index=True,
+    ) as arrow_dataset:
         start = time.perf_counter()
-        feature_constraint_comparison = _feature_constraint_report(
-            incumbent_featurizer,
-            arrow_featurizer,
-            selected_signature_ids,
-            n_jobs=int(args.n_jobs),
+        arrow_featurizer = build_rust_featurizer_from_arrow_dataset(
+            arrow_dataset,
+            signature_ids=selected_signature_ids,
+            name_tuples=getattr(dataset, "name_tuples", None),
+            preprocess=True,
+            num_threads=int(args.n_jobs),
         )
-        timings["feature_constraint_compare_seconds"] = time.perf_counter() - start
+        timings["arrow_featurizer_seconds"] = time.perf_counter() - start
+
+        start = time.perf_counter()
+        arrow_dists = clusterer.make_distance_matrices_from_rust_featurizer(
+            block_dict,
+            arrow_featurizer,
+            partial_supervision={},
+            incremental_dont_use_cluster_seeds=False,
+            total_ram_bytes=int(args.total_ram_bytes),
+        )
+        timings["arrow_make_dists_seconds"] = time.perf_counter() - start
+
+        feature_constraint_comparison: dict[str, Any] | None = None
+        if args.compare_features:
+            start = time.perf_counter()
+            feature_constraint_comparison = _feature_constraint_report(
+                dataset,
+                arrow_featurizer,
+                selected_signature_ids,
+                n_jobs=int(args.n_jobs),
+            )
+            timings["feature_constraint_compare_seconds"] = time.perf_counter() - start
+
+        start = time.perf_counter()
+        arrow_clusters, _ = clusterer.predict_from_rust_featurizer(
+            block_dict,
+            arrow_featurizer,
+            dists=arrow_dists,
+            partial_supervision={},
+        )
+        timings["arrow_cluster_from_dists_seconds"] = time.perf_counter() - start
 
     start = time.perf_counter()
     incumbent_clusters, _ = clusterer.predict(
@@ -467,15 +606,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         use_s2_clusters=False,
     )
     timings["incumbent_cluster_from_dists_seconds"] = time.perf_counter() - start
-
-    start = time.perf_counter()
-    arrow_clusters, _ = clusterer.predict_from_rust_featurizer(
-        block_dict,
-        arrow_featurizer,
-        dists=arrow_dists,
-        partial_supervision={},
-    )
-    timings["arrow_cluster_from_dists_seconds"] = time.perf_counter() - start
 
     distance_comparison = {
         block_key: _numeric_report(
@@ -500,11 +630,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "include_specter": not bool(args.no_specter),
         "use_cluster_seeds": bool(args.use_cluster_seeds),
         "cluster_seeds_require_count": int(len(cluster_seeds_require)),
-        "arrow_paths": arrow_paths,
+        "arrow_paths": dict(arrow_paths),
         "physical_layout": physical_layout,
         "raw_planner_batch_indexes": raw_planner_index_metrics,
-        "name_counts_arrow_metrics": name_counts_arrow_metrics,
+        "run_binding_sha256": binding["run_binding_sha256"],
         "name_counts_index_metrics": name_counts_index_metrics,
+        "name_counts_source": name_counts_source,
         "timings_seconds": {key: float(value) for key, value in timings.items()},
         "distance_comparison": distance_comparison,
         "feature_constraint_comparison": feature_constraint_comparison,
@@ -523,10 +654,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture-dir", type=Path, required=True)
+    parser.add_argument("--evaluation-plan", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
-    parser.add_argument("--name-artifact-dir", type=Path, default=None)
-    parser.add_argument("--model-path", type=Path, default=Path("s2and/data/production_model_v1.21"))
+    parser.add_argument(
+        "--name-counts-index",
+        type=Path,
+        default=None,
+        help="Optional existing public-format-1 canonical name-count index; otherwise a bounded index is generated.",
+    )
+    parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
+    parser.add_argument("--run-binding", type=Path, required=True)
     parser.add_argument("--block-size", type=int, required=True)
     parser.add_argument("--n-jobs", type=int, default=20)
     parser.add_argument("--total-ram-bytes", type=int, default=1_000_000_000_000)
@@ -545,19 +683,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--use-cluster-seeds", action="store_true")
     parser.add_argument("--no-specter", action="store_true")
-    parser.add_argument("--allow-mismatch", action="store_true")
     return parser
 
 
 def main() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
+    if args.output_json.exists():
+        raise FileExistsError(f"Report output already exists: {args.output_json}")
 
     report = run(args)
-    args.output_json.parent.mkdir(parents=True, exist_ok=True)
-    args.output_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if not args.allow_mismatch:
-        _assert_exact(report)
+    _assert_exact(report)
+    _write_fresh_json(args.output_json, report)
     print(json.dumps({k: v for k, v in report.items() if k not in {"incumbent_clusters", "arrow_clusters"}}, indent=2))
 
 

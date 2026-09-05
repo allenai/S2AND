@@ -10,34 +10,35 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import scripts.production.model.linker_train_calibrate_eval as replay
 from s2and.incremental_linking.logistic_gate import (
     LOGISTIC_GATE_CLASSES,
     LOGISTIC_GATE_ERROR_WEIGHTS,
     NumpyLogisticGate,
+    load_logistic_gate_config,
     logistic_gate_config,
 )
 from s2and.incremental_linking_training.classic import (
     OfficialBundle,
-    _apply_classic_train_holdout_filter,
     _apply_classic_train_row_cap,
     _build_classic_classifier,
     _classic_feature_matrix,
     _drop_unlabeled_singleton_orcid_rows,
     _evaluate_logistic_manual_holdout,
     _evaluate_logistic_scored_windows,
+    _filter_candidate_rows_to_retrieval_top_k,
     _fit_multiclass_logistic_gate,
     _fold_standard_scaler_into_logistic,
     _iter_extra_eval_paths,
     _promoted_stratified_gate_spec,
     _resolve_classic_monotone_constraints,
     _resolve_path,
-    _score_classic_stratified_eval_test,
+    _score_classic_stratified_rows,
     _score_eval_candidate_rows,
     _score_query_choices,
     _summarize_classic_stratified_predictions,
     _summarize_training_gate_buckets,
     _summary_key_for_eval_dataset,
+    _validate_stratified_base_identity_split_disjointness,
     format_classic_selected_gate_tables,
     load_bundle,
 )
@@ -46,35 +47,16 @@ from s2and.incremental_linking_training.classic import (
 )
 
 
-def test_classic_feature_matrix_requires_materialized_target_features() -> None:
-    """Promoted feature tables must already contain the target feature columns."""
-
-    df = pd.DataFrame([{"cluster_size": 17}])
-
-    with pytest.raises(ValueError, match=r"missing_features=\['cluster_size_log'\]"):
-        _classic_feature_matrix(df, ("cluster_size", "cluster_size_log"))
-
-
 def test_score_query_choices_preserves_float64_probability_tie_breaking() -> None:
     rows = pd.DataFrame(
-        [
-            {
-                "query_group_id": "q",
-                "dataset": "unit",
-                "query_view": "full",
-                "candidate_component_key": "slightly_higher",
-                "retrieval_rank": 2,
-                "label": 1,
-            },
-            {
-                "query_group_id": "q",
-                "dataset": "unit",
-                "query_view": "full",
-                "candidate_component_key": "float32_tie_lower_rank",
-                "retrieval_rank": 1,
-                "label": 0,
-            },
-        ]
+        {
+            "query_group_id": ["q", "q"],
+            "dataset": ["unit", "unit"],
+            "query_view": ["full", "full"],
+            "candidate_component_key": ["slightly_higher", "float32_tie_lower_rank"],
+            "retrieval_rank": [2, 1],
+            "label": [1, 0],
+        }
     )
 
     choices = _score_query_choices(
@@ -136,28 +118,16 @@ def test_official_table_loader_reads_parquet_with_usecols(tmp_path: Path) -> Non
 
 def test_drop_unlabeled_singleton_orcid_rows_reports_removed_queries() -> None:
     rows = pd.DataFrame(
-        [
-            {
-                "query_group_id": "drop_me",
-                "label": 0,
-                "supervision_type": "unlabeled_singleton_orcid",
-            },
-            {
-                "query_group_id": "keep_me",
-                "label": 1,
-                "supervision_type": "positive_repeat_orcid",
-            },
-            {
-                "query_group_id": "mixed",
-                "label": 0,
-                "supervision_type": "unlabeled_singleton_orcid",
-            },
-            {
-                "query_group_id": "mixed",
-                "label": 1,
-                "supervision_type": "positive_repeat_orcid",
-            },
-        ]
+        {
+            "query_group_id": ["drop_me", "keep_me", "mixed", "mixed"],
+            "label": [0, 1, 0, 1],
+            "supervision_type": [
+                "unlabeled_singleton_orcid",
+                "positive_repeat_orcid",
+                "unlabeled_singleton_orcid",
+                "positive_repeat_orcid",
+            ],
+        }
     )
 
     cleaned, summary = _drop_unlabeled_singleton_orcid_rows(rows, context="unit")
@@ -168,25 +138,103 @@ def test_drop_unlabeled_singleton_orcid_rows_reports_removed_queries() -> None:
     assert summary["queries_removed"] == 1
 
 
+def test_filter_candidate_rows_to_retrieval_top_k_rejects_invalid_ranks() -> None:
+    rows = pd.DataFrame({"retrieval_rank": [1, 0, 1.5, "bad"]})
+
+    with pytest.raises(ValueError, match="retrieval_rank must contain positive integers"):
+        _filter_candidate_rows_to_retrieval_top_k(
+            rows,
+            retrieval_top_k=1,
+            context="unit",
+        )
+
+
+def _stratified_bundle(tmp_path):
+    """Create empty candidate sources; scenarios fill only the rows they dispute."""
+    root = tmp_path / "bundle"
+    spec = {
+        "classic_gate_source_path": "calibration/gate_rows.csv.gz",
+        "s2and_eval_path": "test/s2and_eval_rows.csv.gz",
+        "hwang_eval_path": "test/hwang_eval_rows.csv.gz",
+    }
+    columns = [
+        "query_group_id",
+        "base_group_id",
+        "dataset",
+        "query_view",
+        "candidate_component_key",
+        "retrieval_rank",
+        "label",
+    ]
+    for relative_path in spec.values():
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(columns=columns).to_csv(path, index=False, compression="gzip")
+    assignments = root / "calibration" / "stratified_eval_test_split" / "assignments.csv"
+    assignments.parent.mkdir(parents=True)
+    return OfficialBundle(root, "demo", {}, {"classic": spec}, {}), assignments
+
+
+def _score_stratified_bundle(bundle, assignments, *, split="test"):
+    """Score constant probabilities so source authority alone determines targets."""
+    return _score_classic_stratified_rows(
+        bundle,
+        bundle.models["classic"],
+        {"assignments_path": str(assignments.relative_to(bundle.root))},
+        lambda features: np.ones(len(features), dtype=np.float64),
+        (),
+        splits=(split,),
+        include_calibration_source=True,
+    )
+
+
+def test_stratified_gate_scoring_uses_artifact_retrieval_top_k(tmp_path: Path) -> None:
+    bundle, split_path = _stratified_bundle(tmp_path)
+    spec = bundle.models["classic"]
+    spec["retrieval_top_k"] = 1
+    hwang_path = bundle.root / spec["hwang_eval_path"]
+    pd.DataFrame(
+        {
+            "query_group_id": ["q", "q"],
+            "base_group_id": ["base", "base"],
+            "dataset": ["h_wang", "h_wang"],
+            "query_view": ["full", "full"],
+            "candidate_component_key": ["inside_window", "positive_outside_window"],
+            "retrieval_rank": [1, 30],
+            "label": [0, 1],
+        },
+    ).to_csv(hwang_path, index=False, compression="gzip")
+    pd.DataFrame(
+        [
+            {
+                "query_group_id": "q",
+                "source_key": "hwang_eval",
+                "split": "calibration_fit",
+                "base_group_id": "base",
+            }
+        ]
+    ).to_csv(split_path, index=False)
+    scored = _score_stratified_bundle(bundle, split_path, split="calibration_fit")
+
+    assert scored.rows["candidate_component_key"].tolist() == ["inside_window"]
+    assert scored.choices.loc[0, "query_safe_target"] == 0
+    assert not bool(scored.assignments.loc[0, "has_positive_candidate"])
+
+
 def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibration_rows(
     tmp_path: Path,
 ) -> None:
     """Calibration-source rows must not duplicate active public test rows."""
 
-    bundle_root = tmp_path / "bundle"
-    calibration_path = bundle_root / "calibration" / "gate_rows.csv.gz"
-    hwang_path = bundle_root / "test" / "hwang_eval_rows.csv.gz"
-    s2and_path = bundle_root / "test" / "s2and_eval_rows.csv.gz"
-    split_path = bundle_root / "calibration" / "stratified_eval_test_split" / "combined_query_split_assignments.csv"
-    calibration_path.parent.mkdir(parents=True)
-    hwang_path.parent.mkdir(parents=True)
-    split_path.parent.mkdir(parents=True)
-
-    row_columns = ["query_group_id", "dataset", "query_view", "candidate_component_key", "retrieval_rank", "label"]
+    bundle, split_path = _stratified_bundle(tmp_path)
+    spec = bundle.models["classic"]
+    calibration_path = bundle.root / spec["classic_gate_source_path"]
+    hwang_path = bundle.root / spec["hwang_eval_path"]
     pd.DataFrame(
         [
             {
                 "query_group_id": "h:q1",
+                "base_group_id": "h:b1",
                 "dataset": "h_wang",
                 "query_view": "full",
                 "candidate_component_key": "c1",
@@ -194,12 +242,12 @@ def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibrati
                 "label": 0,
             }
         ],
-        columns=row_columns,
     ).to_csv(calibration_path, index=False, compression="gzip")
     pd.DataFrame(
         [
             {
                 "query_group_id": "h:q1",
+                "base_group_id": "h:b1",
                 "dataset": "h_wang",
                 "query_view": "full",
                 "candidate_component_key": "c1",
@@ -207,15 +255,14 @@ def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibrati
                 "label": 1,
             }
         ],
-        columns=row_columns,
     ).to_csv(hwang_path, index=False, compression="gzip")
-    pd.DataFrame([], columns=row_columns).to_csv(s2and_path, index=False, compression="gzip")
     pd.DataFrame(
         [
             {
                 "query_group_id": "h:q1",
                 "source_key": "hwang_eval",
                 "split": "test",
+                "base_group_id": "h:b1",
                 "source_stratum": "hwang_block",
                 "has_positive_candidate": False,
                 "positive_rank_bucket": "no_positive",
@@ -225,30 +272,7 @@ def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibrati
             }
         ]
     ).to_csv(split_path, index=False)
-    spec = {
-        "classic_gate_source_path": "calibration/gate_rows.csv.gz",
-        "s2and_eval_path": "test/s2and_eval_rows.csv.gz",
-        "hwang_eval_path": "test/hwang_eval_rows.csv.gz",
-    }
-    bundle = OfficialBundle(
-        root=bundle_root,
-        bundle_name="demo",
-        assets={},
-        models={"classic": spec},
-        expected_metrics={},
-    )
-
-    class AlwaysLinkModel:
-        def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
-            return np.repeat([[0.0, 1.0]], repeats=len(features), axis=0)
-
-    scored = _score_classic_stratified_eval_test(
-        bundle,
-        spec,
-        {"assignments_path": "calibration/stratified_eval_test_split/combined_query_split_assignments.csv"},
-        AlwaysLinkModel(),  # type: ignore[arg-type]
-        (),
-    )
+    scored = _score_stratified_bundle(bundle, split_path, split="test")
 
     choice = scored.choices.set_index("query_case_id").loc["h:q1"]
     assignment = scored.assignments.set_index("query_group_id").loc["h:q1"]
@@ -258,49 +282,38 @@ def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibrati
     assert assignment["positive_rank_bucket"] == "positive_first"
 
 
-def test_promoted_stratified_gate_spec_rejects_removed_threshold_calibration() -> None:
-    """Promoted gate config should not silently preserve old threshold calibration settings."""
-
-    with pytest.raises(ValueError, match="no longer supports threshold calibration keys"):
-        _promoted_stratified_gate_spec(
-            {
-                "stratified_eval_test_split": {"test_split": "test"},
-                "promoted_stratified_gate": {
-                    "mode": "promoted_logistic_topk_multiclass_l2",
-                    "calibration_splits": ["calibration_fit"],
-                    "test_split": "test",
-                    "fixed_grid_step": 0.1,
-                },
-            }
-        )
-
-    with pytest.raises(ValueError, match="mode must be"):
-        _promoted_stratified_gate_spec(
-            {
-                "promoted_stratified_gate": {
-                    "mode": "full_calibration_fixed_grid_4score_2margin",
-                    "calibration_splits": ["calibration_fit"],
+def test_promoted_stratified_gate_spec_rejects_ambiguous_or_leaky_splits() -> None:
+    cases = (
+        ("leaky-test", ["calibration_fit", "test"], "test", "must not include test_split"),
+        ("duplicate", ["calibration_fit", "calibration_fit"], "test", "must not contain duplicates"),
+        ("empty-calibration", [""], "test", "must contain nonempty names"),
+        ("empty-test", ["calibration_fit"], "", "test_split must be nonempty"),
+    )
+    for case_id, calibration_splits, test_split, message in cases:
+        try:
+            _promoted_stratified_gate_spec(
+                {
+                    "promoted_stratified_gate": {
+                        "calibration_splits": calibration_splits,
+                        "test_split": test_split,
+                    }
                 }
-            }
-        )
+            )
+        except ValueError as error:
+            assert message in str(error), f"{case_id}: {error}"
+        else:
+            raise AssertionError(f"{case_id}: ambiguous/leaky split was accepted")
 
 
 def test_apply_classic_train_row_cap_preserves_positive_queries() -> None:
     """Classic row-cap filtering should keep every positive query represented."""
 
     train_df = pd.DataFrame(
-        [
-            {"query_group_id": "q1", "retrieval_rank": 1, "label": 0},
-            {"query_group_id": "q1", "retrieval_rank": 2, "label": 0},
-            {"query_group_id": "q1", "retrieval_rank": 6, "label": 1},
-            {"query_group_id": "q1", "retrieval_rank": 8, "label": 0},
-            {"query_group_id": "q2", "retrieval_rank": 1, "label": 0},
-            {"query_group_id": "q2", "retrieval_rank": 3, "label": 1},
-            {"query_group_id": "q2", "retrieval_rank": 7, "label": 0},
-            {"query_group_id": "q3", "retrieval_rank": 1, "label": 0},
-            {"query_group_id": "q3", "retrieval_rank": 5, "label": 0},
-            {"query_group_id": "q3", "retrieval_rank": 7, "label": 0},
-        ]
+        {
+            "query_group_id": [1, 1, 1, 1, "q2", "q2", "q2", 3, 3, 3],
+            "retrieval_rank": [1, 2, 6, 8, 1, 3, 7, 1, 5, 7],
+            "label": [0, 0, 1, 0, 0, 1, 0, 0, 0, 0],
+        }
     )
     selected, summary = _apply_classic_train_row_cap(
         train_df,
@@ -308,108 +321,70 @@ def test_apply_classic_train_row_cap_preserves_positive_queries() -> None:
         min_train_limit=5,
     )
     assert selected.groupby("query_group_id", sort=False)["retrieval_rank"].max().to_dict() == {
-        "q1": 6,
+        1: 6,
         "q2": 3,
-        "q3": 5,
+        3: 5,
     }
     assert summary is not None
     assert summary["lost_positive_queries"] == 0
     assert summary["positive_rows_after"] == 2
-
-
-def test_apply_classic_train_row_cap_matches_numeric_query_ids() -> None:
-    train_df = pd.DataFrame(
-        [
-            {"query_group_id": 1, "retrieval_rank": 1, "label": 0},
-            {"query_group_id": 1, "retrieval_rank": 6, "label": 1},
-            {"query_group_id": 2, "retrieval_rank": 1, "label": 0},
-            {"query_group_id": 2, "retrieval_rank": 3, "label": 1},
-        ]
-    )
-
-    selected, summary = _apply_classic_train_row_cap(
-        train_df,
-        rule_name="max_of_min_limit_and_first_positive_rank",
-        min_train_limit=5,
-    )
-
-    assert selected.groupby("query_group_id", sort=False)["retrieval_rank"].max().to_dict() == {1: 6, 2: 3}
-    assert summary is not None
     assert summary["queries_with_row_cap_above_min"] == 1
-    assert summary["lost_positive_queries"] == 0
 
 
-def test_apply_classic_train_holdout_filter_removes_eval_identities() -> None:
-    """Classic training should drop rows that share query or base IDs with held-out rows."""
+def test_stratified_split_disjointness_rejects_base_identity_spanning_splits() -> None:
+    """Masked views of one base query must not straddle calibration and test."""
 
-    train_df = pd.DataFrame(
-        [
-            {"query_group_id": "q_keep", "base_group_id": "b_keep", "label": 1},
-            {"query_group_id": "q_exact", "base_group_id": "b_train", "label": 1},
-            {"query_group_id": "q_base_pos", "base_group_id": "b_eval", "label": 1},
-            {"query_group_id": "q_base_neg", "base_group_id": "b_eval", "label": 0},
-        ]
+    assignments = pd.DataFrame(
+        {
+            "query_group_id": ["q1:full", "q1:initial_only", "q2:full"],
+            "base_group_id": ["b1", "b1", "b2"],
+            "split": ["test", "calibration_check", "test"],
+        }
     )
 
-    filtered, summary = _apply_classic_train_holdout_filter(
-        train_df,
-        holdout_query_group_ids={"q_exact"},
-        holdout_base_group_ids={"b_eval"},
-        holdout_sources=[{"source": "demo", "query_groups": 1, "base_groups": 1}],
+    with pytest.raises(ValueError, match="base_group_id values in multiple splits.*count=1"):
+        _validate_stratified_base_identity_split_disjointness(assignments)
+
+
+def test_stratified_split_disjointness_accepts_per_base_assignments() -> None:
+    """Views of one base query landing in one split (or repeated there) are fine."""
+
+    assignments = pd.DataFrame(
+        {
+            "query_group_id": ["q1:full", "q1:initial_only", "q2:full"],
+            "base_group_id": ["b1", "b1", "b2"],
+            "split": ["test", "test", "calibration_fit"],
+        }
     )
 
-    assert filtered["query_group_id"].tolist() == ["q_keep"]
-    assert summary["rows_removed"] == 3
-    assert summary["queries_removed"] == 3
-    assert summary["positive_rows_removed"] == 2
-    assert summary["positive_queries_removed"] == 2
-    assert summary["overlapping_query_groups"] == 1
-    assert summary["overlapping_base_groups"] == 1
-    assert summary["holdout_sources"] == [{"source": "demo", "query_groups": 1, "base_groups": 1}]
+    _validate_stratified_base_identity_split_disjointness(assignments)
+
+
+@pytest.mark.parametrize(
+    "assignments",
+    (
+        pd.DataFrame([{"base_group_id": "", "split": "test"}]),
+        pd.DataFrame([{"base_group_id": "b1", "split": None}]),
+    ),
+)
+def test_stratified_split_disjointness_requires_complete_identity_keys(assignments: pd.DataFrame) -> None:
+    with pytest.raises(ValueError, match="require a nonempty"):
+        _validate_stratified_base_identity_split_disjointness(assignments)
 
 
 def test_evaluate_logistic_manual_holdout_scores_fresh_candidates() -> None:
     """Manual holdout evaluation should score fresh candidates through the logistic gate."""
 
     manual_holdout = pd.DataFrame(
-        [
-            {
-                "query_case_id": "q1",
-                "dataset": "demo",
-                "query_view": "full",
-                "review_bucket": "rescue",
-                "candidate_component_key": "wrong",
-                "retrieval_rank": 1,
-                "binary_safe_link_target": 0,
-            },
-            {
-                "query_case_id": "q1",
-                "dataset": "demo",
-                "query_view": "full",
-                "review_bucket": "rescue",
-                "candidate_component_key": "right",
-                "retrieval_rank": 2,
-                "binary_safe_link_target": 1,
-            },
-            {
-                "query_case_id": "q2",
-                "dataset": "demo",
-                "query_view": "full",
-                "review_bucket": "easy",
-                "candidate_component_key": "negative",
-                "retrieval_rank": 1,
-                "binary_safe_link_target": 0,
-            },
-            {
-                "query_case_id": "q2",
-                "dataset": "demo",
-                "query_view": "full",
-                "review_bucket": "easy",
-                "candidate_component_key": "distractor",
-                "retrieval_rank": 2,
-                "binary_safe_link_target": 0,
-            },
-        ]
+        {
+            "query_case_id": ["q1", "q1", "q2", "q2"],
+            "dataset": ["demo", "demo", "demo", "demo"],
+            "query_view": ["full", "full", "full", "full"],
+            "review_bucket": ["rescue", "rescue", "easy", "easy"],
+            "candidate_component_key": ["wrong", "right", "negative", "distractor"],
+            "retrieval_rank": [1, 2, 1, 2],
+            "binary_safe_link_target": [0, 1, 0, 0],
+        }
     )
     gate_config = logistic_gate_config(
         feature_names=("chosen_probability",),
@@ -423,7 +398,7 @@ def test_evaluate_logistic_manual_holdout_scores_fresh_candidates() -> None:
     summary = _evaluate_logistic_manual_holdout(
         manual_holdout,
         probabilities=np.array([0.1, 0.9, 0.1, 0.05], dtype=np.float64),
-        gate_config=gate_config,
+        gate=load_logistic_gate_config(gate_config),
     )
 
     assert summary["overall"]["balanced_accuracy"] == 1.0
@@ -448,7 +423,7 @@ def test_logistic_eval_summaries_accept_empty_candidate_tables() -> None:
     window_summary = _evaluate_logistic_scored_windows(
         candidate_rows,
         probabilities=np.asarray([], dtype=np.float64),
-        gate_config=gate_config,
+        gate=load_logistic_gate_config(gate_config),
     )
 
     assert window_summary["5"]["overall"]["n_queries"] == 0
@@ -468,59 +443,36 @@ def test_logistic_eval_summaries_accept_empty_candidate_tables() -> None:
     manual_summary = _evaluate_logistic_manual_holdout(
         manual_holdout,
         probabilities=np.asarray([], dtype=np.float64),
-        gate_config=gate_config,
+        gate=load_logistic_gate_config(gate_config),
     )
 
     assert manual_summary["overall"]["n_queries"] == 0
     assert manual_summary["by_bucket"] == {}
 
 
-def test_classic_feature_matrix_preserves_present_derivable_features() -> None:
-    """Stored feature columns should be used as-is even when they are derivable."""
+def test_classic_feature_matrix_preserves_present_values_and_missing_cells() -> None:
+    """Stored values stay authoritative and missing cells remain NaN for LightGBM."""
 
-    df = pd.DataFrame([{"cluster_size": 17, "cluster_size_log": 99.0}])
-
-    features = _classic_feature_matrix(df, ("cluster_size_log",))
-
-    assert features.iloc[0]["cluster_size_log"] == 99.0
-
-
-def test_classic_feature_matrix_rejects_missing_required_features() -> None:
-    """Absent non-runtime features should fail instead of becoming zero-valued signals."""
-
-    df = pd.DataFrame([{"title_overlap": 0.25}])
-
-    with pytest.raises(ValueError, match="missing required feature inputs"):
-        _classic_feature_matrix(df, ("title_overlap", "cluster_size"))
-
-
-def test_classic_feature_matrix_preserves_missing_feature_cells() -> None:
-    """Present active features with missing values should remain NaN for LightGBM."""
-
-    df = pd.DataFrame([{"title_overlap": None, "cluster_size": 17}])
-
-    features = _classic_feature_matrix(df, ("title_overlap", "cluster_size"))
+    df = pd.DataFrame([{"title_overlap": None, "cluster_size": 17, "cluster_size_log": 99.0}])
+    features = _classic_feature_matrix(df, ("title_overlap", "cluster_size", "cluster_size_log"))
 
     assert np.isnan(features.iloc[0]["title_overlap"])
     assert features.iloc[0]["cluster_size"] == 17.0
+    assert features.iloc[0]["cluster_size_log"] == 99.0
 
 
-def test_classic_feature_matrix_rejects_non_numeric_feature_cells() -> None:
-    """Present active features with malformed values should still fail."""
+def test_classic_feature_matrix_rejects_invalid_feature_tables() -> None:
+    """Missing, non-numeric, and infinite active features fail explicitly."""
 
-    df = pd.DataFrame([{"title_overlap": "not-a-number", "cluster_size": 17}])
-
-    with pytest.raises(ValueError, match="non-numeric feature values"):
-        _classic_feature_matrix(df, ("title_overlap", "cluster_size"))
-
-
-def test_classic_feature_matrix_rejects_infinite_feature_cells() -> None:
-    """LightGBM feature matrices should not contain infinities."""
-
-    df = pd.DataFrame([{"title_overlap": np.inf, "cluster_size": 17}])
-
-    with pytest.raises(ValueError, match="infinite feature values"):
-        _classic_feature_matrix(df, ("title_overlap", "cluster_size"))
+    cases = (
+        ({"cluster_size": 17}, ("cluster_size", "cluster_size_log"), r"missing_features=\['cluster_size_log'\]"),
+        ({"title_overlap": 0.25}, ("title_overlap", "cluster_size"), "missing required feature inputs"),
+        ({"title_overlap": "not-a-number", "cluster_size": 17}, ("title_overlap", "cluster_size"), "non-numeric"),
+        ({"title_overlap": np.inf, "cluster_size": 17}, ("title_overlap", "cluster_size"), "infinite"),
+    )
+    for row, features, message in cases:
+        with pytest.raises(ValueError, match=message):
+            _classic_feature_matrix(pd.DataFrame([row]), features)
 
 
 def test_load_bundle_requires_explicit_root(tmp_path: Path) -> None:
@@ -541,7 +493,11 @@ def test_load_bundle_requires_explicit_root(tmp_path: Path) -> None:
     assert bundle.expected_metrics == {}
 
 
-def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(tmp_path: Path) -> None:
+@pytest.mark.parametrize("assignment_base_group_id", ["rescue:b1", "wrong:b1"])
+def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(
+    tmp_path: Path,
+    assignment_base_group_id: str,
+) -> None:
     """Classic stratified scoring should refresh stale split targets from active labels."""
 
     bundle_root = tmp_path / "bundle"
@@ -557,6 +513,7 @@ def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(tm
     common_row = {
         "dataset": "demo",
         "query_view": "full",
+        "base_group_id": "rescue:b1",
         "candidate_component_key": "c1",
         "retrieval_rank": 1,
         "label": 0,
@@ -576,6 +533,7 @@ def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(tm
                 "query_group_id": "rescue:q1",
                 "source_key": "s2and_rescue_reviewed_eval",
                 "split": "test",
+                "base_group_id": assignment_base_group_id,
                 "manual_safe_target": 1,
                 "stratum_key": "s2and_block|has_pos=1|positive_first|multi_letter_first|multi_cand=0",
             }
@@ -597,16 +555,27 @@ def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(tm
         expected_metrics={},
     )
 
-    class AlwaysLinkModel:
-        def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
-            return np.repeat([[0.0, 1.0]], repeats=len(features), axis=0)
+    if assignment_base_group_id != "rescue:b1":
+        with pytest.raises(ValueError, match="base_group_id does not match source rows"):
+            _score_classic_stratified_rows(
+                bundle,
+                spec,
+                {"assignments_path": "calibration/stratified_eval_test_split/combined_query_split_assignments.csv"},
+                lambda features: np.ones(len(features), dtype=np.float64),
+                (),
+                splits=("test",),
+                include_calibration_source=True,
+            )
+        return
 
-    scored = _score_classic_stratified_eval_test(
+    scored = _score_classic_stratified_rows(
         bundle,
         spec,
         {"assignments_path": "calibration/stratified_eval_test_split/combined_query_split_assignments.csv"},
-        AlwaysLinkModel(),  # type: ignore[arg-type]
+        lambda features: np.ones(len(features), dtype=np.float64),
         (),
+        splits=("test",),
+        include_calibration_source=True,
     )
 
     row = scored.choices.set_index("query_case_id").loc["rescue:q1"]
@@ -710,30 +679,30 @@ def test_format_classic_selected_gate_tables_includes_requested_breakdowns() -> 
     assert "| has_positive_candidate | True | 2 | 1 | 1 | 0.2500 | 1 | 0 | 0 |" in tables
 
 
+def test_format_classic_selected_gate_tables_rejects_malformed_metrics() -> None:
+    summary = {
+        "stratified_eval_test_split": {
+            "test_breakdowns": {
+                "source_key": {},
+                "has_positive_candidate": {"True": 42},
+            }
+        }
+    }
+
+    with pytest.raises(TypeError, match=r"has_positive_candidate\['True'\] metrics must be a dict, got int"):
+        format_classic_selected_gate_tables(summary)
+
+
 def test_summarize_training_gate_buckets_counts_queries_and_rows() -> None:
     """Training bucket counts should reflect the post-filter query windows."""
 
     train_df = pd.DataFrame(
-        [
-            {
-                "query_group_id": "multi_multi",
-                "query_first_token": "anna",
-                "query_view": "full",
-                "candidate_component_key": "c1",
-            },
-            {
-                "query_group_id": "multi_multi",
-                "query_first_token": "anna",
-                "query_view": "full",
-                "candidate_component_key": "c2",
-            },
-            {
-                "query_group_id": "single_single",
-                "query_first_token": "a",
-                "query_view": "initial_only",
-                "candidate_component_key": "c3",
-            },
-        ]
+        {
+            "query_group_id": ["multi_multi", "multi_multi", "single_single"],
+            "query_first_token": ["anna", "anna", "a"],
+            "query_view": ["full", "full", "initial_only"],
+            "candidate_component_key": ["c1", "c2", "c3"],
+        }
     )
 
     summary = _summarize_training_gate_buckets(train_df)
@@ -748,56 +717,27 @@ def test_stratified_summary_tracks_gate_bucket_split_counts_and_errors() -> None
     """The promoted split summary should expose joint calibration-bucket metrics."""
 
     predictions = pd.DataFrame(
-        [
-            {
-                "query_case_id": "fit_pos",
-                "split": "calibration_fit",
-                "candidate_kind": "multi_candidate",
-                "first_name_bucket": "multi_letter_first",
-                "predicted_action": "link_candidate",
-                "query_safe_target": 1,
-                "chosen_candidate_target": 1,
-                "correct": 1,
-            },
-            {
-                "query_case_id": "check_neg",
-                "split": "calibration_check",
-                "candidate_kind": "multi_candidate",
-                "first_name_bucket": "single_letter_first",
-                "predicted_action": "abstain",
-                "query_safe_target": 0,
-                "chosen_candidate_target": 0,
-                "correct": 1,
-            },
-            {
-                "query_case_id": "test_false_abstain",
-                "split": "test",
-                "candidate_kind": "single_candidate",
-                "first_name_bucket": "multi_letter_first",
-                "predicted_action": "abstain",
-                "query_safe_target": 1,
-                "chosen_candidate_target": 1,
-                "correct": 0,
-            },
-            {
-                "query_case_id": "test_wrong_link",
-                "split": "test",
-                "candidate_kind": "single_candidate",
-                "first_name_bucket": "single_letter_first",
-                "predicted_action": "link_candidate",
-                "query_safe_target": 1,
-                "chosen_candidate_target": 0,
-                "correct": 0,
-            },
-        ]
+        {
+            "query_case_id": ["fit_pos", "check_neg", "test_false_abstain", "test_wrong_link"],
+            "split": ["calibration_fit", "calibration_check", "test", "test"],
+            "candidate_kind": ["multi_candidate", "multi_candidate", "single_candidate", "single_candidate"],
+            "first_name_bucket": [
+                "multi_letter_first",
+                "single_letter_first",
+                "multi_letter_first",
+                "single_letter_first",
+            ],
+            "predicted_action": ["link_candidate", "abstain", "abstain", "link_candidate"],
+            "query_safe_target": [1, 0, 1, 1],
+            "chosen_candidate_target": [1, 0, 1, 0],
+            "correct": [1, 1, 0, 0],
+        }
     )
     assignments = pd.DataFrame(
-        [
-            {"query_group_id": "fit_pos", "split": "calibration_fit"},
-            {"query_group_id": "check_neg", "split": "calibration_check"},
-            {"query_group_id": "test_false_abstain", "split": "test"},
-            {"query_group_id": "test_wrong_link", "split": "test"},
-        ]
+        {
+            "query_group_id": ["fit_pos", "check_neg", "test_false_abstain", "test_wrong_link"],
+            "split": ["calibration_fit", "calibration_check", "test", "test"],
+        }
     )
 
     summary = _summarize_classic_stratified_predictions(
@@ -817,56 +757,14 @@ def test_score_eval_candidate_rows_defaults_to_w5_and_w25_only() -> None:
     """Official classic eval scoring should only materialize the retained window limits."""
 
     df = pd.DataFrame(
-        [
-            {
-                "query_group_id": "q1",
-                "dataset": "demo",
-                "query_view": "full",
-                "candidate_component_key": "c1",
-                "retrieval_rank": 1,
-                "label": 1,
-            },
-            {
-                "query_group_id": "q1",
-                "dataset": "demo",
-                "query_view": "full",
-                "candidate_component_key": "c2",
-                "retrieval_rank": 10,
-                "label": 0,
-            },
-            {
-                "query_group_id": "q1",
-                "dataset": "demo",
-                "query_view": "full",
-                "candidate_component_key": "c3",
-                "retrieval_rank": 30,
-                "label": 0,
-            },
-            {
-                "query_group_id": "q2",
-                "dataset": "demo",
-                "query_view": "initial_only",
-                "candidate_component_key": "c4",
-                "retrieval_rank": 3,
-                "label": 0,
-            },
-            {
-                "query_group_id": "q2",
-                "dataset": "demo",
-                "query_view": "initial_only",
-                "candidate_component_key": "c5",
-                "retrieval_rank": 20,
-                "label": 1,
-            },
-            {
-                "query_group_id": "q2",
-                "dataset": "demo",
-                "query_view": "initial_only",
-                "candidate_component_key": "c6",
-                "retrieval_rank": 40,
-                "label": 0,
-            },
-        ]
+        {
+            "query_group_id": ["q1", "q1", "q1", "q2", "q2", "q2"],
+            "dataset": ["demo", "demo", "demo", "demo", "demo", "demo"],
+            "query_view": ["full", "full", "full", "initial_only", "initial_only", "initial_only"],
+            "candidate_component_key": ["c1", "c2", "c3", "c4", "c5", "c6"],
+            "retrieval_rank": [1, 10, 30, 3, 20, 40],
+            "label": [1, 0, 0, 0, 1, 0],
+        }
     )
 
     scored = _score_eval_candidate_rows(
@@ -876,36 +774,20 @@ def test_score_eval_candidate_rows_defaults_to_w5_and_w25_only() -> None:
     )
 
     assert sorted(scored["retrieval_rank_limit"].astype(int).unique().tolist()) == [5, 25]
+    assert scored["second_probability"].dtype == np.dtype(np.float64)
+    assert scored["score_margin"].dtype == np.dtype(np.float64)
 
 
 def test_score_eval_candidate_rows_uses_positions_not_index_labels() -> None:
     df = pd.DataFrame(
-        [
-            {
-                "query_group_id": "q1",
-                "dataset": "s2and",
-                "query_view": "full",
-                "candidate_component_key": "c1",
-                "retrieval_rank": 1,
-                "label": 0,
-            },
-            {
-                "query_group_id": "q1",
-                "dataset": "s2and",
-                "query_view": "full",
-                "candidate_component_key": "c2",
-                "retrieval_rank": 2,
-                "label": 1,
-            },
-            {
-                "query_group_id": "q2",
-                "dataset": "s2and",
-                "query_view": "full",
-                "candidate_component_key": "c3",
-                "retrieval_rank": 1,
-                "label": 1,
-            },
-        ],
+        {
+            "query_group_id": ["q1", "q1", "q2"],
+            "dataset": ["s2and", "s2and", "s2and"],
+            "query_view": ["full", "full", "full"],
+            "candidate_component_key": ["c1", "c2", "c3"],
+            "retrieval_rank": [1, 2, 1],
+            "label": [0, 1, 1],
+        },
         index=[10, 20, 30],
     )
 
@@ -926,108 +808,3 @@ def test_build_classic_classifier_uses_configured_thread_count(monkeypatch: pyte
     classifier = _build_classic_classifier({}, n_jobs=-1)
 
     assert classifier.get_params()["n_jobs"] == 8
-
-
-def test_minimal_raw_materialization_skips_tables_empty_after_dataset_filter(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Dataset-limited smoke runs should skip default tables with no selected rows."""
-
-    source_root = tmp_path / "source"
-    labels_dir = source_root / "labels"
-    labels_dir.mkdir(parents=True)
-    train_path = labels_dir / "train.parquet"
-    hwang_path = labels_dir / "hwang_eval.parquet"
-    pd.DataFrame(
-        [
-            {
-                "dataset": "h_wang",
-                "query_group_id": "q1",
-                "candidate_component_key": "c1",
-                "retrieval_rank": 1,
-                "label": 1,
-            }
-        ]
-    ).to_parquet(train_path, index=False)
-    pd.DataFrame(
-        [
-            {
-                "dataset": "h_wang",
-                "query_group_id": "q2",
-                "candidate_component_key": "c2",
-                "retrieval_rank": 1,
-                "label": 0,
-            }
-        ]
-    ).to_parquet(hwang_path, index=False)
-
-    source_bundle = OfficialBundle(
-        root=source_root,
-        bundle_name="demo",
-        assets={
-            "featureless_rows": {
-                "files": {
-                    "train_path": "labels/train.parquet",
-                    "hwang_eval_path": "labels/hwang_eval.parquet",
-                }
-            }
-        },
-        models={"classic": {}},
-        expected_metrics={},
-    )
-    labels_by_key = {
-        "train_path": train_path,
-        "hwang_eval_path": hwang_path,
-    }
-    captured: dict[str, list[str]] = {}
-
-    monkeypatch.setattr(replay, "_copy_bundle_support_files", lambda *args, **kwargs: None)
-    monkeypatch.setattr(replay, "_classic_table_keys", lambda _spec: list(labels_by_key))
-    monkeypatch.setattr(replay, "_asset_file", lambda _bundle, _group, table_key: labels_by_key[table_key])
-    monkeypatch.setattr(
-        replay,
-        "_output_table_relpath",
-        lambda _table_key, labels_path: Path("features_corrected") / labels_path.name,
-    )
-    monkeypatch.setattr(
-        replay,
-        "_clean_minimal_raw_structural_rows",
-        lambda **kwargs: (kwargs["rows"], {"rows_before": len(kwargs["rows"]), "rows_after": len(kwargs["rows"])}),
-    )
-    monkeypatch.setattr(replay, "_required_materialized_output_columns", lambda _labels, _target_features: ["dataset"])
-
-    def fail_build_context(**_kwargs) -> None:
-        raise AssertionError("empty selected tables should not build dataset contexts")
-
-    monkeypatch.setattr(replay, "_build_minimal_raw_dataset_context", fail_build_context)
-
-    def fake_finalize(**kwargs):
-        captured["selected_keys"] = list(kwargs["selected_keys"])
-        return kwargs["source_bundle"]
-
-    monkeypatch.setattr(replay, "_finalize_minimal_raw_bundle_metadata", fake_finalize)
-
-    _feature_bundle, summaries = replay._materialize_minimal_raw_feature_bundle(
-        source_bundle=source_bundle,
-        output_bundle_root=tmp_path / "output",
-        target={"features": ["feature_a"]},
-        clusterer=None,
-        n_jobs=1,
-        total_ram_bytes=1_000_000,
-        table_keys=None,
-        datasets={"qian"},
-        limit_rows=50,
-        pair_batch_size=100,
-        query_batch_pair_limit=100,
-        max_exemplars=1,
-        max_top_k=1,
-        reuse_existing_features=False,
-        pairwise_model_nan_value=float("nan"),
-        pairwise_aggregate_nan_value=0.0,
-        row_nan_policy="finite",
-    )
-
-    assert captured["selected_keys"] == []
-    assert [summary["table_key"] for summary in summaries] == ["train_path", "hwang_eval_path"]
-    assert {summary["skipped"] for summary in summaries} == {"empty_selection"}

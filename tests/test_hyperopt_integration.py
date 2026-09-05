@@ -56,6 +56,36 @@ def test_clusterer_default_search_space_fits_with_extracted_metrics(monkeypatch)
     assert 0 <= clusterer.best_params["eps"] <= 1
 
 
+def test_deferred_calibration_matches_explicit_default_space(monkeypatch):
+    """Deferring setup preserves optimizer samples, scores, EPS, and predictions."""
+    dataset = build_dummy_dataset("deferred_cluster_calibration")
+    block = {"tiny": ["0", "1", "2"]}
+    monkeypatch.setattr(dataset, "split_cluster_signatures", lambda: ({}, block, {}))
+    distances = {"tiny": np.array([0.2, 0.8, 0.9])}
+    explicit_space = {"eps": hp.uniform("eps", 0, 1)}
+    deferred, explicit = [
+        Clusterer(
+            FeaturizationInfo(["year_diff"]),
+            classifier=None,
+            search_space=space,
+            n_iter=8,
+            n_jobs=1,
+            random_state=0,
+        )
+        for space in (None, explicit_space)
+    ]
+    assert deferred.search_space is None
+    for clusterer in (deferred, explicit):
+        clusterer.fit(dataset, val_dists_precomputed={dataset.name: distances})
+        assert isinstance(clusterer.hyperopt_trials_store, Trials)
+    assert explicit.search_space is explicit_space
+    assert deferred.hyperopt_trials_store.vals == explicit.hyperopt_trials_store.vals
+    assert deferred.hyperopt_trials_store.losses() == explicit.hyperopt_trials_store.losses()
+    assert len(set(deferred.hyperopt_trials_store.losses())) > 1
+    assert deferred.best_params == explicit.best_params
+    assert deferred.predict(block, dataset, dists=distances)[0] == explicit.predict(block, dataset, dists=distances)[0]
+
+
 def test_pairwise_modeler_resets_trials_when_search_space_empty():
     rng = np.random.RandomState(1)
     X_train = rng.normal(size=(12, 3))

@@ -27,17 +27,18 @@ def test_import_does_not_load_plotting_or_training(module: str) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_fixed_search_space_construction_does_not_load_hyperopt() -> None:
-    """An explicitly configured inference model does not need the optimizer."""
+@pytest.mark.parametrize("argument", ["", ", search_space=None", ", search_space={}"])
+def test_inference_construction_does_not_load_hyperopt(argument: str) -> None:
+    """Default and explicitly configured inference models need no optimizer."""
     script = textwrap.dedent(
-        """
+        f"""
         import sys
         from lightgbm import LGBMClassifier
         from s2and.featurizer import FeaturizationInfo
         from s2and.model import Clusterer
 
-        clusterer = Clusterer(FeaturizationInfo(), LGBMClassifier(), search_space={})
-        assert clusterer.search_space == {}
+        clusterer = Clusterer(FeaturizationInfo(), LGBMClassifier(){argument})
+        assert clusterer.search_space == {"{}" if argument.endswith("{}") else "None"}
         assert "hyperopt" not in sys.modules
         """
     )

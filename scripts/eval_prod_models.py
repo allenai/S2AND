@@ -980,7 +980,8 @@ def fit_clusterer_from_arrow_validation(
 ) -> Any:
     from hyperopt import Trials, fmin, space_eval, tpe
 
-    from s2and.eval import b3_precision_recall_fscore
+    from s2and.calibration import default_cluster_search_space
+    from s2and.metrics import b3_precision_recall_fscore
     from s2and.model_pairwise import intify
 
     val_block_dict = clusterer.filter_blocks(splits.val_block_dict, clusterer.val_blocks_size)
@@ -989,6 +990,9 @@ def fit_clusterer_from_arrow_validation(
     weight = float(sum(len(signatures) for signatures in val_block_dict.values()))
     if weight <= 0:
         raise ValueError("Arrow validation split has no signatures after filtering")
+
+    if clusterer.search_space is None:
+        clusterer.search_space = default_cluster_search_space()
 
     def obj(params):
         clusterer.set_params(params)

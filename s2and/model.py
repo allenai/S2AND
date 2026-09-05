@@ -1568,7 +1568,7 @@ class Clusterer:
             Defaults to None, which uses FastCluster with average linking.
         search_space: Dict
             Search space for the hyperpamater optimization.
-            Defaults to None, which uses a space appropriate to FastCluster.
+            Defaults to None; fit creates the FastCluster calibration space.
         n_iter: int
             Number of hyperparameter evaluations
         n_jobs: int
@@ -1626,12 +1626,7 @@ class Clusterer:
         else:
             self.cluster_model = copy.deepcopy(cluster_model)
 
-        if search_space is None:
-            from hyperopt import hp
-
-            self.search_space = {"eps": hp.uniform("eps", 0, 1)}
-        else:
-            self.search_space = search_space
+        self.search_space = search_space
 
         self.feature_contract: dict[str, str] = {}
         self.hyperopt_trials_store: Trials | list[Trials] | None = None
@@ -3721,12 +3716,17 @@ class Clusterer:
         """
         from hyperopt import Trials, fmin, space_eval, tpe
 
+        from s2and.calibration import default_cluster_search_space
+
         assert metric_for_hyperopt in {"b3", "ratio"}
         logger.info("Fitting clusterer")
         if isinstance(datasets, ANDData):
             datasets = [datasets]
         if len(datasets) == 0:
             raise ValueError("Clusterer.fit requires at least one dataset")
+
+        if self.search_space is None:
+            self.search_space = default_cluster_search_space()
 
         contract = getattr(self, "feature_contract", None)
         if not isinstance(contract, dict):

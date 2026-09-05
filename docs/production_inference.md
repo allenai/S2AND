@@ -21,11 +21,11 @@ Hyperopt modules. Pure clustering metrics live in `s2and.metrics`; existing
 imports from `s2and.eval` remain available. Evaluation loads plotting libraries
 when rendering and scopes its plot styling to that operation.
 
-Hyperopt loads when constructing a default training search space or running
-optimization. `Clusterer(..., search_space={})` skips default search-space
-construction for explicitly configured inference. The bundle loader retains
-the default search space for calibration, so loading a bundle still loads
-Hyperopt. Genie loads only when its subblocking algorithm is used.
+Constructing a `Clusterer` or loading a production bundle does not create an
+optimizer search space or load Hyperopt. With the default `search_space=None`,
+the attribute remains `None` until `Clusterer.fit()` or Arrow validation
+calibration creates the default uniform EPS space. Explicit search spaces
+remain unchanged. Genie loads only when its subblocking algorithm is used.
 
 ## Prediction state ownership
 

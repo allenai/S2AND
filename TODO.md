@@ -48,3 +48,14 @@ Ruff, formatting, and configured ty checks passed. Full-suite log:
 Verification: 1090 pytest tests passed, including 16 direct decision cases and
 existing Python/Arrow incremental completion tests. Ruff, formatting, and
 configured ty checks passed. Log: `scratch/seed-link-assignment-pytest.log`.
+
+## Deferred calibration setup
+
+- [x] Keep default optimizer setup out of Clusterer construction and bundle loading.
+- [x] Resolve the default space explicitly in Python and Arrow calibration.
+- [x] Verify fresh-process bundle inference, calibration parity, and full local CI.
+
+Full local CI passed: 1095 Python tests, 119 Rust tests, 87.26% coverage.
+Native bundle scoring avoids Hyperopt; Python and Arrow calibration match the
+explicit default search space exactly on fixed fixtures. Log:
+`scratch/deferred-calibration-local-ci.log`.

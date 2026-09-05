@@ -494,3 +494,56 @@ def test_eval_main_requires_explicit_data_roots(monkeypatch: pytest.MonkeyPatch)
 def test_construct_cluster_to_signatures_reports_missing_assignments() -> None:
     with pytest.raises(ValueError, match="missing cluster assignments"):
         eval_prod_models.construct_cluster_to_signatures({"s1": "c1"}, {"block": ["s1", "s2"]})
+
+
+def test_arrow_calibration_deferred_search_matches_explicit_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+    from hyperopt import hp
+
+    from s2and.featurizer import FeaturizationInfo
+    from s2and.model import Clusterer
+
+    blocks = {"block": ["s1", "s2", "s3"]}
+    distances = {"block": np.array([0.2, 0.8, 0.8], dtype=np.float64)}
+    splits = eval_prod_models.PairwiseTrainingSplits(
+        [], [], [], {}, blocks, {}, {"s1": "together", "s2": "together", "s3": "apart"}
+    )
+    rust_featurizer = SimpleNamespace(cluster_seeds_require=lambda: [])
+    distance_calls = []
+
+    def cached_distances(self, block_dict, actual_featurizer):
+        assert block_dict == blocks
+        assert actual_featurizer is rust_featurizer
+        distance_calls.append(self)
+        return distances
+
+    monkeypatch.setattr(Clusterer, "make_distance_matrices_from_rust_featurizer", cached_distances)
+    deferred = Clusterer(FeaturizationInfo(), classifier=None, n_jobs=1, n_iter=8)
+    explicit = Clusterer(
+        FeaturizationInfo(), classifier=None, n_jobs=1, n_iter=8, search_space={"eps": hp.uniform("eps", 0, 1)}
+    )
+    assert deferred.search_space is None
+
+    for clusterer in (deferred, explicit):
+        result = eval_prod_models.fit_clusterer_from_arrow_validation(
+            clusterer, splits, rust_featurizer, random_seed=42
+        )
+        assert result is clusterer
+
+    assert distance_calls == [deferred, explicit]
+    assert deferred.best_params == explicit.best_params
+    deferred_trials = deferred.hyperopt_trials_store
+    explicit_trials = explicit.hyperopt_trials_store
+    assert deferred_trials is not None and explicit_trials is not None
+    assert deferred_trials.losses() == explicit_trials.losses()
+    assert [trial["misc"]["vals"] for trial in deferred_trials.trials] == [
+        trial["misc"]["vals"] for trial in explicit_trials.trials
+    ]
+    assert min(deferred_trials.losses()) == -1.0
+    for clusterer in (deferred, explicit):
+        predictions, _ = clusterer.predict_from_rust_featurizer(blocks, rust_featurizer, dists=distances)
+        assert {frozenset(signatures) for signatures in predictions.values()} == {
+            frozenset({"s1", "s2"}),
+            frozenset({"s3"}),
+        }
+    np.testing.assert_array_equal(distances["block"], [0.2, 0.8, 0.8])

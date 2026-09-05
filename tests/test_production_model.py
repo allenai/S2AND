@@ -4,6 +4,9 @@ import copy
 import hashlib
 import json
 import pickle
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -345,6 +348,76 @@ def test_synthetic_native_pairwise_models_match_source_boosters(
         rtol=1e-10,
         atol=1e-10,
     )
+
+
+def test_complete_bundle_native_inference_does_not_load_hyperopt(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    """Load and score a validated complete bundle without optimizer imports."""
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.feature_contract.update(_TEST_EXPLICIT_ARTIFACT_HASHES)
+    pairwise_bundle = tmp_path / "explicit-pairwise"
+    write_pairwise_production_bundle(
+        source_clusterer,
+        pairwise_bundle,
+        release_version="9.9",
+        pairwise_training_config={"input_artifact_hashes": dict(_TEST_EXPLICIT_ARTIFACT_HASHES)},
+        pairwise_training_summary={"pair_count": 11},
+    )
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(
+        pairwise_bundle, linker_dir, expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES
+    )
+    output_bundle = tmp_path / "complete"
+    finalize_production_bundle(
+        pairwise_bundle_dir=pairwise_bundle,
+        output_bundle_dir=output_bundle,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=target_json,
+        expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
+    )
+    rng = np.random.default_rng(921)
+    assert source_clusterer.nameless_featurizer_info is not None
+    assert source_clusterer.nameless_classifier is not None
+    main_features = rng.normal(size=(8, len(_selected_feature_indices(source_clusterer.featurizer_info))))
+    nameless_features = rng.normal(size=(8, len(_selected_feature_indices(source_clusterer.nameless_featurizer_info))))
+    fixture_path = tmp_path / "predictions.npz"
+    np.savez(
+        fixture_path,
+        main_features=main_features,
+        nameless_features=nameless_features,
+        main_expected=source_clusterer.classifier.predict_proba(
+            _validated_classifier_features(source_clusterer.classifier, main_features)
+        ),
+        nameless_expected=source_clusterer.nameless_classifier.predict_proba(
+            _validated_classifier_features(source_clusterer.nameless_classifier, nameless_features)
+        ),
+    )
+    script = textwrap.dedent(
+        f"""
+        import sys
+        import numpy as np
+        from s2and.production_model import load_production_model
+
+        clusterer = load_production_model(
+            {str(output_bundle)!r}, expected_artifact_hashes={_TEST_EXPLICIT_ARTIFACT_HASHES!r}
+        )
+        assert clusterer.incremental_linker_artifact is not None
+        assert clusterer.search_space is None
+        assert "hyperopt" not in sys.modules
+        with np.load({str(fixture_path)!r}) as fixture:
+            for name, classifier in [("main", clusterer.classifier), ("nameless", clusterer.nameless_classifier)]:
+                np.testing.assert_allclose(
+                    classifier.predict_proba(fixture[name + "_features"]),
+                    fixture[name + "_expected"], rtol=1e-10, atol=1e-10,
+                )
+        assert clusterer.search_space is None
+        assert "hyperopt" not in sys.modules
+        """
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_synthetic_native_clusterer_predict_matches_source_python(

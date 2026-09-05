@@ -8,7 +8,7 @@ import pickle
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -33,6 +33,18 @@ from s2and.feature_port import (
     build_rust_featurizer_from_arrow_dataset,
 )
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+from s2and.incremental_linking.completion import ResidualClusterer, complete_incremental_prediction
+from s2and.incremental_linking.completion_metadata import (
+    SignatureFirstNames,
+    SignatureOrcids,
+    log_rejected_links,
+)
+from s2and.incremental_linking.completion_metadata import (
+    name_tuples_for_incremental_rules as _name_tuples_for_incremental_rules,
+)
+from s2and.incremental_linking.completion_metadata import (
+    signature_first as _signature_first_for_rules,
+)
 from s2and.incremental_linking.feature_block import (
     normalize_cluster_seed_disallow_pairs,
     temporary_cluster_seed_sidecars,
@@ -58,7 +70,6 @@ from s2and.incremental_linking.seed_assignment import apply_seed_links
 from s2and.metrics import b3_precision_recall_fscore
 from s2and.model_pairwise import FastCluster, intify, predict_pairwise_class0
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
-from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.prediction_state import PredictionState
 from s2and.runtime import (
     RuntimeContext,
@@ -80,7 +91,6 @@ from s2and.subblocking import (
     make_subblocks,
 )
 from s2and.text import (
-    canonical_name_tuple_pair,
     canonicalize_name_parts,
     normalize_orcid_compact,
 )
@@ -745,42 +755,6 @@ def _guard_predict_block_matrix_allocation(
     )
 
 
-def _signature_first_for_rules(signature: Any) -> str:
-    return signature.author_info_first_normalized_without_apostrophe or signature.author_info_first or ""
-
-
-class _SignatureFirstNames(Mapping[str, str]):
-    """Project prepared signatures to first names without copying or scanning them."""
-
-    def __init__(self, signatures: Mapping[str, Any]) -> None:
-        self._signatures = signatures
-
-    def __getitem__(self, signature_id: str) -> str:
-        return _signature_first_for_rules(self._signatures[signature_id])
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._signatures)
-
-    def __len__(self) -> int:
-        return len(self._signatures)
-
-
-def _load_name_tuples_for_incremental_rules() -> frozenset[tuple[str, str]]:
-    return load_packaged_name_tuple_artifact().pairs
-
-
-def _name_tuples_for_incremental_rules(
-    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None,
-) -> set[tuple[str, str]] | frozenset[tuple[str, str]]:
-    if isinstance(name_tuples, frozenset):
-        return name_tuples
-    if isinstance(name_tuples, set):
-        return {canonical_name_tuple_pair(first_a, first_b) for first_a, first_b in name_tuples}
-    if name_tuples is None:
-        return _load_name_tuples_for_incremental_rules()
-    raise TypeError("name_tuples must be None or a set/frozenset of (first_a, first_b) tuples")
-
-
 def _required_incremental_linker_artifact(clusterer: Any) -> Any:
     """Return the linker artifact attached by production-bundle loading."""
 
@@ -791,105 +765,6 @@ def _required_incremental_linker_artifact(clusterer: Any) -> Any:
             "Load a complete production bundle before calling the direct Arrow API."
         )
     return artifact
-
-
-def _signature_first_initials_for_rules(first: str) -> frozenset[str]:
-    tokens = [token for token in first.replace("-", " ").split() if token]
-    if not tokens and first:
-        stripped = first.strip()
-        if stripped:
-            tokens = [stripped]
-    return frozenset(token[0] for token in tokens if token)
-
-
-def _residual_phase_b_first_initial_groups(
-    clusterer: Any,
-    dataset: Any,
-    signature_ids: Sequence[str],
-    partial_supervision: Mapping[tuple[str, str], int | float],
-) -> list[list[str]]:
-    """Split residual Phase B by hard first-initial incompatibility when exact parity is safe."""
-
-    residual_signature_ids = [str(signature_id) for signature_id in signature_ids]
-    if len(residual_signature_ids) <= 1:
-        return [residual_signature_ids]
-    if not bool(getattr(clusterer, "use_default_constraints_as_supervision", True)):
-        return [residual_signature_ids]
-    signatures = getattr(dataset, "signatures", None)
-    if not isinstance(signatures, Mapping):
-        return [residual_signature_ids]
-
-    initials: dict[str, frozenset[str]] = {}
-    for signature_id in residual_signature_ids:
-        signature = signatures.get(signature_id)
-        if signature is None:
-            return [residual_signature_ids]
-        first = _signature_first_for_rules(signature)
-        if not first:
-            return [residual_signature_ids]
-        first_initials = _signature_first_initials_for_rules(first)
-        if not first_initials:
-            return [residual_signature_ids]
-        initials[signature_id] = first_initials
-    if len(set().union(*initials.values())) <= 1:
-        return [residual_signature_ids]
-
-    parent = {signature_id: signature_id for signature_id in residual_signature_ids}
-
-    def find(signature_id: str) -> str:
-        root = signature_id
-        while parent[root] != root:
-            root = parent[root]
-        while parent[signature_id] != signature_id:
-            next_signature_id = parent[signature_id]
-            parent[signature_id] = root
-            signature_id = next_signature_id
-        return root
-
-    def union(left: str, right: str) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root != right_root:
-            parent[right_root] = left_root
-
-    initial_representatives: dict[str, str] = {}
-    for signature_id in residual_signature_ids:
-        for initial in initials[signature_id]:
-            representative = initial_representatives.setdefault(initial, signature_id)
-            union(representative, signature_id)
-
-    if not bool(getattr(clusterer, "suppress_orcid", False)):
-        orcid_representatives: dict[str, str] = {}
-        for signature_id in residual_signature_ids:
-            orcid = _normalized_orcid_for_presplit_skip(dataset, signature_id)
-            if orcid is None:
-                continue
-            representative = orcid_representatives.setdefault(orcid, signature_id)
-            union(representative, signature_id)
-
-    residual_signature_id_set = set(residual_signature_ids)
-    for (left, right), value in partial_supervision.items():
-        left_id = str(left)
-        right_id = str(right)
-        if left_id not in residual_signature_id_set or right_id not in residual_signature_id_set:
-            continue
-        if float(value) < LARGE_DISTANCE:
-            union(left_id, right_id)
-
-    groups_by_root: dict[str, list[str]] = defaultdict(list)
-    for signature_id in residual_signature_ids:
-        groups_by_root[find(signature_id)].append(signature_id)
-    groups = list(groups_by_root.values())
-    if len(groups) <= 1:
-        return [residual_signature_ids]
-    return groups
-
-
-def _next_unused_cluster_id(pred_clusters: dict[str, Any], start: int) -> int:
-    cluster_id = int(start)
-    while str(cluster_id) in pred_clusters:
-        cluster_id += 1
-    return cluster_id
 
 
 def _ensure_lightgbm_fitted(clf: Any) -> None:
@@ -4872,105 +4747,87 @@ class Clusterer:
             recluster_map=recluster_map,
             cluster_seeds_require_inverse=cluster_seeds_require_inverse,
             prevent_new_incompatibilities=prevent_new_incompatibilities,
-            first_names=_SignatureFirstNames(dataset.signatures) if check_names else {},
+            first_names=SignatureFirstNames(dataset.signatures) if check_names else {},
             name_tuples=_name_tuples_for_incremental_rules(dataset.name_tuples) if check_names else frozenset(),
             split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
         )
-        pred_clusters = assignment.clusters
-        singleton_signatures = assignment.residual_signature_ids
-        for signature_id in assignment.rejected_signature_ids:
-            signature = dataset.signatures[signature_id]
-            logger.info(
-                "Incremental clustering prevented a name compatibility issue from being "
-                f"added while clustering {signature.author_info_first} {signature.author_info_last} "
-                f"on {signature.paper_id}"
-            )
+        signatures = getattr(dataset, "signatures", None)
+        signature_metadata = signatures if isinstance(signatures, Mapping) else {}
+        log_rejected_links(assignment.rejected_signature_ids, signature_metadata)
+        return complete_incremental_prediction(
+            assignment,
+            first_names=SignatureFirstNames(signature_metadata),
+            orcids=SignatureOrcids(signature_metadata),
+            partial_supervision=partial_supervision,
+            use_default_constraints_as_supervision=bool(getattr(self, "use_default_constraints_as_supervision", True)),
+            suppress_orcid=bool(getattr(self, "suppress_orcid", False)),
+            start_cluster_id=int(getattr(dataset, "max_seed_cluster_id", 0) or 0),
+            prediction_state=prediction_state,
+            cluster_residuals=Clusterer._make_residual_clusterer(
+                self,
+                dataset,
+                partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+                total_ram_bytes=total_ram_bytes,
+                arrow_dataset=arrow_dataset,
+                cluster_seed_disallows=cluster_seed_disallows,
+                prediction_state=seed_state,
+            ),
+        )
 
-        request_cluster_seed_disallows = (
-            (_cluster_seed_disallows_for_request(dataset) if seed_state is None else seed_state.cluster_seeds_disallow)
+    def _make_residual_clusterer(
+        self,
+        dataset: ANDData,
+        *,
+        partial_supervision: dict[tuple[str, str], int | float],
+        runtime_context: RuntimeContext,
+        total_ram_bytes: int | None,
+        arrow_dataset: ArrowDataset | None = None,
+        cluster_seed_disallows: set[tuple[str, str]] | None = None,
+        prediction_state: PredictionState | None = None,
+    ) -> ResidualClusterer:
+        """Bind backend execution and request constraints for the completion phase."""
+        request_disallows = (
+            (
+                _cluster_seed_disallows_for_request(dataset)
+                if prediction_state is None
+                else prediction_state.cluster_seeds_disallow
+            )
             if cluster_seed_disallows is None
             else set(normalize_cluster_seed_disallow_pairs(cluster_seed_disallows))
         )
 
-        residual_groups: list[list[str]] = []
-        # all remaining singletons are reclustered together
-        if len(singleton_signatures) > 0:
-            logger.info("Clustering together the still unassigned signatures")
-            new_cluster_id = _next_unused_cluster_id(
-                pred_clusters,
-                int(getattr(dataset, "max_seed_cluster_id", 0) or 0),
-            )
-            residual_groups = _residual_phase_b_first_initial_groups(
-                self,
-                dataset,
-                singleton_signatures,
-                partial_supervision,
-            )
-            residual_pair_count_before = len(singleton_signatures) * (len(singleton_signatures) - 1) // 2
-            residual_pair_count_after = sum(len(group) * (len(group) - 1) // 2 for group in residual_groups)
-            prediction_state.telemetry["incremental_residual_phase_b"] = {
-                "residual_phase_b_signature_count": int(len(singleton_signatures)),
-                "residual_phase_b_group_count": int(len(residual_groups)),
-                "residual_phase_b_pair_count_before": int(residual_pair_count_before),
-                "residual_phase_b_pair_count_after": int(residual_pair_count_after),
-                "residual_phase_b_pair_count_saved": int(residual_pair_count_before - residual_pair_count_after),
-            }
-            logger.info(
-                "Telemetry stage: stage=incremental_residual_phase_b residual_signatures=%d groups=%d "
-                "pairs_before=%d pairs_after=%d",
-                len(singleton_signatures),
-                len(residual_groups),
-                residual_pair_count_before,
-                residual_pair_count_after,
-            )
-            for residual_group in residual_groups:
-                if len(residual_group) == 1:
-                    reclustered_output = {"singleton": [residual_group[0]]}
-                else:
-                    if arrow_dataset is None:
-                        reclustered_output, _ = self.predict_helper(
-                            {"block": residual_group},
-                            dataset,
-                            partial_supervision=partial_supervision,
-                            runtime_context=runtime_context,
-                            total_ram_bytes=total_ram_bytes,
-                            prediction_state=seed_state,
-                        )
-                    else:
-                        residual_partial_supervision = _partial_supervision_with_cluster_seed_disallows(
-                            residual_group,
-                            dataset,
-                            partial_supervision,
-                            cluster_seed_disallows=request_cluster_seed_disallows,
-                        )
-                        logger.info(
-                            "Running incremental residual Phase B through Arrow/Rust: residual_signatures=%d",
-                            len(residual_group),
-                        )
-                        reclustered_output, _ = self.predict_from_arrow(
-                            {"block": residual_group},
-                            arrow_dataset,
-                            partial_supervision=residual_partial_supervision,
-                            runtime_context=runtime_context,
-                            total_ram_bytes=total_ram_bytes,
-                            load_name_counts=clusterer_uses_name_count_features(self),
-                            name_tuples=getattr(dataset, "name_tuples", None),
-                            cluster_seeds_disallow=request_cluster_seed_disallows,
-                        )
-                for new_cluster in reclustered_output.values():
-                    new_cluster_id = _next_unused_cluster_id(pred_clusters, new_cluster_id)
-                    pred_clusters[str(new_cluster_id)] = new_cluster
-                    new_cluster_id += 1
-        else:
-            prediction_state.telemetry["incremental_residual_phase_b"] = {
-                "residual_phase_b_signature_count": 0,
-                "residual_phase_b_group_count": 0,
-                "residual_phase_b_pair_count_before": 0,
-                "residual_phase_b_pair_count_after": 0,
-                "residual_phase_b_pair_count_saved": 0,
-            }
-        logger.info("Done. Returning incrementally predicted clusters")
-        return dict(pred_clusters)
+        def cluster_residuals(signature_ids: list[str]) -> dict[str, list[str]]:
+            if arrow_dataset is None:
+                clusters, _ = self.predict_helper(
+                    {"block": signature_ids},
+                    dataset,
+                    partial_supervision=partial_supervision,
+                    runtime_context=runtime_context,
+                    total_ram_bytes=total_ram_bytes,
+                    prediction_state=prediction_state,
+                )
+            else:
+                residual_supervision = _partial_supervision_with_cluster_seed_disallows(
+                    signature_ids, dataset, partial_supervision, cluster_seed_disallows=request_disallows
+                )
+                logger.info(
+                    "Running incremental residual Phase B through Arrow/Rust: residual_signatures=%d",
+                    len(signature_ids),
+                )
+                clusters, _ = self.predict_from_arrow(
+                    {"block": signature_ids},
+                    arrow_dataset,
+                    partial_supervision=residual_supervision,
+                    runtime_context=runtime_context,
+                    total_ram_bytes=total_ram_bytes,
+                    load_name_counts=clusterer_uses_name_count_features(self),
+                    name_tuples=getattr(dataset, "name_tuples", None),
+                    cluster_seeds_disallow=request_disallows,
+                )
+            return clusters
+
+        return cluster_residuals
 
     def _run_incremental_phases_bcd(
         self,
@@ -5181,6 +5038,13 @@ class Clusterer:
                 request_dataset,
                 arrow_dataset=arrow_dataset,
                 artifact=_required_incremental_linker_artifact(self),
+                cluster_residuals=self._make_residual_clusterer(
+                    cast(ANDData, request_dataset),
+                    partial_supervision=partial_supervision or {},
+                    runtime_context=runtime_context,
+                    total_ram_bytes=memory_budget.resolve_total_ram_bytes(total_ram_bytes)[0],
+                    arrow_dataset=arrow_dataset,
+                ),
                 prevent_new_incompatibilities=prevent_new_incompatibilities,
                 partial_supervision=partial_supervision,
                 runtime_context=runtime_context,

@@ -16,6 +16,13 @@ import s2and.incremental_linking.runtime as runtime_module
 from s2and import feature_port, memory_budget
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
+from s2and.incremental_linking.completion import ResidualClusterer, complete_incremental_prediction
+from s2and.incremental_linking.completion_metadata import (
+    SignatureFirstNames,
+    SignatureOrcids,
+    log_rejected_links,
+    name_tuples_for_incremental_rules,
+)
 from s2and.incremental_linking.feature_block import (
     normalize_cluster_seed_disallow_pairs,
     temporary_cluster_seed_sidecars,
@@ -25,6 +32,7 @@ from s2and.incremental_linking.policy import (
     request_cluster_seed_disallow_parts,
 )
 from s2and.incremental_linking.retrieval import RawArrowPlanBundle
+from s2and.incremental_linking.seed_assignment import apply_seed_links
 from s2and.prediction_state import PredictionState
 from s2and.runtime import RuntimeContext
 
@@ -614,46 +622,6 @@ def _query_disallow_partner_ids(
     return partners
 
 
-def _finish_incremental_with_optional_split_inverse(
-    clusterer: Any,
-    unassigned_signature_ids: list[str],
-    dataset: _DirectArrowIncrementalDataset,
-    linked_signature_clusters: Mapping[str, int | str],
-    recluster_map: Mapping[str, int | str],
-    cluster_seeds_require_inverse: Mapping[str, Sequence[str]],
-    prevent_new_incompatibilities: bool,
-    partial_supervision: Mapping[tuple[str, str], int | float],
-    runtime_context: RuntimeContext,
-    *,
-    total_ram_bytes: int | None,
-    arrow_dataset: ArrowDataset | None = None,
-    split_cluster_seeds_require_inverse: Mapping[str, Sequence[str]] | None = None,
-    cluster_seed_disallows: set[tuple[str, str]] | None = None,
-    prediction_state: PredictionState | None = None,
-) -> dict[str, list[str]]:
-    method = clusterer._finish_incremental_with_seed_links
-    kwargs: dict[str, Any] = {"total_ram_bytes": total_ram_bytes}
-    if prediction_state is not None:
-        kwargs["prediction_state"] = prediction_state
-    if arrow_dataset is not None:
-        kwargs["arrow_dataset"] = arrow_dataset
-    if split_cluster_seeds_require_inverse is not None:
-        kwargs["split_cluster_seeds_require_inverse"] = split_cluster_seeds_require_inverse
-    if cluster_seed_disallows is not None:
-        kwargs["cluster_seed_disallows"] = cluster_seed_disallows
-    return method(
-        unassigned_signature_ids,
-        dataset,
-        linked_signature_clusters,
-        recluster_map,
-        cluster_seeds_require_inverse,
-        prevent_new_incompatibilities,
-        partial_supervision,
-        runtime_context,
-        **kwargs,
-    )
-
-
 def promoted_incremental_component_sizes(cluster_seeds_require: Mapping[str, int | str]) -> dict[str, int]:
     component_sizes: dict[str, int] = {}
     for cluster_id in cluster_seeds_require.values():
@@ -919,6 +887,7 @@ def predict_incremental_promoted_linker_from_arrow(
     block_signatures: list[str],
     dataset: _DirectArrowIncrementalDataset,
     *,
+    cluster_residuals: ResidualClusterer,
     arrow_dataset: ArrowDataset,
     artifact: artifact_module.IncrementalLinkingArtifact,
     prevent_new_incompatibilities: bool,
@@ -1299,21 +1268,31 @@ def predict_incremental_promoted_linker_from_arrow(
         del rescore_featurizer_cache
         del raw_request_planner
         finish_start = time.perf_counter()
-        predicted_clusters = _finish_incremental_with_optional_split_inverse(
-            clusterer,
-            unassigned_signature_ids,
-            dataset,
-            linked_signature_clusters,
-            recluster_map,
-            cluster_seeds_require_inverse,
-            prevent_new_incompatibilities,
-            partial_supervision,
-            runtime_context,
-            total_ram_bytes=resolved_total_ram_bytes,
-            arrow_dataset=arrow_dataset,
+        logger.info("Assigning unassigned signatures for incremental clustering")
+        check_names = prevent_new_incompatibilities and bool(recluster_map)
+        assignment = apply_seed_links(
+            unassigned_signature_ids=unassigned_signature_ids,
+            linked_signature_to_cluster=linked_signature_clusters,
+            recluster_map=recluster_map,
+            cluster_seeds_require_inverse=cluster_seeds_require_inverse,
+            prevent_new_incompatibilities=prevent_new_incompatibilities,
+            first_names=SignatureFirstNames(dataset.signatures) if check_names else {},
+            name_tuples=name_tuples_for_incremental_rules(dataset.name_tuples) if check_names else frozenset(),
             split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
-            cluster_seed_disallows=request_disallows,
+        )
+        log_rejected_links(assignment.rejected_signature_ids, dataset.signatures)
+        predicted_clusters = complete_incremental_prediction(
+            assignment,
+            first_names=SignatureFirstNames(dataset.signatures),
+            orcids=SignatureOrcids(dataset.signatures),
+            partial_supervision=partial_supervision,
+            use_default_constraints_as_supervision=bool(
+                getattr(clusterer, "use_default_constraints_as_supervision", True)
+            ),
+            suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False)),
+            start_cluster_id=int(dataset.max_seed_cluster_id or 0),
             prediction_state=prediction_state,
+            cluster_residuals=cluster_residuals,
         )
         finish_seconds = time.perf_counter() - finish_start
         residual_phase_b_telemetry = dict(prediction_state.telemetry.get("incremental_residual_phase_b", {}))

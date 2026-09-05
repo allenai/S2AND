@@ -19,6 +19,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
+from s2and.incremental_linking.completion import next_unused_cluster_id
 from s2and.incremental_linking.feature_block import (
     read_cluster_seed_disallows_arrow,
     read_incremental_query_signatures_arrow,
@@ -43,6 +44,10 @@ from tests.helpers import (
 
 _PROMOTED_TEST_FEATURIZER_INFO = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
 _PROMOTED_TEST_FEATURE_COLUMNS = ("test_link_probability",)
+
+
+def _unexpected_residual_clustering(signature_ids: list[str]) -> dict[str, list[str]]:
+    pytest.fail(f"Unexpected residual clustering: {signature_ids}")
 
 
 def _same_partition(a: dict[str, list[str]], b: dict[str, list[str]]) -> bool:
@@ -1119,6 +1124,7 @@ def test_promoted_linker_adds_partial_query_seed_disallows_to_planner_sidecar(
             FakeClusterer(),
             ["seed-1", "seed-2", "query"],
             dataset,
+            cluster_residuals=_unexpected_residual_clustering,
             arrow_dataset=_minimal_arrow_dataset(tmp_path),
             artifact=FakeArtifact(),
             prevent_new_incompatibilities=False,
@@ -1189,6 +1195,7 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
             FakeClusterer(),
             ["seed", "query"],
             _direct_arrow_dataset(),
+            cluster_residuals=_unexpected_residual_clustering,
             arrow_dataset=_minimal_arrow_dataset(tmp_path),
             artifact=FakeArtifact(),
             prevent_new_incompatibilities=False,
@@ -1226,13 +1233,6 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
             original_inverse = {"c_seed": ["seed-z", "seed-a"]}
             split_inverse = {"c_seed_0": ["seed-z", "seed-a"]}
             return seeds, {"c_seed_0": "c_seed"}, original_inverse, split_inverse
-
-        def _finish_incremental_with_seed_links(self, *args: object, **_kwargs: object):
-            captured["linked"] = dict(cast(Mapping[str, str], args[2]))
-            clusters = {"c_seed_0": ["seed-z", "seed-a"]}
-            for signature_id, component_id in captured["linked"].items():
-                clusters.setdefault(component_id, []).append(signature_id)
-            return clusters
 
     class FakeFeaturizer:
         def __init__(self, signature_ids: tuple[str, ...]) -> None:
@@ -1318,6 +1318,7 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
         FakeClusterer(),
         ["seed-z", "seed-a", *query_ids],
         _direct_arrow_dataset(cluster_seeds_disallow={("q-require", "q-score")}),
+        cluster_residuals=_unexpected_residual_clustering,
         arrow_dataset=arrow_dataset,
         artifact=FakeArtifact(),
         prevent_new_incompatibilities=False,
@@ -1327,10 +1328,6 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
         batching_threshold=batching_threshold,
     )
 
-    assert captured["linked"] == {
-        "q-require": "c_seed_0",
-        "q-score": "c_outside_retained_top_k",
-    }
     assert captured["rescored"] == ["q-score"]
     assert captured["planner_disallows"] == [set()]
     assert captured["planner_plan_disallows"][-1] == {("q-score", "seed-a")}
@@ -1338,7 +1335,7 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
     assert all(dataset is arrow_dataset for dataset in captured["featurizer_datasets"])
     assert len(captured["featurizer_datasets"]) == len(captured["planner_plans"]) - 1
     assert result["clusters"] == {
-        "c_seed_0": ["seed-z", "seed-a", "q-require"],
+        "c_seed": ["seed-z", "seed-a", "q-require"],
         "c_outside_retained_top_k": ["q-score"],
     }
     telemetry = result["incremental_linker_telemetry"]
@@ -1374,16 +1371,6 @@ def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
             seeds = {"s0": "c0", "s1": "c1"}
             inverse = {"c0": ["s0"], "c1": ["s1"]}
             return seeds, {}, inverse, inverse
-
-        def _finish_incremental_with_seed_links(self, *args: object, **_kwargs: object):
-            captured["linked"] = dict(cast(Mapping[str, str], args[2]))
-            captured["phase_a_released_before_finish"] = {
-                "featurizers": all(reference() is None for reference in captured["featurizer_refs"]),
-                "planner": all(reference() is None for reference in captured["planner_refs"]),
-                "rescore_callback": all(reference() is None for reference in captured["rescore_callback_refs"]),
-                "rescore_context": all(reference() is None for reference in captured["rescore_context_refs"]),
-            }
-            return {"done": [*query_ids]}
 
     class FakeFeaturizer:
         def __init__(self, signature_ids: tuple[str, ...]) -> None:
@@ -1441,6 +1428,19 @@ def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
             predicted_peak_delta_bytes=8_500,
         )
 
+    real_complete = production_module.complete_incremental_prediction
+
+    def capturing_complete(*args: Any, **kwargs: Any) -> dict[str, list[str]]:
+        captured["phase_a_released_before_finish"] = {
+            "featurizers": all(reference() is None for reference in captured["featurizer_refs"]),
+            "planner": all(reference() is None for reference in captured["planner_refs"]),
+            "rescore_callback": all(reference() is None for reference in captured["rescore_callback_refs"]),
+            "rescore_context": all(reference() is None for reference in captured["rescore_context_refs"]),
+        }
+        return real_complete(*args, **kwargs)
+
+    monkeypatch.setattr(production_module, "complete_incremental_prediction", capturing_complete)
+
     real_rescore_context = production_module._QueryDisallowRescoreContext  # noqa: SLF001
     real_resolve_query_disallows = production_module._resolve_query_disallows_globally  # noqa: SLF001
 
@@ -1478,6 +1478,7 @@ def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
         _direct_arrow_dataset(
             cluster_seeds_disallow={("q0", "q1"), ("q2", "q3")},
         ),
+        cluster_residuals=_unexpected_residual_clustering,
         arrow_dataset=_minimal_arrow_dataset(tmp_path),
         artifact=FakeArtifact(),
         prevent_new_incompatibilities=False,
@@ -1491,7 +1492,7 @@ def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
     assert captured["planner_plans"][4:] == [("q1",), ("q3",)]
     assert captured["rescored"] == ["q1", "q3"]
     assert len(captured["featurizer_builds"]) == 5
-    assert captured["linked"] == {"q0": "c0", "q1": "c2", "q2": "c1", "q3": "c3"}
+    assert result["clusters"] == {"c0": ["s0", "q0"], "c1": ["s1", "q2"], "c2": ["q1"], "c3": ["q3"]}
     assert captured["phase_a_released_before_finish"] == {
         "featurizers": True,
         "planner": True,
@@ -1521,9 +1522,6 @@ def test_promoted_linker_reuses_one_plan_and_featurizer_for_four_scoring_batches
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
             return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
-
-        def _finish_incremental_with_seed_links(self, *_args: object, **_kwargs: object):
-            return {"c_seed": ["seed", *query_ids]}
 
     def fake_limits(**kwargs: object):
         query_count = int(kwargs["query_count"])
@@ -1557,6 +1555,7 @@ def test_promoted_linker_reuses_one_plan_and_featurizer_for_four_scoring_batches
         FakeClusterer(),
         ["seed", *query_ids],
         _direct_arrow_dataset(),
+        cluster_residuals=_unexpected_residual_clustering,
         arrow_dataset=_minimal_arrow_dataset(tmp_path),
         artifact=FakeArtifact(),
         prevent_new_incompatibilities=False,
@@ -1602,9 +1601,6 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
             return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
 
-        def _finish_incremental_with_seed_links(self, *_args: object, **_kwargs: object):
-            return {"c_seed": ["seed", *query_ids]}
-
     def fake_limits(**kwargs: object):
         query_count = int(kwargs["query_count"])
         captured["limit_checks"].append(
@@ -1645,6 +1641,7 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
         FakeClusterer(),
         ["seed", *query_ids],
         _direct_arrow_dataset(),
+        cluster_residuals=_unexpected_residual_clustering,
         arrow_dataset=_minimal_arrow_dataset(tmp_path),
         artifact=FakeArtifact(),
         prevent_new_incompatibilities=False,
@@ -1907,12 +1904,12 @@ def test_next_unused_cluster_id_prevents_overwrite():
         "1": ["s1"],
         "2": ["existing_singleton_cluster"],
     }
-    start = model_module._next_unused_cluster_id(pred_clusters, 2)
+    start = next_unused_cluster_id(pred_clusters, 2)
     assert start == 3
 
     # Simulate the singleton recluster append loop in Python incremental prediction.
     for signatures in (["new_a"], ["new_b"]):
-        cluster_id = model_module._next_unused_cluster_id(pred_clusters, start)
+        cluster_id = next_unused_cluster_id(pred_clusters, start)
         pred_clusters[str(cluster_id)] = signatures
         start = cluster_id + 1
 

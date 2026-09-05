@@ -48,9 +48,16 @@ Seed-link application is a pure decision phase shared by classic Python and
 promoted Arrow incremental completion. It accepts ordered seed memberships,
 link decisions, altered-profile mappings, and first-name metadata; it returns
 owned cluster lists, residual signatures, and rejected links. It preserves
-split-specific name checks and restores original profile IDs. The orchestrator
-resolves name aliases, logs rejections, and clusters the residual signatures.
-Name metadata is accessed lazily without copying the prepared dataset.
+split-specific name checks and restores original profile IDs.
+
+Both paths pass that result to a shared completion component. Completion owns
+safe residual grouping, numeric cluster-ID allocation, and request telemetry.
+It receives lazy first-name/ORCID views, explicit policy and supervision, and
+one typed operation for clustering a residual group. It has no model, dataset,
+or Arrow dependency. The orchestration boundary resolves aliases, logs rejected
+links, and binds backend execution, constraints, and memory limits. The learned
+linker no longer calls a private `Clusterer` completion method. Name metadata
+is accessed lazily without copying the prepared dataset.
 
 Python subblocked prediction carries original required seed memberships into
 the initial-only attachment pass, including members not yet predicted. Explicit

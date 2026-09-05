@@ -15,6 +15,8 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.data import ANDData, _ordered_coauthors_for_signature
 from s2and.eval import incremental_cluster_eval
 from s2and.featurizer import FeaturizationInfo
+from s2and.incremental_linking.completion import first_initials, residual_first_initial_groups
+from s2and.incremental_linking.completion_metadata import SignatureFirstNames, SignatureOrcids
 from s2and.model import Clusterer
 from s2and.runtime import RuntimeContext
 from s2and.sampling import sampling
@@ -345,15 +347,20 @@ def test_residual_first_initial_groups_union_normalized_orcids():
             "s3": _subblocking_signature("carol", orcid=None),
         }
     )
-    clusterer = SimpleNamespace(use_default_constraints_as_supervision=True, suppress_orcid=False)
-
-    groups = model_module._residual_phase_b_first_initial_groups(clusterer, dataset, ["s1", "s2", "s3"], {})
+    groups = residual_first_initial_groups(
+        ["s1", "s2", "s3"],
+        first_names=SignatureFirstNames(dataset.signatures),
+        orcids=SignatureOrcids(dataset.signatures),
+        partial_supervision={},
+        use_default_constraints_as_supervision=True,
+        suppress_orcid=False,
+    )
 
     assert {frozenset(group) for group in groups} == {frozenset({"s1", "s2"}), frozenset({"s3"})}
 
 
 def test_residual_first_initial_groups_rejects_whitespace_only_first_initials():
-    assert model_module._signature_first_initials_for_rules("  ") == frozenset()
+    assert first_initials("  ") == frozenset()
 
     dataset = SimpleNamespace(
         signatures={
@@ -370,9 +377,14 @@ def test_residual_first_initial_groups_rejects_whitespace_only_first_initials():
             "s3": _subblocking_signature("alice", orcid=None),
         }
     )
-    clusterer = SimpleNamespace(use_default_constraints_as_supervision=True, suppress_orcid=True)
-
-    groups = model_module._residual_phase_b_first_initial_groups(clusterer, dataset, ["s1", "s2", "s3"], {})
+    groups = residual_first_initial_groups(
+        ["s1", "s2", "s3"],
+        first_names=SignatureFirstNames(dataset.signatures),
+        orcids=SignatureOrcids(dataset.signatures),
+        partial_supervision={},
+        use_default_constraints_as_supervision=True,
+        suppress_orcid=True,
+    )
 
     assert groups == [["s1", "s2", "s3"]]
 

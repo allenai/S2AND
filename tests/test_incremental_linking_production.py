@@ -9,6 +9,10 @@ import s2and.incremental_linking.production as production_module
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
 
 
+def _unexpected_residual_clustering(signature_ids: list[str]) -> dict[str, list[str]]:
+    pytest.fail(f"Unexpected residual clustering: {signature_ids}")
+
+
 @pytest.mark.parametrize("query_disallow", [False, True])
 @pytest.mark.parametrize("batch_size", [1, 2])
 @pytest.mark.parametrize("external_fallback", [False, True])
@@ -18,7 +22,6 @@ def test_altered_profile_disallows_survive_native_planning_and_restoration(
     """Exercise production sidecars, native retrieval, conflict rescore, and finalization."""
     from s2and.arrow_inputs import ArrowDataset
     from s2and.featurizer import FeaturizationInfo
-    from s2and.model import Clusterer
     from tests.helpers import write_minimal_arrow_prediction_bundle
 
     write_minimal_arrow_prediction_bundle(tmp_path)
@@ -44,7 +47,6 @@ def test_altered_profile_disallows_survive_native_planning_and_restoration(
         n_jobs = 1
         suppress_orcid = True
         featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
-        _finish_incremental_with_seed_links = Clusterer._finish_incremental_with_seed_links
 
         def _build_incremental_seed_setup(self, *args, **kwargs):
             return (
@@ -106,6 +108,7 @@ def test_altered_profile_disallows_survive_native_planning_and_restoration(
             SplitClusterer(),
             [*seeds, *queries],
             dataset,
+            cluster_residuals=_unexpected_residual_clustering,
             arrow_dataset=arrow_dataset,
             artifact=SimpleNamespace(artifact_dir=tmp_path, retrieval_top_k=2, feature_columns=("test",)),
             prevent_new_incompatibilities=False,

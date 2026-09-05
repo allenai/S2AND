@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -48,12 +48,6 @@ from s2and.runtime import build_runtime_context
 from s2and.thread_config import resolve_n_jobs
 
 LinkAction = Literal["link", "abstain"]
-SeedSetup = tuple[
-    Mapping[str, int | str],
-    Mapping[str, int | str],
-    Mapping[str, Sequence[str]],
-    Mapping[str, Sequence[str]],
-]
 
 # Production 1.2 dense output semantics. The pairwise distance model preserves
 # NaNs internally; only the exported pw_* aggregate features are zero-filled.
@@ -1463,16 +1457,13 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     clusterer: Any,
     artifact: IncrementalLinkingArtifact,
     *,
-    dataset: ANDData | None,
     featurizer: Any,
     retrieval_batch: LinkerRetrievalBatch,
     queries: Sequence[Any],
     query_signature_ids: Sequence[Any],
+    cluster_seeds_require: Mapping[str, int | str],
     partial_supervision: Mapping[tuple[Any, Any], int | float] | None = None,
-    constraint_backend: Any | None = None,
     extra_row_signals: Mapping[str, Any] | None = None,
-    extra_row_signal_builder: Callable[[LinkerRetrievalBatch, Mapping[int, str]], Mapping[str, Any]] | None = None,
-    seed_setup: SeedSetup | None = None,
     partial_supervision_seed_signature_to_component: Mapping[str, Any] | None = None,
     runtime_context: Any | None = None,
     n_jobs: int | None = None,
@@ -1495,22 +1486,6 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     }
     n_jobs_resolved = resolve_n_jobs(getattr(clusterer, "n_jobs", 1) if n_jobs is None else n_jobs)
     retrieval_top_k_resolved = int(artifact.retrieval_top_k if retrieval_top_k is None else retrieval_top_k)
-    if seed_setup is None:
-        build_seed_setup = getattr(clusterer, "_build_incremental_seed_setup", None)
-        if not callable(build_seed_setup):
-            raise TypeError("clusterer must expose _build_incremental_seed_setup for the private M3a slice")
-        resolved_seed_setup = build_seed_setup(
-            dataset,
-            partial_supervision_dict,
-            resolved_runtime_context,
-        )
-    else:
-        resolved_seed_setup = seed_setup
-    cluster_seeds_require, _recluster_map, _cluster_seeds_require_inverse, _split_cluster_seeds_require_inverse = (
-        resolved_seed_setup
-    )
-    cluster_seeds_require = dict(cluster_seeds_require)
-
     signature_id_to_index = signature_id_to_index_map(featurizer)
     signature_ids_by_index = tuple(str(signature_id) for signature_id in featurizer.signature_ids())
     query_signature_id_strings = tuple(str(signature_id) for signature_id in query_signature_ids)
@@ -1565,7 +1540,6 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
             "partial_supervision_ignored_outside_window": 0,
         }
 
-    constraint_featurizer = getattr(constraint_backend, "rust_featurizer", None) or featurizer
     pair_labels, constraint_telemetry = _resolve_candidate_batch_pair_labels_rust(
         candidate_batch=candidate_batch,
         signature_ids_by_index=signature_ids_by_index,
@@ -1573,7 +1547,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         use_default_constraints_as_supervision=bool(getattr(clusterer, "use_default_constraints_as_supervision", True)),
         dont_merge_cluster_seeds=bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
         n_jobs=n_jobs_resolved,
-        featurizer=constraint_featurizer,
+        featurizer=featurizer,
     )
     if pair_labels.shape != (candidate_batch.pair_count,):
         raise ValueError(
@@ -1582,7 +1556,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     constraint_row_signals = _constraint_row_signals(candidate_batch, pair_labels)
 
     pairwise_model_result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
-        dataset,
+        None,
         candidate_batch,
         classifier=clusterer.classifier,
         featurizer_info=clusterer.featurizer_info,
@@ -1599,14 +1573,8 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         query_signature_id_by_index=query_signature_id_by_index,
         query_by_signature_id=query_by_signature_id,
     )
-    built_extra_row_signals = (
-        {}
-        if extra_row_signal_builder is None
-        else dict(extra_row_signal_builder(retrieval_batch, query_signature_id_by_index))
-    )
     merged_extra_row_signals = _merge_row_signal_sources(
         built_runtime_row_signals,
-        built_extra_row_signals,
         extra_row_signals,
     )
     decision_row_signals = _merge_row_signal_sources(
@@ -1627,7 +1595,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     private_result = _predict_incremental_link_or_abstain_retrieved_candidates(
         artifact,
         retrieval_batch,
-        dataset=dataset,
+        dataset=None,
         extra_row_signals=decision_row_signals,
         pairwise_stats=pairwise_model_result.pairwise_stats,
         no_candidate_query_signature_indices=no_candidate_query_signature_indices,
@@ -1685,17 +1653,6 @@ def _validate_raw_plan_query_signature_ids(
         )
 
 
-def _identity_seed_setup(
-    cluster_seeds_require: Mapping[str, int | str],
-) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
-    normalized = {str(signature_id): str(component_id) for signature_id, component_id in cluster_seeds_require.items()}
-    recluster_map: dict[str, str] = {component_id: component_id for component_id in normalized.values()}
-    inverse: dict[str, list[str]] = {}
-    for signature_id, component_id in normalized.items():
-        inverse.setdefault(component_id, []).append(signature_id)
-    return (normalized, recluster_map, inverse, inverse)
-
-
 def _raw_candidate_plan_telemetry_fields(telemetry: Mapping[str, Any] | None) -> dict[str, int | float | str]:
     if telemetry is None:
         return {}
@@ -1715,9 +1672,10 @@ def _raw_candidate_plan_telemetry_fields(telemetry: Mapping[str, Any] | None) ->
     return fields
 
 
-def _seed_setup_from_component_members(
+def _seed_map_from_component_members(
     component_members: Mapping[str, Sequence[str]],
-) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
+) -> dict[str, str]:
+    """Map seed signatures to components, rejecting conflicting membership."""
     cluster_seeds_require: dict[str, str] = {}
     for component_key, members in component_members.items():
         for signature_id in members:
@@ -1731,7 +1689,7 @@ def _seed_setup_from_component_members(
                     f"{existing_component_key!r} and {normalized_component_key!r}"
                 )
             cluster_seeds_require[normalized_signature_id] = normalized_component_key
-    return _identity_seed_setup(cluster_seeds_require)
+    return cluster_seeds_require
 
 
 def _query_placeholders_from_authors(
@@ -1792,25 +1750,22 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         raw_plan_bundle.query_authors,
         query_signature_id_strings,
     )
-    seed_setup = _seed_setup_from_component_members(raw_plan_bundle.component_members)
-    seed_signature_count = sum(len(members) for members in seed_setup[2].values())
+    cluster_seeds_require = _seed_map_from_component_members(raw_plan_bundle.component_members)
+    seed_signature_count = len(cluster_seeds_require)
     if seed_signature_count == 0 and raw_plan_bundle.telemetry is not None:
         seed_signature_count = int(raw_plan_bundle.telemetry.get("seed_signature_count", 0) or 0)
-    seed_component_count = len(seed_setup[1])
+    seed_component_count = len(set(cluster_seeds_require.values()))
     raw_arrow_signal_seconds = time.perf_counter() - stage_start
 
     result = _predict_incremental_link_or_abstain_production_from_retrieval_private(
         clusterer,
         artifact,
-        dataset=None,
         featurizer=featurizer,
         retrieval_batch=retrieval_batch,
         queries=query_placeholders,
         query_signature_ids=query_signature_id_strings,
         partial_supervision=partial_supervision,
-        constraint_backend=None,
-        extra_row_signal_builder=None,
-        seed_setup=seed_setup,
+        cluster_seeds_require=cluster_seeds_require,
         partial_supervision_seed_signature_to_component=partial_supervision_seed_signature_to_component,
         runtime_context=resolved_runtime_context,
         n_jobs=n_jobs_resolved,

@@ -1041,9 +1041,20 @@ def test_raw_arrow_scoring_requires_featurizer_with_provided_raw_plan(tmp_path: 
             )
 
 
+@pytest.mark.parametrize(
+    ("component_members", "expected_seed_count", "expected_component_count"),
+    [
+        ({"c_ada": ["s1"], "c_other": ["s2", "s3"]}, 3, 2),
+        ({"c_ada": ["s1", "s1"], "c_other": ["s2", "s3"], "empty": []}, 3, 2),
+        ({"empty": []}, 7, 0),
+    ],
+)
 def test_preplanned_raw_arrow_scoring_uses_provided_plan_and_featurizer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    component_members: dict[str, list[str]],
+    expected_seed_count: int,
+    expected_component_count: int,
 ) -> None:
     captured: dict[str, Any] = {}
 
@@ -1053,7 +1064,7 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan_and_featurizer(
 
     def fake_from_retrieval(**kwargs: Any) -> LinkOrAbstainProductionResult:
         retrieval_batch = kwargs["retrieval_batch"]
-        captured["dataset"] = kwargs["dataset"]
+        captured["cluster_seeds_require"] = kwargs["cluster_seeds_require"]
         captured["featurizer"] = kwargs["featurizer"]
         captured["retrieval_left_indices"] = retrieval_batch.candidate_batch.left_signature_indices.tolist()
         captured["retrieval_right_indices"] = retrieval_batch.candidate_batch.right_signature_indices.tolist()
@@ -1084,19 +1095,24 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan_and_featurizer(
     )
 
     fake_featurizer = FakeFeaturizer()
+    raw_plan = _raw_plan()
+    raw_plan["component_members"] = component_members
+    raw_plan["telemetry"]["seed_signature_count"] = 7
     with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
         result = _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
             _raw_test_clusterer(),
             _raw_test_artifact(),
             arrow_dataset=arrow_dataset,
             query_signature_ids=["q"],
-            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
+            raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(raw_plan),
             rust_featurizer=fake_featurizer,
             top_k=2,
             n_jobs=1,
         )
 
-    assert captured["dataset"] is None
+    assert captured["cluster_seeds_require"] == {
+        signature_id: component for component, members in component_members.items() for signature_id in members
+    }
     assert captured["featurizer"] is fake_featurizer
     assert captured["retrieval_left_indices"] == [0, 0, 0]
     assert captured["retrieval_right_indices"] == [1, 2, 3]
@@ -1105,6 +1121,10 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan_and_featurizer(
     assert result.telemetry["raw_arrow_retrieval_seconds"] == 0.0
     assert result.telemetry["raw_arrow_signature_count"] == 4
     assert result.telemetry["raw_arrow_plan_signature_count"] == 4
+    assert result.telemetry["seed_signature_count"] == expected_seed_count
+    assert result.telemetry["raw_arrow_seed_signature_count"] == expected_seed_count
+    assert result.telemetry["seed_component_count"] == expected_component_count
+    assert result.telemetry["raw_arrow_seed_component_count"] == expected_component_count
     assert isinstance(result.telemetry["raw_arrow_featurizer_seconds"], float)
 
 
@@ -1191,18 +1211,12 @@ def test_from_retrieval_skips_pair_id_build_when_partial_supervision_empty(
             use_default_constraints_as_supervision=False,
         ),
         _raw_test_artifact(),
-        dataset=None,
         featurizer=FakeFeaturizer(),
         retrieval_batch=retrieval_batch,
         queries=[object()],
         query_signature_ids=["q"],
         partial_supervision=None,
-        seed_setup=(
-            {"s1": "c_ada", "s2": "c_other", "s3": "c_other"},
-            {"c_ada": "c_ada", "c_other": "c_other"},
-            {"c_ada": ["s1"], "c_other": ["s2", "s3"]},
-            {"c_ada": ["s1"], "c_other": ["s2", "s3"]},
-        ),
+        cluster_seeds_require={"s1": "c_ada", "s2": "c_other", "s3": "c_other"},
         n_jobs=1,
         total_ram_bytes=None,
         retrieval_top_k=2,

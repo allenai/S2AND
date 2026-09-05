@@ -791,23 +791,23 @@ def _row_allows_seed_constraint_bypass(
 
 def _has_query_seed_connection_from_maps(
     cluster_seeds_require: Mapping[str, str],
-    cluster_seeds_disallow: Iterable[tuple[str, str]],
+    cluster_seeds_disallow: frozenset[tuple[str, str]],
     *,
     query_signature_id: str,
     candidate_signature_ids: Sequence[str],
 ) -> bool:
-    query_signature_id = str(query_signature_id)
-    require = {str(signature_id): str(cluster_id) for signature_id, cluster_id in cluster_seeds_require.items()}
-    disallow = {(str(left), str(right)) for left, right in cluster_seeds_disallow}
-    query_required_cluster = require.get(query_signature_id)
+    """Check a connection using canonical string maps from the dataset context."""
+    query_required_cluster = cluster_seeds_require.get(query_signature_id)
     for candidate_signature_id in candidate_signature_ids:
-        candidate_signature_id = str(candidate_signature_id)
-        if (query_signature_id, candidate_signature_id) in disallow or (
+        if (query_signature_id, candidate_signature_id) in cluster_seeds_disallow or (
             candidate_signature_id,
             query_signature_id,
-        ) in disallow:
+        ) in cluster_seeds_disallow:
             return True
-        if query_required_cluster is not None and require.get(candidate_signature_id) == query_required_cluster:
+        if (
+            query_required_cluster is not None
+            and cluster_seeds_require.get(candidate_signature_id) == query_required_cluster
+        ):
             return True
     return False
 
@@ -817,7 +817,7 @@ def _arrow_row_seed_bypass_mask(
     component_members: Mapping[str, Sequence[str]],
     *,
     cluster_seeds_require: Mapping[str, str],
-    cluster_seeds_disallow: Iterable[tuple[str, str]],
+    cluster_seeds_disallow: frozenset[tuple[str, str]],
     seed_constrained_signature_ids: frozenset[str],
 ) -> np.ndarray:
     row_seed_bypass = np.zeros(len(rows), dtype=bool)

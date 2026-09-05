@@ -1709,13 +1709,12 @@ def test_from_retrieval_validates_partial_supervision_against_full_seed_map() ->
         runtime_module._predict_incremental_link_or_abstain_production_from_retrieval_private(  # noqa: SLF001
             clusterer,
             artifact,
-            dataset=None,
             featurizer=featurizer,
             retrieval_batch=retrieval_batch,
             queries=[object()],
             query_signature_ids=["q1"],
             partial_supervision={("q1", "s2"): 0},
-            seed_setup=({"s1": "c1"}, {}, {"c1": ["s1"]}, {"c1": ["s1"]}),
+            cluster_seeds_require={"s1": "c1"},
             partial_supervision_seed_signature_to_component={"s1": "c1", "s2": "c2"},
         )
 
@@ -1748,12 +1747,11 @@ def test_from_retrieval_records_artifact_retrieval_top_k_when_not_passed(
     result = runtime_module._predict_incremental_link_or_abstain_production_from_retrieval_private(  # noqa: SLF001
         clusterer,
         artifact,
-        dataset=None,
         featurizer=featurizer,
         retrieval_batch=retrieval_batch,
         queries=[object()],
         query_signature_ids=["q1"],
-        seed_setup=({"s1": "c1"}, {}, {"c1": ["s1"]}, {"c1": ["s1"]}),
+        cluster_seeds_require={"s1": "c1"},
     )
 
     assert result.telemetry["retrieval_top_k"] == 37

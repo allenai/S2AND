@@ -140,11 +140,9 @@ def get_constraints_block_upper_triangle_indexed_rust(
         resolved_num_threads,
         suppress_orcid=suppress_orcid,
     )
-    return (
-        [int(value) for value in left_indices],
-        [int(value) for value in right_indices],
-        list(values),
-    )
+    # PyO3 converts the native Vec<u32> and Vec<Option<f64>> directly to
+    # list[int] and list[float | None]; no per-pair Python coercion is needed.
+    return left_indices, right_indices, values
 
 
 def build_linker_pair_features_and_aggregate_stats_arrays_rust(

@@ -563,6 +563,33 @@ def test_arrow_rust_row_seed_bypass_uses_manifest_seed_constraints() -> None:
     np.testing.assert_array_equal(mask, np.asarray([True, False]))
 
 
+@pytest.mark.parametrize(
+    ("query_id", "members", "disallows", "expected"),
+    [
+        ("q", ("neighbor",), frozenset({("q", "neighbor")}), True),
+        ("q", ("neighbor",), frozenset({("neighbor", "q")}), True),
+        ("q", ("q",), frozenset(), False),
+        ("unseeded", ("neighbor",), frozenset(), False),
+    ],
+    ids=["forward-disallow", "reverse-disallow", "self-excluded", "unseeded-query"],
+)
+def test_arrow_rust_row_seed_bypass_connection_boundaries(
+    query_id: str,
+    members: tuple[str, ...],
+    disallows: frozenset[tuple[str, str]],
+    expected: bool,
+) -> None:
+    rows = pd.DataFrame([{"query_signature_id": query_id, "candidate_component_key": "c", "split": "loo"}])
+    mask = _arrow_row_seed_bypass_mask(
+        rows,
+        {"c": members},
+        cluster_seeds_require={"q": "seed", "neighbor": "other_seed"},
+        cluster_seeds_disallow=disallows,
+        seed_constrained_signature_ids=frozenset({"q", "neighbor"}),
+    )
+    np.testing.assert_array_equal(mask, np.asarray([expected]))
+
+
 def test_arrow_rust_pair_label_resolution_applies_seed_bypass_and_disallow_ignore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

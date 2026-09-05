@@ -631,17 +631,45 @@ def _build_block_feature_matrices_indexed_rust(
     main_indices: list[int],
     nameless_indices: list[int] | None,
     num_threads: int,
+    scored_rows: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
+    """Build shared pair features, optionally omitting rows fixed by supervision.
+
+    Args:
+        scored_rows: Chunk-relative rows consumed by the classifiers. Other
+            rows retain NaN placeholders and must be masked before scoring.
+
+    Returns:
+        Full-shaped main and optional nameless feature matrices.
+    """
     union_indices = list(dict.fromkeys(main_indices + (nameless_indices or [])))
-    union_features = build_block_upper_triangle_feature_matrix_indexed_rust(
-        block_signature_indices,
-        start_offset=start_offset,
-        max_pairs=max_pairs,
-        selected_indices=union_indices,
-        num_threads=num_threads,
-        nan_value=np.nan,
-        featurizer=featurizer,
-    )
+    if scored_rows is None:
+        union_features = build_block_upper_triangle_feature_matrix_indexed_rust(
+            block_signature_indices,
+            start_offset=start_offset,
+            max_pairs=max_pairs,
+            selected_indices=union_indices,
+            num_threads=num_threads,
+            nan_value=np.nan,
+            featurizer=featurizer,
+        )
+    else:
+        local_i, local_j = _upper_triangle_indices_for_range(len(block_signature_indices), start_offset, max_pairs)
+        signature_indices = np.asarray(block_signature_indices, dtype=np.uint32)
+        pairs = list(
+            zip(
+                signature_indices[local_i[scored_rows]].tolist(),
+                signature_indices[local_j[scored_rows]].tolist(),
+                strict=True,
+            )
+        )
+        sparse_features = featurizer.featurize_pairs_matrix_indexed(pairs, union_indices, num_threads, np.nan)
+        del local_i, local_j, signature_indices, pairs
+        # Keep the original matrix shapes and classifier batching. Constrained
+        # rows are masked by _predict_and_combine and never reach a classifier.
+        union_features = np.full((max_pairs, len(union_indices)), np.nan, dtype=np.float64)
+        union_features[scored_rows] = sparse_features
+        del sparse_features
     position_by_index = {index: position for position, index in enumerate(union_indices)}
 
     def project(indices: list[int]) -> np.ndarray:
@@ -2538,8 +2566,15 @@ class Clusterer:
                     label_count = int(len(local_i_array))
 
                 stage_start = time.perf_counter()
-                labels = np.full(label_count, np.nan, dtype=np.float64)
-                if direct_overrides or reverse_overrides or constraint_values is not None:
+                if not direct_overrides and not reverse_overrides and constraint_values is not None:
+                    labels = np.fromiter(
+                        (np.nan if value is None else float(value - LARGE_INTEGER) for value in constraint_values),
+                        dtype=np.float64,
+                        count=label_count,
+                    )
+                else:
+                    labels = np.full(label_count, np.nan, dtype=np.float64)
+                if direct_overrides or reverse_overrides:
                     for row_offset in range(label_count):
                         pair_offset = offset + row_offset
                         override = direct_overrides.get(pair_offset)
@@ -2555,6 +2590,11 @@ class Clusterer:
                 label_build_seconds += time.perf_counter() - stage_start
 
                 stage_start = time.perf_counter()
+                scored_rows = np.flatnonzero(np.isnan(labels))
+                # Use indexed pairs only when supervision resolves a majority;
+                # otherwise retain the cheaper contiguous triangle traversal.
+                if len(scored_rows) * 2 >= label_count:
+                    scored_rows = None
                 batch_features, batch_nameless_features = _build_block_feature_matrices_indexed_rust(
                     block_signature_indices,
                     featurizer=rust_featurizer,
@@ -2563,6 +2603,7 @@ class Clusterer:
                     main_indices=selected_indices,
                     nameless_indices=nameless_selected_indices,
                     num_threads=self.n_jobs,
+                    scored_rows=scored_rows,
                 )
                 feature_matrix_seconds += time.perf_counter() - stage_start
                 batch_predictions, batch_seconds = _predict_and_combine(
@@ -2599,6 +2640,7 @@ class Clusterer:
                     batch_predictions,
                     constraint_values,
                     labels,
+                    scored_rows,
                     local_i,
                     local_j,
                     local_i_array,

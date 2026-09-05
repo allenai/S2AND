@@ -23,7 +23,7 @@ from s2and.incremental_linking.retrieval import (
     RawArrowPlanBundle,
     build_linker_retrieval_batch_from_raw_plan_bundle,
 )
-from s2and.incremental_linking.runtime import _seed_setup_from_component_members
+from s2and.incremental_linking.runtime import _seed_map_from_component_members
 from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import write_test_arrow_artifact_manifest
 
@@ -104,11 +104,11 @@ def test_raw_arrow_plan_bundle_rejects_duplicate_query_signature_ids() -> None:
         RawArrowPlanBundle.from_native_mapping(raw_plan)
 
 
-def test_raw_candidate_plan_seed_setup_rejects_duplicate_seed_signature() -> None:
+def test_raw_candidate_plan_seed_map_rejects_duplicate_seed_signature() -> None:
     raw_plan = {"component_members": {"c1": ["s1", "s2"], "c2": ["s1"]}}
 
     with pytest.raises(ValueError, match="assigns signature_id 's1' to multiple components"):
-        _seed_setup_from_component_members(raw_plan["component_members"])
+        _seed_map_from_component_members(raw_plan["component_members"])
 
 
 def test_raw_candidate_plan_schema_requires_component_members() -> None:

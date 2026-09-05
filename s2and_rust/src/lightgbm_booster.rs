@@ -43,6 +43,8 @@ const MISSING_TYPE_NONE: u8 = 0;
 const MISSING_TYPE_ZERO: u8 = 1;
 const MISSING_TYPE_NAN: u8 = 2;
 const MAX_NUM_FEATURES: usize = u16::MAX as usize + 1;
+// On the production feature widths, each row tile and its margins fit in L1.
+const ROW_TILE: usize = 64;
 
 #[inline]
 fn missing_type(decision_type: u8) -> u8 {
@@ -184,6 +186,7 @@ struct LgbModel {
 }
 
 impl LgbModel {
+    #[cfg(test)]
     #[inline]
     fn predict_row_raw(&self, row: &[f64]) -> f64 {
         let mut raw = 0.0f64;
@@ -193,6 +196,7 @@ impl LgbModel {
         raw
     }
 
+    #[cfg(test)]
     #[inline]
     fn predict_row_raw_f32(&self, row: &[f32]) -> f64 {
         let mut raw = 0.0f64;
@@ -498,21 +502,31 @@ fn predict_rows(
     apply_sigmoid: bool,
 ) -> Vec<f64> {
     let row_count = rows.len() / num_features;
-    let score_chunk = |chunk: &[f64]| {
-        let raw = model.predict_row_raw(chunk);
+    let mut scores = vec![0.0; row_count];
+    let score_tile = |(tile, margins): (&[f64], &mut [f64])| {
+        for tree in &model.trees {
+            for (row, raw) in tile.chunks_exact(num_features).zip(margins.iter_mut()) {
+                *raw += tree.predict(row);
+            }
+        }
         if apply_sigmoid {
-            model.raw_to_probability(raw)
-        } else {
-            raw
+            for raw in margins {
+                *raw = model.raw_to_probability(*raw);
+            }
         }
     };
     if num_threads > 1 && row_count > 1 {
         install_with_optional_rayon_pool(Some(num_threads), || {
-            rows.par_chunks(num_features).map(score_chunk).collect()
-        })
+            rows.par_chunks(num_features * ROW_TILE)
+                .zip(scores.par_chunks_mut(ROW_TILE))
+                .for_each(score_tile);
+        });
     } else {
-        rows.chunks(num_features).map(score_chunk).collect()
+        rows.chunks(num_features * ROW_TILE)
+            .zip(scores.chunks_mut(ROW_TILE))
+            .for_each(score_tile);
     }
+    scores
 }
 
 fn predict_rows_f32(
@@ -531,22 +545,34 @@ fn predict_rows_f32(
         0,
         "float32 scorer rows must be rectangular"
     );
+    // Reuse each tree across a small row tile while keeping the exact tree
+    // accumulation order for every row.
     let row_count = rows.len() / num_features;
-    let score_chunk = |chunk: &[f32]| {
-        let raw = model.predict_row_raw_f32(chunk);
+    let mut scores = vec![0.0; row_count];
+    let score_tile = |(tile, margins): (&[f32], &mut [f64])| {
+        for tree in &model.trees {
+            for (row, raw) in tile.chunks_exact(num_features).zip(margins.iter_mut()) {
+                *raw += tree.predict_f32(row);
+            }
+        }
         if apply_sigmoid {
-            model.raw_to_probability(raw)
-        } else {
-            raw
+            for raw in margins {
+                *raw = model.raw_to_probability(*raw);
+            }
         }
     };
     if num_threads > 1 && row_count > 1 {
         install_with_optional_rayon_pool(Some(num_threads), || {
-            rows.par_chunks(num_features).map(score_chunk).collect()
-        })
+            rows.par_chunks(num_features * ROW_TILE)
+                .zip(scores.par_chunks_mut(ROW_TILE))
+                .for_each(score_tile);
+        });
     } else {
-        rows.chunks(num_features).map(score_chunk).collect()
+        rows.chunks(num_features * ROW_TILE)
+            .zip(scores.chunks_mut(ROW_TILE))
+            .for_each(score_tile);
     }
+    scores
 }
 
 /// Pure-Rust scorer for S2AND's native LightGBM binary classifiers.
@@ -909,6 +935,74 @@ mod tests {
                 predict_rows(&model, &rows_f64, 2, 1, false),
                 "decision_type={decision_type}",
             );
+        }
+    }
+
+    #[test]
+    fn tiled_scoring_preserves_every_score_bit() {
+        let values = [
+            f32::NAN,
+            f32::from_bits(0xffc00001),
+            f32::NEG_INFINITY,
+            -next_f32(K_ZERO_THRESHOLD_F32),
+            -K_ZERO_THRESHOLD_F32,
+            -0.0,
+            0.0,
+            K_ZERO_THRESHOLD_F32,
+            next_f32(K_ZERO_THRESHOLD_F32),
+            previous_f32(0.5),
+            0.5,
+            next_f32(0.5),
+            f32::INFINITY,
+        ];
+        for decision_type in [0, 2, 4, 6, 8, 10] {
+            let text = TOY_MODEL.replacen(
+                "decision_type=10",
+                &format!("decision_type={decision_type}"),
+                1,
+            );
+            let mut model = parse_model(&text).unwrap();
+            // Cancellation makes any reassociation of tree sums observable.
+            let original_trees = model.trees.clone();
+            for magnitude in [1e20, 0.1, -1e20, -0.0, 0.3] {
+                let mut tree = original_trees[0].clone();
+                tree.leaf_value = vec![magnitude, -magnitude];
+                model.trees.push(tree);
+            }
+            for row_count in [0, 1, 63, 64, 65, 127, 128, 129, 1001] {
+                let rows: Vec<f32> = (0..row_count)
+                    .flat_map(|index| [values[index % values.len()], 0.2])
+                    .collect();
+                let rows_f64: Vec<f64> = rows.iter().map(|value| f64::from(*value)).collect();
+                for apply_sigmoid in [false, true] {
+                    let expected: Vec<u64> = rows
+                        .chunks_exact(2)
+                        .map(|row| {
+                            let raw = model.predict_row_raw_f32(row);
+                            if apply_sigmoid {
+                                model.raw_to_probability(raw).to_bits()
+                            } else {
+                                raw.to_bits()
+                            }
+                        })
+                        .collect();
+                    for threads in [1, 10] {
+                        let actual: Vec<u64> =
+                            predict_rows_f32(&model, &rows, 2, threads, apply_sigmoid)
+                                .iter()
+                                .map(|value| value.to_bits())
+                                .collect();
+                        assert_eq!(actual, expected,
+                            "decision={decision_type}, rows={row_count}, threads={threads}, sigmoid={apply_sigmoid}");
+                        let actual_f64: Vec<u64> =
+                            predict_rows(&model, &rows_f64, 2, threads, apply_sigmoid)
+                                .iter()
+                                .map(|value| value.to_bits())
+                                .collect();
+                        assert_eq!(actual_f64, expected);
+                    }
+                }
+            }
         }
     }
 

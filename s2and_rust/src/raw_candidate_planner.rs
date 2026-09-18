@@ -76,7 +76,7 @@ fn validate_signatures_batch_index_before_missing_signature_error(
     paths: &RawArrowPlannerPaths,
 ) -> PyResult<()> {
     if let Some(index_path) = paths.signatures_batch_index_path.as_deref() {
-        crate::arrow_batch_lookup::validate_arrow_batch_lookup_index(
+        crate::arrow_batch_lookup::validate_arrow_batch_lookup_index_if_fingerprinted(
             index_path,
             &paths.signatures_path,
             "signature_id",

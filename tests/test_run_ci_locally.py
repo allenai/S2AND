@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -60,10 +59,9 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, 
     lifecycle: list[str] = []
 
     monkeypatch.setenv("S2AND_BACKEND", "python")
-    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: None)
+    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: lifecycle.append("sync-and-build-rust"))
     monkeypatch.setattr(run_ci, "ensure_rust_on_path", lambda: lifecycle.append("ensure-rust"))
     monkeypatch.setattr(run_ci, "run_native_rust_checks", lambda: lifecycle.append("check-rust"))
-    monkeypatch.setattr(run_ci, "run_maturin_develop_with_retries", lambda: lifecycle.append("build-rust"))
     monkeypatch.setattr(run_ci, "run_ty_checks", lambda: lifecycle.append("typecheck"))
     failure = subprocess.CalledProcessError(7, "native smoke")
 
@@ -77,14 +75,14 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, 
         with pytest.raises(subprocess.CalledProcessError) as caught:
             run_ci.run_typecheck_and_test_job(lock_present=True)
         assert caught.value is failure
-        assert lifecycle == ["ensure-rust", "check-rust", "build-rust"]
+        assert lifecycle == ["ensure-rust", "sync-and-build-rust", "check-rust"]
         assert len(calls) == 1
         return
     run_ci.run_typecheck_and_test_job(lock_present=True)
 
     pytest_calls = [args for args, _env in calls if args[:3] == ["run", "--no-sync", "pytest"]]
     assert len(pytest_calls) == 1
-    assert lifecycle == ["ensure-rust", "check-rust", "build-rust", "typecheck"]
+    assert lifecycle == ["ensure-rust", "sync-and-build-rust", "check-rust", "typecheck"]
     assert calls[0][0] == ["run", "--no-sync", "python", "scripts/verification/smoke_installed_rust_api.py"]
     assert calls[0][1] is not None
     assert "S2AND_BACKEND" not in calls[0][1]
@@ -102,41 +100,12 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, 
     assert calls[1][1]["S2AND_BACKEND"] == "python"
 
 
-@pytest.mark.parametrize(
-    ("platform", "failures", "expected_attempts", "expected_delays"),
-    [("nt", 1, 2, [2.0]), ("nt", 3, 3, [2.0, 4.0]), ("posix", 1, 1, [])],
-    ids=["retry-recovers", "retry-exhausted", "non-windows-no-retry"],
-)
-def test_maturin_retries_are_bounded_and_surface_final_failure(
-    monkeypatch, tmp_path: Path, capsys, platform, failures, expected_attempts, expected_delays
-) -> None:
-    artifact = tmp_path / "stale.pyd"
-    artifact.write_bytes(b"stale extension")
-    attempts = []
-    delays = []
-    failure = subprocess.CalledProcessError(23, "maturin develop")
+@pytest.mark.parametrize(("lock_present", "frozen"), [(True, ["--frozen"]), (False, [])])
+def test_sync_deps_installs_the_rust_extension(monkeypatch, lock_present: bool, frozen: list[str]) -> None:
+    """The typecheck job imports the extension that the locked sync builds."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append(args))
 
-    def build(_args):
-        attempts.append(1)
-        if len(attempts) <= failures:
-            raise failure
-        assert not artifact.exists(), "Retry must clear the stale extension first"
+    run_ci.sync_deps(lock_present=lock_present)
 
-    monkeypatch.setattr(run_ci, "os", SimpleNamespace(name=platform))
-    monkeypatch.setattr(run_ci, "run_uv", build)
-    monkeypatch.setattr(run_ci, "_rust_extension_artifacts", lambda: [artifact] if artifact.exists() else [])
-    monkeypatch.setattr(run_ci.time, "sleep", delays.append)
-
-    if failures >= expected_attempts:
-        with pytest.raises(subprocess.CalledProcessError) as caught:
-            run_ci.run_maturin_develop_with_retries()
-        assert caught.value is failure
-    else:
-        run_ci.run_maturin_develop_with_retries()
-
-    assert len(attempts) == expected_attempts
-    assert delays == expected_delays
-    output = capsys.readouterr()
-    assert f"attempt {expected_attempts}/" in output.out
-    if expected_delays:
-        assert "exit code 23" in output.err
+    assert calls == [["sync", "--extra", "dev", *frozen]]

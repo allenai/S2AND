@@ -105,8 +105,8 @@ to resolution/attribute diagnostics from optional and native modules omitted
 from the static-only environment. Type errors remain blocking; warnings remain
 visible.
 
-The full pytest suite requires the native name-count index. Build the extension first or use
-`uv run --no-project python scripts/run_ci_locally.py`.
+The full pytest suite requires the native name-count index. `uv sync --extra dev` builds and installs the extension;
+`uv run --no-project python scripts/run_ci_locally.py` does the same before testing.
 
 Do not set `PYTHONPATH` for normal repo scripts; it can shadow the installed package or compiled Rust extension. Test
 and CI commands may set it only when they are intentionally exercising the checkout source tree.

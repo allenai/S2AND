@@ -8,8 +8,8 @@ With no argument, execution order is:
      - generated feature-schema sync check
      - isolated, exactly pinned ruff check / format checks
   2) typecheck-and-test job:
+     - sync dependencies, which builds and installs the required Rust extension
      - run Rust formatting, Clippy, and native unit tests
-     - build the required Rust extension
      - smoke-test the installed Rust extension
      - run the full suite with Python orchestration
 
@@ -21,7 +21,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 import tomllib
 from pathlib import Path
 
@@ -64,8 +63,6 @@ TY_SCRIPT_EXTRA_IGNORES = [
     "unresolved-reference",
     "unresolved-attribute",
 ]
-MATURIN_RETRY_ATTEMPTS_WINDOWS = 3
-MATURIN_RETRY_BACKOFF_SECONDS = 2.0
 RUST_MANIFEST = "s2and_rust/Cargo.toml"
 
 
@@ -165,46 +162,10 @@ def top_level_script_files() -> list[str]:
     return [str(path.relative_to(REPO)) for path in sorted((REPO / "scripts").glob("*.py"))]
 
 
-def _rust_extension_artifacts() -> list[Path]:
-    rust_package_dir = REPO / "s2and_rust" / "s2and_rust"
-    if not rust_package_dir.is_dir():
-        return []
-    return sorted(rust_package_dir.glob("_s2and_rust*.pyd"))
-
-
-def run_maturin_develop_with_retries() -> None:
-    args = uv_run_args("--with", "maturin", "maturin", "develop", "-m", "s2and_rust/Cargo.toml")
-    attempts = MATURIN_RETRY_ATTEMPTS_WINDOWS if os.name == "nt" else 1
-    for attempt in range(1, attempts + 1):
-        try:
-            print(f"[maturin] attempt {attempt}/{attempts}")
-            run_uv(args)
-            return
-        except subprocess.CalledProcessError as exc:
-            if attempt >= attempts:
-                raise
-            for artifact in _rust_extension_artifacts():
-                try:
-                    artifact.unlink()
-                    print(f"[maturin] removed stale artifact before retry: {artifact}")
-                except OSError as cleanup_exc:
-                    print(
-                        f"[maturin] cleanup warning (attempt {attempt}): could not remove {artifact}: {cleanup_exc}",
-                        file=sys.stderr,
-                    )
-            sleep_seconds = MATURIN_RETRY_BACKOFF_SECONDS * float(attempt)
-            print(
-                f"[maturin] attempt {attempt} failed with exit code {exc.returncode}; retrying in {sleep_seconds:.1f}s",
-                file=sys.stderr,
-            )
-            time.sleep(sleep_seconds)
-
-
 def sync_deps(*, lock_present: bool) -> None:
     args = ["sync", "--extra", "dev"]
     if lock_present:
         args.append("--frozen")
-    args.extend(["--no-install-package", "s2and-rust"])
     run_uv(args)
 
 
@@ -278,11 +239,10 @@ def run_ty_checks() -> None:
 
 def run_typecheck_and_test_job(*, lock_present: bool) -> None:
     print("\n=== typecheck-and-test ===")
-    sync_deps(lock_present=lock_present)
-
+    # The locked environment builds s2and-rust from source, so cargo comes first.
     ensure_rust_on_path()
+    sync_deps(lock_present=lock_present)
     run_native_rust_checks()
-    run_maturin_develop_with_retries()
     required_rust_env = os.environ.copy()
     required_rust_env.pop("S2AND_BACKEND", None)
     run_uv(

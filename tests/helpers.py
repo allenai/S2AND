@@ -13,7 +13,23 @@ from typing import Any
 
 from s2and.data import ANDData
 from s2and.incremental_linking.query_adapter import ClusterSummary, QueryFeatures
+from s2and.model import _IncrementalSeedSetup
 from s2and.name_counts_index import NameCountsIndex
+
+
+def incremental_seed_setup(
+    required_assignments: dict[str, Any],
+    recluster_map: dict[Any, Any],
+    original_members: dict[Any, list[str]],
+    split_members: dict[Any, list[str]],
+) -> _IncrementalSeedSetup:
+    """Build the private seed-setup record for tests that fake seed setup."""
+    return _IncrementalSeedSetup(
+        required_assignments=required_assignments,
+        recluster_map=recluster_map,
+        original_members=original_members,
+        split_members=split_members,
+    )
 
 
 def pairwise_training_args(

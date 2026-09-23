@@ -36,8 +36,9 @@ from s2and.incremental_linking.runtime import (
     _predict_incremental_link_or_abstain_retrieved_candidates,
     compute_candidate_batch_pairwise_model_and_aggregate_stats,
 )
+from s2and.model import _IncrementalSeedSetup
 from s2and.model_pairwise import predict_pairwise_class0
-from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, incremental_seed_setup
 from tests.model_helpers import ConstantDistanceClassifier
 from tests.promoted_linking_helpers import build_tiny_promoted_booster, synthetic_pairwise_bundle_binding
 
@@ -352,12 +353,12 @@ class FakeProductionClusterer:
         _partial_supervision: dict[tuple[str, str], int | float],
         _runtime_context: object,
         total_ram_bytes: int | None = None,
-    ) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
+    ) -> _IncrementalSeedSetup:
         del total_ram_bytes
         inverse: dict[str, list[str]] = {}
         for signature_id, cluster_id in self.seed_map.items():
             inverse.setdefault(cluster_id, []).append(signature_id)
-        return dict(self.seed_map), dict(self.recluster_map), inverse, inverse
+        return incremental_seed_setup(dict(self.seed_map), dict(self.recluster_map), inverse, inverse)
 
     def _resolve_constraint_batch(
         self,

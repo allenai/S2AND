@@ -911,12 +911,7 @@ def predict_incremental_promoted_linker_from_arrow(
         altered_cluster_signatures=list(dataset.altered_cluster_signatures or ()),
     )
     request_disallows, dataset_disallows = _request_cluster_seed_disallows(dataset)
-    (
-        cluster_seeds_require,
-        recluster_map,
-        cluster_seeds_require_inverse,
-        split_cluster_seeds_require_inverse,
-    ) = clusterer._build_incremental_seed_setup(
+    seed_setup = clusterer._build_incremental_seed_setup(
         dataset,
         partial_supervision,
         runtime_context,
@@ -925,6 +920,10 @@ def predict_incremental_promoted_linker_from_arrow(
         cluster_seed_disallows=request_disallows,
         prediction_state=prediction_state,
     )
+    cluster_seeds_require = seed_setup.required_assignments
+    recluster_map = seed_setup.recluster_map
+    cluster_seeds_require_inverse = seed_setup.original_members
+    split_cluster_seeds_require_inverse = seed_setup.split_members
     seed_setup_telemetry = dict(prediction_state.telemetry.get("incremental_seed_setup", {}))
     if len(cluster_seeds_require) == 0:
         raise ValueError("Promoted incremental linker mode requires at least one seed cluster")

@@ -35,6 +35,7 @@ from s2and.incremental_linking.runtime import LinkOrAbstainDecision
 from s2and.model import Clusterer
 from s2and.prediction_state import PredictionState
 from tests.helpers import (
+    incremental_seed_setup,
     tiny_name_counts_index,
     tiny_name_counts_tuple,
     write_minimal_arrow_prediction_bundle,
@@ -964,7 +965,7 @@ def test_promoted_linker_adds_partial_query_seed_disallows_to_planner_sidecar(
             }
             seeds = {"seed-1": "component-1", "seed-2": "component-2"}
             inverse = {"component-1": ["seed-1"], "component-2": ["seed-2"]}
-            return seeds, {}, inverse, inverse
+            return incremental_seed_setup(seeds, {}, inverse, inverse)
 
     @contextmanager
     def capture_sidecar(
@@ -1041,7 +1042,7 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
             kwargs["prediction_state"].telemetry["incremental_seed_setup"] = {
                 "seed_setup_cluster_seeds_source": "python"
             }
-            return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
+            return incremental_seed_setup({"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]})
 
     def fail_raw_arrow_linker(*_args: object, **_kwargs: object):
         raise RuntimeError("raw Arrow linker failed")
@@ -1100,7 +1101,7 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
             seeds = {"seed-z": "c_seed_0", "seed-a": "c_seed_0"}
             original_inverse = {"c_seed": ["seed-z", "seed-a"]}
             split_inverse = {"c_seed_0": ["seed-z", "seed-a"]}
-            return seeds, {"c_seed_0": "c_seed"}, original_inverse, split_inverse
+            return incremental_seed_setup(seeds, {"c_seed_0": "c_seed"}, original_inverse, split_inverse)
 
     class FakeFeaturizer:
         def __init__(self, signature_ids: tuple[str, ...]) -> None:
@@ -1238,7 +1239,7 @@ def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
             seeds = {"s0": "c0", "s1": "c1"}
             inverse = {"c0": ["s0"], "c1": ["s1"]}
-            return seeds, {}, inverse, inverse
+            return incremental_seed_setup(seeds, {}, inverse, inverse)
 
     class FakeFeaturizer:
         def __init__(self, signature_ids: tuple[str, ...]) -> None:
@@ -1389,7 +1390,7 @@ def test_promoted_linker_reuses_one_plan_and_featurizer_for_four_scoring_batches
         feature_contract = {}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
-            return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
+            return incremental_seed_setup({"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]})
 
     def fake_limits(**kwargs: object):
         query_count = int(kwargs["query_count"])
@@ -1467,7 +1468,7 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
         feature_contract = {}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
-            return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
+            return incremental_seed_setup({"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]})
 
     def fake_limits(**kwargs: object):
         query_count = int(kwargs["query_count"])
@@ -2086,15 +2087,17 @@ def test_build_incremental_seed_setup_uses_arrow_dataset_for_altered_profile_rec
     )
     runtime_context = cast(Any, object())
 
-    cluster_seeds_require, recluster_map, cluster_seeds_require_inverse, split_inverse = (
-        clusterer._build_incremental_seed_setup(
-            dataset,
-            {},
-            runtime_context=runtime_context,
-            total_ram_bytes=123_456,
-            arrow_dataset=arrow_dataset,
-        )
+    setup = clusterer._build_incremental_seed_setup(
+        dataset,
+        {},
+        runtime_context=runtime_context,
+        total_ram_bytes=123_456,
+        arrow_dataset=arrow_dataset,
     )
+    cluster_seeds_require = setup.required_assignments
+    recluster_map = setup.recluster_map
+    cluster_seeds_require_inverse = setup.original_members
+    split_inverse = setup.split_members
 
     assert captured["block_dict"] == {
         "altered_profile_0": ["seed0", "seed1"],
@@ -2147,17 +2150,16 @@ def test_build_incremental_seed_setup_normalizes_without_copying_source_seed_map
     )
     clusterer = _build_minimal_incremental_clusterer()
 
-    cluster_seeds_require, recluster_map, inverse, split_inverse = clusterer._build_incremental_seed_setup(
+    setup = clusterer._build_incremental_seed_setup(
         dataset,
         {},
         runtime_context=cast(Any, object()),
     )
 
-    assert cluster_seeds_require == {"seed0": "7", "seed1": "7", "seed2": "8"}
-    assert inverse == {"7": ["seed0", "seed1"], "8": ["seed2"]}
-    assert recluster_map == {}
-    assert split_inverse == inverse
-    assert split_inverse is inverse
+    assert setup.required_assignments == {"seed0": "7", "seed1": "7", "seed2": "8"}
+    assert setup.original_members == {"7": ["seed0", "seed1"], "8": ["seed2"]}
+    assert setup.recluster_map == {}
+    assert setup.split_members is setup.original_members
     assert source_seeds == {"seed0": 7, "seed1": 7, "seed2": 8}
 
 
@@ -2173,16 +2175,16 @@ def test_build_incremental_seed_setup_reuses_owned_normalized_direct_arrow_map()
     )
     clusterer = _build_minimal_incremental_clusterer()
 
-    cluster_seeds_require, recluster_map, inverse, split_inverse = clusterer._build_incremental_seed_setup(
+    setup = clusterer._build_incremental_seed_setup(
         cast(ANDData, dataset),
         {},
         runtime_context=cast(Any, object()),
     )
 
-    assert cluster_seeds_require is source_seeds
-    assert cluster_seeds_require == {"seed0": "7", "seed1": "7", "seed2": "8"}
-    assert recluster_map == {}
-    assert split_inverse is inverse
+    assert setup.required_assignments is source_seeds
+    assert setup.required_assignments == {"seed0": "7", "seed1": "7", "seed2": "8"}
+    assert setup.recluster_map == {}
+    assert setup.split_members is setup.original_members
 
 
 def test_build_incremental_seed_setup_copies_direct_arrow_map_before_altered_processing() -> None:
@@ -2197,15 +2199,15 @@ def test_build_incremental_seed_setup_copies_direct_arrow_map_before_altered_pro
     )
     clusterer = _build_minimal_incremental_clusterer()
 
-    cluster_seeds_require, recluster_map, _inverse, _split_inverse = clusterer._build_incremental_seed_setup(
+    setup = clusterer._build_incremental_seed_setup(
         cast(ANDData, dataset),
         {},
         runtime_context=cast(Any, object()),
     )
 
-    assert cluster_seeds_require == source_seeds
-    assert cluster_seeds_require is not source_seeds
-    assert recluster_map == {}
+    assert setup.required_assignments == source_seeds
+    assert setup.required_assignments is not source_seeds
+    assert setup.recluster_map == {}
 
 
 def test_native_prediction_ignores_seed_requires_with_precomputed_distances():

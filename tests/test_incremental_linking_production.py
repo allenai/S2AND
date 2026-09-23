@@ -7,6 +7,7 @@ import pytest
 
 import s2and.incremental_linking.production as production_module
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
+from tests.helpers import incremental_seed_setup
 
 
 def _unexpected_residual_clustering(signature_ids: list[str]) -> dict[str, list[str]]:
@@ -49,7 +50,7 @@ def test_altered_profile_disallows_survive_native_planning_and_restoration(
         featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
 
         def _build_incremental_seed_setup(self, *args, **kwargs):
-            return (
+            return incremental_seed_setup(
                 seeds,
                 {"claimed_0": "claimed", "claimed_1": "claimed"},
                 original_inverse,

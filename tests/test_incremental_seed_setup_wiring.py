@@ -8,13 +8,16 @@ import pytest
 
 import s2and.incremental_linking.production as production_module
 from s2and.featurizer import FeaturizationInfo
-from s2and.model import Clusterer
+from s2and.model import Clusterer, FastCluster
+from tests.helpers import incremental_seed_setup
+from tests.model_helpers import ConstantDistanceClassifier
 from tests.test_cluster_incremental import (
     _minimal_arrow_dataset,
     _mock_promoted_limits,
     _patch_fake_raw_arrow_planner,
     _unexpected_residual_clustering,
 )
+from tests.test_subblocked_seed_boundaries import _dataset
 
 
 @pytest.mark.parametrize("route", ["python", "promoted"])
@@ -70,7 +73,7 @@ def test_incremental_routes_use_split_members_for_names_and_original_members_for
         n_jobs=1,
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         feature_contract={},
-        _build_incremental_seed_setup=lambda *_args, **_kwargs: (
+        _build_incremental_seed_setup=lambda *_args, **_kwargs: incremental_seed_setup(
             split_seed_map,
             recluster_map,
             original_inverse,
@@ -135,3 +138,48 @@ def test_incremental_routes_use_split_members_for_names_and_original_members_for
     assert clusters == expected
     assert original_inverse == {"claimed": ["seed_original", "seed_linked"]}
     assert split_inverse == {"split_other": ["seed_original"], "split_linked": ["seed_linked"]}
+
+
+@pytest.mark.parametrize(
+    ("linked_seed_name", "query_name", "accepted"),
+    [("D", "Donald", True), ("Donald", "David", False)],
+    ids=["initial_split_accepts_new_full_name", "full_name_split_rejects_original_profile_match"],
+)
+def test_classic_incremental_hands_seed_setup_maps_to_completion(
+    monkeypatch: pytest.MonkeyPatch, linked_seed_name: str, query_name: str, accepted: bool
+) -> None:
+    """The public Python route must pass setup's split and original maps through.
+
+    Only seed setup is fixed; phases B-D, seed-link assignment and completion run.
+    """
+    dataset = _dataset([("David", "", "Jones"), (linked_seed_name, "", "Jones"), (query_name, "", "Jones")], {})
+    dataset.cluster_seeds_require = {"0": "claimed", "1": "claimed"}
+    dataset.max_seed_cluster_id = 1
+    original_members: dict[int | str, list[str]] = {"claimed": ["0", "1"]}
+    split_members: dict[int | str, list[str]] = {"split_other": ["0"], "split_linked": ["1"]}
+    setup = incremental_seed_setup(
+        {"0": "split_other", "1": "split_linked"},
+        {"split_other": "claimed", "split_linked": "claimed"},
+        original_members,
+        split_members,
+    )
+    monkeypatch.setattr(Clusterer, "_build_incremental_seed_setup", lambda *_args, **_kwargs: setup)
+    clusterer = Clusterer(
+        FeaturizationInfo(["year_diff"]),
+        ConstantDistanceClassifier(0.9),
+        cluster_model=FastCluster(eps=0.5),
+        n_jobs=1,
+    )
+
+    result = clusterer.predict_incremental(
+        ["2"],
+        dataset,
+        prevent_new_incompatibilities=True,
+        partial_supervision={("2", "1"): 0.0},
+    )
+
+    partition = {frozenset(members) for members in result["clusters"].values()}
+    assert partition == ({frozenset({"0", "1", "2"})} if accepted else {frozenset({"0", "1"}), frozenset({"2"})})
+    assert result["clusters"]["claimed"][:2] == ["0", "1"]
+    assert original_members == {"claimed": ["0", "1"]}
+    assert split_members == {"split_other": ["0"], "split_linked": ["1"]}

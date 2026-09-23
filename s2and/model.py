@@ -167,6 +167,28 @@ class _AlteredPresplitJob:
     cache_key: tuple[Any, ...] | None
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _IncrementalSeedSetup:
+    """Request-local seed maps produced once by incremental seed setup.
+
+    Frozen fields cannot be reassigned, but the mappings are the setup's owned
+    objects and are not copied or frozen; consumers treat them as read-only.
+
+    Attributes:
+        required_assignments: Signature to its current scoring component. An
+            altered profile's signatures map to split components, not the profile.
+        recluster_map: Split scoring component to its original profile ID.
+        original_members: Original profile ID to its members, in output order.
+        split_members: Scoring component to its members. The same object as
+            ``original_members`` when no profile was split.
+    """
+
+    required_assignments: dict[str, int | str]
+    recluster_map: dict[int | str, int | str]
+    original_members: dict[int | str, list[str]]
+    split_members: dict[int | str, list[str]]
+
+
 def _clusterer_with_prediction_params(clusterer: Any, params: dict[str, Any] | None) -> Any:
     """Bind explicit clustering overrides to a shallow, request-owned receiver.
 
@@ -3622,7 +3644,7 @@ class Clusterer:
                     ),
                 )
                 presplit_start = time.perf_counter()
-                prediction_cluster_seeds_require, recluster_map, _, _ = self._build_incremental_seed_setup(
+                seed_setup = self._build_incremental_seed_setup(
                     cast(ANDData, presplit_dataset),
                     effective_partial_supervision,
                     runtime_context,
@@ -3630,8 +3652,9 @@ class Clusterer:
                     arrow_dataset=arrow_dataset,
                     cluster_seed_disallows=cluster_seed_disallows,
                 )
+                prediction_cluster_seeds_require = seed_setup.required_assignments
                 prediction_state.telemetry["subblocked_altered_presplit"] = {
-                    "bulk_altered_presplit_applied": int(bool(recluster_map)),
+                    "bulk_altered_presplit_applied": int(bool(seed_setup.recluster_map)),
                     "bulk_altered_presplit_seconds": float(time.perf_counter() - presplit_start),
                 }
                 name_tuples = presplit_name_tuples
@@ -4665,12 +4688,7 @@ class Clusterer:
         arrow_dataset: ArrowDataset | None = None,
         cluster_seed_disallows: set[tuple[str, str]] | None = None,
         prediction_state: PredictionState | None = None,
-    ) -> tuple[
-        dict[str, int | str],
-        dict[int | str, int | str],
-        dict[int | str, list[str]],
-        dict[int | str, list[str]],
-    ]:
+    ) -> _IncrementalSeedSetup:
         seed_setup_start = time.perf_counter()
         altered_presplit_predict_seconds = 0.0
         altered_presplit_block_count = 0
@@ -4893,7 +4911,12 @@ class Clusterer:
             "seed_setup_recluster_map_entry_count": int(len(recluster_map)),
             "seed_setup_altered_cluster_count": int(altered_cluster_count),
         }
-        return cluster_seeds_require, recluster_map, cluster_seeds_require_inverse, split_cluster_seeds_require_inverse
+        return _IncrementalSeedSetup(
+            required_assignments=cluster_seeds_require,
+            recluster_map=recluster_map,
+            original_members=cluster_seeds_require_inverse,
+            split_members=split_cluster_seeds_require_inverse,
+        )
 
     def _convert_sum_count_to_average_distances(
         self,
@@ -5493,18 +5516,14 @@ class Clusterer:
         if prediction_state is None:
             prediction_state = _prediction_state_from_dataset(dataset)
         logger.info(f"Beginning incremental clustering for {len(block_signatures)} signatures...")
-        (
-            cluster_seeds_require,
-            recluster_map,
-            cluster_seeds_require_inverse,
-            split_cluster_seeds_require_inverse,
-        ) = self._build_incremental_seed_setup(
+        seed_setup = self._build_incremental_seed_setup(
             dataset,
             partial_supervision,
             runtime_context,
             total_ram_bytes=total_ram_bytes,
             prediction_state=prediction_state,
         )
+        cluster_seeds_require = seed_setup.required_assignments
 
         logger.info("Getting name constraints")
         all_pairs: list[tuple[str, str, float]] = []
@@ -5628,13 +5647,13 @@ class Clusterer:
             dataset,
             signature_to_cluster_to_average_dist,
             cluster_seeds_require,
-            recluster_map,
-            cluster_seeds_require_inverse,
+            seed_setup.recluster_map,
+            seed_setup.original_members,
             prevent_new_incompatibilities,
             partial_supervision,
             runtime_context,
             total_ram_bytes=total_ram_bytes,
-            split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
+            split_cluster_seeds_require_inverse=seed_setup.split_members,
             prediction_state=prediction_state,
         )
         phase_b_required_bytes = len(unassigned_signature_ids) * (len(unassigned_signature_ids) - 1) // 2 * 8

@@ -12,7 +12,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
 from s2and.prediction_state import PredictionState
-from tests.helpers import write_minimal_arrow_prediction_bundle
+from tests.helpers import incremental_seed_setup, write_minimal_arrow_prediction_bundle
 
 
 @pytest.mark.parametrize("case", ["clean", "dataset", "partial", "direct_soft", "direct_hard", "initial_only"])
@@ -293,7 +293,7 @@ def test_arrow_subblocking_presplits_altered_profiles_before_prediction(
         events.append("presplit")
         assert dataset.cluster_seeds_require == {"s1": "claimed", "s2": "claimed", "s3": "claimed"}
         assert dataset.altered_cluster_signatures == ["s1"]
-        return rewritten_seeds, {"claimed_0": "claimed", "claimed_1": "claimed"}, {}, {}
+        return incremental_seed_setup(rewritten_seeds, {"claimed_0": "claimed", "claimed_1": "claimed"}, {}, {})
 
     def fake_load_signature_info(_dataset: Any, signature_ids: list[str]):
         return {

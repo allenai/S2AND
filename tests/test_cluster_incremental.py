@@ -34,6 +34,7 @@ from s2and.incremental_linking.retrieval import (
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
 from s2and.model import Clusterer
 from s2and.prediction_state import PredictionState
+from s2and.runtime import build_runtime_context
 from tests.helpers import (
     incremental_seed_setup,
     tiny_name_counts_index,
@@ -464,6 +465,25 @@ def test_predict_incremental_links_against_altered_components(clusterer_dataset_
     control = _clusters(clusterer.predict_incremental(["4"], dataset))
     assert control["split3"] == ["3", "4"]
     assert set(result["claimed"]) == {"0", "3", "4"}
+
+
+def test_altered_split_ids_do_not_collide_with_existing_profiles(clusterer_dataset_factory) -> None:
+    """Splitting profile ``claimed`` must not reuse another profile's ``claimed_0`` ID."""
+    clusterer, dataset = clusterer_dataset_factory(name="altered_split_collision")
+    dataset.cluster_seeds_require = {"0": "claimed", "3": "claimed", "5": "claimed_0"}
+    dataset.cluster_seeds_disallow = set()
+    dataset.altered_cluster_signatures = ["0"]
+
+    setup = clusterer._build_incremental_seed_setup(
+        dataset, {}, runtime_context=build_runtime_context("altered_split_collision", backend="python")
+    )
+
+    assert set(setup.recluster_map.values()) == {"claimed"}
+    assert len(setup.recluster_map) == 2
+    assert "claimed_0" not in setup.recluster_map
+    assert setup.split_members["claimed_0"] == ["5"]
+    assert sorted(sid for split in setup.recluster_map for sid in setup.split_members[split]) == ["0", "3"]
+    assert setup.original_members == {"claimed": ["0", "3"], "claimed_0": ["5"]}
 
 
 def test_promoted_incremental_orcid_fanout_by_query_counts_matching_components() -> None:

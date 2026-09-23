@@ -4882,12 +4882,19 @@ class Clusterer:
                         [list(new_cluster) for new_cluster in reclustered_output.values()]
                     )
 
+            # Split IDs must not reuse an existing profile ID such as "p_0".
+            used_component_ids = set(cluster_seeds_require_inverse)
             for altered_cluster_num in sorted_altered_cluster_nums:
                 new_clusters = reclustered_by_cluster_num.get(altered_cluster_num, [])
                 if len(new_clusters) <= 1:
                     continue
                 for i, new_cluster_of_signatures in enumerate(new_clusters):
-                    new_cluster_num = str(altered_cluster_num) + f"_{i}"
+                    new_cluster_num = f"{altered_cluster_num}_{i}"
+                    collision_index = 1
+                    while new_cluster_num in used_component_ids:
+                        new_cluster_num = f"{altered_cluster_num}_{i}|collision={collision_index:04d}"
+                        collision_index += 1
+                    used_component_ids.add(new_cluster_num)
                     recluster_map[new_cluster_num] = altered_cluster_num
                     for reclustered_signature_id in new_cluster_of_signatures:
                         cluster_seeds_require[reclustered_signature_id] = new_cluster_num

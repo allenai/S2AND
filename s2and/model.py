@@ -83,7 +83,7 @@ from s2and.rust_calls import (
     get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
 )
-from s2and.seed_merging import merge_seed_labels, restore_seed_membership, seed_disallow_adjacency
+from s2and.seed_merging import merge_seed_labels, pack_seed_components, restore_seed_membership, seed_disallow_adjacency
 from s2and.subblocking import (
     GraphSubblockingConfig,
     _make_subblocks_with_telemetry_arrow_rust,
@@ -1492,6 +1492,46 @@ def _allocate_subblock_key(
         allocated_key = f"{base_key}|collision={collision_index:04d}"
         collision_index += 1
     return allocated_key
+
+
+def _subblocked_prediction_scopes(
+    predicted_clusters: dict[str, list[str]],
+    initial_groups: Mapping[str, Sequence[str]],
+    original_blocks: Mapping[str, Sequence[str]] | None,
+) -> tuple[dict[str, str], dict[str, dict[str, list[str]]]]:
+    """Keep each sequential attachment pass inside its original input block."""
+    if original_blocks is None:
+        original_blocks = {
+            "": [sid for members in (*predicted_clusters.values(), *initial_groups.values()) for sid in members]
+        }
+    origins = {sid: block for block, members in original_blocks.items() for sid in members}
+    scoped: dict[str, dict[str, list[str]]] = {block: {} for block in original_blocks}
+    for cluster_id, members in predicted_clusters.items():
+        if members:
+            origin = origins[members[0]]
+            if any(origins[sid] != origin for sid in members):
+                raise RuntimeError("Subblock prediction crossed an original input-block boundary")
+            scoped[origin][cluster_id] = members
+    return origins, scoped
+
+
+def _combine_subblocked_predictions(scopes: Mapping[str, dict[str, list[str]]]) -> dict[str, list[str]]:
+    """Combine independent predictions without overwriting reused cluster IDs."""
+    result: dict[str, list[str]] = {}
+    reserved = {key for clusters in scopes.values() for key in clusters}
+    next_suffix: dict[str, int] = {}
+    for clusters in scopes.values():
+        for key, members in clusters.items():
+            if key in result:
+                base_key = key
+                index = next_suffix.get(base_key, 1)
+                key = f"{base_key}|collision={index:04d}"
+                while key in reserved or key in result:
+                    index += 1
+                    key = f"{base_key}|collision={index:04d}"
+                next_suffix[base_key] = index + 1
+            result[key] = members
+    return result
 
 
 class Clusterer:
@@ -3087,27 +3127,8 @@ class Clusterer:
                 for component_signatures in seed_components.values()
             )
             repaired_subblock_count = 0
-            emitted_component_ids: set[str] = set()
-            for subblock_key, subblock_signatures in normalized_native_subblocks.items():
-                atomic_items: list[list[str]] = []
-                for signature_id in subblock_signatures:
-                    component_id = component_by_signature_id.get(signature_id)
-                    if component_id is None:
-                        atomic_items.append([signature_id])
-                    elif component_id not in emitted_component_ids:
-                        atomic_items.append(seed_components[component_id])
-                        emitted_component_ids.add(component_id)
-
-                repaired_parts: list[list[str]] = []
-                current_part: list[str] = []
-                for atomic_item in atomic_items:
-                    if current_part and len(current_part) + len(atomic_item) > batching_threshold:
-                        repaired_parts.append(current_part)
-                        current_part = []
-                    current_part.extend(atomic_item)
-                if current_part:
-                    repaired_parts.append(current_part)
-
+            repaired = pack_seed_components(normalized_native_subblocks, seed_components, batching_threshold)
+            for subblock_key, repaired_parts in repaired.items():
                 for part_index, repaired_part in enumerate(repaired_parts):
                     repaired_key_base = f"{block_key}|subblock={subblock_key}"
                     if len(repaired_parts) > 1:
@@ -3154,30 +3175,50 @@ class Clusterer:
         cluster_seeds_disallow: set[tuple[str, str]],
         cluster_seeds_require: Mapping[str, int | str],
         prior_blocks: Iterable[Sequence[str]] = (),
+        original_blocks: Mapping[str, Sequence[str]] | None = None,
     ) -> dict[str, list[str]]:
         """Attach initial-only groups to prior Rust subblock predictions."""
 
         if not block_dict_single_letter:
             return pred_clusters
 
-        pred_clusters_intermediate = pred_clusters
+        origins, scoped_clusters = _subblocked_prediction_scopes(
+            pred_clusters, block_dict_single_letter, original_blocks
+        )
+        scoped_seeds: dict[str, dict[str, int | str]] = defaultdict(dict)
+        for sid, component in cluster_seeds_require.items():
+            if sid in origins:
+                scoped_seeds[origins[sid]][sid] = component
         disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision, blocks=prior_blocks)
         for block_key in sorted(block_dict_single_letter):
-            synthetic_seed_map = restore_seed_membership(
-                pred_clusters_intermediate, cluster_seeds_require, disallow_adjacency
-            )
             group_signature_ids = [str(signature_id) for signature_id in block_dict_single_letter[block_key]]
+            origin = origins[group_signature_ids[0]]
+            synthetic_seed_map = restore_seed_membership(
+                scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency
+            )
+            # Future initial-only groups are not known to this request's planner.
+            # Retain the full disallows above and expose only currently addressable
+            # endpoints here; later passes will see those queries as seeds.
+            known_ids = set(synthetic_seed_map).union(group_signature_ids)
+            current_disallows = {
+                (left, right) for left, right in cluster_seeds_disallow if left in known_ids and right in known_ids
+            }
+            current_supervision = {
+                (left, right): distance
+                for (left, right), distance in partial_supervision.items()
+                if left in known_ids and right in known_ids
+            }
             incremental_result = self.predict_incremental_from_arrow(
                 group_signature_ids,
                 arrow_dataset,
                 prevent_new_incompatibilities=True,
                 batching_threshold=batching_threshold,
-                partial_supervision=partial_supervision,
+                partial_supervision=current_supervision,
                 runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
                 name_tuples=name_tuples,
                 cluster_seeds_require=synthetic_seed_map,
-                cluster_seeds_disallow=cluster_seeds_disallow,
+                cluster_seeds_disallow=current_disallows,
                 altered_cluster_signatures=[],
             )
             clusters_payload = incremental_result.get("clusters")
@@ -3186,7 +3227,7 @@ class Clusterer:
                     "predict_incremental_from_arrow returned invalid clusters payload; expected dict "
                     f"got {type(clusters_payload).__name__}"
                 )
-            pred_clusters_intermediate = {}
+            pred_clusters_intermediate: dict[str, list[str]] = {}
             for cluster_id, signatures in clusters_payload.items():
                 if not isinstance(signatures, list):
                     raise RuntimeError(
@@ -3196,7 +3237,8 @@ class Clusterer:
                 cluster_key = str(cluster_id)
                 normalized_signatures = [str(signature_id) for signature_id in signatures]
                 pred_clusters_intermediate[cluster_key] = normalized_signatures
-        return pred_clusters_intermediate
+            scoped_clusters[origin] = pred_clusters_intermediate
+        return _combine_subblocked_predictions(scoped_clusters)
 
     def _predict_from_arrow(
         self,
@@ -3235,7 +3277,7 @@ class Clusterer:
         active_cluster_seeds_require: dict[str, int | str] = {}
         if needs_subblocking:
             assert batching_threshold is not None
-            if not incremental_dont_use_cluster_seeds:
+            if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds:
                 if prediction_cluster_seeds_require is not None:
                     effective_cluster_seeds_require.update(prediction_cluster_seeds_require)
             active_signature_id_set = set(signature_ids)
@@ -3287,6 +3329,7 @@ class Clusterer:
             ) = self._partition_subblocked_first_name_groups(
                 block_dict_subblocked,
                 cast(ANDData, partition_dataset),
+                original_blocks=block_dict,
             )
             featurizer_signature_ids = list(
                 dict.fromkeys(
@@ -3366,6 +3409,7 @@ class Clusterer:
                 cluster_seeds_disallow=cluster_seed_disallows,
                 cluster_seeds_require=active_cluster_seeds_require,
                 prior_blocks=block_dict_multiple_letter.values(),
+                original_blocks=block_dict,
             )
             result = dict(pred_clusters), None
         else:
@@ -3807,7 +3851,27 @@ class Clusterer:
         *,
         batching_threshold: int,
         specter_cluster_fn: Callable[..., dict[str, list[str]]] | None = None,
+        cluster_seeds_require: Mapping[str, int | str] | None = None,
     ) -> dict[str, list[str]]:
+        seed_map = dataset.cluster_seeds_require if cluster_seeds_require is None else cluster_seeds_require
+        components_by_block: dict[str, dict[int | str, list[str]]] = {}
+        for block_key, signatures in block_dict.items():
+            if len(set(signatures)) != len(signatures):
+                raise ValueError(
+                    f"Subblocking requires unique signature IDs within each input block (block={block_key})"
+                )
+            components: dict[int | str, list[str]] = {}
+            for signature_id in signatures:
+                if signature_id in seed_map:
+                    components.setdefault(seed_map[signature_id], []).append(signature_id)
+            for component_id, members in components.items():
+                if len(members) > batching_threshold:
+                    raise ValueError(
+                        "cluster_seeds_require component exceeds batching_threshold before subblocking "
+                        f"(block={block_key} component={component_id} "
+                        f"size={len(members)} threshold={batching_threshold})"
+                    )
+            components_by_block[block_key] = components
         block_dict_subblocked: dict[str, list[str]] = {}
         for block_key in sorted(block_dict):
             block_signatures = block_dict[block_key]
@@ -3816,15 +3880,27 @@ class Clusterer:
                 if specter_cluster_fn is not None:
                     kwargs["specter_cluster_fn"] = specter_cluster_fn
                 subblocks = make_subblocks(block_signatures, dataset, **kwargs)
-                for subblock_key in sorted(subblocks):
-                    subblock_signatures = subblocks[subblock_key]
-                    generated_key = _allocate_subblock_key(
-                        f"{block_key}|subblock={subblock_key}",
-                        original_block_keys=block_dict.keys(),
-                        emitted_block_keys=block_dict_subblocked.keys(),
+                output_ids = [sid for members in subblocks.values() for sid in members]
+                if len(output_ids) != len(set(output_ids)) or set(output_ids) != set(block_signatures):
+                    raise RuntimeError(
+                        f"Subblocking must return every input signature exactly once (block={block_key})"
                     )
-                    block_dict_subblocked[generated_key] = subblock_signatures
-                    assert len(subblock_signatures) <= batching_threshold, "Subblock is too big for some reason!"
+                if any(len(members) > batching_threshold for members in subblocks.values()):
+                    raise RuntimeError(f"Subblocking exceeded batching_threshold (block={block_key})")
+                repaired = pack_seed_components(
+                    {key: subblocks[key] for key in sorted(subblocks)},
+                    components_by_block[block_key],
+                    batching_threshold,
+                )
+                for subblock_key, parts in repaired.items():
+                    for part_index, members in enumerate(parts):
+                        key = f"{block_key}|subblock={subblock_key}"
+                        if len(parts) > 1:
+                            key += f"|repair_part={part_index:04d}"
+                        generated_key = _allocate_subblock_key(
+                            key, original_block_keys=block_dict.keys(), emitted_block_keys=block_dict_subblocked.keys()
+                        )
+                        block_dict_subblocked[generated_key] = members
             else:
                 block_dict_subblocked[block_key] = block_signatures
         return block_dict_subblocked
@@ -3839,6 +3915,8 @@ class Clusterer:
         self,
         block_dict_subblocked: dict[str, list[str]],
         dataset: ANDData,
+        *,
+        original_blocks: Mapping[str, Sequence[str]] | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, list[str]], bool]:
         nonempty_subblocks = {
             block_key: block_signatures
@@ -3857,6 +3935,14 @@ class Clusterer:
         }
         if len(multiple_letter) == 0:
             return single_letter, {}, True
+        if original_blocks is not None:
+            origins = {sid: block for block, members in original_blocks.items() for sid in members}
+            full_name_origins = {origins[members[0]] for members in multiple_letter.values()}
+            # An all-initial original block has no local candidate seeds. Run it
+            # through bulk prediction even when another block has full names.
+            for key, members in list(single_letter.items()):
+                if origins[members[0]] not in full_name_origins:
+                    multiple_letter[key] = single_letter.pop(key)
         return multiple_letter, single_letter, False
 
     def _predict_subblocked_multiple_letter_groups(
@@ -3944,12 +4030,15 @@ class Clusterer:
         total_ram_bytes: int | None = None,
         incremental_dont_use_cluster_seeds: bool = False,
         prior_blocks: Iterable[Sequence[str]] = (),
+        original_blocks: Mapping[str, Sequence[str]] | None = None,
     ) -> dict[str, list[str]]:
         if len(block_dict_single_letter) == 0:
             return pred_clusters
 
         logger.info("Running predict incremental on subblocks with single letter first names")
-        pred_clusters_intermediate: dict[str, list[str]] = pred_clusters
+        origins, scoped_clusters = _subblocked_prediction_scopes(
+            pred_clusters, block_dict_single_letter, original_blocks
+        )
         predict_times: dict[str, float] = {}
         request_signature_ids = {
             signature_id
@@ -3965,11 +4054,15 @@ class Clusterer:
             if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds
             else {}
         )
+        scoped_seeds: dict[str, dict[str, int | str]] = defaultdict(dict)
+        for sid, component in original_seeds.items():
+            scoped_seeds[origins[sid]][sid] = component
         disallow_adjacency = seed_disallow_adjacency(
             dataset.cluster_seeds_disallow, partial_supervision, blocks=prior_blocks
         )
         for block_key in sorted(block_dict_single_letter):
-            synthetic_seeds = restore_seed_membership(pred_clusters_intermediate, original_seeds, disallow_adjacency)
+            origin = origins[block_dict_single_letter[block_key][0]]
+            synthetic_seeds = restore_seed_membership(scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency)
             # Synthetic seeds belong to this pass, not to claimed dataset profiles.
             prediction_state = PredictionState(
                 cluster_seeds_require=synthetic_seeds,
@@ -3991,7 +4084,7 @@ class Clusterer:
                     "predict_incremental returned invalid clusters payload; expected dict "
                     f"got {type(clusters_payload).__name__}"
                 )
-            pred_clusters_intermediate = {}
+            pred_clusters_intermediate: dict[str, list[str]] = {}
             for cluster_id, signatures in clusters_payload.items():
                 if not isinstance(signatures, list):
                     raise RuntimeError(
@@ -3999,10 +4092,11 @@ class Clusterer:
                         f"for cluster_id={cluster_id!r}, got {type(signatures).__name__}"
                     )
                 pred_clusters_intermediate[str(cluster_id)] = [str(signature) for signature in signatures]
+            scoped_clusters[origin] = pred_clusters_intermediate
             predict_times[block_key] = time.time() - start_predict_time
 
         logger.info(f"Finished subblocked predict incremental. Here's how long each subblock took: {predict_times}")
-        return pred_clusters_intermediate
+        return _combine_subblocked_predictions(scoped_clusters)
 
     def _predict_subblocked(
         self,
@@ -4035,12 +4129,19 @@ class Clusterer:
             dataset,
             batching_threshold=batching_threshold,
             specter_cluster_fn=graph_cluster_fn,
+            cluster_seeds_require=(
+                prediction_state.cluster_seeds_require
+                if self.use_default_constraints_as_supervision
+                and not incremental_dont_use_cluster_seeds
+                and not use_s2_clusters
+                else {}
+            ),
         )
         (
             block_dict_multiple_letter_first_names,
             block_dict_single_letter_first_names,
             alert_flag,
-        ) = self._partition_subblocked_first_name_groups(block_dict_subblocked, dataset)
+        ) = self._partition_subblocked_first_name_groups(block_dict_subblocked, dataset, original_blocks=block_dict)
         pred_clusters = self._predict_subblocked_multiple_letter_groups(
             block_dict_multiple_letter_first_names,
             alert_flag=alert_flag,
@@ -4065,6 +4166,7 @@ class Clusterer:
             total_ram_bytes=total_ram_bytes,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             prior_blocks=block_dict_multiple_letter_first_names.values(),
+            original_blocks=block_dict,
         )
         return dict(pred_clusters), None
 

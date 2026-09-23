@@ -558,6 +558,30 @@ def test_bundle_export_rejects_training_artifact_hash_mismatch(
         )
 
 
+def test_bundle_export_preserves_nonfinite_reproducibility_diagnostics(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.feature_contract.update(_TEST_EXPLICIT_ARTIFACT_HASHES)
+    output_dir = tmp_path / "optional-diagnostic"
+
+    write_pairwise_production_bundle(
+        source_clusterer,
+        output_dir,
+        release_version="10.0",
+        pairwise_training_config={"input_artifact_hashes": _TEST_EXPLICIT_ARTIFACT_HASHES},
+        pairwise_training_summary={"optional_diagnostic": float("nan")},
+    )
+
+    loaded = _load_pairwise_staging_model(output_dir, expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES)
+    assert isinstance(loaded, Clusterer)
+    summary = json.loads(
+        (output_dir / "reproducibility" / "pairwise_training_summary.json").read_text(encoding="utf-8")
+    )
+    assert np.isnan(summary["optional_diagnostic"])
+
+
 def test_finalization_uses_explicit_artifact_authority_instead_of_package_defaults(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -786,6 +810,29 @@ def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
         _refresh_manifest_checksum(bundle_dir, "clusterer.json")
         with pytest.raises(ValueError, match=message):
             _load_pairwise_staging_model(bundle_dir)
+
+
+@pytest.mark.parametrize("model_name", ["main", "nameless"])
+def test_pairwise_fixture_covers_missing_and_zero_rows_in_strict_json(
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+    model_name: str,
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    fixture_path = bundle_dir / "pairwise" / f"{model_name}_prediction_fixture.json"
+    fixture = json.loads(
+        fixture_path.read_text(encoding="utf-8"),
+        parse_constant=lambda value: pytest.fail(f"Fixture contains nonstandard JSON value {value}"),
+    )
+    features = np.asarray(fixture["features"], dtype=np.float64)
+    assert features.shape[0] == 10
+    assert np.isfinite(features[:8]).all()
+    assert fixture["features"][-2] == [None] * features.shape[1]
+    assert np.isnan(features[-2]).all()
+    np.testing.assert_array_equal(features[-1], np.zeros(features.shape[1]))
+    assert fixture["feature_source"] == "numpy_default_rng_normal_with_all_missing_and_zero_rows"
+
+    classifier = NativeLightGBMBinaryClassifier(bundle_dir / "pairwise" / f"{model_name}.lgb", n_jobs=1)
+    production_model_module._validate_pairwise_fixture(classifier, fixture_path)
 
 
 def test_pairwise_fixture_cannot_relax_tolerance_to_accept_wrong_predictions(

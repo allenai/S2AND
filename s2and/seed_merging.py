@@ -2,10 +2,49 @@
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from typing import TypeVar
 
 import numpy as np
 
 from s2and.consts import LARGE_DISTANCE
+
+_Component = TypeVar("_Component", bound=int | str)
+
+
+def pack_seed_components(
+    subblocks: Mapping[str, Sequence[str]],
+    components: Mapping[_Component, list[str]],
+    maximum_size: int,
+) -> dict[str, list[list[str]]]:
+    """Repack validated subblocks with each required component as one item.
+
+    Callers validate coverage and reject oversized components before invoking
+    the expensive subblocker. Preserve its order and move a component to the
+    first subblock containing one of its members.
+    """
+    component_by_signature = {sid: component for component, members in components.items() for sid in members}
+    emitted: set[_Component] = set()
+    repaired: dict[str, list[list[str]]] = {}
+    for key, signatures in subblocks.items():
+        parts: list[list[str]] = []
+        current: list[str] = []
+        for signature_id in signatures:
+            component = component_by_signature.get(signature_id)
+            if component is None:
+                item = [signature_id]
+            elif component in emitted:
+                continue
+            else:
+                item = components[component]
+                emitted.add(component)
+            if current and len(current) + len(item) > maximum_size:
+                parts.append(current)
+                current = []
+            current.extend(item)
+        if current:
+            parts.append(current)
+        repaired[key] = parts
+    return repaired
 
 
 def seed_disallow_adjacency(

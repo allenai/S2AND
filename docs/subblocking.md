@@ -141,6 +141,20 @@ partitioning knob. Missing required Arrow tables, embedding evidence, batch
 indexes, or the incremental artifact raise instead of falling back to Python or
 `ANDData`.
 
+Both prediction routes keep active required seed components together within
+each original input block. A component larger than `batching_threshold` in one
+block raises `ValueError` before subblocking; the size of a profile across
+different blocks does not trigger this check. Disabling required-seed supervision
+also disables this packing and size check.
+
+Initial-only groups can attach only to predictions from their original input
+block. A block containing only initials uses bulk prediction, even when other
+blocks contain full names. Restoring a profile spanning several input blocks
+does not join their output clusters. With constraint supervision enabled,
+explicit disallows remain effective during sequential attachment, including
+pairs whose other endpoint is processed later. Ignoring required seeds with
+`incremental_dont_use_cluster_seeds` does not disable these disallows.
+
 ## Telemetry
 
 `make_subblocks_with_telemetry(...)` returns the final subblocks plus telemetry for the partition process, including:

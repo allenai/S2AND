@@ -143,7 +143,7 @@ from typing import Any, cast
 
 import numpy as np
 
-from s2and.arrow_inputs import ArrowDataset, read_arrow_collection_root
+from s2and.arrow_inputs import ArrowDataset, _load_artifact_specs, read_arrow_collection_root
 from s2and.production_training_contract import frozen_test_blocks
 
 TRAIN_MODE_ANDDATA_CURRENT = "anddata-current"
@@ -466,6 +466,25 @@ def bundle_cluster_test_splits(model_path: Path) -> Mapping[str, Any]:
     return splits
 
 
+def _resolve_requested_arrow_dataset_root(
+    arrow_root: str,
+    dataset_name: str,
+    specter_suffix: str,
+) -> str:
+    """Check manifest availability without opening or hashing dataset payloads."""
+
+    dataset_root = resolve_arrow_dataset_root(arrow_root, dataset_name)
+    _generation_id, specs = _load_artifact_specs(Path(dataset_root))
+    expected_specter_name = "specter2.arrow" if specter_suffix == SPECTER2_SUFFIX else "specter.arrow"
+    specter_spec = specs.get("specter")
+    declared_specter = "" if specter_spec is None else specter_spec.path.name
+    if declared_specter != expected_specter_name:
+        raise FileNotFoundError(
+            f"Arrow dataset {dataset_name!r} declares {declared_specter!r}, not requested {expected_specter_name!r}"
+        )
+    return dataset_root
+
+
 def resolve_arrow_dataset(
     arrow_root: str,
     dataset_name: str,
@@ -473,14 +492,7 @@ def resolve_arrow_dataset(
 ) -> ArrowDataset:
     """Open the exact immutable Arrow generation for one evaluation dataset."""
 
-    dataset_root = resolve_arrow_dataset_root(arrow_root, dataset_name)
-    manifest = json.loads((Path(dataset_root) / "manifest.json").read_text(encoding="utf-8"))
-    expected_specter_name = "specter2.arrow" if specter_suffix == SPECTER2_SUFFIX else "specter.arrow"
-    declared_specter = Path(str(manifest.get("paths", {}).get("specter", ""))).name
-    if declared_specter != expected_specter_name:
-        raise FileNotFoundError(
-            f"Arrow dataset {dataset_name!r} declares {declared_specter!r}, not requested {expected_specter_name!r}"
-        )
+    dataset_root = _resolve_requested_arrow_dataset_root(arrow_root, dataset_name, specter_suffix)
     return ArrowDataset.open(
         dataset_root,
         require_specter=True,
@@ -502,9 +514,8 @@ def first_missing_arrow_dataset_error(
     for dataset_name in datasets:
         for specter_suffix in specter_suffixes:
             try:
-                with resolve_arrow_dataset(arrow_root, dataset_name, specter_suffix):
-                    pass
-            except (FileNotFoundError, ValueError) as exc:
+                _resolve_requested_arrow_dataset_root(arrow_root, dataset_name, specter_suffix)
+            except FileNotFoundError as exc:
                 return FileNotFoundError(
                     f"Missing Arrow files for dataset={dataset_name!r}, specter_suffix={specter_suffix!r}: {exc}"
                 )
@@ -1120,7 +1131,7 @@ def main() -> None:
         raise ValueError("Production evaluation requires --arrow-data-root or --json-data-root")
     missing_arrow_error = (
         first_missing_arrow_dataset_error(arrow_data_root, datasets, active_specter_suffixes)
-        if _supports_arrow_eval(args.dataset) and not train_flag
+        if _supports_arrow_eval(args.dataset) and not train_flag and not args.no_arrow
         else FileNotFoundError("Arrow eval is unavailable for this configuration")
     )
     arrow_available = _supports_arrow_eval(args.dataset) and not train_flag and missing_arrow_error is None

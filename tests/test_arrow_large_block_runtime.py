@@ -165,7 +165,8 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         return {
             "claimed": ["0", "1"],
             "bulk_a": ["2"],
-            "bulk_b": ["3", "4", "5", "9"],
+            "bulk_b": ["3", "4", "5"],
+            "small": ["9"],
         }
 
     def fake_predict_incremental(
@@ -185,13 +186,12 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
             "3": "bulk_b",
             "4": "bulk_b",
             "5": "bulk_b",
-            "9": "bulk_b",
         }
         return {
             "clusters": {
                 "claimed": ["0", "1"],
                 "bulk_a": ["2", "6", "7", "8"],
-                "bulk_b": ["3", "4", "5", "9"],
+                "bulk_b": ["3", "4", "5"],
             }
         }
 
@@ -233,6 +233,8 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     assert {signature_id for members in predicted.values() for signature_id in members} == {
         str(index) for index in range(10)
     }
+
+    assert predicted["small"] == ["9"]
 
     subblocking_telemetry = prediction_state.telemetry["rust_arrow_subblocking"]
     assert subblocking_telemetry["enabled"] == 1

@@ -311,9 +311,21 @@ use strict Arrow-native Rust subblocking; smaller blocks retain the full-block
 route. The native graph fallback requires indexed SPECTER evidence even when
 the pairwise model itself does not select an embedding feature. Initial-only
 groups attach through the production bundle's promoted incremental linker.
+Attachment and required-profile restoration stay within each original input
+block. Active required components are kept together within that block; a
+component larger than the threshold raises before subblocking. Blocks containing
+only initials use bulk prediction. See [subblocking.md](subblocking.md) for the
+same contract on the Python route.
 When altered claimed profiles are supplied on a subblocked request, their
 components are naturally pre-split before native subblocking; the same explicit
 request-local seed view is shared by subblocking and featurization.
+
+Linker source assembly validates each original Arrow manifest and its table and
+index hashes before rebinding its name-count index path. Evaluation's automatic
+Arrow selection treats invalid manifests or corrupt declared data as errors;
+it does not silently switch to JSON. `--no-arrow` explicitly selects JSON and
+skips Arrow inspection. A source without the required Arrow artifacts can still
+use the automatic JSON route.
 
 Promoted incremental inference requires an explicit seed mapping:
 

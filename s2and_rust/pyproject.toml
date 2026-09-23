@@ -16,3 +16,17 @@ bindings = "pyo3"
 python-source = "."
 module-name = "s2and_rust._s2and_rust"
 include = [{ path = "vendor/cld2/**/*", format = "sdist" }]
+
+[tool.uv]
+# Custom keys replace uv's defaults. Keep package metadata and every local
+# native/Python build input, including all files shipped from the vendored crate.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "build.rs" },
+    { file = "src/**/*.rs" },
+    { file = "vendor/cld2/**/*" },
+    { file = "s2and_rust/**/*.py" },
+    { file = "README.md" },
+]

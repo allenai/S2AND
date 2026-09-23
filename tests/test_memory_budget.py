@@ -431,6 +431,8 @@ def test_degenerate_budget_logs_warning(caplog):
         )
     assert snapshot.available_bytes == 1
     assert any("degenerate" in r.message for r in caplog.records)
+    assert "may reject allocations" in caplog.text
+    assert "Chunk sizes will be minimal" not in caplog.text
 
 
 def test_effective_available_fraction_in_snapshot():

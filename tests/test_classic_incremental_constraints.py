@@ -88,7 +88,7 @@ def test_public_incremental_rejects_new_name_conflict(classic):
     assert not any({"1", "2"}.issubset(members) for members in result.values())
 
 
-def test_bulk_initial_attachment_uses_synthetic_seed_state(classic):
+def test_bulk_initial_attachment_uses_synthetic_seed_state(classic, monkeypatch):
     clusterer, dataset = classic
     dataset.cluster_seeds_require = {}
     dataset.cluster_seeds_disallow = {("1", "2")}
@@ -96,7 +96,8 @@ def test_bulk_initial_attachment_uses_synthetic_seed_state(classic):
         dataset.signatures[signature_id] = dataset.signatures[signature_id]._replace(
             author_info_first="j", author_info_first_normalized_without_apostrophe="j"
         )
-    result, _ = clusterer.predict({"full": ["0"], "initial": ["1", "2"]}, dataset, batching_threshold=10)
+    monkeypatch.setattr("s2and.model.make_subblocks", lambda *args, **kwargs: {"full": ["0"], "initial": ["1", "2"]})
+    result, _ = clusterer.predict({"one": ["0", "1", "2"]}, dataset, batching_threshold=2)
     assert any(set(members) == {"0", "1"} for members in result.values())
     assert not any({"1", "2"}.issubset(members) for members in result.values())
     assert dataset.cluster_seeds_require == {}

@@ -84,6 +84,7 @@ def test_classic_subblocking_allocates_collision_safe_keys_and_preserves_members
         input_blocks,
         cast(ANDData, object()),
         batching_threshold=1,
+        cluster_seeds_require={},
     )
 
     assert observed == {

@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import (  # noqa: E402
+    _load_artifact_specs,
     build_arrow_artifact_manifest,
     read_arrow_collection_root,
     require_name_counts_index_artifact,
@@ -109,10 +110,13 @@ def _copy_arrow_root_without_name_counts(source: Path, destination: Path) -> Non
 
 
 def _rebind_dataset_manifests(root: Path, *, name_counts_index: Path) -> None:
-    """Rebuild dataset manifests for their final shared-index location."""
+    """Verify each original generation before relocating its shared-index path."""
 
     entries = _dataset_manifests(root)
     for manifest_path in entries.values():
+        # Validate the original metadata without hashing payloads a second time.
+        # Rebuilding first would silently repair invalid kinds, versions or fields.
+        _load_artifact_specs(manifest_path.parent)
         manifest = _read_json(manifest_path)
         paths = manifest.get("paths")
         if not isinstance(paths, Mapping):
@@ -125,13 +129,11 @@ def _rebind_dataset_manifests(root: Path, *, name_counts_index: Path) -> None:
             )
             for key, value in paths.items()
         }
-        write_arrow_artifact_manifest(
-            build_arrow_artifact_manifest(
-                resolved_paths,
-                manifest_path.parent,
-            ),
-            manifest_path.parent,
-        )
+        rebuilt = build_arrow_artifact_manifest(resolved_paths, manifest_path.parent)
+        if rebuilt["files"] != manifest["files"]:
+            raise ValueError(f"Arrow artifact inventory mismatch before index relocation: {manifest_path}")
+        manifest["paths"]["name_counts_index"] = rebuilt["paths"]["name_counts_index"]
+        write_arrow_artifact_manifest(manifest, manifest_path.parent)
     _write_root_manifest(
         root,
         dataset_manifests={

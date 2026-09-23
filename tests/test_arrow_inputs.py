@@ -497,6 +497,81 @@ def test_open_validates_schema_before_native_construction(
         ArrowDataset.open(tmp_path)
 
 
+@pytest.mark.parametrize("malformation", ["ipc", "schema"])
+def test_schema_errors_include_table_path_and_error_type(tmp_path: Path, malformation: str) -> None:
+    import pyarrow as pa
+
+    paths = _write_dataset(tmp_path)
+    signatures = Path(paths["signatures"])
+    if malformation == "ipc":
+        signatures.write_bytes(b"not an Arrow IPC file")
+        expected_type = "ArrowInvalid"
+    else:
+        write_arrow_ipc_table(pa.table({"signature_id": ["s1"]}), signatures)
+        expected_type = "ValueError"
+    write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, tmp_path), tmp_path)
+
+    with pytest.raises(ValueError) as caught:
+        ArrowDataset.open(tmp_path)
+    assert "signatures" in str(caught.value)
+    assert str(signatures) in str(caught.value)
+    assert expected_type in str(caught.value)
+    signatures.unlink()  # Schema/IPC failures must release the Windows mapping.
+
+
+@pytest.mark.parametrize("failure", [MemoryError("budget"), OSError(5, "read failure"), RuntimeError("unexpected")])
+def test_schema_validation_preserves_non_schema_exceptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    paths = _write_dataset(tmp_path)
+
+    def fail_schema(*_args, **_kwargs) -> None:
+        raise failure
+
+    monkeypatch.setattr(arrow_inputs, "validate_arrow_schema", fail_schema)
+    with pytest.raises(type(failure)) as caught:
+        ArrowDataset.open(tmp_path)
+    assert caught.value is failure
+    Path(paths["signatures"]).unlink()
+
+
+@pytest.mark.parametrize("chain", ["cause", "context", "cycle"])
+def test_schema_failure_releases_mapping_without_losing_exception_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chain: str
+) -> None:
+    import pyarrow as pa
+
+    paths = _write_dataset(tmp_path)
+    signatures = Path(paths["signatures"])
+    failure = RuntimeError("chained read failure")
+    cause = OSError(5, "original read failure", str(signatures))
+
+    def fail_open(source):
+        # The cause's traceback retains this frame and its mapped Arrow source.
+        try:
+            raise cause
+        except OSError:
+            if chain == "context":
+                raise failure  # noqa: B904 - Exercise implicit exception context.
+            if chain == "cycle":
+                cause.__cause__ = failure
+            raise failure from cause
+
+    monkeypatch.setattr(pa.ipc, "open_file", fail_open)
+    with pytest.raises(RuntimeError, match="chained read failure") as caught:
+        ArrowDataset.open(tmp_path)
+
+    assert caught.value is failure
+    assert failure.__context__ is cause
+    assert failure.__cause__ is (None if chain == "context" else cause)
+    assert cause.errno == 5
+    assert cause.filename == str(signatures)
+    assert cause.__traceback__ is None
+    if chain == "cycle":
+        assert cause.__cause__ is failure
+    signatures.unlink()
+
+
 def test_open_requires_the_fixed_base_shape_and_paired_specter(tmp_path: Path) -> None:
     _write_dataset(tmp_path, include_specter=True)
 

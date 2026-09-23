@@ -5,7 +5,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import Protocol
 
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
-from s2and.text import canonical_name_tuple_pair, normalize_orcid_compact
+from s2and.text import canonical_name_tuple_pair, canonicalize_name_parts, normalize_orcid_compact
 
 logger = logging.getLogger("s2and")
 
@@ -27,8 +27,11 @@ class CompletionSignature(Protocol):
 
 
 def signature_first(signature: CompletionSignature) -> str:
-    """Read the prepared first name with the existing raw-name fallback."""
-    return signature.author_info_first_normalized_without_apostrophe or signature.author_info_first or ""
+    """Preserve prepared names, canonicalizing raw input only when unprepared."""
+    prepared_first = signature.author_info_first_normalized_without_apostrophe
+    if prepared_first is not None:
+        return prepared_first
+    return canonicalize_name_parts(signature.author_info_first, None, None).first
 
 
 class SignatureFirstNames(Mapping[str, str]):

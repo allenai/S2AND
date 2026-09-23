@@ -293,6 +293,20 @@ def test_assembled_source_bundle_is_valid_bound_and_portable(
     assert report["data_root"] == str(data_root.resolve())
     assert report["release_version"] == "1.3"
     assert report["name_counts_manifest_sha256"] == _sha256(inputs["name_counts_index"] / "manifest.json")
+    for source_manifest, output_manifest in (
+        (
+            inputs["benchmark_arrow_root"] / "benchmark_demo" / "manifest.json",
+            data_root / "benchmark_demo" / "manifest.json",
+        ),
+        (
+            inputs["replay_arrow_root"] / "datasets" / "replay_demo" / "manifest.json",
+            source_root / "datasets" / "replay_demo" / "manifest.json",
+        ),
+    ):
+        original = json.loads(source_manifest.read_text(encoding="utf-8"))
+        relocated = json.loads(output_manifest.read_text(encoding="utf-8"))
+        original["paths"]["name_counts_index"] = relocated["paths"]["name_counts_index"]
+        assert relocated == original
     assert (source_root / "bundle.json").is_file()
     assert (data_root / "manifest.json").is_file()
     assert sorted(
@@ -435,3 +449,51 @@ def test_assembly_rejects_output_path_overlaps_before_copy(tmp_path: Path) -> No
 
         assert not inputs["output_source_bundle"].exists(), case_id
         assert not inputs["output_data_root"].exists(), case_id
+
+
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("rewrite_index", [False, True])
+def test_assembly_rejects_changed_payload_without_recertifying_it(
+    tmp_path: Path, replay: bool, rewrite_index: bool
+) -> None:
+    inputs = _inputs(tmp_path)
+    root = inputs["replay_arrow_root"] if replay else inputs["benchmark_arrow_root"]
+    dataset = root / "datasets" / "replay_demo" if replay else root / "benchmark_demo"
+    papers = dataset / "papers.arrow"
+    papers.write_bytes(papers.read_bytes().replace(b"Notes", b"WRONG"))
+    if rewrite_index:
+        write_arrow_batch_lookup_index(
+            papers,
+            dataset / "papers.papers_batch_index.bin",
+            key_column="paper_id",
+            table_name="papers",
+        )
+    original_manifest = (dataset / "manifest.json").read_bytes()
+
+    with pytest.raises(ValueError, match="(inventory|checksum|byte_count).*mismatch"):
+        assemble_source_bundle(**inputs)
+    assert (dataset / "manifest.json").read_bytes() == original_manifest
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("kind", "unrecognized", "kind"),
+        ("format_version", 999, "format_version"),
+        ("unexpected", "metadata", "fields mismatch"),
+    ],
+)
+def test_assembly_rejects_original_manifest_metadata(tmp_path: Path, field: str, value: object, message: str) -> None:
+    inputs = _inputs(tmp_path)
+    root = inputs["benchmark_arrow_root"]
+    manifest_path = root / "benchmark_demo" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[field] = value
+    _write_json(manifest_path, manifest)
+    collection_path = root / "manifest.json"
+    collection = json.loads(collection_path.read_text(encoding="utf-8"))
+    collection["dataset_manifests"]["benchmark_demo"]["sha256"] = _sha256(manifest_path)
+    _write_json(collection_path, collection)
+
+    with pytest.raises(ValueError, match=message):
+        assemble_source_bundle(**inputs)

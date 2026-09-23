@@ -14,6 +14,24 @@ from tests.helpers import tiny_name_counts_index
 from tests.model_helpers import ConstantDistanceClassifier
 
 
+def test_combining_block_local_predictions_preserves_reserved_cluster_keys() -> None:
+    from s2and.model import _combine_subblocked_predictions
+
+    result = _combine_subblocked_predictions(
+        {
+            "first": {"0": ["a"]},
+            "second": {"0": ["b"]},
+            "third": {"0|collision=0001": ["c"], "0": ["d"]},
+        }
+    )
+    assert result == {
+        "0": ["a"],
+        "0|collision=0002": ["b"],
+        "0|collision=0001": ["c"],
+        "0|collision=0003": ["d"],
+    }
+
+
 @pytest.mark.parametrize("backend", ["python", "rust"])
 @pytest.mark.parametrize("reverse_block", [False, True])
 @pytest.mark.parametrize("reverse_entries", [False, True])

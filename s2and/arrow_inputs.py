@@ -554,6 +554,23 @@ def _open_retained_path(path: Path) -> BinaryIO:
     return os.fdopen(descriptor, "rb", buffering=0)
 
 
+def _clear_exception_chain_tracebacks(error: BaseException) -> None:
+    """Release buffer-owning frames without changing exception-chain identities."""
+
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        current.__traceback__ = None
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+
 def _validate_retained_arrow_schema(retained: _RetainedFile, *, table_name: str) -> None:
     import mmap
 
@@ -563,12 +580,18 @@ def _validate_retained_arrow_schema(retained: _RetainedFile, *, table_name: str)
         source_map = mmap.mmap(retained.handle.fileno(), 0, access=mmap.ACCESS_READ)
         source = pa.BufferReader(source_map)
         reader = None
-        error: tuple[type[Exception], str] | None = None
+        error: Exception | None = None
         try:
             reader = pa.ipc.open_file(source)
             validate_arrow_schema(reader.schema, table_name=table_name)
+        except (pa.ArrowInvalid, pa.ArrowTypeError, ValueError) as exc:
+            error = ValueError(f"Invalid Arrow {table_name} schema in {retained.path} ({type(exc).__name__}): {exc}")
+            _clear_exception_chain_tracebacks(exc)
         except Exception as exc:
-            error = type(exc), str(exc)
+            # Traceback frames can retain buffers into the mapping. Release them
+            # before closing it, but preserve non-schema errors and their data.
+            _clear_exception_chain_tracebacks(exc)
+            error = exc
         finally:
             reader = None
             source.close()
@@ -576,8 +599,7 @@ def _validate_retained_arrow_schema(retained: _RetainedFile, *, table_name: str)
             source_map.close()
             retained.handle.seek(0)
         if error is not None:
-            error_type, message = error
-            raise error_type(message)
+            raise error
 
 
 def _raw_os_handle(handle: BinaryIO) -> int:

@@ -203,6 +203,14 @@ retrieval statistics for retained queries stay unchanged. The same identity
 authority is checked again before fitting, and diagnostics retain the early
 exclusion counts. Frozen test labels and features are not needed for this check.
 
+Linker reports distinguish two evaluation populations. The
+`stratified_eval_test_split.overall.test` result scores the held-out test queries
+and supplies the official release metrics. The `overall_s2and_eval`,
+`hwang_cleaned_eval`, and `overall_<dataset>_eval` results are full-source
+diagnostics: they can include queries used to calibrate the gate. Use the
+stratified test result when assessing held-out performance; the full-source
+diagnostics describe the broader evaluation-source population.
+
 After a complete bundle passes the release gates, reload it explicitly:
 
 ```python

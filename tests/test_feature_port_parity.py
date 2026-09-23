@@ -684,6 +684,78 @@ def test_get_constraints_matrix_indexed_rust_parity(source_dataset, arrow_datase
     assert actual == expected
 
 
+@pytest.mark.parametrize("backend", ["python", "rust"])
+@pytest.mark.parametrize(
+    ("constraint_kwargs", "expected"),
+    [
+        ({}, [0, 0, LARGE_DISTANCE, LARGE_DISTANCE]),
+        ({"dont_merge_cluster_seeds": False}, [0, 0, None, None]),
+        ({"incremental_dont_use_cluster_seeds": True}, [None, None, None, None]),
+    ],
+)
+def test_seed_group_constraints_have_independent_expected_values(tmp_path, backend, constraint_kwargs, expected):
+    """Seed rules alone distinguish otherwise compatible signatures in two groups."""
+    signature_ids = ["s1", "s2", "s3", "s4"]
+    signatures = {
+        signature_id: {
+            "signature_id": signature_id,
+            "paper_id": signature_id,
+            "author_info": {
+                "first": "Abdul",
+                "middle": "",
+                "last": "Sattar",
+                "suffix": None,
+                "position": 0,
+                "block": "a sattar",
+                "affiliations": [],
+                "email": None,
+                "orcid": None,
+            },
+        }
+        for signature_id in signature_ids
+    }
+    papers = {
+        signature_id: {
+            "paper_id": signature_id,
+            "title": "",
+            "abstract": "",
+            "authors": [{"author_name": "Abdul Sattar", "position": 0}],
+            "venue": "",
+            "journal_name": "",
+            "year": 2000,
+            "references": [],
+        }
+        for signature_id in signature_ids
+    }
+    seed_path = tmp_path / "cluster_seeds.json"
+    seed_path.write_text(json.dumps({"s1": {"s2": "require"}, "s3": {"s4": "require"}}), encoding="utf-8")
+    dataset = ANDData(
+        signatures,
+        papers,
+        name="compatible_seed_groups",
+        mode="inference",
+        cluster_seeds=str(seed_path),
+        name_counts_index=tiny_name_counts_index(),
+        name_tuples=set(),
+        n_jobs=1,
+    )
+    assert dataset.cluster_seeds_disallow == set()
+    assert all(signature.author_info_orcid is None for signature in dataset.signatures.values())
+    pairs = [("s1", "s2"), ("s3", "s4"), ("s1", "s3"), ("s4", "s2")]
+    if backend == "python":
+        actual = [dataset.get_constraint(left, right, **constraint_kwargs) for left, right in pairs]
+    else:
+        arrow_dataset = build_arrow_training_dataset(dataset, tmp_path, name_counts="empty")
+        rust_featurizer = _get_rust_featurizer(arrow_dataset)
+        signature_index = {sid: index for index, sid in enumerate(rust_featurizer.signature_ids())}
+        actual = get_constraints_matrix_indexed_rust(
+            [(signature_index[left], signature_index[right]) for left, right in pairs],
+            featurizer=rust_featurizer,
+            **constraint_kwargs,
+        )
+    assert actual == expected
+
+
 def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(arrow_dataset, constraint_pairs):
     rust_featurizer = _get_rust_featurizer(arrow_dataset)
     signature_ids = list(rust_featurizer.signature_ids())

@@ -57,9 +57,9 @@ class ProductionBundleSummary:
     manifest_path: Path
 
 
-def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+def _write_json(path: Path, payload: Mapping[str, Any], *, allow_nan: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=allow_nan) + "\n", encoding="utf-8")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -145,16 +145,25 @@ def _write_pairwise_model(model: Any, path: Path) -> None:
 
 def _write_pairwise_fixture(model: Any, path: Path, *, width: int, seed: int) -> None:
     rng = np.random.default_rng(int(seed))
-    features = rng.normal(size=(PAIRWISE_FIXTURE_ROWS, int(width)))
+    features = np.vstack(
+        (
+            rng.normal(size=(PAIRWISE_FIXTURE_ROWS, int(width))),
+            np.full((1, int(width)), np.nan),
+            np.zeros((1, int(width))),
+        )
+    )
+    feature_rows = features.tolist()
+    # JSON null is converted back to NaN by the existing float64 fixture loader.
+    feature_rows[-2] = [None] * int(width)
     payload = {
         "atol": PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
         "expected_probabilities": _predict_proba(model, features).tolist(),
-        "feature_source": "numpy_default_rng_normal",
-        "features": features.tolist(),
+        "feature_source": "numpy_default_rng_normal_with_all_missing_and_zero_rows",
+        "features": feature_rows,
         "rtol": PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
         "seed": int(seed),
     }
-    _write_json(path, payload)
+    _write_json(path, payload, allow_nan=False)
 
 
 def _pairwise_reproducibility_present(bundle_dir: Path) -> bool:

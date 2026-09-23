@@ -515,7 +515,7 @@ def memory_snapshot_for_stage(
         logger.warning(
             "Memory budget is degenerate: current_rss_bytes=%d (%.1f%% of total_ram_bytes=%d) "
             "exceeds usable headroom (safety_margin=%.0f%%). "
-            "Chunk sizes will be minimal and throughput will be severely degraded. "
+            "Memory guards may reject allocations that cannot fit even with minimal chunks. "
             "Consider passing a larger total_ram_bytes or reducing process memory usage.",
             current_rss_bytes,
             effective_pct,

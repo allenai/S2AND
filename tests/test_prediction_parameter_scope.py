@@ -124,19 +124,20 @@ def test_request_cache_is_owned_by_original_and_separates_effective_params() -> 
     assert first.subblocking_graph_config is model.subblocking_graph_config
 
 
-def test_singleton_subblocks_still_use_request_threshold() -> None:
-    """Two individually singleton blocks can interact in initial attachment."""
+def test_singleton_subblocks_still_use_request_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Singleton subblocks of one input block interact in initial attachment."""
     dataset = build_dummy_dataset("prediction_params_singletons")
     dataset.signatures["1"] = dataset.signatures["1"]._replace(
         author_info_first="a",
         author_info_first_normalized_without_apostrophe="a",
     )
-    blocks = {"full": ["0"], "initial": ["1"]}
+    blocks = {"one": ["0", "1"]}
+    monkeypatch.setattr("s2and.model.make_subblocks", lambda *args, **kwargs: {"full": ["0"], "initial": ["1"]})
     model = clusterer(0.8)
-    actual, _ = model.predict(blocks, dataset, batching_threshold=10, cluster_model_params={"eps": 0.1})
-    expected, _ = clusterer(0.1).predict(blocks, dataset, batching_threshold=10)
+    actual, _ = model.predict(blocks, dataset, batching_threshold=1, cluster_model_params={"eps": 0.1})
+    expected, _ = clusterer(0.1).predict(blocks, dataset, batching_threshold=1)
     assert partition(actual) == partition(expected) == {frozenset({"0"}), frozenset({"1"})}
-    baseline, _ = model.predict(blocks, dataset, batching_threshold=10)
+    baseline, _ = model.predict(blocks, dataset, batching_threshold=1)
     assert partition(baseline) == {frozenset({"0", "1"})}
 
 

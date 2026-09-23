@@ -1,5 +1,7 @@
 """Source digest used to reject stale native extensions before collection."""
 
+import importlib.machinery
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -8,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.rust_build_freshness import REBUILD_COMMAND, rust_source_digest
+from tests.rust_build_freshness import REBUILD_COMMAND, rust_source_digest, stale_rust_extension_message
 
 _TREE = {
     "Cargo.toml": b"[package]\n",
@@ -82,8 +84,12 @@ def test_digest_ignores_build_outputs_outside_declared_inputs(tmp_path: Path) ->
     assert rust_source_digest(root) == baseline
 
 
-def _session_project(root: Path, *, workspace_shim: bool) -> tuple[Path, Path]:
-    """Copy the real session hook into a small independent pytest project."""
+def _session_project(root: Path) -> tuple[Path, Path]:
+    """Copy the real session hook into a small independent pytest project.
+
+    Like the repository, the project root holds an ``s2and_rust/`` source
+    directory without ``__init__.py``; the package imports from ``installed/``.
+    """
     source_root = _write_tree(root / "s2and_rust", _TREE)
     tests = root / "tests"
     tests.mkdir()
@@ -95,11 +101,7 @@ def _session_project(root: Path, *, workspace_shim: bool) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     (root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-    if workspace_shim:
-        (source_root / "__init__.py").write_text("from .s2and_rust import *\n", encoding="utf-8")
-        package = source_root / "s2and_rust"
-    else:
-        package = root / "installed" / "s2and_rust"
+    package = root / "installed" / "s2and_rust"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("from ._s2and_rust import *\n", encoding="utf-8")
     return source_root, package / "_s2and_rust.py"
@@ -121,10 +123,9 @@ def _run_session(root: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.parametrize("workspace_shim", [True, False], ids=["workspace-shim", "installed-package"])
-def test_session_rejects_source_edit_before_collection(tmp_path: Path, workspace_shim: bool) -> None:
+def test_session_rejects_source_edit_before_collection(tmp_path: Path) -> None:
     """Exercise the real hook and import path, without compiling a fake crate."""
-    source_root, native = _session_project(tmp_path, workspace_shim=workspace_shim)
+    source_root, native = _session_project(tmp_path)
     digest = rust_source_digest(source_root)
     native.write_text(f"def get_build_info():\n    return {{'source_digest': {digest!r}}}\n", encoding="utf-8")
 
@@ -144,9 +145,8 @@ def test_session_rejects_source_edit_before_collection(tmp_path: Path, workspace
     assert "different sources" in output
 
 
-@pytest.mark.parametrize("workspace_shim", [True, False], ids=["workspace-shim", "installed-package"])
-def test_session_rejects_extension_without_source_digest(tmp_path: Path, workspace_shim: bool) -> None:
-    _, native = _session_project(tmp_path, workspace_shim=workspace_shim)
+def test_session_rejects_extension_without_source_digest(tmp_path: Path) -> None:
+    _, native = _session_project(tmp_path)
     native.write_text("def get_build_info():\n    return {'crate_version': '1.0.0'}\n", encoding="utf-8")
 
     result = _run_session(tmp_path)
@@ -159,8 +159,8 @@ def test_session_rejects_extension_without_source_digest(tmp_path: Path, workspa
     assert REBUILD_COMMAND in output
 
 
-def test_session_explains_missing_extension(tmp_path: Path) -> None:
-    _session_project(tmp_path, workspace_shim=True)
+def test_session_explains_missing_native_module(tmp_path: Path) -> None:
+    _session_project(tmp_path)
 
     result = _run_session(tmp_path)
     output = result.stdout + result.stderr
@@ -169,6 +169,21 @@ def test_session_explains_missing_extension(tmp_path: Path) -> None:
     assert not (tmp_path / "collected").exists()
     assert "Cannot import the s2and_rust extension" in output
     assert REBUILD_COMMAND in output
+
+
+def test_uninstalled_extension_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Without an install, the checkout's source directory imports as a namespace package."""
+    source_root = _write_tree(tmp_path / "s2and_rust", _TREE)
+    spec = importlib.machinery.PathFinder.find_spec("s2and_rust", [str(tmp_path)])
+    assert spec is not None and spec.loader is None
+    monkeypatch.setitem(sys.modules, "s2and_rust", importlib.util.module_from_spec(spec))
+
+    message = stale_rust_extension_message(source_root)
+
+    assert message is not None
+    assert "not the compiled extension" in message
+    assert str(source_root) in message
+    assert REBUILD_COMMAND in message
 
 
 def test_real_build_script_tracks_directories_and_current_package_root(tmp_path: Path) -> None:

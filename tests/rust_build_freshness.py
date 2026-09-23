@@ -1,9 +1,11 @@
 """Detect a loaded native extension built from different Rust sources.
 
-Tests run from the repository import whichever ``s2and_rust`` resolves first,
-which can be an old in-tree ``maturin develop`` build. The extension embeds a
-digest of its build inputs (``s2and_rust/build.rs``); this module recomputes it
-from the checkout. It establishes source freshness, not compiler provenance.
+Tests import the installed ``s2and_rust`` package. ``uv run`` rebuilds it when
+Rust build inputs change, but ``--no-sync`` runs, direct interpreter calls and
+editable ``maturin develop`` installs can still load an older build. The
+extension embeds a digest of its build inputs (``s2and_rust/build.rs``); this
+module recomputes it from the checkout. It establishes source freshness, not
+compiler provenance.
 """
 
 import hashlib
@@ -12,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 RUST_PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "s2and_rust"
-REBUILD_COMMAND = "uv run maturin develop -m s2and_rust/Cargo.toml --release"
+REBUILD_COMMAND = "uv sync --extra dev"
 
 # Mirrors SOURCE_DIGEST_FILES and SOURCE_DIGEST_DIRS in s2and_rust/build.rs.
 _SOURCE_DIGEST_FILES = ("Cargo.toml", "Cargo.lock", "build.rs")
@@ -61,7 +63,12 @@ def stale_rust_extension_message(root: Path = RUST_PACKAGE_ROOT) -> str | None:
         if name.rsplit(".", 1)[-1] == "_s2and_rust" and getattr(module, "__file__", None)
     )
     loaded = ", ".join(loaded_paths) or "<unknown>"
-    get_build_info: Callable[[], dict[str, object]] = vars(s2and_rust)["get_build_info"]
+    get_build_info: Callable[[], dict[str, object]] | None = vars(s2and_rust).get("get_build_info")
+    if get_build_info is None:
+        # Without an installed package, the repository's s2and_rust/ directory
+        # imports as an empty namespace package.
+        locations = ", ".join(str(path) for path in getattr(s2and_rust, "__path__", ())) or "<unknown>"
+        return f"s2and_rust resolved to {locations}, not the compiled extension. Install it with: {REBUILD_COMMAND}"
     embedded = get_build_info().get("source_digest")
     expected = rust_source_digest(root)
     if embedded == expected:

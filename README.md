@@ -56,11 +56,12 @@ git lfs pull
 uv venv --python 3.11
 # activate the environment, then:
 uv sync --active --extra dev
-uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 ```
 
-Source checkouts need the matching Rust extension and the LFS-managed parity
-fixture; repeat `git lfs pull` after switching branches that change it.
+`uv sync` builds the matching Rust extension from `s2and_rust/`, and `uv run`
+rebuilds it whenever Rust build inputs change. Source checkouts also need the
+LFS-managed parity fixture; repeat `git lfs pull` after switching branches that
+change it.
 For OS prerequisites, activation commands, WSL notes, and install variants, see
 [docs/install.md](docs/install.md).
 

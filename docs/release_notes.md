@@ -48,9 +48,13 @@ production model and public-data version is `1.3`, on a separate version axis.
   declared Arrow dataset is absent; invalid manifests or corrupt data raise, and
   `--no-arrow` skips Arrow inspection. Linker source assembly rejects Arrow
   inputs whose content differs from their manifests instead of re-hashing them.
-- Development: tests stop before collection when the loaded `s2and_rust`
-  extension was built from different Rust sources than the checkout. Rebuild
-  with `uv run maturin develop -m s2and_rust/Cargo.toml --release`.
+- Development: the repository-root `s2and_rust/__init__.py` workspace shim is
+  removed, so code run from the checkout imports the installed `s2and_rust`
+  package instead of an in-tree `maturin develop` build. `uv sync` and `uv run`
+  rebuild the extension whenever Rust build inputs change, and a fresh
+  `uv sync --extra dev` checkout can run the tests without `maturin develop`.
+  Tests stop before collection when the importable extension was built from
+  different Rust sources than the checkout; refresh it with `uv sync --extra dev`.
 - **Unreleased migration state:** the artifact-independent `1.0.0` code
   and release hardening are implemented. The reviewed canonical benchmark-name
   and ORCID source exports are still needed; production artifact generation,

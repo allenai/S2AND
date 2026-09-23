@@ -23,5 +23,7 @@ come from the same tree.
 
 ```bash
 uv sync --active --extra dev
-uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 ```
+
+`uv sync` builds and installs `s2and-rust` from this directory, and `uv run`
+rebuilds it whenever Rust build inputs change.

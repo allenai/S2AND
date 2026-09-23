@@ -87,19 +87,19 @@ If you do not want to activate the environment first, `uv sync --extra dev` also
 
 ## Build the Rust extension from source
 
-Install the extension into the active environment:
-
-```bash
-uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
-```
+`uv sync --extra dev` builds `s2and-rust` from `s2and_rust/` and installs it
+into the project environment. `uv run` rebuilds it whenever Rust build inputs
+change, so no separate build step is needed.
 
 Notes:
 
-- This also writes the compiled module into `s2and_rust/s2and_rust/`. Code run
-  from the repository root, including pytest, imports that in-tree module
-  through the workspace shim rather than the `site-packages` copy. Rebuild after
-  every Rust change; the test suite stops before collection when the loaded
-  module was built from different Rust sources.
+- The test suite imports the installed package and stops before collection when
+  it was built from different Rust sources, for example after `uv run --no-sync`
+  or a direct interpreter call following a Rust change. Refresh it with
+  `uv sync --extra dev`.
+- `uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml` still
+  installs an editable build; the next syncing `uv sync` or `uv run` replaces it
+  with the locked build.
 - If a rebuild still reports a source mismatch after switching checkouts that
   share `CARGO_TARGET_DIR`, clear this crate's cached release artifacts with
   `uv run --no-sync cargo clean -p s2and_rust --manifest-path s2and_rust/Cargo.toml --release`,

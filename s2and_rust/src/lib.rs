@@ -238,6 +238,7 @@ struct StagePaperPreprocessed {
 fn get_build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
     let build_info = PyDict::new(py);
     build_info.set_item("crate_version", env!("CARGO_PKG_VERSION"))?;
+    build_info.set_item("source_digest", env!("S2AND_RUST_SOURCE_DIGEST"))?;
     build_info.set_item("profile", option_env!("PROFILE").unwrap_or("unknown"))?;
     build_info.set_item("debug_assertions", cfg!(debug_assertions))?;
     build_info.set_item("debug", option_env!("DEBUG").unwrap_or("unknown"))?;

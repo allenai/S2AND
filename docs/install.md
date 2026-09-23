@@ -95,7 +95,15 @@ uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 
 Notes:
 
-- This installs the compiled module into `site-packages`.
+- This also writes the compiled module into `s2and_rust/s2and_rust/`. Code run
+  from the repository root, including pytest, imports that in-tree module
+  through the workspace shim rather than the `site-packages` copy. Rebuild after
+  every Rust change; the test suite stops before collection when the loaded
+  module was built from different Rust sources.
+- If a rebuild still reports a source mismatch after switching checkouts that
+  share `CARGO_TARGET_DIR`, clear this crate's cached release artifacts with
+  `uv run --no-sync cargo clean -p s2and_rust --manifest-path s2and_rust/Cargo.toml --release`,
+  then rebuild. Cargo can otherwise reuse artifacts from the other source copy.
 - If you just installed Rust with `rustup` in the current shell, load its environment first if needed.
 - Keep the Python and Rust packages from the same checkout. Do not rely on a
   public `s2and-rust` wheel for unreleased source behavior.

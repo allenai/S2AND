@@ -24,5 +24,8 @@ unidecode = "0.3.0"
 memmap2 = "0.9"
 unicode-properties = "0.1"
 
+[build-dependencies]
+sha2 = "0.10"
+
 [patch.crates-io]
 cld2 = { path = "vendor/cld2" }

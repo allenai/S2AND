@@ -1727,6 +1727,7 @@ def test_subblocked_single_letter_groups_use_request_owned_seeds(monkeypatch) ->
         {"block|single": ["s1", "s2"]},
         pred_clusters={},
         dataset=dataset,
+        original_blocks={"block": ["s1", "s2"]},
         partial_supervision={},
         runtime_context=cast(Any, _strict_rust_context("cleanup-no-dataset-featurizer")),
         total_ram_bytes=None,
@@ -1774,6 +1775,7 @@ def test_arrow_subblocked_single_letter_groups_carry_prior_assignments(tmp_path:
         name_tuples=frozenset(),
         cluster_seeds_disallow=set(),
         cluster_seeds_require={},
+        original_blocks={"block": ["seed0", "seed1", "q1", "q2"]},
     )
 
     assert result == {

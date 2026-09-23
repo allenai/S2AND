@@ -211,6 +211,27 @@ def test_query_disallows_survive_subblocked_attachment(tmp_path, route, constrai
 
 
 @pytest.mark.parametrize("route", ["python", "arrow"])
+def test_query_must_link_survives_subblocked_attachment(tmp_path, route):
+    """A must-link whose partner is attached in a later initial-only group."""
+    dataset = _dataset(
+        [
+            ("Ada", "", "Smith"),
+            ("A", "", "Smith"),
+            ("A", "", "Smith"),
+            ("A", "Alpha", "Smith"),
+            ("A", "Alpha", "Smith"),
+        ],
+        {},
+    )
+    blocks = {"one": list(dataset.signatures)}
+    clusters = _predict(
+        tmp_path, dataset, blocks, route, threshold=2, distance=0.9, partial_supervision={("1", "3"): 0.0}
+    )
+    _assert_partition(clusters, blocks)
+    assert any({"1", "3"} <= set(members) for members in clusters.values())
+
+
+@pytest.mark.parametrize("route", ["python", "arrow"])
 @pytest.mark.parametrize(
     "flags", [{}, {"incremental_dont_use_cluster_seeds": True}, {"use_default_constraints_as_supervision": False}]
 )

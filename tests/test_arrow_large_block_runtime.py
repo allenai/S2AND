@@ -357,6 +357,7 @@ def test_all_initial_arrow_subblocks_stay_on_bulk_path() -> None:
     bulk_blocks, incremental_blocks, alert_flag = _clusterer()._partition_subblocked_first_name_groups(
         block_dict,
         dataset,
+        original_blocks={"block": [sid for members in block_dict.values() for sid in members]},
     )
 
     assert bulk_blocks == block_dict

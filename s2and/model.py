@@ -1518,14 +1518,9 @@ def _allocate_subblock_key(
 
 def _subblocked_prediction_scopes(
     predicted_clusters: dict[str, list[str]],
-    initial_groups: Mapping[str, Sequence[str]],
-    original_blocks: Mapping[str, Sequence[str]] | None,
+    original_blocks: Mapping[str, Sequence[str]],
 ) -> tuple[dict[str, str], dict[str, dict[str, list[str]]]]:
     """Keep each sequential attachment pass inside its original input block."""
-    if original_blocks is None:
-        original_blocks = {
-            "": [sid for members in (*predicted_clusters.values(), *initial_groups.values()) for sid in members]
-        }
     origins = {sid: block for block, members in original_blocks.items() for sid in members}
     scoped: dict[str, dict[str, list[str]]] = {block: {} for block in original_blocks}
     for cluster_id, members in predicted_clusters.items():
@@ -3196,17 +3191,15 @@ class Clusterer:
         name_tuples: frozenset[tuple[str, str]],
         cluster_seeds_disallow: set[tuple[str, str]],
         cluster_seeds_require: Mapping[str, int | str],
+        original_blocks: Mapping[str, Sequence[str]],
         prior_blocks: Iterable[Sequence[str]] = (),
-        original_blocks: Mapping[str, Sequence[str]] | None = None,
     ) -> dict[str, list[str]]:
         """Attach initial-only groups to prior Rust subblock predictions."""
 
         if not block_dict_single_letter:
             return pred_clusters
 
-        origins, scoped_clusters = _subblocked_prediction_scopes(
-            pred_clusters, block_dict_single_letter, original_blocks
-        )
+        origins, scoped_clusters = _subblocked_prediction_scopes(pred_clusters, original_blocks)
         scoped_seeds: dict[str, dict[str, int | str]] = defaultdict(dict)
         for sid, component in cluster_seeds_require.items():
             if sid in origins:
@@ -3939,7 +3932,7 @@ class Clusterer:
         block_dict_subblocked: dict[str, list[str]],
         dataset: ANDData,
         *,
-        original_blocks: Mapping[str, Sequence[str]] | None = None,
+        original_blocks: Mapping[str, Sequence[str]],
     ) -> tuple[dict[str, list[str]], dict[str, list[str]], bool]:
         nonempty_subblocks = {
             block_key: block_signatures
@@ -3958,14 +3951,13 @@ class Clusterer:
         }
         if len(multiple_letter) == 0:
             return single_letter, {}, True
-        if original_blocks is not None:
-            origins = {sid: block for block, members in original_blocks.items() for sid in members}
-            full_name_origins = {origins[members[0]] for members in multiple_letter.values()}
-            # An all-initial original block has no local candidate seeds. Run it
-            # through bulk prediction even when another block has full names.
-            for key, members in list(single_letter.items()):
-                if origins[members[0]] not in full_name_origins:
-                    multiple_letter[key] = single_letter.pop(key)
+        origins = {sid: block for block, members in original_blocks.items() for sid in members}
+        full_name_origins = {origins[members[0]] for members in multiple_letter.values()}
+        # An all-initial original block has no local candidate seeds. Run it
+        # through bulk prediction even when another block has full names.
+        for key, members in list(single_letter.items()):
+            if origins[members[0]] not in full_name_origins:
+                multiple_letter[key] = single_letter.pop(key)
         return multiple_letter, single_letter, False
 
     def _predict_subblocked_multiple_letter_groups(
@@ -4052,16 +4044,14 @@ class Clusterer:
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None = None,
         incremental_dont_use_cluster_seeds: bool = False,
+        original_blocks: Mapping[str, Sequence[str]],
         prior_blocks: Iterable[Sequence[str]] = (),
-        original_blocks: Mapping[str, Sequence[str]] | None = None,
     ) -> dict[str, list[str]]:
         if len(block_dict_single_letter) == 0:
             return pred_clusters
 
         logger.info("Running predict incremental on subblocks with single letter first names")
-        origins, scoped_clusters = _subblocked_prediction_scopes(
-            pred_clusters, block_dict_single_letter, original_blocks
-        )
+        origins, scoped_clusters = _subblocked_prediction_scopes(pred_clusters, original_blocks)
         predict_times: dict[str, float] = {}
         request_signature_ids = {
             signature_id

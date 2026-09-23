@@ -64,6 +64,7 @@ def _run_subblocks(
         {f"subblock_{index}": [query] for index, query in enumerate(queries)},
         pred_clusters={cluster: [seed]},
         dataset=dataset,
+        original_blocks={"block": [seed, *queries]},
         partial_supervision={},
         runtime_context=build_runtime_context("prediction_state_test", backend="python"),
     )

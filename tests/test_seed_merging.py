@@ -256,6 +256,7 @@ def test_subblocked_restoration_retains_prior_matrix_order(
         # Deliberately put 1 before 0 in the cluster iteration order.
         pred_clusters={"first": ["1"], "second": ["2", "0"]},
         dataset=dataset,
+        original_blocks={"block": ["0", "1", "2", "3"]},
         partial_supervision={("0", "1"): 0.0, ("1", "0"): 10000.0},
         runtime_context=build_runtime_context("subblock_directional_precedence", backend="python"),
         prior_blocks=[["2", "1", "0"] if reverse_block else ["2", "0", "1"]],

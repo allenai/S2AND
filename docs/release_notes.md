@@ -7,9 +7,23 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 - Correctness audit: Arrow subblocking restores seed membership with the shared
   cannot-link policy, including conflicting requires/disallows. Candidate
-  planning now uses the scorer's directional supervision precedence. Windows
+  planning uses the same effective caller supervision as scoring. Windows
   retained Arrow readers reopen the validated handle to isolate Python/native
   cursors while retaining file identity, without copying data.
+- Caller supervision: prediction and distance-matrix APIs now treat pairs as
+  undirected. Equal reverse entries are deduplicated; conflicting distances or
+  NaN/infinity raise `ValueError` before prediction work starts. Requests no
+  longer choose between contradictory directions based on signature order.
+- Constraint parity: Arrow now bypasses dataset disallows when
+  `use_default_constraints_as_supervision=False`, matching Python. Explicit
+  caller supervision remains active. Arrow incremental retrieval also honors
+  caller overrides of dataset disallows before excluding candidates, fixing
+  incorrect abstentions and `partial_supervision_require_outside_retrieval_window`
+  errors for otherwise eligible candidates. Python altered-profile preparation
+  no longer promotes disabled dataset disallows into caller supervision, which
+  could change query attachments by splitting a claimed profile. Precomputed
+  restrictions, direct Rust-featurizer seed overrides, and transitive constraint
+  semantics are unchanged.
 - Evaluation: linker features no longer depend on target labels; actual input
   seed holdouts still preserve name conflicts and explicit disallows. Metrics
   produced with label-assisted features must be regenerated. Pairwise training

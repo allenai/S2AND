@@ -36,10 +36,10 @@ def test_combining_block_local_predictions_preserves_reserved_cluster_keys() -> 
 @pytest.mark.parametrize("reverse_block", [False, True])
 @pytest.mark.parametrize("reverse_entries", [False, True])
 @pytest.mark.parametrize("soft_distance", [0.0, 0.2])
-def test_seed_restoration_matches_effective_directional_supervision(
+def test_seed_restoration_accepts_equal_reverse_supervision_and_rejects_conflicts(
     tmp_path: Path, backend: str, reverse_block: bool, reverse_entries: bool, soft_distance: float
 ) -> None:
-    """Restoration uses the same direct-before-reverse rule as scored distances."""
+    """Seed restoration is independent of pair orientation and dictionary order."""
     from s2and.feature_port import _get_rust_featurizer
     from tests.helpers import build_arrow_training_dataset
 
@@ -59,18 +59,18 @@ def test_seed_restoration_matches_effective_directional_supervision(
     )
     blocks = {"block": ["2", "1", "0"] if reverse_block else ["2", "0", "1"]}
     reference = {("2", "0"): 0.0, ("2", "1"): 1.0, ("0", "1"): soft_distance}
+    duplicate = {**reference, ("1", "0"): soft_distance}
     contradictory = {**reference, ("1", "0"): 10000.0}
     if reverse_entries:
+        duplicate = dict(reversed(list(duplicate.items())))
         contradictory = dict(reversed(list(contradictory.items())))
-    if reverse_block:
-        reference[("0", "1")] = 10000.0
 
     if backend == "rust":
         arrow_dataset = build_arrow_training_dataset(dataset, tmp_path)
         featurizer = _get_rust_featurizer(arrow_dataset)
         matrices = [
             clusterer.make_distance_matrices_from_rust_featurizer(blocks, featurizer, partial_supervision=supervision)
-            for supervision in (reference, contradictory)
+            for supervision in (reference, duplicate)
         ]
         outputs = [
             clusterer.predict_from_rust_featurizer(
@@ -79,19 +79,27 @@ def test_seed_restoration_matches_effective_directional_supervision(
                 partial_supervision=supervision,
                 cluster_seeds_require=dataset.cluster_seeds_require,
             )[0]
-            for supervision in (reference, contradictory)
+            for supervision in (reference, duplicate)
         ]
+        with pytest.raises(ValueError, match="partial_supervision"):
+            clusterer.make_distance_matrices_from_rust_featurizer(blocks, featurizer, partial_supervision=contradictory)
+        with pytest.raises(ValueError, match="partial_supervision"):
+            clusterer.predict_from_rust_featurizer(blocks, featurizer, partial_supervision=contradictory)
     else:
         matrices = [
             clusterer.make_distance_matrices(blocks, dataset, partial_supervision=supervision)
-            for supervision in (reference, contradictory)
+            for supervision in (reference, duplicate)
         ]
         outputs = [
             clusterer.predict(blocks, dataset, partial_supervision=supervision)[0]
-            for supervision in (reference, contradictory)
+            for supervision in (reference, duplicate)
         ]
+        with pytest.raises(ValueError, match="partial_supervision"):
+            clusterer.make_distance_matrices(blocks, dataset, partial_supervision=contradictory)
+        with pytest.raises(ValueError, match="partial_supervision"):
+            clusterer.predict(blocks, dataset, partial_supervision=contradictory)
     np.testing.assert_array_equal(matrices[0]["block"], matrices[1]["block"])
-    expected = {frozenset({"0", "2"}), frozenset({"1"})} if reverse_block else {frozenset({"0", "1", "2"})}
+    expected = {frozenset({"0", "1", "2"})}
     for output in outputs:
         assert {frozenset(group) for group in output.values()} == expected
 

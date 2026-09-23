@@ -240,6 +240,33 @@ clusters = result["clusters"]
 Incremental APIs always return their structured result. There is no
 `return_clusters_only` mode.
 
+### Caller supervision and dataset constraints
+
+`partial_supervision` maps unordered signature pairs to finite distance
+overrides. Either pair orientation is accepted. Equal entries for `(A, B)`
+and `(B, A)` are deduplicated; differing values raise `ValueError` identifying
+the pair and both distances. NaN and infinity also raise. Validation runs
+before candidate selection, subblocking, or scoring, without mutating the
+caller's mapping. Finite soft distances retain their existing meaning and
+range; this does not turn zero distances into globally enforced transitive
+must-links.
+
+Caller distances override dataset constraints for the same pair and remain
+active when `use_default_constraints_as_supervision=False`. That setting
+disables dataset-derived distance constraints, including dataset disallows,
+on both Python and Arrow. Existing profile assignments still identify seed
+targets for incremental prediction. Arrow resolves effective disallows before
+retrieval so an overridden dataset negative cannot remove a candidate before
+the caller's distance is applied. Other retrieval limits still apply.
+
+The lower-level `predict_from_rust_featurizer` bridge retains its explicit
+seed-override behavior: seed arguments supplied directly to that method remain
+active even when default constraints are disabled.
+
+Precomputed-distance restrictions are unchanged: caller supervision cannot be
+combined with precomputed matrices, and Arrow continues rejecting supplied
+seed constraints with those matrices even when default constraints are off.
+
 ## Immutable Arrow contract
 
 Production Arrow input is one manifest-backed immutable root. Open it once with

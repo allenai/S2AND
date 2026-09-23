@@ -91,6 +91,7 @@ from s2and.subblocking import (
     make_dataset_graph_subblocking_cluster_fn,
     make_subblocks,
 )
+from s2and.supervision import effective_dataset_disallows, normalize_partial_supervision
 from s2and.text import (
     canonicalize_name_parts,
     normalize_orcid_compact,
@@ -2347,6 +2348,7 @@ class Clusterer:
         Dict: the distance matrix dictionary, keyed by block key. FastCluster
             condensed matrices use float64, matching streaming prediction.
         """
+        partial_supervision = normalize_partial_supervision(partial_supervision)
         require_dataset_name_counts_binding_for_clusterer(
             self,
             dataset,
@@ -2364,8 +2366,6 @@ class Clusterer:
                 )
         _ensure_lightgbm_fitted(self.classifier)
         _ensure_lightgbm_fitted(self.nameless_classifier)
-        if partial_supervision is None:
-            partial_supervision = {}
         logger.info(f"Making {len(block_dict)} distance matrices")
         logger.info("Initializing pairwise_probas")
         # initialize pairwise_probas with correctly size arrays
@@ -2513,6 +2513,7 @@ class Clusterer:
         featurizer directly instead of looking it up through an `ANDData`.
         """
 
+        partial_supervision = normalize_partial_supervision(partial_supervision)
         require_rust_featurizer_name_counts_binding_for_clusterer(
             self,
             rust_featurizer,
@@ -2817,8 +2818,13 @@ class Clusterer:
         cluster_seeds_require: Mapping[str, int | str] | None = None,
         cluster_seeds_disallow: set[tuple[str, str]] | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
-        """Predict full blocks from an already-built Rust featurizer."""
+        """Predict full blocks from an already-built Rust featurizer.
 
+        Explicit seed arguments on this lower-level bridge are distance
+        overrides and remain active when default constraints are disabled.
+        """
+
+        partial_supervision = normalize_partial_supervision(partial_supervision)
         return Clusterer._predict_from_rust_featurizer(
             self,
             block_dict=block_dict,
@@ -3503,6 +3509,7 @@ class Clusterer:
         Returns:
             Predicted clusters and optional precomputed distance matrices."""
 
+        partial_supervision = normalize_partial_supervision(partial_supervision)
         return Clusterer._predict_from_arrow_request(
             self,
             block_dict=block_dict,
@@ -3600,6 +3607,11 @@ class Clusterer:
                     "cluster_seeds_disallow cannot be used with precomputed dists because disallow pairs "
                     "would not be injected into the distance matrix"
                 )
+            cluster_seed_disallows = effective_dataset_disallows(
+                cluster_seed_disallows,
+                partial_supervision or {},
+                use_default_constraints=self.use_default_constraints_as_supervision,
+            )
             effective_partial_supervision = _partial_supervision_with_cluster_seed_disallows(
                 signature_ids,
                 self,
@@ -4180,6 +4192,7 @@ class Clusterer:
         distances are built and clustered in the fused one-block-at-a-time path.
         """
 
+        partial_supervision = normalize_partial_supervision(partial_supervision)
         if not use_s2_clusters and (
             any(len(signatures) > 1 for signatures in block_dict.values())
             or (batching_threshold is not None and sum(map(len, block_dict.values())) > 1)
@@ -4191,8 +4204,6 @@ class Clusterer:
             raise ValueError("Clusterer.predict operates on ANDData through Python; use predict_from_arrow for Rust")
 
         prediction_state = _prediction_state_from_dataset(dataset)
-        if partial_supervision is None:
-            partial_supervision = {}
 
         if dists is None and not use_s2_clusters and batching_threshold is not None:
             require_dataset_name_counts_binding_for_clusterer(
@@ -4356,14 +4367,13 @@ class Clusterer:
         Optional[Dict]: the predicted distance matrices. This is None when
         distances are built and clustered in the fused one-block-at-a-time path.
         """
+        partial_supervision = normalize_partial_supervision(partial_supervision)
         if not use_s2_clusters and any(len(signatures) > 1 for signatures in block_dict.values()):
             self = _clusterer_with_prediction_params(self, cluster_model_params)
         cluster_model_params = _prediction_cluster_model_params(self, cluster_model_params)
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict", backend="python")
 
-        if partial_supervision is None:
-            partial_supervision = {}
         if dists is not None and partial_supervision:
             raise ValueError(
                 "partial_supervision cannot be used with precomputed dists because override pairs "
@@ -4672,6 +4682,11 @@ class Clusterer:
             )
             if cluster_seed_disallows is None
             else set(normalize_cluster_seed_disallow_pairs(cluster_seed_disallows))
+        )
+        request_cluster_seed_disallows = effective_dataset_disallows(
+            request_cluster_seed_disallows,
+            partial_supervision,
+            use_default_constraints=self.use_default_constraints_as_supervision,
         )
         # Split altered claimed profiles once so incremental assignment can map back to original cluster IDs.
         # Claimed profiles from production can be "unnatural" with respect to S2AND constraints;
@@ -5276,6 +5291,7 @@ class Clusterer:
         immutable base artifacts come only from ``arrow_dataset``.
         """
 
+        partial_supervision = normalize_partial_supervision(partial_supervision, stringify_ids=True)
         if runtime_context is None:
             runtime_context = build_runtime_context(
                 "cluster_predict_incremental_from_arrow",
@@ -5283,8 +5299,6 @@ class Clusterer:
             )
         elif not stage_uses_rust(runtime_context):
             raise ValueError("Clusterer.predict_incremental_from_arrow requires a Rust runtime context")
-        if partial_supervision is None:
-            partial_supervision = {}
         if not isinstance(arrow_dataset, ArrowDataset):
             raise TypeError("Clusterer.predict_incremental_from_arrow requires an open ArrowDataset")
         seed_signature_to_cluster = _normalize_cluster_seeds_require(cluster_seeds_require or {})
@@ -5305,6 +5319,11 @@ class Clusterer:
                 normalize_cluster_seed_disallow_pairs(cluster_seeds_disallow)
                 if cluster_seeds_disallow is not None
                 else set()
+            )
+            resolved_cluster_seed_disallows = effective_dataset_disallows(
+                resolved_cluster_seed_disallows,
+                partial_supervision,
+                use_default_constraints=self.use_default_constraints_as_supervision,
             )
             resolved_altered_cluster_signatures = (
                 [str(signature_id) for signature_id in altered_cluster_signatures]
@@ -5418,6 +5437,7 @@ class Clusterer:
         -------
         Dict: incremental clustering payload.
         """
+        partial_supervision = normalize_partial_supervision(partial_supervision)
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict_incremental", backend="python")
         elif stage_uses_rust(runtime_context):
@@ -5430,8 +5450,6 @@ class Clusterer:
             dataset,
             context="Clusterer.predict_incremental",
         )
-        if partial_supervision is None:
-            partial_supervision = {}
         return self._predict_incremental_python(
             block_signatures,
             dataset,

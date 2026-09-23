@@ -14,7 +14,9 @@ from s2and.prediction_state import PredictionState
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
-@pytest.mark.parametrize("case", ["clean", "dataset", "partial", "direct_soft", "direct_hard", "initial_only"])
+@pytest.mark.parametrize(
+    "case", ["clean", "dataset", "partial", "equal_reverse_soft", "equal_reverse_hard", "initial_only"]
+)
 def test_public_arrow_subblocking_preserves_effective_seed_disallows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
 ) -> None:
@@ -68,13 +70,13 @@ def test_public_arrow_subblocking_preserves_effective_seed_disallows(
     if case == "initial_only":
         seeds = {"0": "full", "1": "claimed", "2": "claimed"}
         pair = ("1", "2")
-    disallows = {pair} if case in {"dataset", "initial_only"} else set()
+    disallows = {pair} if case in {"dataset", "equal_reverse_soft", "initial_only"} else set()
     partial: dict[tuple[str, str], int | float] = {}
     if case == "partial":
         partial[pair] = LARGE_DISTANCE
-    elif case in {"direct_soft", "direct_hard"}:
-        partial[pair] = 0.2 if case == "direct_soft" else LARGE_DISTANCE
-        partial[(pair[1], pair[0])] = LARGE_DISTANCE if case == "direct_soft" else 0.2
+    elif case in {"equal_reverse_soft", "equal_reverse_hard"}:
+        partial[pair] = 0.2 if case == "equal_reverse_soft" else LARGE_DISTANCE
+        partial[(pair[1], pair[0])] = partial[pair]
     with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
         outputs = [
             clusterer.predict_from_arrow(
@@ -90,8 +92,32 @@ def test_public_arrow_subblocking_preserves_effective_seed_disallows(
         ]
     partitions = [{frozenset(members) for members in output.values()} for output in outputs]
     assert partitions[0] == partitions[1]
-    assert any(set(pair) <= members for members in partitions[1]) == (case in {"clean", "direct_soft"})
+    assert any(set(pair) <= members for members in partitions[1]) == (case in {"clean", "equal_reverse_soft"})
     assert sorted(signature_id for members in outputs[1].values() for signature_id in members) == ["0", "1", "2"]
+
+
+@pytest.mark.parametrize("threshold", [None, 2], ids=["unbatched", "subblocked"])
+@pytest.mark.parametrize("reverse_entries", [False, True])
+def test_public_arrow_rejects_conflicting_reverse_seed_supervision(tmp_path, threshold, reverse_entries):
+    """Batching cannot reinstate directional precedence for caller overrides."""
+    from s2and.consts import LARGE_DISTANCE
+
+    write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    entries = [(("0", "1"), 0.2), (("1", "0"), LARGE_DISTANCE)]
+    partial = dict(reversed(entries) if reverse_entries else entries)
+    original = list(partial.items())
+    clusterer = Clusterer(FeaturizationInfo(["year_diff"]), classifier=None, n_jobs=1)
+    with ArrowDataset.open(tmp_path) as arrow_dataset:
+        with pytest.raises(ValueError, match="partial_supervision has conflicting distances"):
+            clusterer.predict_from_arrow(
+                {"block": ["0", "1", "2"]},
+                arrow_dataset,
+                batching_threshold=threshold,
+                cluster_seeds_require={"0": "claimed", "1": "claimed"},
+                partial_supervision=partial,
+                name_tuples=frozenset(),
+            )
+    assert list(partial.items()) == original
 
 
 def _clusterer() -> Clusterer:

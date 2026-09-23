@@ -44,13 +44,13 @@ data. The public prediction entry points retain their existing contracts.
 This ownership boundary is not a general thread-safety guarantee for every
 classifier or cache supplied by an application.
 
-Per-call `cluster_model_params` apply throughout the prediction request,
-including initial-only attachment, altered-profile splitting, and residual
-clustering on the Python and Arrow routes. Each block still fits a fresh
-clustering estimator. Explicit `preserve_input` choices survive nested calls,
-and the shared model's stored parameters are unchanged. Altered-profile caches
-remain reusable and distinguish effective clustering parameters. Graph
-subblocking continues to use its separate graph configuration.
+Per-call `cluster_model_params` apply throughout bulk prediction, including
+initial-only attachment and residual clustering on the Python and Arrow routes.
+Each block still fits a fresh clustering estimator. Explicit `preserve_input`
+choices survive nested calls, and the shared model's stored parameters are
+unchanged. Incremental altered-profile splitting uses the configured clustering
+model; its reusable cache distinguishes the model parameters. Graph subblocking
+continues to use its separate graph configuration.
 
 Seed-link application is a pure decision phase shared by classic Python and
 promoted Arrow incremental completion. It accepts ordered seed memberships,
@@ -301,7 +301,6 @@ with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
         arrow_dataset,
         batching_threshold=15_000,
         cluster_seeds_require=current_seed_assignments,
-        altered_cluster_signatures=corrected_claimed_profiles,
         total_ram_bytes=32 * 1024**3,
     )
 ```
@@ -316,9 +315,17 @@ block. Active required components are kept together within that block; a
 component larger than the threshold raises before subblocking. Blocks containing
 only initials use bulk prediction. See [subblocking.md](subblocking.md) for the
 same contract on the Python route.
-When altered claimed profiles are supplied on a subblocked request, their
-components are naturally pre-split before native subblocking; the same explicit
-request-local seed view is shared by subblocking and featurization.
+Bulk prediction uses ordinary required seed groups on both Python and Arrow,
+with or without subblocking. Altered-profile markers do not change bulk seed
+membership or attachment policy. The Arrow `altered_cluster_signatures` argument
+remains accepted but is ignored by bulk prediction; the Python route likewise
+ignores `ANDData.altered_cluster_signatures` in bulk mode. Required components
+larger than the threshold within one original block raise even when marked altered.
+
+Temporary altered-profile splitting belongs to incremental linking: score new
+papers against the natural components, then restore the original claimed
+profile. Explicit exclusions still apply to the restored identity, so a query
+cannot bypass an exclusion by linking through another component.
 
 Linker source assembly validates each original Arrow manifest and its table and
 index hashes before rebinding its name-count index path. Evaluation's automatic

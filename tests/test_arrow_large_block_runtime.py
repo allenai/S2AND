@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -12,7 +11,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
 from s2and.prediction_state import PredictionState
-from tests.helpers import incremental_seed_setup, write_minimal_arrow_prediction_bundle
+from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
 @pytest.mark.parametrize("case", ["clean", "dataset", "partial", "direct_soft", "direct_hard", "initial_only"])
@@ -277,66 +276,6 @@ def test_arrow_subblocking_avoids_generated_key_collisions(
         "a|subblock=y": ["s2"],
         "a|subblock=x": ["other"],
     }
-
-
-def test_arrow_subblocking_presplits_altered_profiles_before_prediction(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
-    arrow_dataset = ArrowDataset.open(tmp_path)
-    rewritten_seeds = {"s1": "claimed_0", "s2": "claimed_0", "s3": "claimed_1"}
-    events: list[str] = []
-
-    def fake_seed_setup(self: Clusterer, dataset: Any, *_args: Any, **_kwargs: Any):
-        del self
-        events.append("presplit")
-        assert dataset.cluster_seeds_require == {"s1": "claimed", "s2": "claimed", "s3": "claimed"}
-        assert dataset.altered_cluster_signatures == ["s1"]
-        return incremental_seed_setup(rewritten_seeds, {"claimed_0": "claimed", "claimed_1": "claimed"}, {}, {})
-
-    def fake_load_signature_info(_dataset: Any, signature_ids: list[str]):
-        return {
-            signature_id: SimpleNamespace(
-                author_info_first="john",
-                author_info_first_normalized_without_apostrophe="john",
-                author_info_orcid=None,
-            )
-            for signature_id in signature_ids
-        }
-
-    def fake_predict_from_arrow(
-        self: Clusterer,
-        block_dict: dict[str, list[str]],
-        dataset: ArrowDataset,
-        _lease: Any,
-        sidecars: Mapping[str, str],
-        **kwargs: Any,
-    ):
-        del self
-        events.append("prediction")
-        assert dataset is arrow_dataset
-        assert block_dict == {"block": ["s1", "s2", "s3"]}
-        assert "cluster_seeds" in sidecars
-        assert kwargs["prediction_cluster_seeds_require"] == rewritten_seeds
-        assert kwargs["needs_subblocking"] is True
-        return {"cluster": ["s1", "s2", "s3"]}, None
-
-    monkeypatch.setattr(Clusterer, "_build_incremental_seed_setup", fake_seed_setup)
-    monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_signature_info)
-    monkeypatch.setattr(Clusterer, "_predict_from_arrow", fake_predict_from_arrow)
-
-    result, _ = _clusterer().predict_from_arrow(
-        {"block": ["s1", "s2", "s3"]},
-        arrow_dataset,
-        batching_threshold=2,
-        name_tuples=set(),
-        cluster_seeds_require={"s1": "claimed", "s2": "claimed", "s3": "claimed"},
-        altered_cluster_signatures=["s1"],
-    )
-
-    assert events == ["presplit", "prediction"]
-    assert result == {"cluster": ["s1", "s2", "s3"]}
 
 
 def test_all_initial_arrow_subblocks_stay_on_bulk_path() -> None:

@@ -25,6 +25,32 @@ production model and public-data version is `1.3`, on a separate version axis.
   splitting altered profiles. Arrow-backed facet evaluation computes deferred
   canonical names before comparing them, preserving homonymity and synonymity
   metrics across JSON and Arrow ingestion.
+- Correctness: subblocked prediction keeps original input blocks independent.
+  Initial-only groups attach only to predictions from their own block, and a
+  claimed profile spanning blocks no longer merges their clusters. Both routes
+  keep each active required component in one subblock; on the Python route a
+  component larger than `batching_threshold` within one block now raises
+  `ValueError`, as Arrow already did. Blocks containing only initials use bulk
+  prediction. Explicit disallows and caller supervision stay effective across
+  sequential initial-only passes. Subblocked outputs can change accordingly.
+- Correctness: altered-profile split components receive IDs that cannot collide
+  with existing profile IDs. Previously, splitting profile `p` reused an
+  existing profile named `p_0`, merging that profile into the split.
+- Bulk prediction: altered-profile markers no longer trigger temporary seed
+  splitting on subblocked Arrow requests. Both Python and Arrow now use ordinary
+  required groups for bulk prediction, with explicit disallows retaining their
+  existing precedence. The public Arrow argument remains accepted but is ignored
+  in bulk mode. This can restore claimed membership previously split by Arrow;
+  an active required component exceeding `batching_threshold` within one block
+  now raises instead of being split to fit. Incremental linking still splits
+  altered profiles temporarily for scoring and restores their original identity.
+- Evaluation and artifacts: `eval_prod_models` falls back to JSON only when a
+  declared Arrow dataset is absent; invalid manifests or corrupt data raise, and
+  `--no-arrow` skips Arrow inspection. Linker source assembly rejects Arrow
+  inputs whose content differs from their manifests instead of re-hashing them.
+- Development: tests stop before collection when the loaded `s2and_rust`
+  extension was built from different Rust sources than the checkout. Rebuild
+  with `uv run maturin develop -m s2and_rust/Cargo.toml --release`.
 - **Unreleased migration state:** the artifact-independent `1.0.0` code
   and release hardening are implemented. The reviewed canonical benchmark-name
   and ORCID source exports are still needed; production artifact generation,

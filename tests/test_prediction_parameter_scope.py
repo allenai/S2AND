@@ -193,47 +193,42 @@ def test_arrow_subblocked_override_reaches_nested_residual_prediction(
         arrow.close()
 
 
-def test_arrow_altered_presplit_uses_override_and_reuses_original_cache(
+def test_arrow_incremental_presplit_uses_configured_params_and_reuses_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Overrides precede real presplitting, whose cache survives the request."""
+    """Incremental presplitting follows configured EPS and caches each setting."""
     dataset = build_dummy_dataset("prediction_params_arrow_altered")
     dataset.specter_embeddings = {str(paper_id): np.ones(768, dtype=np.float32) for paper_id in dataset.papers}
     training = build_arrow_training_dataset(dataset, tmp_path / "arrow")
     arrow = training.arrow_dataset
     assert arrow is not None
+    dataset.cluster_seeds_require = {"0": "claimed", "1": "claimed", "2": "claimed"}
+    dataset.altered_cluster_signatures = ["0"]
     original_predict = Clusterer._predict_from_arrow
     presplit_thresholds: list[float] = []
 
-    def stop_after_presplit(self: Clusterer, *args: Any, **kwargs: Any):
-        if not kwargs["needs_subblocking"]:
-            presplit_thresholds.append(self.cluster_model.eps)
-            return original_predict(self, *args, **kwargs)
-        clusters: dict[str, list[str]] = {}
-        for signature_id, component in kwargs["prediction_cluster_seeds_require"].items():
-            clusters.setdefault(str(component), []).append(signature_id)
-        return clusters, None
+    def record_presplit(self: Clusterer, *args: Any, **kwargs: Any):
+        assert not kwargs["needs_subblocking"]
+        presplit_thresholds.append(self.cluster_model.eps)
+        return original_predict(self, *args, **kwargs)
 
-    monkeypatch.setattr(Clusterer, "_predict_from_arrow", stop_after_presplit)
+    monkeypatch.setattr(Clusterer, "_predict_from_arrow", record_presplit)
     model = clusterer()
+    runtime_context = build_runtime_context("incremental_presplit_params", backend="rust")
 
     def run(eps: float):
-        return model.predict_from_arrow(
-            {"block": ["0", "1", "2"]},
-            arrow,
-            batching_threshold=2,
-            cluster_model_params={"eps": eps},
-            name_tuples=frozenset(),
-            cluster_seeds_require={"0": "claimed", "1": "claimed", "2": "claimed"},
-            altered_cluster_signatures=["0"],
-        )[0]
+        model.cluster_model.set_params(eps=eps)
+        setup = model._build_incremental_seed_setup(dataset, {}, runtime_context, arrow_dataset=arrow)
+        return setup.split_members
 
     try:
         assert partition(run(0.8)) == {frozenset({"0", "1", "2"})}
         assert partition(run(0.8)) == {frozenset({"0", "1", "2"})}
         assert partition(run(0.1)) == {frozenset({"0"}), frozenset({"1"}), frozenset({"2"})}
         assert presplit_thresholds == [0.8, 0.1]
-        assert model.cluster_model.eps == 0.5
+        assert model.cluster_model.eps == 0.1
+        assert dataset.cluster_seeds_require == {"0": "claimed", "1": "claimed", "2": "claimed"}
+        assert dataset.altered_cluster_signatures == ["0"]
     finally:
         arrow.close()
 

@@ -3496,8 +3496,9 @@ class Clusterer:
                 full-block prediction; a positive value routes oversized blocks
                 through the Arrow-native Rust subblocker.
             cluster_seeds_require: Current request-local required seed components.
-            altered_cluster_signatures: Claimed-profile signatures whose seed
-                components must be naturally pre-split before bulk subblocking.
+            altered_cluster_signatures: Accepted but ignored in bulk prediction.
+                Temporary altered-profile splits apply only to incremental linking;
+                bulk prediction uses the supplied required seed groups unchanged.
 
         Returns:
             Predicted clusters and optional precomputed distance matrices."""
@@ -3547,14 +3548,15 @@ class Clusterer:
                 full-block prediction; a positive value routes oversized blocks
                 through the Arrow-native Rust subblocker.
             cluster_seeds_require: Current request-local required seed components.
-            altered_cluster_signatures: Claimed-profile signatures whose seed
-                components must be naturally pre-split before bulk subblocking.
+            altered_cluster_signatures: Accepted but ignored in bulk prediction.
+                Temporary altered-profile splits apply only to incremental linking;
+                bulk prediction uses the supplied required seed groups unchanged.
 
         Returns:
             Predicted clusters and optional precomputed distance matrices.
         """
 
-        if any(len(signatures) > 1 for signatures in block_dict.values()) or altered_cluster_signatures:
+        if any(len(signatures) > 1 for signatures in block_dict.values()):
             self = _clusterer_with_prediction_params(self, cluster_model_params)
         if prediction_state is None:
             prediction_state = PredictionState()
@@ -3605,57 +3607,6 @@ class Clusterer:
                 cluster_seed_disallows=cluster_seed_disallows,
             )
             prediction_cluster_seeds_require = explicit_cluster_seeds_require
-            resolved_altered_cluster_signatures = (
-                _altered_cluster_signatures_from_values(altered_cluster_signatures)
-                if needs_subblocking and not incremental_dont_use_cluster_seeds
-                else []
-            )
-            if resolved_altered_cluster_signatures:
-                if explicit_cluster_seeds_require is None:
-                    raise ValueError("altered_cluster_signatures requires explicit cluster_seeds_require")
-                seed_signature_to_cluster = explicit_cluster_seeds_require
-                altered_cluster_ids = {
-                    str(seed_signature_to_cluster[signature_id])
-                    for signature_id in resolved_altered_cluster_signatures
-                    if signature_id in seed_signature_to_cluster
-                }
-                altered_seed_signature_ids = [
-                    signature_id
-                    for signature_id, cluster_id in seed_signature_to_cluster.items()
-                    if str(cluster_id) in altered_cluster_ids
-                ]
-                presplit_name_tuples = frozenset(_name_tuples_for_incremental_rules(name_tuples))
-                presplit_dataset = _DirectArrowIncrementalDataset(
-                    name_tuples=presplit_name_tuples,
-                    cluster_seeds_require=seed_signature_to_cluster,
-                    cluster_seeds_disallow=cluster_seed_disallows,
-                    altered_cluster_signatures=resolved_altered_cluster_signatures,
-                    max_seed_cluster_id=_seed_cluster_count_from_seed_map(seed_signature_to_cluster),
-                    signatures=_load_arrow_incremental_signature_info(
-                        arrow_lease,
-                        altered_seed_signature_ids,
-                    ),
-                )
-                presplit_start = time.perf_counter()
-                seed_setup = self._build_incremental_seed_setup(
-                    cast(ANDData, presplit_dataset),
-                    effective_partial_supervision,
-                    runtime_context,
-                    total_ram_bytes=total_ram_bytes,
-                    arrow_dataset=arrow_dataset,
-                    cluster_seed_disallows=cluster_seed_disallows,
-                )
-                prediction_cluster_seeds_require = seed_setup.required_assignments
-                prediction_state.telemetry["subblocked_altered_presplit"] = {
-                    "bulk_altered_presplit_applied": int(bool(seed_setup.recluster_map)),
-                    "bulk_altered_presplit_seconds": float(time.perf_counter() - presplit_start),
-                }
-                name_tuples = presplit_name_tuples
-            else:
-                prediction_state.telemetry["subblocked_altered_presplit"] = {
-                    "bulk_altered_presplit_applied": 0,
-                    "bulk_altered_presplit_seconds": 0.0,
-                }
             if prediction_cluster_seeds_require is None and not cluster_seed_disallows:
                 return self._predict_from_arrow(
                     block_dict,
@@ -4132,10 +4083,6 @@ class Clusterer:
         assert dists is None, "If batching_threshold is not None, then can't use precomputed dists"
         if prediction_state is None:
             prediction_state = _prediction_state_from_dataset(dataset)
-        prediction_state.telemetry["subblocked_altered_presplit"] = {
-            "bulk_altered_presplit_applied": 0,
-            "bulk_altered_presplit_seconds": 0.0,
-        }
         graph_cluster_fn = self._subblocking_graph_cluster_fn()
         block_dict_subblocked = self._build_subblocked_block_dict(
             block_dict,

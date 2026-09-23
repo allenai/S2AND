@@ -112,9 +112,10 @@ Notes:
   seeded/incremental seed sidecars, pass `include_empty_cluster_seeds=True` so
   empty seed/disallow tables are still emitted.
 - `altered_cluster_signatures.arrow` records altered claimed profiles for
-  producer/validation tooling. Public Arrow prediction reads altered profiles
+  producer/validation tooling. Public Arrow incremental prediction reads altered profiles
   from the explicit `altered_cluster_signatures` argument, with no fallback to
-  this sidecar. Classic prediction reads `ANDData.altered_cluster_signatures`.
+  this sidecar. Classic incremental prediction reads `ANDData.altered_cluster_signatures`.
+  Bulk prediction ignores altered markers on both routes and uses ordinary required groups.
   `altered_cluster_signatures.txt` is not a valid
   production Arrow sidecar; it remains only for older fixtures and
   ANDData-compatible training tooling.
@@ -185,7 +186,7 @@ The smaller request-scoped tables do not need a random-access physical layout:
 | `query_signatures.arrow` | Read fully by the raw planner; no bounded-batch requirement. |
 | `cluster_seeds.arrow` | Read fully by the raw planner; no bounded-batch requirement. |
 | `cluster_seed_disallows.arrow` | Read fully when present; no bounded-batch requirement. |
-| `altered_cluster_signatures.arrow` | Read as request metadata; bounded batches do not address altered-profile pre-splitting cost. |
+| `altered_cluster_signatures.arrow` | Incremental request metadata; bounded batches do not address altered-profile pre-splitting cost. Bulk prediction ignores altered markers. |
 
 Implementation notes for producers:
 
@@ -459,7 +460,7 @@ should fail validation.
 ### `altered_cluster_signatures.arrow`
 
 Producer/validation sidecar describing altered claimed profiles. Public Arrow
-prediction receives these ids through the explicit `altered_cluster_signatures`
+incremental prediction receives these ids through the explicit `altered_cluster_signatures`
 argument and does not load them from this file. Omit it, or write an empty table,
 when no altered profiles are present.
 
@@ -470,7 +471,7 @@ Required columns:
 | `signature_id` | `string` | no | Seed signature id belonging to an altered claimed profile |
 
 Each id must exist in `signatures.arrow` and in the active seed assignments. At
-runtime, S2AND maps the explicitly supplied altered signature ids through the
+incremental runtime, S2AND maps the explicitly supplied altered signature ids through the
 seed assignments to identify the claimed seed components that need
 altered-profile pre-splitting.
 `signature_id` values must be unique.

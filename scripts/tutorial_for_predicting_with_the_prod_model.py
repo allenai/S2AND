@@ -9,6 +9,11 @@ You can also point `--data-root` to `tests` and run `--dataset qian`. The
 default `--data-root` (`s2and/data-backup/s2and_mini`) is an internal AI2 mini
 bundle; pass `--data-root` explicitly otherwise.
 
+Test-split metrics use the held-out blocks recorded in the bundle, and pair
+sampling uses the trainer's recorded seed, so evaluation matches training.
+`--specter-suffix` selects the embedding generation for both routes; production
+bundles use SPECTER2.
+
 Update at v1.3 release: every example needs a complete v1.3 production bundle,
 which does not exist yet. The Arrow example also needs public-format-1 data
 (the currently published Arrow release is rejected), the JSON examples need a
@@ -23,15 +28,17 @@ Examples:
       --model-path path/to/complete-production-bundle \
       --input-format arrow --dataset qian --arrow-data-root s2and/data
 
-  # Bundled JSON fixture + explicit Python API
+  # Bundled JSON fixture + explicit Python API (the qian fixture ships SPECTER1
+  # vectors, so this is a smoke run; its scores are not meaningful for SPECTER2)
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
       --model-path path/to/complete-production-bundle \
-      --input-format json --dataset qian --data-root tests
+      --input-format json --dataset qian --data-root tests --specter-suffix _specter.pickle
 
   # Show subblocking for large blocks (the largest qian fixture block has 320 signatures)
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
       --model-path path/to/complete-production-bundle \
-      --input-format json --dataset qian --data-root tests --batching-threshold 100
+      --input-format json --dataset qian --data-root tests --specter-suffix _specter.pickle \
+      --batching-threshold 100
 """
 
 import argparse
@@ -59,6 +66,17 @@ def _resolve_dataset_file(data_root: str, dataset_name: str, preferred_name: str
         return fallback_path
     raise FileNotFoundError(
         f"Missing dataset file for '{dataset_name}'. Tried '{preferred_path}' and '{fallback_path}'."
+    )
+
+
+def _json_specter_path(data_root: str, dataset_name: str, specter_suffix: str) -> str:
+    """Return the JSON-route embedding pickle for the selected SPECTER generation."""
+
+    return _resolve_dataset_file(
+        data_root,
+        dataset_name,
+        f"{dataset_name}{specter_suffix}",
+        specter_suffix.lstrip("_"),
     )
 
 
@@ -97,20 +115,25 @@ def _cluster_eval_with_predict_options(
     split: str,
     use_s2_clusters: bool,
     batching_threshold: int | None,
+    test_split=None,
 ):
     import numpy as np
 
     from s2and.eval import b3_precision_recall_fscore, pairwise_precision_recall_fscore
+    from s2and.production_training_contract import frozen_test_blocks
 
-    train_block_dict, val_block_dict, test_block_dict = dataset.split_blocks_helper(dataset.get_blocks())
-    if split == "test":
-        block_dict = test_block_dict
-    elif split == "val":
-        block_dict = val_block_dict
-    elif split == "train":
-        block_dict = train_block_dict
+    if split == "test" and test_split is not None:
+        block_dict = frozen_test_blocks(dataset.get_blocks(), test_split)
     else:
-        raise ValueError("Split must be one of: train, val, test")
+        train_block_dict, val_block_dict, test_block_dict = dataset.split_blocks_helper(dataset.get_blocks())
+        if split == "test":
+            block_dict = test_block_dict
+        elif split == "val":
+            block_dict = val_block_dict
+        elif split == "train":
+            block_dict = train_block_dict
+        else:
+            raise ValueError("Split must be one of: train, val, test")
 
     cluster_to_signatures = dataset.construct_cluster_to_signatures(block_dict)
     pred_clusters, _ = clusterer.predict(
@@ -179,23 +202,16 @@ def main() -> None:
         "--specter-suffix",
         choices=["_specter.pickle", "_specter2.pkl"],
         default="_specter2.pkl",
-        help="Embedding/model suffix used to select the Arrow embedding file.",
+        help=(
+            "SPECTER generation for both routes: selects the Arrow embedding table, or the JSON "
+            "<dataset><suffix> pickle (plain fixtures: the suffix without its leading underscore)."
+        ),
     )
     parser.add_argument(
         "--arrow-total-ram-bytes",
         type=int,
         default=1_000_000_000_000,
         help="Memory budget passed to Clusterer.predict_from_arrow.",
-    )
-    parser.add_argument(
-        "--load-name-counts",
-        type=int,
-        choices=[0, 1],
-        default=1,
-        help=(
-            "Set 0 to skip name-count artifact loading. Only models without name-count features "
-            "accept this; production bundles always use them."
-        ),
     )
     parser.add_argument(
         "--n-jobs",
@@ -217,7 +233,10 @@ def main() -> None:
         type=str,
         choices=["train", "val", "test"],
         default="test",
-        help="Evaluation split for reported metrics (default: test).",
+        help=(
+            "Evaluation split for reported metrics (default: test). test uses the bundle's recorded "
+            "held-out blocks; train and val re-derive splits with the bundle's recorded seed."
+        ),
     )
     parser.add_argument(
         "--model-path",
@@ -231,7 +250,12 @@ def main() -> None:
     from s2and.data import ANDData
     from s2and.featurizer import DEFAULT_FEATURE_GROUPS, DEFAULT_NAMELESS_FEATURE_GROUPS, FeaturizationInfo
     from s2and.production_model import load_production_model
-    from scripts.eval_prod_models import cluster_eval_arrow, resolve_arrow_dataset
+    from scripts.eval_prod_models import (
+        bundle_cluster_test_splits,
+        bundle_data_random_seed,
+        cluster_eval_arrow,
+        resolve_arrow_dataset,
+    )
 
     n_jobs = args.n_jobs
 
@@ -240,8 +264,6 @@ def main() -> None:
 
     data_original = _resolve_root(PROJECT_ROOT_PATH, args.data_root)
     arrow_data_root = _resolve_root(PROJECT_ROOT_PATH, args.arrow_data_root)
-
-    random_seed = 42
 
     datasets = [
         "arnetminer",
@@ -268,14 +290,15 @@ def main() -> None:
 
     # The public loader accepts only an explicitly selected complete native bundle.
     model_path = _resolve_root(PROJECT_ROOT_PATH, args.model_path)
-    clusterer = load_production_model(model_path)
-    clusterer.n_jobs = n_jobs
+    clusterer = load_production_model(model_path, n_jobs=n_jobs)
+    # Reuse the trainer's recorded split identities instead of guessing a seed.
+    random_seed = bundle_data_random_seed(Path(model_path))
+    recorded_test_splits = bundle_cluster_test_splits(Path(model_path)) if args.split == "test" else {}
 
     print(
         "Config: "
         f"split={args.split}, n_jobs={n_jobs}, "
         f"batching_threshold={args.batching_threshold}, "
-        f"load_name_counts={args.load_name_counts}, "
         f"input_format={args.input_format}"
     )
     print(f"Model: {model_path}")
@@ -284,6 +307,11 @@ def main() -> None:
 
     cluster_metrics_all = []
     for dataset_name in datasets:
+        test_split = None
+        if args.split == "test":
+            if dataset_name not in recorded_test_splits:
+                raise ValueError(f"Bundle records no cluster test split for {dataset_name!r}")
+            test_split = recorded_test_splits[dataset_name]
         input_format, arrow_dataset = _select_input_route(
             requested_input_format=args.input_format,
             dataset_name=dataset_name,
@@ -304,6 +332,7 @@ def main() -> None:
                     split=args.split,
                     total_ram_bytes=int(args.arrow_total_ram_bytes),
                     batching_threshold=args.batching_threshold,
+                    test_split=test_split,
                 )
             print(f"[{dataset_name}] Arrow predict_from_arrow (Rust)")
             print(cluster_metrics)
@@ -318,9 +347,7 @@ def main() -> None:
             data_original, dataset_name, f"{dataset_name}_clusters.json", "clusters.json"
         )
         try:
-            specter_path = _resolve_dataset_file(
-                data_original, dataset_name, f"{dataset_name}_specter.pickle", "specter.pickle"
-            )
+            specter_path = _json_specter_path(data_original, dataset_name, args.specter_suffix)
         except FileNotFoundError:
             specter_path = None
             print(f"[{dataset_name}] No specter file found; embedding features will be missing.")
@@ -339,7 +366,7 @@ def main() -> None:
             val_pairs_size=10000,
             test_pairs_size=10000,
             n_jobs=n_jobs,
-            name_counts_index=NAME_COUNTS_INDEX_PATH if args.load_name_counts else None,
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=True,
             random_seed=random_seed,
             name_tuples=None,
@@ -353,6 +380,7 @@ def main() -> None:
             split=args.split,
             use_s2_clusters=False,
             batching_threshold=args.batching_threshold,
+            test_split=test_split,
         )
         print(cluster_metrics)
         cluster_metrics_all.append(cluster_metrics)

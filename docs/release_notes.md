@@ -203,6 +203,10 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Changed
 
+- `scripts/tutorial_for_predicting_with_the_prod_model.py` scores the bundle's
+  recorded held-out blocks with the trainer's recorded seed, applies
+  `--specter-suffix` to the JSON route as well as Arrow (no silent SPECTER1
+  fallback), and drops `--load-name-counts`, which no production bundle accepts.
 - `load_production_model(path, n_jobs=N)` sets the prediction worker count at
   load time. Without it, a loaded bundle keeps its stored `n_jobs=1`.
 - Bulk prediction: altered-profile markers no longer trigger temporary seed

@@ -94,10 +94,8 @@ pairwise_model = PairwiseModeler(
 pairwise_model.fit(X_train, y_train, X_val, y_val)
 ```
 
-The production `train_pairwise.py` command always featurizes from its frozen
-`model_plan.json` and has no cache or smoke mode. Programmatic research callers
-use `featurize(...)` directly; there is no second persistent feature-snapshot
-format to coordinate with the runtime.
+The production `train_pairwise.py` command featurizes from its frozen
+`model_plan.json`; programmatic research callers use `featurize(...)` directly.
 
 ## Evaluate the pairwise classifier
 
@@ -151,21 +149,18 @@ FastCluster's condensed distance matrices use `float64` in both Python and
 Rust, including matrices retained for EPS calibration. This matches streaming
 inference and prevents cache rounding from changing merges near the threshold.
 Storage is eight bytes per pair, or `8 * n * (n - 1) / 2` bytes for a block of
-`n` signatures. Python's stored matrices previously used two bytes per pair;
-the allocation guard now budgets the full eight bytes.
+`n` signatures, and the allocation guard budgets the full eight bytes.
 
 When supplying `val_dists_precomputed` or prediction `dists`, generate the
-distances at `float64` precision. Recompute any previously rounded `float16`
-cache; casting it to `float64` cannot recover the original scores.
+distances at `float64` precision; casting lower-precision values to `float64`
+cannot recover the original scores.
 
 Pairwise training, `Clusterer.fit()`, and clustering evaluation resolve the
 same signature splits: explicit block lists take precedence over explicit
 signature lists, followed by the configured block, signature, or time split.
-Default split ordering and random seeds are preserved. Recompute validation
-distance matrices if the selected signatures or their order change, including
-when moving from the former random calibration population to an explicit
-validation split. The precomputed matrix mapping does not record signature
-identities and cannot detect an obsolete matrix merely from its dimensions.
+Recompute validation distance matrices whenever the selected signatures or
+their order change: the precomputed matrix mapping does not record signature
+identities and cannot detect an obsolete matrix from its dimensions.
 
 ## Evaluate clustering
 

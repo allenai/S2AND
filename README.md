@@ -210,16 +210,6 @@ Runtime controls:
 - Rust routes require `s2and-rust` to have exactly the installed Python package
   version and fail explicitly if it is missing or different.
 
-Reuse behavior:
-
-- Production inference has no persistent feature-snapshot or artifact cache;
-  Rust featurizers are not serialized to disk. Same-process Rust-featurizer
-  reuse and the bounded altered-profile presplit memo are private runtime
-  optimizations, not persisted artifact formats.
-- Production training featurizes the frozen model plan directly. Repeated
-  research experiments retain their ordinary inputs and rerun featurization
-  rather than depending on a second artifact format.
-
 Large blocks:
 
 - `predict(..., batching_threshold=...)` uses subblocking to keep full-block work bounded.
@@ -231,7 +221,6 @@ Large blocks:
 - `predict_incremental(...)` is the Python `ANDData` route and does not accept
   query batching. Use `predict_incremental_from_arrow(...,
   batching_threshold=...)` for promoted Rust query batching.
-- Incremental results still include `phase_b_mode`; current supported routes report `exact`.
 - `total_ram_bytes` is the main memory-control knob for large inference jobs.
 
 Concurrency:
@@ -292,16 +281,15 @@ hook, synchronize manifests, and regenerate both lockfiles.
 ## Reproducibility
 
 The original paper experiments used the `s2and_paper` branch with Python
-`3.7.9` and the package pins in `paper_experiments_env.txt`. Start in that branch
-with an isolated environment:
+`3.7.9`. Start in that branch with an isolated environment:
 
 ```bash
 git checkout s2and_paper
 uv venv --python 3.7.9
 ```
 
-Install that branch's pinned environment from `paper_experiments_env.txt`, then
-rerun its paper experiment commands. The selected artifacts retained in
+Install the pinned environment from that branch's `paper_experiments_env.txt`,
+then rerun its paper experiment commands. The selected artifacts retained in
 `scripts/archive/` are historical references, not supported current entrypoints
 or substitutes for the paper branch; see the
 [archive catalog](scripts/README.md#archived-historical-artifacts).

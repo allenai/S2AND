@@ -193,24 +193,11 @@ pairs whose other endpoint is processed later. Ignoring required seeds with
   fallback-produced subblock (keys containing `|specter=`), whichever fallback
   ran
 
-## Incremental routing
+## Incremental prediction
 
-Incremental prediction has two supported routes:
-
-- **Promoted Rust linker.** `Clusterer.predict_incremental_from_arrow` requires
-  an open `ArrowDataset` and creates a Rust runtime context when none is supplied.
-  An explicit context must select Rust. Retrieval and scoring run directly
-  against its Arrow tables using the pinned native ABI.
-- **Python helper.** `Clusterer.predict_incremental` operates on `ANDData` and
-  creates a Python runtime context when none is supplied. An explicit context
-  must select Python. It does not implement query batching.
-
-The APIs do not inspect native capabilities or fall back between implementations. A missing or mismatched pinned
-Rust extension is an error on the Arrow route.
-
-`batching_threshold` has two separate entry points. On full-block `Clusterer.predict`, it caps subblock size. On
-`Clusterer.predict_incremental_from_arrow`, it caps the number of unassigned query signatures per linker batch.
-The standalone Python `Clusterer.predict_incremental` API does not take a batching parameter.
-
-See [production_inference.md](production_inference.md#incremental-decision-semantics) for the full
-caller-facing contract.
+Subblocking applies to full-block prediction. On
+`Clusterer.predict_incremental_from_arrow`, `batching_threshold` has a different
+meaning: it caps the number of unassigned query signatures per linker batch.
+The Python `Clusterer.predict_incremental` API takes no batching parameter. See
+[production_inference.md](production_inference.md#incremental-decision-semantics)
+for the incremental contract.

@@ -160,8 +160,7 @@ round trips revalidate and reload it from the recorded bundle path.
 runtime controls, and only the clustering algorithm fields consumed by
 prediction (`eps` and `linkage`). Stage 3 records placeholder EPS `0.5`; the
 manifest marks that value as pending until validation-only calibration writes
-a calibrated sibling bundle. It has no independent schema, normalization, or
-featurizer version counter.
+a calibrated sibling bundle.
 
 ### Staged publication
 
@@ -196,8 +195,8 @@ gates.
 
 ## Explicit execution routes
 
-The input type determines the backend. There is no automatic backend,
-capability matrix, or Python/Rust fallback:
+The input type determines the backend, and there is no fallback between
+backends:
 
 | API | Input authority | Backend | Result |
 | --- | --- | --- | --- |
@@ -211,8 +210,7 @@ capability matrix, or Python/Rust fallback:
 Passing a Rust runtime context to an `ANDData` API, or a Python context to an
 Arrow API, is an error. Rust entry points import the exact `s2and-rust` version
 pinned by the project metadata and fail on a missing or different version. That
-dependency is part of the normal S2AND install; there is no `s2and[rust]`
-compatibility extra.
+dependency is part of the normal S2AND install.
 
 The [environment reference](environment.md#runtime-and-telemetry) documents
 backend selection and errors for runtime contexts built without an explicit
@@ -220,10 +218,8 @@ backend. Public APIs retain the routes above regardless of that default.
 
 Classic `ANDData` prediction remains useful for Python training, fixtures, and
 reference checks over the canonical S2 partition. `author_info.block` is its
-sole grouping authority. The legacy `block_type` selector,
-`author_info.given_block`, `get_original_blocks()`, and `get_s2_blocks()` are
-not part of the current API; preserve any historical/original partition
-outside `ANDData` if it is still needed.
+sole grouping authority; keep any other partition, such as original benchmark
+blocks, outside `ANDData`.
 
 ```python
 # dataset is an ANDData; block_signatures is a list of signature IDs to link.
@@ -236,8 +232,7 @@ result = clusterer.predict_incremental(block_signatures, dataset)
 clusters = result["clusters"]
 ```
 
-Incremental APIs always return their structured result. There is no
-`return_clusters_only` mode.
+Incremental APIs always return their structured result.
 
 ### Caller supervision and dataset constraints
 
@@ -432,9 +427,8 @@ The current runtime uses one binary `NameCountsIndex` in Python and Rust. Classi
 `ANDData` defaults to the canonical configured index and also accepts a
 verified alternate path, a shared open index handle, or explicit `None` when
 count features are intentionally absent. Arrow routes retain the manifest-bound
-index inside `ArrowDataset`. Runtime code does not open the
-historical source pickle, and the generator no longer publishes one. Models
-bind directly to the native index's single `manifest_sha256`. The manifest
+index inside `ArrowDataset`. Models bind directly to the native index's single
+`manifest_sha256`. The manifest
 contains exactly `kind: "s2and_name_counts"`, public `format_version: 1`, and
 byte count plus SHA-256 for the four fixed binary roles. Paths are derived as
 `<role>.bin`; producer mode and output-count metrics are reported by the
@@ -452,9 +446,8 @@ Canonical ORCID prefix counts use a direct JSON data file and one adjacent
 runtime loader validates the prefix-pair keys and positive integer counts,
 computes the data hash, and retains the result in-process.
 Production contracts bind that hash and require the manifest's tuple hash
-to match the canonical name-tuple artifact. There is no ORCID generation
-pointer, producer-provenance protocol, retry loop, or legacy fallback. The
-package declares both ORCID runtime paths.
+to match the canonical name-tuple artifact. The package declares both ORCID
+runtime paths.
 
 > **Update at v1.3 release:** the current pre-release tree contains neither
 > ORCID file, so subblocking and distribution verification fail until Stage 1
@@ -468,10 +461,9 @@ the ORCID and name-tuple data hashes, and the linker. The model root's exact
 generating-runtime match owns behavioral compatibility; legacy artifacts are
 rejected rather than adapted.
 
-Production inference has no persistent feature-snapshot or artifact cache.
-Direct Arrow/Rust prediction reuses already validated immutable native state
-in-process; the bounded altered-profile presplit memo is likewise a private
-same-process optimization, not a persisted format.
+Direct Arrow/Rust prediction reuses validated immutable native state within the
+process, and the bounded altered-profile presplit memo is a private in-process
+optimization. Nothing is cached on disk between processes.
 
 ## Verification
 

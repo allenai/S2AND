@@ -1,7 +1,5 @@
 # Threading and parallelism
 
-Status date: 2026-09-04
-
 S2AND uses multiple libraries that can each create their own thread pools (Rust Rayon, LightGBM/OpenMP, BLAS, etc.).
 If those pools are configured independently, runs can oversubscribe CPU cores and show higher-than-expected CPU usage.
 

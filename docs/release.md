@@ -39,19 +39,6 @@ The first two are the remaining implementation prerequisites carried into this
 runbook. The name counts, historical baseline, and other benchmark/linker data
 are ordinary release inputs.
 
-Two former implementation gaps are already closed:
-
-- the reviewed
-  `combined_query_split_assignments_base_group_seed13.csv` has 23,572 rows,
-  SHA-256
-  `b67b7ba7a5258b99d71f624ae12a2b5c6f938ba207215d1b7ebf63b791eadc64`
-  and zero `base_group_id` overlap across splits. It changed only the 394
-  leaking rows from source SHA-256
-  `9ecc005c0734cd64627bef84fd320a5d0f4e281ecebf483e1f6728dce42d597b`;
-  and
-- pairwise training records finite selected validation AUROCs for both
-  boosters and fails if either is non-finite.
-
 ## Fixed decisions
 
 - Model and public data version: `1.3`.

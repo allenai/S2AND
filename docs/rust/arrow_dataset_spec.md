@@ -1,7 +1,5 @@
 ﻿# Arrow Dataset Specification
 
-Status date: 2026-09-04
-
 This document defines the Arrow artifact contract for engineers assembling
 datasets for direct Rust S2AND routes. These artifacts are used by
 `ArrowDataset.open(root)`, `Clusterer.predict_from_arrow(...)`,

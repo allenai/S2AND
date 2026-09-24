@@ -1,7 +1,5 @@
 # Production commands
 
-Status date: 2026-07-27
-
 This is a command reference. The dependency-ordered v1.3 sequence is
 [../../docs/release.md](../../docs/release.md).
 
@@ -320,8 +318,7 @@ Assembly refuses existing output directories, loads the assembled bundle, and
 preflights the selected rows. The final public-data manifest takes
 `release_version` from the prepared model plan and records
 `kind: "s2and_public_data"` plus public `format_version: 1`; the operator does
-not enter the version again. There is no separate source-manifest validator or
-digest inventory.
+not enter the version again.
 
 ## Complete model and linker evaluation
 
@@ -661,6 +658,9 @@ b67b7ba7a5258b99d71f624ae12a2b5c6f938ba207215d1b7ebf63b791eadc64
 51cc222218f1ac3906bfcae3d8c1e0f070dcc6c0eb815cd5aaea6908d9b40106
 ```
 
+The assignments CSV has 23,572 data rows and no `base_group_id` shared across
+splits.
+
 Verify those hashes, then assemble and preflight once:
 
 ```powershell
@@ -676,7 +676,7 @@ uv run python scripts/production/model/linker_source_bundle.py `
 
 The command refuses existing outputs, loads all referenced data, checks
 base-group split disjointness, and reports selected rows. A failure starts a
-fresh attempt; there is no repair or compatibility mode. The data root contains
+fresh attempt. The data root contains
 one shared `name_counts_index/`; benchmark and replay dataset manifests point
 to it rather than carrying per-dataset copies.
 

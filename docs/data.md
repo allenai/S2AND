@@ -104,11 +104,7 @@ directory.
 
 ## Production model bundles
 
-The obsolete production pickles and previous v1.21 repository bundle have been
-removed. Their history remains available from the compatible prior release and
-Git history, but no current command accepts their former paths.
-
-No default production model declaration is distributed during cutover.
+No default production model declaration is distributed.
 Evaluation and validation tools must receive an explicit model bundle path.
 The v1.3 model is an external bundle, not package data. Its manifest records
 `kind: "s2and_model"`, `release_version: "1.3"`, exact

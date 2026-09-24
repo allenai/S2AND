@@ -16,31 +16,38 @@ uv run ruff format .
 uv run ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
 ```
 
-## Scoped searches
+## Native build troubleshooting
 
-Choose the relevant source roots for the task. For a search spanning maintained code and docs, these PowerShell
-examples reuse exclusions for virtual environments, data, and generated output. The `.venv` glob also excludes
-directories such as `.venv-dev` and `project.venv-cache`, including nested paths.
+The user-facing recovery commands are in
+[install.md](install.md#build-the-rust-extension-from-source). This section
+explains why they are sometimes needed.
 
-```powershell
-$searchRoots = @('s2and', 's2and_rust/src', 'scripts', 'tests', 'docs')
-$searchGlobs = @(
-  '--glob', '!**/*.venv*/**',
-  '--glob', '!**/.git/**',
-  '--glob', '!**/data/**',
-  '--glob', '!**/dist/**',
-  '--glob', '!**/scratch/**',
-  '--glob', '!**/target/**'
-)
-rg -n --hidden @searchGlobs 'pattern' @searchRoots
-rg --files --hidden @searchGlobs @searchRoots
+Syncing `uv run` decides whether to rebuild `s2and-rust` from the cache keys in
+`s2and_rust/pyproject.toml`: the root Cargo manifest, lockfile and build
+script, the vendored CLD2 manifest, Rust sources under `src/` and
+`vendor/cld2/src/`, plus `s2and_rust/pyproject.toml`, its `README.md`, and the
+Python wrapper files. Editor swap files, build outputs and the unused vendored
+lockfile do not invalidate uv's cached wheel. Cargo still watches source
+directories to detect new modules when a native build runs.
 
-# When a root content search is necessary, keep the exclusions and cap file size.
-rg -n --hidden @searchGlobs --max-filesize 4M 'pattern' .
-```
+uv's file-glob keys track the newest matching timestamp, not file contents or
+the complete file inventory. Deleting an older file, adding a backdated file,
+or changing content while preserving timestamps can therefore miss a rebuild.
 
-For intentional data inspection, choose the exact file or directory and bound the output (for example,
-`rg -n --max-count 5 --glob '!**/*.venv*/**' 'pattern' data/specific-file.json`).
+The extension embeds a content digest of its Rust build inputs (the Cargo
+manifests, root lockfile, build script and Rust sources; not the Python
+wrapper or `README.md`). `tests/conftest.py` recomputes it from the checkout
+and stops before collection when they differ, for example after
+`uv run --no-sync` or a direct interpreter call following a Rust change. The
+digest records inputs seen by the build script; it does not prove that Cargo
+recompiled every dependency, which is why a Cargo clean is sometimes needed.
+Participating native input paths must be valid UTF-8 and source directories
+must not be symlinks or junctions; unsupported paths fail with a diagnostic
+instead of producing different Python and Rust digests.
+
+`uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml` still
+installs an editable build; the next syncing `uv sync` or `uv run` replaces it
+with the locked build.
 
 ## Local CI mirror
 

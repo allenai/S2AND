@@ -43,9 +43,6 @@ command reference. Canonical-name rules live in [data.md](data.md).
 ## Deep dives and engineering notes
 
 - Release notes: [release_notes.md](release_notes.md)
-- September test audit and verification record: [test_audit_2026_09.md](test_audit_2026_09.md)
-- Retained historical Rust profiling evidence:
-  [rust/profiling/2026-05-28-promoted-incremental-arrow.md](rust/profiling/2026-05-28-promoted-incremental-arrow.md)
 - Bulk Arrow optimization measurements:
   [initial optimizations](rust/profiling/2026-09-04-bulk-optimizations.md) and
   [specialization follow-up](rust/profiling/2026-09-04-bulk-followup.md)

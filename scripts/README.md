@@ -83,19 +83,3 @@ attempt to rerun one needs an explicit bounded migration plan first.
 | `archive/make_s2and_mini_dataset.py` | Legacy JSON/pickle recipe | Records the source-selection policy for the mini datasets still used in evaluation and conversion |
 | `archive/sota.py` | Historical private-data workflow | Preserves post-paper SOTA splits, metrics, and multi-seed aggregation fixes |
 | `archive/transform_all_datasets.py` | Legacy dry-run utility | Preserves the old-schema conversion and curated dataset corrections |
-
-The following former archive files remain intentionally deleted:
-
-| Former script | Replacement or disposition |
-|---|---|
-| `archive/claims_cluster_eval.py` | Thin legacy-pickle wrapper; use `s2and.eval.claims_eval`, and use the `s2and_paper` branch for the exact historical wrapper |
-| `archive/make_s2and_name_tuples.py` | Obsolete legacy producer; use `production/generate_canonical_name_tuples.py` |
-| `archive/paper_experiments.sh` | Use the authoritative command set on the `s2and_paper` branch |
-| `archive/test_s2aff.py` | Deleted-model/private-path tombstone. Its historical result was unchanged B3 for original and S2AFF-replaced data: `[0.979, 0.978, 0.959, 0.984, 0.969, 0.961]` (mean 0.9717). Use git history for the script. |
-| `archive/test_specter2.ipynb` | Replaced by the maintained and tested `eval_prod_models.py` workflow |
-
-## Notes
-
-**`production/model/train_linker_and_finalize.py`**: One direct invocation fits
-once, writes a complete bundle with its embedded replay target, reloads
-those exact bytes, and evaluates them. Feature staging is temporary.

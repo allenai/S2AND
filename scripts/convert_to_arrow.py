@@ -1461,7 +1461,6 @@ def _run_benchmark(args: argparse.Namespace) -> None:
     )
     if not dataset_names:
         raise ValueError(f"No benchmark datasets found under {args.source_root}")
-    reports = []
     for dataset_name in dataset_names:
         start = time.perf_counter()
         report = convert_runtime_dataset_to_arrow(
@@ -1476,9 +1475,8 @@ def _run_benchmark(args: argparse.Namespace) -> None:
             validate=not bool(args.skip_validation),
         )
         report["total_seconds"] = time.perf_counter() - start
-        reports.append(report)
         print(json.dumps({"dataset": dataset_name, "total_seconds": report["total_seconds"]}, sort_keys=True))
-    print(json.dumps({"datasets": [report["dataset"] for report in reports]}, indent=2, sort_keys=True))
+    print(json.dumps({"datasets": list(dataset_names)}, indent=2, sort_keys=True))
 
 
 def _run_linker_replay(args: argparse.Namespace) -> None:
@@ -1493,7 +1491,6 @@ def _run_linker_replay(args: argparse.Namespace) -> None:
     )
     if not dataset_names:
         raise ValueError(f"No linker replay datasets found under {args.raw_root}")
-    reports = []
     for dataset_name in dataset_names:
         start = time.perf_counter()
         report = convert_runtime_dataset_to_arrow(
@@ -1508,9 +1505,8 @@ def _run_linker_replay(args: argparse.Namespace) -> None:
             validate=not bool(args.skip_validation),
         )
         report["total_seconds"] = time.perf_counter() - start
-        reports.append(report)
         print(json.dumps({"dataset": dataset_name, "total_seconds": report["total_seconds"]}, sort_keys=True))
-    print(json.dumps({"datasets": [report["dataset"] for report in reports]}, indent=2, sort_keys=True))
+    print(json.dumps({"datasets": list(dataset_names)}, indent=2, sort_keys=True))
 
 
 def _run_validate(args: argparse.Namespace) -> None:

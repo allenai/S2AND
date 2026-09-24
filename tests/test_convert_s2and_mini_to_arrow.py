@@ -33,6 +33,25 @@ def _fake_sources(tmp_path: Path, dataset: str) -> RuntimeDatasetSources:
     )
 
 
+def _converted_report_shape() -> dict[str, Any]:
+    """Return the key shape of a real conversion report, which carries no dataset name."""
+    return {
+        "kind": "s2and_arrow_dataset",
+        "format_version": 1,
+        "paths": {},
+        "files": {},
+        "signature_count": 1,
+        "paper_count": 1,
+        "timings_seconds": {},
+        "validation": None,
+    }
+
+
+def _printed_dataset_summary(output: str) -> list[str]:
+    """Parse the final multi-line ``{"datasets": [...]}`` summary a converter command prints."""
+    return json.loads(output[output.rindex('{\n  "datasets"') :])["datasets"]
+
+
 def _minimal_tables(row_count: int = 1) -> dict[str, pa.Table]:
     paper_ids = [f"p{i + 1}" for i in range(row_count)]
     return {
@@ -168,12 +187,13 @@ def test_arrow_manifest_files_exclude_request_local_sidecars(tmp_path: Path) -> 
 def test_run_full_discovers_datasets_only_when_explicit(
     tmp_path: Path,
     monkeypatch,
+    capsys,
 ) -> None:
     calls: list[dict[str, Any]] = []
 
     def fake_convert_runtime_dataset_to_arrow(**kwargs: Any) -> dict[str, Any]:
         calls.append(kwargs)
-        return {"dataset": kwargs["sources"].dataset}
+        return _converted_report_shape()
 
     monkeypatch.setattr(convert_to_arrow, "discover_benchmark_datasets", lambda _source_root: ["first", "second"])
     monkeypatch.setattr(
@@ -199,6 +219,7 @@ def test_run_full_discovers_datasets_only_when_explicit(
 
     assert [call["sources"].dataset for call in calls] == ["first", "second"]
     assert [call["selected_embedding"] for call in calls] == ["specter2", "specter2"]
+    assert _printed_dataset_summary(capsys.readouterr().out) == ["first", "second"]
 
     calls.clear()
 
@@ -236,6 +257,7 @@ def test_run_full_discovers_datasets_only_when_explicit(
 
     assert [call["sources"].dataset for call in calls] == ["pubmed"]
     assert calls[0]["selected_embedding"] == "specter2"
+    assert _printed_dataset_summary(capsys.readouterr().out) == ["pubmed"]
 
 
 def test_runtime_conversion_requires_selected_specter2_before_writing(tmp_path: Path) -> None:
@@ -407,7 +429,7 @@ def test_linker_replay_main_writes_datasets_under_release_root(
 
     def fake_convert_runtime_dataset_to_arrow(**kwargs: Any) -> dict[str, Any]:
         calls.append(kwargs)
-        return {"dataset": kwargs["sources"].dataset}
+        return _converted_report_shape()
 
     monkeypatch.setattr(convert_to_arrow, "linker_replay_dataset_sources", fake_linker_sources)
     monkeypatch.setattr(convert_to_arrow, "convert_runtime_dataset_to_arrow", fake_convert_runtime_dataset_to_arrow)

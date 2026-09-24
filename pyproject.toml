@@ -8,7 +8,8 @@ dynamic = ["version"]
 description = "S2AND"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-license = "MIT"
+# Code is MIT (LICENSE); packaged data files are CC-BY-4.0 (LICENSE-DATA).
+license = "MIT AND CC-BY-4.0"
 authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 
 # --- Runtime dependencies ---

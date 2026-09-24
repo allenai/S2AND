@@ -496,7 +496,7 @@ $ReplayDatasets = @(
 $BenchmarkArrowRoot = "$RunRoot\stages\benchmark_arrow"
 $ReplayArrowRoot = "$RunRoot\stages\replay_arrow"
 $NameCountsIndexRoot = Split-Path -Parent $NameCountsIndex
-$ReviewedDatasetLicense = "REVIEWED_DATASET_LICENSE_PATH"
+$DatasetLicense = (Resolve-Path LICENSE-DATA).Path  # CC-BY-4.0 data license
 uv run python scripts/convert_to_arrow.py benchmark `
   --source-root $CanonicalBenchmarkRoot `
   --output-root $BenchmarkArrowRoot `
@@ -504,7 +504,7 @@ uv run python scripts/convert_to_arrow.py benchmark `
   --name-counts-index-root $NameCountsIndexRoot `
   --n-jobs $NJobs
 
-Copy-Item -LiteralPath $ReviewedDatasetLicense `
+Copy-Item -LiteralPath $DatasetLicense `
   -Destination (Join-Path $BenchmarkArrowRoot 'LICENSE.txt')
 
 uv run python scripts/convert_to_arrow.py linker-replay `
@@ -525,9 +525,9 @@ reviewed external authority root containing `name_counts_index`; they do not
 copy it into each intermediate Arrow root. The assembler below copies it once
 into each final self-contained publication root. Converter commands take the
 parent containing `name_counts_index`, while model and assembler commands take
-the index directory itself. The reviewed `LICENSE.txt` is copied once into the
-benchmark root because that root becomes the base of the final public-data
-publication.
+the index directory itself. The CC-BY-4.0 data license (`LICENSE-DATA`) is
+copied once into the benchmark root as `LICENSE.txt`, because that root becomes
+the base of the final public-data publication.
 
 Run the bounded `ANDData -> Arrow -> Rust` feature-parity fixture before this
 full export.

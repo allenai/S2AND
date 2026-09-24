@@ -183,9 +183,12 @@ and [release runbook](docs/release.md).
 
 ## Licensing
 
-Package metadata currently declares the Python package license as MIT, while the
-root `LICENSE` file is CC-BY-4.0. The released dataset is under ODC-BY. Some
-affiliation data comes directly from the Microsoft Academic Graph.
+S2AND code is licensed under the MIT License ([LICENSE](LICENSE)). S2AND data,
+including the benchmark datasets and the data files in this repository, is
+licensed under the Creative Commons Attribution 4.0 International License
+([LICENSE-DATA](LICENSE-DATA)). Data releases published before v1.3 keep the
+license they were published with. Some affiliation data comes directly from the
+Microsoft Academic Graph.
 
 ## Citation
 

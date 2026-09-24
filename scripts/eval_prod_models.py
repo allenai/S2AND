@@ -795,56 +795,6 @@ def pair_splits_from_arrow_dataset(
     )
 
 
-def _feature_indices(featurizer_info: Any) -> list[int]:
-    indices: set[int] = set()
-    for feature_name in featurizer_info.features_to_use:
-        indices.update(featurizer_info.feature_group_to_index[feature_name])
-    return sorted(indices)
-
-
-def _feature_tuple_from_rust_featurizer(
-    rust_featurizer: Any,
-    pairs: Sequence[tuple[str, str, int | float]],
-    *,
-    featurizer_info: Any,
-    nameless_featurizer_info: Any | None,
-    n_jobs: int,
-    nan_value: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    selected_indices = _feature_indices(featurizer_info)
-    nameless_indices = _feature_indices(nameless_featurizer_info) if nameless_featurizer_info is not None else []
-    labels = np.asarray([float(pair[2]) for pair in pairs], dtype=np.float64)
-    if not pairs:
-        nameless_empty = (
-            np.empty((0, len(nameless_indices)), dtype=np.float64) if nameless_featurizer_info is not None else None
-        )
-        return np.empty((0, len(selected_indices)), dtype=np.float64), labels, nameless_empty
-
-    index_by_signature_id = {
-        str(signature_id): index for index, signature_id in enumerate(rust_featurizer.signature_ids())
-    }
-    indexed_pairs = [(index_by_signature_id[str(left)], index_by_signature_id[str(right)]) for left, right, _ in pairs]
-    union_indices = sorted(set(selected_indices) | set(nameless_indices))
-    union_features = np.asarray(
-        rust_featurizer.featurize_pairs_matrix_indexed(indexed_pairs, union_indices, int(n_jobs), nan_value),
-        dtype=np.float64,
-    )
-    position_by_index = {feature_index: position for position, feature_index in enumerate(union_indices)}
-    features = (
-        union_features
-        if selected_indices == union_indices
-        else np.take(union_features, [position_by_index[index] for index in selected_indices], axis=1)
-    )
-    nameless_features = None
-    if nameless_featurizer_info is not None:
-        nameless_features = (
-            union_features
-            if nameless_indices == union_indices
-            else np.take(union_features, [position_by_index[index] for index in nameless_indices], axis=1)
-        )
-    return features, labels, nameless_features
-
-
 def arrow_training_feature_splits(
     arrow_dataset: ArrowDataset,
     splits: PairwiseTrainingSplits,
@@ -866,33 +816,19 @@ def arrow_training_feature_splits(
         name_tuples=None,
         num_threads=n_jobs,
     )
-    return (
-        _feature_tuple_from_rust_featurizer(
+    train, val, test = (
+        feature_port.featurize_pairs_with_rust(
             rust_featurizer,
-            splits.train_pairs,
-            featurizer_info=featurizer_info,
+            pairs,
+            featurizer_info,
             nameless_featurizer_info=nameless_featurizer_info,
             n_jobs=n_jobs,
             nan_value=nan_value,
-        ),
-        _feature_tuple_from_rust_featurizer(
-            rust_featurizer,
-            splits.val_pairs,
-            featurizer_info=featurizer_info,
-            nameless_featurizer_info=nameless_featurizer_info,
-            n_jobs=n_jobs,
-            nan_value=nan_value,
-        ),
-        _feature_tuple_from_rust_featurizer(
-            rust_featurizer,
-            splits.test_pairs,
-            featurizer_info=featurizer_info,
-            nameless_featurizer_info=nameless_featurizer_info,
-            n_jobs=n_jobs,
-            nan_value=nan_value,
-        ),
-        rust_featurizer,
+            total_ram_bytes=None,
+        )
+        for pairs in (splits.train_pairs, splits.val_pairs, splits.test_pairs)
     )
+    return train, val, test, rust_featurizer
 
 
 def build_pairwise_clusterer_from_features(

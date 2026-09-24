@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -318,11 +319,8 @@ def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_
             )
             return [[float(row * 100 + index) for index in selected_indices] for row in range(len(indexed_pairs))]
 
-    main_info = SimpleNamespace(
-        features_to_use=["main_b", "main_a"],
-        feature_group_to_index={"main_a": [3], "main_b": [4, 1]},
-    )
-    nameless_info = SimpleNamespace(features_to_use=["nameless"], feature_group_to_index={"nameless": [4, 2]})
+    main_info = SimpleNamespace(selected_feature_indices=lambda: [1, 3, 4])
+    nameless_info = SimpleNamespace(selected_feature_indices=lambda: [2, 4])
 
     def build(dataset, **kwargs):
         assert dataset is arrow_dataset
@@ -344,14 +342,11 @@ def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_
     features, labels, nameless = train
     assert val[0].shape == test[0].shape == (0, 3)
 
-    assert calls == [
-        {
-            "indexed_pairs": [(2, 0), (0, 1)],
-            "selected_indices": [1, 2, 3, 4],
-            "n_jobs": 3,
-            "nan_value": -7.5,
-        }
-    ]
+    # One union call; NaN is requested from Rust and nan_value is applied afterwards,
+    # as many_pairs_featurize does.
+    assert len(calls) == 1
+    assert math.isnan(calls[0].pop("nan_value"))
+    assert calls == [{"indexed_pairs": [(2, 0), (0, 1)], "selected_indices": [1, 2, 3, 4], "n_jobs": 3}]
     assert features.tolist() == [[1.0, 3.0, 4.0], [101.0, 103.0, 104.0]]
     assert labels.tolist() == [0.25, 1.0]
     assert nameless is not None

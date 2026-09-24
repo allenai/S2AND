@@ -198,6 +198,8 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Changed
 
+- `load_production_model(path, n_jobs=N)` sets the prediction worker count at
+  load time. Without it, a loaded bundle keeps its stored `n_jobs=1`.
 - Bulk prediction: altered-profile markers no longer trigger temporary seed
   splitting on subblocked Arrow requests. Both Python and Arrow now use ordinary
   required groups for bulk prediction, with explicit disallows retaining their

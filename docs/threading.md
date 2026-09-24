@@ -14,8 +14,9 @@ Within the Python API, treat `n_jobs` as the canonical concurrency setting for a
 
 Defaults differ by entry point: `ANDData(...)` uses `n_jobs=1`, a newly
 constructed `Clusterer(...)` uses `n_jobs=16`, and a bundle loaded with
-`load_production_model(...)` starts with `n_jobs=1`. Set `clusterer.n_jobs`
-after loading a bundle; otherwise production scoring is single-threaded.
+`load_production_model(...)` keeps the bundle's stored `n_jobs=1` unless you
+pass `n_jobs=N` (or set `clusterer.n_jobs` later); otherwise production scoring
+is single-threaded.
 
 - **Rust Arrow routes**: Python passes `num_threads=n_jobs` into the Rust extension for batch constraints + featurization.
 - **Production model scoring**: `Clusterer.n_jobs` propagates into the underlying

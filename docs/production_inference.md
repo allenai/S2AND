@@ -19,12 +19,13 @@ bundle.
 ```python
 from s2and.production_model import load_production_model
 
-clusterer = load_production_model("/path/to/production_model_v1.3")
-clusterer.n_jobs = 8  # loaded bundles start with n_jobs=1 (single-threaded scoring)
+clusterer = load_production_model("/path/to/production_model_v1.3", n_jobs=8)
 ```
 
-See [Complete model bundles](#complete-model-bundles) for the bundle layout
-and what the loader validates.
+Without `n_jobs`, a loaded bundle keeps its stored `n_jobs=1` and scores
+single-threaded; `clusterer.n_jobs` can also be changed after loading. See
+[Complete model bundles](#complete-model-bundles) for the bundle layout and
+what the loader validates.
 
 ## Explicit execution routes
 

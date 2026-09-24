@@ -137,9 +137,9 @@ until the one-shot evaluation in Stage 5 of the
   > copied into `s2and/data/`, any call with `batching_threshold` set raises
   > `FileNotFoundError`.
 - **Concurrency:** `n_jobs` is the main concurrency knob. A loaded production
-  bundle starts with `n_jobs=1`; set `clusterer.n_jobs` before predicting. Set
-  thread-related environment variables before importing heavy compute
-  libraries ([docs/threading.md](docs/threading.md),
+  bundle keeps `n_jobs=1` unless you pass
+  `load_production_model(path, n_jobs=N)`. Set thread-related environment
+  variables before importing heavy compute libraries ([docs/threading.md](docs/threading.md),
   [docs/environment.md](docs/environment.md)).
 
 ## Development

@@ -1167,6 +1167,19 @@ def test_normal_load_hashes_each_declared_file_exactly_once(finalization, monkey
     assert standalone_artifact_hashes == []
 
 
+def test_load_production_model_applies_requested_n_jobs(finalization) -> None:
+    output_bundle = finalization["output_bundle_dir"]
+    finalize_production_bundle(**finalization)
+
+    default = load_production_model(output_bundle)
+    requested = load_production_model(output_bundle, n_jobs=3)
+
+    assert default.n_jobs == 1
+    assert (requested.n_jobs, requested.classifier.n_jobs, requested.nameless_classifier.n_jobs) == (3, 3, 3)
+    with pytest.raises(ValueError, match="n_jobs must not be zero"):
+        load_production_model(output_bundle, n_jobs=0)
+
+
 def test_manifest_writer_rejects_directory_at_required_file_path(tmp_path: Path) -> None:
     files = production_bundle_module.production_manifest_files(
         bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,

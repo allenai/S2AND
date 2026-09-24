@@ -215,8 +215,7 @@ After a complete bundle passes the release gates, reload it explicitly:
 from s2and.arrow_inputs import ArrowDataset
 from s2and.production_model import load_production_model
 
-clusterer = load_production_model("/path/to/production_model_vX.Y")
-clusterer.n_jobs = 8  # loaded bundles start with n_jobs=1
+clusterer = load_production_model("/path/to/production_model_vX.Y", n_jobs=8)
 blocks = {"block key": ["signature_id_1", "signature_id_2"]}
 with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
     pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow(

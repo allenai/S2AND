@@ -770,11 +770,23 @@ def load_production_model(
     path: str | Path | None = None,
     *,
     expected_artifact_hashes: Mapping[str, Any] | None = None,
+    n_jobs: int | None = None,
 ) -> Clusterer:
-    """Load a complete native production model bundle."""
+    """Load a complete native production model bundle.
+
+    Args:
+        path: Complete native bundle directory.
+        expected_artifact_hashes: Optional artifact hashes the bundle must match.
+        n_jobs: Prediction worker count applied through ``Clusterer.n_jobs``.
+            ``None`` keeps the bundle's stored value, which is 1.
+
+    Returns:
+        The loaded clusterer.
+    """
 
     if path is None:
         raise ValueError("No default production model is declared; pass a complete native bundle path")
+    requested_n_jobs = None if n_jobs is None else resolve_n_jobs(n_jobs)
     bundle_dir = Path(path).resolve()
     if not bundle_dir.is_dir():
         raise ValueError(f"Production model must be a complete native bundle directory: {bundle_dir}")
@@ -783,9 +795,12 @@ def load_production_model(
         expected_bundle_kind=COMPLETE_BUNDLE_KIND,
         expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
     )
-    return _load_bundle_clusterer(
+    clusterer = _load_bundle_clusterer(
         bundle_dir,
         manifest,
         bundle_kind=COMPLETE_BUNDLE_KIND,
         expected_artifact_hashes=expected_artifact_hashes,
     )
+    if requested_n_jobs is not None:
+        clusterer.n_jobs = requested_n_jobs
+    return clusterer

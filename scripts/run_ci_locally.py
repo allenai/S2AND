@@ -51,14 +51,8 @@ def repo_root() -> Path:
 
 REPO = repo_root()
 PYTEST_REPORT_FLAGS = ["-ra"]
-TY_PYTHON_VERSION = "3.11"
+# ty's Python version and rule ignores come from [tool.ty] in pyproject.toml.
 TY_PYTHON_PLATFORM = os.environ.get("S2AND_CI_TY_PLATFORM", "linux")
-TY_BASE_IGNORES = [
-    "unresolved-import",
-    "unused-type-ignore-comment",
-    "possibly-missing-attribute",
-    "unresolved-global",
-]
 TY_SCRIPT_EXTRA_IGNORES = [
     "unresolved-reference",
     "unresolved-attribute",
@@ -201,40 +195,15 @@ def run_lint_job() -> None:
 
 
 def run_ty_checks() -> None:
-    ignore_args: list[str] = []
-    for rule in TY_BASE_IGNORES:
-        ignore_args.extend(["--ignore", rule])
-
-    run_uv(
-        uv_run_args(
-            "ty",
-            "check",
-            "s2and",
-            *ignore_args,
-            "--python-version",
-            TY_PYTHON_VERSION,
-            "--python-platform",
-            TY_PYTHON_PLATFORM,
-        )
-    )
+    platform_args = ["--python-platform", TY_PYTHON_PLATFORM]
+    run_uv(uv_run_args("ty", "check", "s2and", *platform_args))
 
     script_files = top_level_script_files()
     if script_files:
-        script_ignore_args = list(ignore_args)
+        script_ignore_args: list[str] = []
         for rule in TY_SCRIPT_EXTRA_IGNORES:
             script_ignore_args.extend(["--ignore", rule])
-        run_uv(
-            uv_run_args(
-                "ty",
-                "check",
-                *script_files,
-                *script_ignore_args,
-                "--python-version",
-                TY_PYTHON_VERSION,
-                "--python-platform",
-                TY_PYTHON_PLATFORM,
-            )
-        )
+        run_uv(uv_run_args("ty", "check", *script_files, *script_ignore_args, *platform_args))
 
 
 def run_typecheck_and_test_job(*, lock_present: bool) -> None:

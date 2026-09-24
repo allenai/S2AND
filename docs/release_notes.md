@@ -339,6 +339,18 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Performance
 
+- `RustLightGBMBooster` builds an exact fast scorer at load time. Models whose
+  trees all have at most 32 leaves use QuickScorer; models with up to 256
+  leaves per tree use lockstep traversal over integer bin keys. Both support up
+  to 256 features and 255 distinct thresholds per feature, which covers
+  LightGBM's default `max_bin=255`. Raw scores and probabilities are
+  bit-identical to the previous traversal. That traversal still scores every
+  other model, including Zero-missing splits, NaN thresholds, and parser-accepted
+  shared-child graphs. On the v1.21 pairwise models and 50,000 real rows,
+  8-thread float32 scoring was 6.2x (main) and 3.3x (nameless) faster. A 5-block
+  AMiner bulk request (8.76M pairs) ran 2.79x faster end to end (46.3 s to
+  16.6 s), with identical clusters and chunk digests. The public API is
+  unchanged.
 - Python pair featurization runs serially on Windows. Its thread pool was
   slower than serial there, and the output is bit-identical.
 - The default bulk prediction path validates caller supervision

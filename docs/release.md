@@ -290,6 +290,23 @@ thresholds, and performance workload are frozen.
       `s2and_rust/README.md` are the PyPI descriptions published in Stage 6, so
       notes that need final model/data URLs use the owner-selected Stage 7
       locations.
+- [ ] PyPI cannot resolve relative links, so pin both READMEs' repository
+      links to the release tag (they resolve once Stage 7 pushes the tag):
+
+```powershell
+$Version = (Get-Content -Raw VERSION).Trim()
+$Base = "https://github.com/allenai/S2AND/blob/v$Version"
+$Utf8 = New-Object System.Text.UTF8Encoding($false)
+$Readme = (Resolve-Path README.md).Path
+$Text = [IO.File]::ReadAllText($Readme)
+$Text = [regex]::Replace($Text, '\]\((?!https?://|#|mailto:)([^)\s]+)\)', { param($m) "]($Base/$($m.Groups[1].Value))" })
+[IO.File]::WriteAllText($Readme, $Text, $Utf8)
+$RustReadme = (Resolve-Path s2and_rust\README.md).Path
+$RustText = [IO.File]::ReadAllText($RustReadme).Replace('https://github.com/allenai/S2AND/blob/main/', "$Base/")
+[IO.File]::WriteAllText($RustReadme, $RustText, $Utf8)
+git diff -- README.md s2and_rust/README.md
+```
+
 - [ ] After final package assets and release metadata are present, commit the
       release tree, rerun `run_ci_locally.py` and version checks, and record
       this as the final package commit.

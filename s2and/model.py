@@ -4004,11 +4004,14 @@ class Clusterer:
             return pred_clusters_intermediate
 
         predict_times: dict[str, float] = {}
+        predict_helper = self.predict_helper
+        if getattr(predict_helper, "__func__", None) is Clusterer._default_predict_helper:
+            predict_helper = self._predict_with_normalized_supervision
         for block_key in sorted(block_dict_multiple_letter):
             block_signatures = block_dict_multiple_letter[block_key]
             logger.info(f"Working on subblock {block_key}")
             start = time.time()
-            pred_clusters_intermediate, _ = self.predict_helper(
+            pred_clusters_intermediate, _ = predict_helper(
                 {block_key: block_signatures},
                 dataset,
                 dists=None,
@@ -4260,7 +4263,10 @@ class Clusterer:
             # normal mode - everything goes through full block clustering
             logger.info("Running predict on full blocks - no subblocking")
             start = time.time()
-            pred_clusters, dists = self.predict_helper(
+            predict_helper = self.predict_helper
+            if getattr(predict_helper, "__func__", None) is Clusterer._default_predict_helper:
+                predict_helper = self._predict_with_normalized_supervision
+            pred_clusters, dists = predict_helper(
                 block_dict,
                 dataset,
                 dists=dists,
@@ -4397,6 +4403,37 @@ class Clusterer:
         distances are built and clustered in the fused one-block-at-a-time path.
         """
         partial_supervision = normalize_partial_supervision(partial_supervision)
+        return self._predict_with_normalized_supervision(
+            block_dict,
+            dataset,
+            dists=dists,
+            cluster_model_params=cluster_model_params,
+            partial_supervision=partial_supervision,
+            use_s2_clusters=use_s2_clusters,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+            total_ram_bytes=total_ram_bytes,
+            prediction_state=prediction_state,
+        )
+
+    # Keep the original boundary identity when callers override predict_helper.
+    _default_predict_helper = predict_helper
+
+    def _predict_with_normalized_supervision(
+        self,
+        block_dict: dict[str, list[str]],
+        dataset: ANDData,
+        *,
+        partial_supervision: dict[tuple[str, str], int | float],
+        dists: dict[str, np.ndarray] | None = None,
+        cluster_model_params: dict[str, Any] | None = None,
+        use_s2_clusters: bool = False,
+        incremental_dont_use_cluster_seeds: bool = False,
+        runtime_context: RuntimeContext | None = None,
+        total_ram_bytes: int | None = None,
+        prediction_state: PredictionState | None = None,
+    ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
+        """Predict using caller distances already validated at a public boundary."""
         if not use_s2_clusters and any(len(signatures) > 1 for signatures in block_dict.values()):
             self = _clusterer_with_prediction_params(self, cluster_model_params)
         cluster_model_params = _prediction_cluster_model_params(self, cluster_model_params)

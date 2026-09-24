@@ -107,6 +107,85 @@ def test_arrow_incremental_boundary_rejects_id_collisions_before_loading_data(se
     assert list(partial.items()) == original
 
 
+@pytest.mark.parametrize("route", ["helper", "full", "subblocked"])
+def test_python_prediction_normalizes_supervision_once_per_request(route: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nested blocks reuse validated overrides without caching later requests."""
+    import s2and.model as model_module
+    from tests.helpers import build_dummy_dataset
+
+    dataset = build_dummy_dataset("supervision_normalization")
+    clusterer = _clusterer()
+    clusterer.use_default_constraints_as_supervision = False
+    blocks = {"first": ["1", "0"], "second": ["3", "2"]}
+    partial = {("1", "0"): 0.2, ("0", "1"): 0.2, ("3", "2"): 0.8}
+    original = list(partial.items())
+    normalization_calls = []
+    normalize = model_module.normalize_partial_supervision
+
+    def record_normalization(supervision, **kwargs):
+        normalization_calls.append(supervision)
+        return normalize(supervision, **kwargs)
+
+    monkeypatch.setattr(model_module, "normalize_partial_supervision", record_normalization)
+    method = clusterer.predict_helper if route == "helper" else clusterer.predict
+    options = {"batching_threshold": 3} if route == "subblocked" else {}
+
+    clusters, _ = method(blocks, dataset, partial_supervision=partial, **options)
+
+    assert {frozenset(members) for members in clusters.values()} == {
+        frozenset({"0", "1"}),
+        frozenset({"2"}),
+        frozenset({"3"}),
+    }
+    assert list(partial.items()) == original
+    assert len(normalization_calls) == 1
+
+    partial[("3", "2")] = 0.2
+    clusters, _ = method(blocks, dataset, partial_supervision=partial, **options)
+
+    assert {frozenset(members) for members in clusters.values()} == {frozenset({"0", "1"}), frozenset({"2", "3"})}
+    assert len(normalization_calls) == 2
+    assert partial[("3", "2")] == 0.2
+
+
+@pytest.mark.parametrize("override", ["subclass", "instance"])
+@pytest.mark.parametrize("threshold", [None, 3])
+def test_bulk_prediction_preserves_predict_helper_overrides(override, threshold, monkeypatch):
+    """The validation fast path must preserve existing custom helper dispatch."""
+    from types import MethodType
+
+    from tests.helpers import build_dummy_dataset
+
+    calls = []
+
+    def record_prediction(self, block_dict, dataset, **kwargs):
+        calls.append(tuple(block_dict))
+        return Clusterer.predict_helper(self, block_dict, dataset, **kwargs)
+
+    class CustomClusterer(Clusterer):
+        predict_helper = record_prediction
+
+    clusterer_type = CustomClusterer if override == "subclass" else Clusterer
+    clusterer = clusterer_type(
+        FeaturizationInfo(["year_diff"]),
+        ConstantDistanceClassifier(0.9),
+        cluster_model=FastCluster(eps=0.5),
+        n_jobs=1,
+        use_default_constraints_as_supervision=False,
+    )
+    if override == "instance":
+        monkeypatch.setattr(clusterer, "predict_helper", MethodType(record_prediction, clusterer))
+    dataset = build_dummy_dataset("supervision_helper_override")
+    blocks = {"first": ["1", "0"], "second": ["3", "2"]}
+
+    clusters, _ = clusterer.predict(
+        blocks, dataset, batching_threshold=threshold, partial_supervision={("1", "0"): 0.2, ("3", "2"): 0.2}
+    )
+
+    assert calls == ([("first", "second")] if threshold is None else [("first",), ("second",)])
+    assert {frozenset(members) for members in clusters.values()} == {frozenset({"0", "1"}), frozenset({"2", "3"})}
+
+
 @pytest.mark.parametrize("method", PUBLIC_METHODS)
 @pytest.mark.parametrize("value", [0.0, 0.2, 10000.0])
 def test_equal_reverse_supervision_matches_single_entry_on_real_public_routes(tmp_path, method, value):

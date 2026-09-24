@@ -18,6 +18,10 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Breaking changes
 
+- `scripts/convert_to_arrow.py --name-counts-index-root` takes the name-count
+  index directory itself, like the model, calibration, evaluation, and linker
+  commands; it previously took the directory containing `name_counts_index/`.
+  Passing the parent now fails with a missing-artifact error.
 - Python and Rust now ship one `canonical_v2` name/feature behavior
   under an exactly matched package runtime. Titles retain letters and digits,
   CLD2 runs in explicit plain-text mode, malformed email is missing evidence,

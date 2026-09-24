@@ -620,9 +620,11 @@ def convert_service_json_to_arrow(
     write_name_counts_index_seconds = 0.0
     if not skip_name_counts_index:
         start = time.perf_counter()
-        index_root = output_root if name_counts_index_root is None else name_counts_index_root
+        index_dir = (
+            Path(output_root) / "name_counts_index" if name_counts_index_root is None else Path(name_counts_index_root)
+        )
         name_counts_index_path = require_name_counts_index_artifact(
-            Path(index_root) / "name_counts_index",
+            index_dir,
             context="service JSON conversion",
             producer_hint="run python -m scripts.production.counts.generate_name_counts first",
         )
@@ -754,9 +756,13 @@ def convert_runtime_dataset_to_arrow(
     write_name_counts_index_seconds = 0.0
     if not skip_name_counts_index:
         start = time.perf_counter()
-        index_root = root_manifest_dir if name_counts_index_root is None else name_counts_index_root
+        index_dir = (
+            Path(root_manifest_dir) / "name_counts_index"
+            if name_counts_index_root is None
+            else Path(name_counts_index_root)
+        )
         name_counts_index_path = require_name_counts_index_artifact(
-            Path(index_root) / "name_counts_index",
+            index_dir,
             context="runtime dataset conversion",
             producer_hint="run python -m scripts.production.counts.generate_name_counts first",
         )
@@ -1157,7 +1163,12 @@ def _run_validate(args: argparse.Namespace) -> None:
 
 
 def _add_common_runtime_args(parser: argparse.ArgumentParser, *, default_n_jobs: int) -> None:
-    parser.add_argument("--name-counts-index-root", type=Path, default=None)
+    parser.add_argument(
+        "--name-counts-index-root",
+        type=Path,
+        default=None,
+        help="Manifest-backed name-count index directory (default: name_counts_index/ under the output root).",
+    )
     parser.add_argument("--n-jobs", type=int, default=default_n_jobs)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--skip-name-counts-index", action="store_true")

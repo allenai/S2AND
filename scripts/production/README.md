@@ -495,13 +495,12 @@ $ReplayDatasets = @(
 )
 $BenchmarkArrowRoot = "$RunRoot\stages\benchmark_arrow"
 $ReplayArrowRoot = "$RunRoot\stages\replay_arrow"
-$NameCountsIndexRoot = Split-Path -Parent $NameCountsIndex
 $DatasetLicense = (Resolve-Path LICENSE-DATA).Path  # CC-BY-4.0 data license
 uv run python scripts/convert_to_arrow.py benchmark `
   --source-root $CanonicalBenchmarkRoot `
   --output-root $BenchmarkArrowRoot `
   --datasets $BenchmarkDatasets `
-  --name-counts-index-root $NameCountsIndexRoot `
+  --name-counts-index-root $NameCountsIndex `
   --n-jobs $NJobs
 
 Copy-Item -LiteralPath $DatasetLicense `
@@ -512,7 +511,7 @@ uv run python scripts/convert_to_arrow.py linker-replay `
   --embeddings-root $ReviewedReplayEmbeddingsRoot `
   --output-root $ReplayArrowRoot `
   --datasets $ReplayDatasets `
-  --name-counts-index-root $NameCountsIndexRoot `
+  --name-counts-index-root $NameCountsIndex `
   --n-jobs $NJobs
 ```
 
@@ -521,11 +520,10 @@ benchmark source is
 `<root>/<dataset>/<dataset>_signatures.json` plus its other benchmark files.
 Replay source is `<raw>/<dataset>/{signatures.json,papers.json}` plus
 `<embeddings>/<dataset>/specter2.pkl`. Both conversions reference the same
-reviewed external authority root containing `name_counts_index`; they do not
-copy it into each intermediate Arrow root. The assembler below copies it once
-into each final self-contained publication root. Converter commands take the
-parent containing `name_counts_index`, while model and assembler commands take
-the index directory itself. The CC-BY-4.0 data license (`LICENSE-DATA`) is
+reviewed external name-count index directory; they do not copy it into each
+intermediate Arrow root. The assembler below copies it once into each final
+self-contained publication root. Like the model and assembler commands, the
+converters take the index directory itself. The CC-BY-4.0 data license (`LICENSE-DATA`) is
 copied once into the benchmark root as `LICENSE.txt`, because that root becomes
 the base of the final public-data publication.
 

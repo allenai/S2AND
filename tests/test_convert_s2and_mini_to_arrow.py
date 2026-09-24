@@ -12,7 +12,7 @@ import pyarrow as pa
 import pytest
 
 import scripts.convert_to_arrow as convert_to_arrow
-from s2and.arrow_inputs import ARROW_COLLECTION_KIND
+from s2and.arrow_inputs import ARROW_COLLECTION_KIND, MissingArrowArtifactError
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.feature_block import (
     write_arrow_ipc_table,
@@ -255,7 +255,8 @@ def test_runtime_conversion_requires_selected_specter2_before_writing(tmp_path: 
     assert not output_dir.exists()
 
 
-def test_runtime_conversion_defaults_to_one_physical_specter2_table(tmp_path: Path) -> None:
+def _write_one_signature_sources(tmp_path: Path) -> RuntimeDatasetSources:
+    """Write one signature, one paper, and distinct SPECTER1/SPECTER2 vectors."""
     source_dir = tmp_path / "source" / "dummy"
     source_dir.mkdir(parents=True)
     signatures_path = source_dir / "dummy_signatures.json"
@@ -304,17 +305,21 @@ def test_runtime_conversion_defaults_to_one_physical_specter2_table(tmp_path: Pa
     with specter2_path.open("wb") as stream:
         pickle.dump({"p1": np.asarray([2.0, 2.0], dtype=np.float32)}, stream)
 
+    return RuntimeDatasetSources(
+        dataset="dummy",
+        source_dir=source_dir,
+        signatures_path=signatures_path,
+        papers_path=papers_path,
+        specter_path=specter1_path,
+        specter2_path=specter2_path,
+    )
+
+
+def test_runtime_conversion_defaults_to_one_physical_specter2_table(tmp_path: Path) -> None:
     output_root = tmp_path / "out"
     output_dir = output_root / "dummy"
     manifest = convert_to_arrow.convert_runtime_dataset_to_arrow(
-        sources=RuntimeDatasetSources(
-            dataset="dummy",
-            source_dir=source_dir,
-            signatures_path=signatures_path,
-            papers_path=papers_path,
-            specter_path=specter1_path,
-            specter2_path=specter2_path,
-        ),
+        sources=_write_one_signature_sources(tmp_path),
         output_dir=output_dir,
         root_manifest_dir=output_root,
         name_counts_index_root=None,
@@ -579,4 +584,41 @@ def test_validate_arrow_dataset_manifest_requires_batch_index_sidecar(tmp_path: 
             {"paths": paths},
             require_embeddings=False,
             require_name_counts_index=False,
+        )
+
+
+def test_runtime_conversion_binds_explicit_name_counts_index_directory(tmp_path: Path) -> None:
+    # The writer publishes <root>/name_counts_index; the converter must use that directory as given.
+    index_dir, _metrics = write_name_counts_index(tmp_path / "counts", tiny_name_counts_tuple())
+    output_root = tmp_path / "out"
+    output_dir = output_root / "dummy"
+
+    manifest = convert_to_arrow.convert_runtime_dataset_to_arrow(
+        sources=_write_one_signature_sources(tmp_path),
+        output_dir=output_dir,
+        root_manifest_dir=output_root,
+        name_counts_index_root=Path(index_dir),
+        n_jobs=1,
+        overwrite=False,
+        skip_name_counts_index=False,
+    )
+
+    assert (output_dir / manifest["paths"]["name_counts_index"]).resolve() == Path(index_dir).resolve()
+
+
+def test_runtime_conversion_rejects_parent_of_name_counts_index(tmp_path: Path) -> None:
+    parent = tmp_path / "counts"
+    index_dir, _metrics = write_name_counts_index(parent, tiny_name_counts_tuple())
+    assert Path(index_dir).parent == parent
+    output_dir = tmp_path / "out" / "dummy"
+
+    with pytest.raises(MissingArrowArtifactError, match="name_counts_index"):
+        convert_to_arrow.convert_runtime_dataset_to_arrow(
+            sources=_write_one_signature_sources(tmp_path),
+            output_dir=output_dir,
+            root_manifest_dir=tmp_path / "out",
+            name_counts_index_root=parent,
+            n_jobs=1,
+            overwrite=False,
+            skip_name_counts_index=False,
         )

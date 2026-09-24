@@ -62,11 +62,16 @@ def _filter(
 
 
 @pytest.mark.parametrize("order", [["0", "1", "2"], ["2", "1", "0"]])
-@pytest.mark.parametrize("broadcast", ["always", "never", "top1_consensus"])
-@pytest.mark.parametrize("score_mode", ["mean", "min", "mean_min_hybrid"])
+@pytest.mark.parametrize(
+    ("broadcast", "score_mode"),
+    [("always", "mean"), ("never", "min"), ("top1_consensus", "mean_min_hybrid")],
+)
 def test_public_incremental_preserves_query_disallow(classic, order, broadcast, score_mode):
     """A hard-negative pair cannot join a common seed through independent links."""
     clusterer, dataset = classic
+    # Constant distances to one seed cannot distinguish score/broadcast modes.
+    # Keep each mode at this constraint boundary without their full cross-product;
+    # test_cluster_incremental exercises distinct score winners and consensus.
     clusterer.incremental_precluster_broadcast_mode = broadcast
     clusterer.incremental_seed_score_mode = score_mode
     dataset.cluster_seeds_disallow = {("1", "2")}
@@ -137,28 +142,6 @@ def test_required_link_priority_and_contradictory_requires(classic):
     assert _filter(classic, supervision={("0", "2"): 0}) == {"2": "seed"}
     with pytest.raises(ValueError, match="Conflicting required classic incremental attachments"):
         _filter(classic, supervision={("0", "2"): 0, ("1", "0"): 0})
-
-
-@pytest.mark.parametrize("default_constraints", [False, True])
-def test_attachment_uses_direct_supervision_over_reverse_negative(classic, default_constraints):
-    clusterer, _ = classic
-    clusterer.use_default_constraints_as_supervision = default_constraints
-    supervision = {("1", "2"): LARGE_DISTANCE, ("2", "1"): 0.1}
-    assert _filter(classic, supervision=supervision) == {"1": "seed", "2": "seed"}
-    assert _filter(classic, supervision=supervision, scores={"1": 0.2, "2": 0.1}) == {"2": "seed"}
-    historical = {("0", "1"): LARGE_DISTANCE, ("1", "0"): 0.1}
-    assert _filter(classic, links={"1": "seed"}, supervision=historical) == {"1": "seed"}
-
-
-def test_overridden_reverse_zero_does_not_create_atomic_require_group(classic):
-    links = {"2": "seed", "1": "seed", "3": "seed"}
-    scores = {"1": 0.1, "2": 0.2, "3": 0.05}
-    supervision = {("1", "2"): 0, ("2", "1"): 0.3, ("1", "3"): LARGE_DISTANCE}
-    assert _filter(classic, links=links, scores=scores, supervision=supervision) == {"3": "seed", "2": "seed"}
-    # Reversing score priority makes the zero direct and applicable. The
-    # effective require group now abstains together when it conflicts with 3.
-    scores.update({"1": 0.2, "2": 0.1})
-    assert _filter(classic, links=links, scores=scores, supervision=supervision) == {"3": "seed"}
 
 
 def test_query_require_component_is_never_partially_attached(classic):

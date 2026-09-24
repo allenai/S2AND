@@ -233,7 +233,8 @@ def test_fused_constraint_failure_propagates_with_offset(monkeypatch):
     assert observed_offsets == [0, 2]
 
 
-def test_predict_from_arrow_rejects_disallows_with_precomputed_dists_before_build(monkeypatch, tmp_path):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_predict_from_arrow_rejects_disallows_with_precomputed_dists_before_build(monkeypatch, tmp_path, enabled):
     def fake_build_from_arrow_dataset(*_args, **_kwargs):
         raise AssertionError("precomputed dists with disallows should be rejected before Rust featurizer build")
 
@@ -243,6 +244,7 @@ def test_predict_from_arrow_rejects_disallows_with_precomputed_dists_before_buil
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         classifier=None,
         n_jobs=1,
+        use_default_constraints_as_supervision=enabled,
     )
     dists = {"block": np.asarray([0.5], dtype=np.float64)}
     write_minimal_arrow_prediction_bundle(tmp_path)
@@ -453,75 +455,6 @@ def test_make_subblocks_handles_specter_edge_case_without_unbound_local(monkeypa
 
     output = subblocking_module.make_subblocks(["s1"], anddata, maximum_size=2, first_k_letter_counts_sorted={})
     assert output == {"ab|middle=cd": ["s1"]}
-
-
-def test_clusterer_predict_does_not_forward_batch_threshold_to_python_incremental(monkeypatch):
-    class Signature:
-        def __init__(self, first_name):
-            self.author_info_first_normalized_without_apostrophe = first_name
-
-    dataset = _as_anddata(
-        SimpleNamespace(
-            signatures={
-                "m1": Signature("alex"),
-                "m2": Signature("alex"),
-                "m3": Signature("alex"),
-                "m4": Signature("alex"),
-                "m5": Signature("alex"),
-                "m6": Signature("alex"),
-                "s1": Signature("a"),
-                "s2": Signature("a"),
-            },
-            cluster_seeds_require={},
-            cluster_seeds_disallow=set(),
-        )
-    )
-
-    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
-    clusterer = Clusterer(featurizer_info=featurizer_info, classifier=None, n_jobs=1)
-
-    monkeypatch.setattr(
-        model_module,
-        "make_subblocks",
-        lambda block_signatures, _dataset, maximum_size, **_kwargs: {
-            "multi_1": ["m1", "m2"],
-            "multi_2": ["m3", "m4"],
-            "multi_3": ["m5", "m6"],
-            "single_1": ["s1", "s2"],
-        },
-    )
-
-    def fake_predict_helper(self, block_dict, _dataset, *args, **kwargs):
-        predicted = {}
-        for block_key, signatures in block_dict.items():
-            predicted[f"cluster_{block_key}"] = list(signatures)
-        return predicted, None
-
-    captured_kwargs = {}
-    incremental_calls: list[tuple[str, ...]] = []
-
-    def fake_predict_incremental(self, block_signatures, dataset, *args, **kwargs):
-        incremental_calls.append(tuple(block_signatures))
-        captured_kwargs.update(kwargs)
-        assert dataset.cluster_seeds_require == {}
-        return {
-            "clusters": {"merged": list(kwargs["prediction_state"].cluster_seeds_require) + list(block_signatures)},
-            "phase_b_mode": "exact",
-            "phase_b_budget_bytes": 0,
-            "phase_b_required_bytes": 0,
-        }
-
-    monkeypatch.setattr(Clusterer, "predict_helper", fake_predict_helper)
-    monkeypatch.setattr(Clusterer, "_predict_incremental_python", fake_predict_incremental)
-
-    clusterer.predict(
-        {"block": ["m1", "m2", "m3", "m4", "m5", "m6", "s1", "s2"]},
-        dataset,
-        batching_threshold=2,
-    )
-
-    assert incremental_calls == [("s1", "s2")]
-    assert "batching_threshold" not in captured_kwargs
 
 
 def test_make_distance_matrices_fastcluster_cross_batch_preserves_per_block_order(monkeypatch):

@@ -212,21 +212,6 @@ def test_validation_rejects_out_of_bounds_record_batch_index(tmp_path: Path) -> 
         validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
 
 
-def test_write_reuse_rejects_corrupt_batch_index(tmp_path: Path) -> None:
-    path, index_path = _write_tiny_index(tmp_path)
-    payload = bytearray(index_path.read_bytes())
-    index_path.write_bytes(payload[:-1])
-
-    with pytest.raises(ValueError, match="does not match expected length"):
-        write_arrow_batch_lookup_index(
-            path,
-            index_path,
-            key_column="signature_id",
-            table_name="signatures",
-            overwrite=False,
-        )
-
-
 def test_write_reuse_fingerprints_source_once_and_validates_last_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

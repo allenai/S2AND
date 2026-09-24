@@ -13,7 +13,9 @@ ONE_SPLIT_INTERIOR_ZERO_MODEL = (
 ).read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("row_count", [0, 1, 63, 64, 65, 127, 128, 129, 1001])
+# Rust's tiled_scoring_preserves_every_score_bit owns the tile-boundary grid.
+# Keep Python's empty and strided multi-tile bindings for each dtype and mode.
+@pytest.mark.parametrize("row_count", [0, 1001])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("probability", [False, True])
 def test_tiled_scores_match_single_rows_exactly(row_count, dtype, probability):
@@ -35,6 +37,8 @@ def test_tiled_scores_match_single_rows_exactly(row_count, dtype, probability):
         dtype=dtype,
     )
     rows = np.resize(values, row_count * 2).reshape(row_count, 2)[:, :1]
+    if row_count:
+        assert not rows.flags.c_contiguous
     method_name = "predict_proba_positive" if probability else "predict_raw"
     if dtype == np.float32:
         method_name += "_f32"
@@ -44,4 +48,6 @@ def test_tiled_scores_match_single_rows_exactly(row_count, dtype, probability):
         dtype=np.float64,
     )
     actual = predict(rows, num_threads=10)
+    assert actual.shape == (row_count,)
+    assert actual.dtype == np.float64
     assert actual.tobytes() == expected.tobytes()

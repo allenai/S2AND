@@ -46,11 +46,14 @@ def _constraint_indexed_rust(dataset, sig_id_1: str, sig_id_2: str, **kwargs):
     if rust_featurizer is None:
         rust_featurizer = _get_rust_featurizer(dataset)
     signature_id_to_index = {str(sig_id): index for index, sig_id in enumerate(rust_featurizer.signature_ids())}
-    return get_constraints_matrix_indexed_rust(
+    values = get_constraints_matrix_indexed_rust(
         [(signature_id_to_index[str(sig_id_1)], signature_id_to_index[str(sig_id_2)])],
         featurizer=rust_featurizer,
         **kwargs,
-    )[0]
+    )
+    assert isinstance(values, list)
+    assert len(values) == 1
+    return values[0]
 
 
 def _load_dataset_from_dir(data_dir, name, *, signatures=None):
@@ -284,76 +287,6 @@ def test_arrow_training_helper_does_not_reuse_source_records(source_dataset, arr
     assert arrow_dataset.papers[paper_id] is not source_dataset.papers[paper_id]
 
 
-def test_rust_featurizer_supports_string_paper_ids(tmp_path):
-    # Regression guard: datasets may use non-numeric paper IDs (e.g., "app:123").
-    signatures = {
-        "s1": {
-            "signature_id": "s1",
-            "paper_id": "app:1",
-            "author_info": {
-                "position": 0,
-                "block": "alice_smith",
-                "first": "Alice",
-                "middle": "",
-                "last": "Smith",
-                "suffix": None,
-                "email": None,
-                "affiliations": [],
-            },
-        },
-        "s2": {
-            "signature_id": "s2",
-            "paper_id": "app:2",
-            "author_info": {
-                "position": 0,
-                "block": "alice_smith",
-                "first": "Alice",
-                "middle": "",
-                "last": "Smith",
-                "suffix": None,
-                "email": None,
-                "affiliations": [],
-            },
-        },
-    }
-    papers = {
-        "app:1": {
-            "paper_id": "app:1",
-            "title": "A",
-            "abstract": "",
-            "authors": [
-                {"author_name": "Alice Smith", "position": 0},
-                {"author_name": "Bob Jones", "position": 1},
-            ],
-            "venue": "",
-            "journal_name": "",
-            "year": 2020,
-            "references": [],
-        },
-        "app:2": {
-            "paper_id": "app:2",
-            "title": "B",
-            "abstract": "",
-            "authors": [
-                {"author_name": "Alice Smith", "position": 0},
-                {"author_name": "Carol Lee", "position": 1},
-            ],
-            "venue": "",
-            "journal_name": "",
-            "year": 2021,
-            "references": [],
-        },
-    }
-    ds = _build_two_signature_dataset(signatures, papers, "rust_string_id_regression")
-
-    ds = build_arrow_training_dataset(ds, tmp_path, name_counts="empty")
-    features = _featurize_pair_indexed_rust(ds, "s1", "s2")
-    assert len(features) > 0
-
-    constraint = _constraint_indexed_rust(ds, "s1", "s2")
-    assert constraint is None or isinstance(constraint, int | float)
-
-
 def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setenv("S2AND_BACKEND", "python")
     _reset_featurizer_env_caches()
@@ -392,7 +325,10 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
             "paper_id": "app:1",
             "title": "A",
             "abstract": "",
-            "authors": [{"author_name": "A Smith", "position": 0}],
+            "authors": [
+                {"author_name": "A Smith", "position": 0},
+                {"author_name": "Bob Jones", "position": 1},
+            ],
             "venue": "",
             "journal_name": "",
             "year": 2020,
@@ -402,7 +338,10 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
             "paper_id": "app:2",
             "title": "B",
             "abstract": "",
-            "authors": [{"author_name": "Alice Smith", "position": 0}],
+            "authors": [
+                {"author_name": "Alice Smith", "position": 0},
+                {"author_name": "Carol Lee", "position": 1},
+            ],
             "venue": "",
             "journal_name": "",
             "year": 2021,
@@ -415,7 +354,10 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
     rust_features = _featurize_pair_indexed_rust(arrow_dataset, "s1", "s2")
     feature_names = featurizer_mod.FeaturizationInfo().get_feature_names()
 
+    assert {signature.paper_id for signature in arrow_dataset.signatures.values()} == {"app:1", "app:2"}
+    assert rust_features.shape == (len(feature_names),)
     assert ds.get_constraint("s1", "s2") is None
+    assert _constraint_indexed_rust(arrow_dataset, "s1", "s2") is None
     for feature_name in ("levenshtein", "prefix", "lcs", "jaro"):
         idx = feature_names.index(feature_name)
         assert not math.isnan(ref_features[idx])
@@ -466,6 +408,9 @@ def test_language_reliability_min_is_pair_order_invariant_in_python_and_rust(tmp
         rust_reverse[reliability_index],
     ]
     assert all(equalish(float(value), 0.25) for value in observed), observed
+    for left, right in ((signature_id_1, signature_id_2), (signature_id_2, signature_id_1)):
+        assert dataset.get_constraint(left, right) is None
+        assert _constraint_indexed_rust(arrow_dataset, left, right) is None
 
 
 @pytest.mark.parametrize(
@@ -562,43 +507,6 @@ def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):
     _reset_featurizer_env_caches()
 
 
-def test_indexed_constraint_rust_ignores_reliable_language_mismatch(tmp_path):
-    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
-    source_dataset = _load_dataset_from_dir(data_dir, "dummy_language_constraint_removed")
-
-    s1 = "0"
-    s2 = "2"
-    paper_id_1 = str(source_dataset.signatures[s1].paper_id)
-    paper_id_2 = str(source_dataset.signatures[s2].paper_id)
-
-    source_dataset.papers[paper_id_1] = source_dataset.papers[paper_id_1]._replace(
-        predicted_language="en",
-        is_reliable=True,
-    )
-    source_dataset.papers[paper_id_2] = source_dataset.papers[paper_id_2]._replace(
-        predicted_language="fr",
-        is_reliable=True,
-    )
-    arrow_dataset = build_arrow_training_dataset(source_dataset, tmp_path)
-
-    ref_val = source_dataset.get_constraint(s1, s2)
-    got_val = _constraint_indexed_rust(arrow_dataset, s1, s2)
-
-    assert ref_val is None
-    assert got_val is None
-
-    rust_featurizer = _get_rust_featurizer(arrow_dataset)
-    signature_ids = list(rust_featurizer.signature_ids())
-    signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
-
-    got_indexed = get_constraints_matrix_indexed_rust(
-        [(signature_index[s1], signature_index[s2])],
-        featurizer=rust_featurizer,
-    )
-
-    assert got_indexed == [None]
-
-
 def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases(tmp_path):
     signatures = {
         "s1": {
@@ -663,13 +571,6 @@ def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases(tmp_path):
     ds = build_arrow_training_dataset(ds, tmp_path, name_counts="empty")
     rust_featurizer = _get_rust_featurizer(ds)
     assert _constraint_indexed_rust(ds, "s1", "s2", featurizer=rust_featurizer) is None
-    signature_ids = list(rust_featurizer.signature_ids())
-    signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
-    indexed_values = get_constraints_matrix_indexed_rust(
-        [(signature_index["s1"], signature_index["s2"])],
-        featurizer=rust_featurizer,
-    )
-    assert indexed_values == [None]
 
 
 @pytest.mark.parametrize(

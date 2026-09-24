@@ -11,7 +11,7 @@ from s2and.incremental_linking.completion_metadata import SignatureFirstNames, s
 
 @pytest.mark.parametrize(
     ("raw_first", "expected"),
-    [("!!!", ""), (" D’Ángelo ", "dangelo"), ("Dr. Jean–Paul Henry", "jean paul"), (None, "")],
+    [("Dr. Jean–Paul Henry", "jean paul"), (None, "")],
 )
 def test_completion_first_canonicalizes_unprepared_names(raw_first: str | None, expected: str) -> None:
     signatures = json.loads(Path("tests/dummy/signatures.json").read_text(encoding="utf-8"))
@@ -43,7 +43,7 @@ def test_completion_first_preserves_prepared_name(prepared_first: str) -> None:
         name_tuples=set(),
     )
     signature = dataset.signatures["0"]._replace(
-        author_info_first="!!!", author_info_first_normalized_without_apostrophe=prepared_first
+        author_info_first="Ada", author_info_first_normalized_without_apostrophe=prepared_first
     )
 
     assert signature_first(signature) == prepared_first

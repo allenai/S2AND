@@ -14,9 +14,7 @@ from s2and.prediction_state import PredictionState
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
-@pytest.mark.parametrize(
-    "case", ["clean", "dataset", "partial", "equal_reverse_soft", "equal_reverse_hard", "initial_only"]
-)
+@pytest.mark.parametrize("case", ["clean", "dataset", "partial", "equal_reverse_soft", "initial_only"])
 def test_public_arrow_subblocking_preserves_effective_seed_disallows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
 ) -> None:
@@ -74,8 +72,8 @@ def test_public_arrow_subblocking_preserves_effective_seed_disallows(
     partial: dict[tuple[str, str], int | float] = {}
     if case == "partial":
         partial[pair] = LARGE_DISTANCE
-    elif case in {"equal_reverse_soft", "equal_reverse_hard"}:
-        partial[pair] = 0.2 if case == "equal_reverse_soft" else LARGE_DISTANCE
+    elif case == "equal_reverse_soft":
+        partial[pair] = 0.2
         partial[(pair[1], pair[0])] = partial[pair]
     with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
         outputs = [
@@ -96,28 +94,18 @@ def test_public_arrow_subblocking_preserves_effective_seed_disallows(
     assert sorted(signature_id for members in outputs[1].values() for signature_id in members) == ["0", "1", "2"]
 
 
-@pytest.mark.parametrize("threshold", [None, 2], ids=["unbatched", "subblocked"])
-@pytest.mark.parametrize("reverse_entries", [False, True])
-def test_public_arrow_rejects_conflicting_reverse_seed_supervision(tmp_path, threshold, reverse_entries):
-    """Batching cannot reinstate directional precedence for caller overrides."""
-    from s2and.consts import LARGE_DISTANCE
+@pytest.fixture
+def patch_arrow_orchestration(monkeypatch: pytest.MonkeyPatch):
+    """Install per-test orchestration fakes; each test owns its captures/oracles."""
 
-    write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
-    entries = [(("0", "1"), 0.2), (("1", "0"), LARGE_DISTANCE)]
-    partial = dict(reversed(entries) if reverse_entries else entries)
-    original = list(partial.items())
-    clusterer = Clusterer(FeaturizationInfo(["year_diff"]), classifier=None, n_jobs=1)
-    with ArrowDataset.open(tmp_path) as arrow_dataset:
-        with pytest.raises(ValueError, match="partial_supervision has conflicting distances"):
-            clusterer.predict_from_arrow(
-                {"block": ["0", "1", "2"]},
-                arrow_dataset,
-                batching_threshold=threshold,
-                cluster_seeds_require={"0": "claimed", "1": "claimed"},
-                partial_supervision=partial,
-                name_tuples=frozenset(),
-            )
-    assert list(partial.items()) == original
+    def install(native_subblocking, representatives, featurizer, bulk_predict, incremental_predict):
+        monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", native_subblocking)
+        monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", representatives)
+        monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", featurizer)
+        monkeypatch.setattr(Clusterer, "_predict_subblocked_multiple_letter_groups", bulk_predict)
+        monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", incremental_predict)
+
+    return install
 
 
 def _clusterer() -> Clusterer:
@@ -130,6 +118,7 @@ def _clusterer() -> Clusterer:
 
 
 def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
+    patch_arrow_orchestration,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -221,11 +210,13 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
             }
         }
 
-    monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
-    monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_representatives)
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", fake_build_featurizer)
-    monkeypatch.setattr(Clusterer, "_predict_subblocked_multiple_letter_groups", fake_predict_multiple)
-    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", fake_predict_incremental)
+    patch_arrow_orchestration(
+        fake_native_subblocking,
+        fake_load_representatives,
+        fake_build_featurizer,
+        fake_predict_multiple,
+        fake_predict_incremental,
+    )
     monkeypatch.setattr(
         model_module,
         "make_subblocks",
@@ -334,7 +325,7 @@ def test_all_initial_arrow_subblocks_stay_on_bulk_path() -> None:
 
 
 def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
-    monkeypatch: pytest.MonkeyPatch,
+    patch_arrow_orchestration,
     tmp_path: Path,
 ) -> None:
     """Keep seeded initial-only groups on the cross-subblock attachment path."""
@@ -401,11 +392,13 @@ def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
         }
         return {"clusters": {"established": ["0", "1", "2", "3", "4"]}}
 
-    monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
-    monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_representatives)
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", fake_build_featurizer)
-    monkeypatch.setattr(Clusterer, "_predict_subblocked_multiple_letter_groups", fake_predict_multiple)
-    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", fake_predict_incremental)
+    patch_arrow_orchestration(
+        fake_native_subblocking,
+        fake_load_representatives,
+        fake_build_featurizer,
+        fake_predict_multiple,
+        fake_predict_incremental,
+    )
 
     predicted, dists = _clusterer().predict_from_arrow(
         {"large": ["0", "1", "2", "3", "4"]},

@@ -3,101 +3,8 @@
 import numpy as np
 import pytest
 
-from s2and.arrow_inputs import ArrowDataset
-from s2and.data import ANDData
-from s2and.featurizer import FeaturizationInfo
-from s2and.incremental_linking.artifact import load_incremental_linking_artifact, save_incremental_linking_artifact
-from s2and.incremental_linking.feature_block_arrow import write_raw_arrow_batch_lookup_indexes
-from s2and.model import Clusterer, FastCluster
-from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
-from tests.helpers import write_test_arrow_artifact_manifest
-from tests.model_helpers import ConstantDistanceClassifier
-from tests.promoted_linking_helpers import (
-    build_tiny_promoted_booster,
-    synthetic_pairwise_bundle_binding,
-    tiny_logistic_gate_config,
-)
-
-
-def _dataset(names: list[tuple[str, str, str]], seeds: dict[str, str]) -> ANDData:
-    signatures, papers = {}, {}
-    for index, (first, middle, last) in enumerate(names):
-        sid, pid = str(index), str(100 + index)
-        signatures[sid] = {
-            "signature_id": sid,
-            "paper_id": int(pid),
-            "author_info": {
-                "first": first,
-                "middle": middle,
-                "last": last,
-                "suffix": "",
-                "position": 0,
-                "email": None,
-                "affiliations": [],
-                "block": f"a {last.lower()}",
-            },
-        }
-        papers[pid] = {
-            "paper_id": int(pid),
-            "title": "Notes on mathematics",
-            "abstract": "",
-            "year": 2000,
-            "venue": "",
-            "journal_name": "",
-            "authors": [{"position": 0, "author_name": f"{first} {last}"}],
-        }
-    dataset = ANDData(
-        signatures,
-        papers,
-        name="seed_boundaries",
-        mode="inference",
-        name_counts_index=None,
-        name_tuples=set(),
-        specter_embeddings={pid: np.array([1.0, 0.0], dtype=np.float32) for pid in papers},
-    )
-    dataset.cluster_seeds_require = seeds.copy()
-    dataset.max_seed_cluster_id = len(set(seeds.values()))
-    return dataset
-
-
-def _predict(tmp_path, dataset, blocks, route, *, threshold=3, distance=0.1, classifier=None, **kwargs):
-    clusterer = Clusterer(
-        FeaturizationInfo(["year_diff"]),
-        ConstantDistanceClassifier(distance) if classifier is None else classifier,
-        cluster_model=FastCluster(eps=0.5),
-        n_jobs=1,
-        use_default_constraints_as_supervision=kwargs.pop("use_default_constraints_as_supervision", True),
-    )
-    if route == "python":
-        return clusterer.predict(blocks, dataset, batching_threshold=threshold, **kwargs)[0]
-    paths = write_raw_planner_arrow_from_anddata(dataset, tmp_path / "arrow", include_specter=True)
-    paths, _ = write_raw_arrow_batch_lookup_indexes(paths, tmp_path / "arrow")
-    write_test_arrow_artifact_manifest(tmp_path / "arrow", paths)
-    booster, _ = build_tiny_promoted_booster()
-    save_incremental_linking_artifact(
-        booster,
-        tmp_path / "linker",
-        gate_config=tiny_logistic_gate_config(),
-        target_spec={},
-        pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
-    )
-    clusterer.incremental_linker_artifact = load_incremental_linking_artifact(tmp_path / "linker")
-    with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
-        return clusterer.predict_from_arrow(
-            blocks,
-            arrow_dataset,
-            batching_threshold=threshold,
-            name_tuples=frozenset(),
-            cluster_seeds_require=dataset.cluster_seeds_require,
-            cluster_seeds_disallow=dataset.cluster_seeds_disallow,
-            **kwargs,
-        )[0]
-
-
-@pytest.fixture(autouse=True)
-def _empty_orcid_priors(monkeypatch):
-    # Stage 1's optional generated prior is unrelated to these name/seed cases.
-    monkeypatch.setattr("s2and.subblocking._resolved_orcid_prefix_counts", lambda counts: {})
+from tests.incremental_test_helpers import _dataset, _predict
+from tests.incremental_test_helpers import empty_orcid_priors as empty_orcid_priors
 
 
 def _assert_partition(clusters, blocks):
@@ -314,13 +221,10 @@ class _YearDistanceClassifier:
 @pytest.mark.parametrize("exclude_query", [False, True])
 def test_generated_bulk_seed_negatives_do_not_reject_initial_attachment(tmp_path, route, source, exclude_query):
     """Real bulk linkage can contain a negative without being a caller seed claim."""
-    dataset = _dataset([("Ada", "", "Smith")] * 400 + [("A", "", "Smith")], {})
-    for index in range(200, 400):
-        paper_id = str(100 + index)
-        dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=2001)
-    negatives = {("0", "200")}
+    dataset = _dataset([("Ada", "", "Smith")] * 3 + [("A", "", "Smith")], {})
+    negatives = {("0", "2")}
     if exclude_query:
-        negatives.add(("0", "400"))
+        negatives.add(("0", "3"))
     dataset.cluster_seeds_disallow = negatives.copy() if source == "dataset" else set()
     partial_supervision = dict.fromkeys(negatives, 10000.0) if source == "caller" else {}
     original_disallows = dataset.cluster_seeds_disallow.copy()
@@ -332,6 +236,40 @@ def test_generated_bulk_seed_negatives_do_not_reject_initial_attachment(tmp_path
         dataset,
         blocks,
         route,
+        threshold=3,
+        linkage="single",
+        partial_supervision=partial_supervision,
+    )
+
+    _assert_partition(clusters, blocks)
+    # Single linkage joins the three full names around their internal negative;
+    # that generated group must not become an inconsistent caller seed claim.
+    expected = {frozenset({"0", "1", "2"}), frozenset({"3"})}
+    if not exclude_query:
+        expected = {frozenset({"0", "1", "2", "3"})}
+    assert {frozenset(members) for members in clusters.values()} == expected
+    assert dataset.cluster_seeds_require == {}
+    assert dataset.cluster_seeds_disallow == original_disallows
+    assert partial_supervision == original_supervision
+
+
+def test_generated_bulk_seed_negatives_preserve_average_linkage_arrow_partition(tmp_path):
+    """Keep the original average-linkage dilution and excluded-query mechanism."""
+    dataset = _dataset([("Ada", "", "Smith")] * 400 + [("A", "", "Smith")], {})
+    for index in range(200, 400):
+        paper_id = str(100 + index)
+        dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=2001)
+    dataset.cluster_seeds_disallow = {("0", "200"), ("0", "400")}
+    partial_supervision = {}
+    original_disallows = dataset.cluster_seeds_disallow.copy()
+    original_supervision = partial_supervision.copy()
+    blocks = {"one": list(dataset.signatures)}
+
+    clusters = _predict(
+        tmp_path,
+        dataset,
+        blocks,
+        "arrow",
         threshold=400,
         classifier=_YearDistanceClassifier(),
         partial_supervision=partial_supervision,
@@ -341,8 +279,6 @@ def test_generated_bulk_seed_negatives_do_not_reject_initial_attachment(tmp_path
     # The 200-by-200 linkage mean is about .35, below eps=.5. Preserve that
     # computed bulk group, while a negative involving the new query stays active.
     expected = {frozenset(str(index) for index in range(400)), frozenset({"400"})}
-    if not exclude_query:
-        expected = {frozenset(dataset.signatures)}
     assert {frozenset(members) for members in clusters.values()} == expected
     assert dataset.cluster_seeds_require == {}
     assert dataset.cluster_seeds_disallow == original_disallows

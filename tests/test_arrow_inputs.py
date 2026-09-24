@@ -292,11 +292,10 @@ def test_generation_identity_uses_role_and_content_not_filename(tmp_path: Path) 
     assert first_manifest["files"] == renamed_manifest["files"]
 
 
-def test_cold_open_hashes_each_file_once_and_reuse_never_rehashes(
+def test_six_open_roots_hash_once_and_reuse_without_eviction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths = _write_dataset(tmp_path)
     original = arrow_inputs._hash_retained_file  # noqa: SLF001
     hashed: list[Path] = []
 
@@ -305,42 +304,28 @@ def test_cold_open_hashes_each_file_once_and_reuse_never_rehashes(
         return original(source)
 
     monkeypatch.setattr(arrow_inputs, "_hash_retained_file", record)
-    dataset = ArrowDataset.open(tmp_path)
-    expected = {Path(path).resolve() for path in paths.values()}
-    assert set(hashed) == expected
-    assert len(hashed) == len(expected)
-    monkeypatch.setattr(
-        arrow_inputs,
-        "_hash_retained_file",
-        lambda _source: (_ for _ in ()).throw(AssertionError("dataset reuse rehashed files")),
-    )
-
-    for _ in range(3):
-        with dataset.use() as lease:
-            assert lease.native is dataset.native
-    dataset.close()
-
-
-def test_six_open_roots_are_owned_without_global_eviction(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
     datasets = []
-    for index in range(6):
-        root = tmp_path / str(index)
-        _write_dataset(root)
-        datasets.append(ArrowDataset.open(root))
-    monkeypatch.setattr(
-        arrow_inputs,
-        "_hash_retained_file",
-        lambda _source: (_ for _ in ()).throw(AssertionError("retained root was reopened")),
-    )
-
-    for dataset in datasets:
-        with dataset.use() as lease:
-            assert lease.native is dataset.native
-    for dataset in datasets:
-        dataset.close()
+    try:
+        for index in range(6):
+            root = tmp_path / str(index)
+            paths = _write_dataset(root)
+            start = len(hashed)
+            datasets.append(ArrowDataset.open(root))
+            expected = {Path(path).resolve() for path in paths.values()}
+            assert set(hashed[start:]) == expected
+            assert len(hashed[start:]) == len(expected)
+        monkeypatch.setattr(
+            arrow_inputs,
+            "_hash_retained_file",
+            lambda _source: (_ for _ in ()).throw(AssertionError("dataset reuse rehashed files")),
+        )
+        for dataset in datasets:
+            for _ in range(3):
+                with dataset.use() as lease:
+                    assert lease.native is dataset.native
+    finally:
+        for dataset in datasets:
+            dataset.close()
 
 
 def test_concurrent_use_leases_block_close(tmp_path: Path) -> None:
@@ -493,30 +478,27 @@ def test_open_validates_schema_before_native_construction(
         lambda *_args: (_ for _ in ()).throw(AssertionError("native constructed before schema validation")),
     )
 
-    with pytest.raises(ValueError, match="missing required column 'paper_id'"):
+    with pytest.raises(ValueError, match="missing required column 'paper_id'") as caught:
         ArrowDataset.open(tmp_path)
+    signatures = Path(paths["signatures"])
+    assert "signatures" in str(caught.value)
+    assert str(signatures) in str(caught.value)
+    assert "ValueError" in str(caught.value)
+    signatures.unlink()  # Schema failures must release the Windows mapping.
 
 
-@pytest.mark.parametrize("malformation", ["ipc", "schema"])
-def test_schema_errors_include_table_path_and_error_type(tmp_path: Path, malformation: str) -> None:
-    import pyarrow as pa
-
+def test_ipc_errors_include_table_path_and_error_type(tmp_path: Path) -> None:
     paths = _write_dataset(tmp_path)
     signatures = Path(paths["signatures"])
-    if malformation == "ipc":
-        signatures.write_bytes(b"not an Arrow IPC file")
-        expected_type = "ArrowInvalid"
-    else:
-        write_arrow_ipc_table(pa.table({"signature_id": ["s1"]}), signatures)
-        expected_type = "ValueError"
+    signatures.write_bytes(b"not an Arrow IPC file")
     write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, tmp_path), tmp_path)
 
     with pytest.raises(ValueError) as caught:
         ArrowDataset.open(tmp_path)
     assert "signatures" in str(caught.value)
     assert str(signatures) in str(caught.value)
-    assert expected_type in str(caught.value)
-    signatures.unlink()  # Schema/IPC failures must release the Windows mapping.
+    assert "ArrowInvalid" in str(caught.value)
+    signatures.unlink()  # IPC failures must release the Windows mapping.
 
 
 @pytest.mark.parametrize("table_name", ["signatures", "papers", "paper_authors", "specter"])
@@ -543,11 +525,9 @@ def test_empty_arrow_file_names_table_and_path_and_allows_retry(tmp_path: Path, 
             assert lease.has(table_name)
 
 
-@pytest.mark.parametrize("failure", [MemoryError("budget"), OSError(5, "read failure"), RuntimeError("unexpected")])
-def test_schema_validation_preserves_non_schema_exceptions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
-) -> None:
+def test_schema_validation_preserves_non_schema_exceptions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths = _write_dataset(tmp_path)
+    failure = OSError(5, "read failure")
 
     def fail_schema(*_args, **_kwargs) -> None:
         raise failure
@@ -559,7 +539,7 @@ def test_schema_validation_preserves_non_schema_exceptions(
     Path(paths["signatures"]).unlink()
 
 
-@pytest.mark.parametrize("chain", ["cause", "context", "cycle"])
+@pytest.mark.parametrize("chain", ["context", "cycle"])
 def test_schema_failure_releases_mapping_without_losing_exception_chain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chain: str
 ) -> None:

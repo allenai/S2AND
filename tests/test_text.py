@@ -34,6 +34,11 @@ from s2and.text import (
 )
 
 
+@pytest.mark.parametrize(("raw_first", "expected"), [("!!!", ""), (" D’Ángelo ", "dangelo")])
+def test_canonical_first_name_preserves_completion_literals(raw_first: str, expected: str) -> None:
+    assert canonicalize_name_parts(raw_first, None, None).first == expected
+
+
 class TestClusterer(unittest.TestCase):
     def test_normalize_text(self):
         assert "" == normalize_text(None)
@@ -249,7 +254,6 @@ class TestClusterer(unittest.TestCase):
 
     def test_jaccard(self):
         assert np.isnan(jaccard(set(), set()))
-        self.assertAlmostEqual(4 / 6, jaccard({1, 2, 3, 4, 5}, {1, 2, 3, 4, 6}))
         self.assertAlmostEqual(4 / 6, jaccard({1, 2, 3, 4, 5}, {1, 2, 3, 4, 6}))
 
     def test_compute_block(self):

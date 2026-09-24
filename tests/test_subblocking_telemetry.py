@@ -12,12 +12,7 @@ from s2and.data import Signature
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index
 from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import write_test_arrow_artifact_manifest
-
-
-def _write_ipc(path, table: pa.Table) -> str:
-    with pa.OSFile(str(path), "wb") as sink, pa.ipc.new_file(sink, table.schema) as writer:
-        writer.write_table(table)
-    return str(path)
+from tests.raw_arrow_helpers import write_ipc as _write_ipc
 
 
 class _SingleBatchArrowLease:
@@ -200,46 +195,32 @@ def test_subdivide_helper_accepts_prefix_exactly_at_capacity() -> None:
     }
 
 
-def test_subdivide_helper_advances_past_an_oversized_shared_prefix() -> None:
-    names = np.array(["anna", "anne", "anny"])
-    signature_ids = np.array(["s1", "s2", "s3"])
+@pytest.mark.parametrize(
+    ("names", "signature_ids", "expected_output", "expected_dead_ends"),
+    [
+        (["ann", "ann", "anna"], ["s1", "s2", "s3"], {"anna": ["s3"]}, {"ann": ["s1", "s2"]}),
+        (
+            ["anna", "anna", "anne", "anne"],
+            ["s1", "s2", "s3", "s4"],
+            {},
+            {"anna": ["s1", "s2"], "anne": ["s3", "s4"]},
+        ),
+    ],
+    ids=["terminal-prefix-collision", "distinct-full-names"],
+)
+def test_subdivide_helper_keeps_terminal_full_name_groups_separate(
+    names: list[str],
+    signature_ids: list[str],
+    expected_output: dict[str, list[str]],
+    expected_dead_ends: dict[str, list[str]],
+) -> None:
+    output, dead_ends = subblocking.subdivide_helper(
+        np.array(names), np.array(signature_ids), maximum_size=1, starting_k=2
+    )
 
-    output, dead_ends = subblocking.subdivide_helper(names, signature_ids, maximum_size=1, starting_k=2)
-
-    assert dead_ends == {}
-    assert {key: values.tolist() for key, values in output.items()} == {
-        "anna": ["s1"],
-        "anne": ["s2"],
-        "anny": ["s3"],
-    }
-
-
-def test_subdivide_helper_keeps_distinct_unsplittable_full_names_separate() -> None:
-    names = np.array(["anna", "anna", "anne", "anne"])
-    signature_ids = np.array(["s1", "s2", "s3", "s4"])
-
-    output, dead_ends = subblocking.subdivide_helper(names, signature_ids, maximum_size=1, starting_k=2)
-
-    assert output == {}
-    assert {key: values.tolist() for key, values in dead_ends.items()} == {
-        "anna": ["s1", "s2"],
-        "anne": ["s3", "s4"],
-    }
-
-
-def test_subdivide_helper_terminal_name_does_not_collide_with_longer_prefix() -> None:
-    names = np.array(["ann", "ann", "anna"])
-    signature_ids = np.array(["s1", "s2", "s3"])
-
-    output, dead_ends = subblocking.subdivide_helper(names, signature_ids, maximum_size=1, starting_k=2)
-
-    assert {key: values.tolist() for key, values in output.items()} == {"anna": ["s3"]}
-    assert {key: values.tolist() for key, values in dead_ends.items()} == {"ann": ["s1", "s2"]}
-    assert sorted(value for values in (*output.values(), *dead_ends.values()) for value in values) == [
-        "s1",
-        "s2",
-        "s3",
-    ]
+    assert {key: values.tolist() for key, values in output.items()} == expected_output
+    assert {key: values.tolist() for key, values in dead_ends.items()} == expected_dead_ends
+    assert sorted(value for values in (*output.values(), *dead_ends.values()) for value in values) == signature_ids
 
 
 def test_make_subblocks_does_not_fallback_when_longer_name_prefixes_fit(monkeypatch) -> None:
@@ -587,13 +568,10 @@ def test_python_and_arrow_orcid_repair_preserve_whole_subblocks(
 def _write_signatures_arrow(
     path,
     rows: list[tuple[str, str, str, str | None]],
-    *,
-    author_positions: list[int | None] | None = None,
 ) -> None:
     import pyarrow as pa
     import pyarrow.ipc as ipc
 
-    positions = [0] * len(rows) if author_positions is None else author_positions
     table = pa.table(
         {
             "signature_id": pa.array([row[0] for row in rows], type=pa.string()),
@@ -605,7 +583,7 @@ def _write_signatures_arrow(
             "author_block": pa.array([f"{row[1][:1]} wang" for row in rows], type=pa.string()),
             "author_affiliations": pa.array([[] for _row in rows], type=pa.list_(pa.string())),
             "author_orcid": pa.array([row[3] for row in rows], type=pa.string()),
-            "author_position": pa.array(positions, type=pa.int64()),
+            "author_position": pa.array([0] * len(rows), type=pa.int64()),
         }
     )
     with path.open("wb") as sink:
@@ -823,17 +801,3 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_tel
     assert telemetry["graph_fallback_load_metrics"]["paper_authors_rows_loaded"] == 12
     assert telemetry["graph_fallback_stats"][0]["packed_component_count"] == 2
     arrow_dataset.close()
-
-
-def test_rust_arrow_native_graph_subblocking_rejects_null_author_position(tmp_path):
-    signatures_path = tmp_path / "signatures.arrow"
-    _write_signatures_arrow(
-        signatures_path,
-        [("s1", "hui", "", None), ("s2", "hui", "", None)],
-        author_positions=[None, 0],
-    )
-    with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow_dataset:
-        with pytest.raises(ValueError, match="author_position is null"):
-            subblocking._make_subblocks_with_telemetry_arrow_rust(
-                arrow_dataset, ["s1", "s2"], maximum_size=1, first_k_letter_counts_sorted={}
-            )

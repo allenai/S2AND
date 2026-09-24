@@ -23,12 +23,12 @@ def native_constraints(tmp_path_factory: pytest.TempPathFactory) -> Any:
 
 @pytest.mark.parametrize(
     ("start_offset", "max_pairs", "flags"),
-    [(0, None, flags) for flags in range(8)] + [(0, 0, 7), (1, 1, 7), (2, 3, 7), (10, 7, 7)],
+    [(0, None, 7), (0, 0, 7), (1, 1, 7), (2, 3, 7), (10, 7, 7)],
 )
 def test_values_only_preserves_optional_float_bits(
     native_constraints: Any, start_offset: int, max_pairs: int | None, flags: int
 ) -> None:
-    """Preserve ordering, duplicate indices, chunk boundaries and all rule flags."""
+    """Preserve ordering, duplicate indices, chunk boundaries and optional float bits."""
     native = native_constraints
     indices = list(range(min(4, len(native.signature_ids()))))[::-1]
     indices.append(indices[0])

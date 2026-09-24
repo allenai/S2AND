@@ -452,22 +452,18 @@ def test_assembly_rejects_output_path_overlaps_before_copy(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("replay", [False, True])
-@pytest.mark.parametrize("rewrite_index", [False, True])
-def test_assembly_rejects_changed_payload_without_recertifying_it(
-    tmp_path: Path, replay: bool, rewrite_index: bool
-) -> None:
+def test_assembly_rejects_changed_payload_without_recertifying_it(tmp_path: Path, replay: bool) -> None:
     inputs = _inputs(tmp_path)
     root = inputs["replay_arrow_root"] if replay else inputs["benchmark_arrow_root"]
     dataset = root / "datasets" / "replay_demo" if replay else root / "benchmark_demo"
     papers = dataset / "papers.arrow"
     papers.write_bytes(papers.read_bytes().replace(b"Notes", b"WRONG"))
-    if rewrite_index:
-        write_arrow_batch_lookup_index(
-            papers,
-            dataset / "papers.papers_batch_index.bin",
-            key_column="paper_id",
-            table_name="papers",
-        )
+    write_arrow_batch_lookup_index(
+        papers,
+        dataset / "papers.papers_batch_index.bin",
+        key_column="paper_id",
+        table_name="papers",
+    )
     original_manifest = (dataset / "manifest.json").read_bytes()
 
     with pytest.raises(ValueError, match="(inventory|checksum|byte_count).*mismatch"):

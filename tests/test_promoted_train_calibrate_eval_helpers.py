@@ -40,7 +40,6 @@ from s2and.incremental_linking_training.classic import (
     _summary_key_for_eval_dataset,
     _validate_stratified_base_identity_split_disjointness,
     format_classic_selected_gate_tables,
-    load_bundle,
 )
 from s2and.incremental_linking_training.classic import (
     _read_csv as _read_official_table,
@@ -473,24 +472,6 @@ def test_classic_feature_matrix_rejects_invalid_feature_tables() -> None:
     for row, features, message in cases:
         with pytest.raises(ValueError, match=message):
             _classic_feature_matrix(pd.DataFrame([row]), features)
-
-
-def test_load_bundle_requires_explicit_root(tmp_path: Path) -> None:
-    """Bundle loading should not silently default to historical feature tables."""
-
-    bundle_root = tmp_path / "bundle"
-    bundle_root.mkdir()
-    (bundle_root / "bundle.json").write_text(
-        '{"bundle_name":"demo","assets":{},"models":{"classic":{}},"expected_metrics":{}}',
-        encoding="utf-8",
-    )
-
-    bundle = load_bundle(bundle_root)
-
-    assert bundle.root == bundle_root.resolve()
-    assert bundle.bundle_name == "demo"
-    assert bundle.models == {"classic": {}}
-    assert bundle.expected_metrics == {}
 
 
 @pytest.mark.parametrize("assignment_base_group_id", ["rescue:b1", "wrong:b1"])

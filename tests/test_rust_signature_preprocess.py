@@ -1,9 +1,10 @@
+from collections import Counter
 from itertools import combinations
 
 import numpy as np
 import pytest
 
-from s2and import feature_port
+from s2and import feature_port, subblocking
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo, _single_pair_featurize
 from s2and.subblocking import make_subblocks
@@ -170,13 +171,38 @@ def test_signature_preprocess_lazy_materialization_ngrams_match_python(monkeypat
     dataset_python = build_dummy_dataset("dummy_signature_preprocess_materialize_python_ngrams")
     monkeypatch.setenv("S2AND_BACKEND", "rust")
     dataset_rust = build_dummy_dataset("dummy_signature_preprocess_materialize_rust_ngrams")
-    dataset_rust.materialize_signature_ngrams_python()
+    for signature_id, signature in dataset_rust.signatures.items():
+        dataset_rust.signatures[signature_id] = signature._replace(
+            author_info_affiliations_n_grams=None,
+            author_info_coauthor_n_grams=None,
+        )
+    dataset_rust.materialize_signature_ngrams_python(batch_size=2)
 
+    assert set(dataset_rust.signatures) == set(dataset_python.signatures)
     for signature_id in dataset_python.signatures:
         signature_python = dataset_python.signatures[signature_id]
         signature_rust = dataset_rust.signatures[signature_id]
         assert signature_python.author_info_affiliations_n_grams == signature_rust.author_info_affiliations_n_grams
         assert signature_python.author_info_coauthor_n_grams == signature_rust.author_info_coauthor_n_grams
+
+    # Signature 0 has Bridgewater State University and one coauthor, Torben
+    # Lorenzen. Pin the word/character grams independently of the eager path:
+    # "university" is a stopword, and character grams never cross word boundaries.
+    signature = dataset_rust.signatures["0"]
+    assert signature.author_info_affiliations_n_grams == Counter({"bridgewater": 1, "state": 1, "bridgewater state": 1})
+    assert signature.author_info_coauthor_n_grams == Counter(
+        "to or rb be en lo or re en nz ze en "
+        "tor orb rbe ben lor ore ren enz nze zen "
+        "torb orbe rben lore oren renz enze nzen".split()
+    )
+    assert dataset_rust.signatures["3"].author_info_coauthor_n_grams == Counter()
+
+    materialized_signatures = dict(dataset_rust.signatures)
+    dataset_rust.materialize_signature_ngrams_python(batch_size=2)
+    assert all(
+        dataset_rust.signatures[signature_id] is signature
+        for signature_id, signature in materialized_signatures.items()
+    )
 
 
 def test_short_coauthor_tokens_match_python_and_rust_featurizers(tmp_path, monkeypatch: pytest.MonkeyPatch):
@@ -213,8 +239,37 @@ def test_subblocking_handles_missing_signature_affiliation_ngrams(monkeypatch: p
     monkeypatch.setenv("S2AND_BACKEND", "rust")
     dataset_rust = build_dummy_dataset("dummy_signature_preprocess_subblocking_rust")
     signature_ids = list(dataset_rust.signatures.keys())
+    expected_affiliation_keys = {
+        signature_id: set(signature.author_info_affiliations_n_grams)
+        for signature_id, signature in dataset_rust.signatures.items()
+    }
+    for signature_id, signature in dataset_rust.signatures.items():
+        dataset_rust.signatures[signature_id] = signature._replace(author_info_affiliations_n_grams=None)
+
+    missing_ngram_keys: dict[str, set[str]] = {}
+    real_affiliation_keys = subblocking.signature_affiliation_feature_keys
+
+    def track_missing_affiliation_keys(signature):
+        assert signature.author_info_affiliations_n_grams is None
+        keys = real_affiliation_keys(signature)
+        missing_ngram_keys[signature.signature_id] = set(keys)
+        return keys
+
+    monkeypatch.setattr(subblocking, "signature_affiliation_feature_keys", track_missing_affiliation_keys)
     output = make_subblocks(signature_ids, dataset_rust, maximum_size=2, first_k_letter_counts_sorted={})
     assert sum(len(subblock) for subblock in output.values()) == len(signature_ids)
+    assert sorted(signature_id for subblock in output.values() for signature_id in subblock) == sorted(signature_ids)
+    assert sorted(tuple(sorted(subblock)) for subblock in output.values()) == [
+        ("0",),
+        ("1", "2"),
+        ("3", "7"),
+        ("4", "5"),
+        ("6", "8"),
+    ]
+    assert all(len(subblock) <= 2 for subblock in output.values())
+    assert missing_ngram_keys
+    for signature_id, keys in missing_ngram_keys.items():
+        assert keys == expected_affiliation_keys[signature_id]
 
 
 def test_subblocking_membership_parity_python_vs_rust(monkeypatch: pytest.MonkeyPatch):

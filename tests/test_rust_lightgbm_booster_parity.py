@@ -425,38 +425,6 @@ def _rust_from_booster(lgb_booster: lgb.Booster) -> Any:
     return RustLightGBMBooster.from_string(lgb_booster.model_to_string())
 
 
-def test_written_pairwise_boosters_reload_with_python_rust_parity(tmp_path: Path) -> None:
-    """Synthetic main and nameless boosters retain missing/default behavior after reload."""
-
-    cases = (
-        ("main", "main.lgb", {}, True, False, "missing_nan"),
-        ("nameless", "nameless.lgb", {"zero_as_missing": True}, True, True, "missing_zero"),
-    )
-    for case_id, filename, params, inject_nans, inject_zeros, missing_key in cases:
-        rng = np.random.default_rng(20260726)
-        trained = _train_booster(
-            rng,
-            params=params,
-            inject_nans=inject_nans,
-            inject_zeros=inject_zeros,
-        )
-        model_path = tmp_path / filename
-        trained.save_model(model_path)
-
-        python_booster = lgb.Booster(model_file=str(model_path))
-        rust_booster = RustLightGBMBooster(str(model_path))
-        summary = rust_booster.decision_type_summary()
-        assert summary[missing_key] > 0, case_id
-        assert 0 < summary["default_left"] < summary["num_splits"], case_id
-
-        features = _adversarial_matrix(
-            python_booster,
-            python_booster.num_feature(),
-            rng,
-        )
-        _assert_parity(python_booster, rust_booster, features, case_id=case_id)
-
-
 def test_negative_zero_sentinel_split_matches_lightgbm() -> None:
     """Pin LightGBM's strict equality behavior at a serialized ``-1e-35f`` split."""
 

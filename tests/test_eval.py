@@ -17,10 +17,21 @@ from s2and.eval import (
     cluster_precision_recall_fscore,
     f1_score,
     facet_eval,
+    min_pair_edit,
     pairwise_eval,
     pairwise_precision_recall_fscore,
     pairwise_probability_metrics,
 )
+
+
+def test_min_pair_edit_corrects_a_wrong_positive_pair() -> None:
+    predictions = {
+        "left": [("Left paper", "left-id")],
+        "right": [("Right paper", "right-id")],
+        "sig_pairs_wrong": [("left-id", "right-id", "Left paper", "Right paper", False, True)],
+        "sig_pairs_right": [],
+    }
+    assert min_pair_edit(predictions) == (1.0, 1, 2)
 
 
 @pytest.mark.parametrize("include_average_precision", [False, True])

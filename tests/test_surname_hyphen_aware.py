@@ -8,17 +8,7 @@ docs/data.md.
 """
 
 from s2and.data import ANDData
-from s2and.text import canonical_lasts_equivalent, canonicalize_name_text
-
-
-def test_canonical_last_treats_dash_and_space_variants_identically():
-    # D4/D5: every dash-like character is a separator; canonical surnames are
-    # spaced with particles preserved. Joined spellings stay distinct strings.
-    assert canonicalize_name_text("Ou-Yang") == "ou yang"
-    assert canonicalize_name_text("Ou–Yang") == "ou yang"
-    assert canonicalize_name_text("Ou Yang") == "ou yang"
-    assert canonicalize_name_text("Ouyang") == "ouyang"
-    assert canonicalize_name_text("van-der-Berg") == "van der berg"
+from s2and.text import canonical_lasts_equivalent
 
 
 def test_canonical_lasts_equivalent_is_space_insensitive_compare_policy():

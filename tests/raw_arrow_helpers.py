@@ -3,10 +3,12 @@
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pyarrow as pa
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block import write_raw_arrow_batch_lookup_indexes
+from s2and.incremental_linking.retrieval import RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS
 from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import write_test_arrow_artifact_manifest
 
@@ -110,3 +112,33 @@ def native_labeled_plan(paths: dict[str, str], *args: Any, **kwargs: Any) -> dic
     """Build a native labeled plan while owning the fixture's Arrow handles."""
     with open_arrow_dataset(paths) as arrow_dataset:
         return load_s2and_rust_extension().raw_arrow_labeled_candidate_plan(arrow_dataset.native, *args, **kwargs)
+
+
+def minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
+    """Build a fresh empty raw-plan payload, with explicit row/pair overrides."""
+    query_signature_ids = list(overrides.pop("query_signature_ids", ["q0"]))
+    row_count = int(overrides.pop("row_count", 0))
+    pair_count = int(overrides.pop("pair_count", 0))
+    plan: dict[str, Any] = {
+        "query_signature_ids": query_signature_ids,
+        "query_views": ["full"] * len(query_signature_ids),
+        "query_authors": ["Alice"] * len(query_signature_ids),
+        "row_count": row_count,
+        "pair_count": pair_count,
+        "row_query_signature_indices": np.zeros(row_count, dtype=np.uint32),
+        "row_component_keys": [f"c{index}" for index in range(row_count)],
+        "retrieval_scores": np.zeros(row_count, dtype=np.float32),
+        "retrieval_ranks": np.arange(1, row_count + 1, dtype=np.uint16),
+        "pair_row_indices": np.zeros(pair_count, dtype=np.uint32),
+        "left_signature_ids": [(query_signature_ids[0] if query_signature_ids else "")] * pair_count,
+        "right_signature_ids": [f"s{index}" for index in range(pair_count)],
+        "component_members": {},
+        "telemetry": {},
+    }
+    for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
+        if dtype is object:
+            plan[raw_key] = np.asarray([""] * row_count, dtype=object)
+        else:
+            plan[raw_key] = np.zeros(row_count, dtype=dtype)
+    plan.update(overrides)
+    return plan

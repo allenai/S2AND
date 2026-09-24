@@ -38,7 +38,7 @@ from s2and.data import ANDData, Signature
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_counts_index import NameCountsIndex
 from s2and.runtime import build_runtime_context
-from s2and.text import canonical_name_count_keys, canonicalize_name_parts, same_prefix_tokens
+from s2and.text import canonical_name_count_keys, canonicalize_name_parts, canonicalize_name_text, same_prefix_tokens
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "canonical_name_examples.json"
 FIXTURE = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -222,6 +222,7 @@ def test_canonical_pure_contract():
         actual_parts = (parts.first, parts.middle, parts.last)
         expected_parts = (canonical["first"], canonical["middle"], canonical["last"])
         assert actual_parts == expected_parts, f"{case_id}: canonical parts {actual_parts!r} != {expected_parts!r}"
+        assert canonicalize_name_text(raw["last"]) == canonical["last"], case_id
         actual_keys = canonical_name_count_keys(parts)
         assert actual_keys == canonical["count_keys"], (
             f"{case_id}: canonical count keys {actual_keys!r} != {canonical['count_keys']!r}"

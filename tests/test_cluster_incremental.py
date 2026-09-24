@@ -20,8 +20,6 @@ from s2and.consts import LARGE_DISTANCE
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
-    read_cluster_seed_disallows_arrow,
-    read_incremental_query_signatures_arrow,
     write_arrow_batch_lookup_index,
     write_arrow_ipc_table,
     write_cluster_seeds_arrow,
@@ -43,9 +41,51 @@ from tests.helpers import (
     write_test_arrow_artifact_manifest,
 )
 from tests.model_helpers import ConstantDistanceClassifier
+from tests.promoted_orchestration_helpers import (
+    _minimal_arrow_dataset,
+    _mock_promoted_limits,
+    _patch_fake_raw_arrow_planner,
+)
 
 _PROMOTED_TEST_FEATURIZER_INFO = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
 _PROMOTED_TEST_FEATURE_COLUMNS = ("test_link_probability",)
+
+
+def _promoted_artifact(tmp_path: Path) -> SimpleNamespace:
+    """Build the common artifact metadata without sharing mutable state."""
+    return SimpleNamespace(artifact_dir=tmp_path, retrieval_top_k=25, feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS)
+
+
+def _promoted_clusterer(
+    seed_setup: Any, *, suppress_orcid: bool, featurizer_info: FeaturizationInfo
+) -> SimpleNamespace:
+    """Keep each test's seed behavior and policy on a fresh orchestration input."""
+    return SimpleNamespace(
+        n_jobs=1,
+        suppress_orcid=suppress_orcid,
+        featurizer_info=featurizer_info,
+        feature_contract={},
+        _build_incremental_seed_setup=seed_setup,
+    )
+
+
+def _signature_info_loader(captured: dict[str, Any], *, orcid_signature_id: str | None = None) -> Any:
+    """Build matching metadata while preserving the selected ORCID-bearing row."""
+
+    def load(_lease: Any, signature_ids: Any) -> dict[str, Any]:
+        captured["metadata_signature_ids"] = tuple(signature_ids)
+        return {
+            str(signature_id): model_module._ArrowIncrementalSignatureInfo(
+                paper_id=f"p{signature_id}",
+                author_info_first="Alex",
+                author_info_last="Smith",
+                author_info_first_normalized_without_apostrophe="alex",
+                author_info_orcid="0000-0000-0000-0001" if str(signature_id) == orcid_signature_id else None,
+            )
+            for signature_id in signature_ids
+        }
+
+    return load
 
 
 def _unexpected_residual_clustering(signature_ids: list[str]) -> dict[str, list[str]]:
@@ -63,11 +103,6 @@ def _same_partition(a: dict[str, list[str]], b: dict[str, list[str]]) -> bool:
 
 def _clusters(result: dict[str, Any]) -> dict[str, list[str]]:
     return dict(result["clusters"])
-
-
-def _minimal_arrow_dataset(tmp_path: Path) -> ArrowDataset:
-    write_minimal_arrow_prediction_bundle(tmp_path)
-    return ArrowDataset.open(tmp_path)
 
 
 def _signature_table(rows: Sequence[Mapping[str, Any]]) -> Any:
@@ -103,100 +138,6 @@ def _direct_arrow_dataset(
         altered_cluster_signatures=None,
         max_seed_cluster_id=0,
         signatures=signatures or {},
-    )
-
-
-def _patch_fake_raw_arrow_planner(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    captured: dict[str, Any] | None = None,
-) -> None:
-    """Install a planner-shaped Rust fake for promoted raw Arrow orchestration tests."""
-
-    class FakePlanner:
-        def __init__(self, resource: object, query_signature_ids: list[str], **_kwargs: object):
-            self._resource = resource
-            self._query_signature_ids = tuple(query_signature_ids)
-            self._name_counts_index = object()
-            if captured is not None:
-                captured.setdefault("planner_inits", []).append(self._query_signature_ids)
-                captured.setdefault("planner_refs", []).append(weakref.ref(self))
-                captured["planner_name_counts_index"] = self._name_counts_index
-
-        @classmethod
-        def from_query_signatures(
-            cls,
-            resource: object,
-            query_signatures_path: str,
-            **kwargs: object,
-        ) -> "FakePlanner":
-            rows = read_incremental_query_signatures_arrow(Path(query_signatures_path))
-            return cls(resource, [row.signature_id for row in rows], **kwargs)
-
-        @classmethod
-        def from_auto_queries(
-            cls,
-            resource: object,
-            _cluster_seeds_path: str,
-            **kwargs: object,
-        ) -> "FakePlanner":
-            if captured is not None:
-                disallow_path = kwargs.get("cluster_seed_disallows_path")
-                captured.setdefault("planner_disallows", []).append(
-                    set() if disallow_path is None else set(read_cluster_seed_disallows_arrow(Path(str(disallow_path))))
-                )
-            return cls(resource, [], **kwargs)
-
-        def build_telemetry(self):
-            return {
-                "query_signature_count": len(self._query_signature_ids),
-                "signature_count": len(self._query_signature_ids),
-            }
-
-        def name_counts_index(self) -> object:
-            if captured is not None:
-                captured["planner_name_counts_index_calls"] = (
-                    int(captured.get("planner_name_counts_index_calls", 0)) + 1
-                )
-            return self._name_counts_index
-
-        def plan(
-            self,
-            query_signature_ids: list[str],
-            additional_cluster_seed_disallows: list[tuple[str, str]] | None = None,
-            **_kwargs: object,
-        ):
-            query_ids = tuple(query_signature_ids)
-            if captured is not None:
-                captured.setdefault("planner_plans", []).append(query_ids)
-                captured.setdefault("planner_plan_disallows", []).append(set(additional_cluster_seed_disallows or ()))
-            plan: dict[str, Any] = {
-                "query_signature_ids": query_ids,
-                "query_views": ["full"] * len(query_ids),
-                "query_authors": [""] * len(query_ids),
-                "row_count": 0,
-                "pair_count": 0,
-                "row_query_signature_indices": np.asarray([], dtype=np.uint32),
-                "row_component_keys": [],
-                "retrieval_scores": np.asarray([], dtype=np.float32),
-                "retrieval_ranks": np.asarray([], dtype=np.uint16),
-                "pair_row_indices": np.asarray([], dtype=np.uint32),
-                "left_signature_ids": [],
-                "right_signature_ids": [],
-                "component_members": {},
-            }
-            for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
-                plan[raw_key] = np.asarray([], dtype=dtype)
-            return plan
-
-    class FakeRustModule:
-        RawBlockQueryCandidatePlanner = FakePlanner
-
-    monkeypatch.setattr(production_module.feature_port, "_require_rust_runtime", lambda: FakeRustModule())
-    monkeypatch.setattr(
-        production_module.feature_port,
-        "build_rust_featurizer_from_arrow_dataset",
-        lambda *_args, **_kwargs: object(),
     )
 
 
@@ -555,18 +496,7 @@ def test_predict_incremental_from_arrow_uses_promoted_linker_without_anddata(
         "phase_b_required_bytes": 0,
     }
 
-    def fake_load_signature_info(_lease: Any, signature_ids: Any) -> dict[str, Any]:
-        captured["metadata_signature_ids"] = tuple(signature_ids)
-        return {
-            str(signature_id): model_module._ArrowIncrementalSignatureInfo(
-                paper_id=f"p{signature_id}",
-                author_info_first="Alex",
-                author_info_last="Smith",
-                author_info_first_normalized_without_apostrophe="alex",
-                author_info_orcid=None,
-            )
-            for signature_id in signature_ids
-        }
+    fake_load_signature_info = _signature_info_loader(captured)
 
     def fake_promoted_linker(clusterer_arg: Any, block_signatures_arg: list[str], dataset_arg: Any, **kwargs: Any):
         captured["clusterer"] = clusterer_arg
@@ -633,18 +563,7 @@ def test_predict_incremental_from_arrow_loads_altered_seed_metadata(
     arrow_dataset = _minimal_arrow_dataset(tmp_path)
     captured: dict[str, Any] = {}
 
-    def fake_load_signature_info(_lease: Any, signature_ids: Any) -> dict[str, Any]:
-        captured["metadata_signature_ids"] = tuple(signature_ids)
-        return {
-            str(signature_id): model_module._ArrowIncrementalSignatureInfo(
-                paper_id=f"p{signature_id}",
-                author_info_first="Alex",
-                author_info_last="Smith",
-                author_info_first_normalized_without_apostrophe="alex",
-                author_info_orcid=None,
-            )
-            for signature_id in signature_ids
-        }
+    fake_load_signature_info = _signature_info_loader(captured)
 
     def fake_promoted_linker(_clusterer: Any, _block_signatures: list[str], dataset_arg: Any, **_kwargs: Any):
         captured["dataset"] = dataset_arg
@@ -679,18 +598,7 @@ def test_predict_incremental_from_arrow_loads_seed_orcids_for_budget_floor(
     arrow_dataset = _minimal_arrow_dataset(tmp_path)
     captured: dict[str, Any] = {}
 
-    def fake_load_signature_info(_lease: Any, signature_ids: Any) -> dict[str, Any]:
-        captured["metadata_signature_ids"] = tuple(signature_ids)
-        return {
-            str(signature_id): model_module._ArrowIncrementalSignatureInfo(
-                paper_id=f"p{signature_id}",
-                author_info_first="Alex",
-                author_info_last="Smith",
-                author_info_first_normalized_without_apostrophe="alex",
-                author_info_orcid="0000-0000-0000-0001" if str(signature_id) == "5" else None,
-            )
-            for signature_id in signature_ids
-        }
+    fake_load_signature_info = _signature_info_loader(captured, orcid_signature_id="5")
 
     def fake_load_orcid_info(_lease: Any, signature_ids: Any) -> dict[str, Any]:
         captured["orcid_signature_ids"] = tuple(signature_ids)
@@ -965,27 +873,14 @@ def test_promoted_linker_adds_partial_query_seed_disallows_to_planner_sidecar(
     class SidecarCaptured(Exception):
         pass
 
-    class FakeArtifact:
-        artifact_dir = tmp_path
-        retrieval_top_k = 25
-        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
-
     captured: dict[str, Any] = {}
 
-    class FakeClusterer:
-        n_jobs = 1
-        suppress_orcid = True
-        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {}
-
-        def _build_incremental_seed_setup(self, *_args: object, **kwargs: object):
-            captured["request_disallows"] = set(kwargs["cluster_seed_disallows"])
-            kwargs["prediction_state"].telemetry["incremental_seed_setup"] = {
-                "seed_setup_cluster_seeds_source": "python"
-            }
-            seeds = {"seed-1": "component-1", "seed-2": "component-2"}
-            inverse = {"component-1": ["seed-1"], "component-2": ["seed-2"]}
-            return incremental_seed_setup(seeds, {}, inverse, inverse)
+    def build_seed_setup(*_args: object, **kwargs: object):
+        captured["request_disallows"] = set(kwargs["cluster_seed_disallows"])
+        kwargs["prediction_state"].telemetry["incremental_seed_setup"] = {"seed_setup_cluster_seeds_source": "python"}
+        seeds = {"seed-1": "component-1", "seed-2": "component-2"}
+        inverse = {"component-1": ["seed-1"], "component-2": ["seed-2"]}
+        return incremental_seed_setup(seeds, {}, inverse, inverse)
 
     @contextmanager
     def capture_sidecar(
@@ -1010,12 +905,12 @@ def test_promoted_linker_adds_partial_query_seed_disallows_to_planner_sidecar(
 
     with pytest.raises(SidecarCaptured):
         production_module.predict_incremental_promoted_linker_from_arrow(
-            FakeClusterer(),
+            _promoted_clusterer(build_seed_setup, suppress_orcid=True, featurizer_info=_PROMOTED_TEST_FEATURIZER_INFO),
             ["seed-1", "seed-2", "query"],
             dataset,
             cluster_residuals=_unexpected_residual_clustering,
             arrow_dataset=_minimal_arrow_dataset(tmp_path),
-            artifact=FakeArtifact(),
+            artifact=_promoted_artifact(tmp_path),
             prevent_new_incompatibilities=False,
             partial_supervision=partial_supervision,
             runtime_context=cast(Any, SimpleNamespace(run_id="test")),
@@ -1038,11 +933,6 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
 ) -> None:
     closed: list[bool] = []
 
-    class FakeArtifact:
-        artifact_dir = tmp_path
-        retrieval_top_k = 25
-        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
-
     @contextmanager
     def fake_temporary_cluster_seed_sidecars(*_args: object, **_kwargs: object):
         temp_seed_path = tmp_path / "temp_cluster_seeds.arrow"
@@ -1052,17 +942,9 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
         finally:
             closed.append(True)
 
-    class FakeClusterer:
-        n_jobs = 1
-        suppress_orcid = False
-        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {}
-
-        def _build_incremental_seed_setup(self, *_args: object, **kwargs: object):
-            kwargs["prediction_state"].telemetry["incremental_seed_setup"] = {
-                "seed_setup_cluster_seeds_source": "python"
-            }
-            return incremental_seed_setup({"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]})
+    def build_seed_setup(*_args: object, **kwargs: object):
+        kwargs["prediction_state"].telemetry["incremental_seed_setup"] = {"seed_setup_cluster_seeds_source": "python"}
+        return incremental_seed_setup({"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]})
 
     def fail_raw_arrow_linker(*_args: object, **_kwargs: object):
         raise RuntimeError("raw Arrow linker failed")
@@ -1081,12 +963,12 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
 
     with pytest.raises(RuntimeError, match="raw Arrow linker failed"):
         production_module.predict_incremental_promoted_linker_from_arrow(
-            FakeClusterer(),
+            _promoted_clusterer(build_seed_setup, suppress_orcid=False, featurizer_info=_PROMOTED_TEST_FEATURIZER_INFO),
             ["seed", "query"],
             _direct_arrow_dataset(),
             cluster_residuals=_unexpected_residual_clustering,
             arrow_dataset=_minimal_arrow_dataset(tmp_path),
-            artifact=FakeArtifact(),
+            artifact=_promoted_artifact(tmp_path),
             prevent_new_incompatibilities=False,
             partial_supervision={},
             runtime_context=cast(Any, SimpleNamespace(run_id="test")),
@@ -1106,22 +988,11 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
     query_ids = ["q-require", "q-score"]
     captured: dict[str, Any] = {"rescored": []}
 
-    class FakeArtifact:
-        artifact_dir = tmp_path
-        retrieval_top_k = 25
-        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
-
-    class FakeClusterer:
-        n_jobs = 1
-        suppress_orcid = True
-        featurizer_info = FeaturizationInfo(features_to_use=["name_counts"])
-        feature_contract = {}
-
-        def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
-            seeds = {"seed-z": "c_seed_0", "seed-a": "c_seed_0"}
-            original_inverse = {"c_seed": ["seed-z", "seed-a"]}
-            split_inverse = {"c_seed_0": ["seed-z", "seed-a"]}
-            return incremental_seed_setup(seeds, {"c_seed_0": "c_seed"}, original_inverse, split_inverse)
+    def build_seed_setup(*_args: object, **_kwargs: object):
+        seeds = {"seed-z": "c_seed_0", "seed-a": "c_seed_0"}
+        original_inverse = {"c_seed": ["seed-z", "seed-a"]}
+        split_inverse = {"c_seed_0": ["seed-z", "seed-a"]}
+        return incremental_seed_setup(seeds, {"c_seed_0": "c_seed"}, original_inverse, split_inverse)
 
     class FakeFeaturizer:
         def __init__(self, signature_ids: tuple[str, ...]) -> None:
@@ -1204,12 +1075,14 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
     )
 
     result = production_module.predict_incremental_promoted_linker_from_arrow(
-        FakeClusterer(),
+        _promoted_clusterer(
+            build_seed_setup, suppress_orcid=True, featurizer_info=FeaturizationInfo(features_to_use=["name_counts"])
+        ),
         ["seed-z", "seed-a", *query_ids],
         _direct_arrow_dataset(cluster_seeds_disallow={("q-require", "q-score")}),
         cluster_residuals=_unexpected_residual_clustering,
         arrow_dataset=arrow_dataset,
-        artifact=FakeArtifact(),
+        artifact=_promoted_artifact(tmp_path),
         prevent_new_incompatibilities=False,
         partial_supervision={},
         runtime_context=cast(Any, SimpleNamespace(run_id="test")),
@@ -1245,21 +1118,10 @@ def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
         "rescored": [],
     }
 
-    class FakeArtifact:
-        artifact_dir = tmp_path
-        retrieval_top_k = 25
-        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
-
-    class FakeClusterer:
-        n_jobs = 1
-        suppress_orcid = True
-        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {}
-
-        def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
-            seeds = {"s0": "c0", "s1": "c1"}
-            inverse = {"c0": ["s0"], "c1": ["s1"]}
-            return incremental_seed_setup(seeds, {}, inverse, inverse)
+    def build_seed_setup(*_args: object, **_kwargs: object):
+        seeds = {"s0": "c0", "s1": "c1"}
+        inverse = {"c0": ["s0"], "c1": ["s1"]}
+        return incremental_seed_setup(seeds, {}, inverse, inverse)
 
     class FakeFeaturizer:
         def __init__(self, signature_ids: tuple[str, ...]) -> None:
@@ -1362,14 +1224,14 @@ def test_query_disallow_rescores_reuse_two_bounded_batch_featurizers(
     monkeypatch.setattr(production_module.feature_port, "build_rust_featurizer_from_arrow_dataset", fake_featurizer)
 
     result = production_module.predict_incremental_promoted_linker_from_arrow(
-        FakeClusterer(),
+        _promoted_clusterer(build_seed_setup, suppress_orcid=True, featurizer_info=_PROMOTED_TEST_FEATURIZER_INFO),
         ["s0", "s1", *query_ids],
         _direct_arrow_dataset(
             cluster_seeds_disallow={("q0", "q1"), ("q2", "q3")},
         ),
         cluster_residuals=_unexpected_residual_clustering,
         arrow_dataset=_minimal_arrow_dataset(tmp_path),
-        artifact=FakeArtifact(),
+        artifact=_promoted_artifact(tmp_path),
         prevent_new_incompatibilities=False,
         partial_supervision={},
         runtime_context=cast(Any, SimpleNamespace(run_id="test")),
@@ -1395,22 +1257,12 @@ def test_promoted_linker_reuses_one_plan_and_featurizer_for_four_scoring_batches
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    class FakeArtifact:
-        artifact_dir = tmp_path
-        retrieval_top_k = 25
-        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
 
     query_ids = [f"q{index:02d}" for index in range(20)]
     captured: dict[str, Any] = {"featurizer_windows": [], "scored_batches": []}
 
-    class FakeClusterer:
-        n_jobs = 1
-        suppress_orcid = True
-        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {}
-
-        def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
-            return incremental_seed_setup({"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]})
+    def build_seed_setup(*_args: object, **_kwargs: object):
+        return incremental_seed_setup({"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]})
 
     def fake_limits(**kwargs: object):
         query_count = int(kwargs["query_count"])
@@ -1441,12 +1293,12 @@ def test_promoted_linker_reuses_one_plan_and_featurizer_for_four_scoring_batches
     monkeypatch.setattr(production_module.feature_port, "build_rust_featurizer_from_arrow_dataset", fake_featurizer)
 
     result = production_module.predict_incremental_promoted_linker_from_arrow(
-        FakeClusterer(),
+        _promoted_clusterer(build_seed_setup, suppress_orcid=True, featurizer_info=_PROMOTED_TEST_FEATURIZER_INFO),
         ["seed", *query_ids],
         _direct_arrow_dataset(),
         cluster_residuals=_unexpected_residual_clustering,
         arrow_dataset=_minimal_arrow_dataset(tmp_path),
-        artifact=FakeArtifact(),
+        artifact=_promoted_artifact(tmp_path),
         prevent_new_incompatibilities=False,
         partial_supervision={},
         runtime_context=cast(Any, SimpleNamespace(run_id="test")),
@@ -1469,10 +1321,6 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    class FakeArtifact:
-        artifact_dir = tmp_path
-        retrieval_top_k = 25
-        feature_columns = _PROMOTED_TEST_FEATURE_COLUMNS
 
     query_ids = [f"q{index:02d}" for index in range(20)]
     captured: dict[str, Any] = {
@@ -1481,14 +1329,8 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
         "scored_batches": [],
     }
 
-    class FakeClusterer:
-        n_jobs = 1
-        suppress_orcid = True
-        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {}
-
-        def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
-            return incremental_seed_setup({"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]})
+    def build_seed_setup(*_args: object, **_kwargs: object):
+        return incremental_seed_setup({"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]})
 
     def fake_limits(**kwargs: object):
         query_count = int(kwargs["query_count"])
@@ -1527,12 +1369,12 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
     monkeypatch.setattr(production_module.feature_port, "build_rust_featurizer_from_arrow_dataset", fake_featurizer)
 
     result = production_module.predict_incremental_promoted_linker_from_arrow(
-        FakeClusterer(),
+        _promoted_clusterer(build_seed_setup, suppress_orcid=True, featurizer_info=_PROMOTED_TEST_FEATURIZER_INFO),
         ["seed", *query_ids],
         _direct_arrow_dataset(),
         cluster_residuals=_unexpected_residual_clustering,
         arrow_dataset=_minimal_arrow_dataset(tmp_path),
-        artifact=FakeArtifact(),
+        artifact=_promoted_artifact(tmp_path),
         prevent_new_incompatibilities=False,
         partial_supervision={},
         runtime_context=cast(Any, SimpleNamespace(run_id="test")),
@@ -1673,19 +1515,6 @@ def test_promoted_incremental_batch_telemetry_records_constant_and_unknown_confl
         assert merged["query_count"] == len(batches)
         assert merged[field] == expected_value
         assert merged[f"{field}_batch_conflict_count"] == expected_conflicts
-
-
-def _mock_promoted_limits(
-    *,
-    query_batch_size: int = 1,
-    predicted_peak_delta_bytes: int = 2_000,
-    predicted_peak_rss_bytes: int = 3_000,
-) -> model_module.memory_budget.PromotedPhaseALimits:
-    return model_module.memory_budget.PromotedPhaseALimits(
-        query_batch_size=int(query_batch_size),
-        predicted_peak_delta_bytes=int(predicted_peak_delta_bytes),
-        predicted_peak_rss_bytes=int(predicted_peak_rss_bytes),
-    )
 
 
 def _build_minimal_incremental_clusterer() -> Clusterer:

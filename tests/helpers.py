@@ -7,12 +7,11 @@ import shutil
 import tempfile
 import threading
 from argparse import Namespace
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from s2and.data import ANDData
-from s2and.incremental_linking.query_adapter import ClusterSummary, QueryFeatures
+from s2and.incremental_linking.query_adapter import QueryFeatures
 from s2and.model import _IncrementalSeedSetup
 from s2and.name_counts_index import NameCountsIndex
 
@@ -374,64 +373,4 @@ def build_query_features(
         author_position=author_position,
         local10_author_names=local10_author_names,
         signature_id=signature_id,
-    )
-
-
-def build_cluster_summary(
-    *,
-    component_key: str,
-    size: int = 1,
-    first_name_counts: Counter[str] | None = None,
-    middle_initial_counts: Counter[str] | None = None,
-    coauthor_counts: Counter[str] | None = None,
-    non_mega_coauthor_counts: Counter[str] | None = None,
-    affiliation_counts: Counter[str] | None = None,
-    venue_counts: Counter[str] | None = None,
-    year_min: int | None = None,
-    year_max: int | None = None,
-    year_mean: float | None = None,
-    orcid_values: frozenset[str] = frozenset(),
-    specter_centroid: Any | None = None,
-    exemplar_vectors: list[Any] | None = None,
-    title_counts: Counter[str] | None = None,
-    name_counts_values: tuple[Any, ...] = (),
-    max_paper_author_count: int = 0,
-    member_paper_author_names: tuple[frozenset[str], ...] = (),
-    member_paper_author_counts: tuple[int, ...] = (),
-    member_author_positions: tuple[int | None, ...] = (),
-    member_local10_author_names: tuple[frozenset[str], ...] = (),
-    member_signature_ids: tuple[str, ...] = (),
-    member_title_terms: tuple[frozenset[str], ...] = (),
-) -> ClusterSummary:
-    """Build a compact `ClusterSummary` fixture for retrieval tests."""
-
-    return ClusterSummary(
-        component_key=component_key,
-        cluster_id=component_key,
-        block_key="b",
-        size=size,
-        first_name_counts=first_name_counts or Counter(),
-        middle_initial_counts=middle_initial_counts or Counter(),
-        coauthor_counts=coauthor_counts or Counter(),
-        non_mega_coauthor_counts=(
-            non_mega_coauthor_counts if non_mega_coauthor_counts is not None else coauthor_counts or Counter()
-        ),
-        affiliation_counts=affiliation_counts or Counter(),
-        venue_counts=venue_counts or Counter(),
-        year_values=[],
-        year_min=year_min,
-        year_max=year_max,
-        year_mean=year_mean,
-        orcid_values=orcid_values,
-        specter_centroid=specter_centroid,
-        exemplar_vectors=[] if exemplar_vectors is None else exemplar_vectors,
-        title_counts=title_counts or Counter(),
-        name_counts_values=name_counts_values,
-        max_paper_author_count=max_paper_author_count,
-        member_paper_author_names=member_paper_author_names,
-        member_paper_author_counts=member_paper_author_counts,
-        member_author_positions=member_author_positions,
-        member_local10_author_names=member_local10_author_names,
-        member_signature_ids=member_signature_ids,
-        member_title_terms=member_title_terms,
     )

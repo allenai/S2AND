@@ -10,14 +10,17 @@ import s2and.incremental_linking.production as production_module
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, FastCluster
 from tests.helpers import incremental_seed_setup
+from tests.incremental_test_helpers import _dataset
 from tests.model_helpers import ConstantDistanceClassifier
-from tests.test_cluster_incremental import (
+from tests.promoted_orchestration_helpers import (
     _minimal_arrow_dataset,
     _mock_promoted_limits,
     _patch_fake_raw_arrow_planner,
-    _unexpected_residual_clustering,
 )
-from tests.test_subblocked_seed_boundaries import _dataset
+
+
+def _unexpected_residual_clustering(signature_ids: list[str]) -> dict[str, list[str]]:
+    pytest.fail(f"Unexpected residual clustering: {signature_ids}")
 
 
 @pytest.mark.parametrize("route", ["python", "promoted"])

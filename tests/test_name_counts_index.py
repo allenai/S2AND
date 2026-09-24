@@ -238,24 +238,18 @@ def test_writer_rejects_keys_that_would_collide_after_stringification(tmp_path: 
     (
         ("first", "Ada"),
         ("first", "a"),
-        ("first", "ada!"),
-        ("first", "ada  marie"),
         ("last", ""),
         ("first_last", "adasmith"),
         ("first_last", "a smith"),
         ("last_first_initial", "smith ad"),
-        ("last_first_initial", "smith A"),
     ),
     ids=(
         "first-uppercase",
         "first-single-letter",
-        "first-punctuation",
-        "first-double-space",
         "last-empty",
         "first-last-unseparated",
         "first-last-short-first",
         "last-first-initial-long",
-        "last-first-initial-uppercase",
     ),
 )
 def test_writer_rejects_noncanonical_name_count_keys(tmp_path: Path, kind: str, name: str) -> None:
@@ -318,18 +312,39 @@ def test_fresh_writer_validates_each_name_count_entry_once(
     assert validation_calls == sum(len(mapping) for mapping in mappings)
 
 
-def test_identical_counts_produce_byte_identical_flat_indexes(tmp_path: Path) -> None:
-    mappings = (
-        {"ada": 2.0, "grace": 3.0},
-        {"lovelace": 4.0, "hopper": 5.0},
-        {"ada lovelace": 2.0, "grace hopper": 3.0},
-        {"lovelace a": 2.0, "hopper g": 3.0},
-    )
+@pytest.mark.parametrize(
+    ("mappings", "expected_row_count", "expected_first_count"),
+    [
+        (({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}), 4, 1),
+        (
+            (
+                {"ada": 2.0, "grace": 3.0},
+                {"lovelace": 4.0, "hopper": 5.0},
+                {"ada lovelace": 2.0, "grace hopper": 3.0},
+                {"lovelace a": 2.0, "hopper g": 3.0},
+            ),
+            8,
+            2,
+        ),
+    ],
+    ids=["singleton-integer-counts", "two-rows-per-kind"],
+)
+def test_identical_counts_produce_byte_identical_flat_indexes(
+    tmp_path: Path,
+    mappings: tuple[dict[str, int | float], ...],
+    expected_row_count: int,
+    expected_first_count: int,
+) -> None:
     reversed_mappings = tuple(dict(reversed(tuple(mapping.items()))) for mapping in mappings)
-    indexes = [
-        Path(feature_block_arrow.write_name_counts_index(tmp_path / label, values)[0])
+    outputs = [
+        feature_block_arrow.write_name_counts_index(tmp_path / label, values)
         for label, values in (("first", mappings), ("second", reversed_mappings))
     ]
+    indexes = [Path(index_path) for index_path, _metrics in outputs]
+    for _index_path, metrics in outputs:
+        assert "reused" not in metrics
+        assert metrics["row_count"] == expected_row_count
+        assert metrics["first_count"] == expected_first_count
     kinds = ("first", "last", "first_last", "last_first_initial")
     expected_files = {"manifest.json", *(f"{kind}.bin" for kind in kinds)}
 

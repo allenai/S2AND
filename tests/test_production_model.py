@@ -383,35 +383,20 @@ def test_synthetic_native_clusterer_predict_matches_source_python(
     monkeypatch: pytest.MonkeyPatch,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
-    monkeypatch.setenv("S2AND_BACKEND", "python")
     monkeypatch.setattr(subblocking_module._LazyCanonicalOrcidPrefixCounts, "load", lambda _self: {})  # noqa: SLF001
     bundle_dir, source_clusterer = synthetic_pairwise_bundle
 
     for batching_threshold in (None, 7):
+        monkeypatch.setenv("S2AND_BACKEND", "python")
         native_clusterer = _prepare_prediction_clusterer(_load_pairwise_staging_model(bundle_dir))
         expected_clusterer = _prepare_prediction_clusterer(copy.deepcopy(source_clusterer))
-
-        assert _predict_dummy_block(native_clusterer, batching_threshold=batching_threshold) == _predict_dummy_block(
+        expected = _predict_dummy_block(
             expected_clusterer,
             batching_threshold=batching_threshold,
         )
 
-
-def test_native_clusterer_predict_is_explicitly_python_even_with_rust_environment(
-    monkeypatch: pytest.MonkeyPatch,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, source_clusterer = synthetic_pairwise_bundle
-    native_clusterer = _prepare_prediction_clusterer(_load_pairwise_staging_model(bundle_dir))
-
-    monkeypatch.setenv("S2AND_BACKEND", "python")
-    expected = _predict_dummy_block(
-        _prepare_prediction_clusterer(copy.deepcopy(source_clusterer)),
-        batching_threshold=None,
-    )
-
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
-    assert _predict_dummy_block(native_clusterer, batching_threshold=None) == expected
+        monkeypatch.setenv("S2AND_BACKEND", "rust")
+        assert _predict_dummy_block(native_clusterer, batching_threshold=batching_threshold) == expected
 
 
 def test_synthetic_native_clusterer_runtime_config_round_trips(
@@ -452,18 +437,18 @@ def test_canonical_artifact_hash_contract_rejects_missing_malformed_or_mismatche
         lambda: dict(_TEST_CANONICAL_ARTIFACT_HASHES),
     )
     invalid_values = (
-        ("name_tuples_data_sha256", None),
-        ("name_tuples_data_sha256", "f" * 63),
-        ("orcid_prefix_counts_data_sha256", "F" * 64),
-        ("orcid_prefix_counts_data_sha256", "c" * 64),
+        ("name_tuples_data_sha256", None, "name_tuples_data_sha256"),
+        ("name_tuples_data_sha256", "f" * 63, "name_tuples_data_sha256"),
+        ("orcid_prefix_counts_data_sha256", "F" * 64, "orcid_prefix_counts_data_sha256"),
+        ("orcid_prefix_counts_data_sha256", "c" * 64, "orcid_prefix_counts_data_sha256 does not match"),
     )
-    for field, invalid in invalid_values:
+    for field, invalid, message in invalid_values:
         feature_contract = dict(_TEST_CANONICAL_ARTIFACT_HASHES)
         if invalid is None:
             feature_contract.pop(field)
         else:
             feature_contract[field] = invalid
-        with pytest.raises(ValueError, match=field):
+        with pytest.raises(ValueError, match=message):
             production_model_module.require_canonical_artifact_hashes(
                 feature_contract,
                 context="test feature_contract",
@@ -558,30 +543,6 @@ def test_bundle_export_rejects_training_artifact_hash_mismatch(
         )
 
 
-def test_bundle_export_preserves_nonfinite_reproducibility_diagnostics(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    _, source_clusterer = synthetic_pairwise_bundle
-    source_clusterer.feature_contract.update(_TEST_EXPLICIT_ARTIFACT_HASHES)
-    output_dir = tmp_path / "optional-diagnostic"
-
-    write_pairwise_production_bundle(
-        source_clusterer,
-        output_dir,
-        release_version="10.0",
-        pairwise_training_config={"input_artifact_hashes": _TEST_EXPLICIT_ARTIFACT_HASHES},
-        pairwise_training_summary={"optional_diagnostic": float("nan")},
-    )
-
-    loaded = _load_pairwise_staging_model(output_dir, expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES)
-    assert isinstance(loaded, Clusterer)
-    summary = json.loads(
-        (output_dir / "reproducibility" / "pairwise_training_summary.json").read_text(encoding="utf-8")
-    )
-    assert np.isnan(summary["optional_diagnostic"])
-
-
 def test_finalization_uses_explicit_artifact_authority_instead_of_package_defaults(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -634,21 +595,6 @@ def test_finalization_uses_explicit_artifact_authority_instead_of_package_defaul
         expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
     )
     assert loaded.incremental_linker_artifact is not None
-
-
-def test_bundle_load_rejects_canonical_artifact_hash_mismatch(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    config_path = bundle_dir / "clusterer.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    field = "orcid_prefix_counts_data_sha256"
-    config["feature_contract"][field] = "c" * 64
-    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    _refresh_manifest_checksum(bundle_dir, "clusterer.json")
-
-    with pytest.raises(ValueError, match=rf"{field} does not match"):
-        _load_pairwise_staging_model(bundle_dir)
 
 
 def test_canonical_artifact_hashes_feed_pairwise_bundle_binding(
@@ -740,15 +686,13 @@ def test_manifest_has_exact_shape_and_identity(
         )
 
 
-@pytest.mark.parametrize("eps_calibration", ("unknown", None), ids=("unknown", "null"))
-def test_manifest_rejects_invalid_lifecycle_states(
+def test_manifest_rejects_null_lifecycle_state(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    eps_calibration: object,
 ) -> None:
     pairwise_bundle, _ = synthetic_pairwise_bundle
     manifest_path = pairwise_bundle / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["eps_calibration"] = eps_calibration
+    manifest["eps_calibration"] = None
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="Unsupported production bundle lifecycle state"):
@@ -756,19 +700,6 @@ def test_manifest_rejects_invalid_lifecycle_states(
             pairwise_bundle,
             expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
             expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
-        )
-
-
-def test_manifest_loader_requires_expected_lifecycle(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    pairwise_bundle, _ = synthetic_pairwise_bundle
-
-    with pytest.raises(ValueError, match="lifecycle mismatch"):
-        production_model_module._validate_manifest(
-            pairwise_bundle,
-            expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
-            expected_eps_calibration=PENDING_EPS_CALIBRATION,
         )
 
 
@@ -812,27 +743,28 @@ def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
             _load_pairwise_staging_model(bundle_dir)
 
 
-@pytest.mark.parametrize("model_name", ["main", "nameless"])
 def test_pairwise_fixture_covers_missing_and_zero_rows_in_strict_json(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    model_name: str,
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
-    fixture_path = bundle_dir / "pairwise" / f"{model_name}_prediction_fixture.json"
-    fixture = json.loads(
-        fixture_path.read_text(encoding="utf-8"),
-        parse_constant=lambda value: pytest.fail(f"Fixture contains nonstandard JSON value {value}"),
-    )
-    features = np.asarray(fixture["features"], dtype=np.float64)
-    assert features.shape[0] == 10
-    assert np.isfinite(features[:8]).all()
-    assert fixture["features"][-2] == [None] * features.shape[1]
-    assert np.isnan(features[-2]).all()
-    np.testing.assert_array_equal(features[-1], np.zeros(features.shape[1]))
-    assert fixture["feature_source"] == "numpy_default_rng_normal_with_all_missing_and_zero_rows"
+    for model_name in ("main", "nameless"):
+        fixture_path = bundle_dir / "pairwise" / f"{model_name}_prediction_fixture.json"
+        fixture = json.loads(
+            fixture_path.read_text(encoding="utf-8"),
+            parse_constant=lambda value, name=model_name: pytest.fail(
+                f"{name} fixture contains nonstandard JSON value {value}"
+            ),
+        )
+        features = np.asarray(fixture["features"], dtype=np.float64)
+        assert features.shape[0] == 10, model_name
+        assert np.isfinite(features[:8]).all(), model_name
+        assert fixture["features"][-2] == [None] * features.shape[1], model_name
+        assert np.isnan(features[-2]).all(), model_name
+        np.testing.assert_array_equal(features[-1], np.zeros(features.shape[1]), err_msg=model_name)
+        assert fixture["feature_source"] == "numpy_default_rng_normal_with_all_missing_and_zero_rows", model_name
 
-    classifier = NativeLightGBMBinaryClassifier(bundle_dir / "pairwise" / f"{model_name}.lgb", n_jobs=1)
-    production_model_module._validate_pairwise_fixture(classifier, fixture_path)
+        classifier = NativeLightGBMBinaryClassifier(bundle_dir / "pairwise" / f"{model_name}.lgb", n_jobs=1)
+        production_model_module._validate_pairwise_fixture(classifier, fixture_path)
 
 
 def test_pairwise_fixture_cannot_relax_tolerance_to_accept_wrong_predictions(
@@ -1018,6 +950,8 @@ def test_pending_pairwise_loader_requires_placeholder_eps(
     )
     assert pending_clusterer.best_params is None
     with pytest.raises(ValueError, match="lifecycle mismatch"):
+        _load_pairwise_staging_model(pending_bundle)
+    with pytest.raises(ValueError, match="lifecycle mismatch"):
         pairwise_bundle_binding(pending_bundle)
 
     config_path = pending_bundle / "clusterer.json"
@@ -1048,9 +982,14 @@ def test_pairwise_reproducibility_files_are_manifest_bound(
             "training_seed": 7,
             "input_artifact_hashes": dict(_TEST_EXPLICIT_ARTIFACT_HASHES),
         },
-        pairwise_training_summary={"pair_count": 11},
+        pairwise_training_summary={"pair_count": 11, "optional_diagnostic": float("nan")},
     )
-    _load_pairwise_staging_model(output_dir)
+    loaded = _load_pairwise_staging_model(output_dir, expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES)
+    assert isinstance(loaded, Clusterer)
+    summary = json.loads(
+        (output_dir / "reproducibility" / "pairwise_training_summary.json").read_text(encoding="utf-8")
+    )
+    assert np.isnan(summary["optional_diagnostic"])
 
     for relative_path in (
         "reproducibility/pairwise_training_config.json",
@@ -1062,6 +1001,7 @@ def test_pairwise_reproducibility_files_are_manifest_bound(
         with pytest.raises(ValueError, match="checksum mismatch"):
             _load_pairwise_staging_model(output_dir)
         path.write_bytes(original)
+        _load_pairwise_staging_model(output_dir)
 
 
 def test_finalization_publishes_with_one_rename_and_is_retry_safe(

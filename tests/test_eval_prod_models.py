@@ -14,7 +14,6 @@ import scripts.eval_prod_models as eval_prod_models
 from s2and.arrow_inputs import (
     ARROW_COLLECTION_KIND,
     ArrowDataset,
-    MissingArrowArtifactError,
     build_arrow_artifact_manifest,
     write_arrow_artifact_manifest,
 )
@@ -90,12 +89,7 @@ def test_arrow_availability_reads_only_manifests_and_opens_once_for_evaluation(
 
 
 def test_arrow_availability_requires_name_counts_declaration(tmp_path: Path) -> None:
-    dataset_root = _write_eval_arrow_root(tmp_path, include_name_counts_index=False)
-    with ArrowDataset.open(dataset_root, require_specter=True):
-        pass
-    with pytest.raises(MissingArrowArtifactError, match="name_counts_index"):
-        ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True)
-
+    _write_eval_arrow_root(tmp_path, include_name_counts_index=False)
     assert not eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
     error = eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
     assert isinstance(error, FileNotFoundError)
@@ -136,8 +130,10 @@ def test_arrow_availability_accepts_utf8_bom_dataset_manifest(tmp_path: Path) ->
         assert dataset.root == dataset_root.resolve()
 
 
-@pytest.mark.parametrize("corruption", ["checksum", "missing"])
-@pytest.mark.parametrize("artifact", ["papers", "name_counts_index"])
+@pytest.mark.parametrize(
+    "artifact,corruption",
+    [("papers", "missing"), ("name_counts_index", "checksum"), ("name_counts_index", "missing")],
+)
 def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path, corruption: str, artifact: str) -> None:
     dataset_root = _write_eval_arrow_root(tmp_path)
     manifest = json.loads((dataset_root / "manifest.json").read_text(encoding="utf-8"))
@@ -157,26 +153,17 @@ def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path, 
         eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl")
 
 
-@pytest.mark.parametrize("corruption", ["json", "binding", "metadata", "missing_base"])
-def test_arrow_availability_propagates_corrupt_manifests(tmp_path: Path, corruption: str) -> None:
+def test_arrow_availability_rejects_missing_base_artifact(tmp_path: Path) -> None:
     dataset_root = _write_eval_arrow_root(tmp_path)
     root_manifest = tmp_path / "manifest.json"
     child_manifest = dataset_root / "manifest.json"
-    if corruption == "json":
-        root_manifest.write_text("{", encoding="utf-8")
-    elif corruption == "binding":
-        child_manifest.write_text("{}", encoding="utf-8")
-    else:
-        child = json.loads(child_manifest.read_text(encoding="utf-8"))
-        if corruption == "metadata":
-            child["format_version"] = 999
-        else:
-            del child["paths"]["papers"]
-            del child["files"]["papers"]
-        child_manifest.write_text(json.dumps(child), encoding="utf-8")
-        collection = json.loads(root_manifest.read_text(encoding="utf-8"))
-        collection["dataset_manifests"]["pubmed"]["sha256"] = hashlib.sha256(child_manifest.read_bytes()).hexdigest()
-        root_manifest.write_text(json.dumps(collection), encoding="utf-8")
+    child = json.loads(child_manifest.read_text(encoding="utf-8"))
+    del child["paths"]["papers"]
+    del child["files"]["papers"]
+    child_manifest.write_text(json.dumps(child), encoding="utf-8")
+    collection = json.loads(root_manifest.read_text(encoding="utf-8"))
+    collection["dataset_manifests"]["pubmed"]["sha256"] = hashlib.sha256(child_manifest.read_bytes()).hexdigest()
+    root_manifest.write_text(json.dumps(collection), encoding="utf-8")
     with pytest.raises(ValueError):
         eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
 
@@ -270,6 +257,7 @@ def test_build_pairwise_clusterer_can_disable_hyperopt(monkeypatch: pytest.Monke
 
 def test_read_arrow_s2_blocks_reads_from_open_dataset(tmp_path: Path) -> None:
     with _open_minimal_arrow_dataset(tmp_path) as arrow_dataset:
+        assert arrow_dataset.root == tmp_path.resolve()
         assert eval_prod_models.read_arrow_s2_blocks(arrow_dataset) == {
             "a lovelace": [*[str(index) for index in range(10)], "q1", "q2", "seed1"]
         }
@@ -646,6 +634,9 @@ def test_eval_main_surfaces_arrow_corruption_with_json_fallback_configured(
         papers = dataset_root / "papers.arrow"
         papers.write_bytes(papers.read_bytes().replace(b"Notes", b"WRONG"))
         message = "checksum mismatch"
+        # Availability reads manifests only; the real open must reject the
+        # damaged payload even when JSON fallback is configured.
+        assert eval_prod_models.arrow_datasets_available(str(arrow_root), ["pubmed"], ["_specter2.pkl"])
     else:
         (arrow_root / "manifest.json").write_text("{", encoding="utf-8")
         message = "invalid JSON"
@@ -767,6 +758,43 @@ def test_eval_main_json_uses_recorded_holdout(
         assert "name_counts_index" in output
     else:
         assert "Arrow unavailable; using JSON:" not in output
+
+
+def test_eval_main_forced_arrow_rejects_undeclared_name_counts_with_json_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arrow_root = tmp_path / "arrow"
+    _write_eval_arrow_root(arrow_root, include_name_counts_index=False)
+    missing_arrow_error = eval_prod_models.first_missing_arrow_dataset_error(
+        str(arrow_root), ["pubmed"], ["_specter2.pkl"]
+    )
+    assert isinstance(missing_arrow_error, FileNotFoundError)
+    model_path = tmp_path / "model"
+    _write_bundle_training_config(model_path, {"data_random_seed": 1111})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_prod_models.py",
+            "--dataset",
+            "mini",
+            "--datasets",
+            "pubmed",
+            "--use-arrow",
+            "--specter2-model-path",
+            str(model_path),
+            "--arrow-data-root",
+            str(arrow_root),
+            "--json-data-root",
+            str(tmp_path),
+        ],
+    )
+    # The automatic-selection case above falls back to JSON for this missing
+    # declaration. Explicit Arrow must retain the original missing-artifact error.
+    with pytest.raises(FileNotFoundError, match="name_counts_index") as error:
+        eval_prod_models.main()
+    assert str(error.value) == str(missing_arrow_error)
+    assert "dataset='pubmed'" in str(error.value)
 
 
 def test_eval_main_unavailable_arrow_without_json_preserves_reason(

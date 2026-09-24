@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -49,6 +50,15 @@ def _unsupported_source_path(root: Path) -> Path:
     return root / "src" / name
 
 
+def _install_native_stub(monkeypatch: pytest.MonkeyPatch, native_path: Path, build_info: dict[str, str]) -> None:
+    package = ModuleType("s2and_rust")
+    monkeypatch.setattr(package, "get_build_info", lambda: build_info, raising=False)
+    native = ModuleType("s2and_rust._s2and_rust")
+    native.__file__ = str(native_path)
+    monkeypatch.setitem(sys.modules, "s2and_rust", package)
+    monkeypatch.setitem(sys.modules, "s2and_rust._s2and_rust", native)
+
+
 def test_digest_is_independent_of_file_creation_order(tmp_path: Path) -> None:
     forward = _write_tree(tmp_path / "forward", _TREE)
     reverse = _write_tree(tmp_path / "reverse", dict(reversed(list(_TREE.items()))))
@@ -73,10 +83,19 @@ def test_digest_is_independent_of_file_creation_order(tmp_path: Path) -> None:
 )
 def test_digest_changes_for_every_build_input_change(tmp_path: Path, change: str) -> None:
     root = _write_tree(tmp_path, _TREE)
+    older_ns = 1_600_000_000_000_000_000
+    newer_ns = older_ns + 100_000_000_000
+    if change in {"modify_source", "add_source", "delete_source"}:
+        # Older additions/deletions and preserved mtimes must still change the
+        # digest even when a timestamp-based build cache might miss the edit.
+        for path in (root / "src").rglob("*.rs"):
+            os.utime(path, ns=(older_ns, older_ns))
+        os.utime(root / "src/lib.rs", ns=(newer_ns, newer_ns))
     baseline = rust_source_digest(root)
 
     if change == "modify_source":
         (root / "src/lib.rs").write_bytes(b"pub fn f() { }\n")
+        os.utime(root / "src/lib.rs", ns=(newer_ns, newer_ns))
     elif change == "modify_manifest":
         (root / "Cargo.toml").write_bytes(b"[package]\nname = 'x'\n")
     elif change == "modify_lockfile":
@@ -85,6 +104,7 @@ def test_digest_changes_for_every_build_input_change(tmp_path: Path, change: str
         (root / "build.rs").write_bytes(b"fn main() { }\n")
     elif change == "add_source":
         (root / "src/new.rs").write_bytes(b"")
+        os.utime(root / "src/new.rs", ns=(older_ns, older_ns))
     elif change == "delete_source":
         (root / "src/nested/mod.rs").unlink()
     elif change == "rename_source":
@@ -94,7 +114,7 @@ def test_digest_changes_for_every_build_input_change(tmp_path: Path, change: str
     else:
         (root / "vendor/cld2/Cargo.toml").write_bytes(b"[package]\nname = 'cld2'\n")
 
-    assert rust_source_digest(root) != baseline
+    assert rust_source_digest(root) != baseline, change
 
 
 def test_digest_ignores_metadata_and_build_outputs(tmp_path: Path) -> None:
@@ -117,23 +137,37 @@ def test_digest_ignores_metadata_and_build_outputs(tmp_path: Path) -> None:
     assert rust_source_digest(root) == baseline
 
 
-def test_digest_rejects_linked_source_directories(tmp_path: Path) -> None:
+def test_digest_rejects_linked_source_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = _write_tree(tmp_path / "crate", _TREE)
+    _install_native_stub(monkeypatch, tmp_path / "native.pyd", {"source_digest": rust_source_digest(source)})
     external = tmp_path / "external"
     external.mkdir()
     (external / "module.rs").write_bytes(b"pub fn linked() {}\n")
     _link_directory(source / "src/linked", external)
 
-    with pytest.raises(ValueError, match="linked native source directories are unsupported"):
+    with pytest.raises(ValueError, match="linked native source directories are unsupported") as error:
         rust_source_digest(source)
+    message = stale_rust_extension_message(source)
+    assert message == (
+        f"Cannot verify s2and_rust source freshness: {error.value}. Correct the native source inputs before rebuilding."
+    )
+    assert "INTERNALERROR" not in message
 
 
-def test_digest_rejects_unsupported_source_names_with_clear_error(tmp_path: Path) -> None:
+def test_digest_rejects_unsupported_source_names_with_clear_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = _write_tree(tmp_path, _TREE)
+    _install_native_stub(monkeypatch, tmp_path / "native.pyd", {"source_digest": rust_source_digest(source)})
     _unsupported_source_path(source).write_bytes(b"// unused module\n")
 
-    with pytest.raises(ValueError, match="native source paths must be valid UTF-8"):
+    with pytest.raises(ValueError, match="native source paths must be valid UTF-8") as error:
         rust_source_digest(source)
+    message = stale_rust_extension_message(source)
+    assert message == (
+        f"Cannot verify s2and_rust source freshness: {error.value}. Correct the native source inputs before rebuilding."
+    )
+    assert "INTERNALERROR" not in message
 
 
 def _uv_cache_project(root: Path) -> tuple[Path, Path]:
@@ -212,72 +246,37 @@ def _sync_uv_cache_project(project: Path, *, recovery: bool = False) -> int:
     return int((project.parent / "package/build_count.txt").read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize(
-    "relative",
-    ["src/lib.rs.orig", "src/.swp", "vendor/cld2/Cargo.lock", "vendor/cld2/target/generated.rs"],
-)
-def test_uv_and_digest_ignore_noninputs(tmp_path: Path, relative: str) -> None:
-    """Editor state and a vendored crate's outputs cannot stale the extension."""
+def test_uv_cache_and_digest_track_only_native_inputs(tmp_path: Path) -> None:
+    """Check every cache edit independently while reusing one offline fixture."""
     source, project = _uv_cache_project(tmp_path)
     baseline = rust_source_digest(source)
-    assert _sync_uv_cache_project(project) == 1
-    assert _sync_uv_cache_project(project) == 1
+    assert _sync_uv_cache_project(project) == 1, "initial build"
+    assert _sync_uv_cache_project(project) == 1, "unchanged fixture must stay cached"
 
-    added = source / relative
-    added.parent.mkdir(parents=True, exist_ok=True)
-    added.write_bytes(b"irrelevant file\n")
-    assert rust_source_digest(source) == baseline
-    assert _sync_uv_cache_project(project) == 1
+    for relative in ("src/lib.rs.orig", "src/.swp", "vendor/cld2/Cargo.lock", "vendor/cld2/target/generated.rs"):
+        ignored = source / relative
+        ignored.parent.mkdir(parents=True, exist_ok=True)
+        for operation, content in (
+            ("add", b"irrelevant file\n"),
+            ("modify", b"changed irrelevant file\n"),
+            ("delete", None),
+        ):
+            if content is None:
+                ignored.unlink()
+            else:
+                ignored.write_bytes(content)
+            scenario = f"{relative}: {operation}"
+            assert rust_source_digest(source) == baseline, scenario
+            assert _sync_uv_cache_project(project) == 1, scenario
 
-    added.write_bytes(b"changed irrelevant file\n")
-    assert rust_source_digest(source) == baseline
-    assert _sync_uv_cache_project(project) == 1
-
-    added.unlink()
-    assert rust_source_digest(source) == baseline
-    assert _sync_uv_cache_project(project) == 1
-
-
-@pytest.mark.parametrize(
-    "relative", ["src/lib.rs", "src/nested/mod.rs", "vendor/cld2/src/lib.rs", "vendor/cld2/Cargo.toml"]
-)
-def test_uv_rebuilds_for_native_input_edits(tmp_path: Path, relative: str) -> None:
-    source, project = _uv_cache_project(tmp_path)
-    assert _sync_uv_cache_project(project) == 1
-    path = source / relative
-    path.write_bytes(path.read_bytes() + b"\n// changed\n")
-    assert _sync_uv_cache_project(project) == 2
-
-
-@pytest.mark.parametrize("change", ["delete_older", "add_older", "preserve_mtime"])
-def test_digest_detects_timestamp_cache_misses_and_reinstall_rebuilds(tmp_path: Path, change: str) -> None:
-    """A UV timestamp hit is not evidence that source contents still match."""
-    source, project = _uv_cache_project(tmp_path)
-    older_ns = 1_600_000_000_000_000_000
-    newer_ns = older_ns + 100_000_000_000
-    for path in (source / "src").rglob("*.rs"):
-        os.utime(path, ns=(older_ns, older_ns))
-    newest = source / "src/lib.rs"
-    os.utime(newest, ns=(newer_ns, newer_ns))
-    baseline = rust_source_digest(source)
-    assert _sync_uv_cache_project(project) == 1
-
-    if change == "delete_older":
-        (source / "src/nested/mod.rs").unlink()
-    elif change == "add_older":
-        added = source / "src/new.rs"
-        added.write_bytes(b"pub fn new_module() {}\n")
-        os.utime(added, ns=(older_ns, older_ns))
-    else:
-        newest.write_bytes(b"pub fn changed() {}\n")
-        os.utime(newest, ns=(newer_ns, newer_ns))
-
-    assert rust_source_digest(source) != baseline
-    # UV versions may improve this heuristic. Regardless of cache behavior,
-    # the documented reinstall command must invoke the build backend again.
-    cached_builds = _sync_uv_cache_project(project)
-    assert cached_builds in (1, 2)
-    assert _sync_uv_cache_project(project, recovery=True) == cached_builds + 1
+    for expected_builds, relative in enumerate(
+        ("src/lib.rs", "src/nested/mod.rs", "vendor/cld2/src/lib.rs", "vendor/cld2/Cargo.toml"), start=2
+    ):
+        previous_digest = rust_source_digest(source)
+        path = source / relative
+        path.write_bytes(path.read_bytes() + b"\n// changed\n")
+        assert rust_source_digest(source) != previous_digest, f"{relative}: edited input must change digest"
+        assert _sync_uv_cache_project(project) == expected_builds, f"{relative}: edit must rebuild once"
 
 
 def test_recovery_command_rebuilds_an_unchanged_cached_package(tmp_path: Path) -> None:
@@ -346,57 +345,35 @@ def test_session_rejects_source_edit_before_collection(tmp_path: Path) -> None:
     assert not (tmp_path / "collected").exists()
     assert str(native) in output
     assert REBUILD_COMMAND in output
+    assert CLEAN_COMMAND in output
     assert "different sources" in output
 
 
-def test_session_rejects_extension_without_source_digest(tmp_path: Path) -> None:
-    _, native = _session_project(tmp_path)
-    native.write_text("def get_build_info():\n    return {'crate_version': '1.0.0'}\n", encoding="utf-8")
+def test_missing_source_digest_reports_loaded_path_and_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_tree(tmp_path / "crate", _TREE)
+    native = tmp_path / "installed" / "_s2and_rust.pyd"
+    _install_native_stub(monkeypatch, native, {"crate_version": "1.0.0"})
 
-    result = _run_session(tmp_path)
-    output = result.stdout + result.stderr
+    message = stale_rust_extension_message(source)
 
-    assert result.returncode == pytest.ExitCode.USAGE_ERROR, output
-    assert not (tmp_path / "collected").exists()
-    assert "embedded=None" in output
-    assert str(native) in output
-    assert REBUILD_COMMAND in output
-
-
-@pytest.mark.parametrize("unsupported", ["filename", "directory_link"])
-def test_session_reports_unsupported_inputs_before_collection(tmp_path: Path, unsupported: str) -> None:
-    source_root, native = _session_project(tmp_path)
-    digest = rust_source_digest(source_root)
-    native.write_text(f"def get_build_info():\n    return {{'source_digest': {digest!r}}}\n", encoding="utf-8")
-    if unsupported == "filename":
-        _unsupported_source_path(source_root).write_bytes(b"// unused module\n")
-        expected = "native source paths must be valid UTF-8"
-    else:
-        external = tmp_path / "external"
-        external.mkdir()
-        _link_directory(source_root / "src/linked", external)
-        expected = "linked native source directories are unsupported"
-
-    result = _run_session(tmp_path)
-    output = result.stdout + result.stderr
-
-    assert result.returncode == pytest.ExitCode.USAGE_ERROR, output
-    assert expected in output
-    assert "Cannot verify s2and_rust source freshness" in output
-    assert "INTERNALERROR" not in output
-    assert not (tmp_path / "collected").exists()
+    assert message is not None
+    assert "different sources" in message
+    assert f"embedded=None, checkout={rust_source_digest(source)!r}" in message
+    assert str(native) in message
+    assert REBUILD_COMMAND in message
+    assert CLEAN_COMMAND in message
 
 
-def test_session_explains_missing_native_module(tmp_path: Path) -> None:
-    _session_project(tmp_path)
+def test_missing_native_module_reports_rebuild_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "s2and_rust", None)
 
-    result = _run_session(tmp_path)
-    output = result.stdout + result.stderr
+    message = stale_rust_extension_message(tmp_path)
 
-    assert result.returncode == pytest.ExitCode.USAGE_ERROR, output
-    assert not (tmp_path / "collected").exists()
-    assert "Cannot import the s2and_rust extension" in output
-    assert REBUILD_COMMAND in output
+    assert message is not None
+    assert "Cannot import the s2and_rust extension" in message
+    assert REBUILD_COMMAND in message
 
 
 def test_uninstalled_extension_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

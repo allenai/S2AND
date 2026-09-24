@@ -14,8 +14,11 @@ def _unexpected_residual_clustering(signature_ids: list[str]) -> dict[str, list[
     pytest.fail(f"Unexpected residual clustering: {signature_ids}")
 
 
-@pytest.mark.parametrize("query_disallow", [False, True])
-@pytest.mark.parametrize("batch_size", [1, 2])
+@pytest.mark.parametrize(
+    ("query_disallow", "batch_size"),
+    [(False, 1), (True, 1), (True, 2)],
+    ids=["single-query", "query-conflict-cross-batch", "query-conflict-same-batch"],
+)
 @pytest.mark.parametrize("external_fallback", [False, True])
 def test_altered_profile_disallows_survive_native_planning_and_restoration(
     tmp_path, monkeypatch, query_disallow, batch_size, external_fallback
@@ -209,22 +212,6 @@ def _scored_query(
     )
 
 
-def test_scored_query_extraction_retains_require_constraint_priority() -> None:
-    result = SimpleNamespace(
-        compact_result=SimpleNamespace(decisions=(_scored_query("q-require", "required-component", 0.7).decision,)),
-        pairwise_model_result=SimpleNamespace(row_signals={}),
-        decision_row_signals={"constraint_require_count": np.asarray([1.0], dtype=np.float32)},
-    )
-
-    scored = production_module._scored_query_decisions_from_result(  # noqa: SLF001
-        result,
-        signature_ids_by_index=["q-require"],
-        expected_query_signature_ids=["q-require"],
-    )
-
-    assert scored["q-require"].require_forced is True
-
-
 def test_cross_batch_disallow_resolution_cannot_exclude_required_component() -> None:
     def extract_batch(signature_id: str, score: float, require_count: float):
         decision = _scored_query(signature_id, "shared", score).decision
@@ -244,7 +231,9 @@ def test_cross_batch_disallow_resolution_cannot_exclude_required_component() -> 
     initial = {
         **extract_batch("q-require", 0.70, 1.0),
         **extract_batch("q-score", 0.99, 0.0),
+        "q-uncontended": _scored_query("q-uncontended", "other", 0.80),
     }
+    assert initial["q-require"].require_forced is True
     rescored: list[str] = []
 
     def rescore(signature_id: str, excluded_components: set[str]):
@@ -258,9 +247,10 @@ def test_cross_batch_disallow_resolution_cannot_exclude_required_component() -> 
         rescore=rescore,
     )
 
-    assert linked == {"q-require": "shared"}
+    assert linked == {"q-require": "shared", "q-uncontended": "other"}
     assert rescored == ["q-score"]
     assert telemetry["global_query_disallow_rescore_count"] == 1
+    assert telemetry["global_query_disallow_demoted_abstain_count"] == 1
 
 
 def test_global_query_disallow_resolution_is_score_ordered_and_input_order_invariant() -> None:
@@ -285,30 +275,6 @@ def test_global_query_disallow_resolution_is_score_ordered_and_input_order_invar
         assert telemetry["global_query_disallow_conflict_count"] == 1
         assert telemetry["global_query_disallow_rescore_count"] == 1
     assert rescored == [("q-low", {"shared"}), ("q-low", {"shared"})]
-
-
-def test_global_query_disallow_resolution_prioritizes_require_and_avoids_unneeded_rescore() -> None:
-    initial = {
-        "q-require": _scored_query("q-require", "shared", 0.70, require_forced=True),
-        "q-score": _scored_query("q-score", "shared", 0.99),
-        "q-uncontended": _scored_query("q-uncontended", "other", 0.80),
-    }
-    rescored: list[str] = []
-
-    def rescore(signature_id: str, excluded_components: set[str]):
-        rescored.append(signature_id)
-        assert excluded_components == {"shared"}
-        return _scored_query(signature_id, None, None)
-
-    linked, telemetry = production_module._resolve_query_disallows_globally(  # noqa: SLF001
-        initial,
-        {"q-require": {"q-score"}, "q-score": {"q-require"}},
-        rescore=rescore,
-    )
-
-    assert linked == {"q-require": "shared", "q-uncontended": "other"}
-    assert rescored == ["q-score"]
-    assert telemetry["global_query_disallow_demoted_abstain_count"] == 1
 
 
 def test_global_query_disallow_resolution_rejects_conflicting_requires() -> None:

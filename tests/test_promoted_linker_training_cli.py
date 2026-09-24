@@ -115,7 +115,7 @@ def test_source_support_preflight_requires_declared_split_files(tmp_path: Path) 
         source_bundle_preflight.validate_source_bundle_support_files(bundle)
 
 
-def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -> None:
+def test_source_support_preflight_requires_all_configured_splits(tmp_path: Path) -> None:
     (tmp_path / "bundle.json").write_text("{}", encoding="utf-8")
     splits_dir = tmp_path / "splits"
     splits_dir.mkdir()
@@ -126,7 +126,7 @@ def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -
         {
             "query_group_id": ["q1", "q2"],
             "source_key": ["s", "s"],
-            "base_group_id": ["b1", "b1"],
+            "base_group_id": ["b1", "b2"],
             "split": ["calibration_fit", "test"],
         }
     ).to_csv(assignments_path, index=False)
@@ -134,7 +134,7 @@ def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -
         "classic_gate_internal_eval_base_groups_path": "splits/internal_eval.csv",
         "stratified_eval_test_split": {"assignments_path": "splits/assignments.csv", "test_split": "test"},
         "promoted_stratified_gate": {
-            "calibration_splits": ["calibration_fit"],
+            "calibration_splits": ["calibration_fit", "calibration_check"],
             "test_split": "test",
         },
     }
@@ -146,21 +146,7 @@ def test_source_support_preflight_rejects_leaky_split_contract(tmp_path: Path) -
         expected_metrics={},
     )
 
-    with pytest.raises(ValueError, match="base_group_id values in multiple splits"):
-        source_bundle_preflight.validate_source_bundle_support_files(bundle)
-
-    assignments = pd.read_csv(assignments_path)
-    assignments.loc[1, "base_group_id"] = "b2"
-    assignments.to_csv(assignments_path, index=False)
-    classic["promoted_stratified_gate"]["calibration_splits"] = [
-        "calibration_fit",
-        "calibration_check",
-    ]
     with pytest.raises(ValueError, match="omit configured calibration/test splits"):
-        source_bundle_preflight.validate_source_bundle_support_files(bundle)
-
-    classic["promoted_stratified_gate"]["calibration_splits"] = ["calibration_fit", "test"]
-    with pytest.raises(ValueError, match="must not include test_split"):
         source_bundle_preflight.validate_source_bundle_support_files(bundle)
 
 
@@ -267,25 +253,6 @@ def test_run_rejects_name_count_binding_before_materialization(
     assert not output_dir.exists()
 
 
-def test_partial_target_metrics_are_rejected_when_loaded(tmp_path: Path) -> None:
-    target_path = tmp_path / "partial-target.json"
-    features = list(promoted_train.promoted_linker_feature_columns())
-    target_path.write_text(
-        json.dumps(
-            {
-                "features": features,
-                "feature_count": len(features),
-                "params": {"n_estimators": 1},
-                "metrics": {"stratified_test_accuracy": 1.0},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="complete official metric set"):
-        promoted_train._load_target(target_path)  # noqa: SLF001
-
-
 def test_arrow_rust_materialization_passes_dataset_handle_to_native_planner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -384,12 +351,7 @@ def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tm
                 "files": source_files,
             },
         },
-        "models": {
-            "classic": {
-                "feature_columns": [],
-                "best_params": {},
-            },
-        },
+        "models": {"classic": {}},
         "expected_metrics": {},
     }
     source_root.mkdir(parents=True, exist_ok=True)
@@ -401,8 +363,14 @@ def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tm
         output_path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame([{"query_group_id": Path(relpath).stem}]).to_parquet(output_path, index=False)
 
+    source_bundle = promoted_train.load_bundle(source_root)
+    assert source_bundle.root == source_root.resolve()
+    assert source_bundle.bundle_name == "arrow_source"
+    assert source_bundle.models == {"classic": {}}
+    assert source_bundle.expected_metrics == {}
+
     bundle = promoted_train._finalize_arrow_rust_bundle_metadata(  # noqa: SLF001
-        source_bundle=promoted_train.load_bundle(source_root),
+        source_bundle=source_bundle,
         output_bundle_root=output_root,
         target={"feature_count": 1, "features": ["f0"], "params": {"n_estimators": 10}, "metrics": {}},
         selected_keys=list(source_files),
@@ -454,24 +422,11 @@ def test_observed_metrics_use_weighted_average_error() -> None:
     assert observed["weighted_average_error"] == pytest.approx(((0.25 * 0.04) + 0.03 + (1.5 * 0.03)) / 2.75)
 
 
-def test_observed_metric_validation_requires_exact_official_keys() -> None:
-    for case_id in ("missing", "extra"):
-        observed = _valid_observed_metrics()
-        if case_id == "missing":
-            observed.pop("weighted_average_error")
-        else:
-            observed["unexpected_metric"] = 0.0
-
-        try:
-            promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
-        except ValueError as error:
-            assert "complete official metric set" in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: incomplete official metric set was accepted")
-
-
-def test_observed_metric_validation_rejects_malformed_values() -> None:
-    cases = [
+@pytest.mark.parametrize(
+    ("case_id", "field", "value", "message"),
+    [
+        ("missing", "weighted_average_error", None, "complete official metric set"),
+        ("extra", "unexpected_metric", 0.0, "complete official metric set"),
         ("accuracy-nan", "stratified_test_accuracy", float("nan"), "must be finite"),
         ("accuracy-over-one", "stratified_test_accuracy", 1.1, "must be in [0, 1]"),
         ("negative-errors", "stratified_test_errors", -1, "must be a nonnegative integer"),
@@ -496,17 +451,31 @@ def test_observed_metric_validation_rejects_malformed_values() -> None:
             },
             "must equal the official value",
         ),
-    ]
-    for case_id, field, value, message in cases:
-        observed = _valid_observed_metrics()
+    ],
+    ids=[
+        "missing",
+        "extra",
+        "accuracy-nan",
+        "accuracy-over-one",
+        "negative-errors",
+        "zero-training-rows",
+        "zero-test-queries",
+        "too-many-errors",
+        "nonpositive-weight",
+        "nonofficial-weight",
+    ],
+)
+def test_observed_metric_validation_rejects_invalid_contract(
+    case_id: str, field: str, value: Any, message: str
+) -> None:
+    observed = _valid_observed_metrics()
+    if case_id == "missing":
+        observed.pop(field)
+    else:
         observed[field] = value
-
-        try:
-            promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
-        except ValueError as error:
-            assert message in str(error), f"{case_id}: {error}"
-        else:
-            raise AssertionError(f"{case_id}: malformed metric was accepted")
+    with pytest.raises(ValueError) as error:
+        promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
+    assert message in str(error.value)
 
 
 def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:

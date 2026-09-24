@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 import s2and.incremental_linking.runtime as runtime_module
+from s2and import memory_budget
 from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import load_incremental_linking_artifact, save_incremental_linking_artifact
@@ -25,7 +26,6 @@ from s2and.incremental_linking.linker_pairwise import (
 )
 from s2and.incremental_linking.logistic_gate import load_logistic_gate_config, logistic_gate_config
 from s2and.incremental_linking.retrieval import (
-    RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS,
     LinkerRetrievalBatch,
     RawArrowPlanBundle,
     build_linker_retrieval_batch_from_raw_plan_bundle,
@@ -41,6 +41,7 @@ from s2and.model_pairwise import predict_pairwise_class0
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, incremental_seed_setup
 from tests.model_helpers import ConstantDistanceClassifier
 from tests.promoted_linking_helpers import build_tiny_promoted_booster, synthetic_pairwise_bundle_binding
+from tests.raw_arrow_helpers import minimal_raw_candidate_plan
 
 runtime_module: Any = runtime_module
 
@@ -102,22 +103,21 @@ class TwoFeatureClassifier:
         raise AssertionError("feature-count mismatch must fail before prediction")
 
 
-def test_pairwise_predict_class0_does_not_require_num_threads_keyword_support() -> None:
+@pytest.mark.parametrize(
+    "classifier,expected",
+    [
+        (RejectsNumThreadsClassifier(), [0.25, 0.75]),
+        (PositiveProbabilityClassifier(), [0.75, 0.25]),
+    ],
+    ids=["no-num-threads-keyword", "positive-probability-fast-path"],
+)
+def test_pairwise_predict_class0_supports_classifier_interfaces(classifier, expected) -> None:
     predictions = predict_pairwise_class0(
-        RejectsNumThreadsClassifier(),
+        classifier,
         np.asarray([[0.25], [0.75]], dtype=np.float64),
     )
 
-    assert np.allclose(predictions, [0.25, 0.75])
-
-
-def test_pairwise_predict_class0_uses_native_positive_probability_fast_path() -> None:
-    predictions = predict_pairwise_class0(
-        PositiveProbabilityClassifier(),
-        np.asarray([[0.25], [0.75]], dtype=np.float64),
-    )
-
-    assert np.allclose(predictions, [0.75, 0.25])
+    assert np.allclose(predictions, expected)
 
 
 def test_pairwise_predict_class0_rejects_fitted_feature_count_mismatch() -> None:
@@ -150,23 +150,15 @@ def test_distance_row_signals_distinguish_top3_and_top5_means() -> None:
 
 
 def _minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
-    raw_plan = {
-        "query_signature_ids": ["q0"],
-        "query_views": ["full"],
-        "query_authors": ["Alice"],
-        "row_count": 1,
-        "pair_count": 1,
-        "row_query_signature_indices": np.asarray([0], dtype=np.uint32),
-        "row_component_keys": ["c1"],
-        "retrieval_scores": np.asarray([0.9], dtype=np.float32),
-        "retrieval_ranks": np.asarray([1], dtype=np.uint16),
-        "pair_row_indices": np.asarray([0], dtype=np.uint32),
-        "left_signature_ids": ["q0"],
-        "right_signature_ids": ["s1"],
-        "component_members": {"c1": ["s1"]},
-    }
-    for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
-        raw_plan[raw_key] = np.asarray([""] if dtype is object else [0], dtype=dtype)
+    raw_plan = minimal_raw_candidate_plan(
+        row_count=1,
+        pair_count=1,
+        row_component_keys=["c1"],
+        retrieval_scores=np.asarray([0.9], dtype=np.float32),
+        right_signature_ids=["s1"],
+        component_members={"c1": ["s1"]},
+    )
+    raw_plan.pop("telemetry")
     raw_plan.update(overrides)
     return raw_plan
 
@@ -637,6 +629,70 @@ def test_fused_native_features_scoring_and_constraints(tmp_path, monkeypatch, mo
     assert result.telemetry["predicted_index_remap_bytes"] == stats.chunk_plan.chunk_pairs * 8
 
 
+@pytest.mark.parametrize("aggregate_nan", [0.0, np.nan], ids=["zero-fill", "preserve-nan"])
+def test_fused_native_aggregates_across_chunks_match_dense_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, aggregate_nan: float
+) -> None:
+    monkeypatch.setattr(memory_budget, "RUST_BATCH_MAX_CHUNK_PAIRS", 2)
+    dataset = build_arrow_training_dataset(build_dummy_dataset("fused-chunks", name_counts_index=True), tmp_path)
+    native = runtime_module.feature_port._get_rust_featurizer(dataset)
+    pairs = [(0, 1), (0, 2), (3, 4), (0, 3), (1, 4), (2, 5)]
+    # Row 2 spans all three chunks with different local indices; row 3 is empty.
+    rows = np.asarray([2, 0, 2, 1, 2, 2], dtype=np.uint32)
+    candidate_batch = LinkerCandidateBatch(
+        row_count=4,
+        left_signature_indices=np.asarray([left for left, _ in pairs], dtype=np.uint32),
+        right_signature_indices=np.asarray([right for _, right in pairs], dtype=np.uint32),
+        pair_row_indices=rows,
+    )
+    labels = np.asarray(
+        [np.nan, -LARGE_INTEGER, LARGE_DISTANCE - LARGE_INTEGER, np.nan, LARGE_DISTANCE - LARGE_INTEGER, np.nan],
+        dtype=np.float64,
+    )
+    # The dense feature API and NumPy reductions do not use the fused chunk merge.
+    raw_features = np.asarray(native.featurize_pairs_matrix_indexed(pairs, None, 1, np.nan))
+    aggregate = raw_features[:, PROMOTED_PAIRWISE_AGG_FEATURE_INDICES].copy()
+    assert np.isnan(aggregate).any()
+    if not np.isnan(aggregate_nan):
+        aggregate[np.isnan(aggregate)] = aggregate_nan
+
+    result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
+        dataset,
+        candidate_batch,
+        classifier=ConstantDistanceClassifier(0.2),
+        featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
+        pair_labels=labels,
+        pairwise_aggregate_nan_value=aggregate_nan,
+        featurizer=native,
+    )
+
+    stats = result.pairwise_stats
+    assert stats.chunk_plan.chunk_pairs == 2
+    assert stats.chunk_count == result.telemetry["chunk_count"] == 3
+    assert tuple(stats.aggregate_feature_columns) == tuple(PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS)
+    assert stats.counts.dtype == np.uint64
+    assert stats.valid_counts is not None
+    assert stats.valid_counts.dtype == np.uint64
+    np.testing.assert_array_equal(stats.counts, [1, 1, 4, 0])
+    for values in (stats.sums, stats.mins, stats.maxs):
+        assert values.dtype == np.float64
+    for row in range(4):
+        values = aggregate[rows == row]
+        valid = ~np.isnan(values)
+        np.testing.assert_array_equal(stats.valid_counts[row], valid.sum(axis=0))
+        np.testing.assert_allclose(stats.sums[row], np.nansum(values, axis=0, dtype=np.float64))
+        np.testing.assert_allclose(stats.mins[row], np.min(np.where(valid, values, np.inf), axis=0, initial=np.inf))
+        np.testing.assert_allclose(stats.maxs[row], np.max(np.where(valid, values, -np.inf), axis=0, initial=-np.inf))
+    for values in result.row_signals.values():
+        assert values.dtype == np.float32
+    np.testing.assert_array_equal(result.row_signals["pair_count"], [1, 1, 4, 0])
+    np.testing.assert_allclose(result.row_signals["min_distance"], [0, 0.2, 0.2, 1])
+    np.testing.assert_allclose(result.row_signals["top3_mean_distance"], [0, 0.2, (LARGE_DISTANCE + 0.4) / 3, 1])
+    for signal in ("mean_distance", "top5_mean_distance"):
+        np.testing.assert_allclose(result.row_signals[signal], [0, 0.2, (2 * LARGE_DISTANCE + 0.4) / 4, 1])
+    assert result.telemetry["hard_disallow_distance_pair_count"] == 2
+
+
 def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1085,43 +1141,34 @@ def test_private_retrieved_candidate_slice_rejects_partial_supervision() -> None
         )
 
 
-def test_production_query_author_row_signals_reuses_retrieval_signal() -> None:
-    retrieval_batch = _production_retrieval_batch(
-        row_query_signature_indices=np.asarray([0, 0], dtype=np.uint32),
-        row_component_keys=("c1", "c2"),
-    )
-    retrieval_batch.row_signals["query_author"] = np.asarray(["Ada Lovelace", "Ada Lovelace"], dtype=object)
-
-    assert (
-        runtime_module._production_query_author_row_signals(
-            retrieval_batch,
-            query_signature_id_by_index={0: "q1"},
-            query_by_signature_id={"q1": SimpleNamespace(query_author="ignored")},
-        )
-        == {}
-    )
-
-
-@pytest.mark.parametrize("row_count", [0, 2])
-def test_authoritative_query_author_signals_require_no_query_objects(row_count: int) -> None:
+@pytest.mark.parametrize(
+    "component_keys,query_objects",
+    [
+        ((), None),
+        (("c1", "c1"), None),
+        (("c1", "c2"), {"q1": SimpleNamespace(query_author="ignored")}),
+    ],
+    ids=["empty", "without-query-objects", "ignore-query-objects"],
+)
+def test_authoritative_query_author_signals_need_no_extra_signals(component_keys, query_objects) -> None:
+    row_count = len(component_keys)
     retrieval_batch = _production_retrieval_batch(
         row_query_signature_indices=np.zeros(row_count, dtype=np.uint32),
-        row_component_keys=("c1",) * row_count,
+        row_component_keys=component_keys,
     )
     retrieval_batch.row_signals["query_author"] = np.asarray(["Ada Lovelace"] * row_count, dtype=object)
     assert (
         runtime_module._production_query_author_row_signals(
             retrieval_batch,
             query_signature_id_by_index={0: "q1"},
-            query_by_signature_id=None,
+            query_by_signature_id=query_objects,
         )
         == {}
     )
 
 
-@pytest.mark.parametrize("query_objects", [None, {"q1": SimpleNamespace(query_author="Ada Lovelace")}])
 @pytest.mark.parametrize("authors", [[], [["Ada Lovelace"]]])
-def test_query_author_row_signal_rejects_malformed_length_and_shape(query_objects, authors) -> None:
+def test_query_author_row_signal_rejects_malformed_length_and_shape(authors) -> None:
     retrieval_batch = _production_retrieval_batch(
         row_query_signature_indices=np.asarray([0], dtype=np.uint32),
         row_component_keys=("c1",),
@@ -1131,7 +1178,7 @@ def test_query_author_row_signal_rejects_malformed_length_and_shape(query_object
         runtime_module._production_query_author_row_signals(
             retrieval_batch,
             query_signature_id_by_index={0: "q1"},
-            query_by_signature_id=query_objects,
+            query_by_signature_id=None,
         )
 
 
@@ -1261,6 +1308,12 @@ def test_from_retrieval_records_artifact_retrieval_top_k_when_not_passed(
         right_signature_indices=np.asarray([1], dtype=np.uint32),
         pair_row_indices=np.asarray([0], dtype=np.uint32),
     )
+    assert retrieval_batch.candidate_batch.pair_count == 1
+
+    def fail_candidate_pair_ids(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("pair ids should not be materialized when partial_supervision is empty")
+
+    monkeypatch.setattr(runtime_module, "_candidate_pair_ids", fail_candidate_pair_ids)
     monkeypatch.setattr(
         runtime_module,
         "compute_candidate_batch_pairwise_model_and_aggregate_stats",
@@ -1279,7 +1332,10 @@ def test_from_retrieval_records_artifact_retrieval_top_k_when_not_passed(
         retrieval_batch=retrieval_batch,
         queries=[object()],
         query_signature_ids=["q1"],
+        partial_supervision=None,
         cluster_seeds_require={"s1": "c1"},
     )
 
     assert result.telemetry["retrieval_top_k"] == 37
+    assert result.telemetry["partial_supervision_pair_count"] == 0
+    assert result.telemetry["candidate_row_count"] == 1

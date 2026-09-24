@@ -68,6 +68,7 @@ def _publication_rows() -> list[dict[str, object]]:
 
 def test_module_entrypoint_publishes_tiny_csv(tmp_path: Path) -> None:
     args = _csv_args(tmp_path, _publication_rows())
+    _write_guardrails(tmp_path / "publication-guardrails.json", min_source_rows=20)
     completed = subprocess.run(
         [sys.executable, "-m", "scripts.production.counts.generate_orcid_name_prefix_counts", *args],
         cwd=REPO_ROOT,
@@ -155,42 +156,6 @@ def test_full_run_rejects_invalid_expansion_guard_before_reading_rows(
                 str(guardrails),
             ]
         )
-
-
-def test_reviewed_csv_uses_full_guardrails_without_internal_warehouse_client(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    export = tmp_path / "orcid-export.csv"
-    rows = "".join(
-        f"0000-0000-0000-{index:04d},0000-0000-0000-{index:04d},{first},\n"
-        for index in range(10)
-        for first in ("Alice", "Amy")
-    )
-    export.write_text(
-        f"raw_orcid,orcid,first_name,middle\n{rows}",
-        encoding="utf-8",
-    )
-    guardrails = _write_guardrails(tmp_path / "guardrails.json", min_source_rows=20)
-
-    assert (
-        generator.main(
-            [
-                "--input-csv",
-                str(export),
-                "--guardrails-json",
-                str(guardrails),
-                "--output-dir",
-                str(tmp_path / "output"),
-            ]
-        )
-        == 0
-    )
-
-    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert records[0]["event"] == "orcid_prefix_plan"
-    assert records[0]["plan"]["source"] == str(export.resolve())
-    assert (tmp_path / "output" / ORCID_PREFIX_DATA_FILENAME).is_file()
 
 
 @pytest.mark.parametrize(

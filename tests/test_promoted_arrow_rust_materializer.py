@@ -61,6 +61,10 @@ def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path, targe
         ({"metrics": {"stratified_test_accuracy": True}}, "must be numeric"),
         ({"metrics": {"stratified_test_errors": 1.5}}, "nonnegative integer"),
         ({"metrics": {"weighted_average_error_weights": {"wrong": 1.0}}}, "must equal"),
+        (
+            {"params": {"n_estimators": 1}, "metrics": {"stratified_test_accuracy": 1.0}},
+            "complete official metric set",
+        ),
     ],
 )
 def test_load_target_rejects_invalid_contract(tmp_path: Path, target_payload, overrides, message: str) -> None:
@@ -510,18 +514,7 @@ def test_arrow_rust_row_seed_bypass_uses_manifest_seed_constraints() -> None:
     np.testing.assert_array_equal(mask, np.asarray([True, True]))
 
 
-@pytest.mark.parametrize(
-    ("query_id", "expected"),
-    [
-        ("q", True),
-        ("unseeded", False),
-    ],
-    ids=["input-seeded-query", "unseeded-query-with-loo-annotation"],
-)
-def test_arrow_rust_row_seed_bypass_requires_input_membership(
-    query_id: str,
-    expected: bool,
-) -> None:
+def test_arrow_rust_row_seed_bypass_requires_input_membership() -> None:
     rows = pd.DataFrame(
         [
             {
@@ -531,13 +524,14 @@ def test_arrow_rust_row_seed_bypass_requires_input_membership(
                 "query_in_seed_before_holdout": 1,
                 "label": 1,
             }
+            for query_id in ("q", "unseeded")
         ]
     )
     mask = _arrow_row_seed_bypass_mask(
         rows,
         cluster_seeds_require={"q": "seed", "neighbor": "other_seed"},
     )
-    np.testing.assert_array_equal(mask, np.asarray([expected]))
+    np.testing.assert_array_equal(mask, np.asarray([True, False]))
 
 
 def test_arrow_rust_pair_label_resolution_applies_seed_bypass_without_erasing_disallows(

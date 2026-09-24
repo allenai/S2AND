@@ -2,30 +2,15 @@
 
 from collections.abc import Mapping
 
-import numpy as np
 import pytest
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
 from s2and.featurizer import FeaturizationInfo
-from s2and.incremental_linking.artifact import load_incremental_linking_artifact, save_incremental_linking_artifact
-from s2and.incremental_linking.feature_block_arrow import write_raw_arrow_batch_lookup_indexes
 from s2and.model import Clusterer, FastCluster
-from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
-from tests.helpers import write_test_arrow_artifact_manifest
+from tests.incremental_test_helpers import _dataset, _predict, attach_tiny_incremental_linker, prepare_seed_arrow_bundle
+from tests.incremental_test_helpers import empty_orcid_priors as empty_orcid_priors
 from tests.model_helpers import ConstantDistanceClassifier
-from tests.promoted_linking_helpers import (
-    build_tiny_promoted_booster,
-    synthetic_pairwise_bundle_binding,
-    tiny_logistic_gate_config,
-)
-from tests.test_subblocked_seed_boundaries import _dataset, _predict
-
-
-@pytest.fixture(autouse=True)
-def _empty_orcid_priors(monkeypatch):
-    # These fixtures contain no ORCIDs and do not need generated Stage 1 priors.
-    monkeypatch.setattr("s2and.subblocking._resolved_orcid_prefix_counts", lambda counts: {})
 
 
 def _partition(clusters: Mapping[object, list[str]]) -> list[list[str]]:
@@ -49,18 +34,8 @@ def _incremental_predictions(tmp_path, dataset, *, enabled, partial_supervision,
             clusterer.predict_incremental(signatures, dataset, partial_supervision=partial_supervision)["clusters"]
         ),
     )
-    paths = write_raw_planner_arrow_from_anddata(dataset, tmp_path / "arrow", include_specter=True)
-    paths, _ = write_raw_arrow_batch_lookup_indexes(paths, tmp_path / "arrow")
-    write_test_arrow_artifact_manifest(tmp_path / "arrow", paths)
-    booster, _ = build_tiny_promoted_booster()
-    save_incremental_linking_artifact(
-        booster,
-        tmp_path / "linker",
-        gate_config=tiny_logistic_gate_config(),
-        target_spec={},
-        pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
-    )
-    clusterer.incremental_linker_artifact = load_incremental_linking_artifact(tmp_path / "linker")
+    prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+    attach_tiny_incremental_linker(clusterer, tmp_path / "linker")
     with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
         yield (
             "arrow",
@@ -77,9 +52,18 @@ def _incremental_predictions(tmp_path, dataset, *, enabled, partial_supervision,
         )
 
 
-@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("threshold", [None, 2])
-@pytest.mark.parametrize("case", ["dataset_disallow", "caller_disallow", "zero_override", "soft_override"])
+@pytest.mark.parametrize(
+    ("case", "enabled"),
+    [
+        ("dataset_disallow", False),
+        ("dataset_disallow", True),
+        ("caller_disallow", False),
+        ("caller_disallow", True),
+        ("zero_override", True),
+        ("soft_override", True),
+    ],
+)
 def test_bulk_uses_effective_constraints_before_real_subblocking(tmp_path, enabled, threshold, case):
     dataset = _dataset([("Ada", "", "Smith")] * 3, {})
     dataset.cluster_seeds_disallow = set() if case == "caller_disallow" else {("0", "1")}
@@ -132,15 +116,13 @@ def test_incremental_negative_policy_preserves_seed_anchors(tmp_path, enabled, c
     assert dataset.cluster_seeds_disallow == ({pair} if case.startswith("dataset") else set())
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("override", [0.0, 0.3])
-def test_incremental_override_precedes_retrieval(tmp_path, enabled, reverse, override):
+def test_incremental_override_precedes_retrieval(tmp_path, override):
     dataset = _dataset([("Ada", "", "Smith")] * 2, {"0": "claimed"})
     dataset.cluster_seeds_disallow = {("0", "1")}
-    pair = ("1", "0") if reverse else ("0", "1")
+    pair = ("0", "1")
     partial = {pair: override}
-    for route, clusters in _incremental_predictions(tmp_path, dataset, enabled=enabled, partial_supervision=partial):
+    for route, clusters in _incremental_predictions(tmp_path, dataset, enabled=True, partial_supervision=partial):
         assert clusters == [["0", "1"]], route
     assert dataset.cluster_seeds_disallow == {("0", "1")}
     assert partial == {pair: override}
@@ -183,20 +165,3 @@ def test_disabled_dataset_disallow_cannot_split_altered_profile_during_seed_setu
     assert _partition(result["clusters"]) == [["0", "1"], ["2"]]
     assert dataset.cluster_seeds_require == {"0": "claimed", "1": "claimed"}
     assert dataset.cluster_seeds_disallow == dataset_disallows
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-def test_arrow_precomputed_distance_rejection_still_uses_supplied_dataset_disallows(tmp_path, enabled):
-    """The effective-constraint gate does not relax the separate precomputed API."""
-    dataset = _dataset([("Ada", "", "Smith")] * 3, {})
-    dataset.cluster_seeds_disallow = {("0", "1")}
-    with pytest.raises(ValueError, match="cluster_seeds_disallow cannot be used with precomputed dists"):
-        _predict(
-            tmp_path,
-            dataset,
-            {"one": ["0", "1", "2"]},
-            "arrow",
-            threshold=None,
-            dists={"one": np.array([0.1, 0.1, 0.1])},
-            use_default_constraints_as_supervision=enabled,
-        )

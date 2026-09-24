@@ -58,8 +58,20 @@ def _members(blocks: dict[str, list[str]]) -> set[str]:
     return {signature for signatures in blocks.values() for signature in signatures}
 
 
-@pytest.mark.parametrize("kind", ["fixed_blocks", "fixed_signatures", "blocks", "signatures", "time"])
-@pytest.mark.parametrize("split,index", [("train", 0), ("val", 1), ("test", 2)])
+# Every kind retains its holdout and all three training-pair membership checks;
+# split selection is shared after resolving the three populations.
+@pytest.mark.parametrize(
+    "kind,split,index",
+    [
+        ("fixed_blocks", "train", 0),
+        ("fixed_blocks", "val", 1),
+        ("fixed_blocks", "test", 2),
+        ("fixed_signatures", "test", 2),
+        ("blocks", "test", 2),
+        ("signatures", "test", 2),
+        ("time", "test", 2),
+    ],
+)
 def test_cluster_eval_matches_configured_split(dataset: ANDData, kind: str, split: str, index: int) -> None:
     """Evaluation honors explicit populations and preserves default split order."""
     if kind == "fixed_blocks":

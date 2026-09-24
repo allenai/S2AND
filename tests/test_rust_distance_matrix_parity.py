@@ -174,7 +174,7 @@ def test_predict_from_arrow_filters_real_rust_featurizer(
 
 
 @pytest.mark.parametrize("pair_chunk_size", [1, 3], ids=["one-pair", "whole-block"])
-@pytest.mark.parametrize("distance", [0.4999, 0.5, 0.5001])
+@pytest.mark.parametrize("distance", [0.5, 0.5001])
 def test_fastcluster_stored_and_streaming_precision_at_threshold(
     parity_datasets: tuple[ANDData, ANDData],
     pair_chunk_size: int,

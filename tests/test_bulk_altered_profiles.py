@@ -2,13 +2,8 @@
 
 import pytest
 
-from tests.test_subblocked_seed_boundaries import _assert_partition, _dataset, _predict
-
-
-@pytest.fixture(autouse=True)
-def _empty_orcid_priors(monkeypatch):
-    # Generated ORCID priors do not participate in these seed-policy cases.
-    monkeypatch.setattr("s2and.subblocking._resolved_orcid_prefix_counts", lambda counts: {})
+from tests.incremental_test_helpers import _dataset, _predict
+from tests.incremental_test_helpers import empty_orcid_priors as empty_orcid_priors
 
 
 @pytest.mark.parametrize("route", ["python", "arrow"])
@@ -68,3 +63,9 @@ def test_bulk_altered_marker_does_not_bypass_required_component_size_limit(tmp_p
     else:
         clusters = _predict(tmp_path, dataset, blocks, route, threshold=threshold, distance=0.9, **kwargs)
         assert {frozenset(members) for members in clusters.values()} == {frozenset({"0", "1", "2"}), frozenset({"3"})}
+
+
+def _assert_partition(clusters, blocks):
+    ids = [sid for members in clusters.values() for sid in members]
+    assert sorted(ids) == sorted(sid for members in blocks.values() for sid in members)
+    assert all(any(set(members) <= set(block) for block in blocks.values()) for members in clusters.values())

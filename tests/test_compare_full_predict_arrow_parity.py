@@ -9,7 +9,6 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from s2and.arrow_inputs import ArrowDataset
 from scripts.verification import compare_full_predict_arrow_parity as parity_module
 from scripts.verification.compare_full_predict_arrow_parity import (
     _assert_exact,
@@ -254,11 +253,3 @@ def test_parity_arrow_writer_adds_current_raw_planner_indexes(tmp_path) -> None:
     assert indexed_paths["signatures_batch_index"].endswith("signatures.signatures_batch_index.bin")
     assert index_metrics["signatures_batch_index"]["magic"] == "S2ABI002"
     assert physical_layout["tables"]["signatures"]["batch_index_present"] is True
-
-
-def test_parity_arrow_writer_publishes_validator_compatible_manifest(tmp_path) -> None:
-    from tests.helpers import write_minimal_arrow_prediction_bundle
-
-    write_minimal_arrow_prediction_bundle(tmp_path)
-    with ArrowDataset.open(tmp_path) as dataset:
-        assert dataset.root == tmp_path.resolve()

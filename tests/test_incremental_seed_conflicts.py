@@ -7,18 +7,9 @@ import pytest
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
 from s2and.featurizer import FeaturizationInfo
-from s2and.incremental_linking.artifact import load_incremental_linking_artifact, save_incremental_linking_artifact
-from s2and.incremental_linking.feature_block_arrow import write_raw_arrow_batch_lookup_indexes
 from s2and.model import Clusterer, FastCluster
-from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
-from tests.helpers import write_test_arrow_artifact_manifest
+from tests.incremental_test_helpers import _dataset, attach_tiny_incremental_linker, prepare_seed_arrow_bundle
 from tests.model_helpers import ConstantDistanceClassifier
-from tests.promoted_linking_helpers import (
-    build_tiny_promoted_booster,
-    synthetic_pairwise_bundle_binding,
-    tiny_logistic_gate_config,
-)
-from tests.test_subblocked_seed_boundaries import _dataset
 
 CONFLICT_MESSAGE = (
     "incremental_seed_disallow_conflict: seed_group='claimed', pair=('0', '1'); "
@@ -38,18 +29,8 @@ def _predict(tmp_path, dataset, route, *, enabled=True, partial=None, threshold=
     if route == "python":
         result = clusterer.predict_incremental(requested, dataset, partial_supervision=partial)
     else:
-        paths = write_raw_planner_arrow_from_anddata(dataset, tmp_path / "arrow", include_specter=True)
-        paths, _ = write_raw_arrow_batch_lookup_indexes(paths, tmp_path / "arrow")
-        write_test_arrow_artifact_manifest(tmp_path / "arrow", paths)
-        booster, _ = build_tiny_promoted_booster()
-        save_incremental_linking_artifact(
-            booster,
-            tmp_path / "linker",
-            gate_config=tiny_logistic_gate_config(),
-            target_spec={},
-            pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
-        )
-        clusterer.incremental_linker_artifact = load_incremental_linking_artifact(tmp_path / "linker")
+        prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+        attach_tiny_incremental_linker(clusterer, tmp_path / "linker")
         with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
             result = clusterer.predict_incremental_from_arrow(
                 requested,
@@ -65,26 +46,38 @@ def _predict(tmp_path, dataset, route, *, enabled=True, partial=None, threshold=
 
 
 @pytest.mark.parametrize("altered", [False, True])
-@pytest.mark.parametrize("threshold", [None, 1])
 @pytest.mark.parametrize(
-    ("enabled", "source", "override", "reject"),
+    ("enabled", "source", "override", "reject", "threshold"),
     [
-        pytest.param(True, "dataset", None, True, id="dataset-active"),
-        pytest.param(False, "dataset", None, False, id="dataset-disabled"),
-        pytest.param(True, "caller", LARGE_DISTANCE, True, id="caller-defaults-on"),
-        pytest.param(False, "caller", LARGE_DISTANCE, True, id="caller-defaults-off"),
-        pytest.param(True, "dataset", 0.0, False, id="zero-override"),
-        pytest.param(True, "dataset", 0.3, False, id="soft-override"),
-        pytest.param(True, "caller", LARGE_DISTANCE - 1, False, id="high-soft-distance"),
+        pytest.param(True, "dataset", None, True, None, id="dataset-active-None"),
+        pytest.param(False, "dataset", None, False, None, id="dataset-disabled-None"),
+        pytest.param(False, "dataset", None, False, 1, id="dataset-disabled-1"),
+        pytest.param(True, "caller", LARGE_DISTANCE, True, None, id="caller-defaults-on-None"),
+        pytest.param(False, "caller", LARGE_DISTANCE, True, None, id="caller-defaults-off-None"),
+        pytest.param(True, "dataset", 0.0, False, None, id="zero-override-None"),
+        pytest.param(True, "dataset", 0.0, False, 1, id="zero-override-1"),
+        pytest.param(True, "dataset", 0.3, False, None, id="soft-override-None"),
+        pytest.param(True, "dataset", 0.3, False, 1, id="soft-override-1"),
+        pytest.param(True, "caller", LARGE_DISTANCE - 1, False, None, id="high-soft-distance-None"),
+        pytest.param(True, "caller", LARGE_DISTANCE - 1, False, 1, id="high-soft-distance-1"),
     ],
 )
 def test_incremental_seed_conflict_policy_matches_routes(
-    tmp_path, altered, threshold, enabled, source, override, reject
+    tmp_path, monkeypatch, altered, threshold, enabled, source, override, reject
 ):
     dataset = _dataset([("Ada", "", "Smith")] * 4, {"0": "claimed", "1": "claimed"})
     dataset.altered_cluster_signatures = ["0"] if altered else []
     dataset.cluster_seeds_disallow = {("0", "1")} if source == "dataset" else set()
     partial = {} if override is None else {("1", "0"): override}
+    if reject:
+
+        def reject_promoted_scoring(*_args, **_kwargs):
+            raise AssertionError("Conflicting original seed membership reached promoted scoring")
+
+        monkeypatch.setattr(
+            "s2and.incremental_linking.production.runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
+            reject_promoted_scoring,
+        )
     errors = []
     for route in ["python", "arrow"]:
         if reject:
@@ -96,6 +89,7 @@ def test_incremental_seed_conflict_policy_matches_routes(
                     enabled=enabled,
                     partial=partial,
                     threshold=threshold,
+                    classifier=_RejectScoringClassifier(),
                 )
             except ValueError as error:
                 errors.append(str(error))
@@ -153,16 +147,6 @@ def test_negatives_outside_an_original_seed_group_remain_valid(tmp_path, altered
 class _RejectScoringClassifier(ConstantDistanceClassifier):
     def predict_proba(self, features):
         raise AssertionError("Conflicting original seed membership reached model scoring")
-
-
-@pytest.mark.parametrize("route", ["python", "arrow"])
-@pytest.mark.parametrize("altered", [False, True])
-def test_seed_conflict_is_rejected_before_model_scoring(tmp_path, route, altered):
-    dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "claimed", "1": "claimed"})
-    dataset.altered_cluster_signatures = ["0"] if altered else []
-    dataset.cluster_seeds_disallow = {("0", "1")}
-    with pytest.raises(ValueError, match=re.escape(CONFLICT_MESSAGE)):
-        _predict(tmp_path, dataset, route, classifier=_RejectScoringClassifier())
 
 
 @pytest.mark.parametrize("reverse", [False, True])

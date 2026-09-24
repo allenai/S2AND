@@ -156,55 +156,41 @@ def test_release_candidate_smoke_uses_exact_downloaded_artifacts(
     }
 
 
-def test_release_candidate_smoke_rejects_modified_nested_dataset_manifest(
+@pytest.mark.parametrize(
+    ("corruption", "message"),
+    [
+        ("dataset-manifest", r"dataset_manifests\.smoke\.sha256 mismatch"),
+        ("release-version", "model/data version mismatch"),
+        ("name-count-material", "mismatch"),
+        ("model-material", "mismatch"),
+    ],
+)
+def test_release_candidate_smoke_rejects_corrupted_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+    message: str,
 ) -> None:
     model_dir, data_root = _write_release_smoke_inputs(tmp_path, monkeypatch)
-    manifest_path = data_root / "smoke" / "manifest.json"
-    manifest_path.write_bytes(manifest_path.read_bytes() + b" ")
+    if corruption == "dataset-manifest":
+        manifest_path = data_root / "smoke" / "manifest.json"
+        manifest_path.write_bytes(manifest_path.read_bytes() + b" ")
+    elif corruption == "release-version":
+        root_manifest_path = data_root / "manifest.json"
+        root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))
+        root_manifest["release_version"] = "different"
+        root_manifest_path.write_text(json.dumps(root_manifest, sort_keys=True) + "\n", encoding="utf-8")
+    elif corruption == "name-count-material":
+        index_root = data_root / "name_counts_index"
+        manifest = json.loads((index_root / "manifest.json").read_text(encoding="utf-8"))
+        material_path = index_root / f"{next(iter(manifest['files']))}.bin"
+        material_path.write_bytes(material_path.read_bytes() + b"\0")
+    else:
+        assert corruption == "model-material"
+        clusterer_path = model_dir / "clusterer.json"
+        clusterer_path.write_bytes(clusterer_path.read_bytes() + b" ")
 
-    with pytest.raises(ValueError, match=r"dataset_manifests\.smoke\.sha256 mismatch"):
-        _run_release_candidate(model_dir, data_root)
-
-
-def test_release_candidate_smoke_rejects_model_data_release_version_mismatch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model_dir, data_root = _write_release_smoke_inputs(tmp_path, monkeypatch)
-    root_manifest_path = data_root / "manifest.json"
-    root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))
-    root_manifest["release_version"] = "different"
-    root_manifest_path.write_text(json.dumps(root_manifest, sort_keys=True) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="model/data version mismatch"):
-        _run_release_candidate(model_dir, data_root)
-
-
-def test_release_candidate_smoke_rejects_modified_name_count_material(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model_dir, data_root = _write_release_smoke_inputs(tmp_path, monkeypatch)
-    index_root = data_root / "name_counts_index"
-    manifest = json.loads((index_root / "manifest.json").read_text(encoding="utf-8"))
-    material_path = index_root / f"{next(iter(manifest['files']))}.bin"
-    material_path.write_bytes(material_path.read_bytes() + b"\0")
-
-    with pytest.raises(ValueError, match="mismatch"):
-        _run_release_candidate(model_dir, data_root)
-
-
-def test_release_candidate_smoke_rejects_modified_model_material(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model_dir, data_root = _write_release_smoke_inputs(tmp_path, monkeypatch)
-    clusterer_path = model_dir / "clusterer.json"
-    clusterer_path.write_bytes(clusterer_path.read_bytes() + b" ")
-
-    with pytest.raises(ValueError, match="mismatch"):
+    with pytest.raises(ValueError, match=message):
         _run_release_candidate(model_dir, data_root)
 
 

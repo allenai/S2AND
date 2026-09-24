@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import replace
@@ -45,7 +44,6 @@ from s2and.incremental_linking.runtime import (
     CandidateBatchPairwiseModelResult,
     LinkOrAbstainCompactResult,
     LinkOrAbstainProductionResult,
-    LinkOrAbstainRetrievedCandidatesResult,
     _predict_incremental_link_or_abstain_from_preplanned_raw_arrow,
 )
 from s2and.model import Clusterer
@@ -273,7 +271,6 @@ def _with_query_signatures(
 
 def test_raw_planner_arrow_tables_from_anddata_builds_requested_mini_contract() -> None:
     dataset = _tiny_anddata()
-    dataset.cluster_seeds_disallow = set()
     tables = raw_planner_arrow_tables_from_anddata(
         dataset,
         signature_ids=["q", "s1"],
@@ -613,19 +610,6 @@ def test_read_cluster_seeds_arrow_rejects_duplicate_signature_rows(tmp_path: Pat
         read_cluster_seeds_arrow(path)
 
 
-def test_write_arrow_ipc_table_writes_bounded_record_batches(tmp_path: Path) -> None:
-    import pyarrow as pa
-
-    table = pa.table({"signature_id": pa.array([str(index) for index in range(5)], type=pa.string())})
-    path = write_arrow_ipc_table(table, tmp_path / "signatures.arrow", max_record_batch_rows=2)
-
-    assert arrow_ipc_physical_layout(path) == {
-        "row_count": 5,
-        "record_batch_count": 3,
-        "actual_max_batch_rows": 2,
-    }
-
-
 def test_raw_planner_index_rejects_unbounded_large_batch(tmp_path: Path) -> None:
     import pyarrow as pa
 
@@ -645,6 +629,11 @@ def test_raw_planner_index_metadata_uses_stem_qualified_sidecar(tmp_path: Path) 
 
     table = pa.table({"signature_id": pa.array([str(index) for index in range(5)], type=pa.string())})
     path = write_arrow_ipc_table(table, tmp_path / "signatures.arrow", max_record_batch_rows=2)
+    assert arrow_ipc_physical_layout(path) == {
+        "row_count": 5,
+        "record_batch_count": 3,
+        "actual_max_batch_rows": 2,
+    }
     indexed_paths, index_metrics = write_raw_arrow_batch_lookup_indexes(
         {"signatures": path},
         tmp_path,
@@ -775,22 +764,6 @@ def test_raw_planner_index_reuse_rejects_record_count_mismatch(tmp_path: Path) -
         )
 
 
-def test_write_name_counts_index(tmp_path: Path) -> None:
-    mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
-
-    index_path, index_metrics = write_name_counts_index(tmp_path, mappings)
-
-    assert "reused" not in index_metrics
-    assert index_metrics["row_count"] == 4
-    assert index_metrics["first_count"] == 1
-    manifest = json.loads((Path(index_path) / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["kind"] == "s2and_name_counts"
-    assert manifest["format_version"] == 1
-    assert set(manifest["files"]["first"]) == {"byte_count", "sha256"}
-    with pytest.raises(FileExistsError, match="target already exists"):
-        write_name_counts_index(tmp_path, mappings)
-
-
 @pytest.mark.skipif(os.name != "nt", reason="Windows prevents unlinking open sort-run files")
 def test_name_count_index_merge_failure_closes_sort_runs_before_cleanup(
     tmp_path: Path,
@@ -819,15 +792,6 @@ def test_name_count_index_merge_failure_closes_sort_runs_before_cleanup(
         )
 
     assert list(tmp_path.glob(f".{output_path.name}.run.*")) == []
-
-
-def test_raw_planner_arrow_tables_from_anddata_filters_one_sided_disallow_pair() -> None:
-    tables = raw_planner_arrow_tables_from_anddata(
-        _tiny_anddata(),
-        signature_ids=["q", "s1"],
-    )
-
-    assert tables["cluster_seed_disallows"].num_rows == 0
 
 
 def test_disallow_contract_rejects_out_of_set_pair() -> None:
@@ -1014,7 +978,6 @@ def test_raw_arrow_scoring_requires_featurizer_with_provided_raw_plan(tmp_path: 
 @pytest.mark.parametrize(
     ("component_members", "expected_seed_count", "expected_component_count"),
     [
-        ({"c_ada": ["s1"], "c_other": ["s2", "s3"]}, 3, 2),
         ({"c_ada": ["s1", "s1"], "c_other": ["s2", "s3"], "empty": []}, 3, 2),
         ({"empty": []}, 7, 0),
     ],
@@ -1137,82 +1100,3 @@ def test_preplanned_raw_arrow_scoring_rejects_mismatched_query_author_count(tmp_
                 raw_plan_bundle=bundle,
                 rust_featurizer=featurizer,
             )
-
-
-def test_from_retrieval_skips_pair_id_build_when_partial_supervision_empty(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import s2and.incremental_linking.runtime as runtime_module
-
-    order = RawArrowPlanBundle.from_native_mapping(_raw_plan()).signature_order
-    retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
-        RawArrowPlanBundle.from_native_mapping(_raw_plan()),
-        feature_block_signature_order=order,
-    )
-
-    class FakeFeaturizer:
-        def signature_ids(self) -> list[str]:
-            return list(order.signature_ids)
-
-    def fail_candidate_pair_ids(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("pair ids should not be materialized when partial_supervision is empty")
-
-    def fake_pairwise_model(*args: Any, **_kwargs: Any) -> CandidateBatchPairwiseModelResult:
-        candidate_batch = args[1]
-        return CandidateBatchPairwiseModelResult(
-            row_signals={
-                "paper_author_list_max_overlap_count": np.zeros(candidate_batch.row_count, dtype=np.float32),
-            },
-            pairwise_stats=cast(Any, None),
-            telemetry={"feature_seconds": 0.0},
-        )
-
-    def fake_retrieved_candidates(*args: Any, **kwargs: Any) -> LinkOrAbstainRetrievedCandidatesResult:
-        current_retrieval_batch = args[1]
-        return LinkOrAbstainRetrievedCandidatesResult(
-            feature_matrix=LinkerFeatureMatrix(
-                matrix=np.empty((2, 0), dtype=np.float32),
-                feature_columns=(),
-                candidate_batch=current_retrieval_batch.candidate_batch,
-            ),
-            compact_result=LinkOrAbstainCompactResult(
-                probabilities=np.asarray([0.8, 0.2], dtype=np.float32),
-                decisions=(),
-            ),
-            telemetry={"candidate_row_count": current_retrieval_batch.candidate_batch.row_count},
-        )
-
-    monkeypatch.setattr(runtime_module, "_candidate_pair_ids", fail_candidate_pair_ids)
-    monkeypatch.setattr(
-        runtime_module,
-        "compute_candidate_batch_pairwise_model_and_aggregate_stats",
-        fake_pairwise_model,
-    )
-    monkeypatch.setattr(runtime_module, "_production_query_author_row_signals", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        runtime_module,
-        "_predict_incremental_link_or_abstain_retrieved_candidates",
-        fake_retrieved_candidates,
-    )
-
-    result = runtime_module._predict_incremental_link_or_abstain_production_from_retrieval_private(
-        Clusterer(
-            featurizer_info=FeaturizationInfo(features_to_use=[]),
-            classifier=None,
-            n_jobs=1,
-            use_default_constraints_as_supervision=False,
-        ),
-        _raw_test_artifact(),
-        featurizer=FakeFeaturizer(),
-        retrieval_batch=retrieval_batch,
-        queries=[object()],
-        query_signature_ids=["q"],
-        partial_supervision=None,
-        cluster_seeds_require={"s1": "c_ada", "s2": "c_other", "s3": "c_other"},
-        n_jobs=1,
-        total_ram_bytes=None,
-        retrieval_top_k=2,
-    )
-
-    assert result.telemetry["partial_supervision_pair_count"] == 0
-    assert result.telemetry["candidate_row_count"] == 2

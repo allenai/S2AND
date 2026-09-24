@@ -142,23 +142,14 @@ def test_arrow_training_rejects_noncanonical_signature_affiliations_type(tmp_pat
         load_signatures_from_arrow(signatures_path)
 
 
-@pytest.mark.parametrize(
-    ("table_name", "column_name", "values", "message"),
-    [
-        ("papers", "paper_id", pa.array([1], type=pa.int64()), "papers column 'paper_id' expected string"),
-        ("paper_authors", "position", pa.array([0], type=pa.int32()), "paper_authors column 'position' expected int64"),
-    ],
-)
-def test_arrow_training_rejects_noncanonical_paper_column_types(
-    tmp_path: Path, table_name: str, column_name: str, values: pa.Array, message: str
-) -> None:
+def test_arrow_training_rejects_noncanonical_paper_column_types(tmp_path: Path) -> None:
     papers_path = tmp_path / "papers.arrow"
     authors_path = tmp_path / "paper_authors.arrow"
     _write_minimal_papers_table(papers_path, ["p1"])
     _write_minimal_paper_authors_table(authors_path, ["p1"])
-    _replace_arrow_column(tmp_path / f"{table_name}.arrow", column_name, values)
+    _replace_arrow_column(authors_path, "position", pa.array([0], type=pa.int32()))
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="paper_authors column 'position' expected int64"):
         load_papers_from_arrow(papers_path, authors_path)
 
 
@@ -211,7 +202,9 @@ def test_arrow_training_accepts_missing_orcid_column(tmp_path: Path) -> None:
     assert signatures["s1"].author_info_orcid is None
 
 
-def test_arrow_training_use_orcid_id_controls_python_and_native_ingestion(tmp_path: Path) -> None:
+def test_arrow_training_use_orcid_id_controls_python_and_native_ingestion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     signatures_path = tmp_path / "signatures.arrow"
     papers_path = tmp_path / "papers.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
@@ -236,6 +229,7 @@ def test_arrow_training_use_orcid_id_controls_python_and_native_ingestion(tmp_pa
     }
     paths, _ = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
+    paths["name_counts_index"], _ = write_name_counts_index(tmp_path / "name_counts", tiny_name_counts_tuple())
     write_test_arrow_artifact_manifest(tmp_path, paths)
 
     def native_constraint(use_orcid_id: bool) -> float | None:
@@ -251,6 +245,30 @@ def test_arrow_training_use_orcid_id_controls_python_and_native_ingestion(tmp_pa
 
     assert native_constraint(True) == 0.0
     assert native_constraint(False) is None
+
+    replace_calls = 0
+    original_replace = Signature._replace
+
+    def recording_replace(signature: Signature, **changes: Any) -> Signature:
+        nonlocal replace_calls
+        replace_calls += 1
+        return original_replace(signature, **changes)
+
+    monkeypatch.setattr(Signature, "_replace", recording_replace)
+    with ArrowDataset.open(tmp_path) as arrow_source:
+        arrow_dataset = build_training_anddata_from_arrow(
+            arrow_source,
+            "dummy_arrow_training_without_orcid",
+            clusters={"c1": {"signature_ids": ["s1", "s2"]}},
+            name_tuples=set(),
+            random_seed=42,
+            n_jobs=1,
+            use_orcid_id=False,
+        )
+
+        assert arrow_dataset.use_orcid_id is False
+        assert all(signature.author_info_orcid is None for signature in arrow_dataset.signatures.values())
+        assert replace_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -534,32 +552,6 @@ def test_arrow_training_constructor_defers_exact_papers_and_uses_native_sidecars
     assert arrow_dataset.papers == expected_papers
     assert arrow_dataset.papers is arrow_dataset.__dict__["papers"]
     assert load_calls == 1
-
-
-def test_arrow_training_constructor_retains_disabled_orcid_policy(
-    training_bundle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    replace_calls = 0
-    original_replace = Signature._replace
-
-    def recording_replace(signature: Signature, **changes: Any) -> Signature:
-        nonlocal replace_calls
-        replace_calls += 1
-        return original_replace(signature, **changes)
-
-    monkeypatch.setattr(Signature, "_replace", recording_replace)
-    arrow_dataset = build_training_anddata_from_arrow(
-        training_bundle["arrow_source"],
-        "dummy_arrow_training_without_orcid",
-        clusters=str(DUMMY_DIR / "clusters.json"),
-        random_seed=42,
-        n_jobs=1,
-        use_orcid_id=False,
-    )
-
-    assert arrow_dataset.use_orcid_id is False
-    assert all(signature.author_info_orcid is None for signature in arrow_dataset.signatures.values())
-    assert replace_calls == 0
 
 
 def _fixed_pair_frames(json_dataset: ANDData) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

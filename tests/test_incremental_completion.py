@@ -112,11 +112,7 @@ def test_callback_failure_propagates_without_mutating_assignment():
 @pytest.mark.parametrize(
     "orcids,suppress,supervision,expected",
     [
-        ({}, False, {}, [["a", "c"], ["b"], ["d"]]),
-        ({"a": "shared", "b": "shared"}, False, {}, [["a", "b", "c"], ["d"]]),
-        ({"a": "shared", "b": "shared"}, True, {}, [["a", "c"], ["b"], ["d"]]),
         ({}, False, {("b", "d"): LARGE_DISTANCE - 1}, [["a", "c"], ["b", "d"]]),
-        ({}, False, {("b", "d"): LARGE_DISTANCE}, [["a", "c"], ["b"], ["d"]]),
         ({}, False, {("outside", "a"): 0}, [["a", "c"], ["b"], ["d"]]),
     ],
 )

@@ -412,18 +412,6 @@ class TestData(unittest.TestCase):
         assert len(val_pairs) == 500
         assert len(test_pairs) == 7244
 
-    def test_split_cluster_signatures_accepts_float_ratios_close_to_one(self):
-        self.qian_dataset.train_ratio = 0.7
-        self.qian_dataset.val_ratio = 0.2
-        self.qian_dataset.test_ratio = 0.1
-
-        train_blocks, val_blocks, test_blocks = self.qian_dataset.split_cluster_signatures()
-
-        self.assertEqual(
-            set(train_blocks) | set(val_blocks) | set(test_blocks),
-            set(self.qian_dataset.get_blocks()),
-        )
-
     def test_split_cluster_signatures_rejects_out_of_range_ratios(self):
         self.qian_dataset.train_ratio = 1.1
         self.qian_dataset.val_ratio = -0.1
@@ -432,8 +420,9 @@ class TestData(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "between 0 and 1"):
             self.qian_dataset.split_cluster_signatures()
 
-    def test_split_cluster_signatures_allows_empty_ratio_partitions(self):
+    def test_split_cluster_signatures_preserves_ratio_partitions(self):
         cases = [
+            ((0.7, 0.2, 0.1), set()),
             ((1.0, 0.0, 0.0), {"val", "test"}),
             ((0.8, 0.2, 0.0), {"test"}),
             ((0.8, 0.0, 0.2), {"val"}),
@@ -449,6 +438,10 @@ class TestData(unittest.TestCase):
                     ) = ratios
 
                     train_blocks, val_blocks, test_blocks = self.qian_dataset.split_cluster_signatures()
+                    self.assertEqual(
+                        set(train_blocks) | set(val_blocks) | set(test_blocks),
+                        set(self.qian_dataset.get_blocks()),
+                    )
 
                     split_signatures = {
                         "train": {signature for block in train_blocks.values() for signature in block},

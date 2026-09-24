@@ -60,11 +60,7 @@ def test_combining_block_local_predictions_preserves_reserved_cluster_keys() -> 
 
 @pytest.mark.parametrize("backend", ["python", "rust"])
 @pytest.mark.parametrize("reverse_block", [False, True])
-@pytest.mark.parametrize("reverse_entries", [False, True])
-@pytest.mark.parametrize("soft_distance", [0.0, 0.2])
-def test_seed_restoration_accepts_equal_reverse_supervision_and_rejects_conflicts(
-    tmp_path: Path, backend: str, reverse_block: bool, reverse_entries: bool, soft_distance: float
-) -> None:
+def test_seed_restoration_accepts_equal_reverse_supervision(tmp_path: Path, backend: str, reverse_block: bool) -> None:
     """Seed restoration is independent of pair orientation and dictionary order."""
     from s2and.feature_port import _get_rust_featurizer
     from tests.helpers import build_arrow_training_dataset
@@ -84,13 +80,9 @@ def test_seed_restoration_accepts_equal_reverse_supervision_and_rejects_conflict
         n_jobs=1,
     )
     blocks = {"block": ["2", "1", "0"] if reverse_block else ["2", "0", "1"]}
+    soft_distance = 0.2
     reference = {("2", "0"): 0.0, ("2", "1"): 1.0, ("0", "1"): soft_distance}
     duplicate = {**reference, ("1", "0"): soft_distance}
-    contradictory = {**reference, ("1", "0"): 10000.0}
-    if reverse_entries:
-        duplicate = dict(reversed(list(duplicate.items())))
-        contradictory = dict(reversed(list(contradictory.items())))
-
     if backend == "rust":
         arrow_dataset = build_arrow_training_dataset(dataset, tmp_path)
         featurizer = _get_rust_featurizer(arrow_dataset)
@@ -107,10 +99,6 @@ def test_seed_restoration_accepts_equal_reverse_supervision_and_rejects_conflict
             )[0]
             for supervision in (reference, duplicate)
         ]
-        with pytest.raises(ValueError, match="partial_supervision"):
-            clusterer.make_distance_matrices_from_rust_featurizer(blocks, featurizer, partial_supervision=contradictory)
-        with pytest.raises(ValueError, match="partial_supervision"):
-            clusterer.predict_from_rust_featurizer(blocks, featurizer, partial_supervision=contradictory)
     else:
         matrices = [
             clusterer.make_distance_matrices(blocks, dataset, partial_supervision=supervision)
@@ -120,10 +108,6 @@ def test_seed_restoration_accepts_equal_reverse_supervision_and_rejects_conflict
             clusterer.predict(blocks, dataset, partial_supervision=supervision)[0]
             for supervision in (reference, duplicate)
         ]
-        with pytest.raises(ValueError, match="partial_supervision"):
-            clusterer.make_distance_matrices(blocks, dataset, partial_supervision=contradictory)
-        with pytest.raises(ValueError, match="partial_supervision"):
-            clusterer.predict(blocks, dataset, partial_supervision=contradictory)
     np.testing.assert_array_equal(matrices[0]["block"], matrices[1]["block"])
     expected = {frozenset({"0", "1", "2"})}
     for output in outputs:

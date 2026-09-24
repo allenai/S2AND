@@ -8,45 +8,6 @@ from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from tests.helpers import build_dummy_dataset
 
 
-def _mock_chunk_plan(chunk_pairs: int, total_pairs: int) -> memory_budget.RustBatchChunkPlan:
-    bytes_per_pair_row = featurizer_mod.NUM_FEATURES * 8 + 128
-    predicted_chunk_bytes = int(chunk_pairs) * int(bytes_per_pair_row)
-    predicted_features_matrix_bytes = int(total_pairs) * int(featurizer_mod.NUM_FEATURES * 8)
-    predicted_labels_bytes = int(total_pairs) * 8
-    predicted_stage_peak_delta_bytes = int(
-        predicted_chunk_bytes + predicted_features_matrix_bytes + predicted_labels_bytes
-    )
-    return memory_budget.RustBatchChunkPlan(
-        total_ram_bytes=2 * 1024 * 1024 * 1024,
-        total_ram_source="test",
-        current_rss_bytes=256 * 1024 * 1024,
-        current_rss_source="test",
-        available_bytes=1024 * 1024 * 1024,
-        effective_available_fraction=0.5,
-        safety_margin_bytes=128 * 1024 * 1024,
-        stage_budget_fraction=0.25,
-        stage_budget_bytes=256 * 1024 * 1024,
-        base_chunk_pairs=10_000,
-        max_chunk_pairs=10_000,
-        row_overhead_bytes=128,
-        persistent_row_overhead_bytes=0,
-        fixed_overhead_bytes=0,
-        bytes_per_pair_row=int(bytes_per_pair_row),
-        chunk_pairs=int(chunk_pairs),
-        total_rows=int(total_pairs),
-        full_feature_count=featurizer_mod.NUM_FEATURES,
-        selected_feature_count=featurizer_mod.NUM_FEATURES,
-        nameless_feature_count=0,
-        predicted_chunk_bytes=int(predicted_chunk_bytes),
-        predicted_features_matrix_bytes=int(predicted_features_matrix_bytes),
-        predicted_labels_bytes=predicted_labels_bytes,
-        predicted_persistent_row_overhead_bytes=0,
-        predicted_fixed_overhead_bytes=0,
-        predicted_stage_peak_delta_bytes=predicted_stage_peak_delta_bytes,
-        predicted_stage_peak_rss_bytes=256 * 1024 * 1024 + predicted_stage_peak_delta_bytes,
-    )
-
-
 def _pin_stable_rss(monkeypatch, rss_bytes: int = 256 * 1024 * 1024) -> None:
     """Keep chunk-size contract tests independent from live process RSS movement."""
 
@@ -99,24 +60,27 @@ class FakeIndexedRustFeaturizer:
         return np.zeros((len(pairs), len(selected_indices)), dtype=np.float64)
 
 
-def test_rust_batch_uses_configured_plan_and_chunks_for_progress(monkeypatch):
+def test_rust_batch_uses_configured_plan_and_normalizes_integer_ids(monkeypatch):
     dataset = build_dummy_dataset("dummy_rust_chunking", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     _pin_stable_rss(monkeypatch)
 
     call_sizes = []
     selected_indices_seen: list[list[int] | None] = []
+    indexed_pairs_seen: list[tuple[int, int]] = []
     fake_rust_featurizer = FakeIndexedRustFeaturizer(
         sorted(dataset.signatures.keys()),
         call_sizes=call_sizes,
         selected_indices_seen=selected_indices_seen,
+        indexed_pairs_seen=indexed_pairs_seen,
     )
-    pairs = _build_pairs(5)
+    pairs = [(int(left), int(right), label) for left, right, label in _build_pairs(5)]
     plan_kwargs = {}
+    compute_plan = memory_budget.compute_rust_batch_chunk_plan
 
     def _plan(**kwargs):
         plan_kwargs.update(kwargs)
-        return _mock_chunk_plan(chunk_pairs=2, total_pairs=len(pairs))
+        return compute_plan(**{**kwargs, "base_chunk_pairs": 2, "max_chunk_pairs": 2})
 
     monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
     monkeypatch.setattr(memory_budget, "compute_rust_batch_chunk_plan", _plan)
@@ -128,7 +92,7 @@ def test_rust_batch_uses_configured_plan_and_chunks_for_progress(monkeypatch):
     )
 
     features, labels, _ = many_pairs_featurize(
-        pairs,
+        pairs,  # type: ignore[arg-type]
         dataset,
         featurizer_info,
         n_jobs=2,
@@ -147,44 +111,6 @@ def test_rust_batch_uses_configured_plan_and_chunks_for_progress(monkeypatch):
         }
     )
     assert selected_indices_seen == [expected_indices, expected_indices, expected_indices]
-    assert features.shape[0] == len(pairs)
-    assert labels.shape[0] == len(pairs)
-
-
-def test_rust_batch_indexed_api_normalizes_integer_signature_ids(monkeypatch):
-    dataset = build_dummy_dataset("dummy_rust_chunking_indexed_int_ids", name_counts_index=True)
-    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
-    indexed_pairs_seen: list[tuple[int, int]] = []
-    fake_rust_featurizer = FakeIndexedRustFeaturizer(
-        sorted(dataset.signatures.keys()),
-        indexed_pairs_seen=indexed_pairs_seen,
-    )
-    string_pairs = _build_pairs(5)
-    pairs = [(int(left), int(right), label) for left, right, label in string_pairs]
-
-    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
-    monkeypatch.setattr(
-        memory_budget,
-        "compute_rust_batch_chunk_plan",
-        lambda **_kwargs: _mock_chunk_plan(chunk_pairs=2, total_pairs=len(pairs)),
-    )
-    monkeypatch.setattr(feature_port, "s2and_rust", object())
-    monkeypatch.setattr(
-        feature_port,
-        "_get_rust_feature_data",
-        lambda _dataset, **_kw: fake_rust_featurizer,
-    )
-
-    features, labels, _ = many_pairs_featurize(
-        pairs,  # type: ignore[arg-type]
-        dataset,
-        featurizer_info,
-        n_jobs=2,
-        chunk_size=1,
-        nan_value=np.nan,
-        total_ram_bytes=2 * 1024 * 1024 * 1024,
-    )
-
     signature_index = {sig_id: idx for idx, sig_id in enumerate(sorted(dataset.signatures.keys()))}
     expected_indexed_pairs = [
         (signature_index[str(left)], signature_index[str(right)]) for left, right, _label in pairs

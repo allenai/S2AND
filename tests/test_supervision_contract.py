@@ -31,17 +31,16 @@ def _clusterer() -> Clusterer:
 
 
 @pytest.mark.parametrize("method", PUBLIC_METHODS)
-@pytest.mark.parametrize("values", [(0.0, 10000.0), (0.2, 0.3)])
-@pytest.mark.parametrize("reverse_entries", [False, True])
-def test_public_boundaries_reject_conflicting_reverse_entries_before_work(method, values, reverse_entries):
+def test_public_boundaries_reject_conflicting_reverse_entries_before_work(method):
     """Even empty requests must not silently discard contradictory caller pairs."""
+    values = (0.0, 10000.0)
     entries = [(("paper-a", "paper-b"), values[0]), (("paper-b", "paper-a"), values[1])]
-    partial = dict(reversed(entries) if reverse_entries else entries)
+    partial = dict(entries)
     original = list(partial.items())
     blocks = [] if "incremental" in method else {}
     # No usable dataset/featurizer: this must fail at the supervision boundary,
     # before leases, feature extraction, subblocking, or candidate selection.
-    with pytest.raises(ValueError, match="partial_supervision") as error:
+    with pytest.raises(ValueError, match="partial_supervision has conflicting distances") as error:
         getattr(_clusterer(), method)(blocks, None, partial_supervision=partial)
     message = str(error.value)
     assert "paper-a" in message and "paper-b" in message
@@ -50,8 +49,8 @@ def test_public_boundaries_reject_conflicting_reverse_entries_before_work(method
 
 
 @pytest.mark.parametrize("method", PUBLIC_METHODS)
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
-def test_public_boundaries_reject_nonfinite_distances_before_work(method, value):
+def test_public_boundaries_reject_nonfinite_distances_before_work(method):
+    value = float("nan")
     partial = {("paper-a", "paper-b"): value}
     blocks = [] if "incremental" in method else {}
     with pytest.raises(ValueError, match="partial_supervision") as error:
@@ -60,7 +59,34 @@ def test_public_boundaries_reject_nonfinite_distances_before_work(method, value)
     assert partial[("paper-a", "paper-b")] is value
 
 
-@pytest.mark.parametrize("value", [-1.0, -0.0, 0.2, 1.0, 10000.0])
+@pytest.mark.parametrize("values", [(0.0, 10000.0), (0.2, 0.3)])
+@pytest.mark.parametrize("reverse_entries", [False, True])
+def test_normalization_rejects_conflicts_in_either_entry_order(values, reverse_entries):
+    from s2and.supervision import normalize_partial_supervision
+
+    entries = [(("paper-a", "paper-b"), values[0]), (("paper-b", "paper-a"), values[1])]
+    partial = dict(reversed(entries) if reverse_entries else entries)
+    original = list(partial.items())
+    with pytest.raises(ValueError, match="partial_supervision has conflicting distances") as error:
+        normalize_partial_supervision(partial)
+    message = str(error.value)
+    assert "paper-a" in message and "paper-b" in message
+    assert all(repr(value) in message for value in values)
+    assert list(partial.items()) == original
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_normalization_rejects_nonfinite_distances_without_mutating_input(value):
+    from s2and.supervision import normalize_partial_supervision
+
+    partial = {("paper-a", "paper-b"): value}
+    with pytest.raises(ValueError, match="partial_supervision") as error:
+        normalize_partial_supervision(partial)
+    assert "paper-a" in str(error.value) and "paper-b" in str(error.value)
+    assert partial[("paper-a", "paper-b")] is value
+
+
+@pytest.mark.parametrize("value", [-1.0, 10000.0])
 def test_normalization_deduplicates_equal_reverse_values_and_owns_its_result(value):
     from s2and.supervision import normalize_partial_supervision
 
@@ -84,13 +110,11 @@ def test_normalization_accepts_equal_numeric_values_and_empty_input():
     assert normalize_partial_supervision(empty) is not empty
 
 
-@pytest.mark.parametrize("reverse_entries", [False, True])
 @pytest.mark.parametrize("second_pair", [("1", "2"), ("2", "1")])
-def test_arrow_id_normalization_checks_conflicts_before_collapsing_keys(reverse_entries, second_pair):
+def test_arrow_id_normalization_checks_conflicts_before_collapsing_keys(second_pair):
     from s2and.supervision import normalize_partial_supervision
 
-    entries = [((1, 2), 0.0), (second_pair, 10000.0)]
-    partial = dict(reversed(entries) if reverse_entries else entries)
+    partial = {(1, 2): 0.0, second_pair: 10000.0}
     original = list(partial.items())
     with pytest.raises(ValueError, match="partial_supervision"):
         normalize_partial_supervision(partial, stringify_ids=True)
@@ -98,9 +122,8 @@ def test_arrow_id_normalization_checks_conflicts_before_collapsing_keys(reverse_
     assert normalize_partial_supervision({(1, 2): 0.2, ("2", "1"): 0.2}, stringify_ids=True) == {("1", "2"): 0.2}
 
 
-@pytest.mark.parametrize("second_pair", [("1", "2"), ("2", "1")])
-def test_arrow_incremental_boundary_rejects_id_collisions_before_loading_data(second_pair):
-    partial = {(1, 2): 0.0, second_pair: 10000.0}
+def test_arrow_incremental_boundary_rejects_id_collisions_before_loading_data():
+    partial = {(1, 2): 0.0, ("2", "1"): 10000.0}
     original = list(partial.items())
     with pytest.raises(ValueError, match="partial_supervision"):
         _clusterer().predict_incremental_from_arrow([], None, partial_supervision=partial)
@@ -191,14 +214,8 @@ def test_bulk_prediction_preserves_predict_helper_overrides(override, threshold,
 def test_equal_reverse_supervision_matches_single_entry_on_real_public_routes(tmp_path, method, value):
     """Duplicates and input order cannot alter actual matrices or predictions."""
     from s2and.feature_port import _get_rust_featurizer
-    from s2and.incremental_linking.artifact import load_incremental_linking_artifact, save_incremental_linking_artifact
     from tests.helpers import build_arrow_training_dataset
-    from tests.promoted_linking_helpers import (
-        build_tiny_promoted_booster,
-        synthetic_pairwise_bundle_binding,
-        tiny_logistic_gate_config,
-    )
-    from tests.test_subblocked_seed_boundaries import _dataset
+    from tests.incremental_test_helpers import _dataset, attach_tiny_incremental_linker
 
     incremental = "incremental" in method
     seeds = {"0": "seed"} if incremental else {}
@@ -212,15 +229,7 @@ def test_equal_reverse_supervision_matches_single_entry_on_real_public_routes(tm
     if "arrow" in method:
         extra = {"name_tuples": frozenset(), "cluster_seeds_require": seeds}
     if method == "predict_incremental_from_arrow":
-        booster, _ = build_tiny_promoted_booster()
-        save_incremental_linking_artifact(
-            booster,
-            tmp_path / "linker",
-            gate_config=tiny_logistic_gate_config(),
-            target_spec={},
-            pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
-        )
-        clusterer.incremental_linker_artifact = load_incremental_linking_artifact(tmp_path / "linker")
+        attach_tiny_incremental_linker(clusterer, tmp_path / "linker")
 
     results = []
     for ids, partial in [
@@ -241,7 +250,7 @@ def test_equal_reverse_supervision_matches_single_entry_on_real_public_routes(tm
             results.append({frozenset(members) for members in clusters.values()})
     if results:
         assert all(result == results[0] for result in results)
-        if value == 0:
+        if value in (0.0, 0.2):
             assert results[0] == {frozenset({"0", "1"})}
         elif value == 10000:
             assert results[0] == {frozenset({"0"}), frozenset({"1"})}

@@ -42,6 +42,11 @@ Rationale (high level): `preprocess_paper_1` is CPU-bound and benefits from `for
 `spawn` platforms (Windows/macOS) pay heavy import/pickle overhead. For signature preprocessing,
 the overhead of shipping large Python objects around dominates, so pooling is net negative.
 
+Python pair featurization (`many_pairs_featurize` on the classic route) follows the same idea. When `n_jobs > 1`, it
+uses a process pool on Linux and a thread pool on macOS, and it runs **serially on Windows**. It is GIL-bound, and the
+Windows thread pool was measured slower than serial with bit-identical output (6,591 vs 4,485 pairs/s at `n_jobs=6`
+on 15k qian pairs, 2026-09-24).
+
 Implementation notes:
 
 - `preprocess_paper_1` takes an explicit `preprocess=...` flag (spawn-safe; no worker globals).

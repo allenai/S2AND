@@ -163,7 +163,7 @@ def _log_featurization_backend_decision(
     if use_rust_featurizer and rust_module_available:
         backend = "rust_batch"
     else:
-        backend = "python_parallel" if n_jobs > 1 else "python_serial"
+        backend = "python_parallel" if _python_featurization_runs_in_parallel(n_jobs) else "python_serial"
 
     logger.info(
         "Featurization backend decision: backend=%s pieces=%d n_jobs=%d "
@@ -720,6 +720,16 @@ def parallel_helper(piece_of_work: tuple, worker_func: Callable):
     return result
 
 
+def _python_featurization_runs_in_parallel(n_jobs: int) -> bool:
+    """Return whether Python pair featurization uses a worker pool for ``n_jobs``.
+
+    Windows runs serially: featurization is GIL-bound, and its thread pool was
+    measured slower than serial with bit-identical output (15k qian pairs:
+    6,591 pairs/s serial vs 4,485 at ``n_jobs=6``).
+    """
+    return n_jobs > 1 and platform.system() != "Windows"
+
+
 def _execute_python_featurization_phase(
     *,
     dataset: ANDData,
@@ -728,13 +738,13 @@ def _execute_python_featurization_phase(
     chunk_size: int,
     scatter_context: ScatterContext,
 ) -> str:
-    if n_jobs > 1:
+    if _python_featurization_runs_in_parallel(n_jobs):
         backend_used = "python_parallel"
         logger.info("Making %d feature vectors in parallel", len(pieces_of_work))
 
         pool_size = n_jobs if len(pieces_of_work) > 1000 else 1
         # Explicit platform policy to avoid implicit UniversalPool defaults at call sites.
-        use_threads = platform.system() in ("Windows", "Darwin")
+        use_threads = platform.system() == "Darwin"
         with UniversalPool(
             processes=pool_size,
             use_threads=use_threads,

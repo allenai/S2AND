@@ -2952,9 +2952,7 @@ class Clusterer:
             )
         if built_dists:
             pred_clusters: defaultdict[str, list[str]] = defaultdict(list)
-            disallow_adjacency = seed_disallow_adjacency(
-                proxy_dataset.cluster_seeds_disallow, partial_supervision, blocks=block_dict.values()
-            )
+            disallow_adjacency = seed_disallow_adjacency(proxy_dataset.cluster_seeds_disallow, partial_supervision)
             effective_cluster_model_params = cluster_model_params
             if isinstance(self.cluster_model, FastCluster):
                 fastcluster_params: dict[str, Any] = dict(cluster_model_params or {})
@@ -3224,9 +3222,8 @@ class Clusterer:
         cluster_seeds_disallow: set[tuple[str, str]],
         cluster_seeds_require: Mapping[str, int | str],
         original_blocks: Mapping[str, Sequence[str]],
-        prior_blocks: Iterable[Sequence[str]] = (),
     ) -> dict[str, list[str]]:
-        """Attach initial-only groups to prior Rust subblock predictions."""
+        """Attach initial-only groups using already normalized caller supervision."""
 
         if not block_dict_single_letter:
             return pred_clusters
@@ -3236,7 +3233,7 @@ class Clusterer:
         for sid, component in cluster_seeds_require.items():
             if sid in origins:
                 scoped_seeds[origins[sid]][sid] = component
-        disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision, blocks=prior_blocks)
+        disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
         for block_key in sorted(block_dict_single_letter):
             group_signature_ids = [str(signature_id) for signature_id in block_dict_single_letter[block_key]]
             origin = origins[group_signature_ids[0]]
@@ -3459,7 +3456,6 @@ class Clusterer:
                 name_tuples=prediction_name_tuples,
                 cluster_seeds_disallow=cluster_seed_disallows,
                 cluster_seeds_require=active_cluster_seeds_require,
-                prior_blocks=block_dict_multiple_letter.values(),
                 original_blocks=block_dict,
             )
             result = dict(pred_clusters), None
@@ -4049,8 +4045,8 @@ class Clusterer:
         total_ram_bytes: int | None = None,
         incremental_dont_use_cluster_seeds: bool = False,
         original_blocks: Mapping[str, Sequence[str]],
-        prior_blocks: Iterable[Sequence[str]] = (),
     ) -> dict[str, list[str]]:
+        """Attach initial-only groups using already normalized caller supervision."""
         if len(block_dict_single_letter) == 0:
             return pred_clusters
 
@@ -4074,9 +4070,7 @@ class Clusterer:
         scoped_seeds: dict[str, dict[str, int | str]] = defaultdict(dict)
         for sid, component in original_seeds.items():
             scoped_seeds[origins[sid]][sid] = component
-        disallow_adjacency = seed_disallow_adjacency(
-            dataset.cluster_seeds_disallow, partial_supervision, blocks=prior_blocks
-        )
+        disallow_adjacency = seed_disallow_adjacency(dataset.cluster_seeds_disallow, partial_supervision)
         for block_key in sorted(block_dict_single_letter):
             origin = origins[block_dict_single_letter[block_key][0]]
             synthetic_seeds = restore_seed_membership(scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency)
@@ -4181,7 +4175,6 @@ class Clusterer:
             runtime_context=runtime_context,
             total_ram_bytes=total_ram_bytes,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-            prior_blocks=block_dict_multiple_letter_first_names.values(),
             original_blocks=block_dict,
         )
         return dict(pred_clusters), None
@@ -4477,9 +4470,7 @@ class Clusterer:
         cluster_seeds_disallow = (
             dataset.cluster_seeds_disallow if prediction_state is None else prediction_state.cluster_seeds_disallow
         )
-        disallow_adjacency = seed_disallow_adjacency(
-            cluster_seeds_disallow, partial_supervision, blocks=block_dict.values()
-        )
+        disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
 
         effective_cluster_model_params = cluster_model_params
         fastcluster_fused_dtype = np.float16

@@ -260,21 +260,23 @@ def test_directional_precedence_is_scoped_to_evaluated_blocks() -> None:
     assert seed_disallow_adjacency(set(), {("b", "a"): 10000.0}, blocks=[["a", "b"]]) == hard
 
 
-@pytest.mark.parametrize("reverse_block", [False, True])
-def test_subblocked_restoration_retains_prior_matrix_order(
-    monkeypatch: pytest.MonkeyPatch, reverse_block: bool
+@pytest.mark.parametrize("reverse_clusters", [False, True])
+@pytest.mark.parametrize("distance", [0.0, 10000.0])
+def test_subblocked_restoration_uses_normalized_supervision_independent_of_cluster_order(
+    monkeypatch: pytest.MonkeyPatch, reverse_clusters: bool, distance: float
 ) -> None:
-    """Cluster iteration order must not redefine prior supervision precedence."""
+    """Normalized caller overrides need no previous matrix-order metadata."""
     from s2and.prediction_state import PredictionState
 
     dataset = ANDData(
         "tests/dummy/signatures.json",
         "tests/dummy/papers.json",
-        name="subblock_directional_precedence",
+        name="subblock_normalized_supervision",
         mode="inference",
         cluster_seeds={"0": {"1": "require"}},
         name_counts_index=tiny_name_counts_index(),
     )
+    dataset.cluster_seeds_disallow = {("1", "0")}
     clusterer = Clusterer(FeaturizationInfo(features_to_use=["year_diff"]), classifier=None, n_jobs=1)
     observed_seeds: list[dict[str, int | str]] = []
 
@@ -285,18 +287,20 @@ def test_subblocked_restoration_retains_prior_matrix_order(
         return {"clusters": {"done": ["0", "1", "2", "3"]}}
 
     monkeypatch.setattr(clusterer, "_predict_incremental_python", incremental)
+    # Seed 1 appears before seed 0 within the original cluster iteration order.
+    clusters = {"first": ["1"], "second": ["2", "0"]}
+    if reverse_clusters:
+        clusters = dict(reversed(list(clusters.items())))
     clusterer._predict_subblocked_single_letter_incremental_groups(
         {"initial": ["3"]},
-        # Deliberately put 1 before 0 in the cluster iteration order.
-        pred_clusters={"first": ["1"], "second": ["2", "0"]},
+        pred_clusters=clusters,
         dataset=dataset,
         original_blocks={"block": ["0", "1", "2", "3"]},
-        partial_supervision={("0", "1"): 0.0, ("1", "0"): 10000.0},
-        runtime_context=build_runtime_context("subblock_directional_precedence", backend="python"),
-        prior_blocks=[["2", "1", "0"] if reverse_block else ["2", "0", "1"]],
+        partial_supervision={("0", "1"): distance},
+        runtime_context=build_runtime_context("subblock_normalized_supervision", backend="python"),
     )
     assert len(observed_seeds) == 1
-    assert (observed_seeds[0]["0"] == observed_seeds[0]["1"]) is (not reverse_block)
+    assert (observed_seeds[0]["0"] == observed_seeds[0]["1"]) is (distance == 0.0)
 
 
 def test_initial_only_seed_partitions_receive_distinct_synthetic_ids():

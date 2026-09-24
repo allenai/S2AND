@@ -33,7 +33,7 @@ def _sample_pairs(signature_ids: list[str], limit: int = 8) -> list[tuple[str, s
     return pairs
 
 
-def _short_coauthor_dataset(name: str, backend: str, monkeypatch: pytest.MonkeyPatch) -> ANDData:
+def _short_coauthor_dataset(name: str) -> ANDData:
     signatures = {
         "s1": {
             "author_info": {
@@ -92,7 +92,6 @@ def _short_coauthor_dataset(name: str, backend: str, monkeypatch: pytest.MonkeyP
             "references": [],
         },
     }
-    monkeypatch.setenv("S2AND_BACKEND", backend)
     return ANDData(
         signatures,
         papers,
@@ -105,28 +104,8 @@ def _short_coauthor_dataset(name: str, backend: str, monkeypatch: pytest.MonkeyP
     )
 
 
-def test_signature_preprocess_json_dataset_rust_backend_uses_python_signature_fields(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setenv("S2AND_BACKEND", "python")
-    dataset_python = build_dummy_dataset("dummy_signature_preprocess_python")
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
-    dataset_rust = build_dummy_dataset("dummy_signature_preprocess_rust")
-
-    assert set(dataset_python.signatures.keys()) == set(dataset_rust.signatures.keys())
-    for signature_id in dataset_python.signatures:
-        signature_python = dataset_python.signatures[signature_id]
-        signature_rust = dataset_rust.signatures[signature_id]
-        assert _signature_scalar_fields(signature_rust) == _signature_scalar_fields(signature_python)
-
-
-def test_signature_preprocess_pair_features_and_constraints_parity_with_arrow_fields(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setenv("S2AND_BACKEND", "python")
+def test_signature_preprocess_pair_features_and_constraints_parity_with_arrow_fields(tmp_path):
     dataset_python = build_dummy_dataset("dummy_signature_preprocess_materialize_python", name_counts_index=True)
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
     dataset_rust = build_dummy_dataset("dummy_signature_preprocess_materialize_rust", name_counts_index=True)
     dataset_rust = build_arrow_training_dataset(dataset_rust, tmp_path)
 
@@ -166,10 +145,8 @@ def test_signature_preprocess_pair_features_and_constraints_parity_with_arrow_fi
             assert python_constraint == rust_constraint
 
 
-def test_signature_preprocess_lazy_materialization_ngrams_match_python(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("S2AND_BACKEND", "python")
+def test_signature_preprocess_lazy_materialization_ngrams_match_python():
     dataset_python = build_dummy_dataset("dummy_signature_preprocess_materialize_python_ngrams")
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
     dataset_rust = build_dummy_dataset("dummy_signature_preprocess_materialize_rust_ngrams")
     for signature_id, signature in dataset_rust.signatures.items():
         dataset_rust.signatures[signature_id] = signature._replace(
@@ -205,8 +182,8 @@ def test_signature_preprocess_lazy_materialization_ngrams_match_python(monkeypat
     )
 
 
-def test_short_coauthor_tokens_match_python_and_rust_featurizers(tmp_path, monkeypatch: pytest.MonkeyPatch):
-    dataset_python = _short_coauthor_dataset("short_coauthor_python", "python", monkeypatch)
+def test_short_coauthor_tokens_match_python_and_rust_featurizers(tmp_path):
+    dataset_python = _short_coauthor_dataset("short_coauthor_python")
     python_features, _ = _single_pair_featurize(("s1", "s2"), dataset=dataset_python)
     coauthor_similarity_idx = FeaturizationInfo().feature_group_to_index["coauthor_similarity"][1]
 
@@ -215,7 +192,7 @@ def test_short_coauthor_tokens_match_python_and_rust_featurizers(tmp_path, monke
     assert "li" in python_coauthor_ngrams
     assert python_features[coauthor_similarity_idx] == 1.0
 
-    dataset_rust = _short_coauthor_dataset("short_coauthor_rust", "rust", monkeypatch)
+    dataset_rust = _short_coauthor_dataset("short_coauthor_rust")
     dataset_rust = build_arrow_training_dataset(dataset_rust, tmp_path)
     rust_featurizer = feature_port._get_rust_featurizer(dataset_rust)  # noqa: SLF001
     rust_signature_id_to_index = {
@@ -236,7 +213,6 @@ def test_short_coauthor_tokens_match_python_and_rust_featurizers(tmp_path, monke
 
 
 def test_subblocking_handles_missing_signature_affiliation_ngrams(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
     dataset_rust = build_dummy_dataset("dummy_signature_preprocess_subblocking_rust")
     signature_ids = list(dataset_rust.signatures.keys())
     expected_affiliation_keys = {
@@ -272,35 +248,7 @@ def test_subblocking_handles_missing_signature_affiliation_ngrams(monkeypatch: p
         assert keys == expected_affiliation_keys[signature_id]
 
 
-def test_subblocking_membership_parity_python_vs_rust(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("S2AND_BACKEND", "python")
-    dataset_python = build_dummy_dataset("dummy_signature_preprocess_subblocking_python")
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
-    dataset_rust = build_dummy_dataset("dummy_signature_preprocess_subblocking_rust_parity")
-
-    signature_ids = list(dataset_python.signatures.keys())
-    output_python = make_subblocks(
-        signature_ids,
-        dataset_python,
-        maximum_size=2,
-        first_k_letter_counts_sorted={},
-    )
-    output_rust = make_subblocks(
-        signature_ids,
-        dataset_rust,
-        maximum_size=2,
-        first_k_letter_counts_sorted={},
-    )
-
-    clusters_python = {tuple(sorted(subblock)) for subblock in output_python.values()}
-    clusters_rust = {tuple(sorted(subblock)) for subblock in output_rust.values()}
-    assert clusters_python == clusters_rust
-
-
-def test_classic_inference_uses_python_preprocessing_even_when_env_requests_rust(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
+def test_classic_inference_uses_python_preprocessing() -> None:
     dataset_inference = build_dummy_dataset("dummy_signature_preprocess_minimal_papers", mode="inference")
 
     paper_id = next(iter(dataset_inference.papers.keys()))

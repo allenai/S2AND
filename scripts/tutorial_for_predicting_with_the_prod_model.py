@@ -273,7 +273,6 @@ def main() -> None:
 
     print(
         "Config: "
-        f"runtime_context_default={os.environ.get('S2AND_BACKEND', 'python')}, "
         f"split={args.split}, n_jobs={n_jobs}, "
         f"batching_threshold={args.batching_threshold}, "
         f"load_name_counts={args.load_name_counts}, "

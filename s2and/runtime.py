@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -49,14 +48,7 @@ def _normalize_backend_value(value: str, *, label: str) -> Backend:
 
 
 def _resolve_backend(backend: Backend | None) -> Backend:
-    if backend is not None:
-        requested = _normalize_backend_value(backend, label="backend")
-    else:
-        requested_raw = os.environ.get("S2AND_BACKEND")
-        if requested_raw is None:
-            return "python"
-        requested = _normalize_backend_value(requested_raw, label="S2AND_BACKEND")
-
+    requested: Backend = "python" if backend is None else _normalize_backend_value(backend, label="backend")
     if requested == "rust":
         load_s2and_rust_extension()
     return requested
@@ -68,7 +60,17 @@ def build_runtime_context(
     backend: Backend | None = None,
     run_id: str | None = None,
 ) -> RuntimeContext:
-    """Build a runtime context for one explicitly routed operation."""
+    """Build a runtime context for one explicitly routed operation.
+
+    Args:
+        operation: Non-empty operation name used in the trace identifier.
+        backend: ``"python"`` or ``"rust"``; ``None`` selects Python. Rust requires
+            the exactly pinned ``s2and-rust`` extension.
+        run_id: Optional trace identifier; one is generated when omitted.
+
+    Returns:
+        The resolved runtime context.
+    """
 
     if not operation:
         raise ValueError("operation must be a non-empty string")

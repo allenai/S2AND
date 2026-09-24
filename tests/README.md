@@ -29,7 +29,7 @@ on Windows, so Windows file-lock and open-file cleanup contracts are exercised.
 
 | Module | Responsibility |
 | --- | --- |
-| `conftest.py` | Session-start stop when the installed native extension is stale; Python backend default and restoration of global Python/NumPy RNG state after each test |
+| `conftest.py` | Session-start stop when the installed native extension is stale; restoration of global Python/NumPy RNG state after each test |
 | `rust_build_freshness.py` | Source digest comparison behind the stale-extension check |
 | `helpers.py` | Tiny datasets, name counts, Arrow conversion, query/cluster values, and pairwise CLI arguments |
 | `raw_arrow_helpers.py` | Tiny raw Arrow bundles, retained readers, and native planner construction |
@@ -49,10 +49,9 @@ multiple domains in the appropriate helper module; keep single-use fixtures near
 their tests. Builders construct inputs, while assertions stay with the test.
 Keep identity/expected-result oracles independent from the production algorithm.
 
-Ordinary tests use Python orchestration even if the invoking shell sets
-`S2AND_BACKEND=rust`. Native tests select explicit runtime contexts or use
-`monkeypatch.setenv`. Tests of absent-environment defaults use
-`monkeypatch.delenv`. Prefer local seeded RNGs; global RNG restoration protects
+Routes are chosen by API: classic `ANDData` tests run in Python, and native
+tests use `ArrowDataset`-based APIs or explicit Rust runtime contexts. Prefer
+local seeded RNGs; global RNG restoration protects
 legacy tests without replacing assertions about a function's own RNG effects.
 Use `tmp_path` for mutable artifacts and `tmp_path_factory` for immutable shared
 fixtures. Patch the failing IO/scorer boundary, not the function under test.

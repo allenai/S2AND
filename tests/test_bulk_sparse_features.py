@@ -15,10 +15,8 @@ from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 @pytest.fixture(scope="module")
 def native_features(tmp_path_factory: pytest.TempPathFactory) -> Any:
     """Build a real Arrow featurizer with diverse paper and author metadata."""
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setenv("S2AND_BACKEND", "python")
-        dataset = build_dummy_dataset("sparse_features", name_counts_index=True)
-        arrow = build_arrow_training_dataset(dataset, tmp_path_factory.mktemp("sparse_features"))
+    dataset = build_dummy_dataset("sparse_features", name_counts_index=True)
+    arrow = build_arrow_training_dataset(dataset, tmp_path_factory.mktemp("sparse_features"))
     return _get_rust_featurizer(arrow)
 
 

@@ -359,44 +359,37 @@ def _json_training_anddata(name: str, specter: dict[str, np.ndarray], **override
 
 @pytest.fixture(scope="module")
 def training_bundle(tmp_path_factory: pytest.TempPathFactory) -> Any:
-    monkeypatch = pytest.MonkeyPatch()
-    try:
-        monkeypatch.setenv("S2AND_BACKEND", "python")
+    rng = np.random.default_rng(0)
+    paper_ids = list(json.loads((DUMMY_DIR / "papers.json").read_text(encoding="utf-8")))
+    specter = {str(paper_id): rng.normal(size=16).astype(np.float32) for paper_id in paper_ids}
 
-        rng = np.random.default_rng(0)
-        paper_ids = list(json.loads((DUMMY_DIR / "papers.json").read_text(encoding="utf-8")))
-        specter = {str(paper_id): rng.normal(size=16).astype(np.float32) for paper_id in paper_ids}
+    json_dataset = _json_training_anddata("dummy_json_training", specter)
 
-        json_dataset = _json_training_anddata("dummy_json_training", specter)
+    bundle_dir = tmp_path_factory.mktemp("arrow_training_bundle")
+    arrow_paths = write_raw_planner_arrow_from_anddata(json_dataset, bundle_dir, include_specter=True)
+    arrow_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(arrow_paths, bundle_dir)
+    name_counts_index_path, _name_counts_metrics = write_name_counts_index(bundle_dir, tiny_name_counts_tuple())
+    arrow_paths["name_counts_index"] = name_counts_index_path
+    write_test_arrow_artifact_manifest(bundle_dir, arrow_paths)
 
-        bundle_dir = tmp_path_factory.mktemp("arrow_training_bundle")
-        arrow_paths = write_raw_planner_arrow_from_anddata(json_dataset, bundle_dir, include_specter=True)
-        arrow_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(arrow_paths, bundle_dir)
-        name_counts_index_path, _name_counts_metrics = write_name_counts_index(bundle_dir, tiny_name_counts_tuple())
-        arrow_paths["name_counts_index"] = name_counts_index_path
-        write_test_arrow_artifact_manifest(bundle_dir, arrow_paths)
-
-        with ArrowDataset.open(
-            bundle_dir,
-            require_specter=True,
-            require_name_counts_index=True,
-        ) as arrow_source:
-            arrow_dataset = build_training_anddata_from_arrow(
-                arrow_source,
-                "dummy_arrow_training",
-                clusters=str(DUMMY_DIR / "clusters.json"),
-                random_seed=42,
-                n_jobs=1,
-            )
-            yield {
-                "json_dataset": json_dataset,
-                "arrow_dataset": arrow_dataset,
-                "arrow_source": arrow_source,
-                "specter": specter,
-                "monkeypatch": monkeypatch,
-            }
-    finally:
-        monkeypatch.undo()
+    with ArrowDataset.open(
+        bundle_dir,
+        require_specter=True,
+        require_name_counts_index=True,
+    ) as arrow_source:
+        arrow_dataset = build_training_anddata_from_arrow(
+            arrow_source,
+            "dummy_arrow_training",
+            clusters=str(DUMMY_DIR / "clusters.json"),
+            random_seed=42,
+            n_jobs=1,
+        )
+        yield {
+            "json_dataset": json_dataset,
+            "arrow_dataset": arrow_dataset,
+            "arrow_source": arrow_source,
+            "specter": specter,
+        }
 
 
 def _optionalish(value: Any) -> Any:
@@ -409,11 +402,8 @@ def _optionalish(value: Any) -> Any:
     ("first", "suffix", "same_name"),
     [("A", None, False), ("Dr A’bdul", None, True), ("Abdul", "Jr.", False)],
 )
-def test_arrow_name_facets_match_json(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str, suffix: str | None, same_name: bool
-) -> None:
+def test_arrow_name_facets_match_json(tmp_path: Path, first: str, suffix: str | None, same_name: bool) -> None:
     """Name facets must retain identity and normalization across Arrow ingestion."""
-    monkeypatch.setenv("S2AND_BACKEND", "python")
     signatures = json.loads((DUMMY_DIR / "signatures.json").read_text(encoding="utf-8"))
     signatures["1"]["author_info"].update(first=first, suffix=suffix)
     json_dataset = _json_training_anddata("facet_json", {}, signatures=signatures)
@@ -515,7 +505,6 @@ def test_arrow_training_constructor_defers_exact_papers_and_uses_native_sidecars
         load_calls += 1
         return load_papers_from_arrow(*args, **kwargs)
 
-    monkeypatch.setenv("S2AND_BACKEND", "python")
     monkeypatch.setattr(
         ANDData,
         "preprocess_signatures",
@@ -633,7 +622,6 @@ def test_featurize_end_to_end_with_fixed_pairs(
 
     results = {}
     for label, dataset in (("json", json_dataset), ("arrow", arrow_dataset)):
-        monkeypatch.setenv("S2AND_BACKEND", "rust" if label == "arrow" else "python")
         results[label] = featurize(
             dataset,
             featurizer_info,

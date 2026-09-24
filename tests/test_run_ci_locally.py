@@ -58,7 +58,6 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, 
     calls: list[tuple[list[str], dict[str, str] | None]] = []
     lifecycle: list[str] = []
 
-    monkeypatch.setenv("S2AND_BACKEND", "python")
     monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: lifecycle.append("sync-and-build-rust"))
     monkeypatch.setattr(run_ci, "ensure_rust_on_path", lambda: lifecycle.append("ensure-rust"))
     monkeypatch.setattr(run_ci, "run_native_rust_checks", lambda: lifecycle.append("check-rust"))
@@ -84,8 +83,7 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, 
     assert len(pytest_calls) == 1
     assert lifecycle == ["ensure-rust", "sync-and-build-rust", "check-rust", "typecheck"]
     assert calls[0][0] == ["run", "--no-sync", "python", "scripts/verification/smoke_installed_rust_api.py"]
-    assert calls[0][1] is not None
-    assert "S2AND_BACKEND" not in calls[0][1]
+    assert calls[0][1] is None
     assert all("-ra" in args for args in pytest_calls)
     assert pytest_calls[0] == [
         "run",
@@ -96,8 +94,7 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, 
         "--cov=s2and",
         "--cov-report=term-missing",
     ]
-    assert calls[1][1] is not None
-    assert calls[1][1]["S2AND_BACKEND"] == "python"
+    assert calls[1][1] is None
 
 
 @pytest.mark.parametrize(("lock_present", "frozen"), [(True, ["--frozen"]), (False, [])])

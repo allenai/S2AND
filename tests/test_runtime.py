@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -9,11 +8,6 @@ import pytest
 
 import s2and
 import s2and.runtime as runtime
-
-
-@pytest.fixture(autouse=True)
-def _clear_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("S2AND_BACKEND", raising=False)
 
 
 def test_runtime_backend_routing_contract(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -26,7 +20,6 @@ def test_runtime_backend_routing_contract(monkeypatch: pytest.MonkeyPatch) -> No
     assert context.backend == "python"
     assert runtime.stage_uses_rust(context) is False
 
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
     context = runtime.build_runtime_context("unit_test", backend="python")
     assert context.backend == "python"
 
@@ -50,13 +43,10 @@ def fail():
 runtime.load_s2and_rust_extension = fail
 import s2and.model
 """
-    env = os.environ.copy()
-    env["S2AND_BACKEND"] = "python"
     result = subprocess.run(
         [sys.executable, "-c", script],
         check=False,
         capture_output=True,
-        env=env,
         text=True,
     )
 

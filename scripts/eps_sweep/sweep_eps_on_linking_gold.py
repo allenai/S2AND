@@ -1033,9 +1033,8 @@ def _loggable_metric(value: Any) -> float:
 
 
 def _configure_runtime_environment(args: argparse.Namespace) -> None:
-    """Configure backend/thread environment variables."""
+    """Configure thread environment variables."""
 
-    os.environ["S2AND_BACKEND"] = "rust"
     os.environ["OMP_NUM_THREADS"] = str(args.n_jobs)
     os.environ["RAYON_NUM_THREADS"] = str(args.n_jobs)
 

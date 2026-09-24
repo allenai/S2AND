@@ -423,7 +423,6 @@ def _validated_release_parity_inputs(args: argparse.Namespace, plan: Mapping[str
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    os.environ.setdefault("S2AND_BACKEND", "rust")
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
     evaluation_plan_path = Path(args.evaluation_plan).resolve()
     evaluation_plan = _load_evaluation_plan(evaluation_plan_path)

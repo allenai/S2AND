@@ -10,11 +10,8 @@ from s2and.feature_port import _get_rust_featurizer
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
 
-def test_native_seed_overlays_are_independent_after_interleaving_and_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_native_seed_overlays_are_independent_after_interleaving_and_failure(tmp_path: Path) -> None:
     """Two seed policies on one native backing survive interleaved calls and errors."""
-    monkeypatch.setenv("S2AND_BACKEND", "python")
     source = build_dummy_dataset("seed-overlay", name_counts_index=True)
     dataset = build_arrow_training_dataset(source, tmp_path)
     base = _get_rust_featurizer(dataset)

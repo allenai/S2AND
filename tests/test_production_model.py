@@ -387,7 +387,6 @@ def test_synthetic_native_clusterer_predict_matches_source_python(
     bundle_dir, source_clusterer = synthetic_pairwise_bundle
 
     for batching_threshold in (None, 7):
-        monkeypatch.setenv("S2AND_BACKEND", "python")
         native_clusterer = _prepare_prediction_clusterer(_load_pairwise_staging_model(bundle_dir))
         expected_clusterer = _prepare_prediction_clusterer(copy.deepcopy(source_clusterer))
         expected = _predict_dummy_block(
@@ -395,7 +394,6 @@ def test_synthetic_native_clusterer_predict_matches_source_python(
             batching_threshold=batching_threshold,
         )
 
-        monkeypatch.setenv("S2AND_BACKEND", "rust")
         assert _predict_dummy_block(native_clusterer, batching_threshold=batching_threshold) == expected
 
 

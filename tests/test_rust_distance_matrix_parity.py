@@ -31,16 +31,14 @@ class _DeterministicClassifier:
 def parity_datasets(tmp_path_factory: pytest.TempPathFactory) -> tuple[ANDData, ANDData]:
     """Build matching Python and Arrow-backed Rust dummy datasets."""
 
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setenv("S2AND_BACKEND", "python")
-        python_dataset = build_dummy_dataset(
-            "distance_matrix_python_parity",
-            name_counts_index=True,
-        )
-        rust_dataset = build_arrow_training_dataset(
-            python_dataset,
-            tmp_path_factory.mktemp("distance_matrix_rust_parity"),
-        )
+    python_dataset = build_dummy_dataset(
+        "distance_matrix_python_parity",
+        name_counts_index=True,
+    )
+    rust_dataset = build_arrow_training_dataset(
+        python_dataset,
+        tmp_path_factory.mktemp("distance_matrix_rust_parity"),
+    )
     cluster_seeds_require = {"3": "seed-a", "4": "seed-a", "5": "seed-b"}
     cluster_seeds_disallow = {("5", "6")}
     for dataset in (python_dataset, rust_dataset):

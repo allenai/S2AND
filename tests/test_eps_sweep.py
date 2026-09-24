@@ -68,13 +68,11 @@ def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
     assert loaded["supervision_type"].tolist() == ["positive_repeat_orcid"]
 
 
-def test_eps_sweep_runtime_environment_sets_backend_and_threads(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("S2AND_BACKEND", "python")
+def test_eps_sweep_runtime_environment_sets_threads(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
     monkeypatch.setenv("RAYON_NUM_THREADS", "1")
     sweep_eps_on_linking_gold._configure_runtime_environment(cast(Any, SimpleNamespace(n_jobs=2)))
 
-    assert sweep_eps_on_linking_gold.os.environ["S2AND_BACKEND"] == "rust"
     assert sweep_eps_on_linking_gold.os.environ["OMP_NUM_THREADS"] == "2"
     assert sweep_eps_on_linking_gold.os.environ["RAYON_NUM_THREADS"] == "2"
 

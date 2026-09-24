@@ -291,7 +291,7 @@ def _bench_signatures_preprocess(
 
     def _make_ds(signatures: dict[str, Any]) -> Any:
         ds = ANDData.__new__(ANDData)
-        ds.runtime_context = build_runtime_context("bench_preprocess_signatures")
+        ds.runtime_context = build_runtime_context("bench_preprocess_signatures", backend="python")
         ds.arrow_dataset = None
         ds.preprocess = True
         ds.signatures = signatures
@@ -423,12 +423,6 @@ def main() -> None:
         help="Print a time breakdown for signature preprocessing n-gram computation per config",
     )
     parser.add_argument(
-        "--backend",
-        choices=["python", "rust", "auto"],
-        default="python",
-        help="Set S2AND_BACKEND for this run (default: python)",
-    )
-    parser.add_argument(
         "--skip-signatures",
         action="store_true",
         help="Skip signatures preprocessing benchmarking",
@@ -450,11 +444,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    os.environ["S2AND_BACKEND"] = args.backend
-
     print(f"Platform: {platform.system()} ({platform.platform()})")
     print(f"Python:   {sys.version}")
-    print(f"Backend:  {args.backend}")
     print(f"Dataset:  {args.dataset}")
     print(f"Data dir: {args.data_dir}")
     print(f"Workers:  {args.n_jobs}    Rounds: {args.rounds}")

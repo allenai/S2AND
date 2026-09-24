@@ -14,11 +14,9 @@ def native_constraints(tmp_path_factory: pytest.TempPathFactory) -> Any:
     from s2and.feature_port import _get_rust_featurizer
     from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setenv("S2AND_BACKEND", "python")
-        dataset = build_dummy_dataset("bulk-constraint-values", name_counts_index=True)
-        arrow_dataset = build_arrow_training_dataset(dataset, tmp_path_factory.mktemp("constraint-values"))
-        return _get_rust_featurizer(arrow_dataset)
+    dataset = build_dummy_dataset("bulk-constraint-values", name_counts_index=True)
+    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path_factory.mktemp("constraint-values"))
+    return _get_rust_featurizer(arrow_dataset)
 
 
 @pytest.mark.parametrize(

@@ -88,14 +88,10 @@ def test_numeric_report_requires_exact_integer_reference_values() -> None:
     assert report["exact_integer_mismatch_count"] == 1
 
 
-def test_feature_constraint_report_compares_real_tiny_python_and_arrow_paths(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_feature_constraint_report_compares_real_tiny_python_and_arrow_paths(tmp_path) -> None:
     from s2and.feature_port import _get_rust_featurizer
     from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
-    monkeypatch.setenv("S2AND_BACKEND", "python")
     python_dataset = build_dummy_dataset("full-predict-parity-report", name_counts_index=True)
     arrow_dataset = build_arrow_training_dataset(python_dataset, tmp_path)
     arrow_featurizer = _get_rust_featurizer(arrow_dataset)

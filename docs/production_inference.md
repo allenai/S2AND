@@ -46,9 +46,8 @@ Arrow API, is an error. Rust entry points import the exact `s2and-rust` version
 pinned by the project metadata and fail on a missing or different version. That
 dependency is part of the normal S2AND install.
 
-The [environment reference](environment.md#runtime-and-telemetry) documents
-backend selection and errors for runtime contexts built without an explicit
-backend. Public APIs retain the routes above regardless of that default.
+Lower-level callers of `s2and.runtime.build_runtime_context(...)` get Python
+when they omit `backend`. No environment variable changes these routes.
 
 Classic `ANDData` prediction remains useful for Python training, fixtures, and
 reference checks over the canonical S2 partition. `author_info.block` is its

@@ -271,7 +271,6 @@ def load_dataset(dataset_root: Path, n_jobs: int, random_seed: int) -> ANDData:
     papers_path = _required_file(dataset_root, "papers.json")
     specter_path = _required_file(dataset_root, "specter.pickle")
 
-    os.environ.setdefault("S2AND_BACKEND", "python")
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
 
     return ANDData(

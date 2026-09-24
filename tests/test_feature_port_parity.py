@@ -144,31 +144,29 @@ def _build_labeled_pairs(sig_ids, count=20, seed=123):
 
 @pytest.fixture(scope="session")
 def source_dataset():
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setenv("S2AND_BACKEND", "python")
-        # Avoid reusing stale process-level env caches between parity fixtures.
-        _reset_featurizer_env_caches()
+    # Avoid reusing stale process-level env caches between parity fixtures.
+    _reset_featurizer_env_caches()
 
-        data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
-        with open(os.path.join(data_dir, "signatures.json"), encoding="utf-8") as infile:
-            raw_signatures = json.load(infile)
-        canonical_rows = [
-            {
-                "signature_id": signature_id,
-                **canonicalize_name_parts(
-                    signature["author_info"].get("first"),
-                    signature["author_info"].get("middle"),
-                    signature["author_info"].get("last"),
-                )._asdict(),
-            }
-            for signature_id, signature in raw_signatures.items()
-        ]
-        signatures, report = join_canonical_benchmark_names(raw_signatures, canonical_rows)
-        assert report["rows"] == len(raw_signatures)
-        assert report["changed_signatures"] > 0
-        return _attach_fake_specter_embeddings(
-            _load_dataset_from_dir(data_dir, "dummy_parity_session", signatures=signatures)
-        )
+    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
+    with open(os.path.join(data_dir, "signatures.json"), encoding="utf-8") as infile:
+        raw_signatures = json.load(infile)
+    canonical_rows = [
+        {
+            "signature_id": signature_id,
+            **canonicalize_name_parts(
+                signature["author_info"].get("first"),
+                signature["author_info"].get("middle"),
+                signature["author_info"].get("last"),
+            )._asdict(),
+        }
+        for signature_id, signature in raw_signatures.items()
+    ]
+    signatures, report = join_canonical_benchmark_names(raw_signatures, canonical_rows)
+    assert report["rows"] == len(raw_signatures)
+    assert report["changed_signatures"] > 0
+    return _attach_fake_specter_embeddings(
+        _load_dataset_from_dir(data_dir, "dummy_parity_session", signatures=signatures)
+    )
 
 
 @pytest.fixture(scope="session")
@@ -287,8 +285,7 @@ def test_arrow_training_helper_does_not_reuse_source_records(source_dataset, arr
     assert arrow_dataset.papers[paper_id] is not source_dataset.papers[paper_id]
 
 
-def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    monkeypatch.setenv("S2AND_BACKEND", "python")
+def test_single_initial_name_text_features_match_rust(tmp_path):
     _reset_featurizer_env_caches()
     signatures = {
         "s1": {
@@ -467,10 +464,9 @@ def test_raw_arrow_language_detection_matches_python_for_rejected_controls(tmp_p
         assert equalish(python_features[feature_index], 0.0)
 
 
-def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):
+def test_many_pairs_end_to_end_parity_python_vs_rust(tmp_path):
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
 
-    monkeypatch.setenv("S2AND_BACKEND", "python")
     _reset_featurizer_env_caches()
     ds_python = _load_dataset_from_dir(data_dir, "dummy_python_end_to_end")
     ds_python = _attach_fake_specter_embeddings(ds_python)
@@ -486,7 +482,6 @@ def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):
         nan_value=np.nan,
     )
 
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
     _reset_featurizer_env_caches()
     ds_rust = _load_dataset_from_dir(data_dir, "dummy_rust_end_to_end")
     ds_rust = _attach_fake_specter_embeddings(ds_rust)

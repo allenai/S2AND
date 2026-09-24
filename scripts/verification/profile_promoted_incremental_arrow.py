@@ -389,9 +389,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         clusterer = load_production_model(str(args.model_path))
         clusterer.n_jobs = int(args.n_jobs)
-        env_keys = ("S2AND_BACKEND", "OMP_NUM_THREADS")
+        env_keys = ("OMP_NUM_THREADS",)
         prior_env = {key: os.environ.get(key) for key in env_keys}
-        os.environ.update(S2AND_BACKEND="rust", OMP_NUM_THREADS=str(args.n_jobs))
+        os.environ.update(OMP_NUM_THREADS=str(args.n_jobs))
         try:
             for run_index in range(int(args.runs)):
                 with ProcessTreeRSSMonitor(psutil_module) as monitor:

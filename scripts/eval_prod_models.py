@@ -110,7 +110,7 @@ Usage
         --specter2-model-path /path/to/production_model_bundle
 
     # Evaluate a bundle on its recorded mini holdout via ANDData/Python
-    S2AND_BACKEND=python uv run python scripts/eval_prod_models.py \
+    uv run python scripts/eval_prod_models.py \
         --dataset mini --no-arrow \
         --specter2-model-path /path/to/production_model_bundle
 
@@ -131,7 +131,6 @@ Usage
 """
 
 import argparse
-import contextlib
 import json
 import os
 from collections import defaultdict
@@ -356,27 +355,6 @@ def _assert_training_mode_metrics_identical(
                             f"metric={metric_name} baseline_mode={baseline_mode} mode={train_mode}: "
                             f"expected={expected_value} observed={observed_value}"
                         )
-
-
-@contextlib.contextmanager
-def _temporary_s2and_backend(backend: str | None):
-    previous = os.environ.get("S2AND_BACKEND")
-    if backend is not None:
-        os.environ["S2AND_BACKEND"] = backend
-    try:
-        yield
-    finally:
-        if backend is not None:
-            if previous is None:
-                os.environ.pop("S2AND_BACKEND", None)
-            else:
-                os.environ["S2AND_BACKEND"] = previous
-
-
-def _backend_for_train_mode(train_mode: str) -> str | None:
-    if train_mode == TRAIN_MODE_ANDDATA_PYTHON:
-        return "python"
-    return None
 
 
 def _supports_arrow_eval(dataset_label: str) -> bool:
@@ -1278,36 +1256,34 @@ def main() -> None:
                     cluster_metrics_all.append(cluster_metrics)
                     continue
 
-                backend = _backend_for_train_mode(train_mode)
                 if data_original is None:
                     raise RuntimeError("ANDData evaluation requires an explicit --json-data-root")
-                with _temporary_s2and_backend(backend):
-                    if args.name_counts_index_root is None or json_name_tuples is None:
-                        raise RuntimeError("ANDData evaluation requires explicit canonical artifact paths")
-                    anddata = build_eval_anddata(
-                        data_root=data_original,
-                        dataset_name=dataset_name,
-                        name_counts_index_root=args.name_counts_index_root,
-                        name_tuples=json_name_tuples,
-                        specter_suffix=specter_suffix,
-                        n_jobs=n_jobs,
-                        random_seed=random_seed,
-                        train_pairs_size=int(args.train_pairs_size),
-                        val_pairs_size=int(args.val_pairs_size),
-                        test_pairs_size=int(args.test_pairs_size),
-                    )
-                    train = None
-                    val = None
+                if args.name_counts_index_root is None or json_name_tuples is None:
+                    raise RuntimeError("ANDData evaluation requires explicit canonical artifact paths")
+                anddata = build_eval_anddata(
+                    data_root=data_original,
+                    dataset_name=dataset_name,
+                    name_counts_index_root=args.name_counts_index_root,
+                    name_tuples=json_name_tuples,
+                    specter_suffix=specter_suffix,
+                    n_jobs=n_jobs,
+                    random_seed=random_seed,
+                    train_pairs_size=int(args.train_pairs_size),
+                    val_pairs_size=int(args.val_pairs_size),
+                    test_pairs_size=int(args.test_pairs_size),
+                )
+                train = None
+                val = None
 
-                    if train_flag:
-                        train, val, _test = featurize(
-                            anddata,
-                            featurization_info,
-                            n_jobs=n_jobs,
-                            chunk_size=DEFAULT_CHUNK_SIZE,
-                            nameless_featurizer_info=nameless_featurization_info,
-                            nan_value=np.nan,
-                        )
+                if train_flag:
+                    train, val, _test = featurize(
+                        anddata,
+                        featurization_info,
+                        n_jobs=n_jobs,
+                        chunk_size=DEFAULT_CHUNK_SIZE,
+                        nameless_featurizer_info=nameless_featurization_info,
+                        nan_value=np.nan,
+                    )
 
                 if train_flag:
                     if train is None or val is None:
@@ -1326,8 +1302,7 @@ def main() -> None:
                         fixed_cluster_eps=args.fixed_cluster_eps,
                     )
                     if args.fixed_cluster_eps is None:
-                        with _temporary_s2and_backend("python"):
-                            clusterer.fit(evaluation_anddata)
+                        clusterer.fit(evaluation_anddata)
                     else:
                         clusterer = apply_fixed_cluster_eps(clusterer, args.fixed_cluster_eps)
                 else:
@@ -1341,12 +1316,11 @@ def main() -> None:
                 if clusterer is None:
                     raise RuntimeError("Clusterer was not initialized. Check --train flag and model artifact path.")
 
-                with _temporary_s2and_backend("python" if train_flag else None):
-                    cluster_metrics, _b3_metrics_per_signature = cluster_eval(
-                        evaluation_anddata,
-                        clusterer,
-                        split="test",
-                    )
+                cluster_metrics, _b3_metrics_per_signature = cluster_eval(
+                    evaluation_anddata,
+                    clusterer,
+                    split="test",
+                )
                 print(cluster_metrics)
                 cluster_metrics_all.append(cluster_metrics)
 

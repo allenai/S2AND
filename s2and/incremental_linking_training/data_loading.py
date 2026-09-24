@@ -154,10 +154,9 @@ def load_giant_block_dataset(
     filtered_cluster_seeds = _filter_cluster_seeds(cluster_seeds, set(selected_signature_ids))
     filtered_altered = _filter_altered_signatures(altered_cluster_signatures, set(selected_signature_ids))
 
-    env_keys = ("S2AND_BACKEND", "OMP_NUM_THREADS", "RAYON_NUM_THREADS")
+    env_keys = ("OMP_NUM_THREADS", "RAYON_NUM_THREADS")
     previous_env = {key: os.environ.get(key) for key in env_keys}
     try:
-        os.environ["S2AND_BACKEND"] = "rust"
         thread_count = str(resolve_n_jobs(n_jobs))
         os.environ["OMP_NUM_THREADS"] = thread_count
         os.environ["RAYON_NUM_THREADS"] = thread_count

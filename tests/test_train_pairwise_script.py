@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,32 +60,6 @@ def _write_model_plan(tmp_path: Path) -> Path:
     path = tmp_path / "model_plan.json"
     path.write_text(json.dumps(plan), encoding="utf-8")
     return path
-
-
-def test_import_preserves_backend_environment() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    for case_id, backend in (("unset", None), ("python", "python")):
-        env = os.environ.copy()
-        if backend is None:
-            env.pop("S2AND_BACKEND", None)
-        else:
-            env["S2AND_BACKEND"] = backend
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import json, os; import scripts.production.model.train_pairwise; "
-                "print(json.dumps({'backend': os.environ.get('S2AND_BACKEND')}))",
-            ],
-            cwd=repo_root,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-        )
-        assert completed.returncode == 0, f"{case_id}: {completed.stderr}"
-        assert json.loads(completed.stdout.strip().splitlines()[-1])["backend"] == backend, case_id
 
 
 def test_preflight_loads_test_free_direct_path_plan(tmp_path: Path) -> None:

@@ -18,6 +18,11 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Breaking changes
 
+- The `S2AND_BACKEND` environment variable is removed. Public APIs already chose
+  their backend by method, so only direct callers of
+  `s2and.runtime.build_runtime_context(...)` without `backend` are affected;
+  they now always get Python. `scripts/bench_preprocess_phases.py` drops its
+  `--backend` option.
 - `scripts/convert_to_arrow.py --name-counts-index-root` takes the name-count
   index directory itself, like the model, calibration, evaluation, and linker
   commands; it previously took the directory containing `name_counts_index/`.

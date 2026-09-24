@@ -51,8 +51,7 @@ Set `bundle_dir` to a canonical training root. Opening the handle validates
 required tables, raw-planner batch indexes, checksums, public format `1`, and
 the name-count index before any pairs are sampled. Keep `arrow_dataset`
 open while the returned dataset is used, then close it. The constructor always
-selects the Rust training runtime and pins canonical preprocessing, regardless
-of `S2AND_BACKEND`. The requested pair counts are upper bounds when a split
+selects the Rust training runtime and pins canonical preprocessing. The requested pair counts are upper bounds when a split
 contains fewer eligible within-block pairs.
 The returned dataset's Python-visible signatures and papers are reconstructed
 from the validated Arrow bundle; the constructor never injects pre-conversion

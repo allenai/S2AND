@@ -119,7 +119,7 @@ def _ensure_python_pair_signature_ngrams(
     if getattr(dataset, "arrow_dataset", None) is not None and signature_pairs:
         raise RuntimeError(
             "Python featurization cannot run on a dataset built with normalized signature fields deferred to Rust. "
-            "Rebuild the dataset with S2AND_BACKEND=python/backend='python', or keep Rust featurization active with "
+            "Rebuild the dataset through classic ANDData construction, or keep Rust featurization active with "
             "the open Arrow dataset."
         )
     if getattr(dataset, "_s2and_python_pair_ngrams_ready", False):

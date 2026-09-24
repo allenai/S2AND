@@ -95,15 +95,12 @@ def test_bulk_labels_preserve_scalar_bits(
     np.testing.assert_array_equal(np.concatenate(observed).view(np.uint64), expected.view(np.uint64))
 
 
-def test_native_constraint_wrapper_preserves_native_types_and_values(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_native_constraint_wrapper_preserves_native_types_and_values(tmp_path: Path) -> None:
     """Check the real PyO3 list contract used to remove Python coercions."""
     from s2and.feature_port import _get_rust_featurizer
     from s2and.rust_calls import get_constraints_block_upper_triangle_indexed_rust
     from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
-    monkeypatch.setenv("S2AND_BACKEND", "python")
     dataset = build_dummy_dataset("native-constraint-list-contract", name_counts_index=True)
     arrow_dataset = build_arrow_training_dataset(dataset, tmp_path)
     native = _get_rust_featurizer(arrow_dataset)

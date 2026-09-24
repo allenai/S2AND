@@ -243,16 +243,8 @@ def run_typecheck_and_test_job(*, lock_present: bool) -> None:
     ensure_rust_on_path()
     sync_deps(lock_present=lock_present)
     run_native_rust_checks()
-    required_rust_env = os.environ.copy()
-    required_rust_env.pop("S2AND_BACKEND", None)
-    run_uv(
-        uv_run_args("python", "scripts/verification/smoke_installed_rust_api.py"),
-        env=required_rust_env,
-    )
+    run_uv(uv_run_args("python", "scripts/verification/smoke_installed_rust_api.py"))
     run_ty_checks()
-
-    python_backend_env = required_rust_env.copy()
-    python_backend_env["S2AND_BACKEND"] = "python"
 
     run_uv(
         pytest_args(
@@ -260,7 +252,6 @@ def run_typecheck_and_test_job(*, lock_present: bool) -> None:
             "--cov=s2and",
             "--cov-report=term-missing",
         ),
-        env=python_backend_env,
     )
 
 

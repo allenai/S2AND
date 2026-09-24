@@ -160,23 +160,22 @@ Version bump workflow:
 ```bash
 # 1) edit VERSION to the new semantic version
 
-# 2) sync manifests
+# 2) sync manifests and both lockfiles
 uv run python scripts/sync_version.py
 
-# 3) regenerate lockfiles
+# 3) rebuild the environment for the new version
 uv sync --extra dev
-uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml
 ```
 
 Notes:
 
-- The pre-commit hook only runs when `VERSION` is staged.
-- The hook auto-syncs manifests and regenerates lockfiles when needed.
-- `scripts/sync_version.py` already rewrites the `s2and_rust` entry in
-  `s2and_rust/Cargo.lock` and the `s2and-rust` entry in `uv.lock`. Step 3's
-  `cargo generate-lockfile` (also run by the hook) re-resolves every Rust
-  dependency to its newest compatible version, so review the `Cargo.lock` diff
-  before committing a version bump.
+- The pre-commit hook only runs when `VERSION` is staged; it runs steps 2 and 3
+  and stages the updated files.
+- `scripts/sync_version.py` rewrites the version in `pyproject.toml`,
+  `s2and_rust/pyproject.toml`, `s2and_rust/Cargo.toml`, and the package entries
+  in `s2and_rust/Cargo.lock` and `uv.lock`. The result passes
+  `cargo metadata --locked` and `uv lock --check`, so a bump does not re-resolve
+  other dependencies.
 - `uv.lock` and `s2and_rust/Cargo.lock` are generated files.
 
 ## Related docs

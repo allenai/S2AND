@@ -40,7 +40,6 @@ uv() {
         'run python scripts/sync_version.py --check') return "$CHECK_STATUS" ;;
         'run python scripts/sync_version.py') return "$SYNC_STATUS" ;;
         'sync --extra dev') return 0 ;;
-        'run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml') return 0 ;;
         'run --active --no-project ruff format scripts/sync_version.py') return 0 ;;
         *) return 98 ;;
     esac
@@ -68,7 +67,13 @@ uv() {
     elif sync_status != "0":
         assert log.read_text().splitlines()[-1] == "run python scripts/sync_version.py"
     else:
-        assert "sync --extra dev" in log.read_text().splitlines()
+        assert log.read_text().splitlines() == [
+            "run python scripts/sync_version.py --print-targets",
+            "run python scripts/sync_version.py --check",
+            "run python scripts/sync_version.py",
+            "sync --extra dev",
+            "run --active --no-project ruff format scripts/sync_version.py",
+        ]
 
 
 def _write_version_fixture(root: Path) -> None:

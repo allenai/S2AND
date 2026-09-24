@@ -778,6 +778,8 @@ def test_calibrate_eps_binds_plan_reuses_matrices_applies_floors_and_smallest_ti
         (tmp_path / "converted", "random", 5)
     ]
     assert featurizer_calls[0]["source_sha256"] == _source_digests(fixture.model["random"])
+    # Only the filtered validation blocks' members are built ("b2" has one signature and is dropped).
+    assert featurizer_calls[0]["signature_ids"] == {"s1", "s2"}
     assert [event for event in clusterer.events if event[0] == "build"] == [("build", "random")]
     assert [event[2] for event in clusterer.events if event[0] == "predict"] == [0.2, 0.4, 0.6]
     assert clusterer.distance_ram == [2048]
@@ -941,6 +943,10 @@ def test_pair_evaluator_loads_complete_model_before_plan_and_ignores_cluster_dig
         name: _source_digests(files) for name, files in fixture.pairwise.items()
     }
     assert {call["arrow_root"] for call in featurizer_calls} == {Path("converted")}
+    assert {call["name"]: call["signature_ids"] for call in featurizer_calls} == {
+        "random": {"rt1", "rt2"},
+        "fixed": {"f5", "f6"},
+    }
 
 
 def test_cluster_evaluator_loads_complete_model_before_plan_and_ignores_pair_digest(
@@ -982,6 +988,7 @@ def test_cluster_evaluator_loads_complete_model_before_plan_and_ignores_pair_dig
     assert set(report["datasets"]) == {"random"}
     assert report["signature_weighted"]["f1"] == 1.0
     assert [call["source_sha256"] for call in featurizer_calls] == [_source_digests(fixture.cluster["random"])]
+    assert [call["signature_ids"] for call in featurizer_calls] == [{"ct1", "ct2"}]
     # Block by block, with the evaluator's autodetected RAM budget, as fused predict did.
     assert model.distance_calls == [({"b": ["ct1", "ct2"]}, None)]
 

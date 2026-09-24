@@ -259,19 +259,28 @@ def _stage_dataset_features(
 
 def _featurize_selection(
     dataset: ANDData,
-    rust_featurizer: Any,
+    arrow_dataset: ArrowDataset,
     featurizer_info: FeaturizationInfo,
     *,
+    name_counts_manifest_sha256: str,
     n_jobs: int,
     nameless_featurizer_info: FeaturizationInfo,
     total_ram_bytes: int | None,
 ) -> tuple[TupleOfArrays, TupleOfArrays]:
     """Featurize release train/validation pairs and never resolve a test split.
 
-    The JSON dataset selects the pairs; the Rust featurizer computes their features.
+    The JSON dataset selects the pairs. A Rust featurizer built only for the
+    selected pairs' signatures computes their features.
     """
 
     train_pairs, val_pairs = resolve_selection_pairs(dataset)
+    rust_featurizer = build_verified_rust_featurizer(
+        dataset,
+        arrow_dataset,
+        signature_ids={member for pair in (*train_pairs, *val_pairs) for member in pair[:2]},
+        name_counts_manifest_sha256=name_counts_manifest_sha256,
+        num_threads=n_jobs,
+    )
     train, val = (
         featurize_pairs_with_rust(
             rust_featurizer,
@@ -455,21 +464,15 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 require_specter=True,
                 require_name_counts_index=True,
             ) as arrow_dataset:
-                rust_featurizer = build_verified_rust_featurizer(
-                    anddata,
-                    arrow_dataset,
-                    name_counts_manifest_sha256=expected_name_counts,
-                    num_threads=int(args.n_jobs),
-                )
                 train, val = _featurize_selection(
                     anddata,
-                    rust_featurizer,
+                    arrow_dataset,
                     featurizer_info,
+                    name_counts_manifest_sha256=expected_name_counts,
                     n_jobs=int(args.n_jobs),
                     nameless_featurizer_info=nameless_featurizer_info,
                     total_ram_bytes=plan.total_ram_bytes,
                 )
-                del rust_featurizer
             staged = _stage_dataset_features(
                 matrix_work_dir,
                 dataset_name,

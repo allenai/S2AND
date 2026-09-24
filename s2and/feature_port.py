@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -133,28 +133,50 @@ def build_rust_featurizer_from_arrow_dataset(
     )
 
 
+def _arrow_signature_ids(arrow_dataset: ArrowDataset) -> set[str]:
+    """Read the Arrow signatures table's IDs without building native signature records."""
+
+    import pyarrow.ipc as ipc
+
+    with arrow_dataset.use() as lease, lease.open_file("signatures") as source:
+        reader = ipc.open_file(source)
+        return {
+            str(value)
+            for batch_index in range(reader.num_record_batches)
+            for value in reader.get_batch(batch_index).column("signature_id").to_pylist()
+        }
+
+
 def build_verified_rust_featurizer(
     dataset: ANDData,
     arrow_dataset: ArrowDataset,
     *,
+    signature_ids: Iterable[str],
     name_counts_manifest_sha256: str,
     num_threads: int,
 ) -> Any:
-    """Build a Rust featurizer over ``dataset``'s signatures from its converted Arrow data.
+    """Build a Rust featurizer for selected signatures of ``dataset`` from its converted Arrow data.
 
     ``dataset`` is a JSON-loaded ``ANDData`` that stays the authority for splits,
     pairs and cluster truth. The caller must already have verified the Arrow
     conversion provenance against ``dataset``'s source files. This checks that
-    both routes use the same name counts, name tuples, ORCID policy and signatures.
+    both routes use the same name counts and exactly the same signature IDs, and
+    uses the dataset's name tuples and ORCID policy.
+
+    Only ``signature_ids`` are built. Native records hold per-signature coauthor
+    data, which grows with the square of a paper's author count, so building every
+    signature of a dataset with very large author lists (e.g. INSPIRE) is slow to
+    build and to free. Each pair's features depend only on its two signatures.
 
     Args:
         dataset: JSON-loaded dataset whose pairs will be featurized.
         arrow_dataset: Open Arrow conversion of the same source files.
+        signature_ids: Members of the pairs or blocks to featurize.
         name_counts_manifest_sha256: Release name-count index identity.
         num_threads: Native featurizer threads.
 
     Returns:
-        A seedless Rust featurizer covering exactly ``dataset.signatures``.
+        A seedless Rust featurizer covering exactly ``signature_ids``.
     """
 
     arrow_counts = arrow_dataset.name_counts_index
@@ -165,8 +187,21 @@ def build_verified_rust_featurizer(
             f"expected={name_counts_manifest_sha256!r} arrow={observed_counts!r} "
             f"json={dataset.name_counts_manifest_sha256!r}"
         )
+    json_signature_ids = {str(signature_id) for signature_id in dataset.signatures}
+    arrow_signature_ids = _arrow_signature_ids(arrow_dataset)
+    if arrow_signature_ids != json_signature_ids:
+        raise ValueError(
+            f"Arrow signatures for {dataset.name!r} differ from its JSON signatures: "
+            f"only_arrow={sorted(arrow_signature_ids - json_signature_ids)[:5]} "
+            f"only_json={sorted(json_signature_ids - arrow_signature_ids)[:5]}"
+        )
+    requested = sorted({str(signature_id) for signature_id in signature_ids})
+    unknown = [signature_id for signature_id in requested if signature_id not in json_signature_ids]
+    if unknown:
+        raise ValueError(f"Requested signatures are not in {dataset.name!r}: {unknown[:5]}")
     featurizer = build_rust_featurizer_from_arrow_dataset(
         arrow_dataset,
+        signature_ids=requested,
         name_tuples=dataset.name_tuples,
         preprocess=True,
         cluster_seed_require_value=float(CLUSTER_SEEDS_LOOKUP["require"]),
@@ -174,14 +209,8 @@ def build_verified_rust_featurizer(
         num_threads=num_threads,
         use_orcid_id=bool(dataset.use_orcid_id),
     )
-    rust_signature_ids = {str(signature_id) for signature_id in featurizer.signature_ids()}
-    json_signature_ids = {str(signature_id) for signature_id in dataset.signatures}
-    if rust_signature_ids != json_signature_ids:
-        raise ValueError(
-            f"Arrow signatures for {dataset.name!r} differ from its JSON signatures: "
-            f"only_arrow={sorted(rust_signature_ids - json_signature_ids)[:5]} "
-            f"only_json={sorted(json_signature_ids - rust_signature_ids)[:5]}"
-        )
+    if len(featurizer.signature_ids()) != len(requested):
+        raise RuntimeError(f"Rust featurizer for {dataset.name!r} does not cover the requested signatures")
     return featurizer
 
 

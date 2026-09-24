@@ -34,8 +34,9 @@ production model and public-data version is `1.3`, on a separate version axis.
   signatures, papers, and SPECTER digests. `train_pairwise.py --chunk-size` is
   removed. The pairwise training config drops `chunk_size` and records
   `featurization_backend` plus, per dataset, `arrow_dir` and
-  `arrow_conversion_provenance_sha256`. Cluster evaluation still processes one
-  block at a time.
+  `arrow_conversion_provenance_sha256`. Each command builds the featurizer
+  only for the signatures it scores, and cluster evaluation still processes
+  one block at a time.
 - The `S2AND_BACKEND` environment variable is removed. Public APIs already chose
   their backend by method, so only direct callers of
   `s2and.runtime.build_runtime_context(...)` without `backend` are affected;

@@ -1095,15 +1095,17 @@ def _release_rust_featurizer(
     *,
     source_sha256: Mapping[str, str],
     dataset: ANDData,
+    signature_ids: set[str],
     artifacts: ProductionArtifactAuthority,
     n_jobs: int,
 ) -> Iterator[Any]:
-    """Yield a Rust featurizer for ``dataset`` built from its provenance-bound Arrow conversion.
+    """Yield a Rust featurizer for ``signature_ids`` built from the provenance-bound Arrow conversion.
 
     The JSON ``dataset`` stays the authority for pairs, blocks, seeds and truth.
     ``<arrow_root>/<name>`` must carry conversion provenance naming the same
-    signatures, papers and SPECTER files as the plan, and the featurizer must
-    cover exactly the dataset's signatures with the release name counts and tuples.
+    signatures, papers and SPECTER files as the plan, contain exactly the
+    dataset's signature IDs, and use the release name counts. Only the pairs' or
+    blocks' ``signature_ids`` are built.
     """
 
     dataset_dir = Path(arrow_root) / name
@@ -1115,6 +1117,7 @@ def _release_rust_featurizer(
         yield build_verified_rust_featurizer(
             dataset,
             arrow_dataset,
+            signature_ids=signature_ids,
             name_counts_manifest_sha256=artifacts.name_counts_index.manifest_sha256,
             num_threads=n_jobs,
         )
@@ -1225,6 +1228,7 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
             name,
             source_sha256=source_sha256,
             dataset=dataset,
+            signature_ids={member for pair in pairs for member in pair[:2]},
             artifacts=artifacts,
             n_jobs=int(args.n_jobs),
         ) as rust_featurizer:
@@ -1341,6 +1345,7 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
             name,
             source_sha256=_spec_sha256(specs),
             dataset=dataset,
+            signature_ids={signature for signatures in blocks.values() for signature in signatures},
             artifacts=artifacts,
             n_jobs=int(args.n_jobs),
         ) as rust_featurizer:
@@ -1448,6 +1453,7 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
                 name,
                 source_sha256=dataset_spec.sha256,
                 dataset=dataset,
+                signature_ids={signature for signatures in val_blocks.values() for signature in signatures},
                 artifacts=artifacts,
                 n_jobs=int(args.n_jobs),
             ) as rust_featurizer:

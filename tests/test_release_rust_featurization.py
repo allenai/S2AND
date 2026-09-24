@@ -14,7 +14,11 @@ from lightgbm import LGBMClassifier
 from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_provenance import ArrowProvenanceError, verify_conversion_provenance
 from s2and.data import ANDData
-from s2and.feature_port import build_verified_rust_featurizer, featurize_pairs_with_rust
+from s2and.feature_port import (
+    build_rust_featurizer_from_arrow_dataset,
+    build_verified_rust_featurizer,
+    featurize_pairs_with_rust,
+)
 from s2and.featurizer import (
     DEFAULT_FEATURE_GROUPS,
     DEFAULT_NAMELESS_FEATURE_GROUPS,
@@ -74,13 +78,27 @@ def _json_dataset(inputs: dict[str, Any]) -> ANDData:
     )
 
 
-def _featurizer(inputs: dict[str, Any], dataset: ANDData, arrow_dataset: ArrowDataset) -> Any:
+def _featurizer(
+    inputs: dict[str, Any],
+    dataset: ANDData,
+    arrow_dataset: ArrowDataset,
+    signature_ids: set[str],
+) -> Any:
     return build_verified_rust_featurizer(
         dataset,
         arrow_dataset,
+        signature_ids=signature_ids,
         name_counts_manifest_sha256=NameCountsIndex.open(inputs["name_counts_path"]).manifest_sha256,
         num_threads=2,
     )
+
+
+def _pair_members(*pair_lists: list[Any]) -> set[str]:
+    return {member for pairs in pair_lists for pair in pairs for member in pair[:2]}
+
+
+def _block_members(blocks: dict[str, list[str]]) -> set[str]:
+    return {signature for signatures in blocks.values() for signature in signatures}
 
 
 def _open(inputs: dict[str, Any]) -> ArrowDataset:
@@ -128,7 +146,8 @@ def test_rust_features_match_python_on_the_selected_training_pairs(release_input
     assert len(train_pairs) == 24 and len(val_pairs) == 6
 
     with _open(release_inputs) as arrow_dataset:
-        featurizer = _featurizer(release_inputs, dataset, arrow_dataset)
+        featurizer = _featurizer(release_inputs, dataset, arrow_dataset, _pair_members(train_pairs, val_pairs))
+        assert len(featurizer.signature_ids()) < len(dataset.signatures)
         for pairs in (train_pairs, val_pairs):
             _assert_features_match(_python_features(pairs, dataset), _rust_features(pairs, featurizer))
         # A non-NaN nan_value is applied after featurization, as many_pairs_featurize does.
@@ -165,7 +184,7 @@ def test_rust_distances_give_python_partitions_at_every_eps(release_inputs: dict
 
     python_distances = clusterer.make_distance_matrices(blocks, dataset)
     with _open(release_inputs) as arrow_dataset:
-        seeded = _featurizer(release_inputs, dataset, arrow_dataset).with_cluster_seeds(
+        seeded = _featurizer(release_inputs, dataset, arrow_dataset, _block_members(blocks)).with_cluster_seeds(
             dataset.cluster_seeds_require, dataset.cluster_seeds_disallow
         )
         rust_distances = clusterer.make_distance_matrices_from_rust_featurizer(blocks, seeded)
@@ -178,6 +197,46 @@ def test_rust_distances_give_python_partitions_at_every_eps(release_inputs: dict
         from_python, _ = clusterer.predict(blocks, dataset, dists=python_distances)
         from_rust, _ = clusterer.predict(blocks, dataset, dists=rust_distances)
         assert _canonical_partition(from_rust) == _canonical_partition(from_python) == _canonical_partition(fused), eps
+
+
+def test_subset_featurizer_matches_a_full_build_bit_for_bit(release_inputs: dict[str, Any]) -> None:
+    dataset = _json_dataset(release_inputs)
+    blocks = dict(sorted(dataset.get_blocks().items()))
+    first_key, second_key = list(blocks)[:2]
+    block = {first_key: blocks[first_key]}
+    inside, outside = blocks[first_key], blocks[second_key]
+    # Seeds that also name signatures the subset featurizer never builds.
+    require = {inside[0]: 0, inside[1]: 0, outside[0]: 0, outside[1]: 1}
+    disallow = {(inside[2], inside[3]), (inside[0], outside[2])}
+    pairs = [(inside[0], inside[1], 1), (inside[0], inside[2], 0), (inside[2], inside[3], 0)]
+    clusterer = Clusterer(
+        MAIN_INFO,
+        LGBMClassifier(n_estimators=5, num_leaves=3, min_child_samples=1, random_state=0, verbose=-1).fit(
+            np.nan_to_num(_python_features(pairs, dataset)[0]), [1, 0, 0]
+        ),
+        cluster_model=FastCluster(linkage="average", eps=0.5),
+        n_jobs=1,
+        use_default_constraints_as_supervision=True,
+        dont_merge_cluster_seeds=True,
+    )
+    clusterer.feature_contract = {
+        "name_counts_manifest_sha256": dataset.name_counts_manifest_sha256,
+        "name_counts_last_first_initial_semantics": "initial_char",
+    }
+
+    with _open(release_inputs) as arrow_dataset:
+        full = build_rust_featurizer_from_arrow_dataset(arrow_dataset, name_tuples=dataset.name_tuples, num_threads=1)
+        subset = _featurizer(release_inputs, dataset, arrow_dataset, set(inside))
+        assert len(subset.signature_ids()) == len(inside) < len(full.signature_ids())
+        for expected, observed in zip(_rust_features(pairs, full), _rust_features(pairs, subset), strict=True):
+            np.testing.assert_array_equal(np.asarray(observed).view(np.uint64), np.asarray(expected).view(np.uint64))
+        distances = [
+            clusterer.make_distance_matrices_from_rust_featurizer(
+                block, featurizer.with_cluster_seeds(require, disallow)
+            )[first_key]
+            for featurizer in (full, subset)
+        ]
+    np.testing.assert_array_equal(distances[1].view(np.uint64), distances[0].view(np.uint64))
 
 
 def _changed_signatures(files: dict[str, Path]) -> None:
@@ -219,6 +278,7 @@ def test_release_rejects_stale_arrow_through_provenance_not_the_plan_file_check(
             "qian",
             source_sha256=updated_plan_digests,
             dataset=dataset,
+            signature_ids=set(dataset.signatures),
             artifacts=_authority(release_inputs),
             n_jobs=1,
         ):
@@ -234,6 +294,7 @@ def test_release_rejects_stale_arrow_through_provenance_not_the_plan_file_check(
         "qian",
         source_sha256=updated_plan_digests,
         dataset=dataset,
+        signature_ids=set(dataset.signatures),
         artifacts=_authority(release_inputs),
         n_jobs=1,
     ) as featurizer:
@@ -260,12 +321,18 @@ def test_provenance_rejects_tables_that_differ_from_the_recorded_conversion(rele
 def test_verified_featurizer_rejects_mismatched_counts_and_signatures(release_inputs: dict[str, Any]) -> None:
     dataset = _json_dataset(release_inputs)
     with _open(release_inputs) as arrow_dataset:
+        members = set(list(dataset.signatures)[:4])
         with pytest.raises(ValueError, match="requires one name-count index"):
-            build_verified_rust_featurizer(dataset, arrow_dataset, name_counts_manifest_sha256="0" * 64, num_threads=1)
+            build_verified_rust_featurizer(
+                dataset, arrow_dataset, signature_ids=members, name_counts_manifest_sha256="0" * 64, num_threads=1
+            )
+        with pytest.raises(ValueError, match="Requested signatures are not in 'qian'"):
+            _featurizer(release_inputs, dataset, arrow_dataset, members | {"unknown-signature"})
         extra = next(iter(dataset.signatures.values()))
         dataset.signatures["not-in-arrow"] = extra._replace(signature_id="not-in-arrow")
+        # The full-set check still runs when only a subset is built.
         with pytest.raises(ValueError, match="Arrow signatures for 'qian' differ from its JSON signatures"):
-            _featurizer(release_inputs, dataset, arrow_dataset)
+            _featurizer(release_inputs, dataset, arrow_dataset, members)
 
 
 def test_rust_pair_featurization_handles_empty_input_and_rejects_constraint_labels(
@@ -273,7 +340,7 @@ def test_rust_pair_featurization_handles_empty_input_and_rejects_constraint_labe
 ) -> None:
     dataset = _json_dataset(release_inputs)
     with _open(release_inputs) as arrow_dataset:
-        featurizer = _featurizer(release_inputs, dataset, arrow_dataset)
+        featurizer = _featurizer(release_inputs, dataset, arrow_dataset, set(list(dataset.signatures)[:2]))
         features, labels, nameless = _rust_features([], featurizer)
         assert features.shape == (0, len(MAIN_INFO.selected_feature_indices()))
         assert labels.shape == (0,)

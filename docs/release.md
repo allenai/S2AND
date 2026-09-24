@@ -211,6 +211,12 @@ uv run --no-project python scripts/run_ci_locally.py
 - [ ] Convert one benchmark and one linker-replay fixture to Arrow outside the
       run root, then convert the full reviewed datasets into the prepared
       run's fresh `stages/` roots.
+- [ ] Convert every model-plan dataset, and any held-out population with
+      its own files, into the release Arrow working roots described in the
+      [release Arrow conversions](../scripts/production/README.md#release-arrow-conversions)
+      reference. Training, calibration, and evaluation compute features from
+      these roots and reject any conversion whose provenance does not match
+      the plan's source digests.
 - [ ] Regenerate linker-replay Arrow from reviewed raw JSON, SPECTER2 inputs,
       and the final name counts; validate it with production loaders.
 - [ ] Stage only the reviewed linker support files and the frozen assignment

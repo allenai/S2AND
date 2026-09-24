@@ -7,9 +7,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
+from s2and import memory_budget
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import CLUSTER_SEEDS_LOOKUP
 from s2and.data import ANDData
+from s2and.feature_schema import FEATURE_SCHEMA
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.runtime import load_s2and_rust_extension
 from s2and.rust_calls import (
@@ -24,6 +28,7 @@ from s2and.rust_calls import (
 from s2and.thread_config import resolve_n_jobs
 
 if TYPE_CHECKING:
+    from s2and.featurizer import FeaturizationInfo
     from s2and.prediction_state import PredictionState
 
 # Treat extension as Any for typing; it is optional and loaded on first use.
@@ -126,6 +131,151 @@ def build_rust_featurizer_from_arrow_dataset(
         num_threads=None if num_threads is None else resolve_n_jobs(num_threads),
         use_orcid_id=bool(use_orcid_id),
     )
+
+
+def build_verified_rust_featurizer(
+    dataset: ANDData,
+    arrow_dataset: ArrowDataset,
+    *,
+    name_counts_manifest_sha256: str,
+    num_threads: int,
+) -> Any:
+    """Build a Rust featurizer over ``dataset``'s signatures from its converted Arrow data.
+
+    ``dataset`` is a JSON-loaded ``ANDData`` that stays the authority for splits,
+    pairs and cluster truth. The caller must already have verified the Arrow
+    conversion provenance against ``dataset``'s source files. This checks that
+    both routes use the same name counts, name tuples, ORCID policy and signatures.
+
+    Args:
+        dataset: JSON-loaded dataset whose pairs will be featurized.
+        arrow_dataset: Open Arrow conversion of the same source files.
+        name_counts_manifest_sha256: Release name-count index identity.
+        num_threads: Native featurizer threads.
+
+    Returns:
+        A seedless Rust featurizer covering exactly ``dataset.signatures``.
+    """
+
+    arrow_counts = arrow_dataset.name_counts_index
+    observed_counts = None if arrow_counts is None else arrow_counts.manifest_sha256
+    if observed_counts != name_counts_manifest_sha256 or dataset.name_counts_manifest_sha256 != observed_counts:
+        raise ValueError(
+            f"Rust featurization for {dataset.name!r} requires one name-count index: "
+            f"expected={name_counts_manifest_sha256!r} arrow={observed_counts!r} "
+            f"json={dataset.name_counts_manifest_sha256!r}"
+        )
+    featurizer = build_rust_featurizer_from_arrow_dataset(
+        arrow_dataset,
+        name_tuples=dataset.name_tuples,
+        preprocess=True,
+        cluster_seed_require_value=float(CLUSTER_SEEDS_LOOKUP["require"]),
+        cluster_seed_disallow_value=float(CLUSTER_SEEDS_LOOKUP["disallow"]),
+        num_threads=num_threads,
+        use_orcid_id=bool(dataset.use_orcid_id),
+    )
+    rust_signature_ids = {str(signature_id) for signature_id in featurizer.signature_ids()}
+    json_signature_ids = {str(signature_id) for signature_id in dataset.signatures}
+    if rust_signature_ids != json_signature_ids:
+        raise ValueError(
+            f"Arrow signatures for {dataset.name!r} differ from its JSON signatures: "
+            f"only_arrow={sorted(rust_signature_ids - json_signature_ids)[:5]} "
+            f"only_json={sorted(json_signature_ids - rust_signature_ids)[:5]}"
+        )
+    return featurizer
+
+
+def featurize_pairs_with_rust(
+    rust_featurizer: Any,
+    signature_pairs: Sequence[tuple[str, str, int | float]],
+    featurizer_info: FeaturizationInfo,
+    *,
+    nameless_featurizer_info: FeaturizationInfo | None,
+    n_jobs: int,
+    nan_value: float,
+    total_ram_bytes: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Featurize explicit signature pairs with a Rust featurizer.
+
+    Returns the same ``(features, labels, nameless_features)`` layout as
+    :func:`s2and.featurizer.many_pairs_featurize`: selected columns in canonical
+    order, labels in input order, and NaN replaced by ``nan_value``. Chunks are
+    sized by the Rust batch memory planner from ``total_ram_bytes``.
+
+    Args:
+        rust_featurizer: Featurizer whose signatures include every pair member.
+        signature_pairs: ``(signature_id_1, signature_id_2, label)`` rows; labels must be non-negative.
+        featurizer_info: Main model feature selection.
+        nameless_featurizer_info: Nameless model feature selection, or ``None``.
+        n_jobs: Native featurization threads.
+        nan_value: Replacement for missing feature values.
+        total_ram_bytes: Explicit RAM budget, or ``None`` to autodetect.
+
+    Returns:
+        Tuple of (features, labels, nameless features or None).
+    """
+
+    labels = np.asarray([float(pair[2]) for pair in signature_pairs], dtype=np.float64)
+    if np.any(labels < 0):
+        raise ValueError("featurize_pairs_with_rust does not accept partial-supervision (negative) labels")
+    main_indices = featurizer_info.selected_feature_indices()
+    nameless_indices = [] if nameless_featurizer_info is None else nameless_featurizer_info.selected_feature_indices()
+    union_indices = sorted(set(main_indices) | set(nameless_indices))
+    row_count = len(signature_pairs)
+    features = np.empty((row_count, len(main_indices)), dtype=np.float64)
+    nameless_features = (
+        None if nameless_featurizer_info is None else np.empty((row_count, len(nameless_indices)), dtype=np.float64)
+    )
+    if row_count > 0:
+        index_by_signature_id = {
+            str(signature_id): index for index, signature_id in enumerate(rust_featurizer.signature_ids())
+        }
+        missing = sorted(
+            {str(member) for pair in signature_pairs for member in pair[:2]}.difference(index_by_signature_id)
+        )
+        if missing:
+            raise ValueError(f"Rust featurizer is missing pair signatures: {missing[:10]}")
+        plan = memory_budget.compute_rust_batch_chunk_plan(
+            num_features=len(union_indices),
+            total_pairs=row_count,
+            total_rows=row_count,
+            selected_feature_count=len(main_indices),
+            nameless_feature_count=len(nameless_indices),
+            total_ram_bytes=total_ram_bytes,
+        )
+        chunk_pairs = int(plan.chunk_pairs)
+        full_width = len(FEATURE_SCHEMA)
+        for start in range(0, row_count, chunk_pairs):
+            chunk = signature_pairs[start : start + chunk_pairs]
+            computed = np.asarray(
+                rust_featurizer.featurize_pairs_matrix_indexed(
+                    [(index_by_signature_id[str(left)], index_by_signature_id[str(right)]) for left, right, _ in chunk],
+                    union_indices,
+                    max(1, int(n_jobs)),
+                    np.nan,
+                ),
+                dtype=np.float64,
+            )
+            if computed.shape[1] == len(union_indices):
+                column_of = {feature: position for position, feature in enumerate(union_indices)}
+            elif computed.shape[1] == full_width:
+                column_of = {feature: feature for feature in union_indices}
+            else:
+                raise RuntimeError(
+                    f"Rust featurizer returned {computed.shape[1]} columns; "
+                    f"expected {len(union_indices)} (selected) or {full_width} (full)"
+                )
+            if computed.shape[0] != len(chunk):
+                raise RuntimeError(f"Rust featurizer returned {computed.shape[0]} rows for {len(chunk)} pairs")
+            stop = start + len(chunk)
+            features[start:stop] = computed[:, [column_of[feature] for feature in main_indices]]
+            if nameless_features is not None:
+                nameless_features[start:stop] = computed[:, [column_of[feature] for feature in nameless_indices]]
+    if not np.isnan(nan_value):
+        features[np.isnan(features)] = nan_value
+        if nameless_features is not None:
+            nameless_features[np.isnan(nameless_features)] = nan_value
+    return features, labels, nameless_features
 
 
 def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
@@ -239,7 +389,9 @@ __all__ = [
     "build_linker_pair_distance_accumulators_rust",
     "build_linker_pair_features_and_aggregate_stats_arrays_rust",
     "build_rust_featurizer_from_arrow_dataset",
+    "build_verified_rust_featurizer",
     "evict_rust_featurizer",
+    "featurize_pairs_with_rust",
     "get_constraint_labels_index_arrays_rust",
     "get_constraints_block_upper_triangle_indexed_rust",
     "get_constraints_matrix_indexed_rust",

@@ -10,7 +10,8 @@ import math
 import os
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -23,10 +24,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and._atomic_io import fsync_directory  # noqa: E402
 from s2and._sha256 import sha256_file as _sha256_file  # noqa: E402
-from s2and.arrow_inputs import read_arrow_collection_root  # noqa: E402
+from s2and.arrow_inputs import ArrowDataset, read_arrow_collection_root  # noqa: E402
+from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.eval import b3_precision_recall_fscore, pairwise_probability_metrics  # noqa: E402
-from s2and.featurizer import many_pairs_featurize  # noqa: E402
+from s2and.feature_port import build_verified_rust_featurizer, featurize_pairs_with_rust  # noqa: E402
 from s2and.name_counts_index import NameCountsIndex  # noqa: E402
 from s2and.production_bundle import finalize_pairwise_eps  # noqa: E402
 from s2and.production_bundle_contract import PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES  # noqa: E402
@@ -58,6 +60,8 @@ _RANDOM_MODEL_ROLES = _COMMON_MODEL_ROLES | {"clusters"}
 _FIXED_MODEL_ROLES = _COMMON_MODEL_ROLES | {"train_pairs", "val_pairs"}
 _PAIR_ROLES = frozenset({"signatures", "papers", "specter_embeddings", "pairs"})
 _CLUSTER_ROLES = frozenset({"signatures", "papers", "specter_embeddings", "clusters", "blocks"})
+# Plan roles that determine Rust pair features; each Arrow conversion must match them.
+_ARROW_SOURCE_ROLES = ("signatures", "papers", "specter_embeddings")
 _PARITY_WORKLOAD_KEYS = frozenset(
     {
         "block_size",
@@ -1084,6 +1088,42 @@ def _load_anddata(
     )
 
 
+@contextmanager
+def _release_rust_featurizer(
+    arrow_root: Path,
+    name: str,
+    *,
+    source_sha256: Mapping[str, str],
+    dataset: ANDData,
+    artifacts: ProductionArtifactAuthority,
+    n_jobs: int,
+) -> Iterator[Any]:
+    """Yield a Rust featurizer for ``dataset`` built from its provenance-bound Arrow conversion.
+
+    The JSON ``dataset`` stays the authority for pairs, blocks, seeds and truth.
+    ``<arrow_root>/<name>`` must carry conversion provenance naming the same
+    signatures, papers and SPECTER files as the plan, and the featurizer must
+    cover exactly the dataset's signatures with the release name counts and tuples.
+    """
+
+    dataset_dir = Path(arrow_root) / name
+    verify_conversion_provenance(
+        dataset_dir,
+        expected_source_sha256={role: source_sha256[role] for role in _ARROW_SOURCE_ROLES},
+    )
+    with ArrowDataset.open(dataset_dir, require_specter=True, require_name_counts_index=True) as arrow_dataset:
+        yield build_verified_rust_featurizer(
+            dataset,
+            arrow_dataset,
+            name_counts_manifest_sha256=artifacts.name_counts_index.manifest_sha256,
+            num_threads=n_jobs,
+        )
+
+
+def _spec_sha256(specs: Mapping[str, tuple[Path, str]]) -> dict[str, str]:
+    return {role: digest for role, (_path, digest) in specs.items()}
+
+
 def _load_release_artifacts(args: argparse.Namespace) -> ProductionArtifactAuthority:
     return load_packaged_artifact_authority(
         name_counts_index_root=Path(args.name_counts_index_root),
@@ -1117,16 +1157,16 @@ def _labeled_pairs(path: Path, *, name: str) -> list[tuple[str, str, int]]:
 
 def _pairwise_predictions(
     pairs: Sequence[tuple[str, str, int | float]],
-    dataset: ANDData,
+    rust_featurizer: Any,
     clusterer: Any,
     args: argparse.Namespace,
 ) -> tuple[dict[str, float | int], np.ndarray, np.ndarray, np.ndarray]:
-    features, labels, nameless_features = many_pairs_featurize(
+    features, labels, nameless_features = featurize_pairs_with_rust(
+        rust_featurizer,
         list(pairs),
-        dataset,
         clusterer.featurizer_info,
-        n_jobs=int(args.n_jobs),
         nameless_featurizer_info=clusterer.nameless_featurizer_info,
+        n_jobs=int(args.n_jobs),
         nan_value=np.nan,
         total_ram_bytes=args.total_ram_bytes,
     )
@@ -1163,7 +1203,7 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
         candidate_model_dir=Path(args.model).resolve(),
     )
     prepared = [
-        (name, files, _labeled_pairs(files["pairs"], name=name))
+        (name, files, _spec_sha256(specs), _labeled_pairs(files["pairs"], name=name))
         for name, specs in plan.pairwise.items()
         if (files := _verified_files(specs, label=f"pairwise.{name}"))
     ]
@@ -1172,7 +1212,7 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
     all_labels: list[np.ndarray] = []
     all_main: list[np.ndarray] = []
     all_nameless: list[np.ndarray] = []
-    for name, files, pairs in prepared:
+    for name, files, source_sha256, pairs in prepared:
         dataset = _load_anddata(
             name,
             files,
@@ -1180,7 +1220,15 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
             name_counts_index=artifacts.name_counts_index,
             name_tuples=artifacts.name_tuples.pairs,
         )
-        metrics, labels, main, nameless = _pairwise_predictions(pairs, dataset, clusterer, args)
+        with _release_rust_featurizer(
+            Path(args.arrow_root),
+            name,
+            source_sha256=source_sha256,
+            dataset=dataset,
+            artifacts=artifacts,
+            n_jobs=int(args.n_jobs),
+        ) as rust_featurizer:
+            metrics, labels, main, nameless = _pairwise_predictions(pairs, rust_featurizer, clusterer, args)
         dataset_reports[name] = {"metrics": metrics}
         all_labels.append(labels)
         all_main.append(main)
@@ -1287,7 +1335,32 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
             name_tuples=artifacts.name_tuples.pairs,
         )
         true_clusters = dataset.construct_cluster_to_signatures(blocks)
-        predicted, _ = clusterer.predict(blocks, dataset)
+        predicted: dict[str, Any] = {}
+        with _release_rust_featurizer(
+            Path(args.arrow_root),
+            name,
+            source_sha256=_spec_sha256(specs),
+            dataset=dataset,
+            artifacts=artifacts,
+            n_jobs=int(args.n_jobs),
+        ) as rust_featurizer:
+            seeded_featurizer = rust_featurizer.with_cluster_seeds(
+                dataset.cluster_seeds_require,
+                dataset.cluster_seeds_disallow,
+            )
+            # One block at a time keeps distance residency at the largest block, as fused predict did.
+            for block_key, block_signatures in blocks.items():
+                block = {block_key: block_signatures}
+                block_distances = clusterer.make_distance_matrices_from_rust_featurizer(
+                    block,
+                    seeded_featurizer,
+                    total_ram_bytes=None,
+                )
+                block_predicted, _ = clusterer.predict(block, dataset, dists=block_distances, total_ram_bytes=None)
+                if predicted.keys() & block_predicted.keys():
+                    raise RuntimeError(f"Cluster evaluation for {name!r} produced duplicate cluster ids")
+                predicted.update(block_predicted)
+                del block_distances
         metrics[name] = _b3_report(true_clusters, predicted)
         dataset_reports[name] = {"metrics": metrics[name]}
     report = {
@@ -1370,11 +1443,19 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
             _, val_blocks, _ = dataset.split_cluster_signatures()
             val_blocks = clusterer.filter_blocks(val_blocks)
             true_clusters = dataset.construct_cluster_to_signatures(val_blocks)
-            distances = clusterer.make_distance_matrices(
-                val_blocks,
-                dataset,
-                total_ram_bytes=args.total_ram_bytes,
-            )
+            with _release_rust_featurizer(
+                Path(args.arrow_root),
+                name,
+                source_sha256=dataset_spec.sha256,
+                dataset=dataset,
+                artifacts=artifacts,
+                n_jobs=int(args.n_jobs),
+            ) as rust_featurizer:
+                distances = clusterer.make_distance_matrices_from_rust_featurizer(
+                    val_blocks,
+                    rust_featurizer.with_cluster_seeds(dataset.cluster_seeds_require, dataset.cluster_seeds_disallow),
+                    total_ram_bytes=args.total_ram_bytes,
+                )
             identities[name] = {
                 "block_count": len(val_blocks),
                 "signature_count": sum(len(signatures) for signatures in val_blocks.values()),
@@ -1666,6 +1747,11 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--n-jobs", type=_positive_int, default=1)
     calibrate.add_argument("--total-ram-bytes", type=_positive_int)
     calibrate.set_defaults(handler=calibrate_eps)
+    arrow_root_help = (
+        "Directory with one Arrow conversion per plan dataset (<root>/<dataset>/), each carrying conversion "
+        "provenance that matches the plan's signatures, papers and SPECTER files."
+    )
+    calibrate.add_argument("--arrow-root", type=Path, required=True, help=arrow_root_help)
 
     pair_evaluator = commands.add_parser("evaluate-pairs", help="Run the held-out pair evaluation.")
     pair_evaluator.add_argument("--total-ram-bytes", type=_positive_int)
@@ -1678,6 +1764,7 @@ def build_parser() -> argparse.ArgumentParser:
         evaluator.add_argument("--evaluation-plan", type=Path, required=True)
         evaluator.add_argument("--run-binding", type=Path, required=True)
         evaluator.add_argument("--name-counts-index-root", type=Path, required=True)
+        evaluator.add_argument("--arrow-root", type=Path, required=True, help=arrow_root_help)
         evaluator.add_argument("--output-report", type=Path, required=True)
         evaluator.add_argument("--n-jobs", type=_positive_int, default=1)
         evaluator.set_defaults(handler=handler)

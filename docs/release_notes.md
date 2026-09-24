@@ -22,6 +22,20 @@ production model and public-data version is `1.3`, on a separate version axis.
   dataset: v1.3 trains on `aminer`, `arnetminer`, `inspire`, `kisti`, `pubmed`,
   `qian`, and `zbmath` in random-block mode plus `augmented` in fixed-pair mode.
   Model plans that still list `orcid` are rejected.
+- Release featurization: `train_pairwise.py` and `release_pairwise.py`
+  `calibrate-eps`, `evaluate-pairs`, and `evaluate-clusters` now compute pair
+  features and distances with the Rust featurizer from a required
+  `--arrow-root`. JSON `ANDData` still selects the splits, pairs, blocks,
+  seeds, and truth. On six benchmark datasets, featurization was about 100x
+  faster than the Python featurizer, with bit-identical validation distances,
+  B3, and trained AUC. `convert_to_arrow.py` now writes
+  `conversion_provenance.json` with the SHA-256 of each source it read.
+  Release commands reject any conversion that does not match the plan's
+  signatures, papers, and SPECTER digests. `train_pairwise.py --chunk-size` is
+  removed. The pairwise training config drops `chunk_size` and records
+  `featurization_backend` plus, per dataset, `arrow_dir` and
+  `arrow_conversion_provenance_sha256`. Cluster evaluation still processes one
+  block at a time.
 - The `S2AND_BACKEND` environment variable is removed. Public APIs already chose
   their backend by method, so only direct callers of
   `s2and.runtime.build_runtime_context(...)` without `backend` are affected;
@@ -136,6 +150,8 @@ production model and public-data version is `1.3`, on a separate version axis.
   JSON, so the public Arrow MEDLINE dataset shipped without labels. Its
   `train_pairs.csv`, `test_pairs.csv`, and optional `val_pairs.csv` are now
   validated, copied, and declared in the dataset manifest.
+- `convert_to_arrow.py benchmark` and `linker-replay` no longer exit 1 with
+  `KeyError: 'dataset'` after writing every dataset.
 - Arrow subblocking restores seed membership with the shared
   cannot-link policy, including conflicting requires/disallows. Candidate
   planning uses the same effective caller supervision as scoring. Windows
@@ -218,6 +234,8 @@ production model and public-data version is `1.3`, on a separate version axis.
   drops signatures and pairs from `--drop-sources` (v1.3: `orcid`). It writes
   release-ready inputs: training pairs with `signature_id_1`/`signature_id_2`
   columns and held-out pairs in the pairwise-evaluation JSON format.
+- Development: the test suite runs under pytest-xdist (`-n auto`), and
+  `run_ci_locally.py --pytest-workers` selects the worker count.
 - `scripts/tutorial_for_predicting_with_the_prod_model.py` scores the bundle's
   recorded held-out blocks with the trainer's recorded seed, applies
   `--specter-suffix` to the JSON route as well as Arrow (no silent SPECTER1
@@ -321,6 +339,8 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Performance
 
+- Python pair featurization runs serially on Windows. Its thread pool was
+  slower than serial there, and the output is bit-identical.
 - The default bulk prediction path validates caller supervision
   once per request instead of once per subblock, while preserving custom
   prediction-helper overrides and validation at public entry points.

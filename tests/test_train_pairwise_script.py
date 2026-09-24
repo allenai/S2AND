@@ -9,6 +9,7 @@ import pytest
 
 from s2and import production_training_contract
 from s2and._sha256 import sha256_file
+from s2and.arrow_provenance import ArrowProvenanceError, write_conversion_provenance
 from scripts.production.model import train_pairwise
 from tests.helpers import pairwise_training_args as _args
 
@@ -63,11 +64,30 @@ def _write_model_plan(tmp_path: Path, dataset_names: tuple[str, ...] | None = No
     return path
 
 
+def _write_arrow_root(tmp_path: Path, plan_path: Path) -> Path:
+    """Write one manifest plus conversion provenance per plan dataset, naming the plan's own files."""
+
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    arrow_root = tmp_path / "arrow"
+    for name, files in plan["datasets"].items():
+        dataset_dir = arrow_root / name
+        dataset_dir.mkdir(parents=True)
+        (dataset_dir / "manifest.json").write_text(json.dumps({"files": {}}), encoding="utf-8")
+        write_conversion_provenance(
+            dataset_dir,
+            sources={role: Path(files[role]["path"]) for role in train_pairwise.ARROW_SOURCE_ROLES},
+            converter={"script": "test"},
+        )
+    return arrow_root
+
+
 def test_preflight_loads_test_free_direct_path_plan(tmp_path: Path) -> None:
     plan_path = _write_model_plan(tmp_path)
+    arrow_root = _write_arrow_root(tmp_path, plan_path)
     args = _args(
         tmp_path,
         model_plan=plan_path,
+        arrow_root=arrow_root,
     )
 
     plan = train_pairwise._preflight_pairwise(args)
@@ -84,6 +104,13 @@ def test_preflight_loads_test_free_direct_path_plan(tmp_path: Path) -> None:
         isinstance(path, str) for dataset in config["dataset_inputs"].values() for path in dataset["files"].values()
     )
     assert all("test_pairs" not in spec["files"] for spec in config["dataset_inputs"].values())
+    assert config["featurization_backend"] == "rust_from_provenance_bound_arrow"
+    assert "chunk_size" not in config
+    for name, spec in config["dataset_inputs"].items():
+        assert spec["arrow_dir"] == str(arrow_root.resolve() / name)
+        assert spec["arrow_conversion_provenance_sha256"] == sha256_file(
+            arrow_root / name / "conversion_provenance.json"
+        )
     assert list(plan.matrix_work_dir.iterdir()) == []
 
 
@@ -101,6 +128,43 @@ def test_preflight_rejects_plans_outside_the_v13_population(tmp_path: Path, data
 
     with pytest.raises(SystemExit, match="disagree with the production dataset set"):
         train_pairwise._preflight_pairwise(args)
+
+
+def test_preflight_rejects_arrow_converted_from_different_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan_path = _write_model_plan(tmp_path)
+    arrow_root = _write_arrow_root(tmp_path, plan_path)
+    other_signatures = tmp_path / "other_signatures.json"
+    other_signatures.write_text("different content, same role\n", encoding="utf-8")
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    write_conversion_provenance(
+        arrow_root / "kisti",
+        sources={
+            "signatures": other_signatures,
+            "papers": Path(plan["datasets"]["kisti"]["papers"]["path"]),
+            "specter_embeddings": Path(plan["datasets"]["kisti"]["specter_embeddings"]["path"]),
+        },
+        converter={"script": "test"},
+    )
+    monkeypatch.setattr(
+        train_pairwise,
+        "load_packaged_artifact_authority",
+        lambda **_kwargs: pytest.fail("artifact loading must not run"),
+    )
+
+    with pytest.raises(ArrowProvenanceError, match=r"kisti was converted from a different signatures source"):
+        train_pairwise.train_pairwise_bundle(_args(tmp_path, model_plan=plan_path, arrow_root=arrow_root))
+
+
+def test_preflight_rejects_a_dataset_without_arrow_provenance(tmp_path: Path) -> None:
+    plan_path = _write_model_plan(tmp_path)
+    arrow_root = _write_arrow_root(tmp_path, plan_path)
+    (arrow_root / "zbmath" / "conversion_provenance.json").unlink()
+
+    with pytest.raises(ArrowProvenanceError, match="zbmath has no conversion provenance record"):
+        train_pairwise._preflight_pairwise(_args(tmp_path, model_plan=plan_path, arrow_root=arrow_root))
 
 
 def test_training_rejects_source_mutation_before_loading_artifacts_or_data(
@@ -128,7 +192,7 @@ def test_augmented_dataset_contract_is_checked_before_featurization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plan_path = _write_model_plan(tmp_path)
-    args = _args(tmp_path, model_plan=plan_path)
+    args = _args(tmp_path, model_plan=plan_path, arrow_root=_write_arrow_root(tmp_path, plan_path))
     full_plan = train_pairwise._preflight_pairwise(args)
     augmented_plan = train_pairwise.PairwisePreflightPlan(
         output_dir=full_plan.output_dir,
@@ -136,6 +200,8 @@ def test_augmented_dataset_contract_is_checked_before_featurization(
         dataset_names=("augmented",),
         datasets={"augmented": full_plan.datasets["augmented"]},
         model_plan_sha256=full_plan.model_plan_sha256,
+        arrow_dirs={"augmented": full_plan.arrow_dirs["augmented"]},
+        arrow_provenance_sha256={"augmented": full_plan.arrow_provenance_sha256["augmented"]},
         matrix_work_dir=full_plan.matrix_work_dir,
         matrix_work_free_bytes=full_plan.matrix_work_free_bytes,
         total_ram_bytes=full_plan.total_ram_bytes,

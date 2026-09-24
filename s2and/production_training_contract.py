@@ -106,9 +106,14 @@ class EpsPolicy:
 
 @dataclass(frozen=True, slots=True)
 class ModelDataset:
-    """Verified files for one model-development dataset."""
+    """Verified files for one model-development dataset.
+
+    ``sha256`` holds the verified digest of each role's file, so derived inputs
+    such as Arrow conversions can be bound to the exact frozen sources.
+    """
 
     files: Mapping[str, Path]
+    sha256: Mapping[str, str]
 
     @property
     def split_mode(self) -> str:
@@ -200,7 +205,10 @@ def load_model_plan(path: Path) -> ModelPlan:
             if observed_digests[file_path] != expected_digest:
                 raise ValueError("model file digest mismatch")
             files[role] = file_path
-        datasets[name] = ModelDataset(files=files)
+        datasets[name] = ModelDataset(
+            files=files,
+            sha256={role: observed_digests[path] for role, path in files.items()},
+        )
     return ModelPlan(
         release_version=release_version,
         datasets=datasets,

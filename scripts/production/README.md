@@ -578,6 +578,30 @@ the base of the final public-data publication.
 Run the bounded `ANDData -> Arrow -> Rust` feature-parity fixture before this
 full export.
 
+### Release Arrow conversions
+
+Pairwise training, EPS calibration, and held-out pair and cluster evaluation need
+one Arrow conversion of each plan dataset's exact JSON files, under the root each
+command receives as `--arrow-root`. Convert every model-plan dataset, including
+`orcid` and `augmented`, into a working root that is not published. Stage the
+reviewed JSON in benchmark layout (`<root>/<dataset>/<dataset>_signatures.json`,
+`_papers.json`, `_specter2.pkl`, optional `_clusters.json`), and use the same
+files the plan names:
+
+```powershell
+uv run python scripts/convert_to_arrow.py benchmark `
+  --source-root REVIEWED_MODEL_PLAN_SOURCE_ROOT `
+  --output-root "$RunRoot\stages\release_arrow" `
+  --datasets aminer arnetminer inspire kisti orcid pubmed qian zbmath augmented `
+  --name-counts-index-root $NameCountsIndex `
+  --n-jobs $NJobs
+```
+
+Held-out populations whose files differ from the training files need their own
+conversion root, such as `stages\evaluation_arrow`, with one directory per
+evaluation dataset name. Provenance binds each conversion to its source digests,
+so a root converted from different or stale files is rejected rather than used.
+
 ## Linker source and data roots
 
 `linker_source_bundle.py` copies reviewed inputs into a fresh linker source
@@ -634,6 +658,7 @@ Run the release trainer from the prepared model plan:
 uv run python scripts/production/model/train_pairwise.py `
   --model-plan path/to/run/model_plan.json `
   --name-counts-index-root path/to/name_counts_index `
+  --arrow-root path/to/run/stages/release_arrow `
   --matrix-work-dir D:/local-unsynced/s2and-matrix-work `
   --output-dir path/to/run/stages/pairwise/production_model_vX.Y `
   --validation-pairs-size REVIEWED_VALIDATION_PAIRS_SIZE `
@@ -643,7 +668,7 @@ uv run python scripts/production/model/train_pairwise.py `
 
 `--n-jobs` defaults to 25 and also overwrites `OMP_NUM_THREADS` for the run, so
 pass the reviewed value explicitly. Run `--help` for the other defaulted
-options (`--n-iter`, `--train-pairs-size`, `--chunk-size`, `--random-seed`,
+options (`--n-iter`, `--train-pairs-size`, `--random-seed`,
 `--total-ram-bytes`).
 
 The output is a pairwise-only bundle whose manifest records
@@ -659,6 +684,17 @@ The trainer has one full-release mode. It requires an external name-count
 index, an empty local matrix workspace, finite validation metrics, and explicit
 acknowledgement of the expensive run. It cannot resolve held-out test paths.
 
+Training, EPS calibration, and pair and cluster evaluation select pairs, blocks,
+seeds, and truth from the plan's JSON files, then compute features and distances
+with the Rust featurizer. That featurizer reads `--arrow-root/<dataset>/`: a
+`convert_to_arrow.py` conversion of the same JSON files. Each conversion writes
+`conversion_provenance.json`, which records the SHA-256 of every source it read.
+Before any work starts, the commands reject a dataset whose provenance does not
+name the plan's exact `signatures`, `papers`, and `specter_embeddings` digests,
+or whose tables differ from the recorded conversion. They also require the
+Arrow data to use the release name-count index, and to contain exactly the JSON
+signatures. See [release Arrow conversions](#release-arrow-conversions).
+
 ## EPS calibration
 
 Run `release_pairwise.py calibrate-eps` against validation data using only the
@@ -671,7 +707,8 @@ uv run python scripts/production/model/release_pairwise.py `
   --model-plan path/to/run/model_plan.json `
   --output-bundle path/to/run/stages/calibrated/production_model_vX.Y `
   --output-report path/to/run/reports/eps_calibration_report.json `
-  --name-counts-index-root path/to/name_counts_index
+  --name-counts-index-root path/to/name_counts_index `
+  --arrow-root path/to/run/stages/release_arrow
 ```
 
 The EPS grid and floors come from the plan; objective, aggregation, and
@@ -792,6 +829,7 @@ uv run python scripts/production/model/release_pairwise.py evaluate-pairs `
   --evaluation-plan path/to/run/evaluation_plan.json `
   --run-binding path/to/run/run_binding.json `
   --name-counts-index-root path/to/name_counts_index `
+  --arrow-root path/to/run/stages/evaluation_arrow `
   --output-report path/to/run/reports/pairwise_evaluation_report.json `
   --n-jobs REVIEWED_N_JOBS `
   --total-ram-bytes REVIEWED_TOTAL_RAM_BYTES
@@ -801,6 +839,7 @@ uv run python scripts/production/model/release_pairwise.py evaluate-clusters `
   --evaluation-plan path/to/run/evaluation_plan.json `
   --run-binding path/to/run/run_binding.json `
   --name-counts-index-root path/to/name_counts_index `
+  --arrow-root path/to/run/stages/evaluation_arrow `
   --output-report path/to/run/reports/cluster_evaluation_report.json `
   --n-jobs REVIEWED_N_JOBS
 

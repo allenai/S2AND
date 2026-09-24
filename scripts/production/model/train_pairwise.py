@@ -29,13 +29,15 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from s2and.arrow_inputs import ArrowDataset  # noqa: E402
+from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
+from s2and.feature_port import build_verified_rust_featurizer, featurize_pairs_with_rust  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
     DEFAULT_NAMELESS_FEATURE_GROUPS,
     FeaturizationInfo,
     TupleOfArrays,
-    many_pairs_featurize,
     resolve_selection_pairs,
 )
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
@@ -58,8 +60,9 @@ DEFAULT_TRAIN_PAIRS_SIZE = 100_000
 DEFAULT_VALIDATION_PAIRS_SIZE = 10_000
 DEFAULT_N_ITER = 50
 DEFAULT_N_JOBS = 25
-DEFAULT_CHUNK_SIZE = 100
 DEFAULT_RANDOM_SEED = 1111
+# Plan roles that determine Rust pair features; each Arrow conversion must match them.
+ARROW_SOURCE_ROLES = ("signatures", "papers", "specter_embeddings")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +74,8 @@ class PairwisePreflightPlan:
     dataset_names: tuple[str, ...]
     datasets: Mapping[str, ModelDataset]
     model_plan_sha256: str
+    arrow_dirs: Mapping[str, Path]
+    arrow_provenance_sha256: Mapping[str, str]
     matrix_work_dir: Path
     matrix_work_free_bytes: int
     total_ram_bytes: int | None
@@ -117,7 +122,6 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     for numeric_arg in (
         "n_iter",
         "n_jobs",
-        "chunk_size",
         "train_pairs_size",
         "validation_pairs_size",
     ):
@@ -152,12 +156,24 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     if observed_modes != expected_modes:
         raise SystemExit("model plan datasets disagree with the production dataset set")
 
+    arrow_root = Path(args.arrow_root).resolve()
+    arrow_dirs = {name: arrow_root / name for name in dataset_names}
+    arrow_provenance_sha256 = {
+        name: verify_conversion_provenance(
+            arrow_dirs[name],
+            expected_source_sha256={role: model_plan.datasets[name].sha256[role] for role in ARROW_SOURCE_ROLES},
+        )
+        for name in dataset_names
+    }
+
     return PairwisePreflightPlan(
         output_dir=output_dir,
         release_version=model_plan.release_version,
         dataset_names=dataset_names,
         datasets=model_plan.datasets,
         model_plan_sha256=model_plan.sha256,
+        arrow_dirs=arrow_dirs,
+        arrow_provenance_sha256=arrow_provenance_sha256,
         matrix_work_dir=matrix_work_dir,
         matrix_work_free_bytes=matrix_work_free_bytes,
         total_ram_bytes=None if requested_total_ram is None else int(requested_total_ram),
@@ -171,14 +187,16 @@ def _training_config(
     artifact_hashes: Mapping[str, str],
 ) -> dict[str, Any]:
     return {
-        "chunk_size": int(args.chunk_size),
         "dataset_inputs": {
             name: {
+                "arrow_dir": str(plan.arrow_dirs[name]),
+                "arrow_conversion_provenance_sha256": plan.arrow_provenance_sha256[name],
                 "files": {role: str(path) for role, path in plan.datasets[name].files.items()},
                 "split_mode": plan.datasets[name].split_mode,
             }
             for name in plan.dataset_names
         },
+        "featurization_backend": "rust_from_provenance_bound_arrow",
         "features_to_use": list(DEFAULT_FEATURE_GROUPS),
         "training_scope": "production_full",
         "input_artifact_hashes": {str(key): str(value) for key, value in artifact_hashes.items()},
@@ -241,38 +259,32 @@ def _stage_dataset_features(
 
 def _featurize_selection(
     dataset: ANDData,
+    rust_featurizer: Any,
     featurizer_info: FeaturizationInfo,
     *,
     n_jobs: int,
-    chunk_size: int,
     nameless_featurizer_info: FeaturizationInfo,
     total_ram_bytes: int | None,
 ) -> tuple[TupleOfArrays, TupleOfArrays]:
-    """Featurize release train/validation pairs and never resolve a test split."""
+    """Featurize release train/validation pairs and never resolve a test split.
+
+    The JSON dataset selects the pairs; the Rust featurizer computes their features.
+    """
 
     train_pairs, val_pairs = resolve_selection_pairs(dataset)
-    return (
-        many_pairs_featurize(
-            train_pairs,
-            dataset,
+    train, val = (
+        featurize_pairs_with_rust(
+            rust_featurizer,
+            pairs,
             featurizer_info,
-            n_jobs=n_jobs,
-            chunk_size=chunk_size,
             nameless_featurizer_info=nameless_featurizer_info,
+            n_jobs=n_jobs,
             nan_value=np.nan,
             total_ram_bytes=total_ram_bytes,
-        ),
-        many_pairs_featurize(
-            val_pairs,
-            dataset,
-            featurizer_info,
-            n_jobs=n_jobs,
-            chunk_size=chunk_size,
-            nameless_featurizer_info=nameless_featurizer_info,
-            nan_value=np.nan,
-            total_ram_bytes=total_ram_bytes,
-        ),
+        )
+        for pairs in (train_pairs, val_pairs)
     )
+    return train, val
 
 
 def _load_staged_array(path: Path) -> np.ndarray:
@@ -438,14 +450,26 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 }
                 del train_blocks, val_blocks, test_blocks
 
-            train, val = _featurize_selection(
-                anddata,
-                featurizer_info,
-                n_jobs=int(args.n_jobs),
-                chunk_size=int(args.chunk_size),
-                nameless_featurizer_info=nameless_featurizer_info,
-                total_ram_bytes=plan.total_ram_bytes,
-            )
+            with ArrowDataset.open(
+                plan.arrow_dirs[dataset_name],
+                require_specter=True,
+                require_name_counts_index=True,
+            ) as arrow_dataset:
+                rust_featurizer = build_verified_rust_featurizer(
+                    anddata,
+                    arrow_dataset,
+                    name_counts_manifest_sha256=expected_name_counts,
+                    num_threads=int(args.n_jobs),
+                )
+                train, val = _featurize_selection(
+                    anddata,
+                    rust_featurizer,
+                    featurizer_info,
+                    n_jobs=int(args.n_jobs),
+                    nameless_featurizer_info=nameless_featurizer_info,
+                    total_ram_bytes=plan.total_ram_bytes,
+                )
+                del rust_featurizer
             staged = _stage_dataset_features(
                 matrix_work_dir,
                 dataset_name,
@@ -536,7 +560,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--n-iter", type=int, default=DEFAULT_N_ITER)
     parser.add_argument("--n-jobs", type=int, default=DEFAULT_N_JOBS)
-    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
+    parser.add_argument(
+        "--arrow-root",
+        type=Path,
+        required=True,
+        help=(
+            "Directory with one Arrow conversion per training dataset (<root>/<dataset>/), each carrying "
+            "conversion provenance that matches the model plan's signatures, papers and SPECTER files."
+        ),
+    )
     parser.add_argument("--train-pairs-size", type=int, default=DEFAULT_TRAIN_PAIRS_SIZE)
     parser.add_argument(
         "--validation-pairs-size",

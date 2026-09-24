@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import shutil
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -622,13 +623,13 @@ class _StubCalibrationClusterer:
         assert num_to_keep is None
         return {key: values for key, values in blocks.items() if len(values) > 1}
 
-    def make_distance_matrices(
+    def make_distance_matrices_from_rust_featurizer(
         self,
         blocks: dict[str, list[str]],
-        dataset: Any,
+        rust_featurizer: Any,
         total_ram_bytes: int | None = None,
     ) -> dict[str, object]:
-        self.events.append(("build", dataset.name))
+        self.events.append(("build", rust_featurizer.dataset_name))
         self.distance_ram.append(total_ram_bytes)
         return {key: object() for key in blocks}
 
@@ -642,6 +643,36 @@ class _StubCalibrationClusterer:
         assert dists is not None
         self.events.append(("predict", dataset.name, float(self.cluster_model.eps), total_ram_bytes))
         return {"cluster": ["s1", "s2"]}, None
+
+
+class _FakeRustFeaturizer:
+    """Stand-in featurizer that records the cluster seeds overlaid on it."""
+
+    def __init__(self, dataset_name: str) -> None:
+        self.dataset_name = dataset_name
+        self.seeds: list[tuple[Any, Any]] = []
+
+    def with_cluster_seeds(self, require: Any, disallow: Any) -> _FakeRustFeaturizer:
+        self.seeds.append((require, disallow))
+        return self
+
+
+def _patch_rust_featurizers(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Replace provenance verification + Arrow opening with a recorder yielding fake featurizers."""
+
+    calls: list[dict[str, Any]] = []
+
+    @contextmanager
+    def fake(arrow_root: Path, name: str, **kwargs: Any):
+        calls.append({"arrow_root": arrow_root, "name": name, **kwargs})
+        yield _FakeRustFeaturizer(name)
+
+    monkeypatch.setattr(release_pairwise, "_release_rust_featurizer", fake)
+    return calls
+
+
+def _source_digests(files: dict[str, str]) -> dict[str, str]:
+    return {role: _sha256(Path(file_path)) for role, file_path in files.items()}
 
 
 def _artifact_authority() -> release_pairwise.ProductionArtifactAuthority:
@@ -692,6 +723,8 @@ def _patch_calibration(
             name=name,
             split_cluster_signatures=lambda: ({}, {"b1": ["s1", "s2"], "b2": ["s3"]}, {}),
             construct_cluster_to_signatures=lambda _blocks: {"c": ["s1", "s2"]},
+            cluster_seeds_require={},
+            cluster_seeds_disallow=set(),
         ),
     )
     monkeypatch.setattr(
@@ -727,21 +760,28 @@ def test_calibrate_eps_binds_plan_reuses_matrices_applies_floors_and_smallest_ti
     bundle = _calibration_bundle(tmp_path, model_plan)
     clusterer = _StubCalibrationClusterer()
     finalizations = _patch_calibration(monkeypatch, clusterer, {0.2: 0.8, 0.4: 0.8, 0.6: 0.7})
+    featurizer_calls = _patch_rust_featurizers(monkeypatch)
     args = argparse.Namespace(
         source_bundle=bundle,
         model_plan=model_plan,
         output_bundle=tmp_path / "calibrated",
         output_report=tmp_path / "calibration.json",
         name_counts_index_root=tmp_path / "counts",
+        arrow_root=tmp_path / "converted",
         n_jobs=5,
         total_ram_bytes=2048,
     )
 
     report = release_pairwise.calibrate_eps(args)
 
+    assert [(call["arrow_root"], call["name"], call["n_jobs"]) for call in featurizer_calls] == [
+        (tmp_path / "converted", "random", 5)
+    ]
+    assert featurizer_calls[0]["source_sha256"] == _source_digests(fixture.model["random"])
     assert [event for event in clusterer.events if event[0] == "build"] == [("build", "random")]
     assert [event[2] for event in clusterer.events if event[0] == "predict"] == [0.2, 0.4, 0.6]
     assert clusterer.distance_ram == [2048]
+    assert {event[3] for event in clusterer.events if event[0] == "predict"} == {2048}
     assert clusterer.cluster_model.eps == pytest.approx(0.5)
     assert clusterer.n_jobs == 5
     assert report["selected_eps"] == pytest.approx(0.2)
@@ -810,6 +850,7 @@ def _evaluation_args(
         evaluation_plan=evaluation_plan,
         run_binding=binding_path,
         name_counts_index_root=Path("counts"),
+        arrow_root=Path("converted"),
         output_report=output,
         n_jobs=2,
         total_ram_bytes=None,
@@ -821,9 +862,31 @@ def _patch_evaluation_model(
     monkeypatch: pytest.MonkeyPatch,
     events: list[str],
 ) -> argparse.Namespace:
+    distance_calls: list[tuple[dict[str, list[str]], int | None]] = []
+
+    def make_distances(
+        blocks: dict[str, list[str]],
+        _featurizer: Any,
+        total_ram_bytes: int | None = None,
+    ) -> dict[str, object]:
+        distance_calls.append((blocks, total_ram_bytes))
+        return {key: object() for key in blocks}
+
+    def predict(
+        blocks: dict[str, list[str]],
+        _dataset: Any,
+        dists: dict[str, object] | None = None,
+        total_ram_bytes: int | None = None,
+    ) -> tuple[dict[str, list[str]], None]:
+        assert dists is not None and set(dists) == set(blocks)
+        assert total_ram_bytes is None
+        return {f"predicted-{key}": signatures for key, signatures in blocks.items()}, None
+
     model = argparse.Namespace(
         n_jobs=1,
-        predict=lambda blocks, _dataset: ({"predicted": next(iter(blocks.values()))}, None),
+        distance_calls=distance_calls,
+        make_distance_matrices_from_rust_featurizer=make_distances,
+        predict=predict,
     )
     monkeypatch.setattr(
         release_pairwise,
@@ -858,8 +921,10 @@ def test_pair_evaluator_loads_complete_model_before_plan_and_ignores_cluster_dig
         "_load_anddata",
         lambda name, *_args, **_kwargs: argparse.Namespace(name=name),
     )
+    featurizer_calls = _patch_rust_featurizers(monkeypatch)
 
-    def predictions(pairs: list[tuple[str, str, int]], dataset: Any, *_args: Any) -> tuple[Any, ...]:
+    def predictions(pairs: list[tuple[str, str, int]], rust_featurizer: Any, *_args: Any) -> tuple[Any, ...]:
+        assert isinstance(rust_featurizer, _FakeRustFeaturizer)
         label = np.asarray([pairs[0][2]])
         probability = np.asarray([0.8 if label[0] else 0.2])
         return {"rows": 1, "auroc": 1.0, "macro_f1": 1.0}, label, probability, probability
@@ -872,6 +937,10 @@ def test_pair_evaluator_loads_complete_model_before_plan_and_ignores_cluster_dig
     assert events[:3] == ["artifacts", "model", "plan"]
     assert set(report["datasets"]) == {"fixed", "random"}
     assert report["aggregate"]["rows"] == 2
+    assert {call["name"]: call["source_sha256"] for call in featurizer_calls} == {
+        name: _source_digests(files) for name, files in fixture.pairwise.items()
+    }
+    assert {call["arrow_root"] for call in featurizer_calls} == {Path("converted")}
 
 
 def test_cluster_evaluator_loads_complete_model_before_plan_and_ignores_pair_digest(
@@ -882,7 +951,7 @@ def test_cluster_evaluator_loads_complete_model_before_plan_and_ignores_pair_dig
     _, evaluation_plan = _prepare(fixture)
     _write_json(Path(fixture.pairwise["fixed"]["pairs"]), [{"changed": True}])
     events: list[str] = []
-    _patch_evaluation_model(monkeypatch, events)
+    model = _patch_evaluation_model(monkeypatch, events)
     real_load = release_pairwise._load_evaluation_plan
     monkeypatch.setattr(
         release_pairwise,
@@ -895,8 +964,11 @@ def test_cluster_evaluator_loads_complete_model_before_plan_and_ignores_pair_dig
         lambda name, *_args, **_kwargs: argparse.Namespace(
             name=name,
             construct_cluster_to_signatures=lambda blocks: {"truth": next(iter(blocks.values()))},
+            cluster_seeds_require={"ct1": 0},
+            cluster_seeds_disallow={("ct1", "ct2")},
         ),
     )
+    featurizer_calls = _patch_rust_featurizers(monkeypatch)
     monkeypatch.setattr(
         release_pairwise,
         "_b3_report",
@@ -909,6 +981,44 @@ def test_cluster_evaluator_loads_complete_model_before_plan_and_ignores_pair_dig
     assert events[:3] == ["artifacts", "model", "plan"]
     assert set(report["datasets"]) == {"random"}
     assert report["signature_weighted"]["f1"] == 1.0
+    assert [call["source_sha256"] for call in featurizer_calls] == [_source_digests(fixture.cluster["random"])]
+    # Block by block, with the evaluator's autodetected RAM budget, as fused predict did.
+    assert model.distance_calls == [({"b": ["ct1", "ct2"]}, None)]
+
+
+def test_pairwise_predictions_forward_the_ram_budget_to_rust_featurization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: list[dict[str, Any]] = []
+
+    def featurize(rust_featurizer: Any, pairs: list[Any], featurizer_info: Any, **kwargs: Any) -> tuple[Any, ...]:
+        received.append({"featurizer": rust_featurizer, "pairs": pairs, "info": featurizer_info, **kwargs})
+        rows = len(pairs)
+        return np.zeros((rows, 2)), np.asarray([pair[2] for pair in pairs], dtype=float), np.zeros((rows, 1))
+
+    monkeypatch.setattr(release_pairwise, "featurize_pairs_with_rust", featurize)
+    classifier = argparse.Namespace(predict_proba=lambda rows: np.tile([0.2, 0.8], (len(rows), 1)))
+    clusterer = argparse.Namespace(
+        featurizer_info="main-info",
+        nameless_featurizer_info="nameless-info",
+        classifier=classifier,
+        nameless_classifier=classifier,
+    )
+    featurizer = _FakeRustFeaturizer("pairs")
+
+    release_pairwise._pairwise_predictions(
+        [("a", "b", 1), ("c", "d", 0)],
+        featurizer,
+        clusterer,
+        argparse.Namespace(n_jobs=3, total_ram_bytes=4096),
+    )
+
+    assert len(received) == 1
+    assert received[0]["featurizer"] is featurizer
+    assert received[0]["info"] == "main-info"
+    assert received[0]["nameless_featurizer_info"] == "nameless-info"
+    assert received[0]["n_jobs"] == 3
+    assert received[0]["total_ram_bytes"] == 4096
 
 
 def test_pair_labels_are_checked_only_after_complete_model_load(

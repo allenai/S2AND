@@ -13,6 +13,7 @@ import logging
 import os
 import pickle
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -38,6 +39,7 @@ from s2and.arrow_inputs import (  # noqa: E402
     require_name_counts_index_artifact,
     write_arrow_artifact_manifest,
 )
+from s2and.arrow_provenance import write_conversion_provenance  # noqa: E402
 from s2and.arrow_schema import validate_arrow_schema  # noqa: E402
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION  # noqa: E402
 
@@ -658,6 +660,23 @@ def _write_specter_arrow(
     }
 
 
+def _converter_identity(**options: Any) -> dict[str, Any]:
+    """Record the converter revision and the options that shaped its output."""
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=_PROJECT_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    return {
+        "script": "scripts/convert_to_arrow.py",
+        "git_head": git("rev-parse", "HEAD"),
+        "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+        "use_orcid_id": True,
+        **options,
+    }
+
+
 def _source_file(path: Path) -> Path:
     if not path.is_file():
         raise FileNotFoundError(f"Missing source file: {path}")
@@ -1062,6 +1081,20 @@ def convert_runtime_dataset_to_arrow(
             base_dir=output_dir,
         )
     write_arrow_artifact_manifest(manifest, output_dir)
+    write_conversion_provenance(
+        output_dir,
+        sources={
+            "signatures": sources.signatures_path,
+            "papers": sources.papers_path,
+            "specter_embeddings": embedding_source,
+            **({} if sources.clusters_path is None else {"clusters": sources.clusters_path}),
+        },
+        converter=_converter_identity(
+            selected_embedding=selected_embedding,
+            include_empty_cluster_seeds=include_empty_cluster_seeds,
+            name_counts_index="skipped" if skip_name_counts_index else "bound",
+        ),
+    )
     _upsert_root_manifest(root_manifest_dir, dataset_name=dataset_name, dataset_dir=output_dir)
     return {
         **manifest,

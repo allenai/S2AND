@@ -577,7 +577,12 @@ def _validate_retained_arrow_schema(retained: _RetainedFile, *, table_name: str)
     import pyarrow as pa
 
     with retained.lock:
-        source_map = mmap.mmap(retained.handle.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            source_map = mmap.mmap(retained.handle.fileno(), 0, access=mmap.ACCESS_READ)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid Arrow {table_name} IPC file in {retained.path} ({type(exc).__name__}): {exc}"
+            ) from exc
         source = pa.BufferReader(source_map)
         reader = None
         error: Exception | None = None

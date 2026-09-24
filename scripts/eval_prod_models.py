@@ -475,9 +475,12 @@ def _resolve_requested_arrow_dataset_root(
 
     dataset_root = resolve_arrow_dataset_root(arrow_root, dataset_name)
     _generation_id, specs = _load_artifact_specs(Path(dataset_root))
+    with (Path(dataset_root) / "manifest.json").open("rb") as source:
+        manifest = json.load(source)
     expected_specter_name = "specter2.arrow" if specter_suffix == SPECTER2_SUFFIX else "specter.arrow"
-    specter_spec = specs.get("specter")
-    declared_specter = "" if specter_spec is None else specter_spec.path.name
+    # Resolved artifact paths can have different spelling on a case-insensitive
+    # filesystem. The manifest declaration identifies the requested generation.
+    declared_specter = Path(manifest["paths"].get("specter", "")).name
     if declared_specter != expected_specter_name:
         raise FileNotFoundError(
             f"Arrow dataset {dataset_name!r} declares {declared_specter!r}, not requested {expected_specter_name!r}"
@@ -1146,8 +1149,9 @@ def main() -> None:
     )
     if not use_arrow and not train_flag and data_original is None:
         raise ValueError(
-            "Arrow artifacts are unavailable; pass an explicit --json-data-root or repair --arrow-data-root"
-        )
+            f"Arrow artifacts are unavailable: {missing_arrow_error}; "
+            "pass an explicit --json-data-root or repair --arrow-data-root"
+        ) from missing_arrow_error
     uses_json_anddata = (train_flag and any(mode != TRAIN_MODE_ARROW_RUST for mode in train_modes)) or (
         not train_flag and not use_arrow
     )
@@ -1175,6 +1179,8 @@ def main() -> None:
         print(f"Arrow data root: {arrow_data_root}")
     elif train_flag and TRAIN_MODE_ARROW_RUST in train_modes:
         print(f"Arrow data root: {arrow_data_root}")
+    elif not train_flag and not args.no_arrow:
+        print(f"Arrow unavailable; using JSON: {missing_arrow_error}")
     print()
 
     featurization_info = FeaturizationInfo(

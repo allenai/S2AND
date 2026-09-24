@@ -104,6 +104,38 @@ def test_arrow_availability_requires_name_counts_declaration(tmp_path: Path) -> 
         eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl")
 
 
+def test_arrow_availability_uses_declared_specter_name_on_case_insensitive_filesystem(tmp_path: Path) -> None:
+    dataset_root = _write_eval_arrow_root(tmp_path)
+    declared_path = dataset_root / "specter2.arrow"
+    renamed_path = dataset_root / "SPECTER2.ARROW"
+    intermediate_path = declared_path.rename(dataset_root / "rename-intermediate.arrow")
+    intermediate_path.rename(renamed_path)
+    if not declared_path.is_file():
+        pytest.skip("The filesystem distinguishes the declared and physical filename case")
+
+    with ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True):
+        pass
+    assert eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    with eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl") as dataset:
+        assert dataset.root == dataset_root.resolve()
+
+
+def test_arrow_availability_accepts_utf8_bom_dataset_manifest(tmp_path: Path) -> None:
+    dataset_root = _write_eval_arrow_root(tmp_path)
+    manifest_path = dataset_root / "manifest.json"
+    manifest_path.write_bytes(b"\xef\xbb\xbf" + manifest_path.read_bytes())
+    collection_path = tmp_path / "manifest.json"
+    collection = json.loads(collection_path.read_text(encoding="utf-8"))
+    collection["dataset_manifests"]["pubmed"]["sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    collection_path.write_text(json.dumps(collection), encoding="utf-8")
+
+    with ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True):
+        pass
+    assert eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    with eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl") as dataset:
+        assert dataset.root == dataset_root.resolve()
+
+
 @pytest.mark.parametrize("corruption", ["checksum", "missing"])
 @pytest.mark.parametrize("artifact", ["papers", "name_counts_index"])
 def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path, corruption: str, artifact: str) -> None:
@@ -125,7 +157,7 @@ def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path, 
         eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl")
 
 
-@pytest.mark.parametrize("corruption", ["json", "binding", "metadata"])
+@pytest.mark.parametrize("corruption", ["json", "binding", "metadata", "missing_base"])
 def test_arrow_availability_propagates_corrupt_manifests(tmp_path: Path, corruption: str) -> None:
     dataset_root = _write_eval_arrow_root(tmp_path)
     root_manifest = tmp_path / "manifest.json"
@@ -136,7 +168,11 @@ def test_arrow_availability_propagates_corrupt_manifests(tmp_path: Path, corrupt
         child_manifest.write_text("{}", encoding="utf-8")
     else:
         child = json.loads(child_manifest.read_text(encoding="utf-8"))
-        child["format_version"] = 999
+        if corruption == "metadata":
+            child["format_version"] = 999
+        else:
+            del child["paths"]["papers"]
+            del child["files"]["papers"]
         child_manifest.write_text(json.dumps(child), encoding="utf-8")
         collection = json.loads(root_manifest.read_text(encoding="utf-8"))
         collection["dataset_manifests"]["pubmed"]["sha256"] = hashlib.sha256(child_manifest.read_bytes()).hexdigest()
@@ -644,7 +680,10 @@ def test_eval_main_surfaces_arrow_corruption_with_json_fallback_configured(
         eval_prod_models.main()
 
 
-def test_eval_main_json_uses_recorded_holdout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("automatic", [False, True])
+def test_eval_main_json_uses_recorded_holdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], automatic: bool
+) -> None:
     import s2and.name_tuple_artifact as name_tuple_artifact
     import s2and.production_model as production_model
     from s2and.data import ANDData
@@ -684,13 +723,19 @@ def test_eval_main_json_uses_recorded_holdout(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(eval_prod_models, "build_eval_anddata", lambda **_kwargs: Dataset())
     monkeypatch.setattr(name_tuple_artifact, "load_name_tuple_artifact", lambda _path: SimpleNamespace(pairs=set()))
     monkeypatch.setattr(production_model, "load_production_model", lambda _path: Clusterer())
-    # An explicitly selected JSON evaluation never consults unrelated Arrow data.
-    (tmp_path / "manifest.json").write_text("{", encoding="utf-8")
+    arrow_root = tmp_path / "arrow"
+    if automatic:
+        _write_eval_arrow_root(arrow_root, include_name_counts_index=False)
+    else:
+        # An explicitly selected JSON evaluation never consults unrelated Arrow data.
+        arrow_root.mkdir()
+        (arrow_root / "manifest.json").write_text("{", encoding="utf-8")
 
     def fail_arrow_probe(*_args, **_kwargs):
         pytest.fail("--no-arrow must bypass Arrow availability")
 
-    monkeypatch.setattr(eval_prod_models, "first_missing_arrow_dataset_error", fail_arrow_probe)
+    if not automatic:
+        monkeypatch.setattr(eval_prod_models, "first_missing_arrow_dataset_error", fail_arrow_probe)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -700,13 +745,13 @@ def test_eval_main_json_uses_recorded_holdout(tmp_path: Path, monkeypatch: pytes
             "mini",
             "--datasets",
             "pubmed",
-            "--no-arrow",
+            *([] if automatic else ["--no-arrow"]),
             "--specter2-model-path",
             str(model_path),
             "--json-data-root",
             str(tmp_path),
             "--arrow-data-root",
-            str(tmp_path),
+            str(arrow_root),
             "--name-counts-index-root",
             str(tmp_path),
             "--name-tuples-path",
@@ -715,6 +760,42 @@ def test_eval_main_json_uses_recorded_holdout(tmp_path: Path, monkeypatch: pytes
     )
     eval_prod_models.main()
     assert len(predicted) == 1
+    output = capsys.readouterr().out
+    if automatic:
+        assert "Arrow unavailable; using JSON:" in output
+        assert "dataset='pubmed'" in output
+        assert "name_counts_index" in output
+    else:
+        assert "Arrow unavailable; using JSON:" not in output
+
+
+def test_eval_main_unavailable_arrow_without_json_preserves_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arrow_root = tmp_path / "arrow"
+    _write_eval_arrow_root(arrow_root, include_name_counts_index=False)
+    model_path = tmp_path / "model"
+    _write_bundle_training_config(model_path, {"data_random_seed": 1111})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_prod_models.py",
+            "--dataset",
+            "mini",
+            "--datasets",
+            "pubmed",
+            "--specter2-model-path",
+            str(model_path),
+            "--arrow-data-root",
+            str(arrow_root),
+        ],
+    )
+    with pytest.raises(ValueError, match="name_counts_index") as error:
+        eval_prod_models.main()
+    assert "dataset='pubmed'" in str(error.value)
+    assert "--json-data-root" in str(error.value)
+    assert isinstance(error.value.__cause__, FileNotFoundError)
 
 
 def test_eval_main_rejects_invalid_mode_combinations(monkeypatch: pytest.MonkeyPatch) -> None:

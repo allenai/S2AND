@@ -519,6 +519,30 @@ def test_schema_errors_include_table_path_and_error_type(tmp_path: Path, malform
     signatures.unlink()  # Schema/IPC failures must release the Windows mapping.
 
 
+@pytest.mark.parametrize("table_name", ["signatures", "papers", "paper_authors", "specter"])
+def test_empty_arrow_file_names_table_and_path_and_allows_retry(tmp_path: Path, table_name: str) -> None:
+    paths = _write_dataset(tmp_path, include_specter=True)
+    table_path = Path(paths[table_name])
+    original = table_path.read_bytes()
+    table_path.write_bytes(b"")
+    write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, tmp_path), tmp_path)
+
+    with pytest.raises(ValueError) as caught:
+        ArrowDataset.open(tmp_path)
+    message = str(caught.value)
+    assert table_name in message
+    assert str(table_path) in message
+    assert "empty" in message
+    assert isinstance(caught.value.__cause__, ValueError)
+
+    table_path.unlink()  # A failed open must release retained Windows handles.
+    table_path.write_bytes(original)
+    write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, tmp_path), tmp_path)
+    with ArrowDataset.open(tmp_path) as dataset:
+        with dataset.use() as lease:
+            assert lease.has(table_name)
+
+
 @pytest.mark.parametrize("failure", [MemoryError("budget"), OSError(5, "read failure"), RuntimeError("unexpected")])
 def test_schema_validation_preserves_non_schema_exceptions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception

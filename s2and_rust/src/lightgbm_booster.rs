@@ -15,6 +15,13 @@
 //! `1 / (1 + exp(-sigmoid * raw))`. Deterministic parity tests cover the
 //! supported split and missing-value cases; this module does not claim an
 //! exhaustive proof over every model LightGBM can produce.
+//!
+//! Construction also builds an optional [`fast::FastPlan`]: QuickScorer or
+//! lockstep traversal over integer bin keys, which is bit-identical to the
+//! baseline traversal below by construction. Models outside its guards, such
+//! as Zero-missing splits, shared-child graphs, or more than 255 distinct
+//! thresholds for one feature, are scored by the baseline, which also serves
+//! as the test oracle.
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
@@ -24,6 +31,12 @@ use pyo3::Bound;
 use rayon::prelude::*;
 
 use crate::rayon_pool::install_with_optional_rayon_pool;
+
+mod fast;
+#[cfg(test)]
+mod fast_tests;
+
+use fast::FastPlan;
 
 pub(super) fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustLightGBMBooster>()?;
@@ -579,9 +592,17 @@ fn predict_rows_f32(
 #[pyclass]
 pub(crate) struct RustLightGBMBooster {
     model: LgbModel,
+    /// Exact fast traversal; `None` scores through the baseline traversal.
+    fast_plan: Option<FastPlan>,
 }
 
 impl RustLightGBMBooster {
+    fn from_model_text(model_text: &str) -> PyResult<Self> {
+        let model = parse_model(model_text).map_err(model_error)?;
+        let fast_plan = FastPlan::build(&model);
+        Ok(Self { model, fast_plan })
+    }
+
     fn validate_feature_width(&self, column_count: usize) -> PyResult<()> {
         if column_count != self.model.num_features {
             return Err(model_error(format!(
@@ -607,11 +628,13 @@ impl RustLightGBMBooster {
         }
         let threads = num_threads.unwrap_or(1).max(1);
         let model = &self.model;
+        let fast_plan = self.fast_plan.as_ref();
         // Owned standard-layout copy so non-C-contiguous inputs work and the
         // buffer can be scored with the GIL released.
         let rows: Vec<f64> = features.as_array().iter().copied().collect();
-        let scores = py.allow_threads(move || {
-            predict_rows(model, &rows, column_count, threads, apply_sigmoid)
+        let scores = py.allow_threads(move || match fast_plan {
+            Some(plan) => plan.predict_rows(model, &rows, threads, apply_sigmoid),
+            None => predict_rows(model, &rows, column_count, threads, apply_sigmoid),
         });
         Ok(scores.into_pyarray(py))
     }
@@ -631,10 +654,12 @@ impl RustLightGBMBooster {
         }
         let threads = num_threads.unwrap_or(1).max(1);
         let model = &self.model;
+        let fast_plan = self.fast_plan.as_ref();
         // Keep the owned GIL-independent copy at the caller's float32 width.
         let rows: Vec<f32> = features.as_array().iter().copied().collect();
-        let scores = py.allow_threads(move || {
-            predict_rows_f32(model, &rows, column_count, threads, apply_sigmoid)
+        let scores = py.allow_threads(move || match fast_plan {
+            Some(plan) => plan.predict_rows(model, &rows, threads, apply_sigmoid),
+            None => predict_rows_f32(model, &rows, column_count, threads, apply_sigmoid),
         });
         Ok(scores.into_pyarray(py))
     }
@@ -646,16 +671,12 @@ impl RustLightGBMBooster {
     fn new(model_path: &str) -> PyResult<Self> {
         let model_text = std::fs::read_to_string(model_path)
             .map_err(|err| model_error(format!("could not read {model_path:?}: {err}")))?;
-        Ok(Self {
-            model: parse_model(&model_text).map_err(model_error)?,
-        })
+        Self::from_model_text(&model_text)
     }
 
     #[staticmethod]
     fn from_string(model_text: &str) -> PyResult<Self> {
-        Ok(Self {
-            model: parse_model(model_text).map_err(model_error)?,
-        })
+        Self::from_model_text(model_text)
     }
 
     fn num_features(&self) -> usize {
@@ -666,13 +687,12 @@ impl RustLightGBMBooster {
     fn __copy__(&self) -> Self {
         Self {
             model: self.model.clone(),
+            fast_plan: self.fast_plan.clone(),
         }
     }
 
     fn __deepcopy__(&self, _memo: Bound<'_, pyo3::types::PyAny>) -> Self {
-        Self {
-            model: self.model.clone(),
-        }
+        self.__copy__()
     }
 
     fn num_trees(&self) -> usize {

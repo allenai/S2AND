@@ -79,7 +79,8 @@ route.
    - `ANDData(..., n_jobs=N)`
    - `clusterer.n_jobs = N` (or pass `n_jobs=N` when constructing `Clusterer`)
 
-2. **Set thread env vars before importing compute-heavy libraries** (especially on Windows):
+2. **Set thread env vars before importing compute-heavy libraries** (especially on Windows; the
+   variables are listed in [environment.md](environment.md#threading--parallelism)):
    - `OMP_NUM_THREADS=N` for OpenMP phases such as Python LightGBM training;
      production Rust scoring is controlled by `n_jobs` instead
    - Usually `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `NUMEXPR_NUM_THREADS=1`
@@ -165,8 +166,7 @@ Rules of thumb:
   - Rust batch featurization: Rayon handles parallelism; avoid wrapping it in additional thread pools.
   - Production model inference: scoring runs in Rust (`RustLightGBMBooster`) on the estimator's configured `n_jobs` via the
     shared Rayon pools; avoid concurrent `predict_proba()` calls from multiple workers.
-- BLAS / NumExpr are usually **not** the parallelism layer you want to scale first in S2AND. Leave
-  `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, and `NUMEXPR_NUM_THREADS=1` unless profiling shows otherwise.
+- Keep BLAS / NumExpr at `1` unless profiling shows otherwise (see step 2 of the recommended setup above).
 
 ## Rust Rayon pool lifetime
 

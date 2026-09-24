@@ -13,29 +13,31 @@ S2AND provides the S2AND author-name-disambiguation benchmark datasets and the r
 > [docs/release.md](docs/release.md). This README is also the PyPI description,
 > so every "Update at v1.3 release" note must be resolved before publication.
 
-As of this version, S2AND requires the `s2and-rust` extension at install time.
-Explicit classic Python routes still exist for selected `ANDData` stages, but
-they are not silent fallbacks from Arrow/Rust APIs. Production model loading
-and the maintained large-scale runtime require the Rust package.
+S2AND requires the `s2and-rust` extension, which is installed with the package.
+Classic `ANDData` methods run in Python and methods that take an open
+`ArrowDataset` run in Rust; neither falls back to the other. Production model
+loading and the large-scale runtime require the Rust package.
 
 ## What S2AND Provides
 
 - The S2AND datasets used for author name disambiguation research.
 - Versioned production model artifacts used by Semantic Scholar.
 - Training, evaluation, and inference APIs in Python.
-- A required Rust extension for production model scoring and maintained large-scale runtime paths.
+- A required Rust extension for production model scoring and large-scale runtime paths.
 
 ## Choose a Workflow
 
 | Use case | Start here | Details |
 | --- | --- | --- |
 | Run the released model on your own data | [Quick Start](#quick-start) | [docs/production_inference.md](docs/production_inference.md) |
-| Download the benchmark datasets | [Download Data or Model](#download-data-or-model) | [docs/data.md](docs/data.md) |
-| Train or evaluate a model | [Training and Evaluation Essentials](#training-and-evaluation-essentials) | [docs/training.md](docs/training.md) |
-| Build a production release bundle | `scripts/production/` | [docs/production_inference.md](docs/production_inference.md) |
-| Operate the v1.3 retrain and release | [v1.3 release runbook](docs/release.md) | Follow its stages, approvals, and release contract |
-| Operate Rust-backed large-scale inference | [Runtime and Scaling](#runtime-and-scaling) | [Execution routes](docs/production_inference.md#explicit-execution-routes), [docs/subblocking.md](docs/subblocking.md), [docs/threading.md](docs/threading.md) |
+| Download the benchmark datasets | [Download Data](#download-data) | [docs/data.md](docs/data.md) |
+| Train or evaluate a model | [Training and Evaluation](#training-and-evaluation) | [docs/training.md](docs/training.md) |
+| Run large-scale inference | [Runtime and Scaling](#runtime-and-scaling) | [docs/subblocking.md](docs/subblocking.md), [docs/threading.md](docs/threading.md) |
+| Train and publish the v1.3 production release | [Release runbook](docs/release.md) | [Production command reference](scripts/production/README.md) |
 | Work on the repo itself | [Development](#development) | [docs/development.md](docs/development.md) |
+
+All guides are indexed in [docs/README.md](docs/README.md), which also has a
+glossary of S2AND terms.
 
 ## Install
 
@@ -54,26 +56,21 @@ This installs the latest version on the configured package index. Starting with
 > installs an earlier release in which `s2and-rust` is an optional extra. Use a
 > source checkout to validate the unreleased `1.0.0` worktree.
 
-Repo checkout:
+Repo checkout (requires Rust; see [docs/install.md](docs/install.md) for OS
+prerequisites, environment activation, and WSL notes):
 
 ```bash
 git lfs install
 git lfs pull
-uv venv --python 3.11
-# activate the environment, then:
-uv sync --active --extra dev
+uv sync --extra dev
 ```
 
-`uv sync` builds the matching Rust extension from `s2and_rust/`, and `uv run`
-uses file timestamps to detect ordinary Rust build-input edits. The test
-freshness guard checks source contents; see [build recovery](docs/install.md#build-the-rust-extension-from-source)
-if a change is missed. Source checkouts also need the
-LFS-managed LightGBM test fixtures; repeat `git lfs pull` after switching
-branches that change them.
-For OS prerequisites, activation commands, WSL notes, and install variants, see
-[docs/install.md](docs/install.md).
+`uv sync` builds the matching Rust extension from `s2and_rust/`. Repeat
+`git lfs pull` after switching to a branch that changes the LFS-managed
+LightGBM test fixtures. If a Rust change is not picked up, see
+[build recovery](docs/install.md#build-the-rust-extension-from-source).
 
-## Download Data or Model
+## Download Data
 
 > **Update at v1.3 release:** no compatible production model or public-format-1
 > data has been published yet. The Arrow release below is the historical,
@@ -84,10 +81,8 @@ For OS prerequisites, activation commands, WSL notes, and install variants, see
 > location and size. See [docs/release.md](docs/release.md) and
 > [docs/data.md](docs/data.md#dataset-download).
 
-Rust/Arrow dataset download:
-
 The AWS CLI is not a runtime dependency; `uvx` installs and runs it in an
-isolated environment for this command.
+isolated environment for this command:
 
 ```bash
 uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
@@ -97,20 +92,11 @@ Expected size is about `10.1 GiB`; use a narrower S3 prefix when only one
 dataset is needed. The prior v1.21 model is available only from its compatible
 release and Git history; it is not packaged or loadable on this branch.
 
-## Configuration
-
 Classic `ANDData` finds its default name-count index at
 `<main_data_dir>/name_counts_index`, where `main_data_dir` comes from
-`s2and/data/path_config.json` (or the file named by `S2AND_PATH_CONFIG`):
-
-```json
-{
-  "main_data_dir": "/absolute/path/to/your/s2and/data"
-}
-```
-
-Arrow routes and the production scripts take explicit paths instead. More on
-dataset layout and the config: [docs/data.md](docs/data.md#configuring-s2anddatapath_configjson).
+`s2and/data/path_config.json` (or the file named by `S2AND_PATH_CONFIG`). Arrow
+routes and the production scripts take explicit paths instead. See
+[docs/data.md](docs/data.md#configuring-s2anddatapath_configjson).
 
 ## Quick Start
 
@@ -119,164 +105,57 @@ dataset layout and the config: [docs/data.md](docs/data.md#configuring-s2anddata
 > compatible production model, so production inference cannot run; training
 > and evaluation are described below.
 
-## Production Inference Essentials
-
 `load_production_model(path)` accepts one explicit complete native bundle. It
-does not discover a default, load pickle models, or accept pairwise-only staging
-directories. Classic `ANDData` prediction is the Python route; explicit
-methods that take an open `ArrowDataset` are the Rust route.
-
-Full inference and bundle publication details are in
+does not discover a default or accept pairwise-only training stages. Full
+inference details, including the Python and Rust routes, are in
 [docs/production_inference.md](docs/production_inference.md).
 
-## Training and Evaluation Essentials
+## Training and Evaluation
 
-The example below is a small research/API example, not the production release
-protocol: it materializes test features and permits immediate evaluation.
-During the v1.3 release, test identities and scores remain sealed until the
-one-shot evaluation gate in Stage 5 of the
+[docs/training.md](docs/training.md) walks through building a Rust-backed
+training dataset from a canonical Arrow root, featurizing pairs, training the
+pairwise model, fitting the clusterer, and evaluating both. Those examples are
+research/API examples: they materialize test features for immediate
+evaluation. The v1.3 release instead keeps test identities and scores sealed
+until the one-shot evaluation in Stage 5 of the
 [release runbook](docs/release.md).
-
-Minimal training flow:
-
-```python
-import json
-from pathlib import Path
-
-from hyperopt import hp
-
-from s2and.arrow_inputs import ArrowDataset
-from s2and.arrow_training import build_training_anddata_from_arrow
-from s2and.featurizer import FeaturizationInfo, featurize
-from s2and.model import Clusterer, FastCluster, PairwiseModeler
-
-bundle_dir = Path("/path/to/canonical_arrow_training_bundle/pubmed")
-manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
-manifest_paths = manifest["paths"]
-with ArrowDataset.open(
-    bundle_dir,
-    require_specter=True,
-    require_name_counts_index=True,
-) as arrow_dataset:
-    dataset = build_training_anddata_from_arrow(
-        arrow_dataset,
-        "pubmed",
-        clusters=str((bundle_dir / manifest_paths["clusters"]).resolve()),
-        train_pairs_size=1000,
-        val_pairs_size=200,
-        test_pairs_size=200,
-        n_jobs=4,
-    )
-
-    featurization_info = FeaturizationInfo()
-    train, val, test = featurize(dataset, featurization_info, n_jobs=4)
-    X_train, y_train, _ = train
-    X_val, y_val, _ = val
-
-    pairwise_model = PairwiseModeler(
-        n_iter=25,
-        monotone_constraints=featurization_info.lightgbm_monotone_constraints,
-    )
-    pairwise_model.fit(X_train, y_train, X_val, y_val)
-
-    clusterer = Clusterer(
-        featurization_info,
-        pairwise_model,
-        cluster_model=FastCluster(linkage="average"),
-        search_space={"eps": hp.uniform("eps", 0, 1)},
-        n_iter=25,
-        n_jobs=4,
-    )
-    clusterer.fit(dataset)
-```
-
-Point `bundle_dir` at a manifest-backed canonical Arrow dataset root.
-`ArrowDataset.open(...)` validates its tables, batch indexes, checksums,
-public format, and name-count index once and retains the opened files
-for the handle's lifetime. This migration branch does not bundle a full
-training root.
-
-For evaluation and native-bundle publication guidance, see
-[docs/training.md](docs/training.md).
 
 ## Runtime and Scaling
 
-Runtime controls:
-
-- Public prediction routes are method-based: `ANDData` methods use Python and
-  `predict_from_arrow(..., arrow_dataset)` and
-  `predict_incremental_from_arrow(..., arrow_dataset)` use Rust. No environment
-  variable changes these routes.
-- Rust routes require `s2and-rust` to have exactly the installed Python package
-  version and fail explicitly if it is missing or different.
-
-Large blocks:
-
-- `predict(..., batching_threshold=...)` uses subblocking to keep full-block work bounded.
+- **Routes:** `ANDData` methods use Python; `predict_from_arrow(...,
+  arrow_dataset)` and `predict_incremental_from_arrow(..., arrow_dataset)` use
+  Rust. No environment variable changes these routes, and Rust routes fail
+  explicitly if `s2and-rust` is missing or a different version. See
+  [execution routes](docs/production_inference.md#explicit-execution-routes).
+- **Large blocks:** `batching_threshold` on full-block prediction enables
+  subblocking ([docs/subblocking.md](docs/subblocking.md)); on
+  `predict_incremental_from_arrow` it caps the queries per linker batch.
+  `total_ram_bytes` is the main memory-control knob.
 
   > **Update at v1.3 release:** subblocking loads the packaged ORCID
   > prefix-count files, which Stage 1 of the release generates. Until they are
   > copied into `s2and/data/`, any call with `batching_threshold` set raises
   > `FileNotFoundError`.
-- `predict_incremental(...)` is the Python `ANDData` route and does not accept
-  query batching. Use `predict_incremental_from_arrow(...,
-  batching_threshold=...)` for promoted Rust query batching.
-- `total_ram_bytes` is the main memory-control knob for large inference jobs.
-
-Concurrency:
-
-- Treat `n_jobs` as the main concurrency knob for a run. A loaded production
-  bundle starts with `n_jobs=1`; set `clusterer.n_jobs` before predicting.
-- Set thread-related environment variables before importing heavy compute libraries.
-
-Details:
-
-- Execution routes: [docs/production_inference.md](docs/production_inference.md#explicit-execution-routes)
-- Threading guidance: [docs/threading.md](docs/threading.md)
-- Subblocking and memory tradeoffs: [docs/subblocking.md](docs/subblocking.md)
-- Environment variables: [docs/environment.md](docs/environment.md)
-
-## Documentation Map
-
-- Install and setup: [docs/install.md](docs/install.md)
-- Data download and config: [docs/data.md](docs/data.md)
-- Production inference: [docs/production_inference.md](docs/production_inference.md)
-- Training and saved-model workflows: [docs/training.md](docs/training.md)
-- Development workflow: [docs/development.md](docs/development.md)
-- Paper-era reproducibility notes: [Reproducibility](#reproducibility)
-- v1.3 retrain and release runbook: [docs/release.md](docs/release.md)
-- Docs index: [docs/README.md](docs/README.md)
+- **Concurrency:** `n_jobs` is the main concurrency knob. A loaded production
+  bundle starts with `n_jobs=1`; set `clusterer.n_jobs` before predicting. Set
+  thread-related environment variables before importing heavy compute
+  libraries ([docs/threading.md](docs/threading.md),
+  [docs/environment.md](docs/environment.md)).
 
 ## Development
-
-Canonical commands:
 
 ```bash
 uv run pytest -q
 uv run ruff check .
 uv run ruff format .
-uv run ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
+uv run ty check s2and
+uv run --no-project python scripts/run_ci_locally.py  # shared local/hosted CI
 ```
 
-Run the shared local/hosted CI suite, including native build and checks:
-
-```bash
-uv run --no-project python scripts/run_ci_locally.py
-```
-
-See [docs/development.md](docs/development.md#local-ci-mirror) for the shared
-hosted/local job policy and individual-job commands.
-
-For lint and type checks without Rust extension compilation, use the
-[static-check fast path](docs/development.md#static-check-fast-path).
-
-The full pytest suite is not a no-native check; build the required extension first or use `scripts/run_ci_locally.py`.
-
-### Version bumping
-
-`VERSION` is the source of truth for Python/Rust package versions. Follow the
-[version-bump workflow](docs/development.md#version-bumping) to configure the
-hook, synchronize manifests, and regenerate both lockfiles.
+The full test suite needs the native extension that `uv sync --extra dev`
+builds. [docs/development.md](docs/development.md) covers the CI jobs, the
+static-check fast path without a native build, native build troubleshooting,
+and version bumping (`VERSION` is the source of truth for both packages).
 
 ## Reproducibility
 
@@ -296,7 +175,7 @@ or substitutes for the paper branch; see the
 
 Use paper-era seed artifacts such as `full_union_seed_*.pickle` with the paper
 branch. Some historical model pickles contain a dictionary with a `clusterer`
-key rather than a bare clusterer. Current `main` neither distributes nor loads
+key rather than a bare clusterer. Current S2AND neither distributes nor loads
 production-model pickles. Reproduce later historical releases with their
 compatible release or Git history; current model loading and publication follow
 the [native-bundle contract](docs/production_inference.md#complete-model-bundles)

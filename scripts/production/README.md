@@ -1,9 +1,193 @@
 # Production commands
 
 This is a command reference. The dependency-ordered v1.3 sequence is
-[../../docs/release.md](../../docs/release.md).
+[../../docs/release.md](../../docs/release.md); sections below follow its stages:
+count artifacts and distribution checks (Stage 1), run preparation, Arrow
+conversion and linker-source assembly (Stage 2), pairwise training (Stage 3),
+EPS calibration (Stage 4), and finalization, evaluation, and installed smoke
+(Stage 5 onward).
 
-## Pairwise model
+## Count artifacts
+
+The checked-in reviewed source deterministically reproduces the checked-in
+canonical tuple artifact byte-for-byte; CI enforces that invariant. Ordinary
+releases use `s2and/data/s2and_name_tuples_canonical.txt` directly. Run the
+generator only when intentionally changing its reviewed source or
+canonicalization policy:
+
+```powershell
+uv run python scripts/production/generate_canonical_name_tuples.py `
+  --source s2and/data/s2and_unnormalized_filtered_name_tuples.txt `
+  --output path/to/fresh/s2and_name_tuples_canonical.txt
+```
+
+The count producers are module entry points:
+
+```powershell
+uv run python -m scripts.production.counts.generate_name_counts --help
+uv run python -m scripts.production.counts.generate_orcid_name_prefix_counts --help
+```
+
+Full runs consume reviewed CSV exports and follow the
+[release operating rules](../../docs/release.md#operating-rules). The
+repository has no warehouse client or credentials.
+
+Export name counts with this reviewed query, setting the limit to
+`max_source_rows + 1`:
+
+```sql
+select coalesce(first_name, '') as first_name,
+       coalesce(last_name, '') as last_name,
+       count(*) as count
+from content.authors
+group by coalesce(first_name, ''), coalesce(last_name, '')
+order by first_name, last_name
+limit <MAX_SOURCE_ROWS_PLUS_ONE>;
+```
+
+Save exactly `first_name,last_name,count`, then run:
+
+```powershell
+uv run python -m scripts.production.counts.generate_name_counts `
+  --input-csv path/to/reviewed_name_counts.csv `
+  --guardrails-json path/to/name_count_guardrails.json `
+  --output-dir path/to/fresh/count_publication
+```
+
+The native index is written at
+`path/to/fresh/count_publication/name_counts_index`.
+The guardrail file has exactly four positive integer fields. This is a shape
+example, not a reviewed full-run bound:
+
+```json
+{
+  "min_source_rows": 1,
+  "max_source_rows": 100,
+  "min_keys_per_mapping": 1,
+  "max_keys_per_mapping": 100
+}
+```
+
+Each minimum must be no greater than its matching maximum.
+
+Export ORCID names with the following query and the same limit convention:
+
+```sql
+with source_rows as (
+  select pae.corpus_paper_id, pae.orcid as raw_orcid, pae.position,
+         pae.first_name, pa.middle,
+         upper(regexp_replace(
+           regexp_substr(
+             coalesce(pae.orcid, ''),
+             '(?<![0-9x])[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{3}[0-9x](?![0-9x])',
+             1, 1, 'ip'
+           ),
+           '[-‐‑‒–—−﹘﹣－]'
+         )) as canonical_orcid_compact
+  from content_ext.paper_authors_orcids pae
+  join content_ext.papers p
+    on pae.corpus_paper_id = p.corpus_paper_id
+  join content_ext.paper_authors pa
+    on pae.corpus_paper_id = pa.corpus_paper_id
+   and pae.position = pa.position + 1
+   and lower(pae.last_name) = lower(pa.last)
+  join content_ext.authors au
+    on pa.corpus_author_id = au.corpus_author_id
+  where pae.source = 'Crossref'
+    and nullif(trim(coalesce(pae.first_name, '')), '') is not null
+)
+select raw_orcid,
+       case when canonical_orcid_compact = '' then null
+            else substring(canonical_orcid_compact, 1, 4) || '-'
+              || substring(canonical_orcid_compact, 5, 4) || '-'
+              || substring(canonical_orcid_compact, 9, 4) || '-'
+              || substring(canonical_orcid_compact, 13, 4)
+       end as orcid,
+       first_name, middle
+from source_rows
+order by orcid nulls last, first_name, middle, corpus_paper_id, position
+limit <MAX_SOURCE_ROWS_PLUS_ONE>;
+```
+
+Save exactly `raw_orcid,orcid,first_name,middle`, preserving query order, then
+run:
+
+```powershell
+uv run python -m scripts.production.counts.generate_orcid_name_prefix_counts `
+  --input-csv path/to/reviewed_orcid_names.csv `
+  --guardrails-json path/to/orcid_guardrails.json `
+  --output-dir path/to/fresh/orcid_counts
+```
+
+The ORCID guardrail file has exactly five positive integer fields. Again,
+these values demonstrate the shape only:
+
+```json
+{
+  "min_source_rows": 1,
+  "max_source_rows": 100,
+  "max_names_per_orcid": 100,
+  "max_pair_keys": 1000000,
+  "min_orcid_pair_keys": 1
+}
+```
+
+It requires `min_source_rows <= max_source_rows`,
+`max_names_per_orcid >= 2`, and
+`min_orcid_pair_keys <= max_pair_keys`.
+
+The name-count index format is specified in the
+[Arrow dataset spec](../../docs/rust/arrow_dataset_spec.md#name-counts).
+
+ORCID generation uses the packaged canonical tuple and writes one JSON file
+plus a minimal tuple-dependency manifest. Both are loaded and semantically
+validated directly.
+
+Copy the reviewed outputs to these exact package paths:
+
+| Output | Package path |
+|---|---|
+| ORCID JSON | `s2and/data/first_k_letter_counts_from_orcid.json` |
+| ORCID manifest | `s2and/data/first_k_letter_counts_from_orcid.manifest.json` |
+
+## Distribution and Arrow checks
+
+Build one local-platform candidate of each distribution and verify the Python
+wheel/sdist contents. Use a fresh external `$DistRoot` for the Stage 1 asset
+check and `$RunRoot\stages\local-dist` for the final candidate:
+
+```powershell
+$PythonDist = "$DistRoot\python"
+$RustDist = "$DistRoot\rust"
+
+uv run --no-project python scripts/sync_version.py --check
+uv build --sdist --wheel --out-dir $PythonDist --clear
+uv run --no-project maturin build `
+  --manifest-path s2and_rust/Cargo.toml `
+  --release `
+  --locked `
+  --compatibility pypi `
+  --out $RustDist
+uv run --no-project python `
+  scripts/verification/verify_production_model_distributions.py `
+  --dist-dir $PythonDist `
+  --source-root .
+```
+
+The verifier requires the package's tuple and ORCID runtime assets and rejects
+packaged model/default paths.
+
+For a bounded local Arrow layout check:
+
+```powershell
+uv run python scripts/verification/validate_local_arrow_release.py `
+  --release-root path/to/data_root
+```
+
+Use `scripts/convert_to_arrow.py validate --dataset-dir ...` when a deep table
+scan is required.
+
+## Run preparation
 
 Start a fresh run directory containing only the reviewed `release.json`.
 Preparation checks train/validation/held-out identity overlap and writes the
@@ -247,7 +431,158 @@ excluded from the canonical run digest. Changing content, a selected
 subblocking dataset name declared by the public root, or a measured workload
 starts a new run.
 
-Then run the release trainer:
+## Canonical benchmark names
+
+Join the reviewed upstream names by signature ID before Arrow conversion:
+
+```powershell
+uv run python scripts/convert_to_arrow.py join-canonical-names `
+  --signatures path/to/dataset_signatures.json `
+  --canonical-names path/to/canonical_names.json `
+  --output path/to/canonical_signatures.json
+```
+
+The canonical input is a JSON list with `signature_id`, `first`, `middle`, and
+`last`. The command refuses an existing output, duplicate IDs, and any
+missing/extra ID; it reports changed signatures and per-field differences.
+One canonical JSON must contain exactly one dataset's signature IDs; a global
+all-dataset file is rejected as having extras.
+
+First stage the canonical benchmark source outside the run directory. Replace
+the `REVIEWED_*` placeholders with the reviewed paths and resource value:
+
+```powershell
+$RunRoot = 'D:\s2and-v1.3-YYYYMMDD-attempt-N'
+$ReviewedInputWork = 'D:\s2and-v1.3-reviewed-inputs'
+$CanonicalNamesRoot = 'REVIEWED_CANONICAL_NAMES_ROOT'
+$ReviewedBenchmarkRoot = 'REVIEWED_BENCHMARK_ROOT'
+$ReviewedReplayRawRoot = 'REVIEWED_REPLAY_RAW_ROOT'
+$ReviewedReplayEmbeddingsRoot = 'REVIEWED_REPLAY_EMBEDDINGS_ROOT'
+$NameCountsIndex = 'REVIEWED_NAME_COUNTS_INDEX'
+$NJobs = REVIEWED_N_JOBS
+$BenchmarkDatasets = @(
+  'aminer','arnetminer','inspire','kisti','medline','pubmed','qian','zbmath'
+)
+$CanonicalBenchmarkRoot = "$ReviewedInputWork\benchmark_source_canonical"
+
+New-Item -ItemType Directory -Path $CanonicalBenchmarkRoot | Out-Null
+foreach ($Dataset in $BenchmarkDatasets) {
+  $RawDataset = Join-Path $ReviewedBenchmarkRoot $Dataset
+  $StagedDataset = Join-Path $CanonicalBenchmarkRoot $Dataset
+  New-Item -ItemType Directory -Path $StagedDataset | Out-Null
+  Get-ChildItem -LiteralPath $RawDataset -File |
+    Where-Object { $_.Name -notin @("${Dataset}_signatures.json", 'signatures.json') } |
+    Copy-Item -Destination $StagedDataset
+  $RawSignatures = Join-Path $RawDataset "${Dataset}_signatures.json"
+  if (-not (Test-Path -LiteralPath $RawSignatures)) {
+    $RawSignatures = Join-Path $RawDataset 'signatures.json'
+  }
+  uv run python scripts/convert_to_arrow.py join-canonical-names `
+    --signatures $RawSignatures `
+    --canonical-names (Join-Path $CanonicalNamesRoot "$Dataset.json") `
+    --output (Join-Path $StagedDataset "${Dataset}_signatures.json")
+}
+```
+
+These conversion commands expect the reviewed inputs and the `stages/`
+directory established by
+[Stage 2 of the release runbook](../../docs/release.md#stage-2-build-training-and-evaluation-data):
+
+```powershell
+$ReplayDatasets = @(
+  'a_khan','a_silva','arnetminer','h_wang','inspire','j_smith','kisti',
+  'pubmed','qian','s_gupta','s_lee','s_park','zbmath'
+)
+$BenchmarkArrowRoot = "$RunRoot\stages\benchmark_arrow"
+$ReplayArrowRoot = "$RunRoot\stages\replay_arrow"
+$NameCountsIndexRoot = Split-Path -Parent $NameCountsIndex
+$ReviewedDatasetLicense = "REVIEWED_DATASET_LICENSE_PATH"
+uv run python scripts/convert_to_arrow.py benchmark `
+  --source-root $CanonicalBenchmarkRoot `
+  --output-root $BenchmarkArrowRoot `
+  --datasets $BenchmarkDatasets `
+  --name-counts-index-root $NameCountsIndexRoot `
+  --n-jobs $NJobs
+
+Copy-Item -LiteralPath $ReviewedDatasetLicense `
+  -Destination (Join-Path $BenchmarkArrowRoot 'LICENSE.txt')
+
+uv run python scripts/convert_to_arrow.py linker-replay `
+  --raw-root $ReviewedReplayRawRoot `
+  --embeddings-root $ReviewedReplayEmbeddingsRoot `
+  --output-root $ReplayArrowRoot `
+  --datasets $ReplayDatasets `
+  --name-counts-index-root $NameCountsIndexRoot `
+  --n-jobs $NJobs
+```
+
+The commands require fresh output paths for the reviewed full set. The
+benchmark source is
+`<root>/<dataset>/<dataset>_signatures.json` plus its other benchmark files.
+Replay source is `<raw>/<dataset>/{signatures.json,papers.json}` plus
+`<embeddings>/<dataset>/specter2.pkl`. Both conversions reference the same
+reviewed external authority root containing `name_counts_index`; they do not
+copy it into each intermediate Arrow root. The assembler below copies it once
+into each final self-contained publication root. Converter commands take the
+parent containing `name_counts_index`, while model and assembler commands take
+the index directory itself. The reviewed `LICENSE.txt` is copied once into the
+benchmark root because that root becomes the base of the final public-data
+publication.
+
+Run the bounded `ANDData -> Arrow -> Rust` feature-parity fixture before this
+full export.
+
+## Linker source and data roots
+
+`linker_source_bundle.py` copies reviewed inputs into a fresh linker source
+bundle and public data root.
+
+Stage only the reviewed support files—`bundle.json`, `components/`, `labels/`,
+and `splits/`—in a fresh support root. Do not include a legacy `datasets/`
+directory: the assembler reserves that name for the fresh replay Arrow data and
+rejects a support root that contains it. Install the
+reviewed assignments and summary at the paths declared by both split
+references in `bundle.json`:
+
+```text
+splits/combined_query_split_assignments_base_group_seed13.csv
+splits/summary_base_group_seed13.json
+```
+
+Their reviewed SHA-256 values are respectively:
+
+```text
+b67b7ba7a5258b99d71f624ae12a2b5c6f938ba207215d1b7ebf63b791eadc64
+51cc222218f1ac3906bfcae3d8c1e0f070dcc6c0eb815cd5aaea6908d9b40106
+```
+
+The assignments CSV has 23,572 data rows and no `base_group_id` shared across
+splits.
+
+Verify those hashes, then assemble and preflight once:
+
+```powershell
+uv run python scripts/production/model/linker_source_bundle.py `
+  --model-plan "$RunRoot\model_plan.json" `
+  --source-root "$RunRoot\stages\linker_support" `
+  --benchmark-arrow-root "$RunRoot\stages\benchmark_arrow" `
+  --replay-arrow-root "$RunRoot\stages\replay_arrow" `
+  --name-counts-index $NameCountsIndex `
+  --output-source-bundle "$RunRoot\stages\linker_source_bundle" `
+  --output-data-root "$RunRoot\stages\public_data_root"
+```
+
+The command refuses existing outputs, loads all referenced data, checks
+base-group split disjointness, and reports selected rows. A failure starts a
+fresh attempt. The data root contains one shared `name_counts_index/`;
+benchmark and replay dataset manifests point to it rather than carrying
+per-dataset copies. The final public-data manifest takes `release_version` from
+the prepared model plan and records `kind: "s2and_public_data"` plus public
+`format_version: 1`; the operator does not enter the version again.
+
+## Pairwise model
+
+Run the release trainer from the prepared model plan:
 
 ```powershell
 uv run python scripts/production/model/train_pairwise.py `
@@ -297,28 +632,6 @@ The EPS grid and floors come from the plan; objective, aggregation, and
 smallest-EPS tie-break are fixed in code. EPS calibration does not fit the
 release linker. An EPS-only change does not invalidate linker features or
 require a new linker fit. A pairwise-booster or feature-contract change does.
-
-## Linker source assembly
-
-`linker_source_bundle.py` copies reviewed inputs into a fresh linker source
-bundle and public data root:
-
-```powershell
-uv run python scripts/production/model/linker_source_bundle.py `
-  --model-plan path/to/run/model_plan.json `
-  --source-root path/to/reviewed_linker_source `
-  --benchmark-arrow-root path/to/benchmark_arrow `
-  --replay-arrow-root path/to/replay_arrow `
-  --name-counts-index path/to/name_counts_index `
-  --output-source-bundle path/to/run/stages/linker_source_bundle `
-  --output-data-root path/to/run/stages/public_data_root
-```
-
-Assembly refuses existing output directories, loads the assembled bundle, and
-preflights the selected rows. The final public-data manifest takes
-`release_version` from the prepared model plan and records
-`kind: "s2and_public_data"` plus public `format_version: 1`; the operator does
-not enter the version again.
 
 ## Complete model and linker evaluation
 
@@ -376,15 +689,8 @@ contract use the same name-count authority as that release and the packaged
 tuple/ORCID artifacts, and that the model was trained from this run's model
 plan.
 
-Runtime callers load only a complete bundle and always supply its path:
-
-```python
-from s2and.production_model import load_production_model
-
-clusterer = load_production_model("/path/to/production_model_vX.Y")
-```
-
-There is no packaged or implicit default production model.
+Runtime callers load the complete bundle by explicit path; see
+[loading a production model](../../docs/production_inference.md#load-a-production-model).
 
 ## Evaluation
 
@@ -535,333 +841,6 @@ Every component report must carry the same `run_binding_sha256`. The command
 rejects a missing or mixed binding, validates required numeric fields, writes
 the sorted checks and top-level decision with that binding, and exits nonzero
 on a failed gate.
-
-## Canonical benchmark names
-
-Join the reviewed upstream names by signature ID before Arrow conversion:
-
-```powershell
-uv run python scripts/convert_to_arrow.py join-canonical-names `
-  --signatures path/to/dataset_signatures.json `
-  --canonical-names path/to/canonical_names.json `
-  --output path/to/canonical_signatures.json
-```
-
-The canonical input is a JSON list with `signature_id`, `first`, `middle`, and
-`last`. The command refuses an existing output, duplicate IDs, and any
-missing/extra ID; it reports changed signatures and per-field differences.
-One canonical JSON must contain exactly one dataset's signature IDs; a global
-all-dataset file is rejected as having extras.
-
-First stage the canonical benchmark source outside the run directory. Replace
-the `REVIEWED_*` placeholders with the reviewed paths and resource value:
-
-```powershell
-$RunRoot = 'D:\s2and-v1.3-YYYYMMDD-attempt-N'
-$ReviewedInputWork = 'D:\s2and-v1.3-reviewed-inputs'
-$CanonicalNamesRoot = 'REVIEWED_CANONICAL_NAMES_ROOT'
-$ReviewedBenchmarkRoot = 'REVIEWED_BENCHMARK_ROOT'
-$ReviewedReplayRawRoot = 'REVIEWED_REPLAY_RAW_ROOT'
-$ReviewedReplayEmbeddingsRoot = 'REVIEWED_REPLAY_EMBEDDINGS_ROOT'
-$NameCountsIndex = 'REVIEWED_NAME_COUNTS_INDEX'
-$NJobs = REVIEWED_N_JOBS
-$BenchmarkDatasets = @(
-  'aminer','arnetminer','inspire','kisti','medline','pubmed','qian','zbmath'
-)
-$CanonicalBenchmarkRoot = "$ReviewedInputWork\benchmark_source_canonical"
-
-New-Item -ItemType Directory -Path $CanonicalBenchmarkRoot | Out-Null
-foreach ($Dataset in $BenchmarkDatasets) {
-  $RawDataset = Join-Path $ReviewedBenchmarkRoot $Dataset
-  $StagedDataset = Join-Path $CanonicalBenchmarkRoot $Dataset
-  New-Item -ItemType Directory -Path $StagedDataset | Out-Null
-  Get-ChildItem -LiteralPath $RawDataset -File |
-    Where-Object { $_.Name -notin @("${Dataset}_signatures.json", 'signatures.json') } |
-    Copy-Item -Destination $StagedDataset
-  $RawSignatures = Join-Path $RawDataset "${Dataset}_signatures.json"
-  if (-not (Test-Path -LiteralPath $RawSignatures)) {
-    $RawSignatures = Join-Path $RawDataset 'signatures.json'
-  }
-  uv run python scripts/convert_to_arrow.py join-canonical-names `
-    --signatures $RawSignatures `
-    --canonical-names (Join-Path $CanonicalNamesRoot "$Dataset.json") `
-    --output (Join-Path $StagedDataset "${Dataset}_signatures.json")
-}
-```
-
-These conversion commands expect the reviewed inputs and the `stages/`
-directory established by
-[Stage 2 of the release runbook](../../docs/release.md#stage-2-build-training-and-evaluation-data):
-
-```powershell
-$ReplayDatasets = @(
-  'a_khan','a_silva','arnetminer','h_wang','inspire','j_smith','kisti',
-  'pubmed','qian','s_gupta','s_lee','s_park','zbmath'
-)
-$BenchmarkArrowRoot = "$RunRoot\stages\benchmark_arrow"
-$ReplayArrowRoot = "$RunRoot\stages\replay_arrow"
-$NameCountsIndexRoot = Split-Path -Parent $NameCountsIndex
-$ReviewedDatasetLicense = "REVIEWED_DATASET_LICENSE_PATH"
-uv run python scripts/convert_to_arrow.py benchmark `
-  --source-root $CanonicalBenchmarkRoot `
-  --output-root $BenchmarkArrowRoot `
-  --datasets $BenchmarkDatasets `
-  --name-counts-index-root $NameCountsIndexRoot `
-  --n-jobs $NJobs
-
-Copy-Item -LiteralPath $ReviewedDatasetLicense `
-  -Destination (Join-Path $BenchmarkArrowRoot 'LICENSE.txt')
-
-uv run python scripts/convert_to_arrow.py linker-replay `
-  --raw-root $ReviewedReplayRawRoot `
-  --embeddings-root $ReviewedReplayEmbeddingsRoot `
-  --output-root $ReplayArrowRoot `
-  --datasets $ReplayDatasets `
-  --name-counts-index-root $NameCountsIndexRoot `
-  --n-jobs $NJobs
-```
-
-The commands require fresh output paths for the reviewed full set. The
-benchmark source is
-`<root>/<dataset>/<dataset>_signatures.json` plus its other benchmark files.
-Replay source is `<raw>/<dataset>/{signatures.json,papers.json}` plus
-`<embeddings>/<dataset>/specter2.pkl`. Both conversions reference the same
-reviewed external authority root containing `name_counts_index`; they do not
-copy it into each intermediate Arrow root. The assembler below copies it once
-into each final self-contained publication root. Converter commands take the
-parent containing `name_counts_index`, while model and assembler commands take
-the index directory itself. The reviewed `LICENSE.txt` is copied once into the
-benchmark root because that root becomes the base of the final public-data
-publication.
-
-Run the bounded `ANDData -> Arrow -> Rust` feature-parity fixture before this
-full export.
-
-## Linker source and data roots
-
-Stage only the reviewed support files—`bundle.json`, `components/`, `labels/`,
-and `splits/`—in a fresh support root. Do not include a legacy `datasets/`
-directory: the assembler reserves that name for the fresh replay Arrow data and
-rejects a support root that contains it. Install the
-reviewed assignments and summary at the paths declared by both split
-references in `bundle.json`:
-
-```text
-splits/combined_query_split_assignments_base_group_seed13.csv
-splits/summary_base_group_seed13.json
-```
-
-Their reviewed SHA-256 values are respectively:
-
-```text
-b67b7ba7a5258b99d71f624ae12a2b5c6f938ba207215d1b7ebf63b791eadc64
-51cc222218f1ac3906bfcae3d8c1e0f070dcc6c0eb815cd5aaea6908d9b40106
-```
-
-The assignments CSV has 23,572 data rows and no `base_group_id` shared across
-splits.
-
-Verify those hashes, then assemble and preflight once:
-
-```powershell
-uv run python scripts/production/model/linker_source_bundle.py `
-  --model-plan "$RunRoot\model_plan.json" `
-  --source-root "$RunRoot\stages\linker_support" `
-  --benchmark-arrow-root "$RunRoot\stages\benchmark_arrow" `
-  --replay-arrow-root "$RunRoot\stages\replay_arrow" `
-  --name-counts-index $NameCountsIndex `
-  --output-source-bundle "$RunRoot\stages\linker_source_bundle" `
-  --output-data-root "$RunRoot\stages\public_data_root"
-```
-
-The command refuses existing outputs, loads all referenced data, checks
-base-group split disjointness, and reports selected rows. A failure starts a
-fresh attempt. The data root contains
-one shared `name_counts_index/`; benchmark and replay dataset manifests point
-to it rather than carrying per-dataset copies.
-
-## Count artifacts
-
-The checked-in reviewed source deterministically reproduces the checked-in
-canonical tuple artifact byte-for-byte; CI enforces that invariant. Ordinary
-releases use `s2and/data/s2and_name_tuples_canonical.txt` directly. Run the
-generator only when intentionally changing its reviewed source or
-canonicalization policy:
-
-```powershell
-uv run python scripts/production/generate_canonical_name_tuples.py `
-  --source s2and/data/s2and_unnormalized_filtered_name_tuples.txt `
-  --output path/to/fresh/s2and_name_tuples_canonical.txt
-```
-
-The count producers are module entry points:
-
-```powershell
-uv run python -m scripts.production.counts.generate_name_counts --help
-uv run python -m scripts.production.counts.generate_orcid_name_prefix_counts --help
-```
-
-Full runs consume reviewed CSV exports and follow the
-[release operating rules](../../docs/release.md#operating-rules). The
-repository has no warehouse client or credentials.
-
-Export name counts with this reviewed query, setting the limit to
-`max_source_rows + 1`:
-
-```sql
-select coalesce(first_name, '') as first_name,
-       coalesce(last_name, '') as last_name,
-       count(*) as count
-from content.authors
-group by coalesce(first_name, ''), coalesce(last_name, '')
-order by first_name, last_name
-limit <MAX_SOURCE_ROWS_PLUS_ONE>;
-```
-
-Save exactly `first_name,last_name,count`, then run:
-
-```powershell
-uv run python -m scripts.production.counts.generate_name_counts `
-  --input-csv path/to/reviewed_name_counts.csv `
-  --guardrails-json path/to/name_count_guardrails.json `
-  --output-dir path/to/fresh/count_publication
-```
-
-The native index is written at
-`path/to/fresh/count_publication/name_counts_index`.
-The guardrail file has exactly four positive integer fields. This is a shape
-example, not a reviewed full-run bound:
-
-```json
-{
-  "min_source_rows": 1,
-  "max_source_rows": 100,
-  "min_keys_per_mapping": 1,
-  "max_keys_per_mapping": 100
-}
-```
-
-Each minimum must be no greater than its matching maximum.
-
-Export ORCID names with the following query and the same limit convention:
-
-```sql
-with source_rows as (
-  select pae.corpus_paper_id, pae.orcid as raw_orcid, pae.position,
-         pae.first_name, pa.middle,
-         upper(regexp_replace(
-           regexp_substr(
-             coalesce(pae.orcid, ''),
-             '(?<![0-9x])[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{3}[0-9x](?![0-9x])',
-             1, 1, 'ip'
-           ),
-           '[-‐‑‒–—−﹘﹣－]'
-         )) as canonical_orcid_compact
-  from content_ext.paper_authors_orcids pae
-  join content_ext.papers p
-    on pae.corpus_paper_id = p.corpus_paper_id
-  join content_ext.paper_authors pa
-    on pae.corpus_paper_id = pa.corpus_paper_id
-   and pae.position = pa.position + 1
-   and lower(pae.last_name) = lower(pa.last)
-  join content_ext.authors au
-    on pa.corpus_author_id = au.corpus_author_id
-  where pae.source = 'Crossref'
-    and nullif(trim(coalesce(pae.first_name, '')), '') is not null
-)
-select raw_orcid,
-       case when canonical_orcid_compact = '' then null
-            else substring(canonical_orcid_compact, 1, 4) || '-'
-              || substring(canonical_orcid_compact, 5, 4) || '-'
-              || substring(canonical_orcid_compact, 9, 4) || '-'
-              || substring(canonical_orcid_compact, 13, 4)
-       end as orcid,
-       first_name, middle
-from source_rows
-order by orcid nulls last, first_name, middle, corpus_paper_id, position
-limit <MAX_SOURCE_ROWS_PLUS_ONE>;
-```
-
-Save exactly `raw_orcid,orcid,first_name,middle`, preserving query order, then
-run:
-
-```powershell
-uv run python -m scripts.production.counts.generate_orcid_name_prefix_counts `
-  --input-csv path/to/reviewed_orcid_names.csv `
-  --guardrails-json path/to/orcid_guardrails.json `
-  --output-dir path/to/fresh/orcid_counts
-```
-
-The ORCID guardrail file has exactly five positive integer fields. Again,
-these values demonstrate the shape only:
-
-```json
-{
-  "min_source_rows": 1,
-  "max_source_rows": 100,
-  "max_names_per_orcid": 100,
-  "max_pair_keys": 1000000,
-  "min_orcid_pair_keys": 1
-}
-```
-
-It requires `min_source_rows <= max_source_rows`,
-`max_names_per_orcid >= 2`, and
-`min_orcid_pair_keys <= max_pair_keys`.
-
-The large name-count index remains a manifest-backed native binary directory.
-Its private binary layout, public format, and model binding prevent using
-incompatible count features at runtime. Its manifest contains exactly
-`kind: "s2and_name_counts"`, `format_version: 1`, and byte count plus SHA-256
-for the four fixed binary roles; each filename is derived as `<role>.bin`.
-
-ORCID generation uses the packaged canonical tuple and writes one JSON file
-plus a minimal tuple-dependency manifest. Both are loaded and semantically
-validated directly.
-
-Copy the reviewed outputs to these exact package paths:
-
-| Output | Package path |
-|---|---|
-| ORCID JSON | `s2and/data/first_k_letter_counts_from_orcid.json` |
-| ORCID manifest | `s2and/data/first_k_letter_counts_from_orcid.manifest.json` |
-
-## Distribution and Arrow checks
-
-Build one local-platform candidate of each distribution and verify the Python
-wheel/sdist contents. Use a fresh external `$DistRoot` for the Stage 1 asset
-check and `$RunRoot\stages\local-dist` for the final candidate:
-
-```powershell
-$PythonDist = "$DistRoot\python"
-$RustDist = "$DistRoot\rust"
-
-uv run --no-project python scripts/sync_version.py --check
-uv build --sdist --wheel --out-dir $PythonDist --clear
-uv run --no-project maturin build `
-  --manifest-path s2and_rust/Cargo.toml `
-  --release `
-  --locked `
-  --compatibility pypi `
-  --out $RustDist
-uv run --no-project python `
-  scripts/verification/verify_production_model_distributions.py `
-  --dist-dir $PythonDist `
-  --source-root .
-```
-
-The verifier requires the package's tuple and ORCID runtime assets and rejects
-packaged model/default paths.
-
-For a bounded local Arrow layout check:
-
-```powershell
-uv run python scripts/verification/validate_local_arrow_release.py `
-  --release-root path/to/data_root
-```
-
-Use `scripts/convert_to_arrow.py validate --dataset-dir ...` when a deep table
-scan is required.
 
 ## Installed release smoke
 

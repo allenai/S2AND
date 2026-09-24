@@ -11,87 +11,7 @@ reproducing v1.21 behavior.
 > the published bundle and data locations here. Until then, use
 > [release.md](release.md) for execution order and acceptance requirements.
 
-## Import boundaries
-
-Importing `s2and.production_model` does not load evaluation, plotting, or
-Hyperopt modules. Pure clustering metrics live in `s2and.metrics`; existing
-imports from `s2and.eval` remain available. Evaluation loads plotting libraries
-when rendering and scopes its plot styling to that operation.
-
-Constructing a `Clusterer` or loading a production bundle does not create an
-optimizer search space or load Hyperopt. With the default `search_space=None`,
-the attribute remains `None` until `Clusterer.fit()` or Arrow validation
-calibration creates the default uniform EPS space. Explicit search spaces
-remain unchanged. Genie loads only when its subblocking algorithm is used.
-
-## Prediction state ownership
-
-Prediction orchestration keeps effective seed assignments, disallow pairs,
-altered-profile overrides, and internal diagnostics in request-owned state.
-Bulk subblocking builds synthetic seeds from its completed subblocks without
-temporarily replacing the seed collections on `ANDData`. Nested predictions
-and failed subblock calls therefore leave the dataset's original seed
-collections intact.
-
-Prepared Rust feature data is reusable; the effective seed constraints belong
-to the prediction using it. Python orchestration passes those constraints at
-the Rust boundary instead of installing request overrides into cached feature
-data. The public prediction entry points retain their existing contracts.
-
-This ownership boundary is not a general thread-safety guarantee for every
-classifier or cache supplied by an application.
-
-Per-call `cluster_model_params` apply throughout bulk prediction, including
-initial-only attachment and residual clustering on the Python and Arrow routes.
-Each block still fits a fresh clustering estimator. Explicit `preserve_input`
-choices survive nested calls, and the shared model's stored parameters are
-unchanged. Incremental altered-profile splitting uses the configured clustering
-model; its reusable cache distinguishes the model parameters. Graph subblocking
-continues to use its separate graph configuration.
-
-Seed-link application is a pure decision phase shared by classic Python and
-promoted Arrow incremental completion. It accepts ordered seed memberships,
-link decisions, altered-profile mappings, and first-name metadata; it returns
-owned cluster lists, residual signatures, and rejected links. It preserves
-split-specific name checks and restores original profile IDs.
-
-Both paths pass that result to a shared completion component. Completion owns
-safe residual grouping, numeric cluster-ID allocation, and request telemetry.
-It receives lazy first-name/ORCID views, explicit policy and supervision, and
-one typed operation for clustering a residual group. It has no model, dataset,
-or Arrow dependency. The orchestration boundary resolves aliases, logs rejected
-links, and binds backend execution, constraints, and memory limits. Name
-metadata is accessed lazily without copying the prepared dataset.
-
-Python subblocked prediction carries original required seed memberships into
-the initial-only attachment pass, including members not yet predicted. Explicit
-hard cannot-link supervision also constrains post-clustering seed merges;
-indirect merges cannot reconnect a forbidden pair.
-Public prediction and distance APIs normalize caller supervision as undirected
-pairs before scoring or restoring seeds. Equal reverse entries are deduplicated;
-conflicting reverse entries raise. Caller distances override dataset supervision
-consistently during scoring and seed restoration.
-
-Classic incremental prediction checks proposed attachments for conflicts
-before restoring their destination profiles. Explicit required attachments
-take priority, followed by effective distance and signature ID. Conflicting
-ordinary attachments return to residual clustering without trying another seed.
-Conflicting mandatory attachments raise an explicit error.
-Default name constraints apply between new attachments; altered profiles keep
-their existing compatibility policy for historical names. Explicit negatives
-are checked against restored profile identities. The default-constraints and
-ORCID flags, along with caller supervision precedence, still govern these
-checks. Promoted Arrow linking retains its separate conflict-resolution policy.
-
-Promoted incremental prediction checks disallows against restored profile
-identities. A query forbidden from one member of an altered profile cannot
-attach through a sibling split. These exclusions apply before retrieval top-k.
-Mutually disallowed queries likewise cannot attach to different splits that
-restore to the same profile; the lower-priority query is rescored through the
-existing exclusion mechanism. The additional bookkeeping uses explicit
-constraint edges and split mappings rather than enumerating paper pairs.
-
-## Complete model bundles
+## Load a production model
 
 The public loader accepts one format: an explicit, complete, canonical native
 bundle.
@@ -102,6 +22,263 @@ from s2and.production_model import load_production_model
 clusterer = load_production_model("/path/to/production_model_v1.3")
 clusterer.n_jobs = 8  # loaded bundles start with n_jobs=1 (single-threaded scoring)
 ```
+
+See [Complete model bundles](#complete-model-bundles) for the bundle layout
+and what the loader validates.
+
+## Explicit execution routes
+
+The input type determines the backend, and there is no fallback between
+backends:
+
+| API | Input authority | Backend | Result |
+| --- | --- | --- | --- |
+| `ANDData(...)` | classic data inputs | Python | initialized `ANDData` |
+| `build_training_anddata_from_arrow(...)` | open `ArrowDataset` | Rust | train-mode `ANDData` retaining the handle |
+| `Clusterer.predict` | `ANDData` | Python | `(clusters, distance_matrices)`; matrices may be `None` |
+| `Clusterer.predict_incremental` | `ANDData` | Python | structured mapping |
+| `Clusterer.predict_from_arrow` | open `ArrowDataset` | Rust | `(clusters, distance_matrices)`; matrices may be `None` |
+| `Clusterer.predict_incremental_from_arrow` | open `ArrowDataset` | Rust | structured mapping |
+
+Passing a Rust runtime context to an `ANDData` API, or a Python context to an
+Arrow API, is an error. Rust entry points import the exact `s2and-rust` version
+pinned by the project metadata and fail on a missing or different version. That
+dependency is part of the normal S2AND install.
+
+The [environment reference](environment.md#runtime-and-telemetry) documents
+backend selection and errors for runtime contexts built without an explicit
+backend. Public APIs retain the routes above regardless of that default.
+
+Classic `ANDData` prediction remains useful for Python training, fixtures, and
+reference checks over the canonical S2 partition. `author_info.block` is its
+sole grouping authority; keep any other partition, such as original benchmark
+blocks, outside `ANDData`.
+
+```python
+# dataset is an ANDData; block_signatures is a list of signature IDs to link.
+pred_clusters, pred_distance_matrices = clusterer.predict(
+    dataset.get_blocks(),
+    dataset,
+)
+
+result = clusterer.predict_incremental(block_signatures, dataset)
+clusters = result["clusters"]
+```
+
+Incremental APIs always return their structured result.
+
+## Immutable Arrow contract
+
+Production Arrow input is one manifest-backed immutable root. Open it once with
+`ArrowDataset.open(root)`: opening requires `kind: "s2and_arrow_dataset"` and
+public `format_version: 1`, validates the flat content inventory, checksums,
+table schemas, and batch indexes, then retains the exact files for the handle's
+lifetime.
+
+Never edit an open root in place. Publish changed content at a new path and open
+a new handle. Request-local seed constraints are explicit prediction arguments,
+not mutations to the base dataset.
+
+Prediction requires `signatures`, `papers`, `paper_authors`, and their
+raw-planner batch indexes. A model that uses embeddings also requires `specter`
+and its batch index; a model that uses global name counts requires
+`name_counts_index`. The validator reports missing keys/files explicitly before
+building a Rust featurizer.
+
+`author_orcid` is optional in `signatures.arrow`. When the column is absent,
+every signature simply has no ORCID evidence; all other required signature
+columns retain their normal validation.
+
+### Rust training constructor
+
+Rust training has one constructor:
+`s2and.arrow_training.build_training_anddata_from_arrow`. It accepts one open
+handle, validates the training profile, and returns a fully initialized
+train-mode `ANDData` that retains that handle.
+
+```python
+from s2and.arrow_inputs import ArrowDataset
+from s2and.arrow_training import build_training_anddata_from_arrow
+
+arrow_dataset = ArrowDataset.open(
+    "/path/to/arrow_dataset",
+    require_name_counts_index=True,
+)
+dataset = build_training_anddata_from_arrow(
+    arrow_dataset,
+    "training_dataset",
+    clusters="/path/to/clusters.json",
+)
+```
+
+Python SPECTER arrays and name-count mappings are not materialized for this
+route. Rust reads them through the retained handle. Keep `arrow_dataset` open
+until the returned training dataset is no longer used.
+
+### Rust inference
+
+Full-block inference accepts blocks plus one open handle:
+
+```python
+from s2and.arrow_inputs import ArrowDataset
+
+# blocks: {block_key: [signature_id, ...]}
+# current_seed_assignments: {signature_id: existing_profile_id}
+with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
+    pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow(
+        blocks,
+        arrow_dataset,
+        batching_threshold=15_000,
+        cluster_seeds_require=current_seed_assignments,
+        total_ram_bytes=32 * 1024**3,
+    )
+```
+
+`batching_threshold` is optional. When set, blocks larger than the threshold
+use strict Arrow-native Rust subblocking; smaller blocks retain the full-block
+route. The native graph fallback requires indexed SPECTER evidence even when
+the pairwise model itself does not select an embedding feature. Initial-only
+groups attach through the production bundle's promoted incremental linker.
+Attachment and required-profile restoration stay within each original input
+block. Active required components are kept together within that block; a
+component larger than the threshold raises before subblocking. Blocks containing
+only initials use bulk prediction. See [subblocking.md](subblocking.md) for the
+same contract on the Python route.
+Bulk prediction uses ordinary required seed groups on both Python and Arrow,
+with or without subblocking. Altered-profile markers do not change bulk seed
+membership or attachment policy. The Arrow `altered_cluster_signatures` argument
+is accepted but ignored by bulk prediction; the Python route likewise
+ignores `ANDData.altered_cluster_signatures` in bulk mode. Required components
+larger than the threshold within one original block raise even when marked altered.
+
+Promoted incremental inference requires an explicit seed mapping:
+
+```python
+# block_signatures: signature IDs in the request. Those absent from
+# signature_to_seed_cluster ({signature_id: existing_profile_id}) are the queries.
+with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
+    result = clusterer.predict_incremental_from_arrow(
+        block_signatures,
+        arrow_dataset,
+        cluster_seeds_require=signature_to_seed_cluster,
+        batching_threshold=5000,
+        total_ram_bytes=32 * 1024**3,
+    )
+
+clusters = result["clusters"]
+```
+
+Optional disallow pairs are passed through `cluster_seeds_disallow`. Seed
+component IDs are preserved, so parity checks should compare partitions when
+another ingestion path assigns different cluster IDs.
+
+### Arrow validation in release and evaluation tools
+
+Linker source assembly validates each original Arrow manifest and its table and
+index hashes before rebinding its name-count index path. Evaluation's automatic
+Arrow selection treats invalid manifests or corrupt declared data as errors;
+it does not silently switch to JSON. `scripts/eval_prod_models.py --no-arrow`
+explicitly selects JSON, skips Arrow inspection, and requires
+`--json-data-root`. Automatic selection can use JSON when the Arrow source
+or requested dataset is unavailable, the requested SPECTER generation is
+undeclared, or the name-count index is undeclared; it reports the fallback
+reason. A manifest missing required base artifacts is an error. SPECTER
+generation selection uses the declared manifest filename, including when the
+resolved on-disk filename has different casing.
+
+## Caller supervision and dataset constraints
+
+`partial_supervision` maps unordered signature pairs to finite distance
+overrides. Either pair orientation is accepted. Equal entries for `(A, B)`
+and `(B, A)` are deduplicated; differing values raise `ValueError` identifying
+the pair and both distances. NaN and infinity also raise. Validation runs
+before candidate selection, subblocking, or scoring, without mutating the
+caller's mapping. Finite soft distances keep their normal meaning and range; this does not turn zero distances into globally enforced transitive
+must-links.
+
+Caller distances override dataset constraints for the same pair, consistently
+during scoring and seed restoration, and remain active when `use_default_constraints_as_supervision=False`. That setting
+disables dataset-derived distance constraints, including dataset disallows,
+on both Python and Arrow. Existing profile assignments still identify seed
+targets for incremental prediction. Arrow resolves effective disallows before
+retrieval so an overridden dataset negative cannot remove a candidate before
+the caller's distance is applied. Other retrieval limits still apply.
+
+Incremental prediction preserves each original seed group. If an effective
+explicit disallow connects two members of that group, both Python and Arrow
+raise `ValueError` with `incremental_seed_disallow_conflict`, the group ID, and
+the conflicting signature pair before splitting or scoring. This includes
+seed members supplied separately from the query list and requests with no new
+papers. Caller distances equal to `LARGE_DISTANCE` are hard disallows; other
+finite distances and inferred name constraints do not invalidate existing
+membership. Disabled dataset negatives and dataset negatives replaced by
+non-hard caller distances do not conflict. Correct contradictory membership or
+exclusions in the input; incremental prediction does not choose which existing
+paper to remove.
+Exclusions involving new papers prevent attachments to the original
+profile, including attachments through temporary split components.
+Subblocked bulk prediction creates temporary seed groups from its own bulk
+output. Average linkage can place an explicit negative pair together because
+bulk disallows use a finite distance. Follow-on attachment preserves those
+computed memberships and omits only their internal hard negatives from its
+local attachment request. Exclusions involving fresh signatures or different
+groups remain active, and the original input supervision is unchanged. This
+exception does not apply to caller-supplied incremental seed groups.
+
+The lower-level `predict_from_rust_featurizer` bridge retains its explicit
+seed-override behavior: seed arguments supplied directly to that method remain
+active even when default constraints are disabled.
+
+Caller supervision cannot be combined with precomputed matrices, and Arrow
+rejects supplied seed constraints with those matrices even when default
+constraints are off.
+
+Python subblocked prediction carries original required seed memberships into
+the initial-only attachment pass, including members not yet predicted. Explicit
+hard cannot-link supervision also constrains post-clustering seed merges;
+indirect merges cannot reconnect a forbidden pair.
+
+## Incremental decision semantics
+
+Promoted query decisions are request-global and deterministic across input
+order, query batches, and `batching_threshold`. A global conflict is resolved
+by rebuilding and rescoring the lower-priority query from its complete
+single-query candidate plan with the winning component excluded.
+
+RAM limits are refreshed before planning each query window, again after
+planning, and before each scoring batch. If a refresh before planning shrinks
+the window, only its safe prefix is planned and the remaining queries move to
+later windows. If a refresh inside a planned window shrinks the scoring batch,
+the smaller batches are scored from contiguous slices of that window's existing
+plan rather than replanned. Planning uses the loaded model’s actual final,
+pairwise, and aggregate feature widths.
+
+Temporary altered-profile splitting belongs to incremental linking: score new
+papers against the natural components, then restore the original claimed
+profile. Explicit exclusions still apply to the restored identity, so a query
+cannot bypass an exclusion by linking through another component.
+
+Promoted incremental prediction checks disallows against restored profile
+identities. A query forbidden from one member of an altered profile cannot
+attach through a sibling split. These exclusions apply before retrieval top-k.
+Mutually disallowed queries likewise cannot attach to different splits that
+restore to the same profile; the lower-priority query is rescored through the
+existing exclusion mechanism. The additional bookkeeping uses explicit
+constraint edges and split mappings rather than enumerating paper pairs.
+
+Classic incremental prediction checks proposed attachments for conflicts
+before restoring their destination profiles. Explicit required attachments
+take priority, followed by effective distance and signature ID. Conflicting
+ordinary attachments return to residual clustering without trying another seed.
+Conflicting mandatory attachments raise an explicit error.
+Default name constraints apply between new attachments; altered profiles keep
+their existing compatibility policy for historical names. Explicit negatives
+are checked against restored profile identities. The default-constraints and
+ORCID flags, along with caller supervision precedence, govern these
+checks. Promoted Arrow linking uses its own conflict-resolution policy, described
+above.
+
+## Complete model bundles
 
 A complete bundle contains the pairwise boosters, clusterer configuration,
 promoted incremental linker, reproducibility target, and a manifest that binds
@@ -193,234 +370,6 @@ feature materialization and staging are temporary. The
 arguments, and the [v1.3 runbook](release.md) owns release order and
 gates.
 
-## Explicit execution routes
-
-The input type determines the backend, and there is no fallback between
-backends:
-
-| API | Input authority | Backend | Result |
-| --- | --- | --- | --- |
-| `ANDData(...)` | classic data inputs | Python | initialized `ANDData` |
-| `build_training_anddata_from_arrow(...)` | open `ArrowDataset` | Rust | train-mode `ANDData` retaining the handle |
-| `Clusterer.predict` | `ANDData` | Python | `(clusters, distance_matrices)`; matrices may be `None` |
-| `Clusterer.predict_incremental` | `ANDData` | Python | structured mapping |
-| `Clusterer.predict_from_arrow` | open `ArrowDataset` | Rust | `(clusters, distance_matrices)`; matrices may be `None` |
-| `Clusterer.predict_incremental_from_arrow` | open `ArrowDataset` | Rust | structured mapping |
-
-Passing a Rust runtime context to an `ANDData` API, or a Python context to an
-Arrow API, is an error. Rust entry points import the exact `s2and-rust` version
-pinned by the project metadata and fail on a missing or different version. That
-dependency is part of the normal S2AND install.
-
-The [environment reference](environment.md#runtime-and-telemetry) documents
-backend selection and errors for runtime contexts built without an explicit
-backend. Public APIs retain the routes above regardless of that default.
-
-Classic `ANDData` prediction remains useful for Python training, fixtures, and
-reference checks over the canonical S2 partition. `author_info.block` is its
-sole grouping authority; keep any other partition, such as original benchmark
-blocks, outside `ANDData`.
-
-```python
-# dataset is an ANDData; block_signatures is a list of signature IDs to link.
-pred_clusters, pred_distance_matrices = clusterer.predict(
-    dataset.get_blocks(),
-    dataset,
-)
-
-result = clusterer.predict_incremental(block_signatures, dataset)
-clusters = result["clusters"]
-```
-
-Incremental APIs always return their structured result.
-
-### Caller supervision and dataset constraints
-
-`partial_supervision` maps unordered signature pairs to finite distance
-overrides. Either pair orientation is accepted. Equal entries for `(A, B)`
-and `(B, A)` are deduplicated; differing values raise `ValueError` identifying
-the pair and both distances. NaN and infinity also raise. Validation runs
-before candidate selection, subblocking, or scoring, without mutating the
-caller's mapping. Finite soft distances retain their existing meaning and
-range; this does not turn zero distances into globally enforced transitive
-must-links.
-
-Caller distances override dataset constraints for the same pair and remain
-active when `use_default_constraints_as_supervision=False`. That setting
-disables dataset-derived distance constraints, including dataset disallows,
-on both Python and Arrow. Existing profile assignments still identify seed
-targets for incremental prediction. Arrow resolves effective disallows before
-retrieval so an overridden dataset negative cannot remove a candidate before
-the caller's distance is applied. Other retrieval limits still apply.
-
-Incremental prediction preserves each original seed group. If an effective
-explicit disallow connects two members of that group, both Python and Arrow
-raise `ValueError` with `incremental_seed_disallow_conflict`, the group ID, and
-the conflicting signature pair before splitting or scoring. This includes
-seed members supplied separately from the query list and requests with no new
-papers. Caller distances equal to `LARGE_DISTANCE` are hard disallows; other
-finite distances and inferred name constraints do not invalidate existing
-membership. Disabled dataset negatives and dataset negatives replaced by
-non-hard caller distances do not conflict. Correct contradictory membership or
-exclusions in the input; incremental prediction does not choose which existing
-paper to remove.
-Exclusions involving new papers still prevent attachments to the original
-profile, including attachments through temporary split components.
-Subblocked bulk prediction creates temporary seed groups from its own bulk
-output. Average linkage can place an explicit negative pair together because
-bulk disallows use a finite distance. Follow-on attachment preserves those
-computed memberships and omits only their internal hard negatives from its
-local attachment request. Exclusions involving fresh signatures or different
-groups remain active, and the original input supervision is unchanged. This
-exception does not apply to caller-supplied incremental seed groups.
-
-The lower-level `predict_from_rust_featurizer` bridge retains its explicit
-seed-override behavior: seed arguments supplied directly to that method remain
-active even when default constraints are disabled.
-
-Precomputed-distance restrictions are unchanged: caller supervision cannot be
-combined with precomputed matrices, and Arrow continues rejecting supplied
-seed constraints with those matrices even when default constraints are off.
-
-## Immutable Arrow contract
-
-Production Arrow input is one manifest-backed immutable root. Open it once with
-`ArrowDataset.open(root)`: opening requires `kind: "s2and_arrow_dataset"` and
-public `format_version: 1`, validates the flat content inventory, checksums,
-table schemas, and batch indexes, then retains the exact files for the handle's
-lifetime.
-
-Never edit an open root in place. Publish changed content at a new path and open
-a new handle. Request-local seed constraints are explicit prediction arguments,
-not mutations to the base dataset.
-
-Prediction requires `signatures`, `papers`, `paper_authors`, and their
-raw-planner batch indexes. A model that uses embeddings also requires `specter`
-and its batch index; a model that uses global name counts requires
-`name_counts_index`. The validator reports missing keys/files explicitly before
-building a Rust featurizer.
-
-`author_orcid` is optional in `signatures.arrow`. When the column is absent,
-every signature simply has no ORCID evidence; all other required signature
-columns retain their normal validation.
-
-### Rust training constructor
-
-Rust training has one constructor:
-`s2and.arrow_training.build_training_anddata_from_arrow`. It accepts one open
-handle, validates the training profile, and returns a fully initialized
-train-mode `ANDData` that retains that handle.
-
-```python
-from s2and.arrow_inputs import ArrowDataset
-from s2and.arrow_training import build_training_anddata_from_arrow
-
-arrow_dataset = ArrowDataset.open(
-    "/path/to/arrow_dataset",
-    require_name_counts_index=True,
-)
-dataset = build_training_anddata_from_arrow(
-    arrow_dataset,
-    "training_dataset",
-    clusters="/path/to/clusters.json",
-)
-```
-
-Python SPECTER arrays and name-count mappings are not materialized for this
-route. Rust reads them through the retained handle. Keep `arrow_dataset` open
-until the returned training dataset is no longer used.
-
-### Rust inference
-
-Full-block inference accepts blocks plus one open handle:
-
-```python
-from s2and.arrow_inputs import ArrowDataset
-
-# blocks: {block_key: [signature_id, ...]}
-# current_seed_assignments: {signature_id: existing_profile_id}
-with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
-    pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow(
-        blocks,
-        arrow_dataset,
-        batching_threshold=15_000,
-        cluster_seeds_require=current_seed_assignments,
-        total_ram_bytes=32 * 1024**3,
-    )
-```
-
-`batching_threshold` is optional. When set, blocks larger than the threshold
-use strict Arrow-native Rust subblocking; smaller blocks retain the full-block
-route. The native graph fallback requires indexed SPECTER evidence even when
-the pairwise model itself does not select an embedding feature. Initial-only
-groups attach through the production bundle's promoted incremental linker.
-Attachment and required-profile restoration stay within each original input
-block. Active required components are kept together within that block; a
-component larger than the threshold raises before subblocking. Blocks containing
-only initials use bulk prediction. See [subblocking.md](subblocking.md) for the
-same contract on the Python route.
-Bulk prediction uses ordinary required seed groups on both Python and Arrow,
-with or without subblocking. Altered-profile markers do not change bulk seed
-membership or attachment policy. The Arrow `altered_cluster_signatures` argument
-remains accepted but is ignored by bulk prediction; the Python route likewise
-ignores `ANDData.altered_cluster_signatures` in bulk mode. Required components
-larger than the threshold within one original block raise even when marked altered.
-
-Temporary altered-profile splitting belongs to incremental linking: score new
-papers against the natural components, then restore the original claimed
-profile. Explicit exclusions still apply to the restored identity, so a query
-cannot bypass an exclusion by linking through another component.
-
-Linker source assembly validates each original Arrow manifest and its table and
-index hashes before rebinding its name-count index path. Evaluation's automatic
-Arrow selection treats invalid manifests or corrupt declared data as errors;
-it does not silently switch to JSON. `scripts/eval_prod_models.py --no-arrow`
-explicitly selects JSON, skips Arrow inspection, and requires
-`--json-data-root`. Automatic selection can use JSON when the Arrow source
-or requested dataset is unavailable, the requested SPECTER generation is
-undeclared, or the name-count index is undeclared; it reports the fallback
-reason. A manifest missing required base artifacts is an error. SPECTER
-generation selection uses the declared manifest filename, including when the
-resolved on-disk filename has different casing.
-
-Promoted incremental inference requires an explicit seed mapping:
-
-```python
-# block_signatures: signature IDs in the request. Those absent from
-# signature_to_seed_cluster ({signature_id: existing_profile_id}) are the queries.
-with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
-    result = clusterer.predict_incremental_from_arrow(
-        block_signatures,
-        arrow_dataset,
-        cluster_seeds_require=signature_to_seed_cluster,
-        batching_threshold=5000,
-        total_ram_bytes=32 * 1024**3,
-    )
-
-clusters = result["clusters"]
-```
-
-Optional disallow pairs are passed through `cluster_seeds_disallow`. Seed
-component IDs are preserved, so parity checks should compare partitions when
-another ingestion path assigns different cluster IDs.
-
-## Incremental decision semantics
-
-Promoted query decisions are request-global and deterministic across input
-order, query batches, and `batching_threshold`. A global conflict is resolved
-by rebuilding and rescoring the lower-priority query from its complete
-single-query candidate plan with the winning component excluded. The runtime
-does not replay a compact retained subset as a substitute for that complete
-plan.
-
-RAM limits are refreshed before planning each query window, again after
-planning, and before each scoring batch. If a refresh before planning shrinks
-the window, only its safe prefix is planned and the remaining queries move to
-later windows. If a refresh inside a planned window shrinks the scoring batch,
-the smaller batches are scored from contiguous slices of that window's existing
-plan rather than replanned. Planning uses the loaded model’s actual final,
-pairwise, and aggregate feature widths.
-
 ## Name-count and reuse boundaries
 
 The current runtime uses one binary `NameCountsIndex` in Python and Rust. Classic
@@ -464,6 +413,63 @@ rejected rather than adapted.
 Direct Arrow/Rust prediction reuses validated immutable native state within the
 process, and the bounded altered-profile presplit memo is a private in-process
 optimization. Nothing is cached on disk between processes.
+
+## Implementation notes
+
+These notes describe internal boundaries for contributors; they are not part
+of the public API.
+
+### Import boundaries
+
+Importing `s2and.production_model` does not load evaluation, plotting, or
+Hyperopt modules. Pure clustering metrics live in `s2and.metrics` and are also
+importable from `s2and.eval`. Evaluation loads plotting libraries
+when rendering and scopes its plot styling to that operation.
+
+Constructing a `Clusterer` or loading a production bundle does not create an
+optimizer search space or load Hyperopt. With the default `search_space=None`,
+the attribute remains `None` until `Clusterer.fit()` or Arrow validation
+calibration creates the default uniform EPS space. Explicit search spaces are
+used as given. Genie loads only when its subblocking algorithm is used.
+
+### Prediction state ownership
+
+Prediction orchestration keeps effective seed assignments, disallow pairs,
+altered-profile overrides, and internal diagnostics in request-owned state.
+Bulk subblocking builds synthetic seeds from its completed subblocks without
+temporarily replacing the seed collections on `ANDData`. Nested predictions
+and failed subblock calls therefore leave the dataset's original seed
+collections intact.
+
+Prepared Rust feature data is reusable; the effective seed constraints belong
+to the prediction using it. Python orchestration passes those constraints at
+the Rust boundary instead of installing request overrides into cached feature
+data.
+
+This ownership boundary is not a general thread-safety guarantee for every
+classifier or cache supplied by an application.
+
+Per-call `cluster_model_params` apply throughout bulk prediction, including
+initial-only attachment and residual clustering on the Python and Arrow routes.
+Each block fits a fresh clustering estimator. Explicit `preserve_input`
+choices survive nested calls, and the shared model's stored parameters are
+unchanged. Incremental altered-profile splitting uses the configured clustering
+model; its reusable cache distinguishes the model parameters. Graph subblocking
+uses its separate graph configuration.
+
+Seed-link application is a pure decision phase shared by classic Python and
+promoted Arrow incremental completion. It accepts ordered seed memberships,
+link decisions, altered-profile mappings, and first-name metadata; it returns
+owned cluster lists, residual signatures, and rejected links. It preserves
+split-specific name checks and restores original profile IDs.
+
+Both paths pass that result to a shared completion component. Completion owns
+safe residual grouping, numeric cluster-ID allocation, and request telemetry.
+It receives lazy first-name/ORCID views, explicit policy and supervision, and
+one typed operation for clustering a residual group. It has no model, dataset,
+or Arrow dependency. The orchestration boundary resolves aliases, logs rejected
+links, and binds backend execution, constraints, and memory limits. Name
+metadata is accessed lazily without copying the prepared dataset.
 
 ## Verification
 

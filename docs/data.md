@@ -1,53 +1,14 @@
 # Data and Models
 
 This document covers dataset download, public artifact layout, and
-`path_config.json`.
+`path_config.json`. Canonical-name rules live in
+[canonical_names.md](canonical_names.md).
 
 > **Update at v1.3 release:** the currently published Arrow release and shared
 > name counts predate public format `1`. They are not a compatible production
 > release unit for this branch, and current validation rejects them. At
 > release, replace the download commands below with the published v1.3 data
 > location and size. See the [v1.3 release runbook](release.md).
-
-## Canonical name contract
-
-`s2and.text.canonicalize_name_parts` and its Rust equivalent are the
-authorities. Given raw `first`, `middle`, and `last` values, they:
-
-1. normalize Unicode spacing and remove soft hyphen and zero-width joiner;
-2. normalize apostrophe-like marks, transliterate, lowercase, and delete
-   apostrophes rather than making token boundaries;
-3. treat supported Unicode dash variants as one separator;
-4. replace remaining nonletters with spaces and collapse whitespace;
-5. drop at most one leading title from first name, except `md`;
-6. retain a dash-bound first-name group, otherwise keep the first token and
-   spill remaining first-name tokens into middle; and
-7. normalize last name independently, preserving spaces and surname particles.
-
-Examples: `Anne-Marie Claire` becomes first `anne marie`, middle `claire`;
-apostrophe variants of `O'Connor` become `oconnor`; and `Ou-Yang` and
-`Ou Yang` both become last `ou yang`.
-
-`s2and.text.canonical_name_count_keys` emits no sentinel keys. It emits
-`first` only when first has more than one character, `last` when present,
-`first_last` when both are informative, and `last_first_initial` when both
-components exist.
-
-At comparison time, `same_prefix_tokens` checks aligned token pairs up to the
-shorter token list. In each pair, either token must prefix the other; the
-direction can differ between pairs (`ann marie` matches `anna m`). Empty input
-is missing evidence. Alias tuples are unordered. Canonical last names retain
-spaces in storage, but `canonical_lasts_equivalent` ignores spaces when
-comparing them: `ou yang` equals `ouyang`. Dash variants become spaces during
-canonicalization, before this comparison.
-
-The live authorities are `s2and.text`, its Rust implementation, and
-[the frozen examples](../tests/fixtures/canonical_name_examples.json).
-Tuple and ORCID runtime rules live in
-[production_inference.md](production_inference.md); Arrow and name-count
-formats live in [rust/arrow_dataset_spec.md](rust/arrow_dataset_spec.md).
-The retained manual
-tuple review is [release_evidence/name_tuple_legacy_adjudication_v1.md](release_evidence/name_tuple_legacy_adjudication_v1.md).
 
 ## Dataset download
 
@@ -104,22 +65,11 @@ directory.
 
 ## Production model bundles
 
-No default production model declaration is distributed.
-Evaluation and validation tools must receive an explicit model bundle path.
-The v1.3 model is an external bundle, not package data. Its manifest records
-`kind: "s2and_model"`, `release_version: "1.3"`, exact
-`generated_by_runtime`, EPS calibration state, and the runtime-file checksum
-inventory.
-
-New production releases use fresh native bundle directories. The component
-entry points are `scripts/production/model/train_pairwise.py` and
-`scripts/production/model/train_linker_and_finalize.py`, with release-only
-calibration/evaluation in `scripts/production/model/release_pairwise.py`.
-The v1.3 sequence trains the final pairwise boosters, selects EPS on validation
-data, materializes the calibrated linker inputs, fits one fresh linker, reloads the
-complete bundle, and evaluates it as described in
-[release.md](release.md). Do not create new production
-pickles.
+No default production model is distributed; evaluation and validation tools
+take an explicit bundle path. The v1.3 model is an external bundle, not package
+data. Its layout and manifest are specified in
+[production_inference.md](production_inference.md#complete-model-bundles), and
+[release.md](release.md) owns how it is trained, calibrated, and evaluated.
 
 The reviewed 53-feature linker target is retained as
 `tests/fixtures/incremental_linker_training_target.json`. Prediction logic does
@@ -129,11 +79,9 @@ bundle and the model manifest binds its checksum.
 The previous promoted-linker replay data is published under the Arrow release
 prefix. Use the standalone download only to audit historical inputs; do not use
 it as the v1.3 source bundle without regenerated assignments, Arrow data, and
-pairwise-derived inputs.
-
-Pass the downloaded source bundle explicitly with `--source-bundle-root` to
-`scripts/production/model/train_linker_and_finalize.py`; the release command
-has no implicit replay-bundle default.
+pairwise-derived inputs. Pass a source bundle explicitly with
+`--source-bundle-root` to `scripts/production/model/train_linker_and_finalize.py`;
+the release command has no implicit replay-bundle default.
 
 ## Configuring `s2and/data/path_config.json`
 

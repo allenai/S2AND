@@ -1,7 +1,7 @@
 """Frozen canonical name-normalization example table.
 
 This test module enforces ``tests/fixtures/canonical_name_examples.json`` and
-the ``docs/data.md`` canonical-name contract in four layers. The live pipeline
+the ``docs/canonical_names.md`` canonical-name contract in four layers. The live pipeline
 and the fixture both use canonical_v2. The pure contract and live pipeline are
 each batched once, with case IDs in assertion messages:
 

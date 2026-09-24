@@ -119,7 +119,7 @@ Default `GraphSubblockingConfig` behavior:
 - Sparse coauthor evidence is enabled by default with `sparse_evidence_max_posting_size=8`,
   `sparse_evidence_neighbors=1`, `sparse_evidence_min_weight=0.40`, and affiliations excluded. This adds only
   bounded coauthor-posting edges after projection edges have been scored.
-- Adaptive projection, aggregate packing, and local moves are still experimental knobs and are off by default.
+- Adaptive projection, aggregate packing, and local moves are experimental knobs and are off by default.
 
 The internal Arrow graph helper loads the union of required `signatures`,
 `paper_authors`, and selected embedding rows through raw-planner batch lookup
@@ -161,7 +161,7 @@ score ties are resolved deterministically within each route.
 is the maximum native subblock size; blocks at or below it are unchanged.
 Multi-letter subblocks are predicted first, then initial-only groups attach to
 those clusters through the promoted Rust incremental linker. `total_ram_bytes`
-still controls pair-batch sizing and allocation checks; it is not a block
+controls pair-batch sizing and allocation checks; it is not a block
 partitioning knob. Missing required Arrow tables, embedding evidence, batch
 indexes, or the incremental artifact raise instead of falling back to Python or
 `ANDData`.

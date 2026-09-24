@@ -4,7 +4,7 @@ Historically this module pinned the legacy-compatibility shims
 (`_lasts_equivalent_for_constraint`, `_canonicalize_last_for_counts`, and the
 joined/first-token name-tuple probing forms). Those shims were removed by the
 canonical_v2 cutover; this module now pins the canonical semantics in
-docs/data.md.
+docs/canonical_names.md.
 """
 
 from s2and.data import ANDData

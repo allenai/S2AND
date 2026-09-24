@@ -35,7 +35,7 @@ These variables control thread counts for various libraries. Set them **before i
 | `OPENBLAS_NUM_THREADS` | `<int>` | auto | OpenBLAS thread count (if your NumPy/SciPy stack uses OpenBLAS). |
 | `NUMEXPR_NUM_THREADS` | `<int>` | auto | NumExpr thread count. |
 
-See `docs/threading.md` for detailed guidance on avoiding nested parallelism and oversubscription.
+See [threading.md](threading.md) for detailed guidance on avoiding nested parallelism and oversubscription.
 
 ---
 

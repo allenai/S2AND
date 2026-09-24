@@ -13,8 +13,14 @@ native runtime. The [local CI wrapper](#local-ci-mirror) prepares it, while the
 uv run pytest -q
 uv run ruff check .
 uv run ruff format .
-uv run ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
+uv run ty check s2and
 ```
+
+`ty` reads its defaults from `[tool.ty]` in `pyproject.toml`: Python 3.11, the
+`linux` platform used by the GitHub runners, and ignores for resolution and
+attribute diagnostics from optional and native modules that static-only
+environments omit. Type errors remain blocking. Pass
+`--python-platform windows` for a Windows-specific check.
 
 ## Native build troubleshooting
 
@@ -89,11 +95,9 @@ The current runtime requires the Rust-backed name-count index even when Python o
 the exactly pinned `s2and-rust` dependency once, requires it to import, and then runs full-suite coverage of the Python
 route.
 
-By default, local `ty` checks use `--python-version 3.11 --python-platform linux` to match GitHub Linux runners.
-
-To override the local platform emulation:
-
-- set `S2AND_CI_TY_PLATFORM`, for example `windows`
+The CI runner's `ty` checks use Python 3.11 and the `linux` platform to match
+the GitHub Linux runners. Set `S2AND_CI_TY_PLATFORM` (for example, `windows`)
+to change the platform it emulates.
 
 ## Static-check fast path
 
@@ -102,17 +106,15 @@ If you want to skip Rust extension compilation while iterating, run only the sta
 ```bash
 uv run --no-project python scripts/run_ci_locally.py lint
 uv sync --active --extra dev --frozen --no-install-package s2and-rust
-uv run --active --no-project ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --python-version 3.11 --python-platform linux
-uv run --active --no-project ty check scripts --exclude scripts/archive --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute --python-version 3.11 --python-platform linux
+uv run --active --no-project ty check s2and
+uv run --active --no-project ty check scripts --exclude scripts/archive --ignore unresolved-reference --ignore unresolved-attribute
 ```
 
 The scripts check above covers active top-level and nested scripts but deliberately
 excludes retired reference code in `scripts/archive`; hosted CI currently type-checks
-only top-level scripts. The explicit platform flags match the CI default; replace
-`linux` with `windows` for a Windows-specific check. These ignores are limited
-to resolution/attribute diagnostics from optional and native modules omitted
-from the static-only environment. Type errors remain blocking; warnings remain
-visible.
+only top-level scripts. Both checks use the `[tool.ty]` defaults; the scripts
+check additionally ignores unresolved references and attributes from optional
+and native modules. Type errors remain blocking; warnings remain visible.
 
 The full pytest suite requires the native name-count index. `uv sync --extra dev` builds and installs the extension;
 `uv run --no-project python scripts/run_ci_locally.py` does the same before testing.

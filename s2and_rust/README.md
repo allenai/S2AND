@@ -27,7 +27,7 @@ come from the same tree.
 From the repository root (not this directory):
 
 ```bash
-uv sync --active --extra dev
+uv sync --extra dev
 ```
 
 `uv sync` builds and installs `s2and-rust` from `s2and_rust/`, and `uv run`

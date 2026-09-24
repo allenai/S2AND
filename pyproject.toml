@@ -106,5 +106,17 @@ target-version = "py311"
 select = ["E","F","I","UP","B"]
 ignore = []
 
+# ty defaults match the GitHub Linux CI runners; CLI flags still override them.
+[tool.ty.environment]
+python-version = "3.11"
+python-platform = "linux"
+
+# Optional and native modules can be absent from static-only environments.
+[tool.ty.rules]
+unresolved-import = "ignore"
+unused-type-ignore-comment = "ignore"
+possibly-missing-attribute = "ignore"
+unresolved-global = "ignore"
+
 [tool.uv.sources]
 s2and-rust = { path = "s2and_rust" }

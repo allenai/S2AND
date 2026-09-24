@@ -142,7 +142,7 @@ Omitting `search_space` leaves `clusterer.search_space` as `None` during
 construction and inference. `fit()` creates the same uniform EPS space shown
 above when calibration starts. Custom calibration code can explicitly call
 `s2and.calibration.default_cluster_search_space()`; supplied search spaces are
-retained unchanged. Loading a fitted production bundle does not initialize
+used as given. Loading a fitted production bundle does not initialize
 Hyperopt.
 
 FastCluster's condensed distance matrices use `float64` in both Python and

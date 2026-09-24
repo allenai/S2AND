@@ -188,7 +188,7 @@ uv run --no-project python scripts/run_ci_locally.py
       retain raw names only for reviewed spot checks. Stage these source files
       outside the still-empty run directory.
 - [ ] Review and freeze `release.json` using the
-      [exact shape and example](../scripts/production/README.md#pairwise-model):
+      [exact shape and example](../scripts/production/README.md#run-preparation):
       training/validation and held-out inputs, validation-only EPS grid and
       floors, the reviewed historical baseline-record path and SHA-256, gates,
       the exact performance Arrow root/workload, every parity-fixture content

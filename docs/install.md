@@ -61,15 +61,19 @@ git lfs install
 git lfs pull
 ```
 
-Create and activate a supported Python environment (3.11, 3.12, or 3.13):
+Install repo dependencies into the project environment (`.venv`), building
+the Rust extension:
+
+```bash
+uv sync --extra dev
+```
+
+To choose the interpreter or work in an activated environment instead, create
+it first, activate it, and sync with `--active`:
 
 ```bash
 uv venv --python 3.11
-```
 
-Activation examples:
-
-```bash
 # macOS / Linux
 source .venv/bin/activate
 
@@ -78,15 +82,9 @@ source .venv/bin/activate
 
 # Windows CMD
 .venv\Scripts\activate.bat
-```
 
-Install repo dependencies:
-
-```bash
 uv sync --active --extra dev
 ```
-
-If you do not want to activate the environment first, `uv sync --extra dev` also works and will use the project environment.
 
 The `dev` extra includes everything the tests need. Outside it, the
 `orcid-counts` extra installs `orjson`, which the ORCID prefix-count producer

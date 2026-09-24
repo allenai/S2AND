@@ -51,6 +51,7 @@ dev = [
   # Test stack
   "pytest==9.1.1",
   "pytest-cov>=7.1,<8",
+  "pytest-xdist>=3.8,<4",
   "pyyaml>=6.0.3,<7",
   # Type checking
   "ty==0.0.61",

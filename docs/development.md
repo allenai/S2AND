@@ -10,7 +10,7 @@ native runtime. The [local CI wrapper](#local-ci-mirror) prepares it, while the
 [static-check fast path](#static-check-fast-path) supports lint/type checks without a native build.
 
 ```bash
-uv run pytest -q
+uv run pytest -q -n auto
 uv run ruff check .
 uv run ruff format .
 uv run ty check s2and
@@ -73,7 +73,9 @@ uv run --no-project python scripts/run_ci_locally.py
     library-test gates;
   - runs the installed-Rust API smoke and `ty`; and
   - runs the full pytest suite with coverage (branch coverage is configured in
-    `pyproject.toml`).
+    `pyproject.toml`) under pytest-xdist with `-n auto`. Pass
+    `--pytest-workers N` to choose a worker count, or `--pytest-workers 0` to
+    run it in one process for debugging.
 
 PR CI runs Python 3.11–3.13 on Ubuntu and Python 3.11 on Windows. Both the local
 runner and hosted jobs use the combined 80% coverage floor in `pyproject.toml`.

@@ -206,7 +206,7 @@ def run_ty_checks() -> None:
         run_uv(uv_run_args("ty", "check", *script_files, *script_ignore_args, *platform_args))
 
 
-def run_typecheck_and_test_job(*, lock_present: bool) -> None:
+def run_typecheck_and_test_job(*, lock_present: bool, pytest_workers: str) -> None:
     print("\n=== typecheck-and-test ===")
     # The locked environment builds s2and-rust from source, so cargo comes first.
     ensure_rust_on_path()
@@ -218,6 +218,8 @@ def run_typecheck_and_test_job(*, lock_present: bool) -> None:
     run_uv(
         pytest_args(
             "tests/",
+            "-n",
+            pytest_workers,
             "--cov=s2and",
             "--cov-report=term-missing",
         ),
@@ -232,12 +234,17 @@ def main(argv: list[str] | None = None) -> None:
         choices=("lint", "typecheck-and-test"),
         help="run one CI job instead of the complete local mirror",
     )
+    parser.add_argument(
+        "--pytest-workers",
+        default="auto",
+        help="pytest-xdist worker count passed to -n ('auto' by default; '0' runs the suite in one process)",
+    )
     args = parser.parse_args(argv)
     lock_present = (REPO / "uv.lock").exists()
     if args.job in (None, "lint"):
         run_lint_job()
     if args.job in (None, "typecheck-and-test"):
-        run_typecheck_and_test_job(lock_present=lock_present)
+        run_typecheck_and_test_job(lock_present=lock_present, pytest_workers=str(args.pytest_workers))
     print("\nALL CHECKS PASSED")
 
 

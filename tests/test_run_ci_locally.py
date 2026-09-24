@@ -72,12 +72,12 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, 
     monkeypatch.setattr(run_ci, "run_uv", run_uv)
     if smoke_fails:
         with pytest.raises(subprocess.CalledProcessError) as caught:
-            run_ci.run_typecheck_and_test_job(lock_present=True)
+            run_ci.run_typecheck_and_test_job(lock_present=True, pytest_workers="auto")
         assert caught.value is failure
         assert lifecycle == ["ensure-rust", "sync-and-build-rust", "check-rust"]
         assert len(calls) == 1
         return
-    run_ci.run_typecheck_and_test_job(lock_present=True)
+    run_ci.run_typecheck_and_test_job(lock_present=True, pytest_workers="auto")
 
     pytest_calls = [args for args, _env in calls if args[:3] == ["run", "--no-sync", "pytest"]]
     assert len(pytest_calls) == 1
@@ -91,6 +91,8 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, 
         "pytest",
         "-ra",
         "tests/",
+        "-n",
+        "auto",
         "--cov=s2and",
         "--cov-report=term-missing",
     ]

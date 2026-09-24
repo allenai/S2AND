@@ -37,6 +37,12 @@ The single-letter first-name path is handled later in bulk prediction. Multi-let
 their resulting clusters become temporary cluster seeds, and single-letter subblocks run through a synthetic
 incremental pass so initial-only signatures can attach back to established clusters.
 
+Bulk disallows use finite distances, so average linkage can still put a
+disallowed pair in the same cluster. The synthetic attachment pass preserves
+those computed clusters and omits their internal hard negatives only from its
+local request. Cross-group and fresh-signature exclusions remain active.
+Caller-supplied incremental seed groups with internal disallows still raise.
+
 Required profiles spanning several subblocks are kept together. When a profile
 has a member in a full-name subblock, both Python and Arrow place it there,
 preferring the first such subblock in sorted order. Members native to that

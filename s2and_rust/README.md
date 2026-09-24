@@ -26,4 +26,7 @@ uv sync --active --extra dev
 ```
 
 `uv sync` builds and installs `s2and-rust` from this directory, and `uv run`
-rebuilds it whenever Rust build inputs change.
+uses timestamps to detect ordinary build-input edits. The test guard checks
+source contents, including additions and deletions that uv's timestamp keys
+can miss. See [build recovery](../docs/install.md#build-the-rust-extension-from-source)
+for forced reinstall and Cargo cache-cleaning commands.

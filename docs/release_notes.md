@@ -30,8 +30,11 @@ production model and public-data version is `1.3`, on a separate version axis.
   Previously, restoring the original group could silently violate that disallow.
   Caller overrides and the default-constraint switch are resolved first;
   valid original membership and exclusions involving new papers are preserved.
-  Internal incremental attachment passes in subblocked bulk prediction also
-  reject contradictions within their generated seed groups.
+  Follow-on attachment in subblocked bulk prediction preserves already computed
+  bulk groups, omitting hard negatives internal to those generated groups only
+  from the attachment request. Finite bulk distances can average away a
+  disallow; this does not turn a request without input seeds into a seed-conflict
+  error. Exclusions involving new signatures or different groups remain active.
 - Evaluation: linker features no longer depend on target labels; actual input
   seed holdouts still preserve name conflicts and explicit disallows. Metrics
   produced with label-assisted features must be regenerated. Pairwise training
@@ -60,6 +63,9 @@ production model and public-data version is `1.3`, on a separate version axis.
   packing from separating a claimed full-name member from compatible neighbours
   when they fit together. Arrow subblocking also preserves support for integer
   signature IDs by normalizing the original-block scope.
+- Correctness: completion canonicalizes first names when prepared names are
+  absent, so raw `"J."` is recognized as an initial. An explicitly prepared
+  empty name remains empty. This can change subblocked and incremental outputs.
 - Correctness: altered-profile split components receive IDs that cannot collide
   with existing profile IDs. Previously, splitting profile `p` reused an
   existing profile named `p_0`, merging that profile into the split.
@@ -74,19 +80,29 @@ production model and public-data version is `1.3`, on a separate version axis.
 - Evaluation and artifacts: automatic `eval_prod_models` routing can use JSON
   when the Arrow source or requested dataset is unavailable, the requested
   SPECTER generation is undeclared, or the name-count index is undeclared.
-  Broken collection bindings, invalid manifests and corrupt declared data raise;
-  `--no-arrow` skips Arrow inspection. Linker source assembly rejects Arrow
+  Generation selection uses the manifest's declared filename even when its
+  resolved on-disk name differs. Automatic JSON fallback reports its cause.
+  Broken collection bindings, missing required base artifacts, invalid manifests
+  and corrupt declared data raise; empty Arrow files identify their table and
+  path. `--no-arrow` skips Arrow inspection. Linker source assembly rejects Arrow
   inputs whose content differs from their manifests instead of silently
   regenerating checksums for altered inputs.
 - Development: the repository-root `s2and_rust/__init__.py` workspace shim is
   removed, so code run from the checkout imports the installed `s2and_rust`
   package instead of an in-tree `maturin develop` build. `uv sync` and `uv run`
-  rebuild the extension whenever Rust build inputs change, and a fresh
+  use timestamp cache keys for native build inputs, and a fresh
   `uv sync --extra dev` checkout can run the tests without `maturin develop`.
-  Tests stop before collection when the importable extension was built from
-  different Rust sources than the checkout; force a refresh with
-  `uv sync --extra dev --reinstall-package s2and-rust`. Cache keys cover every
-  file under `src/` and `vendor/`, matching the freshness digest.
+  Tests stop before collection when the importable extension's embedded source
+  snapshot differs from the checkout; force a refresh with
+  `uv sync --extra dev --reinstall-package s2and-rust`. Cache keys and the
+  content digest cover native manifests, the root lockfile, build script and
+  Rust sources, excluding editor files, build outputs and the unused vendored
+  lockfile. uv can miss backdated additions, older-file deletions and edits that
+  preserve timestamps; see [build recovery](install.md#build-the-rust-extension-from-source)
+  if Cargo also needs its cached artifacts cleared.
+- Efficiency: the default bulk prediction path validates caller supervision
+  once per request instead of once per subblock, while preserving custom
+  prediction-helper overrides and validation at public entry points.
 - **Unreleased migration state:** the artifact-independent `1.0.0` code
   and release hardening are implemented. The reviewed canonical benchmark-name
   and ORCID source exports are still needed; production artifact generation,

@@ -59,7 +59,9 @@ uv sync --active --extra dev
 ```
 
 `uv sync` builds the matching Rust extension from `s2and_rust/`, and `uv run`
-rebuilds it whenever Rust build inputs change. Source checkouts also need the
+uses file timestamps to detect ordinary Rust build-input edits. The test
+freshness guard checks source contents; see [build recovery](docs/install.md#build-the-rust-extension-from-source)
+if a change is missed. Source checkouts also need the
 LFS-managed parity fixture; repeat `git lfs pull` after switching branches that
 change it.
 For OS prerequisites, activation commands, WSL notes, and install variants, see

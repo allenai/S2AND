@@ -71,9 +71,10 @@ Python subblocked prediction carries original required seed memberships into
 the initial-only attachment pass, including members not yet predicted. Explicit
 hard cannot-link supervision also constrains post-clustering seed merges;
 indirect merges cannot reconnect a forbidden pair.
-Within an evaluated block, seed restoration uses the same direct-before-reverse
-supervision precedence as distance construction. An overridden reverse
-cannot-link is not reintroduced when restoring required seed memberships.
+Public prediction and distance APIs normalize caller supervision as undirected
+pairs before scoring or restoring seeds. Equal reverse entries are deduplicated;
+conflicting reverse entries raise. Caller distances override dataset supervision
+consistently during scoring and seed restoration.
 
 Classic incremental prediction checks proposed attachments for conflicts
 before restoring their destination profiles. Explicit required attachments
@@ -272,8 +273,13 @@ exclusions in the input; incremental prediction does not choose which existing
 paper to remove.
 Exclusions involving new papers still prevent attachments to the original
 profile, including attachments through temporary split components.
-Incremental attachment passes inside subblocked bulk prediction apply the same
-check to their generated seed groups, rejecting contradictions in those groups.
+Subblocked bulk prediction creates temporary seed groups from its own bulk
+output. Average linkage can place an explicit negative pair together because
+bulk disallows use a finite distance. Follow-on attachment preserves those
+computed memberships and omits only their internal hard negatives from its
+local attachment request. Exclusions involving fresh signatures or different
+groups remain active, and the original input supervision is unchanged. This
+exception does not apply to caller-supplied incremental seed groups.
 
 The lower-level `predict_from_rust_featurizer` bridge retains its explicit
 seed-override behavior: seed arguments supplied directly to that method remain
@@ -374,8 +380,12 @@ Linker source assembly validates each original Arrow manifest and its table and
 index hashes before rebinding its name-count index path. Evaluation's automatic
 Arrow selection treats invalid manifests or corrupt declared data as errors;
 it does not silently switch to JSON. `--no-arrow` explicitly selects JSON and
-skips Arrow inspection. A source without the required Arrow artifacts can still
-use the automatic JSON route.
+skips Arrow inspection. Automatic selection can use JSON when the Arrow source
+or requested dataset is unavailable, the requested SPECTER generation is
+undeclared, or the name-count index is undeclared; it reports the fallback
+reason. A manifest missing required base artifacts is an error. SPECTER
+generation selection uses the declared manifest filename, including when the
+resolved on-disk filename has different casing.
 
 Promoted incremental inference requires an explicit seed mapping:
 

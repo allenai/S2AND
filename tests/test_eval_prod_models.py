@@ -14,6 +14,7 @@ import scripts.eval_prod_models as eval_prod_models
 from s2and.arrow_inputs import (
     ARROW_COLLECTION_KIND,
     ArrowDataset,
+    MissingArrowArtifactError,
     build_arrow_artifact_manifest,
     write_arrow_artifact_manifest,
 )
@@ -42,13 +43,14 @@ def _open_minimal_arrow_dataset(
     return ArrowDataset.open(root)
 
 
-def _write_eval_arrow_root(root: Path) -> Path:
+def _write_eval_arrow_root(root: Path, *, include_name_counts_index: bool = True) -> Path:
     dataset_root = root / "aliased-location"
     paths = write_minimal_arrow_prediction_bundle(dataset_root, include_specter=True)
     specter2 = dataset_root / "specter2.arrow"
     Path(paths["specter"]).rename(specter2)
     paths["specter"] = str(specter2)
-    paths["name_counts_index"], _metrics = write_name_counts_index(root, tiny_name_counts_tuple())
+    if include_name_counts_index:
+        paths["name_counts_index"], _metrics = write_name_counts_index(root, tiny_name_counts_tuple())
     manifest_path = write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, dataset_root), dataset_root)
     (root / "manifest.json").write_text(
         json.dumps(
@@ -87,16 +89,39 @@ def test_arrow_availability_reads_only_manifests_and_opens_once_for_evaluation(
     assert opened == [dataset_root.resolve()]
 
 
+def test_arrow_availability_requires_name_counts_declaration(tmp_path: Path) -> None:
+    dataset_root = _write_eval_arrow_root(tmp_path, include_name_counts_index=False)
+    with ArrowDataset.open(dataset_root, require_specter=True):
+        pass
+    with pytest.raises(MissingArrowArtifactError, match="name_counts_index"):
+        ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True)
+
+    assert not eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    error = eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    assert isinstance(error, FileNotFoundError)
+    assert "name_counts_index" in str(error)
+    with pytest.raises(FileNotFoundError, match="name_counts_index"):
+        eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl")
+
+
 @pytest.mark.parametrize("corruption", ["checksum", "missing"])
-def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path, corruption: str) -> None:
+@pytest.mark.parametrize("artifact", ["papers", "name_counts_index"])
+def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path, corruption: str, artifact: str) -> None:
     dataset_root = _write_eval_arrow_root(tmp_path)
-    papers = dataset_root / "papers.arrow"
+    manifest = json.loads((dataset_root / "manifest.json").read_text(encoding="utf-8"))
+    payload = dataset_root / manifest["paths"][artifact]
+    if artifact == "name_counts_index":
+        payload /= "manifest.json"
     if corruption == "checksum":
-        papers.write_bytes(papers.read_bytes().replace(b"Notes", b"WRONG"))
+        content = payload.read_bytes()
+        payload.write_bytes(bytes([content[0] ^ 1]) + content[1:])
     else:
-        papers.unlink()
+        payload.unlink()
     assert eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
-    with pytest.raises(ValueError if corruption == "checksum" else FileNotFoundError):
+    with pytest.raises(
+        ValueError if corruption == "checksum" else FileNotFoundError,
+        match="checksum mismatch" if corruption == "checksum" else None,
+    ):
         eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl")
 
 

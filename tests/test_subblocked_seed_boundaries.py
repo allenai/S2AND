@@ -107,6 +107,52 @@ def _assert_partition(clusters, blocks):
 
 
 @pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("claimed", [False, True])
+@pytest.mark.parametrize(("count", "threshold"), [(20, 45), (2, 3)])
+def test_mixed_initial_claim_keeps_compatible_full_name_neighbors(tmp_path, route, claimed, count, threshold):
+    names = [("A", "", "Smith")] * count + [("Ada", "", "Smith")] * count + [("Bob", "", "Smith")] * count
+    dataset = _dataset(names, {"0": "claimed", str(count): "claimed"} if claimed else {})
+    blocks = {"one": list(dataset.signatures)}
+
+    clusters = _predict(tmp_path, dataset, blocks, route, threshold=threshold)
+
+    _assert_partition(clusters, blocks)
+    assert {frozenset(members) for members in clusters.values()} == {
+        frozenset(str(index) for index in range(count * 2)),
+        frozenset(str(index) for index in range(count * 2, count * 3)),
+    }
+
+
+@pytest.mark.parametrize("route", ["python", "arrow"])
+def test_mixed_initial_claim_at_capacity_preserves_membership_and_name_constraints(tmp_path, route):
+    names = [("A", "", "Smith")] * 2 + [("Ada", "", "Smith")] * 2 + [("Bob", "", "Smith")] * 2
+    dataset = _dataset(names, {"0": "claimed", "2": "claimed"})
+    blocks = {"one": list(dataset.signatures)}
+
+    clusters = _predict(tmp_path, dataset, blocks, route, threshold=2)
+
+    _assert_partition(clusters, blocks)
+    assert any({"0", "2"} <= set(members) for members in clusters.values())
+    assert all(not (set(members) & {"0", "1", "2", "3"} and set(members) & {"4", "5"}) for members in clusters.values())
+
+
+@pytest.mark.parametrize("initials", [False, True])
+def test_arrow_subblocking_normalizes_integer_signature_ids(tmp_path, initials):
+    names = [("Ada", "", "Smith")] * 4
+    if initials:
+        names = [("A", "", "Smith")] * 2 + [("Ada", "", "Smith")] * 2 + [("Bob", "", "Smith")] * 2
+    dataset = _dataset(names, {})
+    string_blocks = {"one": list(dataset.signatures)}
+    integer_blocks = {"one": [int(signature_id) for signature_id in dataset.signatures]}
+
+    expected = _predict(tmp_path / "strings", dataset, string_blocks, "arrow", threshold=3)
+    actual = _predict(tmp_path / "integers", dataset, integer_blocks, "arrow", threshold=3)
+
+    assert actual == expected
+    _assert_partition(actual, string_blocks)
+
+
+@pytest.mark.parametrize("route", ["python", "arrow"])
 @pytest.mark.parametrize("same_last", [False, True])
 def test_claimed_profile_and_initial_attachment_stay_in_original_block(tmp_path, route, same_last):
     names = [("Ada", "", "Smith")] * 3 + [("Ada", "", "Smith" if same_last else "Jones")] * 3

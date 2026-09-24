@@ -3153,8 +3153,24 @@ class Clusterer:
                 len({output_locations[signature_id][0] for signature_id in component_signatures}) > 1
                 for component_signatures in seed_components.values()
             )
+            full_name_subblocks: set[str] = set()
+            if repacked_seed_component_count:
+                representatives = _load_arrow_incremental_signature_info(
+                    arrow_dataset,
+                    [members[0] for members in normalized_native_subblocks.values() if members],
+                )
+                full_name_subblocks = {
+                    key
+                    for key, members in normalized_native_subblocks.items()
+                    if members and len(_signature_first_for_rules(representatives[members[0]])) > 1
+                }
             repaired_subblock_count = 0
-            repaired = pack_seed_components(normalized_native_subblocks, seed_components, batching_threshold)
+            repaired = pack_seed_components(
+                normalized_native_subblocks,
+                seed_components,
+                batching_threshold,
+                full_name_subblocks=full_name_subblocks,
+            )
             for subblock_key, repaired_parts in repaired.items():
                 for part_index, repaired_part in enumerate(repaired_parts):
                     repaired_key_base = f"{block_key}|subblock={subblock_key}"
@@ -3302,6 +3318,7 @@ class Clusterer:
         active_cluster_seeds_require: dict[str, int | str] = {}
         if needs_subblocking:
             assert batching_threshold is not None
+            block_dict = {key: [str(signature_id) for signature_id in members] for key, members in block_dict.items()}
             if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds:
                 if prediction_cluster_seeds_require is not None:
                     effective_cluster_seeds_require.update(prediction_cluster_seeds_require)
@@ -3870,10 +3887,18 @@ class Clusterer:
                     )
                 if any(len(members) > batching_threshold for members in subblocks.values()):
                     raise RuntimeError(f"Subblocking exceeded batching_threshold (block={block_key})")
+                full_name_subblocks = set()
+                if components_by_block[block_key]:
+                    full_name_subblocks = {
+                        key
+                        for key, members in subblocks.items()
+                        if members and len(_signature_first_for_rules(dataset.signatures[members[0]])) > 1
+                    }
                 repaired = pack_seed_components(
                     {key: subblocks[key] for key in sorted(subblocks)},
                     components_by_block[block_key],
                     batching_threshold,
+                    full_name_subblocks=full_name_subblocks,
                 )
                 for subblock_key, parts in repaired.items():
                     for part_index, members in enumerate(parts):

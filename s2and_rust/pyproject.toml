@@ -19,14 +19,14 @@ include = [{ path = "vendor/cld2/**/*", format = "sdist" }]
 
 [tool.uv]
 # Custom keys replace uv's defaults. Keep package metadata and every local
-# native/Python build input, including all files shipped from the vendored crate.
+# native/Python build input, including every file covered by the source digest.
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "Cargo.toml" },
     { file = "Cargo.lock" },
     { file = "build.rs" },
-    { file = "src/**/*.rs" },
-    { file = "vendor/cld2/**/*" },
+    { file = "src/**/*" },
+    { file = "vendor/**/*" },
     { file = "s2and_rust/**/*.py" },
     { file = "README.md" },
 ]

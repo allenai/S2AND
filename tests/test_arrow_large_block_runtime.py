@@ -143,6 +143,7 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     build_calls: list[dict[str, Any]] = []
     native_calls: list[dict[str, Any]] = []
     incremental_calls: list[dict[str, Any]] = []
+    representative_calls: list[list[str]] = []
 
     class FakeRustFeaturizer:
         def cluster_seeds_require(self) -> list[tuple[str, str]]:
@@ -161,7 +162,7 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
 
     def fake_load_representatives(_dataset: Any, signature_ids: list[str]):
         events.append("representatives")
-        assert signature_ids == ["6", "0", "5", "3", "9"]
+        representative_calls.append(signature_ids)
         return {
             signature_id: SimpleNamespace(
                 author_info_first="j" if signature_id == "6" else "john",
@@ -244,12 +245,14 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     assert events == [
         "native_subblocking",
         "representatives",
+        "representatives",
         "featurizer",
         "bulk_predict",
         "incremental_attach",
     ]
     assert native_calls[0]["signature_ids"] == [str(index) for index in range(9)]
     assert native_calls[0]["maximum_size"] == 3
+    assert representative_calls == [["6", "0", "1"], ["6", "0", "5", "3", "9"]]
     assert len(build_calls) == 1
     assert build_calls[0]["signature_ids"] == ["0", "1", "2", "5", "3", "4", "9"]
     assert build_calls[0]["cluster_seeds_path"] is not None

@@ -1,7 +1,7 @@
 """Sparse cannot-link-aware restoration of required seed groups after clustering."""
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Set
 from typing import TypeVar
 
 import numpy as np
@@ -15,14 +15,38 @@ def pack_seed_components(
     subblocks: Mapping[str, Sequence[str]],
     components: Mapping[_Component, list[str]],
     maximum_size: int,
+    *,
+    full_name_subblocks: Set[str] = frozenset(),
 ) -> dict[str, list[list[str]]]:
     """Repack validated subblocks with each required component as one item.
 
     Callers validate coverage and reject oversized components before invoking
-    the expensive subblocker. Preserve its order and move a component to the
-    first subblock containing one of its members.
+    the expensive subblocker. Move each component to the first full-name
+    subblock containing one of its members, or its first subblock when none
+    has a full name. Keep native members first so imported initials cannot
+    change how the destination is classified for later incremental attachment.
+
+    Args:
+        subblocks: Validated partition, in deterministic preference order.
+        components: Required groups restricted to signatures in this partition.
+        maximum_size: Maximum number of signatures in each emitted part.
+        full_name_subblocks: Keys whose original representative has a full name.
+
+    Returns:
+        Packed parts for each original subblock key, preserving key order.
     """
     component_by_signature = {sid: component for component, members in components.items() for sid in members}
+    locations: dict[str, str] = {}
+    homes: dict[_Component, str] = {}
+    for key, signatures in subblocks.items():
+        for signature_id in signatures:
+            component = component_by_signature.get(signature_id)
+            if component is not None:
+                locations[signature_id] = key
+                if component not in homes or (
+                    key in full_name_subblocks and homes[component] not in full_name_subblocks
+                ):
+                    homes[component] = key
     emitted: set[_Component] = set()
     repaired: dict[str, list[list[str]]] = {}
     for key, signatures in subblocks.items():
@@ -32,10 +56,10 @@ def pack_seed_components(
             component = component_by_signature.get(signature_id)
             if component is None:
                 item = [signature_id]
-            elif component in emitted:
+            elif component in emitted or homes[component] != key:
                 continue
             else:
-                item = components[component]
+                item = sorted(components[component], key=lambda member: locations[member] != key)
                 emitted.add(component)
             if current and len(current) + len(item) > maximum_size:
                 parts.append(current)

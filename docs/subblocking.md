@@ -37,6 +37,15 @@ The single-letter first-name path is handled later in bulk prediction. Multi-let
 their resulting clusters become temporary cluster seeds, and single-letter subblocks run through a synthetic
 incremental pass so initial-only signatures can attach back to established clusters.
 
+Required profiles spanning several subblocks are kept together. When a profile
+has a member in a full-name subblock, both Python and Arrow place it there,
+preferring the first such subblock in sorted order. Members native to that
+subblock stay first so an imported initial does not change its classification.
+This keeps compatible full-name neighbours available during bulk clustering.
+Packing still respects the subblock capacity; separate full-name groups can
+remain separate when they do not fit. The threshold does not cap the size of a
+final cluster after initial-only attachment.
+
 ## Dash normalization
 
 Current normalization handles every dash-like given-name separator uniformly. Dash-bound compounds stay together in the first

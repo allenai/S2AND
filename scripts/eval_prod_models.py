@@ -482,6 +482,8 @@ def _resolve_requested_arrow_dataset_root(
         raise FileNotFoundError(
             f"Arrow dataset {dataset_name!r} declares {declared_specter!r}, not requested {expected_specter_name!r}"
         )
+    if "name_counts_index" not in specs:
+        raise FileNotFoundError(f"Arrow dataset {dataset_name!r} does not declare required 'name_counts_index'")
     return dataset_root
 
 

@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 RUST_PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "s2and_rust"
-REBUILD_COMMAND = "uv sync --extra dev"
+REBUILD_COMMAND = "uv sync --extra dev --reinstall-package s2and-rust"
 
 # Mirrors SOURCE_DIGEST_FILES and SOURCE_DIGEST_DIRS in s2and_rust/build.rs.
 _SOURCE_DIGEST_FILES = ("Cargo.toml", "Cargo.lock", "build.rs")

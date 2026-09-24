@@ -55,6 +55,11 @@ production model and public-data version is `1.3`, on a separate version axis.
   `ValueError`, as Arrow already did. Blocks containing only initials use bulk
   prediction. Explicit disallows and caller supervision stay effective across
   sequential initial-only passes. Subblocked outputs can change accordingly.
+- Correctness: mixed initial/full-name required profiles prefer a full-name
+  subblock on both routes, retaining its native members first. This prevents
+  packing from separating a claimed full-name member from compatible neighbours
+  when they fit together. Arrow subblocking also preserves support for integer
+  signature IDs by normalizing the original-block scope.
 - Correctness: altered-profile split components receive IDs that cannot collide
   with existing profile IDs. Previously, splitting profile `p` reused an
   existing profile named `p_0`, merging that profile into the split.
@@ -66,17 +71,22 @@ production model and public-data version is `1.3`, on a separate version axis.
   an active required component exceeding `batching_threshold` within one block
   now raises instead of being split to fit. Incremental linking still splits
   altered profiles temporarily for scoring and restores their original identity.
-- Evaluation and artifacts: `eval_prod_models` falls back to JSON only when a
-  declared Arrow dataset is absent; invalid manifests or corrupt data raise, and
+- Evaluation and artifacts: automatic `eval_prod_models` routing can use JSON
+  when the Arrow source or requested dataset is unavailable, the requested
+  SPECTER generation is undeclared, or the name-count index is undeclared.
+  Broken collection bindings, invalid manifests and corrupt declared data raise;
   `--no-arrow` skips Arrow inspection. Linker source assembly rejects Arrow
-  inputs whose content differs from their manifests instead of re-hashing them.
+  inputs whose content differs from their manifests instead of silently
+  regenerating checksums for altered inputs.
 - Development: the repository-root `s2and_rust/__init__.py` workspace shim is
   removed, so code run from the checkout imports the installed `s2and_rust`
   package instead of an in-tree `maturin develop` build. `uv sync` and `uv run`
   rebuild the extension whenever Rust build inputs change, and a fresh
   `uv sync --extra dev` checkout can run the tests without `maturin develop`.
   Tests stop before collection when the importable extension was built from
-  different Rust sources than the checkout; refresh it with `uv sync --extra dev`.
+  different Rust sources than the checkout; force a refresh with
+  `uv sync --extra dev --reinstall-package s2and-rust`. Cache keys cover every
+  file under `src/` and `vendor/`, matching the freshness digest.
 - **Unreleased migration state:** the artifact-independent `1.0.0` code
   and release hardening are implemented. The reviewed canonical benchmark-name
   and ORCID source exports are still needed; production artifact generation,

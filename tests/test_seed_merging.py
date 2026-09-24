@@ -14,6 +14,32 @@ from tests.helpers import tiny_name_counts_index
 from tests.model_helpers import ConstantDistanceClassifier
 
 
+def test_seed_packing_prefers_full_names_and_keeps_native_representatives() -> None:
+    from s2and.seed_merging import pack_seed_components
+
+    subblocks = {"a": ["i0", "i1"], "ada": ["f0", "f1"], "amy": ["g0"]}
+    components = {"first": ["i0", "f0"], "second": ["i1", "g0"]}
+
+    packed = pack_seed_components(subblocks, components, 3, full_name_subblocks={"ada", "amy"})
+
+    assert packed == {"a": [], "ada": [["f0", "i0", "f1"]], "amy": [["g0", "i1"]]}
+    assert subblocks == {"a": ["i0", "i1"], "ada": ["f0", "f1"], "amy": ["g0"]}
+    assert components == {"first": ["i0", "f0"], "second": ["i1", "g0"]}
+
+
+def test_seed_packing_preserves_capacity_when_full_name_home_is_full() -> None:
+    from s2and.seed_merging import pack_seed_components
+
+    packed = pack_seed_components(
+        {"a": ["i0"], "ada": ["f0", "f1"]},
+        {"claimed": ["i0", "f0"]},
+        2,
+        full_name_subblocks={"ada"},
+    )
+
+    assert packed == {"a": [], "ada": [["f0", "i0"], ["f1"]]}
+
+
 def test_combining_block_local_predictions_preserves_reserved_cluster_keys() -> None:
     from s2and.model import _combine_subblocked_predictions
 

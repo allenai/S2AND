@@ -2,10 +2,13 @@
 
 import importlib.machinery
 import importlib.util
+import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -82,6 +85,114 @@ def test_digest_ignores_build_outputs_outside_declared_inputs(tmp_path: Path) ->
     _write_tree(root, {"target/release/lib.dll": b"binary", "s2and_rust/__init__.py": b""})
 
     assert rust_source_digest(root) == baseline
+
+
+def _uv_cache_project(root: Path) -> tuple[Path, Path]:
+    """Use the native package's real cache keys with an offline wheel builder."""
+    source = _write_tree(root / "package", _TREE)
+    native_manifest = Path(__file__).resolve().parents[1] / "s2and_rust/pyproject.toml"
+    keys = tomllib.loads(native_manifest.read_text(encoding="utf-8"))["tool"]["uv"]["cache-keys"]
+    cache_keys = ", ".join("{ file = " + json.dumps(key["file"]) + " }" for key in keys)
+    (source / "pyproject.toml").write_text(
+        '[project]\nname = "s2and-rust"\nversion = "0.0.0"\nrequires-python = ">=3.11"\n'
+        '[build-system]\nrequires = []\nbuild-backend = "backend"\nbackend-path = ["."]\n'
+        f"[tool.uv]\ncache-keys = [{cache_keys}]\n",
+        encoding="utf-8",
+    )
+    (source / "backend.py").write_text(
+        "from pathlib import Path\n"
+        "from zipfile import ZipFile\n"
+        "\n"
+        "def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):\n"
+        "    counter = Path(__file__).resolve().parent / 'build_count.txt'\n"
+        "    count = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+        "    counter.write_text(str(count))\n"
+        "    name = 's2and_rust-0.0.0-py3-none-any.whl'\n"
+        "    dist = 's2and_rust-0.0.0.dist-info'\n"
+        "    with ZipFile(Path(wheel_directory) / name, 'w') as wheel:\n"
+        "        wheel.writestr('freshness_probe.py', f'BUILD_COUNT = {count}\\n')\n"
+        "        wheel.writestr(dist + '/METADATA', "
+        "'Metadata-Version: 2.1\\nName: s2and-rust\\nVersion: 0.0.0\\n')\n"
+        "        wheel.writestr(dist + '/WHEEL', "
+        "'Wheel-Version: 1.0\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n')\n"
+        "        wheel.writestr(dist + '/RECORD', '')\n"
+        "    return name\n",
+        encoding="utf-8",
+    )
+    project = root / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "freshness-probe-host"\nversion = "0.0.0"\nrequires-python = ">=3.11"\n'
+        'dependencies = ["s2and-rust"]\n[project.optional-dependencies]\ndev = []\n'
+        '[tool.uv.sources]\ns2and-rust = { path = "../package" }\n',
+        encoding="utf-8",
+    )
+    return source, project
+
+
+def _sync_uv_cache_project(project: Path, *, recovery: bool = False) -> int:
+    """Run uv against only the fixture's environment and local cache."""
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv is required to exercise local package cache invalidation")
+    env = os.environ.copy()
+    env.pop("VIRTUAL_ENV", None)
+    env["UV_PROJECT_ENVIRONMENT"] = str(project / ".venv")
+    arguments = shlex.split(REBUILD_COMMAND)[1:] if recovery else ["sync", "--extra", "dev"]
+    result = subprocess.run(
+        [
+            uv,
+            "--cache-dir",
+            str(project.parent / "cache"),
+            *arguments,
+            "--project",
+            str(project),
+            "--python",
+            sys.executable,
+            "--offline",
+            "--no-python-downloads",
+        ],
+        cwd=project,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=45,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return int((project.parent / "package/build_count.txt").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("relative", ["src/lib.rs.orig", "src/.swp", "vendor/other/README.md"])
+def test_uv_rebuilds_when_digest_tracks_non_rust_files(tmp_path: Path, relative: str) -> None:
+    """Changes rejected by the freshness guard must also invalidate uv's wheel."""
+    source, project = _uv_cache_project(tmp_path)
+    baseline = rust_source_digest(source)
+    assert _sync_uv_cache_project(project) == 1
+    assert _sync_uv_cache_project(project) == 1
+
+    added = source / relative
+    added.parent.mkdir(parents=True, exist_ok=True)
+    added.write_bytes(b"new build input\n")
+    added_digest = rust_source_digest(source)
+    assert added_digest != baseline
+    assert _sync_uv_cache_project(project) == 2
+
+    added.write_bytes(b"changed build input\n")
+    assert rust_source_digest(source) != added_digest
+    assert _sync_uv_cache_project(project) == 3
+
+    added.unlink()
+    assert rust_source_digest(source) == baseline
+    assert _sync_uv_cache_project(project) == 4
+
+
+def test_recovery_command_rebuilds_an_unchanged_cached_package(tmp_path: Path) -> None:
+    """The suggested recovery must force a build even when cache keys match."""
+    _, project = _uv_cache_project(tmp_path)
+    assert _sync_uv_cache_project(project) == 1
+    assert _sync_uv_cache_project(project) == 1
+    assert _sync_uv_cache_project(project, recovery=True) == 2
 
 
 def _session_project(root: Path) -> tuple[Path, Path]:

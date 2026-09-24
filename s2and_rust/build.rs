@@ -5,8 +5,13 @@ use std::path::{Path, PathBuf};
 /// Native build inputs covered by the embedded source digest.
 ///
 /// `tests/rust_build_freshness.py` mirrors these lists and the hashing below.
-const SOURCE_DIGEST_FILES: [&str; 3] = ["Cargo.toml", "Cargo.lock", "build.rs"];
-const SOURCE_DIGEST_DIRS: [&str; 2] = ["src", "vendor"];
+const SOURCE_DIGEST_FILES: [&str; 4] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "vendor/cld2/Cargo.toml",
+];
+const SOURCE_DIGEST_DIRS: [&str; 2] = ["src", "vendor/cld2/src"];
 
 fn main() {
     emit_source_digest();
@@ -17,9 +22,10 @@ fn main() {
 /// Embed a digest of every native build input so tests can reject stale builds.
 ///
 /// Emitting any `rerun-if-changed` limits Cargo's change detection to the
-/// listed paths, so the top-level files and both source directory trees are
-/// listed on every platform. Cargo rescans each listed directory recursively,
-/// including added and removed files.
+/// listed paths, so the manifests and both Rust source trees are listed on
+/// every platform. Directory watches include new modules; the digest includes
+/// only `.rs` files, not editor files or a vendored crate's build outputs.
+/// Cargo's timestamp checks are a heuristic, not content-based invalidation.
 fn emit_source_digest() {
     // A shared target directory can reuse a compiled build script across
     // source copies. Read Cargo's current package root when the script runs.
@@ -52,6 +58,17 @@ fn emit_source_digest() {
 }
 
 fn collect_files(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) {
+    let metadata = fs::symlink_metadata(dir).unwrap_or_else(|err| {
+        panic!(
+            "cannot inspect build input directory {}: {err}",
+            dir.display()
+        )
+    });
+    assert!(
+        !is_linked_directory(&metadata),
+        "linked native source directories are unsupported: {}",
+        dir.display()
+    );
     let entries = fs::read_dir(dir)
         .unwrap_or_else(|err| panic!("cannot list build inputs in {}: {err}", dir.display()));
     for entry in entries {
@@ -60,16 +77,33 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) {
             .path();
         if path.is_dir() {
             collect_files(root, &path, files);
-        } else if path.is_file() {
+        } else if path.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
             let relative = path
                 .strip_prefix(root)
                 .expect("build input is under the manifest directory")
                 .components()
-                .map(|component| component.as_os_str().to_string_lossy())
+                .map(|component| {
+                    component.as_os_str().to_str().unwrap_or_else(|| {
+                        panic!("native source paths must be valid UTF-8: {path:?}")
+                    })
+                })
                 .collect::<Vec<_>>()
                 .join("/");
             files.push((relative, path));
         }
+    }
+}
+
+fn is_linked_directory(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Include junctions, which Python 3.11 also identifies via this flag.
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
     }
 }
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.rust_build_freshness import REBUILD_COMMAND, rust_source_digest, stale_rust_extension_message
+from tests.rust_build_freshness import CLEAN_COMMAND, REBUILD_COMMAND, rust_source_digest, stale_rust_extension_message
 
 _TREE = {
     "Cargo.toml": b"[package]\n",
@@ -21,7 +21,8 @@ _TREE = {
     "build.rs": b"fn main() {}\n",
     "src/lib.rs": b"pub fn f() {}\n",
     "src/nested/mod.rs": b"pub fn g() {}\n",
-    "vendor/dep/src/lib.rs": b"pub fn h() {}\n",
+    "vendor/cld2/Cargo.toml": b"[package]\n",
+    "vendor/cld2/src/lib.rs": b"pub fn h() {}\n",
 }
 
 
@@ -31,6 +32,21 @@ def _write_tree(root: Path, files: dict[str, bytes]) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
     return root
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    """Exercise Windows junctions without requiring symlink privileges."""
+    if os.name == "nt":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+def _unsupported_source_path(root: Path) -> Path:
+    name = "\udcff.rs" if os.name == "nt" else os.fsdecode(b"\xff.rs")
+    return root / "src" / name
 
 
 def test_digest_is_independent_of_file_creation_order(tmp_path: Path) -> None:
@@ -52,6 +68,7 @@ def test_digest_is_independent_of_file_creation_order(tmp_path: Path) -> None:
         "delete_source",
         "rename_source",
         "modify_vendor",
+        "modify_vendor_manifest",
     ],
 )
 def test_digest_changes_for_every_build_input_change(tmp_path: Path, change: str) -> None:
@@ -72,19 +89,51 @@ def test_digest_changes_for_every_build_input_change(tmp_path: Path, change: str
         (root / "src/nested/mod.rs").unlink()
     elif change == "rename_source":
         (root / "src/nested/mod.rs").rename(root / "src/nested/other.rs")
+    elif change == "modify_vendor":
+        (root / "vendor/cld2/src/lib.rs").write_bytes(b"pub fn h() { }\n")
     else:
-        (root / "vendor/dep/src/lib.rs").write_bytes(b"pub fn h() { }\n")
+        (root / "vendor/cld2/Cargo.toml").write_bytes(b"[package]\nname = 'cld2'\n")
 
     assert rust_source_digest(root) != baseline
 
 
-def test_digest_ignores_build_outputs_outside_declared_inputs(tmp_path: Path) -> None:
+def test_digest_ignores_metadata_and_build_outputs(tmp_path: Path) -> None:
     root = _write_tree(tmp_path, _TREE)
     baseline = rust_source_digest(root)
 
-    _write_tree(root, {"target/release/lib.dll": b"binary", "s2and_rust/__init__.py": b""})
+    _write_tree(
+        root,
+        {
+            "target/release/lib.dll": b"binary",
+            "s2and_rust/__init__.py": b"",
+            "vendor/cld2/Cargo.lock": b"standalone vendor resolution",
+            "vendor/cld2/target/generated.rs": b"pub fn unused_output() {}",
+            "vendor/cld2/README.md": b"documentation",
+            "src/lib.rs.orig": b"editor backup",
+            "src/.swp": b"editor state",
+        },
+    )
 
     assert rust_source_digest(root) == baseline
+
+
+def test_digest_rejects_linked_source_directories(tmp_path: Path) -> None:
+    source = _write_tree(tmp_path / "crate", _TREE)
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "module.rs").write_bytes(b"pub fn linked() {}\n")
+    _link_directory(source / "src/linked", external)
+
+    with pytest.raises(ValueError, match="linked native source directories are unsupported"):
+        rust_source_digest(source)
+
+
+def test_digest_rejects_unsupported_source_names_with_clear_error(tmp_path: Path) -> None:
+    source = _write_tree(tmp_path, _TREE)
+    _unsupported_source_path(source).write_bytes(b"// unused module\n")
+
+    with pytest.raises(ValueError, match="native source paths must be valid UTF-8"):
+        rust_source_digest(source)
 
 
 def _uv_cache_project(root: Path) -> tuple[Path, Path]:
@@ -163,9 +212,12 @@ def _sync_uv_cache_project(project: Path, *, recovery: bool = False) -> int:
     return int((project.parent / "package/build_count.txt").read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("relative", ["src/lib.rs.orig", "src/.swp", "vendor/other/README.md"])
-def test_uv_rebuilds_when_digest_tracks_non_rust_files(tmp_path: Path, relative: str) -> None:
-    """Changes rejected by the freshness guard must also invalidate uv's wheel."""
+@pytest.mark.parametrize(
+    "relative",
+    ["src/lib.rs.orig", "src/.swp", "vendor/cld2/Cargo.lock", "vendor/cld2/target/generated.rs"],
+)
+def test_uv_and_digest_ignore_noninputs(tmp_path: Path, relative: str) -> None:
+    """Editor state and a vendored crate's outputs cannot stale the extension."""
     source, project = _uv_cache_project(tmp_path)
     baseline = rust_source_digest(source)
     assert _sync_uv_cache_project(project) == 1
@@ -173,18 +225,59 @@ def test_uv_rebuilds_when_digest_tracks_non_rust_files(tmp_path: Path, relative:
 
     added = source / relative
     added.parent.mkdir(parents=True, exist_ok=True)
-    added.write_bytes(b"new build input\n")
-    added_digest = rust_source_digest(source)
-    assert added_digest != baseline
-    assert _sync_uv_cache_project(project) == 2
+    added.write_bytes(b"irrelevant file\n")
+    assert rust_source_digest(source) == baseline
+    assert _sync_uv_cache_project(project) == 1
 
-    added.write_bytes(b"changed build input\n")
-    assert rust_source_digest(source) != added_digest
-    assert _sync_uv_cache_project(project) == 3
+    added.write_bytes(b"changed irrelevant file\n")
+    assert rust_source_digest(source) == baseline
+    assert _sync_uv_cache_project(project) == 1
 
     added.unlink()
     assert rust_source_digest(source) == baseline
-    assert _sync_uv_cache_project(project) == 4
+    assert _sync_uv_cache_project(project) == 1
+
+
+@pytest.mark.parametrize(
+    "relative", ["src/lib.rs", "src/nested/mod.rs", "vendor/cld2/src/lib.rs", "vendor/cld2/Cargo.toml"]
+)
+def test_uv_rebuilds_for_native_input_edits(tmp_path: Path, relative: str) -> None:
+    source, project = _uv_cache_project(tmp_path)
+    assert _sync_uv_cache_project(project) == 1
+    path = source / relative
+    path.write_bytes(path.read_bytes() + b"\n// changed\n")
+    assert _sync_uv_cache_project(project) == 2
+
+
+@pytest.mark.parametrize("change", ["delete_older", "add_older", "preserve_mtime"])
+def test_digest_detects_timestamp_cache_misses_and_reinstall_rebuilds(tmp_path: Path, change: str) -> None:
+    """A UV timestamp hit is not evidence that source contents still match."""
+    source, project = _uv_cache_project(tmp_path)
+    older_ns = 1_600_000_000_000_000_000
+    newer_ns = older_ns + 100_000_000_000
+    for path in (source / "src").rglob("*.rs"):
+        os.utime(path, ns=(older_ns, older_ns))
+    newest = source / "src/lib.rs"
+    os.utime(newest, ns=(newer_ns, newer_ns))
+    baseline = rust_source_digest(source)
+    assert _sync_uv_cache_project(project) == 1
+
+    if change == "delete_older":
+        (source / "src/nested/mod.rs").unlink()
+    elif change == "add_older":
+        added = source / "src/new.rs"
+        added.write_bytes(b"pub fn new_module() {}\n")
+        os.utime(added, ns=(older_ns, older_ns))
+    else:
+        newest.write_bytes(b"pub fn changed() {}\n")
+        os.utime(newest, ns=(newer_ns, newer_ns))
+
+    assert rust_source_digest(source) != baseline
+    # UV versions may improve this heuristic. Regardless of cache behavior,
+    # the documented reinstall command must invoke the build backend again.
+    cached_builds = _sync_uv_cache_project(project)
+    assert cached_builds in (1, 2)
+    assert _sync_uv_cache_project(project, recovery=True) == cached_builds + 1
 
 
 def test_recovery_command_rebuilds_an_unchanged_cached_package(tmp_path: Path) -> None:
@@ -270,6 +363,30 @@ def test_session_rejects_extension_without_source_digest(tmp_path: Path) -> None
     assert REBUILD_COMMAND in output
 
 
+@pytest.mark.parametrize("unsupported", ["filename", "directory_link"])
+def test_session_reports_unsupported_inputs_before_collection(tmp_path: Path, unsupported: str) -> None:
+    source_root, native = _session_project(tmp_path)
+    digest = rust_source_digest(source_root)
+    native.write_text(f"def get_build_info():\n    return {{'source_digest': {digest!r}}}\n", encoding="utf-8")
+    if unsupported == "filename":
+        _unsupported_source_path(source_root).write_bytes(b"// unused module\n")
+        expected = "native source paths must be valid UTF-8"
+    else:
+        external = tmp_path / "external"
+        external.mkdir()
+        _link_directory(source_root / "src/linked", external)
+        expected = "linked native source directories are unsupported"
+
+    result = _run_session(tmp_path)
+    output = result.stdout + result.stderr
+
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR, output
+    assert expected in output
+    assert "Cannot verify s2and_rust source freshness" in output
+    assert "INTERNALERROR" not in output
+    assert not (tmp_path / "collected").exists()
+
+
 def test_session_explains_missing_native_module(tmp_path: Path) -> None:
     _session_project(tmp_path)
 
@@ -307,10 +424,12 @@ def test_real_build_script_tracks_directories_and_current_package_root(tmp_path:
         {
             "Cargo.toml": (
                 b'[package]\nname = "s2and_freshness_probe"\nversion = "0.0.0"\nedition = "2021"\n'
+                b'[dependencies]\ncld2 = { path = "vendor/cld2" }\n'
                 b'[build-dependencies]\nsha2 = "0.10"\n'
             ),
-            "src/main.rs": b'fn main() { println!("{}", env!("S2AND_RUST_SOURCE_DIGEST")); }\n',
-            "vendor/keep.rs": b"// Vendored input\n",
+            "src/main.rs": b'fn main() { println!("{} {}", env!("S2AND_RUST_SOURCE_DIGEST"), cld2::value()); }\n',
+            "vendor/cld2/Cargo.toml": b'[package]\nname = "cld2"\nversion = "0.0.0"\nedition = "2021"\n',
+            "vendor/cld2/src/lib.rs": b"pub fn value() -> u8 { 1 }\n",
         },
     )
     shutil.copyfile(Path(__file__).resolve().parents[1] / "s2and_rust/build.rs", source / "build.rs")
@@ -318,22 +437,49 @@ def test_real_build_script_tracks_directories_and_current_package_root(tmp_path:
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(target)
     env["PYO3_PYTHON"] = sys.executable
-    command = [cargo, "run", "--offline", "--quiet", "--manifest-path", str(source / "Cargo.toml")]
+    command = [cargo, "run", "--release", "--offline", "--quiet", "--manifest-path", str(source / "Cargo.toml")]
 
-    def assert_current_digest() -> str:
+    def assert_current_digest(expected_value: int = 1) -> str:
         result = subprocess.run(command, cwd=source, env=env, capture_output=True, text=True, check=False, timeout=120)
         assert result.returncode == 0, result.stdout + result.stderr
         digest = rust_source_digest(source)
-        assert result.stdout.strip() == digest
+        assert result.stdout.strip() == f"{digest} {expected_value}"
         return digest
 
     baseline = assert_current_digest()
-    for relative in ("src/new.rs", "vendor/new.rs"):
+    for relative in ("src/new.rs", "vendor/cld2/src/new.rs"):
         added = source / relative
         added.write_bytes(b"// Newly added, unreferenced build input\n")
         assert assert_current_digest() != baseline
         added.unlink()
         assert assert_current_digest() == baseline
+
+    # Both Cargo and UV use timestamps. The recovery must discard the vendored
+    # dependency too, otherwise a fresh root digest can certify stale code.
+    vendor_source = source / "vendor/cld2/src/lib.rs"
+    original_times = vendor_source.stat()
+    vendor_source.write_bytes(b"pub fn value() -> u8 { 2 }\n")
+    os.utime(vendor_source, ns=(original_times.st_atime_ns, original_times.st_mtime_ns))
+    assert rust_source_digest(source) != baseline
+    # A normal root edit reruns build.rs, but may leave the dependency's cached
+    # object intact. Thus the recovery checks executable behavior, not just the
+    # freshly embedded source snapshot.
+    main_source = source / "src/main.rs"
+    main_source.write_bytes(main_source.read_bytes() + b"// Rebuild the root crate.\n")
+    before_clean = subprocess.run(
+        command, cwd=source, env=env, capture_output=True, text=True, check=False, timeout=120
+    )
+    assert before_clean.returncode == 0, before_clean.stdout + before_clean.stderr
+    assert before_clean.stdout.strip() in {f"{rust_source_digest(source)} {value}" for value in (1, 2)}
+    clean_command = shlex.split(CLEAN_COMMAND)[3:]
+    clean_command[0] = cargo
+    clean_command[clean_command.index("s2and_rust")] = "s2and_freshness_probe"
+    clean_command[clean_command.index("s2and_rust/Cargo.toml")] = str(source / "Cargo.toml")
+    cleaned = subprocess.run(
+        clean_command, cwd=source, env=env, capture_output=True, text=True, check=False, timeout=30
+    )
+    assert cleaned.returncode == 0, cleaned.stdout + cleaned.stderr
+    assert_current_digest(expected_value=2)
 
     # A compiled build script may be reused with a shared Cargo target. Its
     # digest must use the current manifest directory supplied at execution.
@@ -341,11 +487,29 @@ def test_real_build_script_tracks_directories_and_current_package_root(tmp_path:
     shutil.copytree(source, alternate)
     (alternate / "src/new.rs").write_bytes(b"// Only in the current package\n")
     build_script_name = "build-script-build.exe" if os.name == "nt" else "build-script-build"
-    build_script = next((target / "debug/build").glob(f"s2and_freshness_probe-*/{build_script_name}"))
+    build_script = next((target / "release/build").glob(f"s2and_freshness_probe-*/{build_script_name}"))
     env["CARGO_MANIFEST_DIR"] = str(alternate)
-    env["OUT_DIR"] = str(target / "debug/build/direct/out")
+    env["OUT_DIR"] = str(target / "release/build/direct/out")
     result = subprocess.run(
         [str(build_script)], cwd=source, env=env, capture_output=True, text=True, check=False, timeout=30
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"cargo:rustc-env=S2AND_RUST_SOURCE_DIGEST={rust_source_digest(alternate)}" in result.stdout
+
+    invalid_source = _unsupported_source_path(alternate)
+    invalid_source.write_bytes(b"// unsupported path\n")
+    invalid = subprocess.run(
+        [str(build_script)], cwd=source, env=env, capture_output=True, text=True, check=False, timeout=30
+    )
+    assert invalid.returncode != 0
+    assert "native source paths must be valid UTF-8" in invalid.stderr
+    invalid_source.unlink()
+
+    external = tmp_path / "external"
+    external.mkdir()
+    _link_directory(alternate / "src/linked", external)
+    linked = subprocess.run(
+        [str(build_script)], cwd=source, env=env, capture_output=True, text=True, check=False, timeout=30
+    )
+    assert linked.returncode != 0
+    assert "linked native source directories are unsupported" in linked.stderr

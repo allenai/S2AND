@@ -20,13 +20,16 @@ include = [{ path = "vendor/cld2/**/*", format = "sdist" }]
 [tool.uv]
 # Custom keys replace uv's defaults. Keep package metadata and every local
 # native/Python build input, including every file covered by the source digest.
+# These are timestamp-based hints: older additions/deletions and preserved
+# mtimes can require an explicit rebuild (see docs/install.md in the repo).
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "Cargo.toml" },
     { file = "Cargo.lock" },
     { file = "build.rs" },
-    { file = "src/**/*" },
-    { file = "vendor/**/*" },
+    { file = "src/**/*.rs" },
+    { file = "vendor/cld2/Cargo.toml" },
+    { file = "vendor/cld2/src/**/*.rs" },
     { file = "s2and_rust/**/*.py" },
     { file = "README.md" },
 ]

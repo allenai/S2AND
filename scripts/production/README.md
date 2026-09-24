@@ -854,10 +854,10 @@ $SmokePython = "$SmokeVenv\Scripts\python.exe"
 $PathConfig = "$RunRoot\stages\installed-smoke-path-config.json"
 $Repo = (Resolve-Path .).Path
 
-@{
-  main_data_dir = (Resolve-Path $PublicDataRoot).Path
-  internal_data_dir = ''
-} | ConvertTo-Json | Set-Content -LiteralPath $PathConfig -Encoding utf8
+# Write UTF-8 without a BOM; Windows PowerShell's `-Encoding utf8` adds one,
+# which the S2AND config loader rejects.
+$PathConfigJson = @{ main_data_dir = (Resolve-Path $PublicDataRoot).Path } | ConvertTo-Json
+[IO.File]::WriteAllText($PathConfig, $PathConfigJson, (New-Object System.Text.UTF8Encoding($false)))
 
 uv venv --python 3.11 $SmokeVenv
 uv pip install --python $SmokePython `

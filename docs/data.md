@@ -106,7 +106,9 @@ Guidance:
   `"absolute path of wherever you downloaded the data to"`. Only that exact
   value falls back to the package's `s2and/data/` directory (with a warning);
   any other value must be an existing directory.
-- The checked-in `internal_data_dir` key is not read by current code.
+- Archived AI2-internal scripts under `scripts/archive/` read an extra
+  `internal_data_dir` key; add it to your own config if you rerun one. Current
+  code does not use it.
 
 ## Dataset file expectations
 

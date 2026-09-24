@@ -40,7 +40,7 @@ v1.3 release work is complete. Release operators must follow
 | `make_inventors_hf_specter_embeddings.py` | Generate one inventors SPECTER embedding set per invocation (`--model specter` or `--model specter2`; defaults to a local ignored output path) |
 | `extract_big_block_dataset.py` | Stream a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, `specter.pickle`, `cluster_seeds.json`, `altered_cluster_signatures.txt`, and `meta.json`; supports both pretty-printed and minified JSON exports |
 | `convert_to_arrow.py` | Join canonical benchmark names; convert service JSON, benchmarks, and linker replay inputs into bounded Arrow runtime artifacts with current raw-planner batch indexes; validate name counts/datasets and write checksum-bound collection manifests |
-| `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on an extracted giant block and write preservation metrics, plots, and tables. It calls `make_subblocks_with_telemetry` without a cluster function, so it measures the SPECTER fallback, not the graph fallback that `Clusterer` uses. Needs the ORCID prefix-count files (see [subblocking](../docs/subblocking.md)). |
+| `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on an extracted giant block and write preservation metrics, plots, and tables. Uses the same graph fallback as `Clusterer`. Needs the ORCID prefix-count files (see [subblocking](../docs/subblocking.md)). |
 | `bench_preprocess_phases.py` | Benchmark preprocessing phases (papers, signatures) across serial / threads / processes |
 
 ### Evaluation and verification

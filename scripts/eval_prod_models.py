@@ -403,9 +403,8 @@ def resolve_arrow_dataset_root(arrow_root: str, dataset_name: str) -> str:
 def bundle_data_random_seed(model_path: Path) -> int:
     """Return the data-split seed the pairwise trainer recorded in a bundle.
 
-    Production-bundle evaluation reuses the trainer's seed. This reproduces
-    its split only while dataset bytes and ordering are identical; release
-    evaluation still requires persisted split identities.
+    Production-bundle evaluation reuses the trainer's seed for pair sampling;
+    held-out cluster blocks come from ``bundle_cluster_test_splits``.
 
     Args:
         model_path: Production bundle directory (``--specter2-model-path``).

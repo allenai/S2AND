@@ -60,10 +60,10 @@ def _dataset(names: list[tuple[str, str, str]], seeds: dict[str, str]) -> ANDDat
     return dataset
 
 
-def _predict(tmp_path, dataset, blocks, route, *, threshold=3, distance=0.1, **kwargs):
+def _predict(tmp_path, dataset, blocks, route, *, threshold=3, distance=0.1, classifier=None, **kwargs):
     clusterer = Clusterer(
         FeaturizationInfo(["year_diff"]),
-        ConstantDistanceClassifier(distance),
+        ConstantDistanceClassifier(distance) if classifier is None else classifier,
         cluster_model=FastCluster(eps=0.5),
         n_jobs=1,
         use_default_constraints_as_supervision=kwargs.pop("use_default_constraints_as_supervision", True),
@@ -299,3 +299,51 @@ def test_legacy_author_id_prediction_does_not_pack_unused_seeds(tmp_path):
         dataset.signatures[sid] = signature._replace(author_id=f"legacy-{sid}")
     result = _predict(tmp_path, dataset, {"one": list(dataset.signatures)}, "python", threshold=2, use_s2_clusters=True)
     assert result == {f"legacy-{sid}": [sid] for sid in dataset.signatures}
+
+
+class _YearDistanceClassifier:
+    """Make two tight groups whose average distance dilutes one negative."""
+
+    def predict_proba(self, features: np.ndarray) -> np.ndarray:
+        distances = np.where(features[:, 0] == 0, 0.0, 0.1)
+        return np.column_stack([distances, 1.0 - distances])
+
+
+@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("source", ["dataset", "caller"])
+@pytest.mark.parametrize("exclude_query", [False, True])
+def test_generated_bulk_seed_negatives_do_not_reject_initial_attachment(tmp_path, route, source, exclude_query):
+    """Real bulk linkage can contain a negative without being a caller seed claim."""
+    dataset = _dataset([("Ada", "", "Smith")] * 400 + [("A", "", "Smith")], {})
+    for index in range(200, 400):
+        paper_id = str(100 + index)
+        dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=2001)
+    negatives = {("0", "200")}
+    if exclude_query:
+        negatives.add(("0", "400"))
+    dataset.cluster_seeds_disallow = negatives.copy() if source == "dataset" else set()
+    partial_supervision = dict.fromkeys(negatives, 10000.0) if source == "caller" else {}
+    original_disallows = dataset.cluster_seeds_disallow.copy()
+    original_supervision = partial_supervision.copy()
+    blocks = {"one": list(dataset.signatures)}
+
+    clusters = _predict(
+        tmp_path,
+        dataset,
+        blocks,
+        route,
+        threshold=400,
+        classifier=_YearDistanceClassifier(),
+        partial_supervision=partial_supervision,
+    )
+
+    _assert_partition(clusters, blocks)
+    # The 200-by-200 linkage mean is about .35, below eps=.5. Preserve that
+    # computed bulk group, while a negative involving the new query stays active.
+    expected = {frozenset(str(index) for index in range(400)), frozenset({"400"})}
+    if not exclude_query:
+        expected = {frozenset(dataset.signatures)}
+    assert {frozenset(members) for members in clusters.values()} == expected
+    assert dataset.cluster_seeds_require == {}
+    assert dataset.cluster_seeds_disallow == original_disallows
+    assert partial_supervision == original_supervision

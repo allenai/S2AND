@@ -11,6 +11,43 @@ from s2and.consts import LARGE_DISTANCE
 _Component = TypeVar("_Component", bound=int | str)
 
 
+def filter_generated_seed_negatives(
+    generated_seeds: Mapping[str, int | str],
+    disallow_pairs: Iterable[tuple[str, str]],
+    partial_supervision: Mapping[tuple[str, str], int | float],
+) -> tuple[set[tuple[str, str]], dict[tuple[str, str], int | float]]:
+    """Copy attachment constraints without negatives internal to bulk clusters.
+
+    Bulk linkage may average a finite hard-negative sentinel into a cluster.
+    Its generated membership is fixed during the subsequent incremental pass;
+    it is not a new caller claim to validate. Omit only negatives already inside
+    that membership, retaining every cross-group and query exclusion. Callers
+    keep their complete constraints for later passes and seed restoration.
+
+    Args:
+        generated_seeds: Temporary memberships produced by bulk prediction.
+        disallow_pairs: Dataset hard negatives for this attachment request.
+        partial_supervision: Caller distances, including hard-negative sentinels.
+
+    Returns:
+        Owned dataset-disallow and caller-supervision maps for attachment.
+    """
+
+    def already_together(pair: tuple[str, str]) -> bool:
+        left, right = pair
+        group = generated_seeds.get(left)
+        return group is not None and group == generated_seeds.get(right)
+
+    return (
+        {pair for pair in disallow_pairs if not already_together(pair)},
+        {
+            pair: distance
+            for pair, distance in partial_supervision.items()
+            if distance != LARGE_DISTANCE or not already_together(pair)
+        },
+    )
+
+
 def pack_seed_components(
     subblocks: Mapping[str, Sequence[str]],
     components: Mapping[_Component, list[str]],

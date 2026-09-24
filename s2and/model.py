@@ -83,7 +83,13 @@ from s2and.rust_calls import (
     get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
 )
-from s2and.seed_merging import merge_seed_labels, pack_seed_components, restore_seed_membership, seed_disallow_adjacency
+from s2and.seed_merging import (
+    filter_generated_seed_negatives,
+    merge_seed_labels,
+    pack_seed_components,
+    restore_seed_membership,
+    seed_disallow_adjacency,
+)
 from s2and.subblocking import (
     GraphSubblockingConfig,
     _make_subblocks_with_telemetry_arrow_rust,
@@ -3249,6 +3255,9 @@ class Clusterer:
                 for (left, right), distance in partial_supervision.items()
                 if left in known_ids and right in known_ids
             }
+            current_disallows, current_supervision = filter_generated_seed_negatives(
+                synthetic_seed_map, current_disallows, current_supervision
+            )
             incremental_result = self.predict_incremental_from_arrow(
                 group_signature_ids,
                 arrow_dataset,
@@ -4071,17 +4080,20 @@ class Clusterer:
         for block_key in sorted(block_dict_single_letter):
             origin = origins[block_dict_single_letter[block_key][0]]
             synthetic_seeds = restore_seed_membership(scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency)
+            current_disallows, current_supervision = filter_generated_seed_negatives(
+                synthetic_seeds, dataset.cluster_seeds_disallow, partial_supervision
+            )
             # Synthetic seeds belong to this pass, not to claimed dataset profiles.
             prediction_state = PredictionState(
                 cluster_seeds_require=synthetic_seeds,
-                cluster_seeds_disallow=set(dataset.cluster_seeds_disallow),
+                cluster_seeds_disallow=current_disallows,
             )
             start_predict_time = time.time()
             incremental_result = self._predict_incremental_python(
                 block_dict_single_letter[block_key],
                 dataset,
                 prevent_new_incompatibilities=True,
-                partial_supervision=partial_supervision,
+                partial_supervision=current_supervision,
                 runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
                 prediction_state=prediction_state,

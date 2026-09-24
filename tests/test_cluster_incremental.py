@@ -2109,9 +2109,11 @@ def test_build_incremental_seed_setup_uses_arrow_dataset_for_altered_profile_rec
     )
     runtime_context = cast(Any, object())
 
+    # A soft caller override permits temporary scoring splits without making
+    # the original membership contradictory; independent disallows still pass through.
     setup = clusterer._build_incremental_seed_setup(
         dataset,
-        {},
+        {("seed0", "seed1"): 0.9},
         runtime_context=runtime_context,
         total_ram_bytes=123_456,
         arrow_dataset=arrow_dataset,
@@ -2127,10 +2129,9 @@ def test_build_incremental_seed_setup_uses_arrow_dataset_for_altered_profile_rec
     }
     assert captured["arrow_dataset"] is arrow_dataset
     assert captured["partial_supervision"] == {
-        ("seed0", "seed1"): LARGE_DISTANCE,
+        ("seed0", "seed1"): 0.9,
     }
     assert captured["cluster_seeds_disallow"] == {
-        ("seed0", "seed1"),
         ("seed3", "seed4"),
     }
     assert captured["incremental_dont_use_cluster_seeds"] is True

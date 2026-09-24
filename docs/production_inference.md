@@ -259,6 +259,22 @@ targets for incremental prediction. Arrow resolves effective disallows before
 retrieval so an overridden dataset negative cannot remove a candidate before
 the caller's distance is applied. Other retrieval limits still apply.
 
+Incremental prediction preserves each original seed group. If an effective
+explicit disallow connects two members of that group, both Python and Arrow
+raise `ValueError` with `incremental_seed_disallow_conflict`, the group ID, and
+the conflicting signature pair before splitting or scoring. This includes
+seed members supplied separately from the query list and requests with no new
+papers. Caller distances equal to `LARGE_DISTANCE` are hard disallows; other
+finite distances and inferred name constraints do not invalidate existing
+membership. Disabled dataset negatives and dataset negatives replaced by
+non-hard caller distances do not conflict. Correct contradictory membership or
+exclusions in the input; incremental prediction does not choose which existing
+paper to remove.
+Exclusions involving new papers still prevent attachments to the original
+profile, including attachments through temporary split components.
+Incremental attachment passes inside subblocked bulk prediction apply the same
+check to their generated seed groups, rejecting contradictions in those groups.
+
 The lower-level `predict_from_rust_featurizer` bridge retains its explicit
 seed-override behavior: seed arguments supplied directly to that method remain
 active even when default constraints are disabled.

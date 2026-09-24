@@ -91,7 +91,11 @@ from s2and.subblocking import (
     make_dataset_graph_subblocking_cluster_fn,
     make_subblocks,
 )
-from s2and.supervision import effective_dataset_disallows, normalize_partial_supervision
+from s2and.supervision import (
+    effective_dataset_disallows,
+    normalize_partial_supervision,
+    validate_incremental_seed_disallows,
+)
 from s2and.text import (
     canonicalize_name_parts,
     normalize_orcid_compact,
@@ -4688,6 +4692,9 @@ class Clusterer:
             partial_supervision,
             use_default_constraints=self.use_default_constraints_as_supervision,
         )
+        # Both incremental routes restore every original seed group. Validate
+        # that contract before scoring or temporary splitting can hide a conflict.
+        validate_incremental_seed_disallows(cluster_seeds_require, request_cluster_seed_disallows, partial_supervision)
         # Split altered claimed profiles once so incremental assignment can map back to original cluster IDs.
         # Claimed profiles from production can be "unnatural" with respect to S2AND constraints;
         # this pre-split step aligns them to natural-looking clusters before adding new signatures.

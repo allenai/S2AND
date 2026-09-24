@@ -24,6 +24,14 @@ production model and public-data version is `1.3`, on a separate version axis.
   could change query attachments by splitting a claimed profile. Precomputed
   restrictions, direct Rust-featurizer seed overrides, and transitive constraint
   semantics are unchanged.
+- Incremental seed validation: Python and Arrow now reject an active explicit
+  disallow between members of the same original seed group before splitting
+  or scoring, with a matching `incremental_seed_disallow_conflict` `ValueError`.
+  Previously, restoring the original group could silently violate that disallow.
+  Caller overrides and the default-constraint switch are resolved first;
+  valid original membership and exclusions involving new papers are preserved.
+  Internal incremental attachment passes in subblocked bulk prediction also
+  reject contradictions within their generated seed groups.
 - Evaluation: linker features no longer depend on target labels; actual input
   seed holdouts still preserve name conflicts and explicit disallows. Metrics
   produced with label-assisted features must be regenerated. Pairwise training

@@ -32,6 +32,7 @@ manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8")
 manifest_paths = manifest["paths"]
 arrow_dataset = ArrowDataset.open(
     bundle_dir,
+    require_specter=True,
     require_name_counts_index=True,
 )
 
@@ -67,7 +68,9 @@ featurizer without rewriting the immutable Arrow bundle.
 `s2and/feature_schema.py` defines the ordered feature names, groups, and
 monotonic constraints. Python derives selection metadata from that specification;
 Rust writes calculated values to its generated named column constants. The
-existing 33 column positions and persisted model meaning remain unchanged.
+pairwise model uses 33 feature columns; the separate 53-feature target in
+`tests/fixtures/incremental_linker_training_target.json` belongs to the
+incremental linker.
 
 After a deliberate feature-contract change, regenerate native constants with
 `uv run --no-project python scripts/sync_feature_schema.py`. Shared local and
@@ -218,6 +221,8 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.production_model import load_production_model
 
 clusterer = load_production_model("/path/to/production_model_vX.Y")
+clusterer.n_jobs = 8  # loaded bundles start with n_jobs=1
+blocks = {"block key": ["signature_id_1", "signature_id_2"]}
 with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
     pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow(
         blocks,
@@ -235,5 +240,6 @@ with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
   components, and `evaluate-release` aggregation into one report
 - `scripts/production/model/train_linker_and_finalize.py`: one-fit
   complete-bundle finalization, reload, and evaluation
-- `scripts/tutorial_for_predicting_with_the_prod_model.py`: released-model inference example
+- `scripts/tutorial_for_predicting_with_the_prod_model.py`: complete-bundle
+  inference example (requires the v1.3 bundle and data)
 - `scripts/README.md`: script catalog

@@ -54,11 +54,13 @@ uv run --no-project python scripts/run_ci_locally.py
 
 - lint (`scripts/sync_version.py --check`, `scripts/sync_feature_schema.py --check`,
   `ruff check`, and `ruff format --check`)
-- one required-runtime `typecheck-and-test` job
-- native `cargo fmt`, correctness/suspicious `clippy`, and Rust library-test
-  gates
-- a local Maturin build, installed-Rust API smoke, `ty`, and the full pytest
-  suite with `S2AND_BACKEND=python`, required native dependencies, and branch coverage
+- one required-runtime `typecheck-and-test` job, which in order:
+  - syncs the locked environment, building `s2and-rust` from source;
+  - runs native `cargo fmt`, correctness/suspicious `clippy`, and Rust
+    library-test gates;
+  - runs the installed-Rust API smoke and `ty`; and
+  - runs the full pytest suite with coverage (branch coverage is configured in
+    `pyproject.toml`).
 
 PR CI runs Python 3.11–3.13 on Ubuntu and Python 3.11 on Windows. Both the local
 runner and hosted jobs use the combined 80% coverage floor in `pyproject.toml`.
@@ -122,9 +124,10 @@ uv run pytest -q tests/test_runtime.py tests/test_data.py tests/test_arrow_train
 ```
 
 The [inference guide](production_inference.md#explicit-execution-routes) owns
-the runtime contract. Feature parity, subblocking quality, packaging, and
-installed-runtime checks use the focused commands in the
-[production command reference](../scripts/production/README.md#evaluation).
+the runtime contract. The production command reference covers
+[feature parity and subblocking quality](../scripts/production/README.md#evaluation),
+[packaging](../scripts/production/README.md#distribution-and-arrow-checks), and
+[installed-runtime checks](../scripts/production/README.md#installed-release-smoke).
 
 ## Version bumping
 
@@ -160,6 +163,11 @@ Notes:
 
 - The pre-commit hook only runs when `VERSION` is staged.
 - The hook auto-syncs manifests and regenerates lockfiles when needed.
+- `scripts/sync_version.py` already rewrites the `s2and_rust` entry in
+  `s2and_rust/Cargo.lock` and the `s2and-rust` entry in `uv.lock`. Step 3's
+  `cargo generate-lockfile` (also run by the hook) re-resolves every Rust
+  dependency to its newest compatible version, so review the `Cargo.lock` diff
+  before committing a version bump.
 - `uv.lock` and `s2and_rust/Cargo.lock` are generated files.
 
 ## Related docs

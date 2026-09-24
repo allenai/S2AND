@@ -5,7 +5,17 @@ This script demonstrates how to use a complete native S2AND model bundle for clu
 The Rust path uses Arrow inputs and calls
 `Clusterer.predict_from_arrow(...)`. JSON/ANDData input calls
 `Clusterer.predict(...)` through Python.
-You can also point `--data-root` to `tests` and run `--dataset qian`.
+You can also point `--data-root` to `tests` and run `--dataset qian`. The
+default `--data-root` (`s2and/data-backup/s2and_mini`) is an internal AI2 mini
+bundle; pass `--data-root` explicitly otherwise.
+
+Update at v1.3 release: every example needs a complete v1.3 production bundle,
+which does not exist yet. The Arrow example also needs public-format-1 data
+(the currently published Arrow release is rejected), the JSON examples need a
+public-format-1 name-count index at `<main_data_dir>/name_counts_index` (see
+docs/data.md), and the subblocking example needs the ORCID prefix-count files
+from release Stage 1. Revise this note once they run against published
+artifacts.
 
 Examples:
   # Arrow release + explicit Rust API
@@ -16,12 +26,12 @@ Examples:
   # Bundled JSON fixture + explicit Python API
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
       --model-path path/to/complete-production-bundle \
-      --input-format json --dataset qian --data-root tests --load-name-counts 0
+      --input-format json --dataset qian --data-root tests
 
-  # Show subblocking for large blocks
+  # Show subblocking for large blocks (the largest qian fixture block has 320 signatures)
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
       --model-path path/to/complete-production-bundle \
-      --input-format json --dataset qian --batching-threshold 5000
+      --input-format json --dataset qian --data-root tests --batching-threshold 100
 """
 
 import argparse
@@ -182,7 +192,10 @@ def main() -> None:
         type=int,
         choices=[0, 1],
         default=1,
-        help="Set 0 to skip name-count artifact loading (useful for lightweight fixtures).",
+        help=(
+            "Set 0 to skip name-count artifact loading. Only models without name-count features "
+            "accept this; production bundles always use them."
+        ),
     )
     parser.add_argument(
         "--n-jobs",

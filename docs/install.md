@@ -6,7 +6,7 @@ This document covers the fuller install and setup options for S2AND.
 
 - Python `3.11`, `3.12`, or `3.13`
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
-- Git LFS for the Arrow fixtures in a source checkout
+- Git LFS for the LightGBM test fixtures in a source checkout
 - Rust, if you are working from a source checkout or building the native extension from source:
   [`rustup`](https://www.rust-lang.org/tools/install)
 
@@ -43,15 +43,18 @@ Runtime install:
 uv pip install s2and
 ```
 
-This installs the latest version available from the configured package index,
-not the unreleased `1.0.0` worktree. That worktree targets coordinated
-`s2and==1.0.0` and `s2and-rust==1.0.0` packages with model/public-data version
-`1.3`; use the checkout flow for pre-release validation.
+This installs the latest version available from the configured package index.
+The `1.0.0` packages are coordinated `s2and==1.0.0` and `s2and-rust==1.0.0`
+with model/public-data version `1.3`.
+
+> **Update at v1.3 release:** until `1.0.0` is published, this command installs
+> an earlier release rather than this worktree. Use the checkout flow below for
+> pre-release validation.
 
 ## Repo checkout
 
-Hydrate the LFS-managed realistic LightGBM parity fixture after cloning and
-after switching to a branch that changes it:
+Hydrate the LFS-managed LightGBM parity fixtures after cloning and after
+switching to a branch that changes them:
 
 ```bash
 git lfs install
@@ -84,6 +87,10 @@ uv sync --active --extra dev
 ```
 
 If you do not want to activate the environment first, `uv sync --extra dev` also works and will use the project environment.
+
+The `dev` extra includes everything the tests need. Outside it, the
+`orcid-counts` extra installs `orjson`, which the ORCID prefix-count producer
+(`scripts/production/counts/generate_orcid_name_prefix_counts.py`) requires.
 
 ## Build the Rust extension from source
 

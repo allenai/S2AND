@@ -26,7 +26,7 @@ evaluation_plan.json
 run_binding.json  # added only after bind-candidate
 stages/
 reports/
-final/
+final/            # created by prepare-run; no current command writes to it
 ```
 
 This is the smallest random-split `release.json` shape accepted by
@@ -219,7 +219,10 @@ and its workload must equal the `release.json` workload:
 }
 ```
 
-Every object has an exact key set; extra keys fail. A random-split model
+Every object has an exact key set and extra keys fail, except
+`evaluation.performance.workload`: `prepare-run` only requires a nonempty
+mapping equal to the baseline record's workload, and the performance profiler
+enforces its exact keys later. A random-split model
 dataset uses `signatures`, `papers`, `specter_embeddings`, and `clusters`, and
 has same-named pairwise and cluster evaluation datasets. A fixed-pair model
 dataset replaces `clusters` with `train_pairs` and `val_pairs` and has a
@@ -255,8 +258,14 @@ uv run python scripts/production/model/train_pairwise.py `
   --matrix-work-dir D:/local-unsynced/s2and-matrix-work `
   --output-dir path/to/run/stages/pairwise/production_model_vX.Y `
   --validation-pairs-size REVIEWED_VALIDATION_PAIRS_SIZE `
+  --n-jobs REVIEWED_N_JOBS `
   --run-full
 ```
+
+`--n-jobs` defaults to 25 and also overwrites `OMP_NUM_THREADS` for the run, so
+pass the reviewed value explicitly. Run `--help` for the other defaulted
+options (`--n-iter`, `--train-pairs-size`, `--chunk-size`, `--random-seed`,
+`--total-ram-bytes`).
 
 The output is a pairwise-only bundle whose manifest records
 `kind: "s2and_model"`, the model plan's `release_version`, the exact
@@ -304,7 +313,7 @@ uv run python scripts/production/model/linker_source_bundle.py `
   --replay-arrow-root path/to/replay_arrow `
   --name-counts-index path/to/name_counts_index `
   --output-source-bundle path/to/run/stages/linker_source_bundle `
-  --output-data-root path/to/public_data_root
+  --output-data-root path/to/run/stages/public_data_root
 ```
 
 Assembly refuses existing output directories, loads the assembled bundle, and
@@ -336,13 +345,16 @@ linker preflight requires the bound path even when another copy has identical
 contents.
 
 The retained 53-feature target has SHA-256
-`00e842566e339c2a8df4384f923d78aef0f51f01840c265bba5d27d0e45dbc04`.
-Changing it is a new target-selection decision and requires a new fit.
+`00e842566e339c2a8df4384f923d78aef0f51f01840c265bba5d27d0e45dbc04`. The
+command enforces the 53 feature columns but not this digest, so verify the
+hash before running. Changing the target is a new target-selection decision and
+requires a new fit.
 
 The command materializes features, fits once, writes the complete bundle,
 reloads it, and then evaluates held-out linker data through the reloaded model.
-For version `X.Y`, the complete model is
-`stages/linker_release/production_model_vX.Y` and the retained report is
+The complete model directory takes the basename of `--pairwise-model-path`, so
+the calibrated input above produces
+`stages/linker_release/production_model_vX.Y`; the retained report is
 `stages/linker_release/linker_evaluation_report.json`. The linker retains its
 runtime binding to the pairwise feature contract and both boosters; that check
 prevents a silent wrong-answer model mismatch.
@@ -416,10 +428,12 @@ in `author_info.block`; the command deterministically takes up to
 `paths.cluster_seeds_require` only when passing `--use-cluster-seeds`, or pass
 `--no-specter` when deliberately omitting the embedding pickle.
 
-For subblocking, use the candidate-member parquet selected for the same dataset
-by `assets.candidate_members.datasets` in the frozen linker-source
-`bundle.json`. It must contain `signature_id` and
-`candidate_component_key` columns and match the selected Arrow root.
+For subblocking, pass exactly the file frozen as
+`evaluation.subblocking.component_members_parquet` in `release.json`. The
+evaluator compares both its resolved path and SHA-256 with the evaluation plan,
+so a copy (for example, the one inside the assembled linker-source bundle) is
+rejected. The file must contain `signature_id` and `candidate_component_key`
+columns; rows for signatures outside the selected Arrow root are ignored.
 
 Produce pairwise, cluster, subblocking, and parity reports:
 
@@ -499,7 +513,7 @@ timing and process-tree RSS, and summary statistics. Release evaluation
 consumes:
 
 - the prepared run's `run_binding_sha256`;
-- the exact reviewed `workload`;
+- the exact reviewed `workload` and `arrow_root`;
 - `summary.predict_seconds.p50`; and
 - `summary.peak_rss_gb.max`.
 
@@ -630,7 +644,8 @@ full export.
 
 Stage only the reviewed support files—`bundle.json`, `components/`, `labels/`,
 and `splits/`—in a fresh support root. Do not include a legacy `datasets/`
-directory because it would overwrite the fresh replay Arrow data. Install the
+directory: the assembler reserves that name for the fresh replay Arrow data and
+rejects a support root that contains it. Install the
 reviewed assignments and summary at the paths declared by both split
 references in `bundle.json`:
 
@@ -669,9 +684,15 @@ to it rather than carrying per-dataset copies.
 
 The checked-in reviewed source deterministically reproduces the checked-in
 canonical tuple artifact byte-for-byte; CI enforces that invariant. Ordinary
-releases use `s2and/data/s2and_name_tuples_canonical.txt` directly. Run
-`generate_canonical_name_tuples.py` only when intentionally changing its
-reviewed source or canonicalization policy.
+releases use `s2and/data/s2and_name_tuples_canonical.txt` directly. Run the
+generator only when intentionally changing its reviewed source or
+canonicalization policy:
+
+```powershell
+uv run python scripts/production/generate_canonical_name_tuples.py `
+  --source s2and/data/s2and_unnormalized_filtered_name_tuples.txt `
+  --output path/to/fresh/s2and_name_tuples_canonical.txt
+```
 
 The count producers are module entry points:
 

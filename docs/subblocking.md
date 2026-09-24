@@ -1,20 +1,29 @@
 # Subblocking
 
-Subblocking is used by the Python/`ANDData` call
-`Clusterer.predict(..., batching_threshold=N)` to keep pairwise distance
-construction bounded for large blocks. The core boundary is
-`make_subblocks_with_telemetry(...)`; `make_subblocks(...)` returns only the
-final subblock dictionary.
+Subblocking keeps pairwise distance construction bounded for large blocks. It is
+used by `Clusterer.predict(..., batching_threshold=N)` on the Python/`ANDData`
+route and by `Clusterer.predict_from_arrow(..., batching_threshold=N)` on the
+Rust Arrow route (see [Python and Rust routing](#python-and-rust-routing)). The
+Python boundary is `make_subblocks_with_telemetry(...)`; `make_subblocks(...)`
+returns only the final subblock dictionary.
 
-For `Clusterer.predict(..., batching_threshold=N)`, `N` becomes the maximum subblock size. Every emitted subblock is
-expected to have at most `N` signatures.
+`N` becomes the maximum subblock size. Every emitted subblock is expected to
+have at most `N` signatures.
 
-## Current Default
+> **Update at v1.3 release:** both routes load the packaged ORCID prefix-count
+> files on entry (see [ORCID policy](#orcid-policy)). The current pre-release
+> tree does not contain them, so any call with `batching_threshold` set raises
+> `FileNotFoundError` until Stage 1 of the release commits them.
 
-Subblocking uses graph fallback for oversized groups that cannot be split by names:
+## Default fallback
 
-- Prefix and middle-name splitting still define the main subblock structure.
-- Oversized groups that cannot be split by names call the graph fallback instead of the old SPECTER fallback.
+Oversized groups that cannot be split by names go to a fallback cluster function:
+
+- Prefix and middle-name splitting define the main subblock structure.
+- `Clusterer.predict(...)` and the Arrow route use the graph fallback.
+- Direct callers of `make_subblocks(...)` or `make_subblocks_with_telemetry(...)`
+  that do not pass a cluster function get the SPECTER fallback,
+  `cluster_with_specter(...)`.
 - Graph preparation and clustering failures propagate; the selected algorithm does not change at runtime.
 
 The graph configuration is available on `Clusterer`:
@@ -29,7 +38,7 @@ Subblocking proceeds in this order:
 
 1. Split signatures by first-name prefix.
 2. For first-name groups that remain too large, split by middle-name prefix.
-3. For groups that are still too large, call the fallback cluster function. By default this is the graph fallback.
+3. For groups that are still too large, call the fallback cluster function (graph for `Clusterer`; see above).
 4. Merge compatible small subblocks back up to the maximum size.
 5. Run the optional same-ORCID repair pass.
 
@@ -70,8 +79,9 @@ After Stage 1 artifact promotion, the default merge-prior mapping is loaded lazi
 canonical prefix-pair keys and positive integer counts directly; the minimal
 manifest records the canonical name-tuple data hash used to generate them.
 Missing or malformed files fail closed before partitioning, and production
-contracts bind their computed hashes. The current pre-release tree contains
-neither file. These learned prefix-pair counts are considered
+contracts bind their computed hashes. (The current pre-release tree contains
+neither file; see the release note at the top.) These learned prefix-pair
+counts are considered
 only after exact-name and `same_prefix_tokens` merge candidates, so they do not
 override stronger compatibility evidence. A caller may supply an explicit
 mapping for a controlled experiment.
@@ -179,7 +189,9 @@ pairs whose other endpoint is processed later. Ignoring required seeds with
 - fallback candidate and invocation counts
 - pre-merge and final subblock counts
 - ORCID repair capacity skips
-- final SPECTER-labeled subblock counts
+- `*_specter_labeled_*` subblock and signature counts, which count every
+  fallback-produced subblock (keys containing `|specter=`), whichever fallback
+  ran
 
 ## Incremental routing
 
@@ -191,8 +203,7 @@ Incremental prediction has two supported routes:
   against its Arrow tables using the pinned native ABI.
 - **Python helper.** `Clusterer.predict_incremental` operates on `ANDData` and
   creates a Python runtime context when none is supplied. An explicit context
-  must select Python. It covers partition coverage but does not implement
-  batched incremental routing.
+  must select Python. It does not implement query batching.
 
 The APIs do not inspect native capabilities or fall back between implementations. A missing or mismatched pinned
 Rust extension is an error on the Arrow route.

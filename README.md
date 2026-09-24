@@ -2,14 +2,16 @@
 
 S2AND provides the S2AND author-name-disambiguation benchmark datasets and the reference model described in the paper [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421) by Shivashankar Subramanian, Daniel King, Doug Downey, and Sergey Feldman.
 
-> **Release status (2026-07-27):** this development branch contains the
-> simplified `1.0.0` runtime, but it is not yet a complete production release.
-> Canonical artifacts and the model bundle `production_model_v1.3` still need to
-> be generated, retrained, evaluated, and published. The coordinated Python and
+> **Update at v1.3 release:** this development branch contains the simplified
+> `1.0.0` runtime, but it is not yet a complete production release. Canonical
+> artifacts and the model bundle `production_model_v1.3` still need to be
+> generated, retrained, evaluated, and published, so the model-dependent and
+> data-dependent workflows below do not work yet. The coordinated Python and
 > Rust package version is fixed at `1.0.0`; the production model and public-data
-> release version remains `1.3`, and independently readable Arrow/name-count
-> data uses public format `1`. Release operators must use
-> [docs/release.md](docs/release.md).
+> release version is `1.3`, and independently readable Arrow/name-count data
+> uses public format `1`. Release operators must use
+> [docs/release.md](docs/release.md). This README is also the PyPI description,
+> so every "Update at v1.3 release" note must be resolved before publication.
 
 As of this version, S2AND requires the `s2and-rust` extension at install time.
 Explicit classic Python routes still exist for selected `ANDData` stages, but
@@ -45,8 +47,12 @@ Package install:
 uv pip install s2and
 ```
 
-This installs the published package and its exactly matched `s2and-rust`
-runtime. Use a source checkout to validate the unreleased `1.0.0` worktree.
+This installs the latest version on the configured package index. Starting with
+`1.0.0`, that install includes the exactly matched `s2and-rust` runtime.
+
+> **Update at v1.3 release:** until `s2and==1.0.0` is published, this command
+> installs an earlier release in which `s2and-rust` is an optional extra. Use a
+> source checkout to validate the unreleased `1.0.0` worktree.
 
 Repo checkout:
 
@@ -62,19 +68,21 @@ uv sync --active --extra dev
 uses file timestamps to detect ordinary Rust build-input edits. The test
 freshness guard checks source contents; see [build recovery](docs/install.md#build-the-rust-extension-from-source)
 if a change is missed. Source checkouts also need the
-LFS-managed parity fixture; repeat `git lfs pull` after switching branches that
-change it.
+LFS-managed LightGBM test fixtures; repeat `git lfs pull` after switching
+branches that change them.
 For OS prerequisites, activation commands, WSL notes, and install variants, see
 [docs/install.md](docs/install.md).
 
 ## Download Data or Model
 
-> **1.0.0 migration status (2026-07-24):** this branch contains the runtime
-> cutover but does not yet contain a compatible production
-> model or canonical count artifacts. No default model is distributed by this
-> branch. Use the previous published S2AND release for working v1.21 inference
-> until canonical v1.3 is trained, validated, and packaged. See
-> [docs/release.md](docs/release.md).
+> **Update at v1.3 release:** no compatible production model or public-format-1
+> data has been published yet. The Arrow release below is the historical,
+> pre-format-1 release: this branch's `ArrowDataset.open(...)` and release
+> validation reject it, so it is useful only for migration and source-data work.
+> Use the previous published S2AND release for working v1.21 inference. At
+> release, replace this note and the command below with the published v1.3 data
+> location and size. See [docs/release.md](docs/release.md) and
+> [docs/data.md](docs/data.md#dataset-download).
 
 Rust/Arrow dataset download:
 
@@ -91,22 +99,25 @@ release and Git history; it is not packaged or loadable on this branch.
 
 ## Configuration
 
-Modify the config file at `s2and/data/path_config.json` (or set the `S2AND_PATH_CONFIG` env var to point elsewhere). This file should look like this:
+Classic `ANDData` finds its default name-count index at
+`<main_data_dir>/name_counts_index`, where `main_data_dir` comes from
+`s2and/data/path_config.json` (or the file named by `S2AND_PATH_CONFIG`):
 
 ```json
 {
-  "main_data_dir": "absolute path to your downloaded S2AND data",
-  "internal_data_dir": ""
+  "main_data_dir": "/absolute/path/to/your/s2and/data"
 }
 ```
 
-More on dataset layout, config, and model-only usage: [docs/data.md](docs/data.md).
+Arrow routes and the production scripts take explicit paths instead. More on
+dataset layout and the config: [docs/data.md](docs/data.md#configuring-s2anddatapath_configjson).
 
 ## Quick Start
 
-This migration branch has no compatible default production model. Training and
-evaluation remain available below; production inference requires an explicit
-complete canonical bundle once one has passed the release gates.
+> **Update at v1.3 release:** replace this note with a short load-and-predict
+> example that uses the published v1.3 bundle and data. Until then there is no
+> compatible production model, so production inference cannot run; training
+> and evaluation are described below.
 
 ## Production Inference Essentials
 
@@ -192,13 +203,12 @@ For evaluation and native-bundle publication guidance, see
 
 Runtime controls:
 
-- Unset `S2AND_BACKEND` means Python; the only accepted values are `python` and
-  `rust`.
-- Rust mode requires `s2and-rust` to have exactly the installed Python package
-  version and fails explicitly if it is missing or different.
 - Public prediction routes are method-based: `ANDData` methods use Python and
   `predict_from_arrow(..., arrow_dataset)` and
-  `predict_incremental_from_arrow(..., arrow_dataset)` use Rust.
+  `predict_incremental_from_arrow(..., arrow_dataset)` use Rust. No environment
+  variable changes these routes.
+- Rust routes require `s2and-rust` to have exactly the installed Python package
+  version and fail explicitly if it is missing or different.
 
 Reuse behavior:
 
@@ -213,6 +223,11 @@ Reuse behavior:
 Large blocks:
 
 - `predict(..., batching_threshold=...)` uses subblocking to keep full-block work bounded.
+
+  > **Update at v1.3 release:** subblocking loads the packaged ORCID
+  > prefix-count files, which Stage 1 of the release generates. Until they are
+  > copied into `s2and/data/`, any call with `batching_threshold` set raises
+  > `FileNotFoundError`.
 - `predict_incremental(...)` is the Python `ANDData` route and does not accept
   query batching. Use `predict_incremental_from_arrow(...,
   batching_threshold=...)` for promoted Rust query batching.
@@ -221,7 +236,8 @@ Large blocks:
 
 Concurrency:
 
-- Treat `n_jobs` as the main concurrency knob for a run.
+- Treat `n_jobs` as the main concurrency knob for a run. A loaded production
+  bundle starts with `n_jobs=1`; set `clusterer.n_jobs` before predicting.
 - Set thread-related environment variables before importing heavy compute libraries.
 
 Details:

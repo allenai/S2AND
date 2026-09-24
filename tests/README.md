@@ -3,8 +3,10 @@
 Use the matching native extension and the `dev` extra; see the
 [development guide](../docs/development.md). Rust and PyArrow are required
 dependencies. A missing or incompatible runtime must fail instead of silently
-skipping native coverage. Shell tests require Bash (native Git Bash on Windows);
-platform-specific file-lock tests remain explicitly marked.
+skipping native coverage. Shell contract tests skip when Bash (native Git Bash
+on Windows) is unavailable, native build-freshness tests skip without `uv` or
+`cargo`, and platform-specific file-lock tests are explicitly marked; check
+`-ra` output for these skips.
 
 ```bash
 uv run pytest -q
@@ -27,15 +29,20 @@ on Windows, so Windows file-lock and open-file cleanup contracts are exercised.
 
 | Module | Responsibility |
 | --- | --- |
-| `conftest.py` | Python backend default and restoration of global Python/NumPy RNG state after each test |
+| `conftest.py` | Session-start stop when the installed native extension is stale; Python backend default and restoration of global Python/NumPy RNG state after each test |
+| `rust_build_freshness.py` | Source digest comparison behind the stale-extension check |
 | `helpers.py` | Tiny datasets, name counts, Arrow conversion, query/cluster values, and pairwise CLI arguments |
 | `raw_arrow_helpers.py` | Tiny raw Arrow bundles, retained readers, and native planner construction |
+| `incremental_test_helpers.py` | Tiny seed datasets, seed Arrow bundles, a tiny incremental linker, and public prediction inputs |
 | `promoted_linking_helpers.py` | Deterministic tiny boosters, pairwise bundles, and logistic gate configuration |
+| `promoted_orchestration_helpers.py` | Input builders (minimal Arrow datasets, fake raw planners, memory limits) for promoted-linker orchestration tests |
 | `model_helpers.py` | Constant pair probabilities for tests of clustering policy |
 | `training_helpers.py` | Classic training, calibration, and holdout populations |
 | `shell_helpers.py` | Bounded Bash execution with captured diagnostics and native Git Bash selection |
 | `linker_row_feature_reference.py` | Independent row-wise reference for native feature comparisons |
-| `fixtures/rust_lightgbm/` | Serialized models and independent prediction fixtures |
+| `fixtures/rust_lightgbm/` | Serialized models and independent prediction fixtures (LFS) |
+| `fixtures/*.json` | Frozen canonical-name examples and the 53-feature linker training target |
+| `dummy/`, `qian/` | Small JSON/pickle datasets used by classic `ANDData` tests |
 
 Test modules must not import other collected test modules. Put a builder used by
 multiple domains in the appropriate helper module; keep single-use fixtures near

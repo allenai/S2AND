@@ -1,18 +1,15 @@
 # Production Inference
 
-Status date: 2026-07-27.
+S2AND distributes no production model and declares no default.
+`load_production_model()` without a path therefore raises; callers must pass an
+explicit compatible bundle. Use the previous compatible S2AND release when
+reproducing v1.21 behavior.
 
-S2AND is in the `1.0.0` cutover. This branch deliberately distributes no
-production model and declares no default. `load_production_model()` without a
-path therefore raises; callers must pass an explicit compatible bundle.
-
-The removed production-model pickles and previous v1.21 bundle are not package
-assets. Use the previous compatible S2AND release when reproducing v1.21
-behavior; current instructions never use its deleted repository path.
-
-The component behavior in this document is implemented, but a releasable v1.3
-bundle does not yet exist. Use [release.md](release.md) for
-execution order and acceptance requirements.
+> **Update at v1.3 release:** the component behavior in this document is
+> implemented, but a releasable v1.3 bundle and public-format-1 data do not
+> exist yet, so the inference examples cannot run. At release, point readers to
+> the published bundle and data locations here. Until then, use
+> [release.md](release.md) for execution order and acceptance requirements.
 
 ## Import boundaries
 
@@ -63,9 +60,8 @@ safe residual grouping, numeric cluster-ID allocation, and request telemetry.
 It receives lazy first-name/ORCID views, explicit policy and supervision, and
 one typed operation for clustering a residual group. It has no model, dataset,
 or Arrow dependency. The orchestration boundary resolves aliases, logs rejected
-links, and binds backend execution, constraints, and memory limits. The learned
-linker no longer calls a private `Clusterer` completion method. Name metadata
-is accessed lazily without copying the prepared dataset.
+links, and binds backend execution, constraints, and memory limits. Name
+metadata is accessed lazily without copying the prepared dataset.
 
 Python subblocked prediction carries original required seed memberships into
 the initial-only attachment pass, including members not yet predicted. Explicit
@@ -104,6 +100,7 @@ bundle.
 from s2and.production_model import load_production_model
 
 clusterer = load_production_model("/path/to/production_model_v1.3")
+clusterer.n_jobs = 8  # loaded bundles start with n_jobs=1 (single-threaded scoring)
 ```
 
 A complete bundle contains the pairwise boosters, clusterer configuration,
@@ -206,9 +203,9 @@ capability matrix, or Python/Rust fallback:
 | --- | --- | --- | --- |
 | `ANDData(...)` | classic data inputs | Python | initialized `ANDData` |
 | `build_training_anddata_from_arrow(...)` | open `ArrowDataset` | Rust | train-mode `ANDData` retaining the handle |
-| `Clusterer.predict` | `ANDData` | Python | `(clusters, distance_matrices)` |
+| `Clusterer.predict` | `ANDData` | Python | `(clusters, distance_matrices)`; matrices may be `None` |
 | `Clusterer.predict_incremental` | `ANDData` | Python | structured mapping |
-| `Clusterer.predict_from_arrow` | open `ArrowDataset` | Rust | `(clusters, distance_matrices)` |
+| `Clusterer.predict_from_arrow` | open `ArrowDataset` | Rust | `(clusters, distance_matrices)`; matrices may be `None` |
 | `Clusterer.predict_incremental_from_arrow` | open `ArrowDataset` | Rust | structured mapping |
 
 Passing a Rust runtime context to an `ANDData` API, or a Python context to an
@@ -229,6 +226,7 @@ not part of the current API; preserve any historical/original partition
 outside `ANDData` if it is still needed.
 
 ```python
+# dataset is an ANDData; block_signatures is a list of signature IDs to link.
 pred_clusters, pred_distance_matrices = clusterer.predict(
     dataset.get_blocks(),
     dataset,
@@ -344,6 +342,8 @@ Full-block inference accepts blocks plus one open handle:
 ```python
 from s2and.arrow_inputs import ArrowDataset
 
+# blocks: {block_key: [signature_id, ...]}
+# current_seed_assignments: {signature_id: existing_profile_id}
 with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
     pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow(
         blocks,
@@ -379,8 +379,9 @@ cannot bypass an exclusion by linking through another component.
 Linker source assembly validates each original Arrow manifest and its table and
 index hashes before rebinding its name-count index path. Evaluation's automatic
 Arrow selection treats invalid manifests or corrupt declared data as errors;
-it does not silently switch to JSON. `--no-arrow` explicitly selects JSON and
-skips Arrow inspection. Automatic selection can use JSON when the Arrow source
+it does not silently switch to JSON. `scripts/eval_prod_models.py --no-arrow`
+explicitly selects JSON, skips Arrow inspection, and requires
+`--json-data-root`. Automatic selection can use JSON when the Arrow source
 or requested dataset is unavailable, the requested SPECTER generation is
 undeclared, or the name-count index is undeclared; it reports the fallback
 reason. A manifest missing required base artifacts is an error. SPECTER
@@ -390,6 +391,8 @@ resolved on-disk filename has different casing.
 Promoted incremental inference requires an explicit seed mapping:
 
 ```python
+# block_signatures: signature IDs in the request. Those absent from
+# signature_to_seed_cluster ({signature_id: existing_profile_id}) are the queries.
 with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
     result = clusterer.predict_incremental_from_arrow(
         block_signatures,
@@ -415,10 +418,13 @@ single-query candidate plan with the winning component excluded. The runtime
 does not replay a compact retained subset as a substitute for that complete
 plan.
 
-RAM limits are refreshed before each batch and after planner and featurizer
-allocations. If a changed limit shrinks the batch, its unscored remainder is
-queued and the safe prefix is replanned before scoring. Planning uses the loaded
-model’s actual final, pairwise, and aggregate feature widths.
+RAM limits are refreshed before planning each query window, again after
+planning, and before each scoring batch. If a refresh before planning shrinks
+the window, only its safe prefix is planned and the remaining queries move to
+later windows. If a refresh inside a planned window shrinks the scoring batch,
+the smaller batches are scored from contiguous slices of that window's existing
+plan rather than replanned. Planning uses the loaded model’s actual final,
+pairwise, and aggregate feature widths.
 
 ## Name-count and reuse boundaries
 
@@ -448,9 +454,12 @@ computes the data hash, and retains the result in-process.
 Production contracts bind that hash and require the manifest's tuple hash
 to match the canonical name-tuple artifact. There is no ORCID generation
 pointer, producer-provenance protocol, retry loop, or legacy fallback. The
-package declares both ORCID runtime paths, but the current pre-release tree
-contains neither file. Stage 1 of the v1.3 runbook must generate, review, and
-copy the approved pair before distribution verification can pass.
+package declares both ORCID runtime paths.
+
+> **Update at v1.3 release:** the current pre-release tree contains neither
+> ORCID file, so subblocking and distribution verification fail until Stage 1
+> of the v1.3 runbook generates, reviews, and copies the approved pair. Remove
+> this note once both files are committed.
 
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key

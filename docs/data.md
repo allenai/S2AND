@@ -3,10 +3,11 @@
 This document covers dataset download, public artifact layout, and
 `path_config.json`.
 
-> **1.0.0 release status (2026-07-27):** the currently published Arrow
-> release and shared name counts predate public format `1`. They are not a
-> compatible production release unit for this branch. See the
-> [v1.3 release runbook](release.md).
+> **Update at v1.3 release:** the currently published Arrow release and shared
+> name counts predate public format `1`. They are not a compatible production
+> release unit for this branch, and current validation rejects them. At
+> release, replace the download commands below with the published v1.3 data
+> location and size. See the [v1.3 release runbook](release.md).
 
 ## Canonical name contract
 
@@ -60,6 +61,9 @@ uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2an
 Expected size is about `10.1 GiB`. Its manifests predate public format `1`, so
 current runtime/release validation deliberately rejects it. A v1.3 production
 root must be regenerated through the release runbook.
+
+> **Update at v1.3 release:** add the published v1.3 public-data root here as
+> the primary download, and label the command above as the historical release.
 
 Download the legacy JSON/pickle S2AND release only when you need paper-era
 JSON/pickle inputs for canonical S2-block `ANDData` workflows. The current API
@@ -137,25 +141,28 @@ has no implicit replay-bundle default.
 
 ## Configuring `s2and/data/path_config.json`
 
-Some scripts look up the main data root through `s2and/data/path_config.json`
-or the `S2AND_PATH_CONFIG` environment variable. This config points at the
-downloaded benchmark dataset root; it is separate from the package data checked
-in under `s2and/data/`.
+`s2and/data/path_config.json`, or the file named by the `S2AND_PATH_CONFIG`
+environment variable, sets `main_data_dir`. Its one consumer is the default
+name-count index path for classic `ANDData`,
+`<main_data_dir>/name_counts_index` (`s2and.consts.NAME_COUNTS_INDEX_PATH`).
+Arrow routes and the production scripts take explicit paths instead.
 
 Example:
 
 ```json
 {
-  "main_data_dir": "absolute path to your downloaded S2AND data",
-  "internal_data_dir": ""
+  "main_data_dir": "/absolute/path/to/your/s2and/data"
 }
 ```
 
 Guidance:
 
-- Set `main_data_dir` to the directory containing your downloaded S2AND datasets.
-- `internal_data_dir` is only relevant for internal AI2 workflows and can be left empty.
-- If your data lives in this repo's `s2and/data/` directory, the default placeholder config already resolves there.
+- Set `main_data_dir` to the directory that contains `name_counts_index/`.
+- The checked-in file keeps the placeholder value
+  `"absolute path of wherever you downloaded the data to"`. Only that exact
+  value falls back to the package's `s2and/data/` directory (with a warning);
+  any other value must be an existing directory.
+- The checked-in `internal_data_dir` key is not read by current code.
 
 ## Dataset file expectations
 
@@ -190,7 +197,9 @@ Legacy-input workflows use the standard S2AND JSON files below, but current
 
 The tutorial script supports Arrow by default when a dataset manifest exists,
 and JSON only when `--input-format json` is requested or Arrow artifacts are
-absent. JSON mode supports:
+absent. Present but invalid Arrow artifacts, including the historical
+pre-format-1 release, raise an error instead of falling back to JSON. JSON mode
+supports:
 
 - mini-dataset naming such as `<dataset>_papers.json`
 - plain fixture naming such as `papers.json`

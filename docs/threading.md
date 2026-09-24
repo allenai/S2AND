@@ -14,6 +14,11 @@ Within the Python API, treat `n_jobs` as the canonical concurrency setting for a
 `n_jobs=None` selects one worker. Negative integers follow sklearn semantics
 (`-1` means all CPUs); zero, booleans, strings, and floats are rejected.
 
+Defaults differ by entry point: `ANDData(...)` uses `n_jobs=1`, a newly
+constructed `Clusterer(...)` uses `n_jobs=16`, and a bundle loaded with
+`load_production_model(...)` starts with `n_jobs=1`. Set `clusterer.n_jobs`
+after loading a bundle; otherwise production scoring is single-threaded.
+
 - **Rust Arrow routes**: Python passes `num_threads=n_jobs` into the Rust extension for batch constraints + featurization.
 - **Production model scoring**: `Clusterer.n_jobs` propagates into the underlying
   estimators. `NativeLightGBMBinaryClassifier` passes its configured `n_jobs` to
@@ -29,7 +34,7 @@ S2AND has two main Python preprocessing phases that can dominate end-to-end runt
 1. **Papers**: `preprocess_paper_1` (title/author normalization + word ngrams; and venue/journal normalization when `preprocess=True`)
 2. **Signatures**: `ANDData.preprocess_signatures` (normalization + feature creation)
 
-**Production default behavior (as of 2026-02-27):**
+**Current default behavior:**
 
 - **Linux / WSL2**: use a process pool for **Papers** when `n_jobs > 1`; run **Signatures** serial.
 - **Windows/macOS (native)**: run **Papers** serial (even if `n_jobs > 1`); run **Signatures** serial.
@@ -96,10 +101,18 @@ route.
    Many OpenMP runtimes read environment variables at first use / first load; setting them after importing `lightgbm`
    is not reliable.
 
+   Most S2AND scripts, including `train_pairwise.py`, `eval_prod_models.py`,
+   and `profile_promoted_incremental_arrow.py`, overwrite `OMP_NUM_THREADS`
+   after import from their own `n_jobs` setting (a CLI flag or, for the
+   profiler, the frozen workload). `train_pairwise.py` defaults to
+   `--n-jobs 25`. Set each script's `n_jobs` explicitly and treat the parent's
+   `OMP_NUM_THREADS` as applying only to libraries that read it before the
+   override.
+
    For v1.3 jobs, set this envelope in the parent before detached launch,
    require children to inherit it, and retain the values in the durable job
-   log. Operational logs are not release authorities. See
-   [release.md](release.md#stage-0-freeze-external-choices-and-source).
+   log. Operational logs are not release authorities. See the release
+   [operating rules](release.md#operating-rules).
 
 3. **Choose the env pattern that matches your deployment shape**:
 

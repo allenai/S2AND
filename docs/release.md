@@ -296,6 +296,13 @@ thresholds, and performance workload are frozen.
       the frozen performance Arrow root and workload exactly.
 - [ ] Retain component reports for diagnosis and the aggregate decision.
 
+- [ ] Resolve every "Update at v1.3 release" note in the docs, tutorials, and
+      READMEs (`git grep -n "Update at v1.3 release"`), including the
+      `docs/README.md` paragraph that describes the convention; only this
+      runbook's own checklist lines may remain. `README.md` and
+      `s2and_rust/README.md` are the PyPI descriptions published in Stage 6, so
+      notes that need final model/data URLs use the owner-selected Stage 7
+      locations.
 - [ ] After final package assets and release metadata are present, commit the
       release tree, rerun `run_ci_locally.py` and version checks, and record
       this as the final package commit.
@@ -337,6 +344,11 @@ Before approving the protected `pypi` environment, verify the selected run's
 remote-tag absence checks from Stage 0. A published Rust version followed by an already-existing
 Python version would be an irreversible partial release.
 
+Both publish jobs (`publish-rust` and `publish-s2and`) use the `pypi`
+environment. If that environment requires reviewers, expect two approvals: the
+second arrives after the Rust packages are already live. Complete every check
+above before the first approval, then approve the second promptly.
+
 The workflow must:
 
 1. reject any non-`main` ref, then run tests and version checks;
@@ -352,7 +364,9 @@ The workflow must:
 
 - [ ] Publish the reviewed model and public data to immutable owner-selected
       locations, download them again, verify their manifest identities, and
-      record the immutable URLs and hashes.
+      record the immutable URLs and hashes. Confirm they match the locations
+      written into the docs when the "Update at v1.3 release" notes were
+      resolved.
 - [ ] Install the exact public Python and Rust versions together in a fresh
       environment and rerun the
       [real bulk and incremental smoke](../scripts/production/README.md#installed-release-smoke)

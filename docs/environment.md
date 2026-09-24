@@ -8,7 +8,7 @@ Centralized reference for supported S2AND environment variables.
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `S2AND_BACKEND` | `python`, `rust` | `python` | Backend used when a caller builds a runtime context without an explicit backend. Invalid values raise `ValueError`; requesting a missing or mismatched Rust extension raises `RuntimeError`. Public APIs have fixed routes: classic `ANDData` construction and prediction use Python, while APIs taking an open `ArrowDataset` use Rust. Rust requires the exact version pinned by the project metadata; there is no silent fallback. |
+| `S2AND_BACKEND` | `python`, `rust` (case-insensitive) | `python` | Read only by `s2and.runtime.build_runtime_context(...)` when a caller omits `backend`. Every public training and prediction API passes its backend explicitly, so this variable does not change their routes: classic `ANDData` construction and prediction use Python, while APIs taking an open `ArrowDataset` use Rust. Invalid values raise `ValueError`; requesting a missing or mismatched Rust extension raises `RuntimeError`. |
 | `S2AND_MEMORY_TELEMETRY_JSONL` | `<path>` | unset | Sole library authority for appending structured memory-telemetry JSONL. Parent directories are created. Prefer a fresh run-specific path; records append under an in-process lock. |
 
 ---
@@ -30,7 +30,7 @@ These variables control thread counts for various libraries. Set them **before i
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `RAYON_NUM_THREADS` | `<int>` | auto | Rust-side thread count (standard Rayon env var). S2AND's Rust extension primarily uses explicit `num_threads` arguments, so this mainly affects Rayon's global pool. |
-| `OMP_NUM_THREADS` | `<int>` | auto | OpenMP thread count (affects LightGBM and some clustering libs). |
+| `OMP_NUM_THREADS` | `<int>` | auto | OpenMP thread count for Python LightGBM training and other OpenMP libraries. Production model scoring runs in Rust and follows `n_jobs` instead. Most S2AND scripts (including `train_pairwise.py`, `eval_prod_models.py`, and `profile_promoted_incremental_arrow.py`) and linker-training data loading overwrite this variable from their own `n_jobs` setting. |
 | `MKL_NUM_THREADS` | `<int>` | auto | Intel MKL thread count (if your NumPy/SciPy stack uses MKL). |
 | `OPENBLAS_NUM_THREADS` | `<int>` | auto | OpenBLAS thread count (if your NumPy/SciPy stack uses OpenBLAS). |
 | `NUMEXPR_NUM_THREADS` | `<int>` | auto | NumExpr thread count. |
@@ -53,7 +53,7 @@ their runtime explicitly. See [the test suite guide](../tests/README.md).
 
 ## Notes
 
-- **Rust batch mode** uses Rayon internally for parallelism; Python process pools are not used when Rust is enabled.
+- **Rust Arrow routes** parallelize through Rayon using `n_jobs`. Python worker pools (`UniversalPool`) belong to classic `ANDData` paper preprocessing and Python featurization.
 - **Thread env vars** (OMP, MKL, etc.) are typically read at library load time. Setting them after importing `lightgbm` or similar is unreliable.
 - **Windows memory budgeting** uses `GlobalMemoryStatusEx` for total RAM and `GetProcessMemoryInfo` for RSS when `psutil` is unavailable.
 - **Import path policy**: avoid using `PYTHONPATH` for normal repo scripts because it can shadow an installed package or compiled extension. CI/test commands may set it only when intentionally testing the checkout source tree.

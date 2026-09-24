@@ -94,17 +94,20 @@ production model and public-data version is `1.3`, on a separate version axis.
   `uv sync --extra dev` checkout can run the tests without `maturin develop`.
   Tests stop before collection when the importable extension's embedded source
   snapshot differs from the checkout; force a refresh with
-  `uv sync --extra dev --reinstall-package s2and-rust`. Cache keys and the
-  content digest cover native manifests, the root lockfile, build script and
-  Rust sources, excluding editor files, build outputs and the unused vendored
-  lockfile. uv can miss backdated additions, older-file deletions and edits that
+  `uv sync --extra dev --reinstall-package s2and-rust`. The content digest
+  covers native manifests, the root lockfile, build script and Rust sources,
+  excluding editor files, build outputs and the unused vendored lockfile. uv's
+  cache keys cover those inputs plus `s2and_rust/pyproject.toml`, its
+  `README.md`, and the Python wrapper files, which the test guard does not
+  check. uv can miss backdated additions, older-file deletions and edits that
   preserve timestamps; see [build recovery](install.md#build-the-rust-extension-from-source)
   if Cargo also needs its cached artifacts cleared.
 - Efficiency: the default bulk prediction path validates caller supervision
   once per request instead of once per subblock, while preserving custom
   prediction-helper overrides and validation at public entry points.
-- **Unreleased migration state:** the artifact-independent `1.0.0` code
-  and release hardening are implemented. The reviewed canonical benchmark-name
+- **Unreleased migration state (Update at v1.3 release: replace this bullet
+  with the published version matrix and artifact locations):** the
+  artifact-independent `1.0.0` code and release hardening are implemented. The reviewed canonical benchmark-name
   and ORCID source exports are still needed; production artifact generation,
   the v1.3 retrain, and release quality/scale measurements follow them. The legacy
   v1.21/v1.0-v1.2 models are not packaged and are rejected by the canonical
@@ -119,9 +122,11 @@ production model and public-data version is `1.3`, on a separate version axis.
 - Simplification: release policy now has one runbook, two prepared plans, one
   final run binding, and one reusable `ArrowDataset` handle. Completed Rust migration comparisons,
   stress tools, memory calibrators, duplicated artifact protocols, their
-  dispatchers, and tool-only tests are retired. One bounded
-  `scripts/verification/profile_promoted_incremental_arrow.py` command remains
-  to produce the release performance report. Obsolete cache and retired-format
+  dispatchers, and tool-only tests are retired. The bounded release
+  verification commands that remain are
+  `scripts/verification/profile_promoted_incremental_arrow.py` (performance
+  report), `compare_full_predict_arrow_parity.py` (parity report), and
+  `compare_graph_subblocking_arrow_quality.py` (subblocking report). Obsolete cache and retired-format
   tests are removed, repeated cases are curated, and the accidentally
   unbounded booster-parity matrix is deterministically budgeted without
   excluding parity from the default suite.
@@ -158,12 +163,12 @@ production model and public-data version is `1.3`, on a separate version axis.
   SPECTER1 production bundle or `--specter1-model-path`; SPECTER1 remains an
   explicit `--train` research comparison, while its historical production
   surface remains in S2AND v1.21 and earlier.
-- Breaking: production-bundle evaluation reuses the trainer's recorded split
-  seed. `eval_prod_models.py` reads `data_random_seed` from
-  `reproducibility/pairwise_training_config.json`, fails closed for bundles
-  without one, and rejects an explicit `--seed` outside `--train`. This only
-  reproduces the same split when dataset bytes and ordering are identical;
-  canonical release evaluation remains blocked on persisted split identities.
+- Breaking: production-bundle evaluation reuses the trainer's recorded split.
+  `eval_prod_models.py` evaluates exactly the test blocks recorded in the
+  bundle's training summary (see the Evaluation entry above), reads
+  `data_random_seed` from `reproducibility/pairwise_training_config.json`,
+  fails closed for bundles without them, and rejects an explicit `--seed`
+  outside `--train`.
 - Breaking: promoted stratified split assignments must carry `base_group_id`,
   and no base identity may appear in more than one split. Masked views
   (`full`, `initial_only`) of one base query previously straddled calibration

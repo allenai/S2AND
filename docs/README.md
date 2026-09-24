@@ -2,9 +2,12 @@
 
 This directory holds both user-facing guides and internal engineering notes.
 
-Documentation status: reviewed against the simplified `1.0.0` worktree on
-2026-09-04. Current-behavior docs do not imply that canonical artifacts or a
-v1.3 model have already been published.
+Current-behavior docs do not imply that canonical artifacts or a v1.3 model
+have already been published. Callouts labeled **Update at v1.3 release** mark
+workflows that cannot work until the v1.3 model and public-format-1 data exist;
+[release.md](release.md#stage-5-fit-evaluate-and-approve) requires resolving
+every one of them (`git grep -n "Update at v1.3 release"`) before the final
+package commit.
 
 [release.md](release.md) is the sole v1.3 release policy and runbook.
 [../scripts/production/README.md](../scripts/production/README.md) is its
@@ -13,7 +16,7 @@ command reference. Canonical-name rules live in [data.md](data.md).
 ## Repository entry points
 
 - Project overview and public quick start: [../README.md](../README.md)
-- Native `s2and-rust` package build and test guide:
+- Native `s2and-rust` package overview and local build:
   [../s2and_rust/README.md](../s2and_rust/README.md)
 
 ## User guides
@@ -59,7 +62,6 @@ command reference. Canonical-name rules live in [data.md](data.md).
 - Runtime and operations docs describe current behavior, knobs, and verification commands.
 - Deep dives explain subsystem behavior or preserve historical context for active areas.
 - Dated profiling snapshots belong under `rust/profiling/` and are immutable
-  historical evidence. Their old dates
-  and commands are preserved intentionally, are exempt from live-link checks,
-  and are not current release gates.
+  historical evidence. Their old dates and commands are preserved
+  intentionally; they are not current commands or release gates.
 - The vendored `s2and_rust/vendor/cld2/README.md` is third-party documentation.

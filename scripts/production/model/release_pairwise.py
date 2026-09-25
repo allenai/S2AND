@@ -1228,7 +1228,7 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
             name,
             source_sha256=source_sha256,
             dataset=dataset,
-            signature_ids={member for pair in pairs for member in pair[:2]},
+            signature_ids={str(pair[index]) for pair in pairs for index in (0, 1)},
             artifacts=artifacts,
             n_jobs=int(args.n_jobs),
         ) as rust_featurizer:

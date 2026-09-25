@@ -277,7 +277,7 @@ def _featurize_selection(
     rust_featurizer = build_verified_rust_featurizer(
         dataset,
         arrow_dataset,
-        signature_ids={member for pair in (*train_pairs, *val_pairs) for member in pair[:2]},
+        signature_ids={str(pair[index]) for pair in (*train_pairs, *val_pairs) for index in (0, 1)},
         name_counts_manifest_sha256=name_counts_manifest_sha256,
         num_threads=n_jobs,
     )

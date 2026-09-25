@@ -30,7 +30,7 @@ from s2and.model import Clusterer, FastCluster
 from s2and.name_counts_index import NameCountsIndex
 from s2and.name_tuple_artifact import load_name_tuple_artifact
 from s2and.production_training_contract import ProductionArtifactAuthority
-from scripts.production.model import release_pairwise
+from scripts.production.model import release_pairwise, train_pairwise
 from tests.pairwise_release_helpers import (
     convert_release_arrow,
     source_sha256,
@@ -94,7 +94,7 @@ def _featurizer(
 
 
 def _pair_members(*pair_lists: list[Any]) -> set[str]:
-    return {member for pairs in pair_lists for pair in pairs for member in pair[:2]}
+    return {str(pair[index]) for pairs in pair_lists for pair in pairs for index in (0, 1)}
 
 
 def _block_members(blocks: dict[str, list[str]]) -> set[str]:
@@ -138,6 +138,52 @@ def _assert_features_match(python: tuple[Any, ...], rust: tuple[Any, ...]) -> No
 
 def _canonical_partition(clusters: dict[str, list[str]]) -> list[list[str]]:
     return sorted(sorted(str(member) for member in members) for members in clusters.values())
+
+
+def test_fixed_pair_datasets_featurize_like_python(release_inputs: dict[str, Any], tmp_path: Path) -> None:
+    """Fixed train/val pair files (as for augmented) resolve to numpy records, not tuples."""
+
+    signature_ids = sorted(json.loads(release_inputs["files"]["signatures"].read_text(encoding="utf-8")))
+    split_files = {}
+    for split, offset in (("train", 0), ("val", 20)):
+        rows = ["signature_id_1,signature_id_2,label"] + [
+            f"{signature_ids[offset + index]},{signature_ids[offset + index + 1]},{index % 2}"
+            for index in range(0, 18, 2)
+        ]
+        path = tmp_path / f"{split}_pairs.csv"
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        split_files[split] = str(path)
+    files = release_inputs["files"]
+    dataset = ANDData(
+        signatures=str(files["signatures"]),
+        papers=str(files["papers"]),
+        name="qian",
+        mode="train",
+        specter_embeddings=str(files["specter_embeddings"]),
+        clusters=None,
+        train_pairs=split_files["train"],
+        val_pairs=split_files["val"],
+        random_seed=1111,
+        name_counts_index=NameCountsIndex.open(release_inputs["name_counts_path"]),
+        n_jobs=1,
+        preprocess=True,
+        name_tuples=release_inputs["name_tuples"],
+    )
+    train_pairs, val_pairs = resolve_selection_pairs(dataset)
+    assert isinstance(train_pairs[0], np.record)
+
+    with _open(release_inputs) as arrow_dataset:
+        train, val = train_pairwise._featurize_selection(
+            dataset,
+            arrow_dataset,
+            MAIN_INFO,
+            name_counts_manifest_sha256=dataset.name_counts_manifest_sha256,
+            n_jobs=1,
+            nameless_featurizer_info=NAMELESS_INFO,
+            total_ram_bytes=None,
+        )
+    _assert_features_match(_python_features(train_pairs, dataset), train)
+    _assert_features_match(_python_features(val_pairs, dataset), val)
 
 
 def test_rust_features_match_python_on_the_selected_training_pairs(release_inputs: dict[str, Any]) -> None:

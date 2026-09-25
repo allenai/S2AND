@@ -244,6 +244,8 @@ def featurize_pairs_with_rust(
         Tuple of (features, labels, nameless features or None).
     """
 
+    # Fixed-pair selections arrive as numpy records; normalize like many_pairs_featurize.
+    signature_pairs = [(str(pair[0]), str(pair[1]), pair[2]) for pair in signature_pairs]
     labels = np.asarray([float(pair[2]) for pair in signature_pairs], dtype=np.float64)
     if np.any(labels < 0):
         raise ValueError("featurize_pairs_with_rust does not accept partial-supervision (negative) labels")
@@ -260,7 +262,7 @@ def featurize_pairs_with_rust(
             str(signature_id): index for index, signature_id in enumerate(rust_featurizer.signature_ids())
         }
         missing = sorted(
-            {str(member) for pair in signature_pairs for member in pair[:2]}.difference(index_by_signature_id)
+            {member for pair in signature_pairs for member in pair[:2]}.difference(index_by_signature_id)
         )
         if missing:
             raise ValueError(f"Rust featurizer is missing pair signatures: {missing[:10]}")

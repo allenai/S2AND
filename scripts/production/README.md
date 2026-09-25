@@ -697,11 +697,7 @@ Arrow data to use the release name-count index, and to contain exactly the JSON
 signatures. See [release Arrow conversions](#release-arrow-conversions).
 
 Each command builds the featurizer only for the signatures it scores: the
-selected pairs' members, or the members of the blocks being clustered. Native
-signature records hold per-signature coauthor data, which grows with the square
-of a paper's author count. INSPIRE has papers with over 3,000 authors, and there
-a whole-dataset build took over 10 minutes and about 25 GB, and freeing it took
-longer still (more than an hour in a process that also held the JSON dataset).
+selected pairs' members, or the members of the blocks being clustered.
 
 ## EPS calibration
 

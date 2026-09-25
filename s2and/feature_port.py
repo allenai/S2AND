@@ -164,10 +164,9 @@ def build_verified_rust_featurizer(
     This checks that the Arrow data uses the expected name counts and exactly the
     dataset's signature IDs, and uses the dataset's name tuples and ORCID policy.
 
-    Only ``signature_ids`` are built. Native records hold per-signature coauthor
-    data, which grows with the square of a paper's author count, so building every
-    signature of a dataset with very large author lists (e.g. INSPIRE) is slow to
-    build and to free. Each pair's features depend only on its two signatures.
+    Only ``signature_ids`` and their papers are built, so build time and memory
+    follow the scored signatures rather than the dataset. Each pair's features
+    depend only on its two signatures and their papers.
 
     Args:
         dataset: JSON-loaded dataset whose pairs will be featurized.

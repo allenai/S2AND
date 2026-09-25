@@ -346,6 +346,14 @@ production model and public-data version is `1.3`, on a separate version axis.
   featurizer computes every feature from Arrow. On all nine model-plan datasets
   the selection is identical to the preprocessed load. INSPIRE's load drops
   from 28 to 7 minutes, and the memory it holds from 90 to 30 GB.
+- The Rust featurizer stores each paper's coauthor names, name blocks, and
+  character n-gram counts once, instead of copying them into every signature on
+  the paper. Pair features subtract each signature's own author, and they are
+  bit-identical to before. On INSPIRE, whose papers have up to 3,167 authors, a
+  featurizer for 174,652 signatures now builds in 7 s instead of 250 s and
+  frees in 11 s instead of 18 minutes. Arrow data whose paper lists two authors
+  at one position, which `convert_to_arrow.py` already rejects, now fails the
+  build.
 - `RustLightGBMBooster` builds an exact fast scorer at load time. Models whose
   trees all have at most 32 leaves use QuickScorer; models with up to 256
   leaves per tree use lockstep traversal over integer bin keys. Both support up

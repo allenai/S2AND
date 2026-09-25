@@ -318,6 +318,7 @@ fn build_retriever_from_raw_arrow_components(
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     max_exemplars: usize,
     num_threads: Option<usize>,
+    ranks_candidates: bool,
 ) -> PyResult<RustHybridCentroidRetriever> {
     let summary_results: Vec<Result<RetrievalSummaryData, RetrievalError>> =
         py.allow_threads(|| {
@@ -342,30 +343,16 @@ fn build_retriever_from_raw_arrow_components(
             };
             install_with_optional_rayon_pool(num_threads, compute)
         });
-    let mut summaries = Vec::<RetrievalSummaryData>::with_capacity(summary_results.len());
-    for result in summary_results {
-        summaries.push(result.map_err(retrieval_error_to_py)?);
-    }
-    let mut component_index_by_key = HashMap::with_capacity(summaries.len());
-    let mut coauthor_cluster_df = HashMap::new();
-    let mut non_mega_coauthor_cluster_df = HashMap::new();
-    let mut affiliation_cluster_df = HashMap::new();
-    for (index, summary) in summaries.iter().enumerate() {
-        component_index_by_key.insert(summary.component_key.clone(), index);
-        increment_df_from_counter(&summary.coauthor_counts, &mut coauthor_cluster_df);
-        increment_df_from_counter(
-            &summary.non_mega_coauthor_counts,
-            &mut non_mega_coauthor_cluster_df,
-        );
-        increment_df_from_counter(&summary.affiliation_counts, &mut affiliation_cluster_df);
-    }
-    Ok(RustHybridCentroidRetriever {
-        summaries,
-        component_index_by_key,
-        coauthor_cluster_df,
-        non_mega_coauthor_cluster_df,
-        affiliation_cluster_df,
+    let summaries = summary_results
+        .into_iter()
+        .collect::<Result<Vec<RetrievalSummaryData>, RetrievalError>>()
+        .map_err(retrieval_error_to_py)?;
+    py.allow_threads(|| {
+        install_with_optional_rayon_pool(num_threads, || {
+            RustHybridCentroidRetriever::from_summaries(summaries, ranks_candidates)
+        })
     })
+    .map_err(retrieval_error_to_py)
 }
 
 fn raw_arrow_component_member_indices_for_batch(
@@ -911,6 +898,7 @@ impl RawBlockQueryCandidatePlanner {
             &features_by_signature_id,
             max_exemplars,
             num_threads,
+            true,
         )?;
         let summary_secs = summary_start.elapsed().as_secs_f64();
 
@@ -1333,6 +1321,7 @@ impl RawBlockQueryCandidatePlanner {
                 &self.state.features_by_signature_id,
                 self.max_exemplars,
                 self.num_threads,
+                true,
             )?)
         } else {
             None
@@ -2267,6 +2256,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         &features_by_signature_id,
         max_exemplars,
         num_threads,
+        false,
     )?;
     let summary_secs = summary_start.elapsed().as_secs_f64();
 

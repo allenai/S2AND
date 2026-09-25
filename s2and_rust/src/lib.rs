@@ -28,6 +28,7 @@ mod raw_arrow_features;
 mod raw_candidate_planner;
 mod rayon_pool;
 mod retrieval;
+mod retrieval_overlap;
 mod rust_featurizer;
 mod subblocking;
 mod text_compat;

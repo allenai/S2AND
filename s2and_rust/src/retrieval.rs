@@ -1,4 +1,7 @@
 use super::*;
+use crate::retrieval_overlap::{
+    component_overlap, overlap_scores, ComponentOverlap, OverlapIndex, PreparedQuery,
+};
 #[derive(Clone)]
 pub(crate) struct RetrievalSummaryData {
     pub(crate) component_key: String,
@@ -132,6 +135,9 @@ pub(crate) struct RustHybridCentroidRetriever {
     pub(crate) coauthor_cluster_df: HashMap<u64, usize>,
     pub(crate) non_mega_coauthor_cluster_df: HashMap<u64, usize>,
     pub(crate) affiliation_cluster_df: HashMap<u64, usize>,
+    /// Inverted coauthor and affiliation counters of `summaries`. Retrievers
+    /// that only score given rows, such as the labeled-row plan, skip it.
+    overlap_index: Option<OverlapIndex>,
 }
 
 #[derive(Default)]
@@ -245,6 +251,76 @@ pub(crate) struct RetrievalCandidateSelection {
 }
 
 impl RustHybridCentroidRetriever {
+    /// Index `summaries`: component keys, per-term cluster document frequencies
+    /// and, when the retriever ranks candidates, the inverted overlap counters.
+    pub(crate) fn from_summaries(
+        summaries: Vec<RetrievalSummaryData>,
+        with_overlap_index: bool,
+    ) -> Result<Self, RetrievalError> {
+        let mut component_index_by_key = HashMap::with_capacity(summaries.len());
+        let mut coauthor_cluster_df = HashMap::new();
+        let mut non_mega_coauthor_cluster_df = HashMap::new();
+        let mut affiliation_cluster_df = HashMap::new();
+        for (index, summary) in summaries.iter().enumerate() {
+            component_index_by_key.insert(summary.component_key.clone(), index);
+            increment_df_from_counter(&summary.coauthor_counts, &mut coauthor_cluster_df);
+            increment_df_from_counter(
+                &summary.non_mega_coauthor_counts,
+                &mut non_mega_coauthor_cluster_df,
+            );
+            increment_df_from_counter(&summary.affiliation_counts, &mut affiliation_cluster_df);
+        }
+        let overlap_index = with_overlap_index
+            .then(|| OverlapIndex::build(&summaries))
+            .transpose()?;
+        Ok(Self {
+            summaries,
+            component_index_by_key,
+            coauthor_cluster_df,
+            non_mega_coauthor_cluster_df,
+            affiliation_cluster_df,
+            overlap_index,
+        })
+    }
+
+    fn overlap_index(&self) -> &OverlapIndex {
+        self.overlap_index
+            .as_ref()
+            .expect("retrievers that rank candidates are built with an overlap index")
+    }
+
+    fn prepare_query(&self, query: &RetrievalQueryData) -> PreparedQuery {
+        PreparedQuery::new(
+            query,
+            &self.coauthor_cluster_df,
+            &self.non_mega_coauthor_cluster_df,
+            &self.affiliation_cluster_df,
+            self.summaries.len(),
+        )
+    }
+
+    /// Hybrid score of candidate `idx`. Indexed components use the query's
+    /// posting walk; an override summary is looked up directly.
+    fn score_candidate(
+        &self,
+        query_data: &RetrievalQueryData,
+        prepared: &PreparedQuery,
+        overlaps: &[ComponentOverlap],
+        idx: usize,
+        override_index: Option<usize>,
+        override_summary: Option<&RetrievalSummaryData>,
+    ) -> f32 {
+        let summary = self.summary_for_candidate_index(idx, override_index, override_summary);
+        let overlap = if Some(idx) == override_index && override_summary.is_some() {
+            component_overlap(query_data, prepared, summary)
+        } else {
+            overlaps[idx]
+        };
+        let (coauthor_score, affiliation_score) =
+            overlap_scores(query_data, prepared, summary, &overlap);
+        hybrid_centroid_score(query_data, summary, coauthor_score, affiliation_score)
+    }
+
     fn summary_for_candidate_index<'a>(
         &'a self,
         idx: usize,
@@ -309,20 +385,22 @@ impl RustHybridCentroidRetriever {
         override_index: Option<usize>,
         override_summary: Option<&RetrievalSummaryData>,
     ) -> Vec<(usize, f32)> {
+        let prepared = self.prepare_query(query_data);
+        let overlaps =
+            self.overlap_index()
+                .component_overlaps(query_data, &prepared, self.summaries.len());
         let mut scored = candidate_indices
             .iter()
             .map(|idx| {
-                let summary =
-                    self.summary_for_candidate_index(*idx, override_index, override_summary);
                 (
                     *idx,
-                    score_hybrid_centroid_query(
+                    self.score_candidate(
                         query_data,
-                        summary,
-                        &self.coauthor_cluster_df,
-                        &self.non_mega_coauthor_cluster_df,
-                        &self.affiliation_cluster_df,
-                        self.summaries.len(),
+                        &prepared,
+                        &overlaps,
+                        *idx,
+                        override_index,
+                        override_summary,
                     ),
                 )
             })
@@ -569,25 +647,26 @@ impl RustHybridCentroidRetriever {
             return Ok((Vec::new(), Vec::new()));
         }
 
+        let prepared = self.prepare_query(query_data);
         let mut scored: Vec<(usize, f32)> = py.allow_threads(|| {
             let compute = || {
+                let overlaps = self.overlap_index().component_overlaps(
+                    query_data,
+                    &prepared,
+                    self.summaries.len(),
+                );
                 candidate_indices
                     .par_iter()
                     .map(|idx| {
-                        let summary = self.summary_for_candidate_index(
-                            *idx,
-                            override_index,
-                            override_summary,
-                        );
                         (
                             *idx,
-                            score_hybrid_centroid_query(
+                            self.score_candidate(
                                 query_data,
-                                summary,
-                                &self.coauthor_cluster_df,
-                                &self.non_mega_coauthor_cluster_df,
-                                &self.affiliation_cluster_df,
-                                self.summaries.len(),
+                                &prepared,
+                                &overlaps,
+                                *idx,
+                                override_index,
+                                override_summary,
                             ),
                         )
                     })
@@ -714,49 +793,6 @@ pub(crate) fn overlap_query_term_weight(
         weight *= overlap_idf_weight(df_map, term.hash, total_summary_count);
     }
     weight.max(0.0)
-}
-
-pub(crate) fn weighted_counter_query_overlap(
-    query_terms: &[RetrievalQueryTerm],
-    counter: &Option<CounterData>,
-    size: usize,
-    df_map: &HashMap<u64, usize>,
-    total_summary_count: usize,
-    config: RetrievalOverlapConfig,
-) -> f64 {
-    let Some(counter_data) = counter.as_ref() else {
-        return 0.0;
-    };
-    if size == 0 || query_terms.is_empty() || counter_data.entries.is_empty() {
-        return 0.0;
-    }
-    let mut numerator = 0.0f64;
-    let mut denominator = 0.0f64;
-    for term in query_terms {
-        let query_weight = overlap_query_term_weight(term, df_map, total_summary_count, config);
-        if query_weight <= 0.0 {
-            continue;
-        }
-        denominator += query_weight;
-        if let Ok(index) = counter_data
-            .entries
-            .binary_search_by_key(&term.hash, |entry| entry.0)
-        {
-            let mut contribution = (counter_data.entries[index].1 as f64) / (size as f64);
-            if let Some(cap) = config.per_term_cap {
-                contribution = contribution.min(cap);
-            }
-            numerator += query_weight * contribution;
-        }
-    }
-    if denominator <= 0.0 {
-        return 0.0;
-    }
-    let mut score = numerator / denominator;
-    if let Some(cap) = config.total_cap {
-        score = score.min(cap);
-    }
-    score
 }
 
 pub(crate) fn middle_initial_score_hashes(
@@ -972,7 +1008,7 @@ pub(crate) fn extract_retrieval_query(obj: &Bound<'_, PyAny>) -> PyResult<Retrie
     })
 }
 
-const COAUTHOR_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalOverlapConfig {
+pub(crate) const COAUTHOR_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalOverlapConfig {
     use_idf: true,
     per_term_cap: Some(0.35),
     total_cap: None,
@@ -981,7 +1017,7 @@ const COAUTHOR_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalOverlapConfig {
     multi_token_weight: 1.0,
 };
 
-const AFFILIATION_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalOverlapConfig {
+pub(crate) const AFFILIATION_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalOverlapConfig {
     use_idf: true,
     per_term_cap: None,
     total_cap: None,
@@ -1006,47 +1042,7 @@ pub(crate) fn specter_exemplar_score(
         .fold(0.0f64, f64::max)
 }
 
-pub(crate) fn query_counter_overlap_count(
-    query_terms: &[RetrievalQueryTerm],
-    counter: &Option<CounterData>,
-) -> usize {
-    let Some(counter_data) = counter.as_ref() else {
-        return 0;
-    };
-    query_terms
-        .iter()
-        .filter(|term| {
-            counter_data
-                .entries
-                .binary_search_by_key(&term.hash, |entry| entry.0)
-                .is_ok()
-        })
-        .count()
-}
-
-pub(crate) fn should_rescue_candidate_mega_coauthors(
-    query: &RetrievalQueryData,
-    summary: &RetrievalSummaryData,
-) -> bool {
-    if summary.max_paper_author_count < RETRIEVAL_MEGA_AUTHOR_THRESHOLD
-        || query.coauthor_terms.is_empty()
-    {
-        return false;
-    }
-
-    let full_overlap = query_counter_overlap_count(&query.coauthor_terms, &summary.coauthor_counts);
-    if full_overlap < 3 {
-        return false;
-    }
-    let filtered_overlap =
-        query_counter_overlap_count(&query.coauthor_terms, &summary.non_mega_coauthor_counts);
-    if full_overlap <= filtered_overlap {
-        return false;
-    }
-
-    (full_overlap as f64) / (query.coauthor_terms.len() as f64) >= 0.995
-}
-
+/// Hybrid centroid score of one summary, looked up directly in its counters.
 pub(crate) fn score_hybrid_centroid_query(
     query: &RetrievalQueryData,
     summary: &RetrievalSummaryData,
@@ -1055,38 +1051,30 @@ pub(crate) fn score_hybrid_centroid_query(
     affiliation_cluster_df: &HashMap<u64, usize>,
     total_summary_count: usize,
 ) -> f32 {
+    let prepared = PreparedQuery::new(
+        query,
+        coauthor_cluster_df,
+        non_mega_coauthor_cluster_df,
+        affiliation_cluster_df,
+        total_summary_count,
+    );
+    let overlap = component_overlap(query, &prepared, summary);
+    let (coauthor_score, affiliation_score) = overlap_scores(query, &prepared, summary, &overlap);
+    hybrid_centroid_score(query, summary, coauthor_score, affiliation_score)
+}
+
+/// Weighted sum of the hybrid score terms, given the two overlap scores.
+fn hybrid_centroid_score(
+    query: &RetrievalQueryData,
+    summary: &RetrievalSummaryData,
+    coauthor_score: f64,
+    affiliation_score: f64,
+) -> f32 {
     let weights = if query.has_full_first {
         DEFAULT_HYBRID_CENTROID_WEIGHTS
     } else {
         DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS
     };
-    let use_non_mega_coauthor_counter = summary.max_paper_author_count
-        >= RETRIEVAL_MEGA_AUTHOR_THRESHOLD
-        && !should_rescue_candidate_mega_coauthors(query, summary);
-    let (coauthor_counts, coauthor_df) = if use_non_mega_coauthor_counter {
-        (
-            &summary.non_mega_coauthor_counts,
-            non_mega_coauthor_cluster_df,
-        )
-    } else {
-        (&summary.coauthor_counts, coauthor_cluster_df)
-    };
-    let coauthor_score = weighted_counter_query_overlap(
-        &query.coauthor_terms,
-        coauthor_counts,
-        summary.size,
-        coauthor_df,
-        total_summary_count,
-        COAUTHOR_OVERLAP_CONFIG,
-    );
-    let affiliation_score = weighted_counter_query_overlap(
-        &query.affiliation_terms,
-        &summary.affiliation_counts,
-        summary.size,
-        affiliation_cluster_df,
-        total_summary_count,
-        AFFILIATION_OVERLAP_CONFIG,
-    );
     let middle_score = middle_initial_score_hashes(
         &query.middle_initial_hashes,
         &summary.middle_initial_counts,
@@ -1172,57 +1160,16 @@ pub(crate) fn chooser_summary_features(
     ]
 }
 
-pub(crate) fn update_cluster_df_from_counter(
-    obj: &Bound<'_, PyAny>,
-    df_map: &mut HashMap<u64, usize>,
-) -> PyResult<()> {
-    if obj.is_none() {
-        return Ok(());
-    }
-    let dict = obj.downcast::<PyDict>()?;
-    for (key_obj, _value_obj) in dict.iter() {
-        let key: String = key_obj.extract()?;
-        let hash = fnv64(key.as_bytes());
-        *df_map.entry(hash).or_insert(0) += 1;
-    }
-    Ok(())
-}
-
 #[pymethods]
 impl RustHybridCentroidRetriever {
     #[new]
     #[pyo3(signature = (summaries, include_exemplars = false))]
     fn new(summaries: &Bound<'_, PyAny>, include_exemplars: bool) -> PyResult<Self> {
         let mut packed_summaries = Vec::new();
-        let mut component_index_by_key = HashMap::new();
-        let mut coauthor_cluster_df = HashMap::new();
-        let mut non_mega_coauthor_cluster_df = HashMap::new();
-        let mut affiliation_cluster_df = HashMap::new();
         for item in PyIterator::from_object(summaries)? {
-            let summary_obj = item?;
-            update_cluster_df_from_counter(
-                &summary_obj.getattr("coauthor_counts")?,
-                &mut coauthor_cluster_df,
-            )?;
-            update_cluster_df_from_counter(
-                &summary_obj.getattr("non_mega_coauthor_counts")?,
-                &mut non_mega_coauthor_cluster_df,
-            )?;
-            update_cluster_df_from_counter(
-                &summary_obj.getattr("affiliation_counts")?,
-                &mut affiliation_cluster_df,
-            )?;
-            let summary = extract_retrieval_summary(&summary_obj, include_exemplars)?;
-            component_index_by_key.insert(summary.component_key.clone(), packed_summaries.len());
-            packed_summaries.push(summary);
+            packed_summaries.push(extract_retrieval_summary(&item?, include_exemplars)?);
         }
-        Ok(Self {
-            summaries: packed_summaries,
-            component_index_by_key,
-            coauthor_cluster_df,
-            non_mega_coauthor_cluster_df,
-            affiliation_cluster_df,
-        })
+        Self::from_summaries(packed_summaries, true).map_err(retrieval_error_to_py)
     }
 
     #[pyo3(signature = (query, component_keys, top_k, num_threads = None, override_summary = None))]
@@ -1330,4 +1277,563 @@ pub(crate) fn retrieval_rank_from_zero_based_offset(
             u16::MAX
         ))
     })
+}
+
+#[cfg(test)]
+mod overlap_index_tests {
+    //! Indexed and prepared overlap scoring against verbatim copies of the
+    //! per-component scoring they replaced.
+
+    use super::*;
+    use crate::retrieval_overlap::rescues_mega_coauthors;
+
+    // Verbatim copies of the replaced scoring (2121a38), renamed.
+    fn reference_weighted_counter_query_overlap(
+        query_terms: &[RetrievalQueryTerm],
+        counter: &Option<CounterData>,
+        size: usize,
+        df_map: &HashMap<u64, usize>,
+        total_summary_count: usize,
+        config: RetrievalOverlapConfig,
+    ) -> f64 {
+        let Some(counter_data) = counter.as_ref() else {
+            return 0.0;
+        };
+        if size == 0 || query_terms.is_empty() || counter_data.entries.is_empty() {
+            return 0.0;
+        }
+        let mut numerator = 0.0f64;
+        let mut denominator = 0.0f64;
+        for term in query_terms {
+            let query_weight = overlap_query_term_weight(term, df_map, total_summary_count, config);
+            if query_weight <= 0.0 {
+                continue;
+            }
+            denominator += query_weight;
+            if let Ok(index) = counter_data
+                .entries
+                .binary_search_by_key(&term.hash, |entry| entry.0)
+            {
+                let mut contribution = (counter_data.entries[index].1 as f64) / (size as f64);
+                if let Some(cap) = config.per_term_cap {
+                    contribution = contribution.min(cap);
+                }
+                numerator += query_weight * contribution;
+            }
+        }
+        if denominator <= 0.0 {
+            return 0.0;
+        }
+        let mut score = numerator / denominator;
+        if let Some(cap) = config.total_cap {
+            score = score.min(cap);
+        }
+        score
+    }
+
+    fn reference_query_counter_overlap_count(
+        query_terms: &[RetrievalQueryTerm],
+        counter: &Option<CounterData>,
+    ) -> usize {
+        let Some(counter_data) = counter.as_ref() else {
+            return 0;
+        };
+        query_terms
+            .iter()
+            .filter(|term| {
+                counter_data
+                    .entries
+                    .binary_search_by_key(&term.hash, |entry| entry.0)
+                    .is_ok()
+            })
+            .count()
+    }
+
+    fn reference_should_rescue_candidate_mega_coauthors(
+        query: &RetrievalQueryData,
+        summary: &RetrievalSummaryData,
+    ) -> bool {
+        if summary.max_paper_author_count < RETRIEVAL_MEGA_AUTHOR_THRESHOLD
+            || query.coauthor_terms.is_empty()
+        {
+            return false;
+        }
+
+        let full_overlap =
+            reference_query_counter_overlap_count(&query.coauthor_terms, &summary.coauthor_counts);
+        if full_overlap < 3 {
+            return false;
+        }
+        let filtered_overlap = reference_query_counter_overlap_count(
+            &query.coauthor_terms,
+            &summary.non_mega_coauthor_counts,
+        );
+        if full_overlap <= filtered_overlap {
+            return false;
+        }
+
+        (full_overlap as f64) / (query.coauthor_terms.len() as f64) >= 0.995
+    }
+
+    fn reference_score_hybrid_centroid_query(
+        query: &RetrievalQueryData,
+        summary: &RetrievalSummaryData,
+        coauthor_cluster_df: &HashMap<u64, usize>,
+        non_mega_coauthor_cluster_df: &HashMap<u64, usize>,
+        affiliation_cluster_df: &HashMap<u64, usize>,
+        total_summary_count: usize,
+    ) -> f32 {
+        let weights = if query.has_full_first {
+            DEFAULT_HYBRID_CENTROID_WEIGHTS
+        } else {
+            DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS
+        };
+        let use_non_mega_coauthor_counter = summary.max_paper_author_count
+            >= RETRIEVAL_MEGA_AUTHOR_THRESHOLD
+            && !reference_should_rescue_candidate_mega_coauthors(query, summary);
+        let (coauthor_counts, coauthor_df) = if use_non_mega_coauthor_counter {
+            (
+                &summary.non_mega_coauthor_counts,
+                non_mega_coauthor_cluster_df,
+            )
+        } else {
+            (&summary.coauthor_counts, coauthor_cluster_df)
+        };
+        let coauthor_score = reference_weighted_counter_query_overlap(
+            &query.coauthor_terms,
+            coauthor_counts,
+            summary.size,
+            coauthor_df,
+            total_summary_count,
+            COAUTHOR_OVERLAP_CONFIG,
+        );
+        let affiliation_score = reference_weighted_counter_query_overlap(
+            &query.affiliation_terms,
+            &summary.affiliation_counts,
+            summary.size,
+            affiliation_cluster_df,
+            total_summary_count,
+            AFFILIATION_OVERLAP_CONFIG,
+        );
+        let middle_score = middle_initial_score_hashes(
+            &query.middle_initial_hashes,
+            &summary.middle_initial_counts,
+            summary.size,
+        );
+        let first_name_score = first_name_score_mode(
+            &query.first,
+            &summary.first_name_counts,
+            summary.size,
+            if query.has_full_first {
+                RetrievalFirstNameMode::ExactThenPrefixHalf
+            } else {
+                RetrievalFirstNameMode::Prefix
+            },
+        );
+        let centroid_score = match (
+            query.specter.as_ref(),
+            query.specter_norm,
+            summary.specter_centroid.as_ref(),
+            summary.specter_centroid_norm,
+        ) {
+            (Some(query_specter), Some(query_norm), Some(summary_specter), Some(summary_norm)) => {
+                cosine_sim_with_norms(query_specter, query_norm, summary_specter, summary_norm)
+            }
+            _ => 0.0,
+        };
+        let exemplar_score = specter_exemplar_score(query, summary);
+        let specter_score = centroid_score.max(exemplar_score);
+        (weights.centroid * specter_score
+            + weights.coauthor * coauthor_score
+            + weights.affiliation * affiliation_score
+            + weights.middle * middle_score
+            + weights.first_name * first_name_score) as f32
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, bound: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) % bound
+        }
+    }
+
+    fn counter(mut entries: Vec<(u64, f32)>) -> Option<CounterData> {
+        entries.sort_unstable_by_key(|entry| entry.0);
+        entries.dedup_by_key(|entry| entry.0);
+        let sum = entries.iter().map(|entry| entry.1).sum();
+        Some(CounterData { entries, sum })
+    }
+
+    fn random_counter(
+        rng: &mut Lcg,
+        universe: u64,
+        max_terms: u64,
+        size: usize,
+    ) -> Option<CounterData> {
+        match rng.below(10) {
+            0 => None,
+            1 => Some(CounterData {
+                entries: Vec::new(),
+                sum: 0.0,
+            }),
+            _ => counter(
+                (0..1 + rng.below(max_terms))
+                    .map(|_| {
+                        (
+                            rng.below(universe),
+                            1.0 + rng.below(size.max(1) as u64) as f32,
+                        )
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    fn vector(rng: &mut Lcg) -> Vec<f32> {
+        (0..8)
+            .map(|_| rng.below(1000) as f32 / 500.0 - 1.0)
+            .collect()
+    }
+
+    fn summary(rng: &mut Lcg, key: String) -> RetrievalSummaryData {
+        let size = [0usize, 1, 2, 3, 7, 40][rng.below(6) as usize];
+        let coauthor_counts = random_counter(rng, 300, 120, size);
+        // Non-mega counters keep a subset of the full counter's terms, as built.
+        let non_mega_coauthor_counts = coauthor_counts.as_ref().and_then(|full| {
+            let kept: Vec<(u64, f32)> = full
+                .entries
+                .iter()
+                .copied()
+                .filter(|_| rng.below(3) != 0)
+                .collect();
+            if kept.is_empty() {
+                None
+            } else {
+                counter(kept)
+            }
+        });
+        let specter_centroid = (rng.below(3) != 0).then(|| vector(rng));
+        let exemplar_vectors: Vec<Vec<f32>> = (0..rng.below(3)).map(|_| vector(rng)).collect();
+        RetrievalSummaryData {
+            component_key: key,
+            size,
+            first_name_counts: vec![("anna".to_string(), 1), ("jian".to_string(), 2)],
+            middle_initial_counts: random_counter(rng, 4, 2, size),
+            coauthor_counts,
+            non_mega_coauthor_counts,
+            affiliation_counts: random_counter(rng, 60, 20, size),
+            venue_counts: None,
+            title_counts: None,
+            max_paper_author_count: [3usize, 49, 50, 3000][rng.below(4) as usize],
+            year_min: None,
+            year_max: None,
+            year_mean: None,
+            orcid_hashes: Vec::new(),
+            specter_centroid_norm: specter_centroid
+                .as_ref()
+                .map(|values| vector_norm_f32(values)),
+            specter_centroid,
+            exemplar_norms: exemplar_vectors
+                .iter()
+                .map(|values| vector_norm_f32(values))
+                .collect(),
+            exemplar_vectors,
+        }
+    }
+
+    fn terms(hashes: impl IntoIterator<Item = u64>, rng: &mut Lcg) -> Vec<RetrievalQueryTerm> {
+        hashes
+            .into_iter()
+            .map(|hash| RetrievalQueryTerm {
+                hash,
+                // A token count of 0 has weight 0, which the numerator skips.
+                token_count: [0u8, 1, 1, 2][rng.below(4) as usize],
+            })
+            .collect()
+    }
+
+    fn query(rng: &mut Lcg, coauthor_terms: Vec<RetrievalQueryTerm>) -> RetrievalQueryData {
+        let affiliation_terms = terms(
+            (0..rng.below(8)).map(|_| rng.below(60)).collect::<Vec<_>>(),
+            rng,
+        );
+        let specter = (rng.below(4) != 0).then(|| vector(rng));
+        RetrievalQueryData {
+            first: ["anna", "a", "jian"][rng.below(3) as usize].to_string(),
+            has_full_first: rng.below(2) == 0,
+            middle_initial_hashes: Vec::new(),
+            coauthor_hashes: coauthor_terms.iter().map(|term| term.hash).collect(),
+            coauthor_terms,
+            affiliation_hashes: affiliation_terms.iter().map(|term| term.hash).collect(),
+            affiliation_terms,
+            venue_hashes: Vec::new(),
+            title_hashes: Vec::new(),
+            year: None,
+            orcid_hash: None,
+            specter_norm: specter.as_ref().map(|values| vector_norm_f32(values)),
+            specter: specter.map(Arc::new),
+        }
+    }
+
+    /// Random summaries, identical twins whose scores tie and are ordered by
+    /// key, and rescue-rule edge cases for a 200-term query over hashes
+    /// 1000..1200.
+    fn synthetic_summaries() -> Vec<RetrievalSummaryData> {
+        let mut rng = Lcg(5);
+        let mut summaries: Vec<RetrievalSummaryData> = (0..300)
+            .map(|index| summary(&mut rng, format!("c{index:03}")))
+            .collect();
+        for index in 0..20 {
+            let mut twin = summaries[index].clone();
+            twin.component_key = format!("b{index:03}");
+            summaries.push(twin);
+        }
+        // (full, non-mega) hits of the 200-term query: 199/0 is a ratio of
+        // exactly 0.995, 198/0 is below it, 2/0 has too few hits, 199/199 gains
+        // nothing over the non-mega counter.
+        for (label, full, filtered) in [
+            ("r199", 199u64, 0u64),
+            ("r198", 198, 0),
+            ("r002", 2, 0),
+            ("r199eq", 199, 199),
+        ] {
+            let mut rescue = summary(&mut rng, label.to_string());
+            rescue.size = 5;
+            rescue.max_paper_author_count = 1000;
+            rescue.coauthor_counts = counter(
+                (1000..1000 + full)
+                    .map(|hash| (hash, 2.0))
+                    .chain([(7, 1.0)])
+                    .collect(),
+            );
+            rescue.non_mega_coauthor_counts = counter(
+                (1000..1000 + filtered)
+                    .map(|hash| (hash, 1.0))
+                    .chain([(7, 1.0)])
+                    .collect(),
+            );
+            summaries.push(rescue);
+        }
+        summaries
+    }
+
+    fn synthetic_queries() -> Vec<RetrievalQueryData> {
+        let mut rng = Lcg(17);
+        let mut queries = Vec::new();
+        for count in [0u64, 1, 3, 6, 40, 250] {
+            for _ in 0..4 {
+                let mut hashes: Vec<u64> = (0..count).map(|_| rng.below(300)).collect();
+                hashes.sort_unstable();
+                hashes.dedup();
+                let coauthor_terms = terms(hashes, &mut rng);
+                queries.push(query(&mut rng, coauthor_terms));
+            }
+        }
+        // Unsorted query terms with a repeated hash.
+        let repeated = terms([9, 3, 9, 250, 1], &mut rng);
+        queries.push(query(&mut rng, repeated));
+        let unit_terms = |hashes: std::ops::Range<u64>| -> Vec<RetrievalQueryTerm> {
+            hashes
+                .map(|hash| RetrievalQueryTerm {
+                    hash,
+                    token_count: 1,
+                })
+                .collect()
+        };
+        queries.push(query(&mut rng, unit_terms(1000..1200)));
+        queries.push(query(&mut rng, unit_terms(1000..1003)));
+        queries
+    }
+
+    fn reference_ranking(
+        retriever: &RustHybridCentroidRetriever,
+        query: &RetrievalQueryData,
+    ) -> Vec<(String, u32)> {
+        let mut scored: Vec<(String, f32)> = retriever
+            .summaries
+            .iter()
+            .map(|summary| {
+                (
+                    summary.component_key.clone(),
+                    reference_score_hybrid_centroid_query(
+                        query,
+                        summary,
+                        &retriever.coauthor_cluster_df,
+                        &retriever.non_mega_coauthor_cluster_df,
+                        &retriever.affiliation_cluster_df,
+                        retriever.summaries.len(),
+                    ),
+                )
+            })
+            .collect();
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        scored
+            .into_iter()
+            .map(|(key, score)| (key, score.to_bits()))
+            .collect()
+    }
+
+    #[test]
+    fn direct_and_indexed_scores_match_the_replaced_scoring_bit_for_bit() {
+        let retriever = RustHybridCentroidRetriever::from_summaries(synthetic_summaries(), true)
+            .expect("retriever");
+        let (mut rescued, mut non_mega, mut positive) = (0usize, 0usize, 0usize);
+        for query in synthetic_queries() {
+            let prepared = retriever.prepare_query(&query);
+            let overlaps = retriever.overlap_index().component_overlaps(
+                &query,
+                &prepared,
+                retriever.summaries.len(),
+            );
+            for (index, summary) in retriever.summaries.iter().enumerate() {
+                let reference = reference_score_hybrid_centroid_query(
+                    &query,
+                    summary,
+                    &retriever.coauthor_cluster_df,
+                    &retriever.non_mega_coauthor_cluster_df,
+                    &retriever.affiliation_cluster_df,
+                    retriever.summaries.len(),
+                );
+                let direct = score_hybrid_centroid_query(
+                    &query,
+                    summary,
+                    &retriever.coauthor_cluster_df,
+                    &retriever.non_mega_coauthor_cluster_df,
+                    &retriever.affiliation_cluster_df,
+                    retriever.summaries.len(),
+                );
+                let indexed =
+                    retriever.score_candidate(&query, &prepared, &overlaps, index, None, None);
+                assert_eq!(
+                    direct.to_bits(),
+                    reference.to_bits(),
+                    "{}",
+                    summary.component_key
+                );
+                assert_eq!(
+                    indexed.to_bits(),
+                    reference.to_bits(),
+                    "{}",
+                    summary.component_key
+                );
+
+                // The f64 overlap scores match too, before the final f32 rounding.
+                let mega = summary.max_paper_author_count >= RETRIEVAL_MEGA_AUTHOR_THRESHOLD;
+                let rescue = reference_should_rescue_candidate_mega_coauthors(&query, summary);
+                let (coauthor_counts, coauthor_df) = if mega && !rescue {
+                    (
+                        &summary.non_mega_coauthor_counts,
+                        &retriever.non_mega_coauthor_cluster_df,
+                    )
+                } else {
+                    (&summary.coauthor_counts, &retriever.coauthor_cluster_df)
+                };
+                let reference_scores = (
+                    reference_weighted_counter_query_overlap(
+                        &query.coauthor_terms,
+                        coauthor_counts,
+                        summary.size,
+                        coauthor_df,
+                        retriever.summaries.len(),
+                        COAUTHOR_OVERLAP_CONFIG,
+                    )
+                    .to_bits(),
+                    reference_weighted_counter_query_overlap(
+                        &query.affiliation_terms,
+                        &summary.affiliation_counts,
+                        summary.size,
+                        &retriever.affiliation_cluster_df,
+                        retriever.summaries.len(),
+                        AFFILIATION_OVERLAP_CONFIG,
+                    )
+                    .to_bits(),
+                );
+                let direct_overlap = component_overlap(&query, &prepared, summary);
+                let direct_scores = overlap_scores(&query, &prepared, summary, &direct_overlap);
+                let indexed_scores = overlap_scores(&query, &prepared, summary, &overlaps[index]);
+                assert_eq!(
+                    (direct_scores.0.to_bits(), direct_scores.1.to_bits()),
+                    reference_scores
+                );
+                assert_eq!(
+                    (indexed_scores.0.to_bits(), indexed_scores.1.to_bits()),
+                    reference_scores
+                );
+                rescued += usize::from(rescue);
+                non_mega += usize::from(mega && !rescue);
+                positive += usize::from(direct_scores.0 > 0.0);
+            }
+        }
+        assert!(
+            rescued >= 2 && non_mega > 100 && positive > 100,
+            "{rescued} {non_mega} {positive}"
+        );
+    }
+
+    #[test]
+    fn indexed_top_k_keeps_the_replaced_ranking_and_tie_order() {
+        let retriever = RustHybridCentroidRetriever::from_summaries(synthetic_summaries(), true)
+            .expect("retriever");
+        let members: HashMap<String, Vec<u32>> = retriever
+            .summaries
+            .iter()
+            .map(|summary| (summary.component_key.clone(), Vec::new()))
+            .collect();
+        let mut ties = 0;
+        for query in synthetic_queries() {
+            let expected = reference_ranking(&retriever, &query);
+            ties += expected
+                .windows(2)
+                .filter(|pair| pair[0].1 == pair[1].1)
+                .count();
+            for top_k in [1usize, 25, expected.len()] {
+                let result = retriever
+                    .build_pair_plan_query_result(&query, "anna", 0, None, &members, top_k)
+                    .expect("plan row");
+                let observed: Vec<(String, u32)> = result
+                    .row_component_keys
+                    .into_iter()
+                    .zip(
+                        result
+                            .row_retrieval_scores
+                            .iter()
+                            .map(|score| score.to_bits()),
+                    )
+                    .collect();
+                assert_eq!(observed, expected[..top_k.min(expected.len())]);
+            }
+        }
+        assert!(ties > 20, "{ties}");
+    }
+
+    #[test]
+    fn rescue_rule_thresholds() {
+        assert!(rescues_mega_coauthors(200, 199, 0));
+        assert!(!rescues_mega_coauthors(200, 198, 0));
+        assert!(!rescues_mega_coauthors(2, 2, 0));
+        assert!(rescues_mega_coauthors(3, 3, 0));
+        assert!(!rescues_mega_coauthors(200, 199, 199));
+    }
+
+    #[test]
+    fn counters_with_repeated_hashes_are_rejected() {
+        let mut rng = Lcg(1);
+        let mut bad = summary(&mut rng, "bad".to_string());
+        bad.affiliation_counts = Some(CounterData {
+            entries: vec![(4, 1.0), (4, 2.0)],
+            sum: 3.0,
+        });
+        assert!(RustHybridCentroidRetriever::from_summaries(vec![bad.clone()], true).is_err());
+        assert!(RustHybridCentroidRetriever::from_summaries(vec![bad], false).is_ok());
+    }
 }

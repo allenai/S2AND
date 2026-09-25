@@ -2,7 +2,8 @@
 
 ``RustLightGBMBooster`` builds a fast plan when a model fits its guards:
 QuickScorer when every tree has at most 32 leaves, lockstep traversal when every
-tree has at most 256. Every other model uses the baseline traversal. The public
+tree has at most 256. Single-tree constants and stumps retain the baseline, as
+does every unsupported model. The public
 API does not say which kernel ran, so ``_expected_kernel`` mirrors the Rust
 dispatch rules from the model text. That lets each test check that its model
 really exercises the kernel it claims to cover.
@@ -89,7 +90,8 @@ def _expected_kernel(model_text: str) -> str:
     num_features = int(model_text.split("max_feature_idx=", 1)[1].split()[0]) + 1
     thresholds: dict[str, set[float]] = {}
     max_leaves = 1
-    for tree in _tree_blocks(model_text):
+    trees = _tree_blocks(model_text)
+    for tree in trees:
         max_leaves = max(max_leaves, int(tree["num_leaves"]))
         if tree["num_leaves"] == "1":
             continue
@@ -100,6 +102,8 @@ def _expected_kernel(model_text: str) -> str:
         for feature, threshold in zip(tree["split_feature"].split(), split_thresholds, strict=True):
             thresholds.setdefault(feature, set()).add(threshold + 0.0)
     if num_features > 256 or max_leaves > 256 or any(len(values) > 255 for values in thresholds.values()):
+        return "baseline"
+    if len(trees) == 1 and max_leaves <= 2:
         return "baseline"
     return "quickscorer" if max_leaves <= 32 else "lockstep"
 
@@ -322,6 +326,30 @@ def test_production_main_fixture_matches_lightgbm() -> None:
     num_features = booster.num_feature()
     rows = _adversarial_rows(model_text, num_features, 2048, seed=20260924)
     _assert_bit_identical(booster, rust, twin, rows, "production_main")
+
+
+@pytest.mark.parametrize("constant", [True, False], ids=["constant", "stump"])
+def test_single_tree_models_use_baseline_without_changing_scores(constant: bool) -> None:
+    rng = np.random.default_rng(392)
+    features = rng.normal(size=(256, NUM_FEATURES))
+    labels = np.zeros(len(features), dtype=np.int64) if constant else (features[:, -1] > 0).astype(np.int64)
+    booster = lgb.train(
+        {"objective": "binary", "num_leaves": 2, "min_child_samples": 2, "verbose": -1, "num_threads": 1},
+        lgb.Dataset(features, label=labels),
+        num_boost_round=1,
+    )
+    model_text = booster.model_to_string()
+    trees = _tree_blocks(model_text)
+    assert len(trees) == 1 and int(trees[0]["num_leaves"]) == (1 if constant else 2)
+    assert _expected_kernel(model_text) == "baseline"
+    rows = _adversarial_rows(model_text, NUM_FEATURES, 257, seed=92)
+    _assert_bit_identical(
+        booster,
+        RustLightGBMBooster.from_string(model_text),
+        _fallback_twin(model_text),
+        rows,
+        "single-tree baseline",
+    )
 
 
 def test_shared_child_model_scores_through_baseline() -> None:

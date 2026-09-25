@@ -146,6 +146,33 @@ struct PaperAuthorNames {
     names: Arc<[u32]>,
 }
 
+impl PaperAuthorNames {
+    fn author_signals(&self, position: Option<i64>) -> RawArrowAuthorSignalData {
+        let mut local10_author_names = Vec::new();
+        if let Some(position) = position {
+            let start = self.named_authors.partition_point(|(author_position, _)| {
+                *author_position < position.saturating_sub(LOCAL_AUTHOR_WINDOW as i64)
+            });
+            for (author_position, name) in self.named_authors[start..].iter() {
+                if *author_position > position.saturating_add(LOCAL_AUTHOR_WINDOW as i64) {
+                    break;
+                }
+                if *author_position != position
+                    && author_position.abs_diff(position) <= LOCAL_AUTHOR_WINDOW
+                {
+                    local10_author_names.push(*name);
+                }
+            }
+            local10_author_names.sort_unstable();
+            local10_author_names.dedup();
+        }
+        RawArrowAuthorSignalData {
+            paper_author_names: Arc::clone(&self.names),
+            local10_author_names,
+        }
+    }
+}
+
 /// Low bits of a name id that select its interning shard.
 const NAME_SHARD_BITS: u32 = 6;
 const NAME_SHARDS: usize = 1 << NAME_SHARD_BITS;
@@ -155,13 +182,21 @@ const NAME_SHARDS: usize = 1 << NAME_SHARD_BITS;
 ///
 /// A name id is `(index within shard << NAME_SHARD_BITS) | shard`, where the
 /// shard comes from the name's hash, so shards intern in parallel. A planner
-/// keeps one index for its lifetime, so the query papers of every plan share
-/// ids with the seed papers they are compared against. A paper is indexed once
-/// and never refreshed; that is exact because a planner reads seed and query
-/// paper authors from its one Arrow dataset, so either read gives a paper the
-/// same rows.
+/// keeps seed papers in this index for its lifetime. Query-only papers belong
+/// to a `QueryPaperAuthorTables` for one plan, so completed query batches do
+/// not accumulate paper tables or interned names. A paper is never refreshed:
+/// both roles read its same author rows from the planner's one Arrow dataset.
 pub(crate) struct PaperAuthorIndex {
     name_shards: Vec<HashMap<String, u32>>,
+    papers: HashMap<String, PaperAuthorNames>,
+}
+
+/// One plan's query papers, with ids compatible with its frozen seed index.
+///
+/// The borrow prevents seed interning while these query tables are live.
+/// Query-only names and tables never enter the planner's persistent summaries.
+pub(crate) struct QueryPaperAuthorTables<'a> {
+    seeds: &'a PaperAuthorIndex,
     papers: HashMap<String, PaperAuthorNames>,
 }
 
@@ -178,21 +213,25 @@ fn name_shard(name: &str) -> usize {
     (fnv64(name.as_bytes()) as usize) & (NAME_SHARDS - 1)
 }
 
-impl PaperAuthorIndex {
-    /// Index the not-yet-indexed papers of `paper_ids` in parallel.
-    ///
-    /// A paper without author rows is indexed with no authors.
-    pub(crate) fn extend<'a>(
-        &mut self,
-        paper_ids: impl IntoIterator<Item = &'a str>,
+fn checked_local_name_id(index: usize) -> Result<u32, String> {
+    u32::try_from(index)
+        .ok()
+        .filter(|local| *local < (1 << (32 - NAME_SHARD_BITS)))
+        .ok_or_else(|| "paper author names overflow u32 name ids".to_string())
+}
+
+/// Shared normalization and table assembly for persistent and query interning.
+struct NormalizedAuthors {
+    papers: Vec<Vec<(i64, String, u8)>>,
+    buckets: Vec<Vec<(u32, u32)>>,
+}
+
+impl NormalizedAuthors {
+    fn new(
+        pending: &[&str],
         paper_authors: &HashMap<String, Vec<(i64, String)>>,
         unidecode_char_map: &HashMap<char, String>,
-    ) -> Result<(), String> {
-        let mut seen = HashSet::new();
-        let pending: Vec<&str> = paper_ids
-            .into_iter()
-            .filter(|paper_id| !self.papers.contains_key(*paper_id) && seen.insert(*paper_id))
-            .collect();
+    ) -> Self {
         let normalized: Vec<Vec<(i64, String, u8)>> = pending
             .par_iter()
             .map(|paper_id| {
@@ -219,23 +258,87 @@ impl PaperAuthorIndex {
                 buckets[*shard as usize].push((paper as u32, author as u32));
             }
         }
-        let shard_ids: Vec<Vec<u32>> = self
+        Self {
+            papers: normalized,
+            buckets,
+        }
+    }
+
+    fn into_tables(
+        self,
+        pending: &[&str],
+        shard_ids: Vec<Vec<u32>>,
+    ) -> Result<HashMap<String, PaperAuthorNames>, String> {
+        let mut named: Vec<Vec<(i64, u32)>> = self
+            .papers
+            .iter()
+            .map(|authors| {
+                authors
+                    .iter()
+                    .map(|(position, _, _)| (*position, 0))
+                    .collect()
+            })
+            .collect();
+        for (bucket, ids) in self.buckets.iter().zip(&shard_ids) {
+            for ((paper, author), id) in bucket.iter().zip(ids) {
+                named[*paper as usize][*author as usize].1 = *id;
+            }
+        }
+        self.papers.into_par_iter().for_each(drop);
+        pending
+            .par_iter()
+            .zip(named.into_par_iter())
+            .map(|(paper_id, mut named_authors)| {
+                named_authors.sort_unstable_by_key(|(position, _)| *position);
+                require_unique_positions(paper_id, &named_authors)?;
+                let mut names: Vec<u32> = named_authors.iter().map(|(_, name)| *name).collect();
+                names.sort_unstable();
+                names.dedup();
+                Ok((
+                    paper_id.to_string(),
+                    PaperAuthorNames {
+                        named_authors,
+                        names: names.into(),
+                    },
+                ))
+            })
+            .collect()
+    }
+}
+
+impl PaperAuthorIndex {
+    /// Index the not-yet-indexed papers of `paper_ids` in parallel.
+    ///
+    /// A paper without author rows is indexed with no authors.
+    pub(crate) fn extend<'a>(
+        &mut self,
+        paper_ids: impl IntoIterator<Item = &'a str>,
+        paper_authors: &HashMap<String, Vec<(i64, String)>>,
+        unidecode_char_map: &HashMap<char, String>,
+    ) -> Result<(), String> {
+        let mut seen = HashSet::new();
+        let pending: Vec<&str> = paper_ids
+            .into_iter()
+            .filter(|paper_id| !self.papers.contains_key(*paper_id) && seen.insert(*paper_id))
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let normalized = NormalizedAuthors::new(&pending, paper_authors, unidecode_char_map);
+        let shard_ids = self
             .name_shards
             .par_iter_mut()
-            .zip(buckets.par_iter())
+            .zip(normalized.buckets.par_iter())
             .enumerate()
             .map(|(shard, (names, bucket))| {
                 bucket
                     .iter()
                     .map(|(paper, author)| {
-                        let name = &normalized[*paper as usize][*author as usize].1;
+                        let name = &normalized.papers[*paper as usize][*author as usize].1;
                         let local = match names.get(name.as_str()) {
                             Some(local) => *local,
                             None => {
-                                let local = u32::try_from(names.len())
-                                    .ok()
-                                    .filter(|local| *local < (1 << (32 - NAME_SHARD_BITS)))
-                                    .ok_or("paper author names overflow u32 name ids")?;
+                                let local = checked_local_name_id(names.len())?;
                                 names.insert(name.clone(), local);
                                 local
                             }
@@ -245,40 +348,64 @@ impl PaperAuthorIndex {
                     .collect::<Result<Vec<u32>, String>>()
             })
             .collect::<Result<_, _>>()?;
-        let mut named: Vec<Vec<(i64, u32)>> = normalized
-            .iter()
-            .map(|authors| {
-                authors
-                    .iter()
-                    .map(|(position, _, _)| (*position, 0))
-                    .collect()
-            })
-            .collect();
-        for (bucket, ids) in buckets.iter().zip(&shard_ids) {
-            for ((paper, author), id) in bucket.iter().zip(ids) {
-                named[*paper as usize][*author as usize].1 = *id;
-            }
-        }
-        normalized.into_par_iter().for_each(drop);
-        let tables: Vec<Result<PaperAuthorNames, String>> = pending
-            .par_iter()
-            .zip(named.into_par_iter())
-            .map(|(paper_id, mut named_authors)| {
-                named_authors.sort_unstable_by_key(|(position, _)| *position);
-                require_unique_positions(paper_id, &named_authors)?;
-                let mut names: Vec<u32> = named_authors.iter().map(|(_, name)| *name).collect();
-                names.sort_unstable();
-                names.dedup();
-                Ok(PaperAuthorNames {
-                    named_authors,
-                    names: names.into(),
-                })
-            })
-            .collect();
-        for (paper_id, table) in pending.into_iter().zip(tables) {
-            self.papers.insert(paper_id.to_string(), table?);
-        }
+        self.papers
+            .extend(normalized.into_tables(&pending, shard_ids)?);
         Ok(())
+    }
+
+    /// Build query-only tables without retaining their names in this index.
+    ///
+    /// Complete all seed extensions first. Unknown query names get temporary
+    /// ids above each frozen seed shard's ids; equal names share an id for this
+    /// plan. Papers already indexed as seeds reuse the seed table directly.
+    pub(crate) fn query_tables<'a>(
+        &self,
+        paper_ids: impl IntoIterator<Item = &'a str>,
+        paper_authors: &HashMap<String, Vec<(i64, String)>>,
+        unidecode_char_map: &HashMap<char, String>,
+    ) -> Result<QueryPaperAuthorTables<'_>, String> {
+        let mut seen = HashSet::new();
+        let pending: Vec<&str> = paper_ids
+            .into_iter()
+            .filter(|paper_id| !self.papers.contains_key(*paper_id) && seen.insert(*paper_id))
+            .collect();
+        if pending.is_empty() {
+            return Ok(QueryPaperAuthorTables {
+                seeds: self,
+                papers: HashMap::new(),
+            });
+        }
+        let normalized = NormalizedAuthors::new(&pending, paper_authors, unidecode_char_map);
+        let shard_ids = self
+            .name_shards
+            .par_iter()
+            .zip(normalized.buckets.par_iter())
+            .enumerate()
+            .map(|(shard, (seeds, bucket))| {
+                let mut query_names = HashMap::<&str, u32>::new();
+                bucket
+                    .iter()
+                    .map(|(paper, author)| {
+                        let name = normalized.papers[*paper as usize][*author as usize]
+                            .1
+                            .as_str();
+                        let local = match seeds.get(name).or_else(|| query_names.get(name)) {
+                            Some(local) => *local,
+                            None => {
+                                let local = checked_local_name_id(seeds.len() + query_names.len())?;
+                                query_names.insert(name, local);
+                                local
+                            }
+                        };
+                        Ok((local << NAME_SHARD_BITS) | shard as u32)
+                    })
+                    .collect::<Result<Vec<u32>, String>>()
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(QueryPaperAuthorTables {
+            seeds: self,
+            papers: normalized.into_tables(&pending, shard_ids)?,
+        })
     }
 
     #[cfg(test)]
@@ -300,28 +427,28 @@ impl PaperAuthorIndex {
                 signature.paper_id
             )
         })?;
-        let mut local10_author_names = Vec::new();
-        if let Some(position) = signature.position {
-            let start = paper.named_authors.partition_point(|(author_position, _)| {
-                *author_position < position.saturating_sub(LOCAL_AUTHOR_WINDOW as i64)
-            });
-            for (author_position, name) in paper.named_authors[start..].iter() {
-                if *author_position > position.saturating_add(LOCAL_AUTHOR_WINDOW as i64) {
-                    break;
-                }
-                if *author_position != position
-                    && author_position.abs_diff(position) <= LOCAL_AUTHOR_WINDOW
-                {
-                    local10_author_names.push(*name);
-                }
-            }
-            local10_author_names.sort_unstable();
-            local10_author_names.dedup();
-        }
-        Ok(RawArrowAuthorSignalData {
-            paper_author_names: Arc::clone(&paper.names),
-            local10_author_names,
-        })
+        Ok(paper.author_signals(signature.position))
+    }
+}
+
+impl QueryPaperAuthorTables<'_> {
+    /// Read one query's evidence while its seed-compatible ids are live.
+    pub(crate) fn author_signals(
+        &self,
+        signature: &RawArrowSignature,
+    ) -> Result<RawArrowAuthorSignalData, String> {
+        let paper = self
+            .seeds
+            .papers
+            .get(&signature.paper_id)
+            .or_else(|| self.papers.get(&signature.paper_id))
+            .ok_or_else(|| {
+                format!(
+                    "paper_id {:?} was not indexed for query author signals",
+                    signature.paper_id
+                )
+            })?;
+        Ok(paper.author_signals(signature.position))
     }
 }
 
@@ -741,6 +868,203 @@ mod tests {
             assert_eq!(sorted_intersection_count(&small, &large), expected);
             assert_eq!(sorted_intersection_count(&large, &small), expected);
         }
+    }
+
+    #[test]
+    fn query_tables_match_reference_without_retaining_query_names() {
+        let papers = synthetic_papers();
+        let map = unidecode_map(&papers);
+        let signatures = synthetic_signatures(&papers);
+        let mut seeds = PaperAuthorIndex::default();
+        seeds.extend(["small0", "small1"], &papers, &map).unwrap();
+        let retained_names = seeds.name_shards.clone();
+        let mut summary = RawArrowSummarySignalData {
+            name_counts_values: Vec::new(),
+            member_paper_author_names: Vec::new(),
+            member_paper_author_counts: Vec::new(),
+            member_local10_author_names: Vec::new(),
+            member_signature_ids: Vec::new(),
+        };
+        let mut reference_members = Vec::new();
+        for paper_id in ["small0", "small1"] {
+            let member = signature(paper_id, Some(0));
+            let signal = seeds.author_signals(&member).unwrap();
+            summary
+                .member_paper_author_names
+                .push(signal.paper_author_names);
+            summary
+                .member_paper_author_counts
+                .push(papers[paper_id].len());
+            summary
+                .member_local10_author_names
+                .push(signal.local10_author_names);
+            summary.member_signature_ids.push(paper_id.to_string());
+            reference_members.push((
+                paper_id.to_string(),
+                papers[paper_id].len(),
+                reference_author_signals(member.position, &papers[paper_id], &map),
+            ));
+        }
+        let mut paper_ids: Vec<&str> = papers.keys().map(String::as_str).collect();
+        paper_ids.sort_unstable();
+        let mut checked = 0;
+        // Each round revisits the same query papers with independently interned ids.
+        for _ in 0..2 {
+            for batch in paper_ids.chunks(9) {
+                let queries = seeds
+                    .query_tables(batch.iter().copied(), &papers, &map)
+                    .unwrap();
+                for query in signatures
+                    .iter()
+                    .filter(|signature| batch.contains(&signature.paper_id.as_str()))
+                {
+                    let observed = queries.author_signals(query).unwrap();
+                    let row = raw_arrow_paper_evidence_row(
+                        "query",
+                        papers[&query.paper_id].len(),
+                        &observed,
+                        &summary,
+                    );
+                    assert_eq!(
+                        [
+                            row.paper_author_list_max_jaccard.to_bits(),
+                            row.paper_author_list_max_containment.to_bits(),
+                            row.paper_author_list_max_overlap_count.to_bits(),
+                            row.local_author_window10_jaccard_max.to_bits(),
+                            row.local_author_window10_overlap_count_max.to_bits(),
+                            row.best_author_count_log_absdiff.to_bits(),
+                        ],
+                        reference_evidence_row(
+                            "query",
+                            papers[&query.paper_id].len(),
+                            &reference_author_signals(
+                                query.position,
+                                &papers[&query.paper_id],
+                                &map
+                            ),
+                            &reference_members,
+                        ),
+                        "paper {:?} position {:?}",
+                        query.paper_id,
+                        query.position
+                    );
+                    checked += 1;
+                }
+                drop(queries);
+                assert_eq!(seeds.papers.len(), 2);
+                assert_eq!(seeds.name_shards, retained_names);
+            }
+        }
+        assert!(checked > 100);
+        // A plan without candidate-bearing queries must not normalize any supplied paper.
+        let queries = seeds.query_tables([], &papers, &map).unwrap();
+        assert!(queries.papers.is_empty());
+        assert!(queries
+            .author_signals(&signature("giant", Some(0)))
+            .is_err());
+        assert_eq!(seeds.name_shards, retained_names);
+    }
+
+    #[test]
+    fn query_ids_remain_correct_when_query_papers_later_become_seed_papers() {
+        // Force all names into one shard, so a later seed really reuses an old
+        // temporary id. Query tables must then allocate above the updated seed range.
+        let names: Vec<String> = (b'a'..=b'z')
+            .flat_map(|first| {
+                (b'a'..=b'z').map(move |last| format!("author {}{}", first as char, last as char))
+            })
+            .filter(|name| name_shard(name) == 0)
+            .take(3)
+            .collect();
+        assert_eq!(names.len(), 3);
+        let papers = HashMap::from([
+            ("seed".to_string(), vec![(0, names[0].clone())]),
+            ("query-a".to_string(), vec![(0, names[1].clone())]),
+            ("query-b".to_string(), vec![(0, names[2].clone())]),
+            (
+                "duplicate-a".to_string(),
+                vec![(0, names[1].clone()), (1, names[1].clone())],
+            ),
+        ]);
+        let map = HashMap::new();
+        let mut seeds = PaperAuthorIndex::default();
+        seeds.extend(["seed"], &papers, &map).unwrap();
+        let cached_seed = seeds.author_signals(&signature("seed", Some(0))).unwrap();
+        let former_query_id = {
+            let queries = seeds
+                .query_tables(["query-a", "duplicate-a", "seed"], &papers, &map)
+                .unwrap();
+            assert_eq!(queries.papers.len(), 2);
+            let a = queries
+                .author_signals(&signature("query-a", Some(0)))
+                .unwrap();
+            let duplicate = queries
+                .author_signals(&signature("duplicate-a", Some(0)))
+                .unwrap();
+            assert_eq!(a.paper_author_names, duplicate.paper_author_names);
+            assert_eq!(
+                duplicate.local10_author_names,
+                a.paper_author_names.as_ref()
+            );
+            let same_paper = queries
+                .author_signals(&signature("seed", Some(10)))
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                &same_paper.paper_author_names,
+                &cached_seed.paper_author_names
+            ));
+            a.paper_author_names[0]
+        };
+        assert_eq!(seeds.name_id(&names[1]), None);
+        seeds.extend(["query-b"], &papers, &map).unwrap();
+        assert_eq!(seeds.name_id(&names[2]), Some(former_query_id));
+        {
+            let queries = seeds
+                .query_tables(["query-a", "query-b"], &papers, &map)
+                .unwrap();
+            assert_eq!(queries.papers.len(), 1);
+            let a = queries
+                .author_signals(&signature("query-a", Some(0)))
+                .unwrap();
+            let b = queries
+                .author_signals(&signature("query-b", Some(0)))
+                .unwrap();
+            assert_ne!(a.paper_author_names, b.paper_author_names);
+            assert_eq!(
+                sorted_intersection_count(&a.paper_author_names, &b.paper_author_names),
+                0
+            );
+            assert_eq!(
+                sorted_intersection_count(&a.paper_author_names, &cached_seed.paper_author_names),
+                0
+            );
+        }
+        seeds.extend(["query-a"], &papers, &map).unwrap();
+        let queries = seeds
+            .query_tables(["query-a", "query-b", "seed"], &papers, &map)
+            .unwrap();
+        assert!(queries.papers.is_empty());
+        let a = queries
+            .author_signals(&signature("query-a", Some(0)))
+            .unwrap();
+        assert_eq!(
+            a.paper_author_names.as_ref(),
+            &[seeds.name_id(&names[1]).unwrap()]
+        );
+        assert_eq!(
+            cached_seed.paper_author_names.as_ref(),
+            &[seeds.name_id(&names[0]).unwrap()]
+        );
+    }
+
+    #[test]
+    fn temporary_name_ids_obey_the_existing_shard_capacity() {
+        let capacity = 1usize << (32 - NAME_SHARD_BITS);
+        assert_eq!(
+            checked_local_name_id(capacity - 1).unwrap(),
+            (capacity - 1) as u32
+        );
+        assert!(checked_local_name_id(capacity).is_err());
     }
 
     #[test]

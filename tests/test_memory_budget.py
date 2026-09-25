@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import builtins
 import json
 import logging
+import os
 from functools import partial
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -95,6 +98,75 @@ def test_current_rss_windows_fallback_used_when_psutil_missing(monkeypatch):
     rss, source = memory_budget.current_rss_bytes_best_effort(10_000_000)
     assert rss == 654_321
     assert source == "winapi:test"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Requires the real Windows process-memory API")
+def test_windows_process_rss_reports_the_real_working_set():
+    rss, source = memory_budget._windows_process_working_set_bytes_best_effort()
+    assert source == "winapi_process_working_set"
+    assert rss is not None and rss > 0
+
+
+@pytest.fixture
+def isolated_psutil_discovery():
+    discover = getattr(memory_budget, "_psutil_module", None)
+    if discover is not None:
+        discover.cache_clear()
+    yield
+    if discover is not None:
+        discover.cache_clear()
+
+
+def test_missing_psutil_is_discovered_once_and_fallback_rss_stays_live(monkeypatch, isolated_psutil_discovery):
+    import_calls = []
+    original_import = builtins.__import__
+
+    def unavailable(name, *args, **kwargs):
+        if name == "psutil":
+            import_calls.append(name)
+            raise ModuleNotFoundError("No module named 'psutil'", name="psutil")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", unavailable)
+    readings = iter((100, 200))
+    monkeypatch.setattr(
+        memory_budget, "_windows_process_working_set_bytes_best_effort", lambda: (next(readings), "winapi:test")
+    )
+    for expected in (100, 200):
+        assert memory_budget._psutil_virtual_memory_total_bytes_best_effort() is None
+        assert memory_budget.current_rss_bytes_best_effort(1_000) == (expected, "winapi:test")
+    assert import_calls == ["psutil"]
+
+
+def test_cached_psutil_keeps_ram_and_scorer_budget_measurements_live(monkeypatch, isolated_psutil_discovery):
+    import_calls = []
+    original_import = builtins.__import__
+    psutil = ModuleType("psutil")
+    total_readings = iter((1_000_000, 2_000_000))
+    rss_readings = iter((200_000, 950_000))
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: SimpleNamespace(total=next(total_readings)), raising=False)
+    monkeypatch.setattr(
+        psutil,
+        "Process",
+        lambda: SimpleNamespace(memory_info=lambda: SimpleNamespace(rss=next(rss_readings))),
+        raising=False,
+    )
+
+    def available(name, *args, **kwargs):
+        if name == "psutil":
+            import_calls.append(name)
+            return psutil
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", available)
+    assert memory_budget.detect_total_ram_bytes_best_effort() == (1_000_000, "psutil.virtual_memory")
+    plan = memory_budget.compute_native_scorer_chunk_plan(row_count=64, feature_count=33, total_ram_bytes=1_000_000)
+    assert plan.chunk_rows == 64
+    assert plan.current_rss_bytes == 200_000
+    assert memory_budget.detect_total_ram_bytes_best_effort() == (2_000_000, "psutil.virtual_memory")
+    with pytest.raises(MemoryError, match="Native LightGBM scorer cannot fit"):
+        memory_budget.compute_native_scorer_chunk_plan(row_count=64, feature_count=33, total_ram_bytes=1_000_000)
+    assert import_calls == ["psutil"]
 
 
 def test_compute_rust_batch_chunk_plan_respects_stage_budget():

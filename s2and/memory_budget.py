@@ -7,7 +7,9 @@ import os
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
+from types import ModuleType
 from typing import Any, cast
 
 logger = logging.getLogger("s2and")
@@ -248,10 +250,24 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def _psutil_virtual_memory_total_bytes_best_effort() -> int | None:
+@cache
+def _psutil_module() -> ModuleType | None:
+    """Discover optional psutil once, including when it is unavailable.
+
+    Only dependency discovery is cached. RAM and RSS are read again for every
+    memory plan so a growing resident matrix still reduces the next budget.
+    """
     try:
         import psutil
-    except Exception:
+    except (ImportError, OSError) as exc:
+        logger.debug("Optional psutil is unavailable: %s", exc)
+        return None
+    return psutil
+
+
+def _psutil_virtual_memory_total_bytes_best_effort() -> int | None:
+    psutil = _psutil_module()
+    if psutil is None:
         return None
     try:
         total = int(psutil.virtual_memory().total)
@@ -263,9 +279,8 @@ def _psutil_virtual_memory_total_bytes_best_effort() -> int | None:
 
 
 def _psutil_process_rss_bytes_best_effort() -> int | None:
-    try:
-        import psutil
-    except Exception:
+    psutil = _psutil_module()
+    if psutil is None:
         return None
     try:
         rss = int(psutil.Process().memory_info().rss)
@@ -369,8 +384,17 @@ def _windows_process_working_set_bytes_best_effort() -> tuple[int | None, str]:
         windll = getattr(ctypes, "windll", None)
         if windll is None:
             return None, "unavailable"
-        process_handle = windll.kernel32.GetCurrentProcess()
-        if not windll.psapi.GetProcessMemoryInfo(process_handle, ctypes.byref(counters), counters.cb):
+        # ctypes otherwise assumes C int arguments/results, truncating HANDLE
+        # on 64-bit Windows. c_void_p accepts this structure's address without
+        # tying the shared function prototype to a per-call Python class.
+        get_current_process = windll.kernel32.GetCurrentProcess
+        get_current_process.argtypes = []
+        get_current_process.restype = wintypes.HANDLE
+        get_memory_info = windll.psapi.GetProcessMemoryInfo
+        get_memory_info.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+        get_memory_info.restype = wintypes.BOOL
+        process_handle = get_current_process()
+        if not get_memory_info(process_handle, ctypes.byref(counters), counters.cb):
             return None, "unavailable"
         rss = int(counters.WorkingSetSize)
         if rss >= 0:

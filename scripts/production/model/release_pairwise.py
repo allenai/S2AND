@@ -1340,7 +1340,6 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
             name_tuples=artifacts.name_tuples.pairs,
         )
         true_clusters = dataset.construct_cluster_to_signatures(blocks)
-        predicted: dict[str, Any] = {}
         with _release_rust_featurizer(
             Path(args.arrow_root),
             name,
@@ -1354,19 +1353,17 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
                 dataset.cluster_seeds_require,
                 dataset.cluster_seeds_disallow,
             )
-            # One block at a time keeps distance residency at the largest block, as fused predict did.
-            for block_key, block_signatures in blocks.items():
-                block = {block_key: block_signatures}
-                block_distances = clusterer.make_distance_matrices_from_rust_featurizer(
-                    block,
-                    seeded_featurizer,
-                    total_ram_bytes=None,
-                )
-                block_predicted, _ = clusterer.predict(block, dataset, dists=block_distances, total_ram_bytes=None)
-                if predicted.keys() & block_predicted.keys():
-                    raise RuntimeError(f"Cluster evaluation for {name!r} produced duplicate cluster ids")
-                predicted.update(block_predicted)
-                del block_distances
+            # The native bridge reuses one signature index while releasing each block's distances.
+            # Required seeds come from the overlay. Explicit disallows also protect posthoc seed
+            # merges, but must not become distance overrides when default constraints are disabled.
+            predicted, _ = clusterer.predict_from_rust_featurizer(
+                blocks,
+                seeded_featurizer,
+                cluster_seeds_disallow=(
+                    dataset.cluster_seeds_disallow if clusterer.use_default_constraints_as_supervision else None
+                ),
+                total_ram_bytes=None,
+            )
         metrics[name] = _b3_report(true_clusters, predicted)
         dataset_reports[name] = {"metrics": metrics[name]}
     report = {

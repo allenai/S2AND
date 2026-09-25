@@ -583,14 +583,40 @@ full export.
 Pairwise training, EPS calibration, and held-out pair and cluster evaluation need
 one Arrow conversion of each plan dataset's exact JSON files, under the root each
 command receives as `--arrow-root`. Convert every model-plan dataset, including
-`augmented`, into a working root that is not published. Stage the same files the
-plan names, including the joined canonical-name signatures, in benchmark layout
+`augmented`, into a working root that is not published. Stage only the plan's
+feature-source files, including the joined canonical-name signatures, in benchmark layout
 (`<root>/<dataset>/<dataset>_signatures.json`, `_papers.json`, `_specter2.pkl`,
-optional `_clusters.json`):
+optional `_clusters.json`). Keep `train_pairs.csv` and `val_pairs.csv` at their
+original model-plan paths; the trainer reads them there. Do not copy pair-label
+files into this private feature-source root: benchmark conversion otherwise
+requires a complete public fixed-pair dataset, including `test_pairs.csv`, while
+the augmented join intentionally exports held-out pairs as `test_pairs.json`.
+The frozen `model_plan.json` contains absolute paths to the reviewed source files.
 
 ```powershell
+$ReleaseFeatureSourceRoot = "$RunRoot\stages\release_feature_sources"
+New-Item -ItemType Directory -Path $ReleaseFeatureSourceRoot -ErrorAction Stop | Out-Null
+$ModelPlan = Get-Content -LiteralPath "$RunRoot\model_plan.json" -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+foreach ($DatasetInput in $ModelPlan.datasets.PSObject.Properties) {
+  $DatasetName = $DatasetInput.Name
+  $StagedDataset = Join-Path $ReleaseFeatureSourceRoot $DatasetName
+  New-Item -ItemType Directory -Path $StagedDataset -ErrorAction Stop | Out-Null
+  $FeatureFilenames = @{
+    signatures = "${DatasetName}_signatures.json"
+    papers = "${DatasetName}_papers.json"
+    specter_embeddings = "${DatasetName}_specter2.pkl"
+    clusters = "${DatasetName}_clusters.json"
+  }
+  foreach ($Role in $FeatureFilenames.Keys) {
+    $SourceSpec = $DatasetInput.Value.PSObject.Properties[$Role]
+    if ($null -ne $SourceSpec) {
+      Copy-Item -LiteralPath $SourceSpec.Value.path `
+        -Destination (Join-Path $StagedDataset $FeatureFilenames[$Role]) -ErrorAction Stop
+    }
+  }
+}
 uv run python scripts/convert_to_arrow.py benchmark `
-  --source-root REVIEWED_MODEL_PLAN_SOURCE_ROOT `
+  --source-root $ReleaseFeatureSourceRoot `
   --output-root "$RunRoot\stages\release_arrow" `
   --datasets aminer arnetminer inspire kisti pubmed qian zbmath augmented `
   --name-counts-index-root $NameCountsIndex `

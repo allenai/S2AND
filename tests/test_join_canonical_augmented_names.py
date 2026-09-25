@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import pickle
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,15 @@ from typing import Any
 import pytest
 
 import scripts.convert_to_arrow as convert_to_arrow
+from s2and._sha256 import sha256_file
+from s2and.arrow_inputs import ArrowDataset
+from s2and.arrow_provenance import verify_conversion_provenance
+from s2and.data import ANDData
+from s2and.featurizer import DEFAULT_FEATURE_GROUPS, DEFAULT_NAMELESS_FEATURE_GROUPS, FeaturizationInfo
+from s2and.name_tuple_artifact import load_name_tuple_artifact
+from s2and.production_training_contract import load_model_plan
+from scripts.production.model import train_pairwise
+from tests.pairwise_release_helpers import write_pairwise_artifacts, write_pairwise_dataset
 
 
 def _signature(signature_id: str, first: str | None, middle: str | None, last: str) -> dict[str, Any]:
@@ -23,6 +34,8 @@ def _signature(signature_id: str, first: str | None, middle: str | None, last: s
             "position": 0,
             "block": "j kim",
             "affiliations": ["Lab"],
+            "suffix": None,
+            "email": None,
         },
     }
 
@@ -206,6 +219,114 @@ def test_augmented_join_cli_writes_release_ready_inputs(tmp_path: Path, monkeypa
     }
     assert report["drop_sources"] == ["orcid"]
     assert not list(tmp_path.glob(".joined.staging-*"))
+
+
+def test_joined_augmented_feature_only_staging_converts_and_selects_frozen_training_pairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow the private release runbook without requiring or reading held-out CSV labels."""
+
+    joined = tmp_path / "joined"
+    _run_cli(monkeypatch, _write_inputs(tmp_path), joined)
+    originals = write_pairwise_dataset(tmp_path / "papers", name="augmented")
+    paper = next(iter(json.loads(originals["papers"].read_text(encoding="utf-8")).values()))
+    paper["paper_id"] = "1"
+    originals["papers"].write_text(json.dumps({"1": paper}), encoding="utf-8")
+    with originals["specter_embeddings"].open("rb") as source:
+        embedding = next(iter(pickle.load(source).values()))
+    with originals["specter_embeddings"].open("wb") as output:
+        pickle.dump({"1": embedding}, output)
+    files = {
+        "signatures": joined / "augmented_signatures.json",
+        "papers": originals["papers"],
+        "specter_embeddings": originals["specter_embeddings"],
+        "train_pairs": joined / "train_pairs.csv",
+        "val_pairs": joined / "val_pairs.csv",
+    }
+    plan_path = tmp_path / "model_plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "release_version": "1.3",
+                "datasets": {
+                    "augmented": {
+                        role: {"path": str(path.resolve()), "sha256": sha256_file(path)} for role, path in files.items()
+                    }
+                },
+                "eps": {"grid": [0.5], "minimum_dataset_f1": 0.0, "minimum_signature_weighted_f1": 0.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan = load_model_plan(plan_path)
+    model_input = plan.datasets["augmented"]
+    staged = tmp_path / "release_feature_sources" / "augmented"
+    staged.mkdir(parents=True)
+    # These are the explicit feature-source roles copied by the release runbook.
+    for role, filename in (
+        ("signatures", "augmented_signatures.json"),
+        ("papers", "augmented_papers.json"),
+        ("specter_embeddings", "augmented_specter2.pkl"),
+    ):
+        shutil.copyfile(model_input.files[role], staged / filename)
+    assert sorted(path.suffix for path in staged.iterdir()) == [".json", ".json", ".pkl"]
+    # The converter and selection authority must not need held-out answers after the join.
+    (joined / "test_pairs.json").write_text("not read during feature conversion or training", encoding="utf-8")
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    tuple_path, counts_path, _ = write_pairwise_artifacts(artifact_root)
+    arrow_root = tmp_path / "arrow"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "convert_to_arrow.py",
+            "benchmark",
+            "--source-root",
+            str(staged.parent),
+            "--output-root",
+            str(arrow_root),
+            "--datasets",
+            "augmented",
+            "--name-counts-index-root",
+            str(counts_path),
+            "--n-jobs",
+            "1",
+        ],
+    )
+    convert_to_arrow.main()
+    verify_conversion_provenance(
+        arrow_root / "augmented",
+        expected_source_sha256={role: model_input.sha256[role] for role in train_pairwise.ARROW_SOURCE_ROLES},
+    )
+    selection = ANDData(
+        signatures=str(model_input.files["signatures"]),
+        papers=str(model_input.files["papers"]),
+        train_pairs=str(model_input.files["train_pairs"]),
+        val_pairs=str(model_input.files["val_pairs"]),
+        name="augmented",
+        mode="train",
+        name_counts_index=None,
+        name_tuples=load_name_tuple_artifact(tuple_path).pairs,
+        preprocess=False,
+        n_jobs=1,
+    )
+    with ArrowDataset.open(arrow_root / "augmented", require_specter=True, require_name_counts_index=True) as arrow:
+        assert arrow.name_counts_index is not None
+        train, validation = train_pairwise._featurize_selection(
+            selection,
+            arrow,
+            FeaturizationInfo(features_to_use=list(DEFAULT_FEATURE_GROUPS)),
+            name_counts_manifest_sha256=arrow.name_counts_index.manifest_sha256,
+            nameless_featurizer_info=FeaturizationInfo(features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS)),
+            n_jobs=1,
+            total_ram_bytes=None,
+        )
+    assert train[0].shape[0] == 2 and validation[0].shape[0] == 1
+    assert train[1].tolist() == [0.0, 1.0]
+    assert validation[1].tolist() == [0.0]
+    for role in ("train_pairs", "val_pairs"):
+        assert sha256_file(model_input.files[role]) == model_input.sha256[role]
 
 
 @pytest.mark.parametrize(

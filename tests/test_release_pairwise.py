@@ -864,31 +864,23 @@ def _patch_evaluation_model(
     monkeypatch: pytest.MonkeyPatch,
     events: list[str],
 ) -> argparse.Namespace:
-    distance_calls: list[tuple[dict[str, list[str]], int | None]] = []
-
-    def make_distances(
-        blocks: dict[str, list[str]],
-        _featurizer: Any,
-        total_ram_bytes: int | None = None,
-    ) -> dict[str, object]:
-        distance_calls.append((blocks, total_ram_bytes))
-        return {key: object() for key in blocks}
+    prediction_calls: list[tuple[dict[str, list[str]], set[tuple[str, str]] | None, int | None]] = []
 
     def predict(
         blocks: dict[str, list[str]],
-        _dataset: Any,
-        dists: dict[str, object] | None = None,
+        _featurizer: Any,
+        cluster_seeds_disallow: set[tuple[str, str]] | None = None,
         total_ram_bytes: int | None = None,
     ) -> tuple[dict[str, list[str]], None]:
-        assert dists is not None and set(dists) == set(blocks)
+        prediction_calls.append((blocks, cluster_seeds_disallow, total_ram_bytes))
         assert total_ram_bytes is None
         return {f"predicted-{key}": signatures for key, signatures in blocks.items()}, None
 
     model = argparse.Namespace(
         n_jobs=1,
-        distance_calls=distance_calls,
-        make_distance_matrices_from_rust_featurizer=make_distances,
-        predict=predict,
+        use_default_constraints_as_supervision=True,
+        prediction_calls=prediction_calls,
+        predict_from_rust_featurizer=predict,
     )
     monkeypatch.setattr(
         release_pairwise,
@@ -949,15 +941,18 @@ def test_pair_evaluator_loads_complete_model_before_plan_and_ignores_cluster_dig
     }
 
 
+@pytest.mark.parametrize("constraints_enabled", [True, False])
 def test_cluster_evaluator_loads_complete_model_before_plan_and_ignores_pair_digest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    constraints_enabled: bool,
 ) -> None:
     fixture = _release_fixture(tmp_path)
     _, evaluation_plan = _prepare(fixture)
     _write_json(Path(fixture.pairwise["fixed"]["pairs"]), [{"changed": True}])
     events: list[str] = []
     model = _patch_evaluation_model(monkeypatch, events)
+    model.use_default_constraints_as_supervision = constraints_enabled
     real_load = release_pairwise._load_evaluation_plan
     monkeypatch.setattr(
         release_pairwise,
@@ -989,8 +984,7 @@ def test_cluster_evaluator_loads_complete_model_before_plan_and_ignores_pair_dig
     assert report["signature_weighted"]["f1"] == 1.0
     assert [call["source_sha256"] for call in featurizer_calls] == [_source_digests(fixture.cluster["random"])]
     assert [call["signature_ids"] for call in featurizer_calls] == [{"ct1", "ct2"}]
-    # Block by block, with the evaluator's autodetected RAM budget, as fused predict did.
-    assert model.distance_calls == [({"b": ["ct1", "ct2"]}, None)]
+    assert model.prediction_calls == [({"b": ["ct1", "ct2"]}, {("ct1", "ct2")} if constraints_enabled else None, None)]
 
 
 def test_pairwise_predictions_forward_the_ram_budget_to_rust_featurization(

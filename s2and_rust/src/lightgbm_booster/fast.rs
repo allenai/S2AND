@@ -9,8 +9,9 @@
 //! - each feature has at most [`MAX_KEY_THRESHOLDS`] distinct thresholds;
 //! - every tree has at most [`MAX_LOCKSTEP_LEAVES`] leaves.
 //!
-//! Dispatch is per model, never per tree: QuickScorer when every tree has at
-//! most [`MAX_QUICKSCORER_LEAVES`] leaves, otherwise lockstep traversal.
+//! Dispatch is per model, never per tree. A single constant or stump uses the
+//! baseline; otherwise QuickScorer handles models whose trees all have at most
+//! [`MAX_QUICKSCORER_LEAVES`] leaves, and larger trees use lockstep traversal.
 //!
 //! Why the scores are bit-identical to the baseline:
 //! - **Bin keys.** Each feature's distinct thresholds form a strictly
@@ -115,7 +116,9 @@ impl FastPlan {
             }
             max_leaves = max_leaves.max(tree.num_leaves);
         }
-        if max_leaves > MAX_LOCKSTEP_LEAVES {
+        // A single constant or stump needs at most one split per row. Building
+        // keys and kernel state costs more than the direct baseline traversal.
+        if max_leaves > MAX_LOCKSTEP_LEAVES || (model.trees.len() == 1 && max_leaves <= 2) {
             return None;
         }
         let keys = KeyTable::build(model)?;
@@ -218,6 +221,8 @@ pub(super) fn is_proper_tree(tree: &LgbTree) -> bool {
 #[derive(Debug, Clone)]
 struct KeyTable {
     num_features: usize,
+    /// Original feature indices that appear in at least one split.
+    used_features: Vec<usize>,
     /// Per feature: strictly increasing, non-NaN, at most `MAX_KEY_THRESHOLDS`.
     thresholds: Vec<Vec<f64>>,
 }
@@ -240,8 +245,14 @@ impl KeyTable {
                 return None;
             }
         }
+        let used_features = thresholds
+            .iter()
+            .enumerate()
+            .filter_map(|(feature, list)| (!list.is_empty()).then_some(feature))
+            .collect();
         Some(Self {
             num_features: model.num_features,
+            used_features,
             thresholds,
         })
     }
@@ -300,6 +311,8 @@ pub(super) struct QuickScorer {
     entries: Vec<(u32, u32)>,
     /// `entries` range of each key slot; `2 * num_features + 1` entries.
     slot_offsets: Vec<usize>,
+    /// Key slots with nodes; unused features and unused NaN directions are skipped.
+    active_slots: Vec<usize>,
     /// `slot * KEY_VALUES + key`: how many of the slot's entries send `key` right.
     right_prefix: Vec<u32>,
     /// In-order leaf values per tree.
@@ -327,8 +340,12 @@ impl QuickScorer {
         }
         let mut entries = Vec::new();
         let mut slot_offsets = vec![0usize];
+        let mut active_slots = Vec::new();
         let mut right_prefix = Vec::with_capacity(slot_count * KEY_VALUES);
-        for mut list in per_slot {
+        for (slot, mut list) in per_slot.into_iter().enumerate() {
+            if !list.is_empty() {
+                active_slots.push(slot);
+            }
             list.sort_by_key(|&(hi, _, _)| hi);
             for key in 0..KEY_VALUES {
                 let sent_right = list.partition_point(|&(hi, _, _)| usize::from(hi) < key);
@@ -341,6 +358,7 @@ impl QuickScorer {
             keys,
             entries,
             slot_offsets,
+            active_slots,
             right_prefix,
             leaves,
         })
@@ -348,53 +366,81 @@ impl QuickScorer {
 
     fn score_tile<F: FeatureValue>(&self, tile: &[F], margins: &mut [f64]) {
         let num_features = self.keys.num_features;
-        let row_count = margins.len();
         let mut state = vec![[u32::MAX; QUICKSCORER_ROWS]; self.leaves.len()];
         let mut lane_keys = [[0u8; 2 * MAX_FAST_FEATURES]; QUICKSCORER_ROWS];
-        for base in (0..row_count).step_by(QUICKSCORER_ROWS) {
-            // Padding lanes past the tile end repeat its last row; their
-            // results are discarded.
-            for (lane, keys) in lane_keys.iter_mut().enumerate() {
-                let row_index = (base + lane).min(row_count - 1);
-                let row = &tile[row_index * num_features..][..num_features];
-                for (feature, value) in row.iter().enumerate() {
-                    let (nan_left, nan_right) = self.keys.keys(feature, value.widen());
-                    keys[feature] = nan_left;
-                    keys[num_features + feature] = nan_right;
-                }
-            }
-            state.fill([u32::MAX; QUICKSCORER_ROWS]);
-            for (slot, bounds) in self.slot_offsets.windows(2).enumerate() {
-                let entries = &self.entries[bounds[0]..bounds[1]];
-                let prefix = &self.right_prefix[slot * KEY_VALUES..][..KEY_VALUES];
-                // u32 lane bounds keep the per-lane select below vectorizable.
-                let ends: [u32; QUICKSCORER_ROWS] =
-                    std::array::from_fn(|lane| prefix[usize::from(lane_keys[lane][slot])]);
-                let shared = ends.iter().copied().min().unwrap_or(0) as usize;
-                let any = ends.iter().copied().max().unwrap_or(0) as usize;
-                for &(tree, mask) in &entries[..shared] {
-                    for word in &mut state[tree as usize] {
-                        *word &= mask;
-                    }
-                }
-                for (position, &(tree, mask)) in (shared as u32..).zip(&entries[shared..any]) {
-                    let words = &mut state[tree as usize];
-                    for (word, end) in words.iter_mut().zip(ends) {
-                        *word &= if position < end { mask } else { u32::MAX };
-                    }
-                }
-            }
-            // One add chain per row, in tree order, starting at 0.0.
-            let mut raw = [0.0f64; QUICKSCORER_ROWS];
-            for (words, tree_leaves) in state.iter().zip(&self.leaves) {
-                for (sum, word) in raw.iter_mut().zip(words) {
-                    *sum += tree_leaves[word.trailing_zeros() as usize];
-                }
-            }
-            for (margin, sum) in margins[base..].iter_mut().zip(raw) {
-                *margin = sum;
+        let full_rows = margins.len() / QUICKSCORER_ROWS * QUICKSCORER_ROWS;
+        let (full_tile, tail_tile) = tile.split_at(full_rows * num_features);
+        let (full_margins, tail_margins) = margins.split_at_mut(full_rows);
+        for (rows, scores) in full_tile
+            .chunks_exact(num_features * QUICKSCORER_ROWS)
+            .zip(full_margins.chunks_exact_mut(QUICKSCORER_ROWS))
+        {
+            self.score_group::<F, true>(rows, scores, &mut state, &mut lane_keys);
+        }
+        if !tail_margins.is_empty() {
+            self.score_group::<F, false>(tail_tile, tail_margins, &mut state, &mut lane_keys);
+        }
+    }
+
+    /// Keep full groups statically sized for vectorization; tails do no work for padding.
+    #[inline]
+    fn score_group<F: FeatureValue, const FULL: bool>(
+        &self,
+        rows: &[F],
+        margins: &mut [f64],
+        state: &mut [[u32; QUICKSCORER_ROWS]],
+        lane_keys: &mut [[u8; 2 * MAX_FAST_FEATURES]; QUICKSCORER_ROWS],
+    ) {
+        let lanes = if FULL {
+            QUICKSCORER_ROWS
+        } else {
+            margins.len()
+        };
+        let num_features = self.keys.num_features;
+        for (row, keys) in rows.chunks_exact(num_features).zip(&mut lane_keys[..lanes]) {
+            for &feature in &self.keys.used_features {
+                let (nan_left, nan_right) = self.keys.keys(feature, row[feature].widen());
+                keys[feature] = nan_left;
+                keys[num_features + feature] = nan_right;
             }
         }
+        if FULL {
+            state.fill([u32::MAX; QUICKSCORER_ROWS]);
+        } else {
+            for words in state.iter_mut() {
+                words[..lanes].fill(u32::MAX);
+            }
+        }
+        for &slot in &self.active_slots {
+            let entries = &self.entries[self.slot_offsets[slot]..self.slot_offsets[slot + 1]];
+            let prefix = &self.right_prefix[slot * KEY_VALUES..][..KEY_VALUES];
+            // u32 lane bounds keep the per-lane select below vectorizable.
+            let mut ends = [0u32; QUICKSCORER_ROWS];
+            for (end, keys) in ends[..lanes].iter_mut().zip(&lane_keys[..lanes]) {
+                *end = prefix[usize::from(keys[slot])];
+            }
+            let shared = ends[..lanes].iter().copied().min().unwrap_or(0) as usize;
+            let any = ends[..lanes].iter().copied().max().unwrap_or(0) as usize;
+            for &(tree, mask) in &entries[..shared] {
+                for word in &mut state[tree as usize][..lanes] {
+                    *word &= mask;
+                }
+            }
+            for (position, &(tree, mask)) in (shared as u32..).zip(&entries[shared..any]) {
+                let words = &mut state[tree as usize];
+                for (word, &end) in words[..lanes].iter_mut().zip(&ends[..lanes]) {
+                    *word &= if position < end { mask } else { u32::MAX };
+                }
+            }
+        }
+        // One add chain per row, in tree order, starting at 0.0.
+        let mut raw = [0.0f64; QUICKSCORER_ROWS];
+        for (words, tree_leaves) in state.iter().zip(&self.leaves) {
+            for (sum, word) in raw[..lanes].iter_mut().zip(words) {
+                *sum += tree_leaves[word.trailing_zeros() as usize];
+            }
+        }
+        margins.copy_from_slice(&raw[..lanes]);
     }
 }
 
@@ -536,50 +582,71 @@ impl Lockstep {
         let num_features = self.keys.num_features;
         let row_count = margins.len();
         let key_block = 2 * num_features * LOCKSTEP_LANES;
-        // Padding lanes of a partial last group keep key 0 and are discarded.
+        // Retain the validated key stride, but never traverse padding lanes.
         let mut keys = vec![0u8; row_count.div_ceil(LOCKSTEP_LANES) * key_block];
         for (row_index, row) in tile.chunks_exact(num_features).take(row_count).enumerate() {
             let group = &mut keys[(row_index / LOCKSTEP_LANES) * key_block..][..key_block];
             let lane = row_index % LOCKSTEP_LANES;
-            for (feature, value) in row.iter().enumerate() {
-                let (nan_left, nan_right) = self.keys.keys(feature, value.widen());
+            for &feature in &self.keys.used_features {
+                let (nan_left, nan_right) = self.keys.keys(feature, row[feature].widen());
                 group[feature * LOCKSTEP_LANES + lane] = nan_left;
                 group[(num_features + feature) * LOCKSTEP_LANES + lane] = nan_right;
             }
         }
+        let full_rows = row_count / LOCKSTEP_LANES * LOCKSTEP_LANES;
+        let full_keys = full_rows / LOCKSTEP_LANES * key_block;
         for &(first_node, first_leaf) in &self.trees {
-            for (group_index, group) in keys.chunks_exact(key_block).enumerate() {
-                let mut lanes = [first_node; LOCKSTEP_LANES];
-                loop {
-                    let mut moved = 0usize;
-                    for (lane, index) in lanes.iter_mut().enumerate() {
-                        // SAFETY: `invariants_hold` proved at construction that
-                        // walks from `first_node` stay inside this tree's node
-                        // range and that key offsets plus any lane stay inside
-                        // one `key_block`-sized group.
-                        let (word, key) = unsafe {
-                            let word = *self.nodes.get_unchecked(*index);
-                            let key_offset = usize::from((word >> 16) as u16);
-                            (word, *group.get_unchecked(key_offset + lane))
-                        };
-                        let next = (word >> 32) as usize + usize::from(key > word as u8);
-                        moved |= next ^ *index;
-                        *index = next;
-                    }
-                    if moved == 0 {
-                        break;
-                    }
-                }
-                let base = group_index * LOCKSTEP_LANES;
-                for (margin, &index) in margins[base..].iter_mut().zip(&lanes) {
-                    // SAFETY: no lane moved, so every lane is on a leaf, whose
-                    // leaf index `invariants_hold` bounded by this tree's leaves.
-                    *margin += unsafe {
-                        let leaf = usize::from((*self.nodes.get_unchecked(index) >> 8) as u8);
-                        *self.leaves.get_unchecked(first_leaf + leaf)
-                    };
-                }
+            let (full_margins, tail_margins) = margins.split_at_mut(full_rows);
+            for (group, scores) in keys[..full_keys]
+                .chunks_exact(key_block)
+                .zip(full_margins.chunks_exact_mut(LOCKSTEP_LANES))
+            {
+                self.score_group::<true>(group, scores, first_node, first_leaf);
             }
+            if !tail_margins.is_empty() {
+                self.score_group::<false>(&keys[full_keys..], tail_margins, first_node, first_leaf);
+            }
+        }
+    }
+
+    #[inline]
+    fn score_group<const FULL: bool>(
+        &self,
+        group: &[u8],
+        margins: &mut [f64],
+        first_node: usize,
+        first_leaf: usize,
+    ) {
+        let lane_count = if FULL { LOCKSTEP_LANES } else { margins.len() };
+        let mut lanes = [first_node; LOCKSTEP_LANES];
+        loop {
+            let mut moved = 0usize;
+            for (lane, index) in lanes[..lane_count].iter_mut().enumerate() {
+                // SAFETY: `invariants_hold` proved at construction that
+                // walks from `first_node` stay inside this tree's node
+                // range and that key offsets plus any lane stay inside
+                // one `key_block`-sized group. Partial groups use fewer lanes
+                // without changing that validated key stride.
+                let (word, key) = unsafe {
+                    let word = *self.nodes.get_unchecked(*index);
+                    let key_offset = usize::from((word >> 16) as u16);
+                    (word, *group.get_unchecked(key_offset + lane))
+                };
+                let next = (word >> 32) as usize + usize::from(key > word as u8);
+                moved |= next ^ *index;
+                *index = next;
+            }
+            if moved == 0 {
+                break;
+            }
+        }
+        for (margin, &index) in margins.iter_mut().zip(&lanes[..lane_count]) {
+            // SAFETY: no active lane moved, so each is on a leaf, whose
+            // leaf index `invariants_hold` bounded by this tree's leaves.
+            *margin += unsafe {
+                let leaf = usize::from((*self.nodes.get_unchecked(index) >> 8) as u8);
+                *self.leaves.get_unchecked(first_leaf + leaf)
+            };
         }
     }
 }

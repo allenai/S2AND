@@ -139,8 +139,8 @@ struct ReusableRawArrowCandidatePlanState {
     features_by_signature_id: HashMap<String, RawArrowFeature>,
     signatures: HashMap<String, RawArrowSignature>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
-    /// Interned author names of the seed and query papers compared so far.
-    author_index: PaperAuthorIndex,
+    /// Interned author names of seed papers needed by candidate summaries.
+    seed_author_index: PaperAuthorIndex,
     raw_name_counts: RawNameCountMaps,
     members_by_component: HashMap<String, Vec<String>>,
     component_keys_by_member: HashMap<String, Vec<String>>,
@@ -929,7 +929,7 @@ impl RawBlockQueryCandidatePlanner {
                 features_by_signature_id,
                 signatures,
                 paper_authors,
-                author_index: PaperAuthorIndex::default(),
+                seed_author_index: PaperAuthorIndex::default(),
                 raw_name_counts,
                 members_by_component,
                 component_keys_by_member,
@@ -1458,24 +1458,38 @@ impl RawBlockQueryCandidatePlanner {
             .filter_map(|signature_id| self.state.signatures.get(signature_id))
             .map(|signature| signature.paper_id.as_str())
             .collect();
+        // Only rows with candidates need author-list evidence. Keep their
+        // query-only papers local to this plan, including their interned names.
+        let query_paper_ids_with_rows: Vec<&str> = query_results
+            .iter()
+            .flatten()
+            .flat_map(|result| result.row_query_signature_indices.iter())
+            .filter_map(|index| query_signature_ids.get(*index as usize))
+            .filter_map(|signature_id| query_inputs.signatures.get(signature_id))
+            .map(|signature| signature.paper_id.as_str())
+            .collect();
         py.allow_threads(|| {
             install_with_optional_rayon_pool(self.num_threads, || {
-                self.state.author_index.extend(
+                self.state.seed_author_index.extend(
                     retrieved_member_paper_ids,
                     &self.state.paper_authors,
-                    &self.state.unidecode_char_map,
-                )?;
-                self.state.author_index.extend(
-                    query_inputs
-                        .signatures
-                        .values()
-                        .map(|signature| signature.paper_id.as_str()),
-                    &query_inputs.paper_authors,
                     &self.state.unidecode_char_map,
                 )
             })
         })
         .map_err(pyo3::exceptions::PyKeyError::new_err)?;
+        // Finish seed interning before borrowing it for temporary query ids.
+        let query_author_tables = py
+            .allow_threads(|| {
+                install_with_optional_rayon_pool(self.num_threads, || {
+                    self.state.seed_author_index.query_tables(
+                        query_paper_ids_with_rows,
+                        &query_inputs.paper_authors,
+                        &self.state.unidecode_char_map,
+                    )
+                })
+            })
+            .map_err(pyo3::exceptions::PyKeyError::new_err)?;
         for query_result in query_results {
             let mut query_result = query_result.map_err(retrieval_error_to_py)?;
             let base_row_index = u32::try_from(row_component_keys.len()).map_err(|_| {
@@ -1545,7 +1559,7 @@ impl RawBlockQueryCandidatePlanner {
                         members_by_component,
                         &self.state.features_by_signature_id,
                         &self.state.signatures,
-                        &self.state.author_index,
+                        &self.state.seed_author_index,
                     )?
                 } else {
                     raw_arrow_summary_signals_cached(
@@ -1554,7 +1568,7 @@ impl RawBlockQueryCandidatePlanner {
                         members_by_component,
                         &self.state.features_by_signature_id,
                         &self.state.signatures,
-                        &self.state.author_index,
+                        &self.state.seed_author_index,
                     )?
                 };
                 let rarity = raw_arrow_name_count_rarity_row(
@@ -1575,9 +1589,7 @@ impl RawBlockQueryCandidatePlanner {
                                 query_signature_id
                             ))
                         })?;
-                    let author_signals = self
-                        .state
-                        .author_index
+                    let author_signals = query_author_tables
                         .author_signals(query_signature)
                         .map_err(pyo3::exceptions::PyKeyError::new_err)?;
                     entry.insert(author_signals);

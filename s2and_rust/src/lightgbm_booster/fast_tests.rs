@@ -473,6 +473,66 @@ fn random_models_match_baseline() {
 }
 
 #[test]
+fn sparse_features_and_every_partial_group_match_baseline() {
+    let num_features = 256;
+    // Leave feature 0 unused: lockstep leaf pseudo-nodes can still read its
+    // zero-initialized key because their compare bound never moves them.
+    let small = split(255, 0.5, 8, Node::Leaf(-0.25), Node::Leaf(0.75));
+    let mut deep_left = Node::Leaf(-1.0);
+    for depth in (0..32).rev() {
+        deep_left = split(
+            255,
+            depth as f64 + 1.0,
+            10,
+            deep_left,
+            Node::Leaf(depth as f64 * 0.125),
+        );
+    }
+    for (kernel, trees) in [
+        ("quickscorer", vec![small.clone(), Node::Leaf(0.125)]),
+        ("lockstep", vec![small, deep_left, Node::Leaf(0.125)]),
+        ("quickscorer", vec![Node::Leaf(0.25), Node::Leaf(-0.125)]),
+    ] {
+        let model = parse(num_features, &trees);
+        let plan = FastPlan::build(&model).unwrap();
+        assert_eq!(plan.kernel_name(), kernel);
+        for tail in 1..16 {
+            // Include full groups before every possible QuickScorer tail;
+            // this also covers every lockstep tail. Unused inputs include
+            // NaNs/infinities/zero-window values and must not affect scoring.
+            let row_count = 16 + tail;
+            let specials = special_values();
+            let rows: Vec<f64> = (0..row_count)
+                .flat_map(|row| {
+                    let specials = &specials;
+                    (0..num_features).map(move |feature| {
+                        if feature == 255 {
+                            if row < 16 {
+                                [-2.0, 0.5, 2.5, f64::NAN][row % 4]
+                            } else {
+                                // Actual tail rows exit the deep tree at its
+                                // root; artificial key-0 lanes would walk all
+                                // 32 levels of its left branch.
+                                100.0
+                            }
+                        } else {
+                            specials[(row + feature) % specials.len()]
+                        }
+                    })
+                })
+                .collect();
+            assert_matches_baseline(&model, &plan, &rows, &format!("{kernel} tail={tail}"));
+            assert_matches_baseline(
+                &model,
+                &plan,
+                &rows[16 * num_features..],
+                &format!("{kernel} standalone tail={tail}"),
+            );
+        }
+    }
+}
+
+#[test]
 fn leaf_limits_select_kernels() {
     // At most 128 distinct thresholds, so only the leaf count can fall back.
     let chain_thresholds = |leaves: usize| -> Vec<f64> {
@@ -513,6 +573,17 @@ fn leaf_limits_select_kernels() {
         );
         let model = parse(3, &[tree.clone(), tree]);
         check_kernel(&model, kernel, true, &format!("balanced depth={depth}"));
+    }
+}
+
+#[test]
+fn single_tree_constants_and_stumps_use_baseline() {
+    for tree in [
+        Node::Leaf(0.25),
+        split(5, 0.5, 10, Node::Leaf(1.5), Node::Leaf(-2.25)),
+    ] {
+        let booster = RustLightGBMBooster::from_model_text(&model_text(6, &[tree])).unwrap();
+        assert!(booster.fast_plan.is_none());
     }
 }
 
@@ -774,7 +845,8 @@ fn mixed_leaf_counts_dispatch_per_model() {
 
 #[test]
 fn booster_attaches_and_copies_fast_plan() {
-    let text = model_text(2, &[split(0, 0.5, 10, Node::Leaf(1.0), Node::Leaf(2.0))]);
+    let tree = split(0, 0.5, 10, Node::Leaf(1.0), Node::Leaf(2.0));
+    let text = model_text(2, &[tree.clone(), tree]);
     let booster = RustLightGBMBooster::from_model_text(&text).unwrap();
     assert_eq!(
         booster.fast_plan.as_ref().map(FastPlan::kernel_name),

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import json
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,6 +13,7 @@ import numpy as np
 import pytest
 from lightgbm import LGBMClassifier
 
+from s2and import model as model_module
 from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_provenance import ArrowProvenanceError, verify_conversion_provenance
 from s2and.data import ANDData
@@ -294,6 +297,131 @@ def test_subset_featurizer_matches_a_full_build_bit_for_bit(release_inputs: dict
             for featurizer in (full, subset)
         ]
     np.testing.assert_array_equal(distances[1].view(np.uint64), distances[0].view(np.uint64))
+
+
+@pytest.mark.parametrize("constraints_enabled", [True, False])
+@pytest.mark.parametrize("dont_merge_seeds", [True, False])
+def test_cluster_release_reuses_index_and_preserves_seed_policy_and_block_order(
+    release_inputs: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    constraints_enabled: bool,
+    dont_merge_seeds: bool,
+) -> None:
+    """The actual release route matches its old loop and frees each consumed block matrix."""
+
+    reference, dataset, train_pairs, _ = _selections(release_inputs)
+    features, labels, nameless = _python_features(train_pairs, reference)
+    classifiers = [
+        LGBMClassifier(n_estimators=25, num_leaves=3, min_child_samples=1, n_jobs=1, verbose=-1, random_state=0).fit(
+            matrix, labels
+        )
+        for matrix in (features, nameless)
+    ]
+    clusterer = Clusterer(
+        MAIN_INFO,
+        classifiers[0],
+        cluster_model=FastCluster(linkage="average", eps=0.5),
+        n_jobs=1,
+        nameless_classifier=classifiers[1],
+        nameless_featurizer_info=NAMELESS_INFO,
+        use_default_constraints_as_supervision=constraints_enabled,
+        dont_merge_cluster_seeds=dont_merge_seeds,
+    )
+    assert reference.name_counts_manifest_sha256 is not None
+    clusterer.feature_contract = {
+        "name_counts_manifest_sha256": reference.name_counts_manifest_sha256,
+        "name_counts_last_first_initial_semantics": "initial_char",
+    }
+    all_blocks = dataset.get_blocks()
+    first, second, singleton, outside = list(all_blocks)[:4]
+    blocks = {second: all_blocks[second], first: all_blocks[first], singleton: all_blocks[singleton][:1]}
+    left, right = blocks[first], blocks[second]
+    dataset.cluster_seeds_require = {
+        left[0]: 0,
+        left[1]: 0,
+        left[2]: 1,
+        right[0]: 0,
+        right[1]: 1,
+        right[2]: 0,
+        all_blocks[outside][0]: 0,
+    }
+    dataset.cluster_seeds_disallow = {(left[0], left[1]), (right[0], right[2])}
+    expected: dict[str, list[str]] = {}
+    expected_distances: dict[str, np.ndarray] = {}
+    with _open(release_inputs) as arrow_dataset:
+        seeded = _featurizer(release_inputs, dataset, arrow_dataset, _block_members(blocks)).with_cluster_seeds(
+            dataset.cluster_seeds_require, dataset.cluster_seeds_disallow
+        )
+        for key, members in blocks.items():
+            block = {key: members}
+            distances = clusterer.make_distance_matrices_from_rust_featurizer(block, seeded)
+            expected_distances[key] = distances[key].copy()
+            predicted, _ = clusterer.predict(block, dataset, dists=distances)
+            expected.update(predicted)
+    # The conflicting require/disallow pair exercises enabled and disabled seed behavior.
+    assert any(left[0] in members and left[1] in members for members in expected.values()) is not constraints_enabled
+
+    blocks_path = tmp_path / "blocks.json"
+    blocks_path.write_text(json.dumps(blocks), encoding="utf-8")
+    specs = {
+        role: (path, release_pairwise._sha256_file(path))
+        for role, path in {**release_inputs["files"], "blocks": blocks_path}.items()
+    }
+    monkeypatch.setattr(release_pairwise, "load_run_binding", lambda _path: {"run_binding_sha256": "a" * 64})
+    monkeypatch.setattr(release_pairwise, "require_run_binding_matches", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(release_pairwise, "_evaluation_model", lambda _args: (_authority(release_inputs), clusterer))
+    monkeypatch.setattr(
+        release_pairwise, "_load_evaluation_plan", lambda _path: SimpleNamespace(cluster={"qian": specs})
+    )
+    monkeypatch.setattr(release_pairwise, "_load_anddata", lambda *_args, **_kwargs: dataset)
+    observed: list[dict[str, list[str]]] = []
+    original_report = release_pairwise._b3_report
+
+    def report(truth: Any, predicted: dict[str, list[str]]) -> dict[str, Any]:
+        observed.append(predicted)
+        return original_report(truth, predicted)
+
+    monkeypatch.setattr(release_pairwise, "_b3_report", report)
+    index_builds = 0
+    original_index = model_module._build_signature_index_by_id
+
+    def index(featurizer: Any) -> dict[str, int]:
+        nonlocal index_builds
+        index_builds += 1
+        return original_index(featurizer)
+
+    monkeypatch.setattr(model_module, "_build_signature_index_by_id", index)
+    previous_matrices: list[weakref.ReferenceType[np.ndarray]] = []
+    matrix_blocks: list[str] = []
+    original_matrices = Clusterer._make_distance_matrices_from_verified_rust_featurizer
+
+    def matrices(self: Clusterer, block: dict[str, list[str]], *args: Any, **kwargs: Any) -> dict[str, np.ndarray]:
+        assert all(matrix() is None for matrix in previous_matrices)
+        result = original_matrices(self, block, *args, **kwargs)
+        for key, matrix in result.items():
+            np.testing.assert_array_equal(matrix.view(np.uint64), expected_distances[key].view(np.uint64))
+        previous_matrices[:] = [weakref.ref(matrix) for matrix in result.values()]
+        matrix_blocks.extend(block)
+        return result
+
+    monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", matrices)
+    release_pairwise.evaluate_clusters(
+        argparse.Namespace(
+            output_report=tmp_path / "report.json",
+            run_binding=tmp_path / "binding.json",
+            model=tmp_path / "model",
+            evaluation_plan=tmp_path / "plan.json",
+            arrow_root=release_inputs["arrow_root"],
+            n_jobs=1,
+        )
+    )
+
+    assert observed == [expected]
+    assert list(observed[0].items()) == list(expected.items())
+    assert index_builds == 1
+    assert matrix_blocks == [second, first]
+    assert all(matrix() is None for matrix in previous_matrices)
 
 
 def _changed_signatures(files: dict[str, Path]) -> None:

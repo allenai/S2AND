@@ -261,9 +261,7 @@ def featurize_pairs_with_rust(
         index_by_signature_id = {
             str(signature_id): index for index, signature_id in enumerate(rust_featurizer.signature_ids())
         }
-        missing = sorted(
-            {member for pair in signature_pairs for member in pair[:2]}.difference(index_by_signature_id)
-        )
+        missing = sorted({member for pair in signature_pairs for member in pair[:2]}.difference(index_by_signature_id))
         if missing:
             raise ValueError(f"Rust featurizer is missing pair signatures: {missing[:10]}")
         plan = memory_budget.compute_rust_batch_chunk_plan(

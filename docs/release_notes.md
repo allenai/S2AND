@@ -350,10 +350,11 @@ production model and public-data version is `1.3`, on a separate version axis.
 - Release pairwise training, EPS calibration, and pair and cluster evaluation
   load the JSON `ANDData` that selects pairs, splits, blocks, seeds, and truth
   with `preprocess=False` and without SPECTER or name counts, since the Rust
-  featurizer computes every feature from Arrow. On all nine model-plan datasets
-  the selection is identical to the preprocessed load. With the coauthor sets
-  it no longer builds, INSPIRE's load drops from 29 minutes to about one, and
-  the memory it holds from 90 GB to 3 GB.
+  featurizer computes every feature from Arrow. On aminer, arnetminer,
+  inspire, kisti, orcid, pubmed, qian, zbmath, and augmented, the selection is
+  identical to the preprocessed load. Without the coauthor sets it no longer
+  builds, INSPIRE's load drops from 29 minutes to about one, and the memory it
+  holds from 90 GB to 3 GB.
 - The Rust featurizer stores each paper's coauthor names, name blocks, and
   character n-gram counts once, instead of copying them into every signature on
   the paper. Pair features subtract each signature's own author, and they are

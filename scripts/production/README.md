@@ -583,16 +583,16 @@ full export.
 Pairwise training, EPS calibration, and held-out pair and cluster evaluation need
 one Arrow conversion of each plan dataset's exact JSON files, under the root each
 command receives as `--arrow-root`. Convert every model-plan dataset, including
-`orcid` and `augmented`, into a working root that is not published. Stage the
-reviewed JSON in benchmark layout (`<root>/<dataset>/<dataset>_signatures.json`,
-`_papers.json`, `_specter2.pkl`, optional `_clusters.json`), and use the same
-files the plan names:
+`augmented`, into a working root that is not published. Stage the same files the
+plan names, including the joined canonical-name signatures, in benchmark layout
+(`<root>/<dataset>/<dataset>_signatures.json`, `_papers.json`, `_specter2.pkl`,
+optional `_clusters.json`):
 
 ```powershell
 uv run python scripts/convert_to_arrow.py benchmark `
   --source-root REVIEWED_MODEL_PLAN_SOURCE_ROOT `
   --output-root "$RunRoot\stages\release_arrow" `
-  --datasets aminer arnetminer inspire kisti orcid pubmed qian zbmath augmented `
+  --datasets aminer arnetminer inspire kisti pubmed qian zbmath augmented `
   --name-counts-index-root $NameCountsIndex `
   --n-jobs $NJobs
 ```

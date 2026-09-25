@@ -122,7 +122,9 @@ Arrow production/eval workflows use each dataset's `manifest.json` to resolve:
   SPECTER1 research-training bundle may instead use `specter.arrow`)
 - raw-planner `*_batch_index.bin` sidecars
 - shared `name_counts_index/`
-- eval-only clusters JSON when metrics are requested
+- eval-only labels when metrics are requested: clusters JSON, or fixed-pair
+  CSVs (`train_pairs.csv`, `test_pairs.csv`, optional `val_pairs.csv`) for
+  pair-labeled benchmarks such as MEDLINE
 
 Dataset manifests require `kind: "s2and_arrow_dataset"`,
 `format_version: 1`, portable `paths`, and a flat `files` inventory mapping

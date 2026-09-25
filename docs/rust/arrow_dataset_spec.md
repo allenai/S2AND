@@ -59,9 +59,11 @@ tables it writes itself:
   `RawBlockQueryCandidatePlanner.from_query_signatures` constructor that tests
   use; the public route ignores it
 
-Offline evaluation datasets may also include:
+Offline evaluation datasets may also include labels:
 
-- `<dataset>_clusters.json`
+- `<dataset>_clusters.json` for cluster-labeled benchmarks
+- `train_pairs.csv`, `test_pairs.csv`, and optional `val_pairs.csv` for
+  pair-labeled benchmarks such as MEDLINE
 
 Do not create per-dataset `name_pairs.arrow` files for production datasets.
 Name aliases are a shared runtime resource. `name_pairs` and `name_tuples` path
@@ -97,6 +99,9 @@ Preferred on-disk layout:
     cluster_seed_disallows.arrow
     altered_cluster_signatures.arrow
     <dataset>_clusters.json
+    train_pairs.csv
+    val_pairs.csv
+    test_pairs.csv
 ```
 
 Notes:
@@ -127,8 +132,8 @@ Notes:
   `altered_cluster_signatures.txt` is not a valid
   production Arrow sidecar; it remains only for older fixtures and
   ANDData-compatible training tooling.
-- `<dataset>_clusters.json` is ground truth for offline evaluation only. It is
-  not part of production inference scoring.
+- `<dataset>_clusters.json` and the fixed-pair CSVs are ground truth for offline
+  evaluation only. They are not part of production inference scoring.
 - Each bundle contains exactly one selected embedding table under manifest key
   `specter`. Production and evaluation bundles select physical
   `specter2.arrow`. An explicit research-training bundle may instead select
@@ -164,6 +169,7 @@ manifest `paths` object uses these keys:
 | `cluster_seed_disallows` | Producer/validation path to pairwise seed-disallow constraints |
 | `altered_cluster_signatures` | Producer/validation path for altered claimed profiles |
 | `clusters` | Path to eval-only ground-truth clusters JSON |
+| `train_pairs`, `val_pairs`, `test_pairs` | Paths to eval-only fixed-pair label CSVs for pair-labeled benchmarks; `val_pairs` is optional |
 | `name_counts_index` | Required manifest-declared shared/global name-count index directory when the selected model uses `name_counts` |
 | `signatures_batch_index` | S2AND-generated lookup index for `signatures.arrow`; always required by `ArrowDataset.open(...)` |
 | `papers_batch_index` | S2AND-generated lookup index for `papers.arrow`; always required by `ArrowDataset.open(...)` |
@@ -513,6 +519,20 @@ The `signature_ids` field is required by the S2AND loader. Other fields, such as
 
 Production prediction does not need this file.
 
+### Fixed-pair label CSVs
+
+Pair-labeled benchmarks such as MEDLINE have no clusters. Their labels ship as
+`train_pairs.csv` and `test_pairs.csv`, plus an optional `val_pairs.csv`,
+declared under the `train_pairs`, `test_pairs`, and `val_pairs` path keys.
+Each file uses the `ANDData` fixed-pair contract: columns `signature_id_1`,
+`signature_id_2`, and `label` (`YES`/`NO` or `1`/`0`). Pass the files to
+`build_training_anddata_from_arrow(..., train_pairs=..., test_pairs=...)` or
+`ANDData(..., train_pairs=..., test_pairs=...)`.
+
+`scripts/convert_to_arrow.py` publishes these files only after checking that
+train and test are both present, every row satisfies the contract, every
+signature exists in the dataset, and no unordered pair appears in two splits.
+
 ---
 
 ## Name Counts
@@ -645,7 +665,8 @@ Conditional `paths` entries:
   `query_signatures` are optional producer/validation paths. Public Arrow
   prediction receives seeds, disallows, and altered profiles as explicit
   arguments; declaring these paths does not populate the request.
-- `clusters` is eval-only ground truth.
+- `clusters`, `train_pairs`, `val_pairs`, and `test_pairs` are eval-only
+  ground truth.
 - `name_counts_index` is required when the selected model uses name-count
   features.
 - `paths.name_pairs` and `paths.name_tuples` are not read; do not add them.
@@ -722,6 +743,8 @@ Required checks:
   source order for that dataset.
 - Eval-only clusters JSON references only signatures present in
   `signatures.arrow`.
+- Fixed-pair label CSVs meet the contract in
+  [Fixed-pair label CSVs](#fixed-pair-label-csvs); the converter checks this.
 
 `scripts/convert_to_arrow.py validate` does not check signature row order or
 clusters-JSON references; verify those in the producer.

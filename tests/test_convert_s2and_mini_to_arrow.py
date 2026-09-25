@@ -622,3 +622,83 @@ def test_runtime_conversion_rejects_parent_of_name_counts_index(tmp_path: Path) 
             overwrite=False,
             skip_name_counts_index=False,
         )
+
+
+def _write_pair_only_benchmark(source_root: Path, pair_rows: dict[str, list[tuple[str, str, str]]]) -> None:
+    """Write a MEDLINE-shaped benchmark: signatures, papers, SPECTER2, and pair CSVs but no clusters."""
+    dummy_dir = Path(__file__).parent / "dummy"
+    dataset_dir = source_root / "pairsonly"
+    dataset_dir.mkdir(parents=True)
+    signatures = json.loads((dummy_dir / "signatures.json").read_text(encoding="utf-8"))
+    papers = json.loads((dummy_dir / "papers.json").read_text(encoding="utf-8"))
+    (dataset_dir / "pairsonly_signatures.json").write_text(json.dumps(signatures), encoding="utf-8")
+    (dataset_dir / "pairsonly_papers.json").write_text(json.dumps(papers), encoding="utf-8")
+    rng = np.random.default_rng(0)
+    with (dataset_dir / "pairsonly_specter2.pkl").open("wb") as stream:
+        pickle.dump({str(paper_id): rng.normal(size=4).astype(np.float32) for paper_id in papers}, stream)
+    for split, rows in pair_rows.items():
+        lines = ["signature_id_1,signature_id_2,label", *(",".join(row) for row in rows)]
+        (dataset_dir / f"{split}.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _convert_pair_only_benchmark(tmp_path: Path, *, skip_name_counts_index: bool = True) -> dict[str, Any]:
+    output_root = tmp_path / "out"
+    return convert_to_arrow.convert_runtime_dataset_to_arrow(
+        sources=convert_to_arrow.benchmark_dataset_sources(tmp_path / "source", "pairsonly"),
+        output_dir=output_root / "pairsonly",
+        root_manifest_dir=output_root,
+        name_counts_index_root=None,
+        n_jobs=1,
+        overwrite=False,
+        skip_name_counts_index=skip_name_counts_index,
+    )
+
+
+def test_benchmark_conversion_publishes_usable_fixed_pair_labels(tmp_path: Path) -> None:
+    train = [("0", "1", "YES"), ("3", "4", "NO"), ("0", "3", "NO")]
+    test = [("5", "6", "YES"), ("1", "7", "NO")]
+    _write_pair_only_benchmark(tmp_path / "source", {"train_pairs": train, "test_pairs": test})
+    write_name_counts_index(tmp_path / "out", tiny_name_counts_tuple())
+
+    manifest = _convert_pair_only_benchmark(tmp_path, skip_name_counts_index=False)
+
+    output_dir = tmp_path / "out" / "pairsonly"
+    assert {"train_pairs", "test_pairs"} <= set(manifest["paths"])
+    assert "val_pairs" not in manifest["paths"] and "clusters" not in manifest["paths"]
+    for key in ("train_pairs", "test_pairs"):
+        published = output_dir / manifest["paths"][key]
+        assert published.read_bytes() == (tmp_path / "source" / "pairsonly" / f"{key}.csv").read_bytes()
+
+    from s2and.arrow_inputs import ArrowDataset
+    from s2and.arrow_training import build_training_anddata_from_arrow
+
+    with ArrowDataset.open(output_dir, require_specter=True, require_name_counts_index=True) as arrow_dataset:
+        dataset = build_training_anddata_from_arrow(
+            arrow_dataset,
+            "pairsonly",
+            train_pairs=str(output_dir / manifest["paths"]["train_pairs"]),
+            test_pairs=str(output_dir / manifest["paths"]["test_pairs"]),
+        )
+        train_pairs, val_pairs, test_pairs = dataset.fixed_pairs()
+
+    assert len(train_pairs) + len(val_pairs) == len(train)
+    assert sorted((str(a), str(b), int(label)) for a, b, label in test_pairs) == [("1", "7", 0), ("5", "6", 1)]
+
+
+@pytest.mark.parametrize(
+    ("pair_rows", "message"),
+    [
+        ({"train_pairs": [("0", "1", "YES")]}, "require train_pairs.csv and test_pairs.csv"),
+        ({"train_pairs": [("0", "1", "YES")], "test_pairs": [("5", "missing", "NO")]}, "absent from dataset"),
+        ({"train_pairs": [("0", "1", "YES")], "test_pairs": [("1", "0", "YES")]}, "share 1 unordered pairs"),
+        ({"train_pairs": [("0", "1", "maybe")], "test_pairs": [("5", "6", "NO")]}, "Unknown fixed-pair labels"),
+    ],
+    ids=["missing-test-split", "unknown-signature", "cross-split-overlap", "invalid-label"],
+)
+def test_benchmark_conversion_rejects_invalid_fixed_pair_labels(
+    tmp_path: Path, pair_rows: dict[str, list[tuple[str, str, str]]], message: str
+) -> None:
+    _write_pair_only_benchmark(tmp_path / "source", pair_rows)
+
+    with pytest.raises(ValueError, match=message):
+        _convert_pair_only_benchmark(tmp_path)

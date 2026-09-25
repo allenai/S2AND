@@ -127,6 +127,11 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Fixed
 
+- Benchmark Arrow conversion publishes fixed-pair labels. MEDLINE has pair
+  labels but no clusters, and the converter previously copied only clusters
+  JSON, so the public Arrow MEDLINE dataset shipped without labels. Its
+  `train_pairs.csv`, `test_pairs.csv`, and optional `val_pairs.csv` are now
+  validated, copied, and declared in the dataset manifest.
 - Arrow subblocking restores seed membership with the shared
   cannot-link policy, including conflicting requires/disallows. Candidate
   planning uses the same effective caller supervision as scoring. Windows

@@ -518,6 +518,9 @@ uv run python scripts/convert_to_arrow.py linker-replay `
 The commands require fresh output paths for the reviewed full set. The
 benchmark source is
 `<root>/<dataset>/<dataset>_signatures.json` plus its other benchmark files.
+Each benchmark's labels are validated and published with it: clusters JSON, or
+`train_pairs.csv`/`test_pairs.csv` (optional `val_pairs.csv`) for the
+pair-labeled MEDLINE benchmark.
 Replay source is `<raw>/<dataset>/{signatures.json,papers.json}` plus
 `<embeddings>/<dataset>/specter2.pkl`. Both conversions reference the same
 reviewed external name-count index directory; they do not copy it into each

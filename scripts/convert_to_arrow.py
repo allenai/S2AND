@@ -58,6 +58,9 @@ class RuntimeDatasetSources:
     clusters_path: Path | None = None
     specter_path: Path | None = None
     specter2_path: Path | None = None
+    train_pairs_path: Path | None = None
+    val_pairs_path: Path | None = None
+    test_pairs_path: Path | None = None
 
 
 def _load_json(path: Path) -> Any:
@@ -469,7 +472,73 @@ def benchmark_dataset_sources(source_root: Path, dataset: str) -> RuntimeDataset
         clusters_path=_optional_source_file(source_dir / f"{dataset}_clusters.json"),
         specter_path=_optional_source_file(source_dir / f"{dataset}_specter.pickle"),
         specter2_path=_optional_source_file(source_dir / f"{dataset}_specter2.pkl"),
+        train_pairs_path=_optional_source_file(source_dir / "train_pairs.csv"),
+        val_pairs_path=_optional_source_file(source_dir / "val_pairs.csv"),
+        test_pairs_path=_optional_source_file(source_dir / "test_pairs.csv"),
     )
+
+
+def _validated_fixed_pair_labels(sources: RuntimeDatasetSources, signature_ids: set[str]) -> dict[str, Path]:
+    """Validate a dataset's fixed-pair label CSVs before they are published.
+
+    Pair-only benchmarks such as MEDLINE carry their labels as ``train_pairs.csv``,
+    ``test_pairs.csv`` and an optional ``val_pairs.csv`` instead of clusters. Each file
+    must satisfy the ``ANDData`` fixed-pair contract, reference only signatures in the
+    dataset, and share no unordered pair with another split.
+
+    Args:
+        sources: Source files for the dataset being converted.
+        signature_ids: Signature IDs present in the converted dataset.
+
+    Returns:
+        Source paths keyed by manifest path key (``train_pairs``, ``val_pairs``,
+        ``test_pairs``); empty when the dataset has no pair labels.
+
+    Raises:
+        ValueError: If only some required splits are present, or a file violates the
+            fixed-pair contract.
+    """
+
+    import pandas as pd
+
+    from s2and.data import _map_fixed_pair_labels
+
+    candidates = {
+        "train_pairs": sources.train_pairs_path,
+        "val_pairs": sources.val_pairs_path,
+        "test_pairs": sources.test_pairs_path,
+    }
+    present = {key: path for key, path in candidates.items() if path is not None}
+    if not present:
+        return {}
+    if "train_pairs" not in present or "test_pairs" not in present:
+        raise ValueError(
+            f"Dataset {sources.dataset!r} fixed-pair labels require train_pairs.csv and test_pairs.csv; "
+            f"found {sorted(present)}"
+        )
+    identities: dict[str, set[tuple[str, str]]] = {}
+    for key, path in present.items():
+        # Same reader as ANDData.maybe_load_dataframe, so published files load identically.
+        frame = _map_fixed_pair_labels(pd.read_csv(path, sep=","), key)
+        id_columns = list(frame.columns[:2])
+        pairs = {
+            (str(left), str(right))
+            for left, right in zip(frame[id_columns[0]].tolist(), frame[id_columns[1]].tolist(), strict=True)
+        }
+        unknown = sorted({signature_id for pair in pairs for signature_id in pair} - signature_ids)
+        if unknown:
+            raise ValueError(f"{path} references signatures absent from dataset {sources.dataset!r}: {unknown[:5]}")
+        identities[key] = {(left, right) if left <= right else (right, left) for left, right in pairs}
+    keys = sorted(identities)
+    for index, left in enumerate(keys):
+        for right in keys[index + 1 :]:
+            overlap = identities[left] & identities[right]
+            if overlap:
+                raise ValueError(
+                    f"Dataset {sources.dataset!r} fixed-pair splits {left!r} and {right!r} share "
+                    f"{len(overlap)} unordered pairs, for example {sorted(overlap)[:3]}"
+                )
+    return present
 
 
 def linker_replay_dataset_sources(raw_root: Path, embeddings_root: Path, dataset: str) -> RuntimeDatasetSources:
@@ -735,6 +804,14 @@ def convert_runtime_dataset_to_arrow(
             output_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(sources.clusters_path, output_clusters_path)
         paths["clusters"] = str(output_clusters_path)
+
+    for pair_key, source_pair_path in _validated_fixed_pair_labels(
+        sources, {str(signature_id) for signature_id in dataset.signatures}
+    ).items():
+        output_pair_path = output_dir / f"{pair_key}.csv"
+        if overwrite or not output_pair_path.exists():
+            shutil.copy2(source_pair_path, output_pair_path)
+        paths[pair_key] = str(output_pair_path)
 
     needed_paper_ids = {str(signature.paper_id) for signature in dataset.signatures.values()}
     embedding_path = output_dir / f"{selected_embedding}.arrow"

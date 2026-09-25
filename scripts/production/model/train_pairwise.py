@@ -424,7 +424,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 "papers": str(files["papers"]),
                 "name": dataset_name,
                 "mode": "train",
-                "specter_embeddings": str(files["specter_embeddings"]),
                 "clusters": str(files["clusters"]) if "clusters" in files else None,
                 "train_pairs": str(files["train_pairs"]) if "train_pairs" in files else None,
                 "val_pairs": str(files["val_pairs"]) if "val_pairs" in files else None,
@@ -432,20 +431,14 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 "train_pairs_size": int(args.train_pairs_size),
                 "val_pairs_size": int(args.validation_pairs_size),
                 "random_seed": int(args.random_seed),
-                "name_counts_index": artifact_authority.name_counts_index,
+                "name_counts_index": None,
                 "n_jobs": int(args.n_jobs),
-                "preprocess": True,
+                "preprocess": False,
                 "name_tuples": canonical_name_tuples.pairs,
             }
 
+            # Selection only: the Rust featurizer computes every feature from Arrow.
             anddata = ANDData(**anddata_kwargs)
-            observed_name_counts = anddata.name_counts_manifest_sha256
-            expected_name_counts = artifact_hashes["name_counts_manifest_sha256"]
-            if observed_name_counts != expected_name_counts:
-                raise ValueError(
-                    f"Production training dataset {dataset_name!r} name-count manifest mismatch: "
-                    f"expected={expected_name_counts!r} observed={observed_name_counts!r}"
-                )
             if anddata.name_tuples != canonical_name_tuples.pairs:
                 raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
 
@@ -468,7 +461,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                     anddata,
                     arrow_dataset,
                     featurizer_info,
-                    name_counts_manifest_sha256=expected_name_counts,
+                    name_counts_manifest_sha256=artifact_hashes["name_counts_manifest_sha256"],
                     n_jobs=int(args.n_jobs),
                     nameless_featurizer_info=nameless_featurizer_info,
                     total_ram_bytes=plan.total_ram_bytes,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -207,21 +208,24 @@ def test_augmented_dataset_contract_is_checked_before_featurization(
         total_ram_bytes=full_plan.total_ram_bytes,
     )
     authority = _artifact_authority()
-    fake_dataset = SimpleNamespace(
-        name_counts_manifest_sha256="e" * 64,
-        name_tuples=authority.name_tuples.pairs,
-    )
+    fake_dataset = SimpleNamespace(name_tuples=frozenset({("not", "canonical")}))
+    anddata_kwargs: list[dict[str, Any]] = []
     monkeypatch.setattr(train_pairwise, "_preflight_pairwise", lambda _args: augmented_plan)
     monkeypatch.setattr(train_pairwise, "load_packaged_artifact_authority", lambda **_kwargs: authority)
-    monkeypatch.setattr(train_pairwise, "ANDData", lambda **_kwargs: fake_dataset)
+    monkeypatch.setattr(train_pairwise, "ANDData", lambda **kwargs: anddata_kwargs.append(kwargs) or fake_dataset)
     monkeypatch.setattr(
         train_pairwise,
         "_featurize_selection",
         lambda *_args, **_kwargs: pytest.fail("featurization ran before dataset contract validation"),
     )
 
-    with pytest.raises(ValueError, match=r"dataset 'augmented'.*name-count manifest mismatch"):
+    with pytest.raises(ValueError, match="dataset 'augmented' does not use the canonical name tuples"):
         train_pairwise.train_pairwise_bundle(args)
+    # Selection only: features come from Arrow, so the JSON load skips normalization, SPECTER and counts.
+    [kwargs] = anddata_kwargs
+    assert kwargs["preprocess"] is False
+    assert kwargs["name_counts_index"] is None
+    assert "specter_embeddings" not in kwargs
 
 
 def test_preflight_rejects_unsafe_launch(tmp_path: Path) -> None:

@@ -29,7 +29,6 @@ from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.eval import b3_precision_recall_fscore, pairwise_probability_metrics  # noqa: E402
 from s2and.feature_port import build_verified_rust_featurizer, featurize_pairs_with_rust  # noqa: E402
-from s2and.name_counts_index import NameCountsIndex  # noqa: E402
 from s2and.production_bundle import finalize_pairwise_eps  # noqa: E402
 from s2and.production_bundle_contract import PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES  # noqa: E402
 from s2and.production_model import _load_pairwise_staging_model, load_production_model  # noqa: E402
@@ -1070,21 +1069,25 @@ def _load_anddata(
     files: Mapping[str, Path],
     *,
     mode: str,
-    name_counts_index: NameCountsIndex,
     name_tuples: frozenset[tuple[str, str]],
     random_seed: int = 1111,
 ) -> ANDData:
+    """Load the JSON selection authority: pairs, splits, blocks, seeds and truth.
+
+    Features come from the Rust featurizer, so the dataset skips name
+    normalization, SPECTER and name counts.
+    """
+
     return ANDData(
         signatures=str(files["signatures"]),
         papers=str(files["papers"]),
         clusters=str(files["clusters"]) if "clusters" in files else None,
-        specter_embeddings=str(files["specter_embeddings"]),
         name=name,
         mode=mode,
         random_seed=random_seed,
-        name_counts_index=name_counts_index,
+        name_counts_index=None,
         name_tuples=name_tuples,
-        preprocess=True,
+        preprocess=False,
     )
 
 
@@ -1220,7 +1223,6 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
             name,
             files,
             mode="inference",
-            name_counts_index=artifacts.name_counts_index,
             name_tuples=artifacts.name_tuples.pairs,
         )
         with _release_rust_featurizer(
@@ -1335,7 +1337,6 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
             name,
             files,
             mode="train",
-            name_counts_index=artifacts.name_counts_index,
             name_tuples=artifacts.name_tuples.pairs,
         )
         true_clusters = dataset.construct_cluster_to_signatures(blocks)
@@ -1442,7 +1443,6 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
                 dataset_spec.files,
                 mode="train",
                 random_seed=int(config["data_random_seed"]),
-                name_counts_index=artifacts.name_counts_index,
                 name_tuples=artifacts.name_tuples.pairs,
             )
             _, val_blocks, _ = dataset.split_cluster_signatures()

@@ -158,10 +158,11 @@ def build_verified_rust_featurizer(
     """Build a Rust featurizer for selected signatures of ``dataset`` from its converted Arrow data.
 
     ``dataset`` is a JSON-loaded ``ANDData`` that stays the authority for splits,
-    pairs and cluster truth. The caller must already have verified the Arrow
-    conversion provenance against ``dataset``'s source files. This checks that
-    both routes use the same name counts and exactly the same signature IDs, and
-    uses the dataset's name tuples and ORCID policy.
+    pairs and cluster truth; it need not be preprocessed or carry SPECTER or name
+    counts, since every feature comes from Arrow. The caller must already have
+    verified the Arrow conversion provenance against ``dataset``'s source files.
+    This checks that the Arrow data uses the expected name counts and exactly the
+    dataset's signature IDs, and uses the dataset's name tuples and ORCID policy.
 
     Only ``signature_ids`` are built. Native records hold per-signature coauthor
     data, which grows with the square of a paper's author count, so building every
@@ -181,11 +182,10 @@ def build_verified_rust_featurizer(
 
     arrow_counts = arrow_dataset.name_counts_index
     observed_counts = None if arrow_counts is None else arrow_counts.manifest_sha256
-    if observed_counts != name_counts_manifest_sha256 or dataset.name_counts_manifest_sha256 != observed_counts:
+    if observed_counts != name_counts_manifest_sha256:
         raise ValueError(
-            f"Rust featurization for {dataset.name!r} requires one name-count index: "
-            f"expected={name_counts_manifest_sha256!r} arrow={observed_counts!r} "
-            f"json={dataset.name_counts_manifest_sha256!r}"
+            f"Arrow data for {dataset.name!r} uses the wrong name-count index: "
+            f"expected={name_counts_manifest_sha256!r} arrow={observed_counts!r}"
         )
     json_signature_ids = {str(signature_id) for signature_id in dataset.signatures}
     arrow_signature_ids = _arrow_signature_ids(arrow_dataset)

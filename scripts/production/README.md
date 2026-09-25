@@ -685,8 +685,9 @@ index, an empty local matrix workspace, finite validation metrics, and explicit
 acknowledgement of the expensive run. It cannot resolve held-out test paths.
 
 Training, EPS calibration, and pair and cluster evaluation select pairs, blocks,
-seeds, and truth from the plan's JSON files, then compute features and distances
-with the Rust featurizer. That featurizer reads `--arrow-root/<dataset>/`: a
+seeds, and truth from the plan's JSON files, loaded without name normalization,
+SPECTER, or name counts, then compute features and distances with the Rust
+featurizer. That featurizer reads `--arrow-root/<dataset>/`: a
 `convert_to_arrow.py` conversion of the same JSON files. Each conversion writes
 `conversion_provenance.json`, which records the SHA-256 of every source it read.
 Before any work starts, the commands reject a dataset whose provenance does not

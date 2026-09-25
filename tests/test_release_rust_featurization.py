@@ -59,23 +59,46 @@ def release_inputs(tmp_path: Path) -> dict[str, Any]:
     }
 
 
-def _json_dataset(inputs: dict[str, Any]) -> ANDData:
+def _json_dataset(inputs: dict[str, Any], *, selection_only: bool = False, **selection: Any) -> ANDData:
+    """Load the fixture as the Python featurizer needs it, or as release selection loads it."""
+
     files = inputs["files"]
+    if not selection:
+        selection = {"clusters": str(files["clusters"]), "train_pairs_size": 24, "val_pairs_size": 6}
+    features: dict[str, Any] = {
+        "specter_embeddings": str(files["specter_embeddings"]),
+        "name_counts_index": NameCountsIndex.open(inputs["name_counts_path"]),
+        "preprocess": True,
+    }
+    if selection_only:
+        features = {"name_counts_index": None, "preprocess": False}
     return ANDData(
         signatures=str(files["signatures"]),
         papers=str(files["papers"]),
         name="qian",
         mode="train",
-        specter_embeddings=str(files["specter_embeddings"]),
-        clusters=str(files["clusters"]),
-        train_pairs_size=24,
-        val_pairs_size=6,
         random_seed=1111,
-        name_counts_index=NameCountsIndex.open(inputs["name_counts_path"]),
         n_jobs=1,
-        preprocess=True,
         name_tuples=inputs["name_tuples"],
+        **selection,
+        **features,
     )
+
+
+def _pair_rows(pairs: list[Any]) -> list[tuple[str, str, float]]:
+    return [(str(pair[0]), str(pair[1]), float(pair[2])) for pair in pairs]
+
+
+def _selections(inputs: dict[str, Any], **selection: Any) -> tuple[ANDData, ANDData, list[Any], list[Any]]:
+    """Return (reference, selection-only) datasets and their identical train and validation pairs."""
+
+    reference = _json_dataset(inputs, **selection)
+    selection_only = _json_dataset(inputs, selection_only=True, **selection)
+    train_pairs, val_pairs = resolve_selection_pairs(selection_only)
+    expected_train, expected_val = resolve_selection_pairs(reference)
+    assert _pair_rows(train_pairs) == _pair_rows(expected_train)
+    assert _pair_rows(val_pairs) == _pair_rows(expected_val)
+    return reference, selection_only, train_pairs, val_pairs
 
 
 def _featurizer(
@@ -153,23 +176,9 @@ def test_fixed_pair_datasets_featurize_like_python(release_inputs: dict[str, Any
         path = tmp_path / f"{split}_pairs.csv"
         path.write_text("\n".join(rows) + "\n", encoding="utf-8")
         split_files[split] = str(path)
-    files = release_inputs["files"]
-    dataset = ANDData(
-        signatures=str(files["signatures"]),
-        papers=str(files["papers"]),
-        name="qian",
-        mode="train",
-        specter_embeddings=str(files["specter_embeddings"]),
-        clusters=None,
-        train_pairs=split_files["train"],
-        val_pairs=split_files["val"],
-        random_seed=1111,
-        name_counts_index=NameCountsIndex.open(release_inputs["name_counts_path"]),
-        n_jobs=1,
-        preprocess=True,
-        name_tuples=release_inputs["name_tuples"],
+    reference, dataset, train_pairs, val_pairs = _selections(
+        release_inputs, clusters=None, train_pairs=split_files["train"], val_pairs=split_files["val"]
     )
-    train_pairs, val_pairs = resolve_selection_pairs(dataset)
     assert isinstance(train_pairs[0], np.record)
 
     with _open(release_inputs) as arrow_dataset:
@@ -177,35 +186,35 @@ def test_fixed_pair_datasets_featurize_like_python(release_inputs: dict[str, Any
             dataset,
             arrow_dataset,
             MAIN_INFO,
-            name_counts_manifest_sha256=dataset.name_counts_manifest_sha256,
+            name_counts_manifest_sha256=reference.name_counts_manifest_sha256,
             n_jobs=1,
             nameless_featurizer_info=NAMELESS_INFO,
             total_ram_bytes=None,
         )
-    _assert_features_match(_python_features(train_pairs, dataset), train)
-    _assert_features_match(_python_features(val_pairs, dataset), val)
+    _assert_features_match(_python_features(train_pairs, reference), train)
+    _assert_features_match(_python_features(val_pairs, reference), val)
 
 
 def test_rust_features_match_python_on_the_selected_training_pairs(release_inputs: dict[str, Any]) -> None:
-    dataset = _json_dataset(release_inputs)
-    train_pairs, val_pairs = resolve_selection_pairs(dataset)
+    reference, dataset, train_pairs, val_pairs = _selections(release_inputs)
     assert len(train_pairs) == 24 and len(val_pairs) == 6
 
     with _open(release_inputs) as arrow_dataset:
         featurizer = _featurizer(release_inputs, dataset, arrow_dataset, _pair_members(train_pairs, val_pairs))
         assert len(featurizer.signature_ids()) < len(dataset.signatures)
         for pairs in (train_pairs, val_pairs):
-            _assert_features_match(_python_features(pairs, dataset), _rust_features(pairs, featurizer))
+            _assert_features_match(_python_features(pairs, reference), _rust_features(pairs, featurizer))
         # A non-NaN nan_value is applied after featurization, as many_pairs_featurize does.
         replaced = _rust_features(train_pairs, featurizer, nan_value=-1.0)
-        _assert_features_match(_python_features(train_pairs, dataset, nan_value=-1.0), replaced)
+        _assert_features_match(_python_features(train_pairs, reference, nan_value=-1.0), replaced)
         assert not np.isnan(replaced[0]).any()
 
 
 def test_rust_distances_give_python_partitions_at_every_eps(release_inputs: dict[str, Any]) -> None:
-    dataset = _json_dataset(release_inputs)
-    train_pairs, _ = resolve_selection_pairs(dataset)
-    features, labels, nameless_features = _python_features(train_pairs, dataset)
+    """Release clustering (selection-only dataset, Rust distances) partitions like Python fused predict."""
+
+    reference, dataset, train_pairs, _ = _selections(release_inputs)
+    features, labels, nameless_features = _python_features(train_pairs, reference)
     classifiers = [
         LGBMClassifier(n_estimators=25, num_leaves=5, min_child_samples=2, random_state=0, n_jobs=1, verbose=-1).fit(
             matrix, labels
@@ -223,12 +232,14 @@ def test_rust_distances_give_python_partitions_at_every_eps(release_inputs: dict
         dont_merge_cluster_seeds=True,
     )
     clusterer.feature_contract = {
-        "name_counts_manifest_sha256": dataset.name_counts_manifest_sha256,
+        "name_counts_manifest_sha256": reference.name_counts_manifest_sha256,
         "name_counts_last_first_initial_semantics": "initial_char",
     }
     blocks = clusterer.filter_blocks(dataset.get_blocks())
+    assert blocks == clusterer.filter_blocks(reference.get_blocks())
+    assert dataset.split_cluster_signatures() == reference.split_cluster_signatures()
 
-    python_distances = clusterer.make_distance_matrices(blocks, dataset)
+    python_distances = clusterer.make_distance_matrices(blocks, reference)
     with _open(release_inputs) as arrow_dataset:
         seeded = _featurizer(release_inputs, dataset, arrow_dataset, _block_members(blocks)).with_cluster_seeds(
             dataset.cluster_seeds_require, dataset.cluster_seeds_disallow
@@ -239,8 +250,8 @@ def test_rust_distances_give_python_partitions_at_every_eps(release_inputs: dict
 
     for eps in EPS_GRID:
         clusterer.cluster_model.eps = eps
-        fused, _ = clusterer.predict(blocks, dataset)
-        from_python, _ = clusterer.predict(blocks, dataset, dists=python_distances)
+        fused, _ = clusterer.predict(blocks, reference)
+        from_python, _ = clusterer.predict(blocks, reference, dists=python_distances)
         from_rust, _ = clusterer.predict(blocks, dataset, dists=rust_distances)
         assert _canonical_partition(from_rust) == _canonical_partition(from_python) == _canonical_partition(fused), eps
 
@@ -365,10 +376,10 @@ def test_provenance_rejects_tables_that_differ_from_the_recorded_conversion(rele
 
 
 def test_verified_featurizer_rejects_mismatched_counts_and_signatures(release_inputs: dict[str, Any]) -> None:
-    dataset = _json_dataset(release_inputs)
+    dataset = _json_dataset(release_inputs, selection_only=True)
     with _open(release_inputs) as arrow_dataset:
         members = set(list(dataset.signatures)[:4])
-        with pytest.raises(ValueError, match="requires one name-count index"):
+        with pytest.raises(ValueError, match="'qian' uses the wrong name-count index"):
             build_verified_rust_featurizer(
                 dataset, arrow_dataset, signature_ids=members, name_counts_manifest_sha256="0" * 64, num_threads=1
             )

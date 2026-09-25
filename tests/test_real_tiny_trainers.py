@@ -105,7 +105,8 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
 
     def checked_anddata(**kwargs):
         assert kwargs["test_pairs"] is None
-        assert kwargs["name_counts_index"].manifest_sha256 == NameCountsIndex.open(name_counts_path).manifest_sha256
+        # Selection only: the Arrow conversion supplies name counts to the Rust featurizer.
+        assert kwargs["name_counts_index"] is None and kwargs["preprocess"] is False
         assert kwargs["name_tuples"] == load_name_tuple_artifact(name_tuples_path).pairs
         assert not {"train_ratio", "val_ratio", "test_ratio"} & set(kwargs)
         return real_anddata(**kwargs)

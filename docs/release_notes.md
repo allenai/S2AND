@@ -340,6 +340,12 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Performance
 
+- Release pairwise training, EPS calibration, and pair and cluster evaluation
+  load the JSON `ANDData` that selects pairs, splits, blocks, seeds, and truth
+  with `preprocess=False` and without SPECTER or name counts, since the Rust
+  featurizer computes every feature from Arrow. On all nine model-plan datasets
+  the selection is identical to the preprocessed load. INSPIRE's load drops
+  from 28 to 7 minutes, and the memory it holds from 90 to 30 GB.
 - `RustLightGBMBooster` builds an exact fast scorer at load time. Models whose
   trees all have at most 32 leaves use QuickScorer; models with up to 256
   leaves per tree use lockstep traversal over integer bin keys. Both support up

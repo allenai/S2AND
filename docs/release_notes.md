@@ -372,6 +372,16 @@ production model and public-data version is `1.3`, on a separate version axis.
   `s_lee` linker block (422k signatures, papers of up to 8,099 authors), the
   labeled-row plan over its 152,900 evaluation rows takes 31 s instead of 54 s
   and peaks at 6.7 GB instead of 8.1 GB.
+- Retrieval scores coauthor and affiliation overlap through an inverted index
+  of the component counters, built with the retriever, and computes query
+  term weights once per query instead of once per component. Scores, top-k
+  order and incremental-linking clusters are bit-identical to before. On
+  `s_lee` (21,669 components), a query with about 2,900 coauthor terms takes
+  40 ms instead of 317 ms, an ordinary query 6 ms instead of 9 ms, and
+  planning 2,000 evaluation queries takes 14.5 s instead of 22.1 s. The index
+  holds 3.2M postings (48 MB) and builds in 0.06 s. Python-built
+  `RustHybridCentroidRetriever` summaries whose counter keys collide in
+  FNV-64 are now rejected.
 - `RustLightGBMBooster` builds an exact fast scorer at load time. Models whose
   trees all have at most 32 leaves use QuickScorer; models with up to 256
   leaves per tree use lockstep traversal over integer bin keys. Both support up

@@ -108,7 +108,6 @@ def main(num_blocks: int):
         reference_ids = set(list(all_references["to_paper_id"].values))
         logger.info(f"Retrieved {len(reference_ids)} reference ids")
 
-        # metadata
         paper_ids_to_query = list(set(root_paper_ids).union(reference_ids))
         make_s2ids_table(paper_ids_to_query, table_name="temp_AND_all_ids")
         logger.info("temp table made")
@@ -119,7 +118,6 @@ def main(num_blocks: int):
         all_authors = get_author_ids_for_papers("temp_AND_all_ids")
         logger.info("authors gotten")
 
-        # specter
         specter_X, specter_keys = specterize(list(root_paper_ids))
         logger.info(f"Retrieved {specter_X.shape} specterized papers")
 

@@ -98,10 +98,8 @@ def cluster_eval(
     # block ground truth labels: cluster_to_signatures
     cluster_to_signatures = dataset.construct_cluster_to_signatures(block_dict)
 
-    # predict
     pred_clusters, _ = clusterer.predict(block_dict, dataset)
 
-    # get metrics
     (
         b3_p,
         b3_r,
@@ -219,7 +217,6 @@ def incremental_cluster_eval(
             else:
                 partial_supervision[(signature_i, signature_j)] = 1
 
-    # predict on test-blocks
     pred_clusters, _ = clusterer.predict(eval_block_dict_full, dataset, partial_supervision=partial_supervision)
     # to avoid sparsity in b3 computation, we use all the signatures' ground-truth
     full_cluster_to_signatures = dataset.construct_cluster_to_signatures(pred_clusters)
@@ -232,7 +229,6 @@ def incremental_cluster_eval(
         if len(test_signatures) > 0:
             eval_only_pred_clusters[cluster_key] = test_signatures
 
-    # get metrics
     b3_p, b3_r, b3_f1, b3_metrics_per_signature, _, _ = b3_precision_recall_fscore(
         full_cluster_to_signatures, pred_clusters, skip_signatures=observed_signatures
     )
@@ -256,8 +252,8 @@ def facet_eval(
     The returned dictionaries are keyed by the metric itself. For example, the keys of the
     homonymity_f1 variable are floating points between 0 and 1 indicating the amount
     of homonymity. The values are the per-signature B3s that have this amount of homonymity.
-    ``facet_eval`` no longer accepts ``block_type``; block-size, homonymity,
-    and synonymity facets use the canonical S2 block in ``author_info.block``.
+    Block-size, homonymity, and synonymity facets use the canonical S2 block in
+    ``author_info.block``.
     Deferred full names on Arrow-backed datasets are canonicalized once per
     evaluated signature without modifying the dataset.
 
@@ -518,7 +514,6 @@ def pairwise_eval(
     if not os.path.exists(figs_path):
         os.makedirs(figs_path)
 
-    # filename base will be title but lower and underscores
     base_name = title.lower().replace(" ", "_")
     if hasattr(classifier, "classifier"):
         classifier = classifier.classifier
@@ -589,9 +584,6 @@ def pairwise_eval(
         if not skip_shap and shap_plot_type is not None:
             from s2and.shap_utils import compute_shap_summary_plots
 
-            # compute_shap_summary_plots will write the same PNGs that the old inline
-            # code produced (names and behavior preserved) and is defensive against
-            # SHAP API changes and NumPy alias removals.
             compute_shap_summary_plots(
                 classifier=classifier,
                 X=X,
@@ -604,7 +596,6 @@ def pairwise_eval(
                 nameless_feature_names=nameless_feature_names,
             )
 
-    # collect metrics and return
     pr, rc, f1, _ = precision_recall_fscore_support(
         y, y_prob > thresh_for_f1, beta=1.0, average="macro", zero_division=0
     )
@@ -866,7 +857,7 @@ def claims_eval(
         paper_metadata_by_id=paper_metadata_by_id,
         signature_affiliations_by_id=signature_affiliations_by_id,
     )
-    # keep tqdm off for programmatic runs; enable by setting env var if desired
+    # keep tqdm off for programmatic runs
     for id1, id2, pred_same, gold_same in tqdm(sig_pairs, disable=True):
         paper_id1, _ = id1.split("___")
         title1 = paper_metadata_by_id[paper_id1][0]

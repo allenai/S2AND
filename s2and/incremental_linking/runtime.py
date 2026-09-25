@@ -103,7 +103,7 @@ class LinkOrAbstainRetrievedCandidatesResult:
 
 @dataclass(frozen=True)
 class LinkOrAbstainProductionResult(LinkOrAbstainRetrievedCandidatesResult):
-    """Private end-to-end result for the M3a production slice."""
+    """Private end-to-end production result."""
 
     retrieval_batch: LinkerRetrievalBatch
     pairwise_model_result: CandidateBatchPairwiseModelResult
@@ -545,10 +545,6 @@ def _predict_incremental_link_or_abstain_compact(
     as if the raw planner had excluded them at retrieval time; it carries
     cluster-seed-disallow exclusions against components that a mutually
     disallowed query linked to in an earlier batch.
-
-    This is intentionally not a public API. It exists to keep the first vertical
-    slice concrete while retrieval policy, constraint handling, and telemetry are
-    still private implementation details.
     """
 
     candidate_batch = feature_matrix.candidate_batch
@@ -1357,11 +1353,7 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
     hard_excluded_rows: np.ndarray | None = None,
     orcid_force_link_enabled: bool = True,
 ) -> LinkOrAbstainRetrievedCandidatesResult:
-    """Private vertical slice over retrieved candidates.
-
-    This intentionally remains private while retrieval parity, partial
-    supervision, constraints, and telemetry are still under M2/M3 validation.
-    """
+    """Private vertical slice over retrieved candidates."""
 
     if partial_supervision:
         raise NotImplementedError("partial supervision is not yet wired into the compact linker runtime")

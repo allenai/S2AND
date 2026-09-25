@@ -261,8 +261,6 @@ class TestShapIntegration(unittest.TestCase):
     def tearDown(self):
         shap_utils._SHAP_MODULE = self._orig_shap_module
 
-    # -------------------- pairwise_eval tests --------------------
-
     def test_pairwise_eval_validates_fitted_feature_names(self):
         import pandas as pd
         from lightgbm import LGBMClassifier

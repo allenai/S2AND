@@ -20,8 +20,6 @@ from s2and.thread_config import resolve_n_jobs
 
 
 def _required_file(data_dir: Path, filename: str) -> Path:
-    """Return a required file under ``data_dir``."""
-
     path = data_dir / filename
     if not path.exists():
         raise FileNotFoundError(f"Missing required file: {path}")

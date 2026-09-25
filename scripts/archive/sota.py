@@ -383,10 +383,10 @@ def main(
         if i < len(DATASET_NAMES):
             b3_f1_grid[i + 1][0] = DATASET_NAMES[i]
 
-    pairwise_auroc_grid = copy.deepcopy(b3_f1_grid)  # makes a copy of the grid
-    pairwise_f1_classification_grid = copy.deepcopy(b3_f1_grid)  # makes a copy of the grid
-    pairwise_average_precisision_grid = copy.deepcopy(b3_f1_grid)  # makes a copy of the grid
-    pairwise_macro_f1_grid = copy.deepcopy(b3_f1_grid)  # makes a copy of the grid
+    pairwise_auroc_grid = copy.deepcopy(b3_f1_grid)
+    pairwise_f1_classification_grid = copy.deepcopy(b3_f1_grid)
+    pairwise_average_precisision_grid = copy.deepcopy(b3_f1_grid)
+    pairwise_macro_f1_grid = copy.deepcopy(b3_f1_grid)
 
     # transfer of individual models
     logger.info("starting individual model evaluation")
@@ -411,7 +411,6 @@ def main(
         ] = pairwise_metrics["Average Precision"]
     logger.info("finished individual model evaluation")
 
-    # union
     logger.info("")
     logger.info("writing results to disk")
     print("B3 F1:")

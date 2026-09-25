@@ -637,8 +637,7 @@ mod tests {
         assert_eq!(rows[1].first, "alice");
         assert_eq!(rows[2].first, "qi xin");
         assert_eq!(rows[2].middle, "a");
-        // Dash-bound given names stay together canonically (D1/D4); the legacy
-        // non-ASCII-dash spill shim is retired.
+        // Dash-bound given names stay together canonically (D1/D4).
         assert_eq!(rows[3].first, "arif ullah");
         assert_eq!(rows[3].middle, "");
     }

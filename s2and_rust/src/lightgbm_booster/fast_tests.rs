@@ -624,8 +624,8 @@ fn catastrophic_cancellation_sums_keep_tree_order() {
     }
 }
 
-/// `count` distinct stumps on feature 0 whose thresholds come from `values`,
-/// cycling through NaN/None decision types so both key slots are used.
+/// One stump on feature 0 per threshold in `values`, cycling through NaN/None
+/// decision types so both key slots are used.
 fn threshold_stumps(values: &[f64]) -> Vec<Node> {
     values
         .iter()
@@ -773,7 +773,7 @@ fn nan_thresholds_fall_back() {
     assert!(FastPlan::build(&parse(3, &with_lockstep_tree(&trees, 2))).is_none());
 }
 
-/// `review_w2_probe.py`: node 1 is both children of the root. The parser
+/// Node 1 is both children of the root. The parser
 /// accepts it, but QuickScorer's masks would score row [0, 1] as 10.
 const SHARED_CHILD_MODEL: &str = "tree
 version=v4

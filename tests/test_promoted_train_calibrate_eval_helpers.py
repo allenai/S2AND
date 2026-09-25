@@ -305,8 +305,6 @@ def test_promoted_stratified_gate_spec_rejects_ambiguous_or_leaky_splits() -> No
 
 
 def test_apply_classic_train_row_cap_preserves_positive_queries() -> None:
-    """Classic row-cap filtering should keep every positive query represented."""
-
     train_df = pd.DataFrame(
         {
             "query_group_id": [1, 1, 1, 1, "q2", "q2", "q2", 3, 3, 3],
@@ -372,8 +370,6 @@ def test_stratified_split_disjointness_requires_complete_identity_keys(assignmen
 
 
 def test_evaluate_logistic_manual_holdout_scores_fresh_candidates() -> None:
-    """Manual holdout evaluation should score fresh candidates through the logistic gate."""
-
     manual_holdout = pd.DataFrame(
         {
             "query_case_id": ["q1", "q1", "q2", "q2"],
@@ -479,8 +475,6 @@ def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(
     tmp_path: Path,
     assignment_base_group_id: str,
 ) -> None:
-    """Classic stratified scoring should refresh stale split targets from active labels."""
-
     bundle_root = tmp_path / "bundle"
 
     def write_rows(relative_path: str, rows: list[dict[str, object]]) -> None:
@@ -584,8 +578,6 @@ def test_bundle_path_resolution_rejects_absolute_paths_outside_bundle(tmp_path: 
 
 
 def test_resolve_classic_monotone_constraints_requires_explicit_opt_in() -> None:
-    """Classic monotone constraints should only activate when the bundle specifies them."""
-
     feature_columns = ("title_overlap", "cluster_size", "min_distance")
     assert _resolve_classic_monotone_constraints({}, feature_columns) is None
     assert _resolve_classic_monotone_constraints(
@@ -595,8 +587,6 @@ def test_resolve_classic_monotone_constraints_requires_explicit_opt_in() -> None
 
 
 def test_extra_eval_paths_support_dynamic_dataset_mapping() -> None:
-    """Classic bundle specs should support arbitrary extra eval dataset mappings."""
-
     spec = {
         "s_park_eval_path": "test/s_park_eval_rows.csv.gz",
         "extra_eval_paths": {

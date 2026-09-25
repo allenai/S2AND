@@ -21,10 +21,6 @@ import pandas as pd
 from s2and.consts import CONFIG
 from s2and.data import ANDData
 
-"""
-This script creates pairs and embeddings to be used in make_augmentation_dataset_b.py
-"""
-
 SPECTER_URL = "https://model-apis.semanticscholar.org/specter/v1/invoke"
 
 
@@ -40,7 +36,6 @@ def embed(papers, embeddings_by_paper_id: dict[str, list[float]] | None = None):
     papers_to_embed = [p for p in papers if p["paper_id"] not in embeddings_by_paper_id]
     unembedded_papers = []
     for chunk in chunks(papers_to_embed):
-        # Prepare the request
         data = json_module.dumps(chunk).encode("utf-8")
         req = urllib.request.Request(SPECTER_URL, data=data, headers={"Content-Type": "application/json"})
 

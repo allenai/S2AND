@@ -1846,11 +1846,11 @@ pub(crate) struct SubblockMergeMetadata {
 pub(crate) fn subblock_merge_candidate_metadata(key: &str, size: usize) -> SubblockMergeMetadata {
     let key_parts: Vec<&str> = key.split('|').collect();
     let first_name = key_parts.first().copied().unwrap_or_default().to_string();
-    // Match s2and/subblocking.py:1543-1554: only emit a middle_name when the second
-    // segment explicitly carries a `key=value` token, mirroring Python's
-    // `if "=" in key_parts[1]` guard. Returning `Some("")` for an `=`-less segment
-    // would silently make the subblock eligible for merge fan-out against other
-    // empty-middle subblocks.
+    // Match s2and.subblocking._subblock_merge_candidate_metadata: only emit a
+    // middle_name when the second segment explicitly carries a `key=value`
+    // token, mirroring Python's `"=" in key_parts[1]` guard. Returning
+    // `Some("")` for an `=`-less segment would silently make the subblock
+    // eligible for merge fan-out against other empty-middle subblocks.
     let middle_name = key_parts
         .get(1)
         .and_then(|part| part.split_once('='))
@@ -1864,8 +1864,7 @@ pub(crate) fn subblock_merge_candidate_metadata(key: &str, size: usize) -> Subbl
     };
     // canonical_v2: the ORCID first-k-letter prefix-count artifact is keyed on
     // slices of FULL canonical first names (spaces included), so the lookup key
-    // is the whole canonical name string. The legacy first-token reduction was
-    // a shim for compact-joined keys and is retired.
+    // is the whole canonical name string.
     let lookup = name_for_splits.clone();
     SubblockMergeMetadata {
         size,

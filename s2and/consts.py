@@ -125,7 +125,6 @@ NAME_COUNTS_INDEX_PATH = _LazyDataPath("name_counts_index")
 # Independently consumed Arrow and name-count data format.
 PUBLIC_DATA_FORMAT_VERSION = 1
 
-# important constant values
 NUMPY_NAN = np.nan
 DEFAULT_CHUNK_SIZE = 100
 LARGE_DISTANCE = 1e4

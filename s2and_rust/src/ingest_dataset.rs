@@ -494,7 +494,6 @@ pub(crate) fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec
             readonly.as_slice()?.iter().map(|v| *v as f32).collect(),
         ));
     }
-    // Fallback: try to extract as Vec<f64>
     let vec_f64: Vec<f64> = obj.extract()?;
     Ok(Some(vec_f64.into_iter().map(|v| v as f32).collect()))
 }

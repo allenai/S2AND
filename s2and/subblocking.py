@@ -1314,8 +1314,7 @@ def signature_name_parts_for_subblocking(signature) -> tuple[str, str]:
     """Canonical (canonical_v2) first/middle for subblocking keys.
 
     Dash handling is uniform (D4): every dash-like character binds given-name
-    compounds identically, replacing the retired ASCII-kept/non-ASCII-spilled
-    legacy repair.
+    compounds identically.
     """
 
     first = signature.author_info_first_normalized_without_apostrophe
@@ -1366,7 +1365,6 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000, com
     elif len(signature_ids) <= target_subblock_size:
         return {"0": signature_ids}
 
-    # extract all the specter stuff in order of the signatures
     X_specter = np.array(
         [
             anddata.specter_embeddings.get(str(anddata.signatures[i].paper_id), np.zeros(SPECTER_DIM))
@@ -1466,7 +1464,6 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         output_cant_subdivide: dict with keys as subblock names and values as list of signature_ids
             that cant be subdivided further
     """
-    # start with 2 letters only, then subdivide further to 3 letters, etc until the maximum_size is reached
     n_signature_ids = len(signature_ids)
     if n_signature_ids == 0:
         return {}, {}
@@ -1482,11 +1479,9 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         # find the ones that are a good size, and then take the rest and subdivide further
         good_size_flag = counts_up_to_k <= maximum_size
         counts_up_to_k_good_size = counts_up_to_k[good_size_flag]
-        # store each subblock in output
         for name in counts_up_to_k_good_size.index:
             flag = names_up_to_k == name
             output[name] = signature_ids[flag]
-        # take the rest and subdivide further
         bad_names = set(counts_up_to_k[counts_up_to_k > maximum_size].index)
         bad_size_flag = np.array([i[0:k] in bad_names for i in names], dtype=bool)
         names = names[bad_size_flag]
@@ -1531,9 +1526,7 @@ def _subblock_merge_candidate_metadata(key: str, size: int) -> tuple[int, str, s
         name_for_splits = middle_name
     else:
         name_for_splits = None
-    # canonical_v2: prefix-count lookups use the full canonical name string; the
-    # legacy first-token reduction for multi-token names is retired with the
-    # regenerated ORCID prefix-count artifact.
+    # canonical_v2: prefix-count lookups use the full canonical name string.
     lookup = name_for_splits
     return size, first_name, middle_name, name_for_splits, lookup
 
@@ -1660,8 +1653,7 @@ def make_subblocks_with_telemetry(
         anddata (s2and.data.ANDData): Contains name attribute data for the signatures.
         maximum_size (int): Maximum size of any subblock. Default is 15000.
         first_k_letter_counts_sorted (dict): Dictionary of name letter counts, used for merging subblocks.
-            Already included in the package. Default is FIRST_K_LETTER_COUNTS, which is imported
-            in this file.
+            Already included in the package. Default is FIRST_K_LETTER_COUNTS.
         use_orcid_subblocking (bool): Whether to run the final same-ORCID co-location pass.
 
     Returns:
@@ -1702,14 +1694,12 @@ def make_subblocks_with_telemetry(
         "final_specter_labeled_signature_count": 0,
     }
 
-    # first letter is
     first_letter = "?"  # could happen if all the first names are missing
     for name in first_names:
         if len(name) > 0:
             first_letter = name[0]
             break
 
-    # first pass through the more-than-one-letter first names
     logger.info("First pass through the more-than-one-letter first names")
     output, output_cant_subdivide = subdivide_helper(
         first_names[~single_letter_first_names_flag], signature_ids[~single_letter_first_names_flag], maximum_size
@@ -1735,7 +1725,6 @@ def make_subblocks_with_telemetry(
             output_loop[key + "|middle=" + str(key_loop)] = output_loop.pop(key_loop)
         for key_loop in list(output_cant_subdivide_loop.keys()):
             output_cant_subdivide_loop[key + "|middle=" + str(key_loop)] = output_cant_subdivide_loop.pop(key_loop)
-        # now update the output
         output.update(output_loop)
         output_for_specter.update(output_cant_subdivide_loop)
 
@@ -1833,9 +1822,6 @@ def make_subblocks_with_telemetry(
     merging_log = {}  # what we will actually merge after we're done. cluster id -> set of keys
     inverse_merging_log = {}  # need this to see if things are in the same subblock already
     cluster_id = 0
-    # we'll use this to see how many tuples a key appears in
-    # and if a proposed merge appears in more than one
-    # then we have a problem and it shouldn't occur
     logger.info(f"Number of small enough pairs to consider for subblock merging: {len(small_enough_pairs_sorted)}")
     logger.info("Merging subblocks...")
     for pair, _ in small_enough_pairs_sorted:
@@ -1899,11 +1885,9 @@ def make_subblocks_with_telemetry(
         key_of_keys = ", ".join(keys_to_merge)
         signature_ids_stacked = np.hstack([output[k] for k in keys_to_merge])
         output[key_of_keys] = signature_ids_stacked
-        # delete what was merged
         for k in keys_to_merge:
             del output[k]
 
-    # values in output should be lists
     for k in list(output.keys()):
         output[k] = list(output[k])
 
@@ -2020,7 +2004,6 @@ def make_subblocks_with_telemetry(
     if output_signature_ids != expected_signature_ids:
         raise RuntimeError("Subblocking output is not a complete one-to-one partition of signature_ids")
 
-    # before the end, makes sure everything is a standard list
     for k in list(output.keys()):
         output[k] = list(output[k])
 

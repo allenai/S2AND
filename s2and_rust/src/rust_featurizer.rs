@@ -413,8 +413,8 @@ impl RustFeaturizer {
 
         let specter_sim = if english_or_unknown_count == 2 {
             if let (Some(specter_a), Some(specter_b)) = (p1.specter.as_ref(), p2.specter.as_ref()) {
-                // Match s2and.featurizer behavior at s2and/featurizer.py:1223,1227:
-                // all-zero SPECTER vectors are treated as missing, yielding NaN.
+                // Match s2and.featurizer._specter_vector_or_none: all-zero SPECTER
+                // vectors are treated as missing, yielding NaN.
                 // The Arrow ingest path keeps all-zero rows as real vectors, so the
                 // missing-vector check has to live here instead of at the ingest
                 // boundary.

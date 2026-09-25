@@ -554,7 +554,7 @@ impl RawNameCountIndexFile {
     /// SHA-256 requires file order, while record validation follows offsets
     /// into the later name blob. Hash record-table chunks immediately before
     /// validating their records, then hash the post-record tail once. This
-    /// avoids the former separate full-file stream while keeping validation
+    /// avoids a separate full-file stream while keeping validation
     /// bounded-memory and SHA updates coarse-grained.
     fn validate_all_records(
         &self,
@@ -936,8 +936,7 @@ mod name_counts_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
-    // A valid 32-byte name-count index header describing zero records; the
-    // manifest reader only checks the files exist.
+    // A valid 32-byte name-count index header describing zero records.
     fn empty_index_bytes() -> [u8; 32] {
         let mut bytes = [0u8; 32];
         bytes[0..8].copy_from_slice(b"S2NCI001");

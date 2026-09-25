@@ -516,10 +516,7 @@ class ANDData:
     """
     The main class for holding our representation of an author disambiguation dataset
 
-    Blocking uses ``author_info.block`` exclusively. The legacy
-    ``block_type`` selector, ``author_info.given_block``,
-    ``get_original_blocks()``, and ``get_s2_blocks()`` are removed; callers
-    that need a historical partition must retain it outside ``ANDData``.
+    Blocking uses ``author_info.block`` exclusively.
 
     Input:
         signatures: path to the signatures json file (or the json object)
@@ -844,7 +841,6 @@ class ANDData:
                 self.cluster_seeds_require[signature_id] = cluster_id
             self.max_seed_cluster_id = len(component_ids)
         logger.info("loaded cluster seeds")
-        # check that all altered_cluster_signatures are in cluster_seeds_require
         if self.altered_cluster_signatures is not None:
             for signature_id in self.altered_cluster_signatures:
                 if signature_id not in self.cluster_seeds_require:
@@ -880,7 +876,6 @@ class ANDData:
                         self.signature_to_cluster_id[signature] = cluster_id
                 logger.info("made signature to cluster id")
         elif self.mode == "inference":
-            # sampling within blocks and exhaustive flag is turned on
             self.pair_sampling_mode = "within_block_random"
             self.all_test_pairs_flag = True
         else:

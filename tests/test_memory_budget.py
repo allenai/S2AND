@@ -453,7 +453,7 @@ def test_compute_rust_batch_chunk_plan_adds_persistent_row_overhead():
 
 
 def test_rss_fallback_logs_warning(caplog, monkeypatch):
-    """Fix #1: RSS fallback should log a warning when using the 50% assumption."""
+    """RSS fallback should log a warning when using the 50% assumption."""
     monkeypatch.setattr(memory_budget, "_psutil_process_rss_bytes_best_effort", lambda: None)
     monkeypatch.setattr(memory_budget, "_proc_status_rss_bytes_best_effort", lambda: (None, "unavailable"))
     monkeypatch.setattr(memory_budget, "_windows_process_working_set_bytes_best_effort", lambda: (None, "unavailable"))
@@ -466,7 +466,7 @@ def test_rss_fallback_logs_warning(caplog, monkeypatch):
 
 
 def test_rust_batch_selected_features_tighter_chunk_sizing():
-    """Fix #6: Rust batch should use selected+nameless for chunk sizing, not full_feature_count."""
+    """Rust batch should use selected+nameless for chunk sizing, not full_feature_count."""
     common_kwargs = dict(
         total_ram_bytes=10_000_000,
         base_chunk_pairs=100_000,
@@ -508,7 +508,6 @@ def test_degenerate_budget_logs_warning(caplog):
 
 
 def test_effective_available_fraction_in_snapshot():
-    """MemorySnapshot should include effective_available_fraction."""
     snapshot = memory_budget.memory_snapshot_for_stage(
         total_ram_bytes=1_000_000,
         safety_margin_fraction=0.10,

@@ -448,8 +448,7 @@ def test_signature_id_to_index_or_raise_reports_missing_signature_id() -> None:
 
 
 def test_many_pairs_featurize_surfaces_rust_initialization_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A placeholder ArrowDataset marks the dataset as Rust-eligible; the Rust build
-    # itself is replaced with fail_prewarm below, so no real build happens.
+    # A placeholder ArrowDataset marks the dataset as Rust-eligible; fail_prewarm replaces the build.
     dataset = cast(
         ANDData,
         SimpleNamespace(

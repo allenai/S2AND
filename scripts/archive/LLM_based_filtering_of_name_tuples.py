@@ -87,8 +87,6 @@ def read_name_tuples(file_path):
 
 input_tuples = read_name_tuples(os.path.join(CONFIG["main_data_dir"], "s2and_name_tuples_filtered.txt"))
 
-# testing
-
 
 def batched(iterable, n):
     "Batch data into tuples of length n. The last batch may be shorter."
@@ -142,7 +140,6 @@ for _input_batch, output in results:
     bad_tuples.extend(bad_part.strip().split("\n"))
     chinese_tuples.extend(chinese_part.strip().split("\n"))
 
-# remove empty strings
 keep_tuples = [t for t in keep_tuples if t]
 bad_tuples = [t for t in bad_tuples if t]
 chinese_tuples = [t for t in chinese_tuples if t]
@@ -236,7 +233,6 @@ for _input_batch, output in results_chinese:
     chinese_keep_tuples.extend(keep_part.strip().split("\n"))
     chinese_bad_tuples.extend(bad_part.strip().split("\n"))
 
-# remove empty strings
 chinese_keep_tuples = [t for t in chinese_keep_tuples if t]
 chinese_bad_tuples = [t for t in chinese_bad_tuples if t]
 
@@ -422,8 +418,6 @@ if not_found_tuples:
     for name in sorted(set(not_found_tuples)):
         print(f"  {name}")
 
-# save the matching original lines to a file
-
 
 def standardize_punctuation(s):
     # Standardize apostrophes
@@ -432,7 +426,6 @@ def standardize_punctuation(s):
     # Standardize dashes/hyphens
     for dash in ["–", "—", "−", "‐", "‒", "―", "﹘", "－", "‑"]:
         s = s.replace(dash, "-")
-    # Normalize unicode to NFKC
     s = unicodedata.normalize("NFKC", s)
     return s
 

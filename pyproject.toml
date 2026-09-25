@@ -99,7 +99,6 @@ branch = true
 # Leave platform headroom while rejecting substantial coverage loss in CI.
 fail_under = 80
 
-# Ruff config (used for lint + format)
 [tool.ruff]
 line-length = 120
 target-version = "py311"

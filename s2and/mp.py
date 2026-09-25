@@ -7,7 +7,6 @@ from itertools import islice
 from typing import Any
 
 
-# ---------- private helper ----------
 def _run_chunk(func: Callable[[Any], Any], idx_items: list[tuple[int, Any]]) -> list[tuple[int, Any]]:
     """Run func on each item in the chunk and keep the index."""
     out = []
@@ -19,7 +18,6 @@ def _run_chunk(func: Callable[[Any], Any], idx_items: list[tuple[int, Any]]) -> 
     return out
 
 
-# ---------- main class ----------
 class UniversalPool:
     """
     Almost-drop-in replacement for multiprocessing.Pool on Py 3.11+
@@ -55,7 +53,6 @@ class UniversalPool:
             if int(processes) <= 0:
                 raise ValueError(f"processes must be a positive integer when provided, got {processes!r}")
             self.processes = int(processes)
-        # _pool can be a process or thread executor depending on platform/settings.
         self._pool: ProcessPoolExecutor | ThreadPoolExecutor
 
         if use_threads:
@@ -79,7 +76,6 @@ class UniversalPool:
                 initargs=initargs,
             )
 
-    # ---------- public API ----------
     def imap(
         self, func: Callable[[Any], Any], iterable: Iterable[Any], chunksize: int = 1, max_prefetch: int = 4
     ) -> Iterator[Any]:
@@ -91,14 +87,12 @@ class UniversalPool:
             raise ValueError(f"chunksize must be >= 1, got {chunksize!r}")
         if int(max_prefetch) <= 0:
             raise ValueError(f"max_prefetch must be >= 1, got {max_prefetch!r}")
-        # Use streaming implementation for ProcessPoolExecutor/ThreadPoolExecutor.
         return self._streaming_imap(func, iterable, int(chunksize), int(max_prefetch))
 
     def _streaming_imap(
         self, func: Callable[[Any], Any], iterable: Iterable[Any], chunksize: int = 1, max_prefetch: int = 4
     ) -> Iterator[Any]:
         """Streaming imap implementation with backpressure control."""
-        # producer over the input
         it = enumerate(iterable)  # keeps original positions
         next_yield = 0  # next index expected to yield
         buffer: dict[int, Any] = {}  # completed results waiting to be yielded
@@ -149,7 +143,6 @@ class UniversalPool:
         self._pool.shutdown(wait=False, cancel_futures=True)
         return cancelled_count
 
-    # ---------- context manager ----------
     def __enter__(self):
         return self
 

@@ -18,10 +18,9 @@ each batched once, with case IDs in assertion messages:
 - Table coherence: equivalence groups, decision references, and
   normalized-form invariants of the ``canonical`` values.
 
-The pure contract checks every frozen row in one batch, with case IDs in each
-assertion, to avoid per-example pytest collection overhead. The JSON fixture is
-the frozen source of truth; decided values must not be
-regenerated silently. Add new cases by hand-writing them into the fixture.
+Batching avoids per-example pytest collection overhead. The JSON fixture is the
+frozen source of truth; decided values must not be regenerated silently. Add new
+cases by hand-writing them into the fixture.
 """
 
 from __future__ import annotations

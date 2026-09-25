@@ -1679,15 +1679,12 @@ class Clusterer:
         -------
         either the loaded json, or the passed in object
         """
-        # blocks with only 1 element are useless for train/val
-        # and we can only keep as many as is specified
         out_dict = {}
         count = 0
         for block_key, signatures in block_dict.items():
             if len(signatures) > 1:
                 out_dict[block_key] = signatures
                 count += 1
-                # early stopping if we have enough
                 if num_to_keep is not None and count == num_to_keep:
                     return out_dict
         return out_dict
@@ -1821,8 +1818,6 @@ class Clusterer:
             the dictionary of partial supervision provided with this dataset/these blocks
         incremental_dont_use_cluster_seeds: bool
             whether to ignore dataset cluster seeds while resolving constraints in incremental flows
-        total_ram_bytes: Optional[int]
-            Optional explicit RAM budget for exact block-matrix allocation checks.
 
         Returns
         -------
@@ -2378,7 +2373,6 @@ class Clusterer:
         _ensure_lightgbm_fitted(self.nameless_classifier)
         logger.info(f"Making {len(block_dict)} distance matrices")
         logger.info("Initializing pairwise_probas")
-        # initialize pairwise_probas with correctly size arrays
         pairwise_probas = {}
         num_pairs = 0
         # Calibration and cached prediction must retain the same precision as
@@ -3572,22 +3566,7 @@ class Clusterer:
         altered_cluster_signatures: Sequence[Any] | None = None,
         prediction_state: PredictionState | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
-        """Predict blocks through one open Arrow dataset.
-
-        Args:
-            block_dict: Mapping from block keys to signature IDs.
-            arrow_dataset: Open immutable Arrow dataset.
-            batching_threshold: Maximum native subblock size. ``None`` keeps
-                full-block prediction; a positive value routes oversized blocks
-                through the Arrow-native Rust subblocker.
-            cluster_seeds_require: Current request-local required seed components.
-            altered_cluster_signatures: Accepted but ignored in bulk prediction.
-                Temporary altered-profile splits apply only to incremental linking;
-                bulk prediction uses the supplied required seed groups unchanged.
-
-        Returns:
-            Predicted clusters and optional precomputed distance matrices.
-        """
+        """Predict blocks through one open Arrow dataset with optional request-local prediction state."""
 
         if any(len(signatures) > 1 for signatures in block_dict.values()):
             self = _clusterer_with_prediction_params(self, cluster_model_params)
@@ -3753,7 +3732,6 @@ class Clusterer:
         val_datasets_list: list[ANDData] = []
         weights: list[float] = []
         for dataset in datasets:
-            # blocks
             train_block_dict, val_block_dict, _ = _resolve_signature_splits(dataset)
             # incremental setting uses all the signatures in train and val
             # block-wise split uses only validation set for building the clustering model
@@ -3770,7 +3748,6 @@ class Clusterer:
             val_cluster_to_signatures = dataset.construct_cluster_to_signatures(val_block_dict)
             val_cluster_to_signatures_list.append(val_cluster_to_signatures)
 
-            # distance matrix
             if val_dists_precomputed is None:
                 val_dists = self.make_distance_matrices(val_block_dict, dataset)
             else:
@@ -4559,7 +4536,6 @@ class Clusterer:
                 chunk = prediction_chunk.chunk
                 block_key = chunk.block_key
                 if block_key != prev_block_key:
-                    # cluster the completed block
                     self._flush_completed_block(
                         block_key=prev_block_key,
                         pairwise_proba=pairwise_proba,
@@ -4573,7 +4549,6 @@ class Clusterer:
                     )
                     pairwise_proba = None
 
-                    # allocate new block's matrix
                     seen_block_keys.add(block_key)
                     _guard_predict_block_matrix_allocation(
                         block_key=block_key,
@@ -4604,7 +4579,6 @@ class Clusterer:
                     )
                 prev_block_key = block_key
 
-            # cluster the final block
             self._flush_completed_block(
                 block_key=prev_block_key,
                 pairwise_proba=pairwise_proba,
@@ -5239,7 +5213,6 @@ class Clusterer:
         prediction_state: PredictionState | None = None,
     ) -> dict[str, list[str]]:
         config = self._incremental_experiment_config()
-        # NEW!
         # First cluster the unassigned signatures, then decide which resulting unassigned
         # clusters should merge with existing seeded clusters.
         logger.info("Batch clustering the unassigned signatures")

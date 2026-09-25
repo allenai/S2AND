@@ -629,7 +629,7 @@ def _single_pair_featurize(
             ),
             50,
         )
-    )  # magic number!
+    )
 
     features.extend(
         [
@@ -684,7 +684,7 @@ def _single_pair_featurize(
     else:
         specter_sim = NUMPY_NAN
 
-    features.append(specter_sim)  # , abstract_count, english_count])
+    features.append(specter_sim)
 
     features.append(counter_jaccard(journal_ngrams_1, journal_ngrams_2))
 
@@ -1131,7 +1131,6 @@ def many_pairs_featurize(
     for i, pair in tqdm(enumerate(signature_pairs), desc="Creating work", disable=len(signature_pairs) <= 100000):
         labels[i] = pair[2]
 
-        # negative labels are an indication of partial supervision
         if _is_partial_supervision_label(pair[2]):
             continue
 

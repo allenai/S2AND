@@ -63,9 +63,7 @@ pub(crate) fn first_names_name_compatible(
         return true;
     }
     // canonical_v2: the regenerated name-tuple artifact is keyed on full
-    // canonical first names, so the fields are probed exactly as given. The
-    // legacy joined/first-token probes were shims for pre-canonical multi-token
-    // fields and are retired.
+    // canonical first names, so the fields are probed exactly as given.
     name_tuple_contains(name_tuples, first_1, first_2)
 }
 

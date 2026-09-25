@@ -253,7 +253,6 @@ class FastCluster(TransformerMixin, BaseEstimator):
             Cutoff used to determine number of clusters.
         preserve_input: bool (default=True)
             Whether to preserve the X input or modify in place.
-            Defaults to False, which modifies in place.
         input_as_observation_matrix: bool (default=False)
             If True, the input to fit/transform must be a 2-D array
             of observation vectors (N by d). If False input to fit/transform

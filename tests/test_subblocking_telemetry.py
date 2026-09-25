@@ -391,7 +391,7 @@ def test_normalize_orcid_for_subblocking_matches_rust_arrow_canonical_form() -> 
 
 def test_signature_name_parts_for_subblocking_recomputes_deferred_normalized_fields() -> None:
     # canonical_v2 (D4): dash-bound compounds stay together regardless of the
-    # dash code point; the legacy non-ASCII-dash spill repair is retired.
+    # dash code point.
     signature = SimpleNamespace(
         author_info_first="Arif\u2010ullah",
         author_info_middle=None,

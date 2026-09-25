@@ -473,11 +473,7 @@ def current_rss_bytes_best_effort(total_ram_bytes: int) -> tuple[int, str]:
 
 
 def gc_collect_and_log(stage_name: str) -> None:
-    """Hint the garbage collector between stages to reduce stale RSS inflation.
-
-    Calling ``gc.collect()`` encourages Python to release reference-counted
-    objects that would otherwise inflate RSS seen by the next stage's snapshot.
-    """
+    """Hint the garbage collector between stages to reduce stale RSS inflation."""
     import gc
 
     collected = gc.collect()
@@ -686,8 +682,6 @@ def compute_rust_batch_chunk_plan(
         selected_feature_count_bounded = max(1, min(full_feature_count, selected_feature_count))
     nameless_feature_count_bounded = max(0, min(full_feature_count, nameless_feature_count))
     # Use selected + nameless for chunk sizing (upper bound on columns Rust produces).
-    # When selected_feature_count is None, selected_feature_count_bounded == full_feature_count,
-    # so behavior is unchanged for callers that don't specify feature counts.
     chunk_feature_count = max(1, selected_feature_count_bounded + nameless_feature_count_bounded)
     parsed_index_remap_bytes_per_pair = int(index_remap_bytes_per_pair)
     if parsed_index_remap_bytes_per_pair < 0:

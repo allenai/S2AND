@@ -1274,7 +1274,6 @@ def main() -> None:
         print("Training mode parity check: passed")
         print()
 
-    # summary
     print("=" * 60)
     print("Summary")
     print("=" * 60)

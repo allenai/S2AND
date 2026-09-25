@@ -783,12 +783,10 @@ def first_names_name_compatible(first_a: str, first_b: str, name_tuples: Set[tup
     Two canonical first fields are compatible when either is missing (unknown is
     not an incompatibility signal), when they are prefix-compatible per
     ``same_prefix_tokens``, or when the pair is a curated alias in the canonical
-    name-tuple artifact. The legacy joined/first-token probing forms were retired
-    with the canonical_v2 cutover.
+    name-tuple artifact.
     """
 
     if not first_a.split() or not first_b.split():
-        # Missing first-name evidence is unknown, not an incompatibility signal.
         return True
 
     if same_prefix_tokens(first_a, first_b):

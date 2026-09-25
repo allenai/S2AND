@@ -219,10 +219,8 @@ def test_feature_values_from_runtime_precedence_three_way_overlap() -> None:
         np.full(row_count, matrix_value, dtype=np.float32),
     )
 
-    # Then mutate the pairwise overlay AFTER assembly so the pairwise_stats overlay value
-    # (3.0) differs from the matrix-baked value (1.0). This is the only way to construct
-    # a three-way disagreement and is exactly the silent-precedence footgun this test
-    # locks down.
+    # Mutate the pairwise overlay AFTER assembly so its value (3.0) differs from the
+    # matrix-baked value (1.0); this is the only way to construct a three-way disagreement.
     overlay_value = np.float32(3.0)
     pairwise_stats._matrix[:, target_index] = overlay_value
     row_signal_value = np.asarray([2.0, 2.0], dtype=np.float32)
@@ -237,7 +235,6 @@ def test_feature_values_from_runtime_precedence_three_way_overlap() -> None:
         values[target_column],
         np.full(row_count, matrix_value, dtype=np.float32),
     )
-    # Explicitly assert the losers are NOT visible.
     assert not np.array_equal(values[target_column], row_signal_value)
     assert not np.array_equal(values[target_column], np.full(row_count, overlay_value, dtype=np.float32))
 

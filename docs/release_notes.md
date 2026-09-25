@@ -18,6 +18,10 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Breaking changes
 
+- The production pairwise training population drops the internal `orcid`
+  dataset: v1.3 trains on `aminer`, `arnetminer`, `inspire`, `kisti`, `pubmed`,
+  `qian`, and `zbmath` in random-block mode plus `augmented` in fixed-pair mode.
+  Model plans that still list `orcid` are rejected.
 - The `S2AND_BACKEND` environment variable is removed. Public APIs already chose
   their backend by method, so only direct callers of
   `s2and.runtime.build_runtime_context(...)` without `backend` are affected;

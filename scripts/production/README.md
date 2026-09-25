@@ -415,11 +415,12 @@ Fixed-pair training and validation CSVs use `signature_id_1`, `signature_id_2`,
 and `label` columns. Columns are selected by name, so their order does not
 matter. Labels may be `YES`/`NO` or `1`/`0`.
 
-The production trainer intentionally accepts only the full release population:
-`aminer`, `arnetminer`, `inspire`, `kisti`, `orcid`, `pubmed`, `qian`, and
-`zbmath` in random-block mode, plus `augmented` in fixed-pair mode. Replace the
-single `random` example with exactly those nine reviewed entries before running
-the trainer below.
+The production trainer accepts exactly the v1.3 population: `aminer`,
+`arnetminer`, `inspire`, `kisti`, `pubmed`, `qian`, and `zbmath` in random-block
+mode, plus the internal `augmented` set in fixed-pair mode. The internal `orcid`
+dataset is not part of v1.3, and pair-labeled `medline` is published but not
+trained on directly. Replace the single `random` example with exactly those
+eight reviewed entries before running the trainer below.
 
 `model_plan.json` has the single owner-selected `release_version`, training and
 validation inputs, and EPS policy, but no held-out path.

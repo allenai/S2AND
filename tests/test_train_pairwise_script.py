@@ -29,11 +29,12 @@ def _artifact_authority(
     )
 
 
-def _write_model_plan(tmp_path: Path) -> Path:
+def _write_model_plan(tmp_path: Path, dataset_names: tuple[str, ...] | None = None) -> Path:
     input_root = tmp_path / "planned_inputs"
     input_root.mkdir()
     datasets = {}
-    for name in (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "augmented"):
+    names = (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "augmented") if dataset_names is None else dataset_names
+    for name in names:
         roles = {"papers", "signatures", "specter_embeddings"}
         roles |= {"train_pairs", "val_pairs"} if name == "augmented" else {"clusters"}
         files = {}
@@ -84,6 +85,22 @@ def test_preflight_loads_test_free_direct_path_plan(tmp_path: Path) -> None:
     )
     assert all("test_pairs" not in spec["files"] for spec in config["dataset_inputs"].values())
     assert list(plan.matrix_work_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "dataset_names",
+    [
+        (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "orcid", "augmented"),
+        (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES[:-1], "augmented"),
+    ],
+    ids=["includes-excluded-orcid", "missing-benchmark"],
+)
+def test_preflight_rejects_plans_outside_the_v13_population(tmp_path: Path, dataset_names) -> None:
+    assert "orcid" not in train_pairwise.DEFAULT_SOURCE_DATASET_NAMES
+    args = _args(tmp_path, model_plan=_write_model_plan(tmp_path, dataset_names))
+
+    with pytest.raises(SystemExit, match="disagree with the production dataset set"):
+        train_pairwise._preflight_pairwise(args)
 
 
 def test_training_rejects_source_mutation_before_loading_artifacts_or_data(

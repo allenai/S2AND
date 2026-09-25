@@ -51,7 +51,9 @@ from s2and.production_training_contract import (  # noqa: E402
 
 logger = logging.getLogger("s2and")
 
-DEFAULT_SOURCE_DATASET_NAMES = ("aminer", "arnetminer", "inspire", "kisti", "orcid", "pubmed", "qian", "zbmath")
+# v1.3 trains on seven public benchmarks plus the internal fixed-pair "augmented" set; the internal
+# "orcid" dataset is excluded, and pair-labeled "medline" is covered only through "augmented".
+DEFAULT_SOURCE_DATASET_NAMES = ("aminer", "arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath")
 DEFAULT_TRAIN_PAIRS_SIZE = 100_000
 DEFAULT_VALIDATION_PAIRS_SIZE = 10_000
 DEFAULT_N_ITER = 50

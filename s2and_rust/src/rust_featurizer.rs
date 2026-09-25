@@ -1116,7 +1116,7 @@ impl RustFeaturizer {
             .collect::<HashSet<_>>();
         let (raw_papers, _) = dataset.read_papers(&needed_paper_ids)?;
         let (mut raw_authors_by_paper, _) = dataset.read_paper_authors(&needed_paper_ids)?;
-        let specter_by_paper = if dataset.has_specter() {
+        let mut specter_by_paper = if dataset.has_specter() {
             dataset.read_specter(&needed_paper_ids)?.0
         } else {
             HashMap::new()
@@ -1283,7 +1283,7 @@ impl RustFeaturizer {
             let coauthors = paper_coauthors
                 .remove(&paper_id)
                 .expect("every preprocessed paper has coauthor aggregates");
-            let specter = specter_by_paper.get(&paper_id).cloned();
+            let specter = specter_by_paper.remove(&paper_id);
             let specter_norm = specter.as_ref().map(|values| vector_norm_f32(values));
             papers.insert(
                 paper_id,

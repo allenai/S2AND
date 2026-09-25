@@ -26,9 +26,9 @@ use crate::PaperId;
 /// Denominator cap of the coauthor-similarity Jaccard (Python `counter_jaccard(..., denominator_max=5000)`).
 const GRAM_SIMILARITY_DENOMINATOR_MAX: f64 = 5000.0;
 
-/// Largest count whose f32 value is exact. The per-signature counters stored
-/// f32 counts and summed them in f32; totals up to this bound are exact, so
-/// integer arithmetic reproduces them bit for bit.
+/// Largest bound below which every integer count has an exact f32 value.
+/// Limiting aggregate totals preserves exact count and sum representability
+/// when computing the coauthor features' f32 counter values.
 const MAX_EXACT_F32_INTEGER: u64 = 1 << 24;
 
 /// One paper's authors, aggregated once for every signature on it.

@@ -381,16 +381,16 @@ def _windows_process_working_set_bytes_best_effort() -> tuple[int | None, str]:
 
         counters = PROCESS_MEMORY_COUNTERS()
         counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
-        windll = getattr(ctypes, "windll", None)
-        if windll is None:
+        win_dll = getattr(ctypes, "WinDLL", None)
+        if win_dll is None:
             return None, "unavailable"
         # ctypes otherwise assumes C int arguments/results, truncating HANDLE
-        # on 64-bit Windows. c_void_p accepts this structure's address without
-        # tying the shared function prototype to a per-call Python class.
-        get_current_process = windll.kernel32.GetCurrentProcess
+        # on 64-bit Windows. Private DLL wrappers keep these prototypes from
+        # changing functions cached on the process-wide ctypes.windll loader.
+        get_current_process = win_dll("kernel32").GetCurrentProcess
         get_current_process.argtypes = []
         get_current_process.restype = wintypes.HANDLE
-        get_memory_info = windll.psapi.GetProcessMemoryInfo
+        get_memory_info = win_dll("psapi").GetProcessMemoryInfo
         get_memory_info.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
         get_memory_info.restype = wintypes.BOOL
         process_handle = get_current_process()

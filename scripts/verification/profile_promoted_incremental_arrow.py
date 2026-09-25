@@ -118,7 +118,7 @@ def _rust_extension_identity(require_release: bool) -> dict[str, Any]:
     debug_assertions = build_info.get("debug_assertions")
     if require_release and debug_assertions is not False:
         raise RuntimeError(
-            "Rust release build required; rebuild with `uv run maturin develop -m s2and_rust/Cargo.toml --release`"
+            "Rust release build required; rebuild with `uv sync --extra dev --reinstall-package s2and-rust`"
         )
     return {
         "available": True,

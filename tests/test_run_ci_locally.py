@@ -53,8 +53,9 @@ def test_ensure_rust_on_path_rejects_rustc_only(monkeypatch: pytest.MonkeyPatch,
         run_ci.ensure_rust_on_path()
 
 
+@pytest.mark.parametrize("workers", ["auto", "12", "0"])
 @pytest.mark.parametrize("smoke_fails", [False, True])
-def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, smoke_fails) -> None:
+def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, smoke_fails, workers) -> None:
     calls: list[tuple[list[str], dict[str, str] | None]] = []
     lifecycle: list[str] = []
 
@@ -72,12 +73,12 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, 
     monkeypatch.setattr(run_ci, "run_uv", run_uv)
     if smoke_fails:
         with pytest.raises(subprocess.CalledProcessError) as caught:
-            run_ci.run_typecheck_and_test_job(lock_present=True, pytest_workers="auto")
+            run_ci.run_typecheck_and_test_job(lock_present=True, pytest_workers=workers)
         assert caught.value is failure
         assert lifecycle == ["ensure-rust", "sync-and-build-rust", "check-rust"]
         assert len(calls) == 1
         return
-    run_ci.run_typecheck_and_test_job(lock_present=True, pytest_workers="auto")
+    run_ci.run_typecheck_and_test_job(lock_present=True, pytest_workers=workers)
 
     pytest_calls = [args for args, _env in calls if args[:3] == ["run", "--no-sync", "pytest"]]
     assert len(pytest_calls) == 1
@@ -92,7 +93,8 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(monkeypatch, 
         "-ra",
         "tests/",
         "-n",
-        "auto",
+        workers,
+        *(["--maxprocesses", "8"] if workers == "auto" else []),
         "--cov=s2and",
         "--cov-report=term-missing",
     ]

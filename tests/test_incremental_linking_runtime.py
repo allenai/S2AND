@@ -220,6 +220,28 @@ def test_constraint_row_signals_summarize_require_and_disallow_labels() -> None:
     np.testing.assert_allclose(signals["constraint_disallow_fraction"], [0.5, 0.5, 1.0])
 
 
+def test_bulk_distance_overrides_do_not_force_attachment_or_change_pair_labels() -> None:
+    candidate_batch = LinkerCandidateBatch(
+        row_count=3,
+        left_signature_indices=np.asarray([0, 0, 0], dtype=np.uint32),
+        right_signature_indices=np.asarray([1, 2, 3], dtype=np.uint32),
+        pair_row_indices=np.asarray([0, 1, 2], dtype=np.uint32),
+    )
+    labels = np.asarray([-LARGE_INTEGER, -LARGE_INTEGER, LARGE_DISTANCE - LARGE_INTEGER], dtype=np.float64)
+    original_labels = labels.copy()
+
+    signals = runtime_module._constraint_row_signals(
+        candidate_batch,
+        labels,
+        distance_override_mask=np.asarray([True, False, True]),
+    )
+
+    np.testing.assert_array_equal(labels, original_labels)
+    np.testing.assert_array_equal(signals["constraint_require_count"], [0.0, 1.0, 0.0])
+    np.testing.assert_array_equal(signals["constraint_disallow_count"], [0.0, 0.0, 1.0])
+    np.testing.assert_array_equal(signals["constraint_hit_count"], [1.0, 1.0, 1.0])
+
+
 def test_runtime_pair_constraint_features_suppress_orcid_like_training(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

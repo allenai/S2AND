@@ -11,6 +11,11 @@ bundle; pass `--data-root` explicitly otherwise.
 
 Test-split metrics use the held-out blocks recorded in the bundle, and pair
 sampling uses the trainer's recorded seed, so evaluation matches training.
+Recorded test splits require the complete, exact model-plan population. A full
+public benchmark does not match a bundle trained on a subset; use that run's
+private release Arrow root for this tutorial, or release_pairwise.py's evaluation
+plan commands for independently held-out populations. Do not disable the digest
+check or re-split public data to claim recorded held-out metrics.
 `--specter-suffix` selects the embedding generation for both routes; production
 bundles use SPECTER2.
 

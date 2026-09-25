@@ -293,8 +293,11 @@ def test_pair_splits_from_arrow_dataset_samples_within_block_random_pairs(
     assert splits.test_pairs == []
 
 
-def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_path, monkeypatch) -> None:
-    from s2and import feature_port
+@pytest.mark.parametrize("n_jobs", [3, -1])
+def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_path, monkeypatch, n_jobs) -> None:
+    from s2and import feature_port, thread_config
+
+    monkeypatch.setattr(thread_config.os, "cpu_count", lambda: 3)
 
     calls: list[dict[str, Any]] = []
 
@@ -317,14 +320,17 @@ def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_
                     "nan_value": nan_value,
                 }
             )
-            return [[float(row * 100 + index) for index in selected_indices] for row in range(len(indexed_pairs))]
+            return [
+                [float("nan") if index == 4 else float(row * 100 + index) for index in selected_indices]
+                for row in range(len(indexed_pairs))
+            ]
 
     main_info = SimpleNamespace(selected_feature_indices=lambda: [1, 3, 4])
     nameless_info = SimpleNamespace(selected_feature_indices=lambda: [2, 4])
 
     def build(dataset, **kwargs):
         assert dataset is arrow_dataset
-        assert kwargs == {"name_tuples": None, "num_threads": 3}
+        assert kwargs == {"name_tuples": None, "num_threads": n_jobs}
         return FakeRustFeaturizer()
 
     monkeypatch.setattr(feature_port, "build_rust_featurizer_from_arrow_dataset", build)
@@ -336,7 +342,7 @@ def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_
             splits,
             featurizer_info=main_info,
             nameless_featurizer_info=nameless_info,
-            n_jobs=3,
+            n_jobs=n_jobs,
             nan_value=-7.5,
         )
     features, labels, nameless = train
@@ -347,10 +353,10 @@ def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_
     assert len(calls) == 1
     assert math.isnan(calls[0].pop("nan_value"))
     assert calls == [{"indexed_pairs": [(2, 0), (0, 1)], "selected_indices": [1, 2, 3, 4], "n_jobs": 3}]
-    assert features.tolist() == [[1.0, 3.0, 4.0], [101.0, 103.0, 104.0]]
+    assert features.tolist() == [[1.0, 3.0, -7.5], [101.0, 103.0, -7.5]]
     assert labels.tolist() == [0.25, 1.0]
     assert nameless is not None
-    assert nameless.tolist() == [[2.0, 4.0], [102.0, 104.0]]
+    assert nameless.tolist() == [[2.0, -7.5], [102.0, -7.5]]
 
 
 def test_split_blocks_like_anddata_matches_anddata_and_rejects_tiny_inputs() -> None:

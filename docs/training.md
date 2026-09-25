@@ -1,7 +1,11 @@
 # Training and Evaluation
 
-This document expands the root README's Arrow-native training example with the
-main steps for training, evaluating, and publishing a model.
+This document describes Arrow-native research training and evaluation.
+
+> **Update at v1.3 release:** verify these examples against the published
+> canonical model and data roots. Recorded production test splits require the
+> exact training population; a full public benchmark cannot replace a training
+> subset. Use the release evaluation plan for independently held-out populations.
 
 The examples are research/API examples and intentionally make a test split
 available for immediate inspection. They are not the v1.3 release protocol.

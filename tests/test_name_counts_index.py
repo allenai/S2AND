@@ -237,6 +237,8 @@ def test_writer_rejects_keys_that_would_collide_after_stringification(tmp_path: 
     ("kind", "name"),
     (
         ("first", "Ada"),
+        ("first", "ada!"),
+        ("first", "ada  marie"),
         ("first", "a"),
         ("last", ""),
         ("first_last", "adasmith"),
@@ -245,6 +247,8 @@ def test_writer_rejects_keys_that_would_collide_after_stringification(tmp_path: 
     ),
     ids=(
         "first-uppercase",
+        "first-punctuation",
+        "first-repeated-space",
         "first-single-letter",
         "last-empty",
         "first-last-unseparated",

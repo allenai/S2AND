@@ -279,7 +279,7 @@ def featurize_pairs_with_rust(
                 rust_featurizer.featurize_pairs_matrix_indexed(
                     [(index_by_signature_id[str(left)], index_by_signature_id[str(right)]) for left, right, _ in chunk],
                     union_indices,
-                    max(1, int(n_jobs)),
+                    resolve_n_jobs(n_jobs),
                     np.nan,
                 ),
                 dtype=np.float64,

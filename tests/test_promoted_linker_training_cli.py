@@ -114,6 +114,13 @@ def test_source_support_preflight_requires_declared_split_files(tmp_path: Path) 
     with pytest.raises(ValueError, match="classic_gate_internal_eval_base_groups_path"):
         source_bundle_preflight.validate_source_bundle_support_files(bundle)
 
+    bundle.models["classic"].update(
+        classic_gate_internal_eval_base_groups_path="splits/placeholder.csv",
+        stratified_eval_test_split={"assignments_path": "splits/placeholder.csv"},
+    )
+    with pytest.raises(ValueError, match="classic.promoted_stratified_gate is required"):
+        source_bundle_preflight.validate_source_bundle_support_files(bundle)
+
 
 def test_source_support_preflight_requires_all_configured_splits(tmp_path: Path) -> None:
     (tmp_path / "bundle.json").write_text("{}", encoding="utf-8")

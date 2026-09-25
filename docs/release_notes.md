@@ -18,6 +18,26 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Breaking changes
 
+- Code is licensed under MIT; distributed data assets use CC-BY-4.0. See
+  [LICENSE](../LICENSE) and [LICENSE-DATA](../LICENSE-DATA). Rust distributions
+  include the code license and notices for the bundled CLD2 dependency.
+- Release preparation resolves augmented source identities when checking
+  held-out overlap. Pairwise training rejects augmented benchmark signatures
+  outside the actual source training blocks, including validation, test, and
+  omitted signatures. Regenerate the reviewed augmented training pairs if this
+  guard rejects a run; it does not silently filter the data.
+- Arrow bulk prediction keeps zero-valued caller supervision as distance
+  overrides during initial-only attachment, rather than treating them as
+  mandatory incremental links. Standalone incremental requests retain their
+  strict requirements. Arrow bulk accepts integer signature IDs by normalizing
+  members and supervision keys to strings consistently, including returned IDs.
+- `convert_to_arrow.py service-json` now prints its summary successfully after
+  writing artifacts. Converters validate shared counts and fixed-pair labels
+  before preprocessing, publish canonical pair column names, and reject self-pairs
+  or conflicting labels. Consistent repeated pairs retain their multiplicity.
+  Overwrite removes stale optional pair files, and conversion detects source
+  changes before publishing the root manifest.
+
 - The production pairwise training population drops the internal `orcid`
   dataset: v1.3 trains on `aminer`, `arnetminer`, `inspire`, `kisti`, `pubmed`,
   `qian`, and `zbmath` in random-block mode plus `augmented` in fixed-pair mode.
@@ -36,7 +56,10 @@ production model and public-data version is `1.3`, on a separate version axis.
   seeds, and truth. On six benchmark datasets, featurization was about 100x
   faster than the Python featurizer, with bit-identical validation distances,
   B3, and trained AUC. `convert_to_arrow.py` now writes
-  `conversion_provenance.json` with the SHA-256 of each source it read.
+  `conversion_provenance.json` with SHA-256 bindings for signatures, papers,
+  selected embeddings, and optional clusters. Public pair CSVs remain outside
+  manifest/provenance content binding; release-plan pair inputs are hashed
+  separately. Converter revision metadata is informational.
   Release commands reject any conversion that does not match the plan's
   signatures, papers, and SPECTER digests. `train_pairwise.py --chunk-size` is
   removed. The pairwise training config drops `chunk_size` and records
@@ -97,7 +120,7 @@ production model and public-data version is `1.3`, on a separate version axis.
   surface remains in S2AND v1.21 and earlier.
 - Production-bundle evaluation reuses the trainer's recorded split.
   `eval_prod_models.py` evaluates exactly the test blocks recorded in the
-  bundle's training summary (see the Evaluation entry above), reads
+  bundle's training summary (see the Evaluation entry below), reads
   `data_random_seed` from `reproducibility/pairwise_training_config.json`,
   fails closed for bundles without them, and rejects an explicit `--seed`
   outside `--train`.
@@ -215,8 +238,8 @@ production model and public-data version is `1.3`, on a separate version axis.
 - Mixed initial/full-name required profiles prefer a full-name
   subblock on both routes, retaining its native members first. This prevents
   packing from separating a claimed full-name member from compatible neighbours
-  when they fit together. Arrow subblocking also preserves support for integer
-  signature IDs by normalizing the original-block scope.
+  when they fit together. Arrow bulk prediction normalizes integer signature IDs
+  and supervision keys to strings on both subblocked and unbatched routes.
 - Completion canonicalizes first names when prepared names are
   absent, so raw `"J."` is recognized as an initial. An explicitly prepared
   empty name remains empty. This can change subblocked and incremental outputs.
@@ -360,11 +383,10 @@ production model and public-data version is `1.3`, on a separate version axis.
   the paper. Pair features subtract each signature's own author, and they are
   bit-identical to before. On INSPIRE, whose papers have up to 3,167 authors, a
   featurizer for 174,652 signatures now builds in 7 s instead of 250 s and
-  frees in 11 s instead of 18 minutes. Arrow data whose paper lists two authors
-  at one position, which `convert_to_arrow.py` already rejects, now fails the
-  build.
+  frees in 11 s instead of 18 minutes. Duplicate author positions remain rejected
+  by the Arrow reader and converter.
 - The raw Arrow candidate planner and `raw_arrow_labeled_candidate_plan`
-  normalize each paper's authors once per call, instead of once per signature
+  normalize authors into shared per-paper tables, instead of once per signature
   and again for every component summary that holds it. Query coauthor blocks
   are read off a per-paper block table, and paper author-list evidence
   intersects interned name ids instead of string sets. Planner payloads and
@@ -377,18 +399,19 @@ production model and public-data version is `1.3`, on a separate version axis.
   term weights once per query instead of once per component. Scores, top-k
   order and incremental-linking clusters are bit-identical to before. On
   `s_lee` (21,669 components), a query with about 2,900 coauthor terms takes
-  40 ms instead of 317 ms, an ordinary query 6 ms instead of 9 ms, and
-  planning 2,000 evaluation queries takes 14.5 s instead of 22.1 s. The index
+  43 ms instead of 317 ms, an ordinary query 6 ms instead of 9 ms, and
+  planning 2,000 evaluation queries takes 17.2 s instead of 24.1 s in the
+  recorded implementation benchmark. The index
   holds 3.2M postings (48 MB) and builds in 0.06 s. Python-built
-  `RustHybridCentroidRetriever` summaries whose counter keys collide in
-  FNV-64 are now rejected.
+  `RustHybridCentroidRetriever` summaries with colliding FNV-64 keys in coauthor,
+  non-mega-coauthor, or affiliation overlap counters are rejected.
 - `RustLightGBMBooster` builds an exact fast scorer at load time. Models whose
   trees all have at most 32 leaves use QuickScorer; models with up to 256
   leaves per tree use lockstep traversal over integer bin keys. Both support up
   to 256 features and 255 distinct thresholds per feature, which covers
   LightGBM's default `max_bin=255`. Raw scores and probabilities are
   bit-identical to the previous traversal. That traversal still scores every
-  other model, including Zero-missing splits, NaN thresholds, and parser-accepted
+  other model, including single-tree constants/stumps, Zero-missing splits, NaN thresholds, and parser-accepted
   shared-child graphs. On the v1.21 pairwise models and 50,000 real rows,
   8-thread float32 scoring was 6.2x (main) and 3.3x (nameless) faster. A 5-block
   AMiner bulk request (8.76M pairs) ran 2.79x faster end to end (46.3 s to
@@ -396,9 +419,9 @@ production model and public-data version is `1.3`, on a separate version axis.
   unchanged.
 - Python pair featurization runs serially on Windows. Its thread pool was
   slower than serial there, and the output is bit-identical.
-- The default bulk prediction path validates caller supervision
-  once per request instead of once per subblock, while preserving custom
-  prediction-helper overrides and validation at public entry points.
+- The default bulk prediction path avoids repeating caller-supervision
+  validation for ordinary subblocks. Public entry points, custom helper
+  overrides, and incremental attachment passes retain their validation.
 - Promoted RAM limits are refreshed before planning each query window, after
   planning, and before each scoring batch. A shrunk window plans only its safe
   prefix and defers the remaining queries; a shrunk scoring batch is scored from

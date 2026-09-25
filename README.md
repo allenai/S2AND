@@ -134,8 +134,9 @@ until the one-shot evaluation in Stage 5 of the
 
   > **Update at v1.3 release:** subblocking loads the packaged ORCID
   > prefix-count files, which Stage 1 of the release generates. Until they are
-  > copied into `s2and/data/`, any call with `batching_threshold` set raises
-  > `FileNotFoundError`.
+  > copied into `s2and/data/`, a call that reaches ORCID-based subblocking without
+  > explicitly supplied counts raises `FileNotFoundError`. Setting a threshold
+  > alone does not imply that this path is reached.
 - **Concurrency:** `n_jobs` is the main concurrency knob. A loaded production
   bundle keeps `n_jobs=1` unless you pass
   `load_production_model(path, n_jobs=N)`. Set thread-related environment

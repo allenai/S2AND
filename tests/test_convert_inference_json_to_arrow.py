@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -301,7 +302,6 @@ def test_service_json_main_dispatches_bounded_cli_args(
     def fake_convert_service_json_to_arrow(**kwargs: Any) -> dict[str, Any]:
         captured.update(kwargs)
         return {
-            "dataset": kwargs["dataset_name"],
             "signature_count": 0,
             "paper_count": 0,
             "paths": {},
@@ -336,6 +336,55 @@ def test_service_json_main_dispatches_bounded_cli_args(
     assert captured["copy_source_json"] is True
     assert captured["validate"] is False
     assert json.loads(capsys.readouterr().out)["dataset"] == "service_payload"
+
+
+def test_service_json_cli_converts_and_reports_success(tmp_path: Path) -> None:
+    input_path = tmp_path / "request.json"
+    input_path.write_text(json.dumps(_minimal_service_payload()), encoding="utf-8")
+    output_root = tmp_path / "arrow"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.convert_to_arrow",
+            "service-json",
+            "--input-json",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--n-jobs",
+            "1",
+            "--skip-name-counts-index",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["dataset"] == "request"
+    assert report["signature_count"] == report["paper_count"] == 1
+    assert (output_root / "manifest.json").is_file()
+    with ArrowDataset.open(output_root / "request"):
+        pass
+
+
+def test_service_conversion_checks_index_before_loading_input(tmp_path: Path) -> None:
+    from s2and.arrow_inputs import MissingArrowArtifactError
+
+    output_root = tmp_path / "arrow"
+    with pytest.raises(MissingArrowArtifactError, match="name_counts_index"):
+        convert_service_json_to_arrow(
+            input_json=tmp_path / "does-not-exist.json",
+            output_root=output_root,
+            dataset_name="request",
+            n_jobs=1,
+            overwrite=False,
+            skip_name_counts_index=False,
+        )
+    assert not output_root.exists()
 
 
 def test_convert_service_json_to_arrow_overwrite_preserves_other_root_manifest_entries(

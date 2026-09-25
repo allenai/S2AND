@@ -43,7 +43,7 @@ def _write_model_plan(tmp_path: Path, dataset_names: tuple[str, ...] | None = No
         for role in sorted(roles):
             path = input_root / f"{name}_{role}"
             if role in {"train_pairs", "val_pairs"}:
-                path.write_text("signature_id_1,signature_id_2,label\na,b,1\n", encoding="utf-8")
+                path.write_text("signature_id_1,signature_id_2,label\nmedline___a,medline___b,1\n", encoding="utf-8")
             else:
                 path.write_text(f"{name}:{role}\n", encoding="utf-8")
             files[role] = {
@@ -131,9 +131,11 @@ def test_preflight_rejects_plans_outside_the_v13_population(tmp_path: Path, data
         train_pairwise._preflight_pairwise(args)
 
 
+@pytest.mark.parametrize("role", train_pairwise.ARROW_SOURCE_ROLES)
 def test_preflight_rejects_arrow_converted_from_different_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    role: str,
 ) -> None:
     plan_path = _write_model_plan(tmp_path)
     arrow_root = _write_arrow_root(tmp_path, plan_path)
@@ -143,9 +145,10 @@ def test_preflight_rejects_arrow_converted_from_different_sources(
     write_conversion_provenance(
         arrow_root / "kisti",
         sources={
-            "signatures": other_signatures,
-            "papers": Path(plan["datasets"]["kisti"]["papers"]["path"]),
-            "specter_embeddings": Path(plan["datasets"]["kisti"]["specter_embeddings"]["path"]),
+            source_role: other_signatures
+            if source_role == role
+            else Path(plan["datasets"]["kisti"][source_role]["path"])
+            for source_role in train_pairwise.ARROW_SOURCE_ROLES
         },
         converter={"script": "test"},
     )
@@ -155,7 +158,7 @@ def test_preflight_rejects_arrow_converted_from_different_sources(
         lambda **_kwargs: pytest.fail("artifact loading must not run"),
     )
 
-    with pytest.raises(ArrowProvenanceError, match=r"kisti was converted from a different signatures source"):
+    with pytest.raises(ArrowProvenanceError, match=rf"kisti was converted from a different {role} source"):
         train_pairwise.train_pairwise_bundle(_args(tmp_path, model_plan=plan_path, arrow_root=arrow_root))
 
 

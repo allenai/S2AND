@@ -44,9 +44,11 @@ def test_fit_classic_fits_real_booster_and_logistic_gate(tmp_path: Path) -> None
     assert np.any(gate_weights != 0)
 
 
+@pytest.mark.parametrize("augmented_population", ["train", "validation", "test", "omitted", "changed-provenance"])
 def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    augmented_population: str,
 ) -> None:
     data_dir = tmp_path / "data"
     dataset_files = write_pairwise_dataset(data_dir)
@@ -72,6 +74,29 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         total_ram_bytes=1_000_000_000,
         name_counts_index_root=name_counts_path,
     )
+    selection = ANDData(
+        signatures=str(dataset_files["signatures"]),
+        papers=str(dataset_files["papers"]),
+        clusters=str(dataset_files["clusters"]),
+        name="qian",
+        mode="train",
+        preprocess=False,
+        random_seed=args.random_seed,
+        name_counts_index=None,
+    )
+    train, val, test = selection.split_cluster_signatures()
+    safe = next(iter(train.values()))[0]
+    target = {
+        "train": next(iter(train.values()))[1],
+        "validation": next(iter(val.values()))[0],
+        "test": next(iter(test.values()))[0],
+        "omitted": "not-in-model-plan",
+        "changed-provenance": next(iter(train.values()))[1],
+    }[augmented_population]
+    augmented_pairs = tmp_path / "augmented_train.csv"
+    augmented_pairs.write_text(
+        f"signature_id_1,signature_id_2,label\nqian___{safe},qian___{target},1\n", encoding="utf-8"
+    )
     monkeypatch.setattr(
         train_pairwise,
         "_preflight_pairwise",
@@ -83,7 +108,11 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
                 "qian": ModelDataset(
                     files=dataset_files,
                     sha256={role: sha256_file(path) for role, path in dataset_files.items()},
-                )
+                ),
+                "augmented": ModelDataset(
+                    files={"train_pairs": augmented_pairs},
+                    sha256={"train_pairs": sha256_file(augmented_pairs)},
+                ),
             },
             model_plan_sha256="0" * 64,
             arrow_dirs={"qian": arrow_dir},
@@ -109,9 +138,29 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         assert kwargs["name_counts_index"] is None and kwargs["preprocess"] is False
         assert kwargs["name_tuples"] == load_name_tuple_artifact(name_tuples_path).pairs
         assert not {"train_ratio", "val_ratio", "test_ratio"} & set(kwargs)
-        return real_anddata(**kwargs)
+        dataset = real_anddata(**kwargs)
+        if augmented_population == "changed-provenance":
+            provenance_path = arrow_dir / "conversion_provenance.json"
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            provenance["converter"]["changed_after_preflight"] = True
+            provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+        return dataset
 
     monkeypatch.setattr(train_pairwise, "ANDData", checked_anddata)
+    if augmented_population in {"validation", "test", "omitted", "changed-provenance"}:
+        monkeypatch.setattr(
+            train_pairwise,
+            "_featurize_selection",
+            lambda *_args, **_kwargs: pytest.fail("unsafe inputs reached featurization"),
+        )
+        message = (
+            "changed after preflight" if augmented_population == "changed-provenance" else "outside its training split"
+        )
+        with pytest.raises(ValueError, match=message):
+            train_pairwise.train_pairwise_bundle(args)
+        assert not args.output_dir.exists()
+        assert list(matrix_work_dir.iterdir()) == []
+        return
     result = train_pairwise.train_pairwise_bundle(args)
 
     summary = result["training_summary"]

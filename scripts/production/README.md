@@ -647,6 +647,66 @@ Held-out populations whose files differ from the training files need their own
 conversion root, such as `stages\evaluation_arrow`, with one directory per
 evaluation dataset name. Provenance binds each conversion to its source digests,
 so a root converted from different or stale files is rejected rather than used.
+Random-block held-out populations must be disjoint from the model population,
+so their conversions are separate. Fixed-pair `augmented` may reuse a conversion
+if all feature-source digests match; the staging loop below also works by making
+a fresh conversion. When pairwise and cluster entries share a dataset name,
+their signatures, papers, and embeddings must have identical digests for one
+evaluation root to serve both.
+
+```powershell
+$EvaluationFeatureSourceRoot = "$RunRoot\stages\evaluation_feature_sources"
+$EvaluationArrowRoot = "$RunRoot\stages\evaluation_arrow"
+$EvaluationPlan = Get-Content -LiteralPath "$RunRoot\evaluation_plan.json" -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+$EvaluationInputs = @{}
+foreach ($Kind in @('pairwise', 'cluster')) {
+  foreach ($Entry in $EvaluationPlan.$Kind.PSObject.Properties) {
+    if ($EvaluationInputs.ContainsKey($Entry.Name)) {
+      foreach ($Role in @('signatures', 'papers', 'specter_embeddings')) {
+        if ($EvaluationInputs[$Entry.Name].$Role.sha256 -ne $Entry.Value.$Role.sha256) {
+          throw "Different $Role populations for $($Entry.Name); use separate pairwise and cluster conversion roots."
+        }
+      }
+    } else {
+      $EvaluationInputs[$Entry.Name] = $Entry.Value
+    }
+  }
+}
+New-Item -ItemType Directory -Path $EvaluationFeatureSourceRoot -ErrorAction Stop | Out-Null
+$FeatureFilenames = @{
+  signatures = 'signatures.json'
+  papers = 'papers.json'
+  specter_embeddings = 'specter2.pkl'
+}
+foreach ($DatasetName in ($EvaluationInputs.Keys | Sort-Object)) {
+  $StagedDataset = Join-Path $EvaluationFeatureSourceRoot $DatasetName
+  New-Item -ItemType Directory -Path $StagedDataset -ErrorAction Stop | Out-Null
+  foreach ($Role in $FeatureFilenames.Keys) {
+    $Source = $EvaluationInputs[$DatasetName].$Role
+    if ((Get-FileHash -LiteralPath $Source.path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Source.sha256) {
+      throw "Frozen evaluation source changed: $DatasetName/$Role"
+    }
+    Copy-Item -LiteralPath $Source.path -Destination (Join-Path $StagedDataset "${DatasetName}_$($FeatureFilenames[$Role])") -ErrorAction Stop
+  }
+}
+uv run python scripts/convert_to_arrow.py benchmark `
+  --source-root $EvaluationFeatureSourceRoot `
+  --output-root $EvaluationArrowRoot `
+  --datasets ($EvaluationInputs.Keys | Sort-Object) `
+  --name-counts-index-root $NameCountsIndex `
+  --n-jobs $NJobs
+if ($LASTEXITCODE -ne 0) { throw 'Evaluation Arrow conversion failed' }
+```
+
+These are feature-only conversions. Leave held-out pair labels, cluster truth,
+and block selections at their frozen evaluation-plan paths.
+
+The production tutorial and `eval_prod_models.py` use test blocks recorded from
+the **complete model-plan population**. They reject full public benchmarks when
+the model plan used a subset. Keep `stages\release_arrow` for those recorded-split
+checks. Use `release_pairwise.py evaluate-pairs` and `evaluate-clusters` with
+`evaluation_plan.json` and `stages\evaluation_arrow` for release held-out metrics.
+Do not bypass the population digest or substitute a fresh random test split.
 
 ## Linker source and data roots
 
@@ -735,12 +795,29 @@ seeds, and truth from the plan's JSON files, loaded without name normalization,
 SPECTER, or name counts, then compute features and distances with the Rust
 featurizer. That featurizer reads `--arrow-root/<dataset>/`: a
 `convert_to_arrow.py` conversion of the same JSON files. Each conversion writes
-`conversion_provenance.json`, which records the SHA-256 of every source it read.
+`conversion_provenance.json`, which records the SHA-256 of signatures, papers,
+selected embeddings, and optional cluster JSON. Public pair CSVs are declared
+but are not content-bound by the current Arrow manifest or conversion provenance;
+retain and check a separately reviewed checksum inventory when distributing them.
+The release plan separately hashes its declared pair inputs. Converter revision
+and options are informational, not an enforced semantic-version policy. Regenerate
+conversions when converter feature semantics change, even if source hashes match.
+Provenance also records absolute source paths for the operator's audit trail;
+review that metadata before public distribution. A conversion outside a Git
+checkout records unavailable Git revision/status as `null` with a warning.
 Before any work starts, the commands reject a dataset whose provenance does not
 name the plan's exact `signatures`, `papers`, and `specter_embeddings` digests,
 or whose tables differ from the recorded conversion. They also require the
 Arrow data to use the release name-count index, and to contain exactly the JSON
 signatures. See [release Arrow conversions](#release-arrow-conversions).
+
+`prepare-run` rejects augmented training copies of external held-out signatures
+by resolving their `<dataset>___<signature>` identities. The trainer also rejects
+augmented copies outside each benchmark's actual training blocks, including
+validation, internal test, and IDs omitted from its model-plan population. These
+checks stop the run; they never edit the source pairs. Prepare reviewed augmented
+training pairs restricted to the frozen source training populations and seed.
+Preserving the old JSON order is insufficient when the population changes.
 
 Each command builds the featurizer only for the signatures it scores: the
 selected pairs' members, or the members of the blocks being clustered.

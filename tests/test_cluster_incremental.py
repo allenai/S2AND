@@ -1566,7 +1566,7 @@ def test_subblocked_single_letter_groups_use_request_owned_seeds(monkeypatch) ->
     assert dataset.cluster_seeds_require == {"seed": "seed_cluster"}
 
 
-def test_arrow_subblocked_single_letter_groups_carry_prior_assignments(tmp_path: Path) -> None:
+def test_arrow_subblocked_custom_incremental_override_carries_prior_assignments(tmp_path: Path) -> None:
     clusterer = _build_minimal_incremental_clusterer()
     arrow_dataset = _minimal_arrow_dataset(tmp_path)
     seed_maps: list[dict[str, str]] = []
@@ -1578,6 +1578,7 @@ def test_arrow_subblocked_single_letter_groups_carry_prior_assignments(tmp_path:
         **kwargs: Any,
     ) -> dict[str, Any]:
         assert dataset is arrow_dataset
+        assert "partial_supervision_is_distance_override" not in kwargs
         seed_map = cast(dict[str, str], kwargs["cluster_seeds_require"])
         seed_maps.append(seed_map)
         seed_map_snapshots.append(dict(seed_map))

@@ -101,10 +101,18 @@ def test_current_rss_windows_fallback_used_when_psutil_missing(monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Requires the real Windows process-memory API")
-def test_windows_process_rss_reports_the_real_working_set():
+def test_windows_process_rss_reports_the_real_working_set(monkeypatch):
+    import ctypes
+
+    shared_functions = (ctypes.windll.kernel32.GetCurrentProcess, ctypes.windll.psapi.GetProcessMemoryInfo)
+    for function in shared_functions:
+        monkeypatch.setattr(function, "argtypes", None)
+        monkeypatch.setattr(function, "restype", ctypes.c_uint32)
+    prototypes = [(function.argtypes, function.restype) for function in shared_functions]
     rss, source = memory_budget._windows_process_working_set_bytes_best_effort()
     assert source == "winapi_process_working_set"
     assert rss is not None and rss > 0
+    assert [(function.argtypes, function.restype) for function in shared_functions] == prototypes
 
 
 @pytest.fixture

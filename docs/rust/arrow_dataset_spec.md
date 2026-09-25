@@ -532,6 +532,17 @@ Each file uses the `ANDData` fixed-pair contract: columns `signature_id_1`,
 `scripts/convert_to_arrow.py` publishes these files only after checking that
 train and test are both present, every row satisfies the contract, every
 signature exists in the dataset, and no unordered pair appears in two splits.
+The converter accepts legacy `pair1`/`pair2` and `pairs1`/`pair2` input headers
+and writes the canonical column names above. It rejects self-pairs and
+conflicting labels for duplicate or reversed pairs; consistent repeated rows
+retain their order and multiplicity. `--overwrite` removes a previously
+published optional pair CSV when the replacement sources no longer include it.
+
+In the current format, pair CSVs are declared only in `paths`; their contents
+are not bound by the dataset manifest's `files` inventory or conversion
+provenance. Release plans separately hash their declared pair inputs. Keep
+published pair CSVs unchanged and verify them against that source authority
+before using a public Arrow root for evaluation.
 
 ---
 

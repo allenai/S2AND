@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pickle
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -644,6 +645,7 @@ def test_runtime_conversion_rejects_parent_of_name_counts_index(tmp_path: Path) 
             overwrite=False,
             skip_name_counts_index=False,
         )
+    assert not output_dir.exists()
 
 
 def _write_pair_only_benchmark(source_root: Path, pair_rows: dict[str, list[tuple[str, str, str]]]) -> None:
@@ -663,7 +665,9 @@ def _write_pair_only_benchmark(source_root: Path, pair_rows: dict[str, list[tupl
         (dataset_dir / f"{split}.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _convert_pair_only_benchmark(tmp_path: Path, *, skip_name_counts_index: bool = True) -> dict[str, Any]:
+def _convert_pair_only_benchmark(
+    tmp_path: Path, *, skip_name_counts_index: bool = True, overwrite: bool = False
+) -> dict[str, Any]:
     output_root = tmp_path / "out"
     return convert_to_arrow.convert_runtime_dataset_to_arrow(
         sources=convert_to_arrow.benchmark_dataset_sources(tmp_path / "source", "pairsonly"),
@@ -671,7 +675,7 @@ def _convert_pair_only_benchmark(tmp_path: Path, *, skip_name_counts_index: bool
         root_manifest_dir=output_root,
         name_counts_index_root=None,
         n_jobs=1,
-        overwrite=False,
+        overwrite=overwrite,
         skip_name_counts_index=skip_name_counts_index,
     )
 
@@ -689,7 +693,7 @@ def test_benchmark_conversion_publishes_usable_fixed_pair_labels(tmp_path: Path)
     assert "val_pairs" not in manifest["paths"] and "clusters" not in manifest["paths"]
     for key in ("train_pairs", "test_pairs"):
         published = output_dir / manifest["paths"][key]
-        assert published.read_bytes() == (tmp_path / "source" / "pairsonly" / f"{key}.csv").read_bytes()
+        assert published.read_text() == (tmp_path / "source" / "pairsonly" / f"{key}.csv").read_text()
 
     from s2and.arrow_inputs import ArrowDataset
     from s2and.arrow_training import build_training_anddata_from_arrow
@@ -714,8 +718,27 @@ def test_benchmark_conversion_publishes_usable_fixed_pair_labels(tmp_path: Path)
         ({"train_pairs": [("0", "1", "YES")], "test_pairs": [("5", "missing", "NO")]}, "absent from dataset"),
         ({"train_pairs": [("0", "1", "YES")], "test_pairs": [("1", "0", "YES")]}, "share 1 unordered pairs"),
         ({"train_pairs": [("0", "1", "maybe")], "test_pairs": [("5", "6", "NO")]}, "Unknown fixed-pair labels"),
+        (
+            {"train_pairs": [("0", "1", "YES"), ("0", "1", "NO")], "test_pairs": [("5", "6", "NO")]},
+            "conflicting labels",
+        ),
+        (
+            {"train_pairs": [("0", "1", "YES"), ("1", "0", "NO")], "test_pairs": [("5", "6", "NO")]},
+            "conflicting labels",
+        ),
+        ({"train_pairs": [("0", "0", "YES")], "test_pairs": [("5", "6", "NO")]}, "self-pair"),
+        ({"train_pairs": [("0", "0", "NO")], "test_pairs": [("5", "6", "NO")]}, "self-pair"),
     ],
-    ids=["missing-test-split", "unknown-signature", "cross-split-overlap", "invalid-label"],
+    ids=[
+        "missing-test-split",
+        "unknown-signature",
+        "cross-split-overlap",
+        "invalid-label",
+        "conflicting-duplicate",
+        "conflicting-reverse",
+        "positive-self",
+        "negative-self",
+    ],
 )
 def test_benchmark_conversion_rejects_invalid_fixed_pair_labels(
     tmp_path: Path, pair_rows: dict[str, list[tuple[str, str, str]]], message: str
@@ -724,3 +747,171 @@ def test_benchmark_conversion_rejects_invalid_fixed_pair_labels(
 
     with pytest.raises(ValueError, match=message):
         _convert_pair_only_benchmark(tmp_path)
+    assert not (tmp_path / "out" / "pairsonly").exists()
+
+
+def test_benchmark_conversion_canonicalizes_legacy_headers_and_preserves_consistent_duplicates(tmp_path: Path) -> None:
+    train = [("0", "1", "YES"), ("1", "0", "1"), ("0", "1", "YES")]
+    _write_pair_only_benchmark(tmp_path / "source", {"train_pairs": train, "test_pairs": [("5", "6", "NO")]})
+    source_path = tmp_path / "source" / "pairsonly" / "train_pairs.csv"
+    source_path.write_text(source_path.read_text().replace("signature_id_1,signature_id_2", "pair1,pair2"))
+
+    report = _convert_pair_only_benchmark(tmp_path)
+
+    published = tmp_path / "out" / "pairsonly" / report["paths"]["train_pairs"]
+    assert published.read_text().splitlines() == [
+        "signature_id_1,signature_id_2,label",
+        "0,1,YES",
+        "1,0,1",
+        "0,1,YES",
+    ]
+
+
+def test_fixed_pair_validation_preserves_string_ids(tmp_path: Path) -> None:
+    _write_pair_only_benchmark(
+        tmp_path / "source", {"train_pairs": [("001", "NA", "YES")], "test_pairs": [("NA", "002", "NO")]}
+    )
+    rows = convert_to_arrow._validated_fixed_pair_labels(
+        convert_to_arrow.benchmark_dataset_sources(tmp_path / "source", "pairsonly"), {"001", "002", "NA"}
+    )
+    assert rows["train_pairs"] == [("001", "NA", "YES")]
+
+
+def test_fixed_pair_validation_preserves_numeric_label_inference(tmp_path: Path) -> None:
+    from s2and.data import ANDData, _map_fixed_pair_labels
+
+    _write_pair_only_benchmark(
+        tmp_path / "source",
+        {"train_pairs": [("0", "1", "1.0"), ("2", "3", "0.0")], "test_pairs": [("5", "6", "NO")]},
+    )
+    report = _convert_pair_only_benchmark(tmp_path)
+    published = tmp_path / "out" / "pairsonly" / report["paths"]["train_pairs"]
+    assert published.read_text().splitlines() == ["signature_id_1,signature_id_2,label", "0,1,1.0", "2,3,0.0"]
+    original = tmp_path / "source" / "pairsonly" / "train_pairs.csv"
+    for path in (original, published):
+        frame = _map_fixed_pair_labels(ANDData.maybe_load_dataframe(str(path)), "train")
+        assert frame["label"].tolist() == [1, 0]
+
+
+def test_benchmark_overwrite_removes_only_stale_pair_artifacts(tmp_path: Path) -> None:
+    _write_pair_only_benchmark(
+        tmp_path / "source",
+        {"train_pairs": [("0", "1", "YES")], "val_pairs": [("2", "3", "NO")], "test_pairs": [("5", "6", "NO")]},
+    )
+    _convert_pair_only_benchmark(tmp_path)
+    output_dir = tmp_path / "out" / "pairsonly"
+    unrelated = output_dir / "operator-notes.txt"
+    unrelated.write_text("keep")
+    (tmp_path / "source" / "pairsonly" / "val_pairs.csv").unlink()
+
+    report = _convert_pair_only_benchmark(tmp_path, overwrite=True)
+
+    assert "val_pairs" not in report["paths"]
+    assert not (output_dir / "val_pairs.csv").exists()
+    assert unrelated.read_text() == "keep"
+
+
+@pytest.mark.parametrize("failure", [FileNotFoundError("git missing"), subprocess.CalledProcessError(128, "git")])
+def test_converter_identity_records_unavailable_git(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    def fail_git(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(convert_to_arrow.subprocess, "run", fail_git)
+    identity = convert_to_arrow._converter_identity(selected_embedding="specter2")
+    assert identity["git_head"] is None and identity["git_dirty"] is None
+    assert identity["selected_embedding"] == "specter2"
+    assert "Git metadata unavailable" in caplog.text
+
+
+def test_runtime_conversion_succeeds_without_git_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources = _write_one_signature_sources(tmp_path)
+    monkeypatch.setattr(convert_to_arrow, "_PROJECT_ROOT", sources.source_dir)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(sources.source_dir.parent))
+    output_root = tmp_path / "out"
+    convert_to_arrow.convert_runtime_dataset_to_arrow(
+        sources=sources,
+        output_dir=output_root / "dummy",
+        root_manifest_dir=output_root,
+        name_counts_index_root=None,
+        n_jobs=1,
+        overwrite=False,
+        skip_name_counts_index=True,
+    )
+
+    provenance = json.loads((output_root / "dummy" / "conversion_provenance.json").read_text())
+    assert provenance["converter"]["git_head"] is None
+    assert provenance["converter"]["git_dirty"] is None
+    assert (output_root / "manifest.json").is_file()
+
+
+@pytest.mark.parametrize("role", ["signatures", "papers", "specter_embeddings", "clusters"])
+def test_runtime_conversion_rejects_sources_changed_during_conversion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    import scripts.arrow_conversion_helpers as helpers
+
+    sources = _write_one_signature_sources(tmp_path)
+    clusters_path = sources.source_dir / "clusters.json"
+    clusters_path.write_text(json.dumps({"c": {"signature_ids": ["s1"]}}))
+    from dataclasses import replace
+
+    sources = replace(sources, clusters_path=clusters_path)
+    path = {
+        "signatures": sources.signatures_path,
+        "papers": sources.papers_path,
+        "specter_embeddings": sources.specter2_path,
+        "clusters": clusters_path,
+    }[role]
+    original_write = helpers.write_raw_planner_arrow_from_anddata
+
+    def write_and_change_source(*args: Any, **kwargs: Any) -> Any:
+        result = original_write(*args, **kwargs)
+        assert path is not None
+        # Whitespace keeps JSON usable; trailing data is valid for pickle.load.
+        with path.open("ab") as stream:
+            stream.write(b"\n")
+        return result
+
+    monkeypatch.setattr(helpers, "write_raw_planner_arrow_from_anddata", write_and_change_source)
+    output_root = tmp_path / "out"
+    with pytest.raises(ValueError, match=f"Source files changed during conversion.*{role}"):
+        convert_to_arrow.convert_runtime_dataset_to_arrow(
+            sources=sources,
+            output_dir=output_root / "dummy",
+            root_manifest_dir=output_root,
+            name_counts_index_root=None,
+            n_jobs=1,
+            overwrite=False,
+            skip_name_counts_index=True,
+        )
+    assert not (output_root / "manifest.json").exists()
+    assert not (output_root / "dummy" / "conversion_provenance.json").exists()
+
+
+def test_runtime_conversion_rejects_sources_changed_while_writing_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = _write_one_signature_sources(tmp_path)
+    write_provenance = convert_to_arrow.write_conversion_provenance
+
+    def change_source_and_write(*args: Any, **kwargs: Any) -> Path:
+        with sources.papers_path.open("a") as stream:
+            stream.write("\n")
+        return write_provenance(*args, **kwargs)
+
+    monkeypatch.setattr(convert_to_arrow, "write_conversion_provenance", change_source_and_write)
+    output_root = tmp_path / "out"
+    with pytest.raises(ValueError, match="Source files changed while writing conversion provenance"):
+        convert_to_arrow.convert_runtime_dataset_to_arrow(
+            sources=sources,
+            output_dir=output_root / "dummy",
+            root_manifest_dir=output_root,
+            name_counts_index_root=None,
+            n_jobs=1,
+            overwrite=False,
+            skip_name_counts_index=True,
+        )
+    assert not (output_root / "manifest.json").exists()
+    assert not (output_root / "dummy" / "conversion_provenance.json").exists()

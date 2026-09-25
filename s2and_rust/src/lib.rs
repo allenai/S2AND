@@ -90,8 +90,9 @@ fn is_dropped_affix(token: &str) -> bool {
 struct CounterData {
     // FNV-1a 64-bit hashes of original string keys, sorted ascending.
     // Values are f32 counts. Binary search replaces HashMap lookup.
-    // Trade-off: collisions are possible but rare at expected key counts.
-    // If they occur, colliding keys merge silently in this representation.
+    // Hashes cannot distinguish colliding string keys. The retrieval overlap
+    // index rejects duplicate hashes in its three counter families; other
+    // consumers do not provide a general collision check.
     entries: Vec<(u64, f32)>,
     sum: f32,
 }

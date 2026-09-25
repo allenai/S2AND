@@ -60,6 +60,9 @@ jobs:
           args: --out dist
           working-directory: s2and_rust
 
+      - name: Verify Rust distribution license notices
+        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir s2and_rust/dist
+
       # Building from sdist compiles the extension, which is a distinct path from
       # installing a wheel. Exercise it on every supported interpreter.
       - name: Install and exercise s2and-rust sdist
@@ -114,6 +117,9 @@ jobs:
           args: --release --locked --compatibility pypi --out dist
           working-directory: s2and_rust
 
+      - name: Verify Rust distribution license notices
+        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir s2and_rust/dist
+
       - name: Install and exercise Windows wheel
         shell: pwsh
         run: |
@@ -161,6 +167,9 @@ jobs:
           args: --release --locked --compatibility pypi --out dist
           working-directory: s2and_rust
 
+      - name: Verify Rust distribution license notices
+        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir s2and_rust/dist
+
       - name: Install and exercise macOS wheel
         shell: bash
         run: |
@@ -198,6 +207,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Build wheels (manylinux/musllinux)
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
         with:
@@ -209,6 +221,9 @@ jobs:
             --release --locked --compatibility pypi --out dist
             -i python3.11 -i python3.12 -i python3.13
           working-directory: s2and_rust
+
+      - name: Verify Rust distribution license notices
+        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir s2and_rust/dist
 
       - uses: actions/upload-artifact@v6
         with:

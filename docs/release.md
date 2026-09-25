@@ -1,6 +1,6 @@
 # S2AND 1.0.0 / model-data v1.3 release
 
-Status date: 2026-07-27
+Status date: 2026-09-25
 
 This is the sole release policy and dependency-ordered operator sequence for
 the `s2and==1.0.0` and `s2and-rust==1.0.0` packages with production model and
@@ -100,6 +100,8 @@ Before using full inputs, rehearse the release boundaries from a clean checkout:
 ```powershell
 uv run pytest -q `
   tests/test_convert_s2and_mini_to_arrow.py `
+  tests/test_join_canonical_augmented_names.py `
+  tests/test_augmented_training_leakage.py `
   tests/test_generate_name_counts_script.py `
   tests/test_generate_orcid_name_prefix_counts.py `
   tests/test_real_tiny_trainers.py `
@@ -200,6 +202,13 @@ uv run --no-project python scripts/run_ci_locally.py
 - [ ] Confirm that every signatures file `release.json` references comes from
       the joined benchmark or augmented outputs (or subsets derived from them);
       `prepare-run` does not check name provenance.
+- [ ] Restrict augmented training pairs to the original identities in each
+      frozen benchmark's actual training split, using the selected training
+      seed. Exclude its validation, test, and omitted signatures. Preserve the
+      reviewed source data and write a new pair file with retained/removed counts.
+      `prepare-run` checks prefixed copies against external held-out identities;
+      the trainer rejects copies outside its actual benchmark training blocks.
+      Neither check filters the pairs for the operator.
 - [ ] Review and freeze `release.json` using the
       [exact shape and example](../scripts/production/README.md#run-preparation):
       training/validation and held-out inputs, validation-only EPS grid and
@@ -245,6 +254,21 @@ uv run --no-project python scripts/run_ci_locally.py
       `eps_calibration: "pending"`, reloads only through the pending-stage
       loader, records the model plan's `release_version` and exact
       `generated_by_runtime`, and both boosters round-trip through Rust.
+- [ ] Check the actual native scoring plans for both newly trained boosters.
+      The search can produce trees larger than the fast kernels support, so
+      fixture eligibility does not establish candidate eligibility. Run:
+
+```powershell
+$env:S2AND_PAIRWISE_MODEL_DIR = "$RunRoot\stages\pairwise\production_model_v1.3\pairwise"
+uv run cargo test --manifest-path s2and_rust/Cargo.toml --lib --no-default-features `
+  release_bundle_uses_native_fast_plans -- --ignored --nocapture
+if ($LASTEXITCODE -ne 0) { throw 'Candidate boosters do not both use native fast plans' }
+Remove-Item Env:S2AND_PAIRWISE_MODEL_DIR
+```
+
+Set the directory to the actual candidate's `pairwise/` folder. A failure requires
+reviewing the candidate and its representative latency; do not silently change
+the scientific search space merely to satisfy the performance check.
 - [ ] Confirm training had no held-out prediction, metric, path, or lookup capability.
 
 ## Stage 4: select EPS and freeze linker inputs
@@ -318,10 +342,11 @@ $Base = "https://github.com/allenai/S2AND/blob/v$Version"
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $Readme = (Resolve-Path README.md).Path
 $Text = [IO.File]::ReadAllText($Readme)
+$Text = [regex]::Replace($Text, 'https://github\.com/allenai/S2AND/blob/(?:main|v[0-9][^/]*)/', "$Base/")
 $Text = [regex]::Replace($Text, '\]\((?!https?://|#|mailto:)([^)\s]+)\)', { param($m) "]($Base/$($m.Groups[1].Value))" })
 [IO.File]::WriteAllText($Readme, $Text, $Utf8)
 $RustReadme = (Resolve-Path s2and_rust\README.md).Path
-$RustText = [IO.File]::ReadAllText($RustReadme).Replace('https://github.com/allenai/S2AND/blob/main/', "$Base/")
+$RustText = [regex]::Replace([IO.File]::ReadAllText($RustReadme), 'https://github\.com/allenai/S2AND/blob/(?:main|v[0-9][^/]*)/', "$Base/")
 [IO.File]::WriteAllText($RustReadme, $RustText, $Utf8)
 git diff -- README.md s2and_rust/README.md
 ```

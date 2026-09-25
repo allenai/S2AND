@@ -220,6 +220,7 @@ def run_typecheck_and_test_job(*, lock_present: bool, pytest_workers: str) -> No
             "tests/",
             "-n",
             pytest_workers,
+            *(["--maxprocesses", "8"] if pytest_workers in {"auto", "logical"} else []),
             "--cov=s2and",
             "--cov-report=term-missing",
         ),
@@ -237,7 +238,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--pytest-workers",
         default="auto",
-        help="pytest-xdist worker count passed to -n ('auto' by default; '0' runs the suite in one process)",
+        help="pytest-xdist workers ('auto' by default, capped at 8; explicit counts override the cap; '0' is serial)",
     )
     args = parser.parse_args(argv)
     lock_present = (REPO / "uv.lock").exists()

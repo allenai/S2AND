@@ -158,6 +158,7 @@ class _DirectArrowIncrementalDataset:
     altered_cluster_signatures: Sequence[str] | None
     max_seed_cluster_id: int
     signatures: Mapping[str, Any]
+    partial_supervision_is_distance_override: bool = False
 
 
 @dataclass(frozen=True)
@@ -183,6 +184,7 @@ class _QueryDisallowRescoreContext:
     base_candidate_rows_per_query: int
     base_pairs_per_query: int
     featurizer_cache: _QueryDisallowFeaturizerCache
+    partial_supervision_is_distance_override: bool = False
 
 
 @dataclass
@@ -518,6 +520,7 @@ def _rescore_query_disallow_endpoint(
         rust_featurizer=featurizer,
         partial_supervision_seed_signature_to_component=context.cluster_seeds_require,
         cluster_seed_disallow_excluded_components={signature_id: excluded_components},
+        partial_supervision_is_distance_override=context.partial_supervision_is_distance_override,
     )
     decision = _scored_query_decisions_from_result(
         result,
@@ -1141,6 +1144,7 @@ def predict_incremental_promoted_linker_from_arrow(
                     rust_featurizer=raw_batch_featurizer,
                     partial_supervision_seed_signature_to_component=cluster_seeds_require,
                     cluster_seed_disallow_excluded_components=None,
+                    partial_supervision_is_distance_override=dataset.partial_supervision_is_distance_override,
                 )
                 if query_disallow_partners:
                     scored_batch = _scored_query_decisions_from_result(
@@ -1198,6 +1202,7 @@ def predict_incremental_promoted_linker_from_arrow(
                 base_candidate_rows_per_query=base_candidate_rows_per_query,
                 base_pairs_per_query=base_pairs_per_query,
                 featurizer_cache=rescore_featurizer_cache,
+                partial_supervision_is_distance_override=dataset.partial_supervision_is_distance_override,
             )
             rescore_outcomes: list[_QueryDisallowRescoreOutcome] = []
 

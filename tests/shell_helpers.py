@@ -14,9 +14,12 @@ def bash_executable() -> str:
     """Find native Bash without accidentally selecting Windows' WSL launcher."""
     if os.name == "nt":
         git = shutil.which("git")
-        candidate = Path(git).resolve().parent.parent / "bin" / "bash.exe" if git else None
-        if candidate is not None and candidate.is_file():
-            return str(candidate)
+        if git:
+            # Git may resolve to cmd/git.exe, bin/git.exe or mingw64/bin/git.exe.
+            for root in Path(git).resolve().parents[:3]:
+                candidate = root / "bin" / "bash.exe"
+                if candidate.is_file():
+                    return str(candidate)
         pytest.skip("Git Bash is required for shell contract tests on Windows")
     executable = shutil.which("bash")
     if executable is None:

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
@@ -30,8 +31,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
-from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
-from s2and.data import ANDData  # noqa: E402
+from s2and.arrow_provenance import ArrowProvenanceError, verify_conversion_provenance  # noqa: E402
+from s2and.data import ANDData, _map_fixed_pair_labels  # noqa: E402
 from s2and.feature_port import build_verified_rust_featurizer, featurize_pairs_with_rust  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
@@ -50,6 +51,7 @@ from s2and.production_training_contract import (  # noqa: E402
     load_model_plan,
     load_packaged_artifact_authority,
 )
+from scripts.production.model.augmented_leakage import require_training_members, source_members  # noqa: E402
 
 logger = logging.getLogger("s2and")
 
@@ -383,6 +385,15 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     """Train pairwise models and write the pairwise production bundle stage."""
 
     plan = _preflight_pairwise(args)
+    augmented_pairs = pd.read_csv(plan.datasets["augmented"].files["train_pairs"])
+    pair_frame = _map_fixed_pair_labels(augmented_pairs, "augmented train")
+    augmented_members = source_members(
+        (str(left), str(right)) for left, right in pair_frame.iloc[:, :2].itertuples(index=False, name=None)
+    )
+    unknown_sources = set(augmented_members) - set(DEFAULT_SOURCE_DATASET_NAMES) - {"medline"}
+    if unknown_sources:
+        raise ValueError(f"Augmented training has unsupported source datasets: {sorted(unknown_sources)}")
+    del augmented_pairs, pair_frame
     artifact_authority = load_packaged_artifact_authority(
         name_counts_index_root=Path(args.name_counts_index_root),
     )
@@ -446,12 +457,23 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 # Resolve the same split as pair selection, before allocating feature
                 # matrices. Persist identities so Arrow row sorting cannot change it.
                 train_blocks, val_blocks, test_blocks = anddata.split_cluster_signatures()
+                require_training_members(
+                    augmented_members,
+                    dataset_name,
+                    {signature_id for members in train_blocks.values() for signature_id in members},
+                )
                 cluster_test_splits[dataset_name] = {
                     "block_membership_sha256": block_membership_sha256(anddata.get_blocks()),
                     "test_block_ids": list(test_blocks),
                 }
                 del train_blocks, val_blocks, test_blocks
 
+            current_provenance = verify_conversion_provenance(
+                plan.arrow_dirs[dataset_name],
+                expected_source_sha256={role: dataset_input.sha256[role] for role in ARROW_SOURCE_ROLES},
+            )
+            if current_provenance != plan.arrow_provenance_sha256[dataset_name]:
+                raise ArrowProvenanceError(f"Arrow conversion provenance changed after preflight for {dataset_name!r}")
             with ArrowDataset.open(
                 plan.arrow_dirs[dataset_name],
                 require_specter=True,

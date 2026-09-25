@@ -39,6 +39,7 @@ from s2and.production_training_contract import (  # noqa: E402
     load_packaged_artifact_authority,
 )
 from s2and.subblocking import GraphSubblockingConfig  # noqa: E402
+from scripts.production.model.augmented_leakage import reject_heldout_members, source_members  # noqa: E402
 from scripts.production.model.run_binding import (  # noqa: E402
     build_run_binding_identity,
     build_run_binding_payload,
@@ -672,6 +673,15 @@ def _check_release_leakage(
         name: _block_signature_ids(files["blocks"], context=f"cluster evaluation {name!r}")
         for name, files in cluster_paths.items()
     }
+    if "augmented" in model_paths:
+        augmented = source_members(
+            _csv_pair_identities(model_paths["augmented"]["train_pairs"], context="augmented train pairs")
+        )
+        heldout = {
+            name: pair_signatures.get(name, set()) | block_signatures.get(name, set())
+            for name in pair_signatures.keys() | block_signatures.keys()
+        }
+        reject_heldout_members(augmented, heldout, context="Release preparation")
     for name, files in model_paths.items():
         if set(files) == _FIXED_MODEL_ROLES:
             if name not in pair_identities:

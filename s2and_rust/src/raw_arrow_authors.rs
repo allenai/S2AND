@@ -21,6 +21,8 @@ use crate::{fnv64, term_token_count, RetrievalQueryTerm};
 /// Position window, in author positions, of the local author-list evidence.
 const LOCAL_AUTHOR_WINDOW: u64 = 10;
 
+// Table construction also accepts in-memory author rows. Enforce the same
+// unambiguous-position contract that the Arrow reader checks at its boundary.
 fn require_unique_positions<T>(paper_id: &str, authors: &[(i64, T)]) -> Result<(), String> {
     match authors.windows(2).find(|pair| pair[0].0 == pair[1].0) {
         Some(pair) => Err(format!(

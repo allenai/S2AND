@@ -44,7 +44,7 @@ the overhead of shipping large Python objects around dominates, so pooling is ne
 
 Python pair featurization (`many_pairs_featurize` on the classic route) follows the same idea. When `n_jobs > 1`, it
 uses a process pool on Linux and a thread pool on macOS, and it runs **serially on Windows**. It is GIL-bound, and the
-Windows thread pool was measured slower than serial with bit-identical output (6,591 vs 4,485 pairs/s at `n_jobs=6`
+Windows thread pool was measured slower than serial with bit-identical output (4,485 pairs/s with six threads versus 6,591 pairs/s serial
 on 15k qian pairs, 2026-09-24).
 
 Implementation notes:

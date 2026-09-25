@@ -9,6 +9,7 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -119,6 +120,9 @@ IncrementalDistStats = tuple[float, int, float]
 _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES = 128
 _ALTERED_PRESPLIT_CACHE_INIT_LOCK = threading.Lock()
 _PREDICT_FEATURE_COPY_MAX_BYTES = 128 * (1 << 20)
+# Carry bulk semantics through public attachment overrides that delegate to
+# super(), without mutating a shared Clusterer or changing public arguments.
+_ARROW_BULK_DISTANCE_OVERRIDES: ContextVar[bool] = ContextVar("s2and_arrow_bulk_distance_overrides", default=False)
 
 
 @dataclass(frozen=True)
@@ -3249,19 +3253,23 @@ class Clusterer:
             current_disallows, current_supervision = filter_generated_seed_negatives(
                 synthetic_seed_map, current_disallows, current_supervision
             )
-            incremental_result = self.predict_incremental_from_arrow(
-                group_signature_ids,
-                arrow_dataset,
-                prevent_new_incompatibilities=True,
-                batching_threshold=batching_threshold,
-                partial_supervision=current_supervision,
-                runtime_context=runtime_context,
-                total_ram_bytes=total_ram_bytes,
-                name_tuples=name_tuples,
-                cluster_seeds_require=synthetic_seed_map,
-                cluster_seeds_disallow=current_disallows,
-                altered_cluster_signatures=[],
-            )
+            bulk_context_token = _ARROW_BULK_DISTANCE_OVERRIDES.set(True)
+            try:
+                incremental_result = self.predict_incremental_from_arrow(
+                    group_signature_ids,
+                    arrow_dataset,
+                    prevent_new_incompatibilities=True,
+                    batching_threshold=batching_threshold,
+                    partial_supervision=current_supervision,
+                    runtime_context=runtime_context,
+                    total_ram_bytes=total_ram_bytes,
+                    name_tuples=name_tuples,
+                    cluster_seeds_require=synthetic_seed_map,
+                    cluster_seeds_disallow=current_disallows,
+                    altered_cluster_signatures=[],
+                )
+            finally:
+                _ARROW_BULK_DISTANCE_OVERRIDES.reset(bulk_context_token)
             clusters_payload = incremental_result.get("clusters")
             if not isinstance(clusters_payload, dict):
                 raise RuntimeError(
@@ -3516,7 +3524,9 @@ class Clusterer:
         """Predict blocks through one open Arrow dataset.
 
         Args:
-            block_dict: Mapping from block keys to signature IDs.
+            block_dict: Mapping from block keys to signature IDs. Integer IDs
+                are accepted and normalized to strings, including output members
+                and caller supervision keys, on every Arrow bulk route.
             arrow_dataset: Open immutable Arrow dataset.
             batching_threshold: Maximum native subblock size. ``None`` keeps
                 full-block prediction; a positive value routes oversized blocks
@@ -3529,7 +3539,8 @@ class Clusterer:
         Returns:
             Predicted clusters and optional precomputed distance matrices."""
 
-        partial_supervision = normalize_partial_supervision(partial_supervision)
+        block_dict = {key: [str(signature_id) for signature_id in members] for key, members in block_dict.items()}
+        partial_supervision = normalize_partial_supervision(partial_supervision, stringify_ids=True)
         return Clusterer._predict_from_arrow_request(
             self,
             block_dict=block_dict,
@@ -5336,6 +5347,7 @@ class Clusterer:
         immutable base artifacts come only from ``arrow_dataset``.
         """
 
+        partial_supervision_is_distance_override = _ARROW_BULK_DISTANCE_OVERRIDES.get()
         partial_supervision = normalize_partial_supervision(partial_supervision, stringify_ids=True)
         if runtime_context is None:
             runtime_context = build_runtime_context(
@@ -5414,6 +5426,7 @@ class Clusterer:
                 altered_cluster_signatures=resolved_altered_cluster_signatures,
                 max_seed_cluster_id=_seed_cluster_count_from_seed_map(seed_signature_to_cluster),
                 signatures=signatures,
+                partial_supervision_is_distance_override=partial_supervision_is_distance_override,
             )
             logger.info("Running direct Arrow promoted incremental prediction")
             return predict_incremental_promoted_linker_from_arrow(

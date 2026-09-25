@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pickle
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
@@ -424,12 +425,21 @@ def test_cluster_release_reuses_index_and_preserves_seed_policy_and_block_order(
     assert all(matrix() is None for matrix in previous_matrices)
 
 
-def _changed_signatures(files: dict[str, Path]) -> None:
-    """Edit one author's first name while keeping every signature ID."""
-
-    signatures = json.loads(files["signatures"].read_text(encoding="utf-8"))
-    signatures["signature-0-0"]["author_info"]["first"] = "Alexandra"
-    files["signatures"].write_text(json.dumps(signatures, sort_keys=True), encoding="utf-8")
+def _changed_feature_source(files: dict[str, Path], role: str) -> None:
+    """Change one real feature input while keeping every signature and paper ID."""
+    if role == "specter_embeddings":
+        with files[role].open("rb") as source:
+            embeddings = pickle.load(source)
+        embeddings["paper-0-0"][0] = 0.5
+        with files[role].open("wb") as output:
+            pickle.dump(embeddings, output)
+    else:
+        payload = json.loads(files[role].read_text(encoding="utf-8"))
+        if role == "signatures":
+            payload["signature-0-0"]["author_info"]["first"] = "Alexandra"
+        else:
+            payload["paper-0-0"]["title"] = "Changed title"
+        files[role].write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
 
 def _authority(inputs: dict[str, Any]) -> ProductionArtifactAuthority:
@@ -440,12 +450,14 @@ def _authority(inputs: dict[str, Any]) -> ProductionArtifactAuthority:
     )
 
 
+@pytest.mark.parametrize("role", ["signatures", "papers", "specter_embeddings"])
 def test_release_rejects_stale_arrow_through_provenance_not_the_plan_file_check(
     release_inputs: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
+    role: str,
 ) -> None:
     files = release_inputs["files"]
-    _changed_signatures(files)
+    _changed_feature_source(files, role)
     # The plan is updated to the changed JSON, so the existing plan-file digest check passes;
     # only the stale Arrow directory and its stale provenance record remain.
     updated_plan_digests = source_sha256(files)
@@ -457,7 +469,7 @@ def test_release_rejects_stale_arrow_through_provenance_not_the_plan_file_check(
         staticmethod(lambda *_args, **_kwargs: pytest.fail("stale Arrow data must be rejected before opening")),
     )
 
-    with pytest.raises(ArrowProvenanceError, match="qian was converted from a different signatures source"):
+    with pytest.raises(ArrowProvenanceError, match=f"qian was converted from a different {role} source"):
         with release_pairwise._release_rust_featurizer(
             release_inputs["arrow_root"],
             "qian",

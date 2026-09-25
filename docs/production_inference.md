@@ -196,6 +196,18 @@ before candidate selection, subblocking, or scoring, without mutating the
 caller's mapping. Finite soft distances keep their normal meaning and range; this does not turn zero distances into globally enforced transitive
 must-links.
 
+Arrow bulk prediction accepts integer signature IDs by normalizing block members
+and supervision keys to strings. Its output members are strings whether or not
+subblocking runs. Conflicting integer/string aliases in caller supervision raise
+the same error as conflicting reversed pairs.
+
+In subblocked bulk prediction, exact zero overrides retain this distance meaning
+during initial-only attachment: they affect retrieved pair scores and residual
+clustering without requiring a candidate outside the retrieval window or merging
+separate bulk groups. Standalone Arrow incremental prediction retains its stricter
+zero-distance require semantics and rejects requirements between residual queries,
+outside the retrieval window, or targeting multiple seed components.
+
 Caller distances override dataset constraints for the same pair, consistently
 during scoring and seed restoration, and remain active when `use_default_constraints_as_supervision=False`. That setting
 disables dataset-derived distance constraints, including dataset disallows,

@@ -145,6 +145,28 @@ impl FastPlan {
         num_threads: usize,
         apply_sigmoid: bool,
     ) -> Vec<f64> {
+        // Keep enough work items for mid-size parallel batches without changing
+        // the 256-row tiles used for larger batches or single-threaded calls.
+        let row_count = rows.len() / model.num_features;
+        let tile_rows = if num_threads > 1 {
+            row_count
+                .div_ceil(num_threads)
+                .next_multiple_of(QUICKSCORER_ROWS)
+                .clamp(QUICKSCORER_ROWS, TILE_ROWS)
+        } else {
+            TILE_ROWS
+        };
+        self.predict_rows_tiled(model, rows, num_threads, apply_sigmoid, tile_rows)
+    }
+
+    pub(super) fn predict_rows_tiled<F: FeatureValue>(
+        &self,
+        model: &LgbModel,
+        rows: &[F],
+        num_threads: usize,
+        apply_sigmoid: bool,
+        tile_rows: usize,
+    ) -> Vec<f64> {
         let num_features = model.num_features;
         debug_assert_eq!(rows.len() % num_features, 0);
         let row_count = rows.len() / num_features;
@@ -162,13 +184,13 @@ impl FastPlan {
         };
         if num_threads > 1 && row_count > 1 {
             install_with_optional_rayon_pool(Some(num_threads), || {
-                rows.par_chunks(num_features * TILE_ROWS)
-                    .zip(scores.par_chunks_mut(TILE_ROWS))
+                rows.par_chunks(num_features * tile_rows)
+                    .zip(scores.par_chunks_mut(tile_rows))
                     .for_each(score_tile);
             });
         } else {
-            rows.chunks(num_features * TILE_ROWS)
-                .zip(scores.chunks_mut(TILE_ROWS))
+            rows.chunks(num_features * tile_rows)
+                .zip(scores.chunks_mut(tile_rows))
                 .for_each(score_tile);
         }
         scores

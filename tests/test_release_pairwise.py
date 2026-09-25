@@ -339,6 +339,28 @@ def test_prepare_run_rejects_leakage_before_writes(tmp_path, fixture_kwargs, mes
     assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}
 
 
+@pytest.mark.parametrize("heldout_id", ["rt1", "ct1"])
+def test_prepare_run_rejects_augmented_copies_of_heldout_signatures(tmp_path: Path, heldout_id: str) -> None:
+    fixture = _release_fixture(tmp_path)
+    # Rename the fixed-pair population without changing its otherwise disjoint pairs.
+    model = fixture.payload["model"]["datasets"]
+    model["augmented"] = model.pop("fixed")
+    pairwise = fixture.payload["evaluation"]["pairwise"]
+    pairwise["augmented"] = pairwise.pop("fixed")
+    baseline = json.loads(fixture.baseline_record.read_text(encoding="utf-8"))
+    for values in (baseline["populations"]["pairwise"], baseline["metrics"]["pairwise_datasets"]):
+        values["augmented"] = values.pop("fixed")
+    _write_json(fixture.baseline_record, baseline)
+    fixture.payload["evaluation"]["baseline"]["sha256"] = _sha256(fixture.baseline_record)
+    Path(model["augmented"]["train_pairs"]).write_text(
+        f"signature_id_1,signature_id_2,label\nrandom___{heldout_id},random___safe,1\n", encoding="utf-8"
+    )
+    _write_json(fixture.release, fixture.payload)
+    with pytest.raises(ValueError, match="augmented training contains held-out 'random' signatures"):
+        release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
+    assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}
+
+
 def test_prepare_run_requires_a_fresh_directory_and_code_owned_gate_maxima(tmp_path: Path) -> None:
     fixture = _release_fixture(tmp_path)
     (fixture.run_dir / "notes.txt").write_text("not fresh", encoding="utf-8")

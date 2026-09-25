@@ -32,6 +32,7 @@ on Windows, so Windows file-lock and open-file cleanup contracts are exercised.
 | `conftest.py` | Session-start stop when the installed native extension is stale; restoration of global Python/NumPy RNG state after each test |
 | `rust_build_freshness.py` | Source digest comparison behind the stale-extension check |
 | `helpers.py` | Tiny datasets, name counts, Arrow conversion, query/cluster values, and pairwise CLI arguments |
+| `pairwise_release_helpers.py` | Canonical artifact fixtures, frozen model plans, and release Arrow conversions |
 | `raw_arrow_helpers.py` | Tiny raw Arrow bundles, retained readers, and native planner construction |
 | `incremental_test_helpers.py` | Tiny seed datasets, seed Arrow bundles, a tiny incremental linker, and public prediction inputs |
 | `promoted_linking_helpers.py` | Deterministic tiny boosters, pairwise bundles, and logistic gate configuration |

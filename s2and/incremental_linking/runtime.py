@@ -238,7 +238,12 @@ def _validate_single_constraint_require_target(
         )
 
 
-def _constraint_row_signals(candidate_batch: LinkerCandidateBatch, pair_labels: np.ndarray) -> dict[str, np.ndarray]:
+def _constraint_row_signals(
+    candidate_batch: LinkerCandidateBatch,
+    pair_labels: np.ndarray,
+    *,
+    distance_override_mask: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
     row_count = int(candidate_batch.row_count)
     labels = np.asarray(pair_labels, dtype=np.float64)
     pair_count = int(candidate_batch.pair_count)
@@ -257,7 +262,10 @@ def _constraint_row_signals(candidate_batch: LinkerCandidateBatch, pair_labels: 
         finite_rows = row_indices[finite]
         distances = labels[finite] + float(LARGE_INTEGER)
         hit_counts += np.bincount(finite_rows, minlength=row_count).astype(np.float32, copy=False)
-        require_rows = finite_rows[np.isclose(distances, 0.0)]
+        require_pairs = np.isclose(distances, 0.0)
+        if distance_override_mask is not None:
+            require_pairs &= ~distance_override_mask[finite]
+        require_rows = finite_rows[require_pairs]
         if len(require_rows):
             require_counts += np.bincount(require_rows, minlength=row_count).astype(np.float32, copy=False)
         disallow_rows = finite_rows[distances >= float(LARGE_DISTANCE)]
@@ -1245,6 +1253,7 @@ def _validate_partial_supervision_window(
     query_signature_ids: set[str],
     seed_signature_to_component: Mapping[str, Any],
     candidate_pair_ids: Sequence[tuple[str, str]],
+    partial_supervision_is_distance_override: bool = False,
 ) -> dict[str, int]:
     telemetry = {
         "partial_supervision_pair_count": int(len(partial_supervision)),
@@ -1263,6 +1272,8 @@ def _validate_partial_supervision_window(
         left = str(left_raw)
         right = str(right_raw)
         kind = _partial_supervision_kind(value)
+        if partial_supervision_is_distance_override and kind == "require":
+            kind = "other"
         left_is_query = left in query_signature_ids
         right_is_query = right in query_signature_ids
         if left_is_query and right_is_query:
@@ -1470,6 +1481,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     total_ram_bytes: int | None = None,
     retrieval_top_k: int | None = None,
     cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
+    partial_supervision_is_distance_override: bool = False,
 ) -> LinkOrAbstainProductionResult:
     """Run production scoring/gating from an already retrieved candidate batch.
 
@@ -1524,8 +1536,19 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         ],
         dtype=np.uint32,
     )
+    distance_override_mask = None
     if partial_supervision_dict:
         pair_ids = _candidate_pair_ids(signature_ids_by_index, candidate_batch)
+        if partial_supervision_is_distance_override:
+            # Bulk caller distances still affect pairwise features, but a zero
+            # override does not become a mandatory incremental attachment.
+            distance_override_mask = np.asarray(
+                [
+                    _partial_supervision_distance(partial_supervision_dict, left, right) is not None
+                    for left, right in pair_ids
+                ],
+                dtype=bool,
+            )
         validation_seed_signature_to_component = (
             {
                 str(signature_id): component
@@ -1539,6 +1562,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
             query_signature_ids=set(query_signature_id_strings),
             seed_signature_to_component=validation_seed_signature_to_component,
             candidate_pair_ids=pair_ids,
+            partial_supervision_is_distance_override=partial_supervision_is_distance_override,
         )
     else:
         partial_telemetry = {
@@ -1562,7 +1586,9 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         raise ValueError(
             f"constraint label count must match pair_count: {pair_labels.shape} != ({candidate_batch.pair_count},)"
         )
-    constraint_row_signals = _constraint_row_signals(candidate_batch, pair_labels)
+    constraint_row_signals = _constraint_row_signals(
+        candidate_batch, pair_labels, distance_override_mask=distance_override_mask
+    )
 
     pairwise_model_result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
         None,
@@ -1718,6 +1744,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     top_k: int | None = None,
     partial_supervision_seed_signature_to_component: Mapping[str, Any] | None = None,
     cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
+    partial_supervision_is_distance_override: bool = False,
 ) -> LinkOrAbstainProductionResult:
     """Shared raw Arrow scoring implementation."""
 
@@ -1769,6 +1796,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         total_ram_bytes=total_ram_bytes,
         retrieval_top_k=top_k_resolved,
         cluster_seed_disallow_excluded_components=cluster_seed_disallow_excluded_components,
+        partial_supervision_is_distance_override=partial_supervision_is_distance_override,
     )
     raw_plan_telemetry_fields = _raw_candidate_plan_telemetry_fields(raw_plan_bundle.telemetry)
     telemetry = {

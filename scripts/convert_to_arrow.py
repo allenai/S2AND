@@ -19,6 +19,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -668,10 +669,17 @@ def _converter_identity(**options: Any) -> dict[str, Any]:
             ["git", *args], cwd=_PROJECT_ROOT, capture_output=True, text=True, check=True
         ).stdout.strip()
 
+    try:
+        git_head: str | None = git("rev-parse", "HEAD")
+        git_dirty: bool | None = bool(git("status", "--porcelain", "--untracked-files=no"))
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        logger.warning("Converter Git metadata unavailable in %s: %s", _PROJECT_ROOT, exc)
+        git_head = None
+        git_dirty = None
     return {
         "script": "scripts/convert_to_arrow.py",
-        "git_head": git("rev-parse", "HEAD"),
-        "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+        "git_head": git_head,
+        "git_dirty": git_dirty,
         "use_orcid_id": True,
         **options,
     }
@@ -703,7 +711,9 @@ def benchmark_dataset_sources(source_root: Path, dataset: str) -> RuntimeDataset
     )
 
 
-def _validated_fixed_pair_labels(sources: RuntimeDatasetSources, signature_ids: set[str]) -> dict[str, Path]:
+def _validated_fixed_pair_labels(
+    sources: RuntimeDatasetSources, signature_ids: set[str]
+) -> dict[str, list[tuple[str, str, str]]]:
     """Validate a dataset's fixed-pair label CSVs before they are published.
 
     Pair-only benchmarks such as MEDLINE carry their labels as ``train_pairs.csv``,
@@ -716,8 +726,9 @@ def _validated_fixed_pair_labels(sources: RuntimeDatasetSources, signature_ids: 
         signature_ids: Signature IDs present in the converted dataset.
 
     Returns:
-        Source paths keyed by manifest path key (``train_pairs``, ``val_pairs``,
-        ``test_pairs``); empty when the dataset has no pair labels.
+        Rows with canonical column order keyed by manifest path key (``train_pairs``,
+        ``val_pairs``, ``test_pairs``); empty when the dataset has no pair labels.
+        Raw label spellings and repeated consistent pairs are preserved.
 
     Raises:
         ValueError: If only some required splits are present, or a file violates the
@@ -742,18 +753,35 @@ def _validated_fixed_pair_labels(sources: RuntimeDatasetSources, signature_ids: 
             f"found {sorted(present)}"
         )
     identities: dict[str, set[tuple[str, str]]] = {}
+    rows_by_split: dict[str, list[tuple[str, str, str]]] = {}
     for key, path in present.items():
-        # Same reader as ANDData.maybe_load_dataframe, so published files load identically.
-        frame = _map_fixed_pair_labels(pd.read_csv(path, sep=","), key)
-        id_columns = list(frame.columns[:2])
-        pairs = {
-            (str(left), str(right))
-            for left, right in zip(frame[id_columns[0]].tolist(), frame[id_columns[1]].tolist(), strict=True)
-        }
-        unknown = sorted({signature_id for pair in pairs for signature_id in pair} - signature_ids)
+        csv_text = path.read_text(encoding="utf-8")
+        raw = pd.read_csv(StringIO(csv_text), sep=",", dtype=str, keep_default_na=False)
+        mapped_input = raw.copy()
+        # Preserve ANDData's label inference (e.g. a numeric 1.0 column), while
+        # retaining exact string IDs and the published label spelling.
+        if "label" in raw:
+            mapped_input["label"] = pd.read_csv(StringIO(csv_text), sep=",", usecols=lambda column: column == "label")[
+                "label"
+            ]
+        frame = _map_fixed_pair_labels(mapped_input, key)
+        labels: dict[tuple[str, str], int] = {}
+        rows: list[tuple[str, str, str]] = []
+        for (left, right, label), original_label in zip(
+            frame.itertuples(index=False, name=None), raw["label"], strict=True
+        ):
+            if left == right:
+                raise ValueError(f"{path} contains self-pair: {left!r}")
+            pair = (left, right) if left < right else (right, left)
+            if pair in labels and labels[pair] != int(label):
+                raise ValueError(f"{path} contains conflicting labels for unordered pair: {pair!r}")
+            labels[pair] = int(label)
+            rows.append((left, right, original_label))
+        unknown = sorted({signature_id for pair in labels for signature_id in pair} - signature_ids)
         if unknown:
             raise ValueError(f"{path} references signatures absent from dataset {sources.dataset!r}: {unknown[:5]}")
-        identities[key] = {(left, right) if left <= right else (right, left) for left, right in pairs}
+        identities[key] = set(labels)
+        rows_by_split[key] = rows
     keys = sorted(identities)
     for index, left in enumerate(keys):
         for right in keys[index + 1 :]:
@@ -763,7 +791,23 @@ def _validated_fixed_pair_labels(sources: RuntimeDatasetSources, signature_ids: 
                     f"Dataset {sources.dataset!r} fixed-pair splits {left!r} and {right!r} share "
                     f"{len(overlap)} unordered pairs, for example {sorted(overlap)[:3]}"
                 )
-    return present
+    return rows_by_split
+
+
+def _conversion_name_counts_index(
+    root: Path, index_root: Path | None, *, skip: bool, context: str
+) -> tuple[str | None, float]:
+    """Check the shared index before preprocessing or writing dataset artifacts."""
+
+    if skip:
+        return None, 0.0
+    start = time.perf_counter()
+    path = require_name_counts_index_artifact(
+        root / "name_counts_index" if index_root is None else index_root,
+        context=context,
+        producer_hint="run python -m scripts.production.counts.generate_name_counts first",
+    )
+    return path, time.perf_counter() - start
 
 
 def linker_replay_dataset_sources(raw_root: Path, embeddings_root: Path, dataset: str) -> RuntimeDatasetSources:
@@ -830,7 +874,9 @@ def convert_service_json_to_arrow(
             "Use --overwrite to regenerate it."
         )
     _validate_existing_root_manifest(output_root / "manifest.json")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    name_counts_index_path, write_name_counts_index_seconds = _conversion_name_counts_index(
+        output_root, name_counts_index_root, skip=skip_name_counts_index, context="service JSON conversion"
+    )
 
     start = time.perf_counter()
     payload = _load_json(input_json)
@@ -911,18 +957,7 @@ def convert_service_json_to_arrow(
     )
     write_raw_planner_indexes_seconds = time.perf_counter() - start
 
-    write_name_counts_index_seconds = 0.0
-    if not skip_name_counts_index:
-        start = time.perf_counter()
-        index_dir = (
-            Path(output_root) / "name_counts_index" if name_counts_index_root is None else Path(name_counts_index_root)
-        )
-        name_counts_index_path = require_name_counts_index_artifact(
-            index_dir,
-            context="service JSON conversion",
-            producer_hint="run python -m scripts.production.counts.generate_name_counts first",
-        )
-        write_name_counts_index_seconds = time.perf_counter() - start
+    if name_counts_index_path is not None:
         paths["name_counts_index"] = name_counts_index_path
 
     manifest = build_arrow_artifact_manifest(paths, output_dir)
@@ -987,11 +1022,27 @@ def convert_runtime_dataset_to_arrow(
             "Use --overwrite to regenerate it."
         )
     _validate_existing_root_manifest(root_manifest_dir / "manifest.json")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    name_counts_index_path, write_name_counts_index_seconds = _conversion_name_counts_index(
+        root_manifest_dir, name_counts_index_root, skip=skip_name_counts_index, context="runtime dataset conversion"
+    )
+    converter = _converter_identity(
+        selected_embedding=selected_embedding,
+        include_empty_cluster_seeds=include_empty_cluster_seeds,
+        name_counts_index="skipped" if skip_name_counts_index else "bound",
+    )
+    provenance_sources = {
+        "signatures": sources.signatures_path,
+        "papers": sources.papers_path,
+        "specter_embeddings": embedding_source,
+        **({} if sources.clusters_path is None else {"clusters": sources.clusters_path}),
+    }
+    source_hashes = {role: _file_sha256(path) for role, path in provenance_sources.items()}
+    signatures = _load_json(sources.signatures_path)
+    pair_rows = _validated_fixed_pair_labels(sources, set(signatures))
 
     start = time.perf_counter()
     dataset = ANDData(
-        signatures=str(sources.signatures_path),
+        signatures=signatures,
         papers=str(sources.papers_path),
         name=dataset_name,
         mode="train" if sources.clusters_path is not None else "inference",
@@ -1030,13 +1081,16 @@ def convert_runtime_dataset_to_arrow(
             shutil.copy2(sources.clusters_path, output_clusters_path)
         paths["clusters"] = str(output_clusters_path)
 
-    for pair_key, source_pair_path in _validated_fixed_pair_labels(
-        sources, {str(signature_id) for signature_id in dataset.signatures}
-    ).items():
+    for pair_key, rows in pair_rows.items():
         output_pair_path = output_dir / f"{pair_key}.csv"
-        if overwrite or not output_pair_path.exists():
-            shutil.copy2(source_pair_path, output_pair_path)
+        with output_pair_path.open("w", encoding="utf-8", newline="") as output:
+            writer = csv.writer(output, lineterminator="\n")
+            writer.writerow(["signature_id_1", "signature_id_2", "label"])
+            writer.writerows(rows)
         paths[pair_key] = str(output_pair_path)
+    if overwrite:
+        for pair_key in {"train_pairs", "val_pairs", "test_pairs"} - pair_rows.keys():
+            (output_dir / f"{pair_key}.csv").unlink(missing_ok=True)
 
     needed_paper_ids = {str(signature.paper_id) for signature in dataset.signatures.values()}
     embedding_path = output_dir / f"{selected_embedding}.arrow"
@@ -1055,20 +1109,7 @@ def convert_runtime_dataset_to_arrow(
         overwrite=overwrite,
     )
     write_raw_planner_indexes_seconds = time.perf_counter() - start
-    write_name_counts_index_seconds = 0.0
-    if not skip_name_counts_index:
-        start = time.perf_counter()
-        index_dir = (
-            Path(root_manifest_dir) / "name_counts_index"
-            if name_counts_index_root is None
-            else Path(name_counts_index_root)
-        )
-        name_counts_index_path = require_name_counts_index_artifact(
-            index_dir,
-            context="runtime dataset conversion",
-            producer_hint="run python -m scripts.production.counts.generate_name_counts first",
-        )
-        write_name_counts_index_seconds = time.perf_counter() - start
+    if name_counts_index_path is not None:
         paths["name_counts_index"] = name_counts_index_path
 
     manifest = build_arrow_artifact_manifest(paths, output_dir)
@@ -1080,21 +1121,19 @@ def convert_runtime_dataset_to_arrow(
             require_name_counts_index=not skip_name_counts_index,
             base_dir=output_dir,
         )
+    changed_sources = [role for role, path in provenance_sources.items() if _file_sha256(path) != source_hashes[role]]
+    if changed_sources:
+        raise ValueError(f"Source files changed during conversion: {changed_sources}; rerun from stable inputs")
     write_arrow_artifact_manifest(manifest, output_dir)
-    write_conversion_provenance(
+    provenance_path = write_conversion_provenance(
         output_dir,
-        sources={
-            "signatures": sources.signatures_path,
-            "papers": sources.papers_path,
-            "specter_embeddings": embedding_source,
-            **({} if sources.clusters_path is None else {"clusters": sources.clusters_path}),
-        },
-        converter=_converter_identity(
-            selected_embedding=selected_embedding,
-            include_empty_cluster_seeds=include_empty_cluster_seeds,
-            name_counts_index="skipped" if skip_name_counts_index else "bound",
-        ),
+        sources=provenance_sources,
+        converter=converter,
     )
+    recorded_sources = _load_json(provenance_path)["sources"]
+    if any(recorded_sources[role]["sha256"] != digest for role, digest in source_hashes.items()):
+        provenance_path.unlink()
+        raise ValueError("Source files changed while writing conversion provenance; rerun from stable inputs")
     _upsert_root_manifest(root_manifest_dir, dataset_name=dataset_name, dataset_dir=output_dir)
     return {
         **manifest,
@@ -1374,7 +1413,7 @@ def _run_service_json(args: argparse.Namespace) -> None:
         copy_source_json=bool(args.copy_source_json),
         validate=not bool(args.skip_validation),
     )
-    _print_report(report)
+    _print_report({**report, "dataset": dataset_name})
 
 
 def _run_join_canonical_names(args: argparse.Namespace) -> None:

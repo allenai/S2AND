@@ -305,7 +305,7 @@ fn validate_overlap_counters(summaries: &[RetrievalSummaryData]) -> Result<(), R
                 .find(|pair| pair[0].0 >= pair[1].0)
             {
                 return Err(RetrievalError::InvalidValue(format!(
-                    "component_key {:?} counter hashes must be strictly increasing, got {} then {}",
+                    "component_key {:?} counter hashes must be strictly increasing, got {} then {}; duplicate FNV hashes may indicate a collision",
                     summary.component_key, pair[0].0, pair[1].0
                 )));
             }

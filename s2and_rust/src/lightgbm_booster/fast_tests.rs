@@ -9,7 +9,7 @@ use super::fast::{is_proper_tree, FastPlan};
 use super::*;
 
 const ROW_COUNTS: [usize; 15] = [0, 1, 7, 8, 9, 15, 16, 17, 63, 64, 65, 255, 256, 257, 1001];
-const THREAD_COUNTS: [usize; 2] = [1, 4];
+const THREAD_COUNTS: [usize; 3] = [1, 4, 8];
 const NAN_AND_NONE_DECISION_TYPES: [u8; 4] = [0, 2, 8, 10];
 const K: f64 = K_ZERO_THRESHOLD;
 
@@ -857,4 +857,26 @@ fn booster_attaches_and_copies_fast_plan() {
         RustLightGBMBooster::from_model_text(&text.replace("decision_type=10", "decision_type=4"))
             .unwrap();
     assert!(fallback.fast_plan.is_none());
+}
+
+/// Release gate for the actual boosters, including newly trained bundles.
+#[test]
+#[ignore = "requires S2AND_PAIRWISE_MODEL_DIR pointing to the candidate release bundle"]
+fn release_bundle_uses_native_fast_plans() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("S2AND_PAIRWISE_MODEL_DIR")
+            .expect("set S2AND_PAIRWISE_MODEL_DIR to the candidate pairwise model directory"),
+    );
+    for filename in ["main.lgb", "nameless.lgb"] {
+        let path = root.join(filename);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let booster = RustLightGBMBooster::from_model_text(&text)
+            .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
+        let plan = booster
+            .fast_plan
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} falls back to baseline native scoring", path.display()));
+        println!("{}: {}", path.display(), plan.kernel_name());
+    }
 }

@@ -26,7 +26,7 @@ from s2and.orcid_prefix_counts import (
     load_canonical_orcid_prefix_counts,
     validate_orcid_prefix_counts,
 )
-from s2and.text import canonicalize_name_parts, normalize_orcid, same_prefix_tokens
+from s2and.text import canonicalize_name_parts, canonicalize_name_text, normalize_orcid, same_prefix_tokens
 
 from ._run_support import (
     emit_jsonl,
@@ -147,33 +147,42 @@ def build_prefix_counts_from_sorted_rows(
     max_pair_keys: int | None = None,
     progress_callback: Callable[[dict[str, int]], None] | None = None,
 ) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
-    """Stream sorted rows one ORCID at a time under explicit expansion bounds."""
+    """Count first-name pairs sharing an ORCID and a nonempty canonical surname.
+
+    Rows must supply ``last_name`` and be sorted by canonical ORCID. Surname
+    comparison ignores canonical spaces, as within-block name constraints do.
+    Each distinct first-name pair contributes once per ORCID even when it shares
+    several surnames; different first-name pairs retain separate prefix events.
+    """
 
     if max_names_per_orcid < 2:
         raise ValueError("max_names_per_orcid must be at least 2")
     metrics = Counter[str]()
     orcid_counts: Counter[tuple[str, str]] = Counter()
     current_orcid: str | None = None
-    current_names: set[str] = set()
+    current_name_lasts: dict[str, set[str]] = {}
     previous_orcid: str | None = None
     previous_source_orcid: str | None = None
     previous_normalized_orcid: str | None = None
     canonical_first_cache: dict[tuple[str | None, str | None], str] = {}
+    canonical_last_cache: dict[str | None, str] = {}
 
     def flush_group() -> None:
         if current_orcid is None:
             return
-        unique_name_count = len(current_names)
+        unique_name_count = len(current_name_lasts)
         metrics["orcid_groups"] += 1
         metrics["unique_orcid_names"] += unique_name_count
         metrics["max_unique_names_per_orcid"] = max(metrics["max_unique_names_per_orcid"], unique_name_count)
-        sorted_names = sorted(current_names)
+        sorted_names = sorted(current_name_lasts)
         metrics["selected_canonical_rows"] += unique_name_count
         # Keep the existing event-count semantics until release policy explicitly
         # decides otherwise: one ORCID may contribute the same prefix pair through
         # multiple distinct name combinations. These counts affect merge ordering
         # as well as thresholding, so changing them is not a producer-only cleanup.
         for first_name, second_name in combinations(sorted_names, 2):
+            if current_name_lasts[first_name].isdisjoint(current_name_lasts[second_name]):
+                continue
             orcid_counts.update(prefix_pairs_for_names(first_name, second_name))
         if max_pair_keys is not None and len(orcid_counts) > max_pair_keys:
             raise ValueError(f"ORCID prefix pairs exceeded guardrail max_pair_keys={max_pair_keys}")
@@ -196,8 +205,12 @@ def build_prefix_counts_from_sorted_rows(
         source_orcid = row.get("orcid")
         raw_first_value = row.get("first_name")
         raw_middle_value = row.get("middle")
+        if "last_name" not in row:
+            raise ValueError("ORCID source rows must include last_name for surname-matched prefix evidence")
+        raw_last_value = row["last_name"]
         raw_first = None if raw_first_value is None else str(raw_first_value)
         raw_middle = None if raw_middle_value is None else str(raw_middle_value)
+        raw_last = None if raw_last_value is None else str(raw_last_value)
         source_orcid_text = None if source_orcid is None else str(source_orcid)
         if source_orcid_text == previous_source_orcid:
             orcid = previous_normalized_orcid
@@ -223,15 +236,25 @@ def build_prefix_counts_from_sorted_rows(
         if not normalized_first:
             metrics["rejected_empty_canonical_first"] += 1
             continue
+        normalized_last = canonical_last_cache.get(raw_last)
+        if normalized_last is None:
+            # The same space-insensitive comparison key as canonical_lasts_equivalent.
+            normalized_last = canonicalize_name_text(raw_last).replace(" ", "")
+            if len(canonical_last_cache) >= 100_000:
+                canonical_last_cache.clear()
+            canonical_last_cache[raw_last] = normalized_last
+        if not normalized_last:
+            metrics["rejected_empty_canonical_last"] += 1
+            continue
         if current_orcid is None:
             current_orcid = orcid
         elif orcid != current_orcid:
             flush_group()
-            current_names.clear()
+            current_name_lasts.clear()
             current_orcid = orcid
-        if normalized_first not in current_names and len(current_names) >= max_names_per_orcid:
+        if normalized_first not in current_name_lasts and len(current_name_lasts) >= max_names_per_orcid:
             raise ValueError(f"ORCID {orcid!r} has more than max_names_per_orcid={max_names_per_orcid} unique names")
-        current_names.add(normalized_first)
+        current_name_lasts.setdefault(normalized_first, set()).add(normalized_last)
         metrics["accepted_rows"] += 1
     flush_group()
 
@@ -315,7 +338,7 @@ def _load_reviewed_csv_rows(path: Path) -> Iterator[Mapping[str, Any]]:
     with path.open(encoding="utf-8-sig", newline="") as input_file:
         reader = csv.DictReader(input_file)
         fields = reader.fieldnames or []
-        expected = ["raw_orcid", "orcid", "first_name", "middle"]
+        expected = ["raw_orcid", "orcid", "first_name", "middle", "last_name"]
         if fields != expected:
             raise ValueError(f"Reviewed ORCID export must have exact header: {expected}")
         for row in reader:

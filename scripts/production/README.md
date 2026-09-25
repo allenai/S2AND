@@ -70,12 +70,17 @@ example, not a reviewed full-run bound:
 
 Each minimum must be no greater than its matching maximum.
 
-Export ORCID names with the following query and the same limit convention:
+The historical warehouse query below preserves its Crossref source policy and
+uses the same limit convention. It now includes the required surname field.
+For the refreshed 2026-09-25 export, retain all refreshed sources, preserve
+`last_name`, rename `middle_name` to `middle`, preserve the original ORCID as
+`raw_orcid`, and normalize/sort `orcid` before writing the reviewed CSV. The
+historical query's source filter does not apply to that refreshed export.
 
 ```sql
 with source_rows as (
   select pae.corpus_paper_id, pae.orcid as raw_orcid, pae.position,
-         pae.first_name, pa.middle,
+         pae.first_name, pa.middle, pae.last_name,
          upper(regexp_replace(
            regexp_substr(
              coalesce(pae.orcid, ''),
@@ -103,14 +108,14 @@ select raw_orcid,
               || substring(canonical_orcid_compact, 9, 4) || '-'
               || substring(canonical_orcid_compact, 13, 4)
        end as orcid,
-       first_name, middle
+       first_name, middle, last_name
 from source_rows
-order by orcid nulls last, first_name, middle, corpus_paper_id, position
+order by orcid nulls last, first_name, middle, last_name, corpus_paper_id, position
 limit <MAX_SOURCE_ROWS_PLUS_ONE>;
 ```
 
-Save exactly `raw_orcid,orcid,first_name,middle`, preserving query order, then
-run:
+Save exactly `raw_orcid,orcid,first_name,middle,last_name`, preserving query
+order. The previous four-column input is rejected. Run:
 
 ```powershell
 uv run python -m scripts.production.counts.generate_orcid_name_prefix_counts `
@@ -135,6 +140,21 @@ these values demonstrate the shape only:
 It requires `min_source_rows <= max_source_rows`,
 `max_names_per_orcid >= 2`, and
 `min_orcid_pair_keys <= max_pair_keys`.
+
+ORCID name pairs require a shared nonempty surname key. The producer canonicalizes
+the surname and removes spaces for comparison, matching the existing
+`canonical_lasts_equivalent` policy: `Ou Yang` and `Ouyang` match. Rows whose
+canonical first name or surname is empty are skipped. Within each ORCID, each
+distinct first-name pair contributes once if both names occur with at least one
+shared surname key, even when that pair occurs under several surnames. Matching
+is not transitive: if Alice and Alicia share Smith, and Alicia and Allison share
+Jones, Alice and Allison do not qualify without their own shared surname key.
+
+`max_names_per_orcid` still limits distinct first names across the ORCID, not
+separately within each surname. Prefix-event construction and thresholds are
+otherwise unchanged: distinct qualifying first-name pairs can contribute to the
+same prefix pair. Alias counts at least 2 supply only prefix pairs absent after
+the ORCID threshold; they are not added to retained ORCID counts.
 
 The name-count index format is specified in the
 [Arrow dataset spec](../../docs/rust/arrow_dataset_spec.md#name-counts).

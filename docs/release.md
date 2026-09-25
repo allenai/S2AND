@@ -27,13 +27,17 @@ Four reviewed external inputs are not in this repository:
 | Input | Required shape | Role |
 |---|---|---|
 | Canonical benchmark names | One JSON file per benchmark, with exactly one row per dataset `signature_id` and `first`, `middle`, `last` | Required before Stage 2 can regenerate the benchmarks and join the augmented training set |
-| ORCID names | Query-ordered CSV with `raw_orcid`, `orcid`, `first_name`, and `middle` | Required before Stage 1 can build package assets |
+| ORCID names | Query-ordered CSV with `raw_orcid`, `orcid`, `first_name`, `middle`, and `last_name` | Required before Stage 1 can build package assets |
 | Name counts | Query-ordered CSV with `first_name`, `last_name`, and `count` | Ordinary Stage 1 release input; its producer is already complete |
 | v1.21 baseline record | Reviewed cluster B3, pairwise aggregate/per-dataset AUROC and macro-F1, and performance p50 for the frozen populations/workload, plus source/model/data/environment/command identities | Ordinary Stage 0 input referenced from `release.json` by path and SHA-256; `prepare-run` verifies its identities and derives the scalar baselines |
 
 Do not replace the canonical or ORCID input with a fixture or relabel a legacy
 artifact. The canonical join rejects duplicate, missing, and extra IDs. The
-ORCID producer requires reviewed row and expansion bounds.
+ORCID producer requires reviewed row and expansion bounds and the surname field;
+the previous four-column CSV is rejected. First-name pairs must share a nonempty
+canonical surname after removing spaces, and each distinct first-name pair counts
+at most once per ORCID. See the [count-generation contract](../scripts/production/README.md)
+for surname matching, skipped empty names, and unchanged expansion/alias rules.
 
 The first two are the remaining implementation prerequisites carried into this
 runbook. The name counts, historical baseline, and other benchmark/linker data

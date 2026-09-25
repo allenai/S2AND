@@ -363,6 +363,15 @@ production model and public-data version is `1.3`, on a separate version axis.
   frees in 11 s instead of 18 minutes. Arrow data whose paper lists two authors
   at one position, which `convert_to_arrow.py` already rejects, now fails the
   build.
+- The raw Arrow candidate planner and `raw_arrow_labeled_candidate_plan`
+  normalize each paper's authors once per call, instead of once per signature
+  and again for every component summary that holds it. Query coauthor blocks
+  are read off a per-paper block table, and paper author-list evidence
+  intersects interned name ids instead of string sets. Planner payloads and
+  incremental-linking clusters are bit-identical to before. On the production
+  `s_lee` linker block (422k signatures, papers of up to 8,099 authors), the
+  labeled-row plan over its 152,900 evaluation rows takes 31 s instead of 54 s
+  and peaks at 6.7 GB instead of 8.1 GB.
 - `RustLightGBMBooster` builds an exact fast scorer at load time. Models whose
   trees all have at most 32 leaves use QuickScorer; models with up to 256
   leaves per tree use lockstep traversal over integer bin keys. Both support up

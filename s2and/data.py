@@ -566,7 +566,10 @@ class ANDData:
             generation; an already-open ``NameCountsIndex`` handle can be
             shared explicitly.
         n_jobs: number of cpus to use
-        preprocess: whether to preprocess the data (normalization, etc)
+        preprocess: whether to preprocess the data: name normalization, n-grams,
+            name counts, and coauthor sets and blocks. Without it the dataset still
+            supports blocks, splits, pair selection, and seeds, but not Python
+            featurization.
         name_tuples: Canonical first-name aliases. ``None`` selects the
             packaged canonical artifact. Pass an explicit empty set or
             frozenset to disable aliases; pair order is ignored.
@@ -1053,8 +1056,10 @@ class ANDData:
                     stored_last_normalized: str | None = signature.author_info_last_normalized
                     stored_suffix_normalized: str | None = signature.author_info_suffix_normalized
 
+                    # Coauthor lists feed only preprocessed featurization. Each costs one entry per
+                    # paper author, which is quadratic on papers with thousands of authors.
                     coauthors: list[str] | None = None
-                    if len(self.papers) != 0 and not defer_signature_fields_to_rust:
+                    if self.preprocess and len(self.papers) != 0 and not defer_signature_fields_to_rust:
                         coauthors = _ordered_coauthors_for_signature(signature, self.papers)
 
                     coauthor_set = set(coauthors) if coauthors is not None else None

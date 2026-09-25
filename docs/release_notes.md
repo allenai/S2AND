@@ -22,6 +22,13 @@ production model and public-data version is `1.3`, on a separate version axis.
   dataset: v1.3 trains on `aminer`, `arnetminer`, `inspire`, `kisti`, `pubmed`,
   `qian`, and `zbmath` in random-block mode plus `augmented` in fixed-pair mode.
   Model plans that still list `orcid` are rejected.
+- `ANDData(preprocess=False)` no longer builds per-signature coauthor sets:
+  `author_info_coauthors` and `author_info_coauthor_blocks` stay `None`. Python
+  featurization, which already requires `preprocess=True`, is the only reader
+  that needs them. Graph subblocking recomputes the same coauthor blocks from
+  the paper authors, and evaluation falls back to the paper author count.
+  Each set holds one entry per paper author, so papers with thousands of
+  authors made them quadratic.
 - Release featurization: `train_pairwise.py` and `release_pairwise.py`
   `calibrate-eps`, `evaluate-pairs`, and `evaluate-clusters` now compute pair
   features and distances with the Rust featurizer from a required
@@ -344,8 +351,9 @@ production model and public-data version is `1.3`, on a separate version axis.
   load the JSON `ANDData` that selects pairs, splits, blocks, seeds, and truth
   with `preprocess=False` and without SPECTER or name counts, since the Rust
   featurizer computes every feature from Arrow. On all nine model-plan datasets
-  the selection is identical to the preprocessed load. INSPIRE's load drops
-  from 28 to 7 minutes, and the memory it holds from 90 to 30 GB.
+  the selection is identical to the preprocessed load. With the coauthor sets
+  it no longer builds, INSPIRE's load drops from 29 minutes to about one, and
+  the memory it holds from 90 GB to 3 GB.
 - The Rust featurizer stores each paper's coauthor names, name blocks, and
   character n-gram counts once, instead of copying them into every signature on
   the paper. Pair features subtract each signature's own author, and they are

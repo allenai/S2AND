@@ -53,6 +53,32 @@ def test_required_seed_components_preserve_transitive_constraints(seeds, expecte
             assert dataset.get_constraint(left, right) == data_module.CLUSTER_SEEDS_LOOKUP[constraint]
 
 
+def test_unpreprocessed_signatures_skip_coauthor_sets_that_subblocking_recomputes():
+    """Coauthor sets are quadratic on huge author lists, so only preprocessing builds them."""
+
+    from s2and.subblocking import _signature_coauthor_blocks_for_specter
+
+    def load(preprocess: bool) -> ANDData:
+        return ANDData(
+            signatures="tests/dummy/signatures.json",
+            papers="tests/dummy/papers.json",
+            name="coauthors",
+            mode="inference",
+            name_counts_index=None,
+            name_tuples=set(),
+            preprocess=preprocess,
+        )
+
+    raw, prepared = load(False), load(True)
+    assert any(signature.author_info_coauthor_blocks for signature in prepared.signatures.values())
+    for signature_id, signature in raw.signatures.items():
+        assert signature.author_info_coauthors is None
+        assert signature.author_info_coauthor_blocks is None
+        # Paper author names are normalized either way, so subblocking evidence is unchanged.
+        expected = prepared.signatures[signature_id].author_info_coauthor_blocks
+        assert set(_signature_coauthor_blocks_for_specter(signature, raw)) == expected - {""}
+
+
 def test_explicit_seed_disallow_survives_connected_require_groups():
     dataset = ANDData(
         signatures="tests/dummy/signatures.json",

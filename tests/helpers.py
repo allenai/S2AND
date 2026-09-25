@@ -77,11 +77,6 @@ def write_minimal_arrow_prediction_bundle(
 
     import pyarrow as pa
 
-    from s2and.arrow_inputs import RAW_PLANNER_ARROW_BATCH_INDEX_KEYS, RAW_PLANNER_ARROW_KEY_COLUMNS
-    from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
-
-    root = Path(bundle_dir)
-    root.mkdir(parents=True, exist_ok=True)
     signature_ids = [str(index) for index in range(10)] + ["q1", "q2", "seed1"]
     tables = {
         "signatures": pa.table(
@@ -121,6 +116,25 @@ def write_minimal_arrow_prediction_bundle(
             }
         )
 
+    return write_arrow_tables_bundle(bundle_dir, tables)
+
+
+def write_arrow_tables_bundle(bundle_dir: Any, tables: dict[str, Any]) -> dict[str, str]:
+    """Write Arrow tables with their batch indexes and a bound manifest.
+
+    Args:
+        bundle_dir: Bundle directory, created if missing.
+        tables: PyArrow tables keyed by bundle table name (``signatures``, ``papers``, ...).
+
+    Returns:
+        Bundle file paths keyed by manifest key.
+    """
+
+    from s2and.arrow_inputs import RAW_PLANNER_ARROW_BATCH_INDEX_KEYS, RAW_PLANNER_ARROW_KEY_COLUMNS
+    from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
+
+    root = Path(bundle_dir)
+    root.mkdir(parents=True, exist_ok=True)
     paths: dict[str, str] = {}
     for table_name, table in tables.items():
         arrow_path = root / f"{table_name}.arrow"

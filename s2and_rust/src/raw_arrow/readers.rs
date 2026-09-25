@@ -1,6 +1,7 @@
 use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::name_counts::NameCountsData;
 use crate::orcid::normalize_orcid_owned;
@@ -95,16 +96,19 @@ pub(crate) struct RawArrowFeature {
     pub(crate) query_author: String,
 }
 
+/// Author-list evidence of one signature, as sorted distinct interned name ids.
 pub(crate) struct RawArrowAuthorSignalData {
-    pub(crate) paper_author_names: HashSet<String>,
-    pub(crate) local10_author_names: HashSet<String>,
+    /// Every nonempty normalized author name on the signature's paper.
+    pub(crate) paper_author_names: Arc<[u32]>,
+    /// Names of the other authors within ten positions of the signature.
+    pub(crate) local10_author_names: Vec<u32>,
 }
 
 pub(crate) struct RawArrowSummarySignalData {
     pub(crate) name_counts_values: Vec<NameCountsData>,
-    pub(crate) member_paper_author_names: Vec<HashSet<String>>,
+    pub(crate) member_paper_author_names: Vec<Arc<[u32]>>,
     pub(crate) member_paper_author_counts: Vec<usize>,
-    pub(crate) member_local10_author_names: Vec<HashSet<String>>,
+    pub(crate) member_local10_author_names: Vec<Vec<u32>>,
     pub(crate) member_signature_ids: Vec<String>,
 }
 

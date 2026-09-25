@@ -139,6 +139,8 @@ struct ReusableRawArrowCandidatePlanState {
     features_by_signature_id: HashMap<String, RawArrowFeature>,
     signatures: HashMap<String, RawArrowSignature>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
+    /// Interned author names of the seed and query papers compared so far.
+    author_index: PaperAuthorIndex,
     raw_name_counts: RawNameCountMaps,
     members_by_component: HashMap<String, Vec<String>>,
     component_keys_by_member: HashMap<String, Vec<String>>,
@@ -511,8 +513,7 @@ fn raw_arrow_summary_signals_cached<'a>(
     members_by_component: &HashMap<String, Vec<String>>,
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     signatures: &HashMap<String, RawArrowSignature>,
-    paper_authors: &HashMap<String, Vec<(i64, String)>>,
-    unidecode_char_map: &HashMap<char, String>,
+    author_index: &PaperAuthorIndex,
 ) -> PyResult<&'a RawArrowSummarySignalData> {
     if let Entry::Vacant(entry) = cache.entry(component_key.to_string()) {
         let members = members_by_component.get(component_key).ok_or_else(|| {
@@ -525,8 +526,7 @@ fn raw_arrow_summary_signals_cached<'a>(
             members,
             features_by_signature_id,
             signatures,
-            paper_authors,
-            unidecode_char_map,
+            author_index,
         )
         .map_err(pyo3::exceptions::PyKeyError::new_err)?;
         entry.insert(summary_signals);
@@ -546,8 +546,7 @@ pub(crate) fn raw_arrow_summary_signals_for_members_cached<'a, S: AsRef<str>>(
     members: &[S],
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     signatures: &HashMap<String, RawArrowSignature>,
-    paper_authors: &HashMap<String, Vec<(i64, String)>>,
-    unidecode_char_map: &HashMap<char, String>,
+    author_index: &PaperAuthorIndex,
 ) -> PyResult<&'a RawArrowSummarySignalData> {
     let cache_key = (
         component_key.to_string(),
@@ -558,8 +557,7 @@ pub(crate) fn raw_arrow_summary_signals_for_members_cached<'a, S: AsRef<str>>(
             members,
             features_by_signature_id,
             signatures,
-            paper_authors,
-            unidecode_char_map,
+            author_index,
         )
         .map_err(pyo3::exceptions::PyKeyError::new_err)?;
         entry.insert(summary_signals);
@@ -862,9 +860,14 @@ impl RawBlockQueryCandidatePlanner {
         let text_context_secs = text_context_start.elapsed().as_secs_f64();
 
         let feature_start = Instant::now();
-        let raw_feature_results: Vec<Result<(String, RawArrowFeature), String>> =
+        let raw_feature_results: Result<Vec<(String, RawArrowFeature)>, String> =
             py.allow_threads(|| {
                 let compute = || {
+                    let coauthor_blocks = paper_coauthor_blocks(
+                        signatures.values(),
+                        &paper_authors,
+                        &unidecode_char_map,
+                    )?;
                     seed_signature_ids
                         .par_iter()
                         .map(|signature_id| {
@@ -875,13 +878,12 @@ impl RawBlockQueryCandidatePlanner {
                                 )
                             })?;
                             let paper = papers.get(&signature.paper_id);
-                            let authors = paper_authors.get(&signature.paper_id);
                             Ok((
                                 signature_id.clone(),
                                 build_raw_arrow_feature(
                                     signature,
                                     paper,
-                                    authors,
+                                    coauthor_blocks.get(&signature.paper_id),
                                     specter_by_paper_id.as_ref(),
                                     &raw_name_counts,
                                     &name_prefixes,
@@ -891,15 +893,14 @@ impl RawBlockQueryCandidatePlanner {
                                 ),
                             ))
                         })
-                        .collect::<Vec<_>>()
+                        .collect()
                 };
                 install_with_optional_rayon_pool(num_threads, compute)
             });
-        let mut features_by_signature_id = HashMap::with_capacity(raw_feature_results.len());
-        for result in raw_feature_results {
-            let (signature_id, feature) = result.map_err(pyo3::exceptions::PyKeyError::new_err)?;
-            features_by_signature_id.insert(signature_id, feature);
-        }
+        let features_by_signature_id: HashMap<String, RawArrowFeature> = raw_feature_results
+            .map_err(pyo3::exceptions::PyKeyError::new_err)?
+            .into_iter()
+            .collect();
         let feature_secs = feature_start.elapsed().as_secs_f64();
 
         let summary_start = Instant::now();
@@ -928,6 +929,7 @@ impl RawBlockQueryCandidatePlanner {
                 features_by_signature_id,
                 signatures,
                 paper_authors,
+                author_index: PaperAuthorIndex::default(),
                 raw_name_counts,
                 members_by_component,
                 component_keys_by_member,
@@ -1199,9 +1201,14 @@ impl RawBlockQueryCandidatePlanner {
         let text_context_secs = text_context_start.elapsed().as_secs_f64();
 
         let feature_start = Instant::now();
-        let raw_feature_results: Vec<Result<(String, RawArrowFeature), String>> =
+        let raw_feature_results: Result<Vec<(String, RawArrowFeature)>, String> =
             py.allow_threads(|| {
                 let compute = || {
+                    let coauthor_blocks = paper_coauthor_blocks(
+                        query_inputs.signatures.values(),
+                        &query_inputs.paper_authors,
+                        &self.state.unidecode_char_map,
+                    )?;
                     query_signature_ids
                         .par_iter()
                         .map(|signature_id| {
@@ -1213,13 +1220,12 @@ impl RawBlockQueryCandidatePlanner {
                                     )
                                 })?;
                             let paper = query_inputs.papers.get(&signature.paper_id);
-                            let authors = query_inputs.paper_authors.get(&signature.paper_id);
                             Ok((
                                 signature_id.clone(),
                                 build_raw_arrow_feature(
                                     signature,
                                     paper,
-                                    authors,
+                                    coauthor_blocks.get(&signature.paper_id),
                                     query_inputs.specter_by_paper_id.as_ref(),
                                     &self.state.raw_name_counts,
                                     &self.state.name_prefixes,
@@ -1229,15 +1235,14 @@ impl RawBlockQueryCandidatePlanner {
                                 ),
                             ))
                         })
-                        .collect::<Vec<_>>()
+                        .collect()
                 };
                 install_with_optional_rayon_pool(self.num_threads, compute)
             });
-        let mut query_features_by_signature_id = HashMap::with_capacity(raw_feature_results.len());
-        for result in raw_feature_results {
-            let (signature_id, feature) = result.map_err(pyo3::exceptions::PyKeyError::new_err)?;
-            query_features_by_signature_id.insert(signature_id, feature);
-        }
+        let query_features_by_signature_id: HashMap<String, RawArrowFeature> = raw_feature_results
+            .map_err(pyo3::exceptions::PyKeyError::new_err)?
+            .into_iter()
+            .collect();
         let feature_secs = feature_start.elapsed().as_secs_f64();
 
         let query_start = Instant::now();
@@ -1444,6 +1449,33 @@ impl RawBlockQueryCandidatePlanner {
             HashMap::<String, RawArrowSummarySignalData>::new();
         let mut author_signals_by_query_signature_id =
             HashMap::<String, RawArrowAuthorSignalData>::new();
+        let retrieved_member_paper_ids: Vec<&str> = query_results
+            .iter()
+            .flatten()
+            .flat_map(|result| result.row_component_keys.iter())
+            .filter_map(|component_key| members_by_component.get(component_key))
+            .flatten()
+            .filter_map(|signature_id| self.state.signatures.get(signature_id))
+            .map(|signature| signature.paper_id.as_str())
+            .collect();
+        py.allow_threads(|| {
+            install_with_optional_rayon_pool(self.num_threads, || {
+                self.state.author_index.extend(
+                    retrieved_member_paper_ids,
+                    &self.state.paper_authors,
+                    &self.state.unidecode_char_map,
+                )?;
+                self.state.author_index.extend(
+                    query_inputs
+                        .signatures
+                        .values()
+                        .map(|signature| signature.paper_id.as_str()),
+                    &query_inputs.paper_authors,
+                    &self.state.unidecode_char_map,
+                )
+            })
+        })
+        .map_err(pyo3::exceptions::PyKeyError::new_err)?;
         for query_result in query_results {
             let mut query_result = query_result.map_err(retrieval_error_to_py)?;
             let base_row_index = u32::try_from(row_component_keys.len()).map_err(|_| {
@@ -1513,8 +1545,7 @@ impl RawBlockQueryCandidatePlanner {
                         members_by_component,
                         &self.state.features_by_signature_id,
                         &self.state.signatures,
-                        &self.state.paper_authors,
-                        &self.state.unidecode_char_map,
+                        &self.state.author_index,
                     )?
                 } else {
                     raw_arrow_summary_signals_cached(
@@ -1523,8 +1554,7 @@ impl RawBlockQueryCandidatePlanner {
                         members_by_component,
                         &self.state.features_by_signature_id,
                         &self.state.signatures,
-                        &self.state.paper_authors,
-                        &self.state.unidecode_char_map,
+                        &self.state.author_index,
                     )?
                 };
                 let rarity = raw_arrow_name_count_rarity_row(
@@ -1545,11 +1575,11 @@ impl RawBlockQueryCandidatePlanner {
                                 query_signature_id
                             ))
                         })?;
-                    let author_signals = build_raw_arrow_author_signal_data(
-                        query_signature,
-                        query_inputs.paper_authors.get(&query_signature.paper_id),
-                        &self.state.unidecode_char_map,
-                    );
+                    let author_signals = self
+                        .state
+                        .author_index
+                        .author_signals(query_signature)
+                        .map_err(pyo3::exceptions::PyKeyError::new_err)?;
                     entry.insert(author_signals);
                 }
                 let query_author_signals = author_signals_by_query_signature_id
@@ -2140,9 +2170,23 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
 
     let specter_by_paper_id = query_inputs.specter_by_paper_id.as_ref();
     let feature_start = Instant::now();
-    let raw_feature_results: Vec<Result<(String, RawArrowFeature), String>> =
+    let mut author_index = PaperAuthorIndex::default();
+    let raw_feature_results: Result<Vec<(String, RawArrowFeature)>, String> =
         py.allow_threads(|| {
             let compute = || {
+                let coauthor_blocks = paper_coauthor_blocks(
+                    query_inputs.signatures.values(),
+                    &query_inputs.paper_authors,
+                    &unidecode_char_map,
+                )?;
+                author_index.extend(
+                    query_inputs
+                        .signatures
+                        .values()
+                        .map(|signature| signature.paper_id.as_str()),
+                    &query_inputs.paper_authors,
+                    &unidecode_char_map,
+                )?;
                 needed_signature_ids
                     .par_iter()
                     .map(|signature_id| {
@@ -2154,13 +2198,12 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
                                 )
                             })?;
                         let paper = query_inputs.papers.get(&signature.paper_id);
-                        let authors = query_inputs.paper_authors.get(&signature.paper_id);
                         Ok((
                             signature_id.clone(),
                             build_raw_arrow_feature(
                                 signature,
                                 paper,
-                                authors,
+                                coauthor_blocks.get(&signature.paper_id),
                                 specter_by_paper_id,
                                 &raw_name_counts,
                                 &name_prefixes,
@@ -2170,15 +2213,14 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
                             ),
                         ))
                     })
-                    .collect::<Vec<_>>()
+                    .collect()
             };
             install_with_optional_rayon_pool(num_threads, compute)
         });
-    let mut features_by_signature_id = HashMap::with_capacity(raw_feature_results.len());
-    for result in raw_feature_results {
-        let (signature_id, feature) = result.map_err(pyo3::exceptions::PyKeyError::new_err)?;
-        features_by_signature_id.insert(signature_id, feature);
-    }
+    let features_by_signature_id: HashMap<String, RawArrowFeature> = raw_feature_results
+        .map_err(pyo3::exceptions::PyKeyError::new_err)?
+        .into_iter()
+        .collect();
     let feature_secs = feature_start.elapsed().as_secs_f64();
 
     let mut members_by_component = HashMap::<String, Vec<String>>::new();
@@ -2461,8 +2503,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
                 &members_by_component,
                 &features_by_signature_id,
                 &query_inputs.signatures,
-                &query_inputs.paper_authors,
-                &unidecode_char_map,
+                &author_index,
             )?;
             (summary, signals)
         } else {
@@ -2484,8 +2525,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
                 &active_members,
                 &features_by_signature_id,
                 &query_inputs.signatures,
-                &query_inputs.paper_authors,
-                &unidecode_char_map,
+                &author_index,
             )?;
             (summary, signals)
         };
@@ -2503,11 +2543,11 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
                             query_signature_id
                         ))
                     })?;
-            entry.insert(build_raw_arrow_author_signal_data(
-                query_signature,
-                query_inputs.paper_authors.get(&query_signature.paper_id),
-                &unidecode_char_map,
-            ));
+            entry.insert(
+                author_index
+                    .author_signals(query_signature)
+                    .map_err(pyo3::exceptions::PyKeyError::new_err)?,
+            );
         }
         let query_author_signals = author_signals_by_query_signature_id
             .get(query_signature_id)

@@ -19,7 +19,7 @@ from typing import Any
 
 import numpy as np
 
-from s2and.arrow_inputs import RAW_PLANNER_ARROW_BATCH_INDEX_KEYS, RAW_PLANNER_ARROW_KEY_COLUMNS, ArrowDataset
+from s2and.arrow_inputs import ArrowDataset
 from s2and.data import ANDData
 from s2and.feature_port import (
     build_rust_featurizer_from_arrow_dataset,
@@ -30,7 +30,7 @@ from s2and.feature_schema import FEATURE_SCHEMA
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from s2and.name_counts_index import NameCountsIndex
 from s2and.name_tuple_artifact import load_name_tuple_artifact
-from tests.helpers import write_test_arrow_artifact_manifest
+from tests.helpers import write_arrow_tables_bundle
 from tests.pairwise_release_helpers import convert_release_arrow, write_pairwise_artifacts
 
 COAUTHOR_COLUMNS = [
@@ -193,24 +193,6 @@ def test_large_author_list_features_match_python(tmp_path: Path) -> None:
     assert ((coauthors > 0) & (coauthors < 1)).any(axis=0).all(), "every coauthor feature takes fractional values"
 
 
-def _write_arrow_bundle(root: Path, tables: dict[str, Any]) -> None:
-    from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
-
-    root.mkdir(parents=True)
-    paths: dict[str, str] = {}
-    for table_name, table in tables.items():
-        arrow_path = root / f"{table_name}.arrow"
-        paths[table_name] = write_arrow_ipc_table(table, arrow_path)
-        index_key = RAW_PLANNER_ARROW_BATCH_INDEX_KEYS[table_name]
-        paths[index_key], _metrics = write_arrow_batch_lookup_index(
-            arrow_path,
-            root / f"{table_name}.{index_key}.bin",
-            key_column=RAW_PLANNER_ARROW_KEY_COLUMNS[table_name],
-            table_name=table_name,
-        )
-    write_test_arrow_artifact_manifest(root, paths)
-
-
 def test_giant_paper_featurizer_builds_featurizes_and_frees_quickly(tmp_path: Path) -> None:
     """A 3,000-author paper with a signature per author builds, featurizes and frees in well under a second.
 
@@ -224,7 +206,7 @@ def test_giant_paper_featurizer_builds_featurizes_and_frees_quickly(tmp_path: Pa
     firsts = ["Anna"] * authors
     lasts = [f"Q{_letters(index)}" for index in range(authors)]
     signature_ids = [str(index) for index in range(authors)]
-    _write_arrow_bundle(
+    write_arrow_tables_bundle(
         tmp_path / "arrow",
         {
             "signatures": pa.table(

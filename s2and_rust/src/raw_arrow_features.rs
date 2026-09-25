@@ -9,9 +9,9 @@ use crate::raw_arrow::readers::{
     RawArrowAuthorSignalData, RawArrowFeature, RawArrowNameCountRarityRow, RawArrowPaper,
     RawArrowPaperEvidenceRow, RawArrowSignature, RawArrowSummarySignalData,
 };
+use crate::raw_arrow_authors::{sorted_intersection_count, PaperAuthorIndex, PaperCoauthorBlocks};
 use crate::text_compat::{
-    canonicalize_name_parts_compat, compute_block_compat, normalize_text_compat_from_map,
-    normalize_title_compat_from_map,
+    canonicalize_name_parts_compat, normalize_text_compat_from_map, normalize_title_compat_from_map,
 };
 use crate::{
     build_name_counts_data_from_artifact, counter_data_from_hash_count_map, fnv64,
@@ -22,7 +22,7 @@ use crate::{
 pub(crate) fn build_raw_arrow_feature(
     signature: &RawArrowSignature,
     paper: Option<&RawArrowPaper>,
-    paper_authors: Option<&Vec<(i64, String)>>,
+    coauthor_blocks: Option<&PaperCoauthorBlocks>,
     specter_by_paper_id: Option<&HashMap<String, Arc<Vec<f32>>>>,
     raw_name_counts: &RawNameCountMaps,
     name_prefixes: &HashSet<String>,
@@ -47,27 +47,13 @@ pub(crate) fn build_raw_arrow_feature(
         .filter_map(|token| token.chars().next())
         .collect();
 
-    let mut coauthor_blocks = HashSet::new();
-    let mut paper_author_count = 0usize;
-    if let Some(authors) = paper_authors {
-        paper_author_count = authors.len();
-        if let Some(signature_position) = signature.position {
-            for (position, author_name) in authors.iter() {
-                let normalized =
-                    normalize_text_compat_from_map(author_name, false, unidecode_char_map);
-                if *position == signature_position {
-                    continue;
-                }
-                if normalized.is_empty() {
-                    continue;
-                }
-                let block = compute_block_compat(&normalized);
-                if !block.is_empty() {
-                    coauthor_blocks.insert(block);
-                }
-            }
-        }
-    }
+    let (paper_author_count, coauthor_terms) = match coauthor_blocks {
+        Some(blocks) => (
+            blocks.author_count(),
+            blocks.coauthor_terms(signature.position),
+        ),
+        None => (0, Vec::new()),
+    };
 
     let mut normalized_affiliations = Vec::with_capacity(signature.affiliations.len());
     for affiliation in signature.affiliations.iter() {
@@ -101,7 +87,6 @@ pub(crate) fn build_raw_arrow_feature(
         (HashSet::new(), HashSet::new(), None)
     };
 
-    let coauthor_terms = query_terms_from_values(&coauthor_blocks);
     let coauthor_hashes = coauthor_terms.iter().map(|term| term.hash).collect();
     let affiliation_query_terms = query_terms_from_values(&affiliation_terms);
     let affiliation_hashes = affiliation_query_terms
@@ -177,33 +162,6 @@ pub(crate) fn build_raw_arrow_feature(
         name_counts,
         paper_author_count,
         query_author,
-    }
-}
-
-pub(crate) fn build_raw_arrow_author_signal_data(
-    signature: &RawArrowSignature,
-    paper_authors: Option<&Vec<(i64, String)>>,
-    unidecode_char_map: &HashMap<char, String>,
-) -> RawArrowAuthorSignalData {
-    let mut paper_author_names = HashSet::new();
-    let mut local10_author_names = HashSet::new();
-    if let Some(authors) = paper_authors {
-        for (position, author_name) in authors.iter() {
-            let normalized = normalize_text_compat_from_map(author_name, false, unidecode_char_map);
-            if normalized.is_empty() {
-                continue;
-            }
-            paper_author_names.insert(normalized.clone());
-            if let Some(author_position) = signature.position {
-                if *position != author_position && (*position).abs_diff(author_position) <= 10 {
-                    local10_author_names.insert(normalized);
-                }
-            }
-        }
-    }
-    RawArrowAuthorSignalData {
-        paper_author_names,
-        local10_author_names,
     }
 }
 
@@ -478,18 +436,17 @@ pub(crate) fn build_raw_arrow_summary<S: AsRef<str>>(
     })
 }
 
+/// Summary signals of a component's members; their papers must be in `author_index`.
 pub(crate) fn build_raw_arrow_summary_signals<S: AsRef<str>>(
     signature_ids: &[S],
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     signatures: &HashMap<String, RawArrowSignature>,
-    paper_authors: &HashMap<String, Vec<(i64, String)>>,
-    unidecode_char_map: &HashMap<char, String>,
+    author_index: &PaperAuthorIndex,
 ) -> Result<RawArrowSummarySignalData, String> {
     let mut name_counts_values = Vec::<NameCountsData>::new();
-    let mut member_paper_author_names = Vec::<HashSet<String>>::with_capacity(signature_ids.len());
+    let mut member_paper_author_names = Vec::<Arc<[u32]>>::with_capacity(signature_ids.len());
     let mut member_paper_author_counts = Vec::<usize>::with_capacity(signature_ids.len());
-    let mut member_local10_author_names =
-        Vec::<HashSet<String>>::with_capacity(signature_ids.len());
+    let mut member_local10_author_names = Vec::<Vec<u32>>::with_capacity(signature_ids.len());
     let mut member_signature_ids = Vec::<String>::with_capacity(signature_ids.len());
 
     for signature_id in signature_ids {
@@ -509,11 +466,7 @@ pub(crate) fn build_raw_arrow_summary_signals<S: AsRef<str>>(
                 signature_id
             )
         })?;
-        let author_signals = build_raw_arrow_author_signal_data(
-            signature,
-            paper_authors.get(&signature.paper_id),
-            unidecode_char_map,
-        );
+        let author_signals = author_index.author_signals(signature)?;
         member_paper_author_names.push(author_signals.paper_author_names);
         member_paper_author_counts.push(feature.paper_author_count);
         member_local10_author_names.push(author_signals.local10_author_names);
@@ -610,14 +563,6 @@ pub(crate) fn raw_arrow_name_count_rarity_row(
     }
 }
 
-pub(crate) fn set_intersection_count(left: &HashSet<String>, right: &HashSet<String>) -> usize {
-    if left.len() <= right.len() {
-        left.iter().filter(|value| right.contains(*value)).count()
-    } else {
-        right.iter().filter(|value| left.contains(*value)).count()
-    }
-}
-
 pub(crate) fn raw_arrow_paper_evidence_row(
     query_signature_id: &str,
     query_paper_author_count: usize,
@@ -640,7 +585,7 @@ pub(crate) fn raw_arrow_paper_evidence_row(
             .zip(summary_signals.member_signature_ids.iter())
     {
         let intersection =
-            set_intersection_count(&query_author_signals.paper_author_names, candidate_names);
+            sorted_intersection_count(&query_author_signals.paper_author_names, candidate_names);
         let union =
             query_author_signals.paper_author_names.len() + candidate_names.len() - intersection;
         if union > 0 {
@@ -670,7 +615,7 @@ pub(crate) fn raw_arrow_paper_evidence_row(
             continue;
         }
 
-        let local10_intersection = set_intersection_count(
+        let local10_intersection = sorted_intersection_count(
             &query_author_signals.local10_author_names,
             candidate_local10_names,
         );
@@ -698,6 +643,7 @@ pub(crate) fn raw_arrow_paper_evidence_row(
 mod tests {
     use super::*;
     use crate::name_counts::RawNameCountMaps;
+    use crate::raw_arrow_authors::paper_coauthor_blocks;
 
     #[test]
     fn round_six_uses_ties_to_even() {
@@ -708,18 +654,16 @@ mod tests {
 
     #[test]
     fn self_member_contributes_full_author_evidence_but_not_local_window() {
+        // Name ids: alice = 0, bob = 1.
         let query = RawArrowAuthorSignalData {
-            paper_author_names: HashSet::from(["alice".to_string(), "bob".to_string()]),
-            local10_author_names: HashSet::from(["bob".to_string()]),
+            paper_author_names: Arc::from([0, 1]),
+            local10_author_names: vec![1],
         };
         let summary = RawArrowSummarySignalData {
             name_counts_values: Vec::new(),
-            member_paper_author_names: vec![HashSet::from([
-                "alice".to_string(),
-                "bob".to_string(),
-            ])],
+            member_paper_author_names: vec![Arc::from([0, 1])],
             member_paper_author_counts: vec![2],
-            member_local10_author_names: vec![HashSet::from(["bob".to_string()])],
+            member_local10_author_names: vec![vec![1]],
             member_signature_ids: vec!["query".to_string()],
         };
 
@@ -789,17 +733,26 @@ mod tests {
             orcid: None,
             position: Some(0),
         };
-        let paper_authors = vec![
-            (0, "Alice Smith".to_string()),
-            (1, String::new()),
-            (2, "   ".to_string()),
-            (3, "Bob Jones".to_string()),
-        ];
+        let paper_authors = HashMap::from([(
+            "p1".to_string(),
+            vec![
+                (0, "Alice Smith".to_string()),
+                (1, String::new()),
+                (2, "   ".to_string()),
+                (3, "Bob Jones".to_string()),
+            ],
+        )]);
+        let coauthor_blocks =
+            paper_coauthor_blocks([&signature], &paper_authors, &HashMap::new()).expect("blocks");
+        let mut author_index = PaperAuthorIndex::default();
+        author_index
+            .extend(["p1"], &paper_authors, &HashMap::new())
+            .expect("index");
 
         let feature = build_raw_arrow_feature(
             &signature,
             None,
-            Some(&paper_authors),
+            coauthor_blocks.get("p1"),
             None,
             &RawNameCountMaps::default(),
             &HashSet::new(),
@@ -807,19 +760,16 @@ mod tests {
             &HashMap::new(),
             false,
         );
-        let author_signals =
-            build_raw_arrow_author_signal_data(&signature, Some(&paper_authors), &HashMap::new());
+        let author_signals = author_index.author_signals(&signature).expect("indexed");
 
         assert_eq!(feature.paper_author_count, 4);
-        assert_eq!(feature.query.coauthor_hashes.len(), 1);
-        assert_eq!(
-            author_signals.paper_author_names,
-            HashSet::from(["alice smith".to_string(), "bob jones".to_string()])
-        );
-        assert_eq!(
-            author_signals.local10_author_names,
-            HashSet::from(["bob jones".to_string()])
-        );
+        assert_eq!(feature.query.coauthor_hashes, vec![fnv64(b"b jones")]);
+        let alice = author_index.name_id("alice smith").expect("interned");
+        let bob = author_index.name_id("bob jones").expect("interned");
+        let mut expected_names = [alice, bob];
+        expected_names.sort_unstable();
+        assert_eq!(&author_signals.paper_author_names[..], &expected_names[..]);
+        assert_eq!(author_signals.local10_author_names, vec![bob]);
     }
 
     #[test]

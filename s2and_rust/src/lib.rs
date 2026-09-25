@@ -23,6 +23,7 @@ mod orcid;
 mod pair_indexing;
 mod promoted_linker;
 mod raw_arrow;
+mod raw_arrow_authors;
 mod raw_arrow_features;
 mod raw_candidate_planner;
 mod rayon_pool;
@@ -49,10 +50,10 @@ use raw_arrow::readers::{
     read_raw_arrow_query_signatures, RawArrowAuthorSignalData, RawArrowFeature, RawArrowPaper,
     RawArrowQuerySignatureRequest, RawArrowSignature, RawArrowSummarySignalData,
 };
+use raw_arrow_authors::{paper_coauthor_blocks, PaperAuthorIndex};
 use raw_arrow_features::{
-    build_raw_arrow_author_signal_data, build_raw_arrow_feature, build_raw_arrow_summary,
-    build_raw_arrow_summary_signals, mask_raw_arrow_query, raw_arrow_name_count_rarity_row,
-    raw_arrow_paper_evidence_row, round_six,
+    build_raw_arrow_feature, build_raw_arrow_summary, build_raw_arrow_summary_signals,
+    mask_raw_arrow_query, raw_arrow_name_count_rarity_row, raw_arrow_paper_evidence_row, round_six,
 };
 #[cfg(test)]
 use raw_candidate_planner::raw_arrow_summary_signals_for_members_cached;
@@ -783,8 +784,10 @@ mod tests {
             ("m1".to_string(), raw_arrow_signature_for_test("p1")),
             ("m2".to_string(), raw_arrow_signature_for_test("p2")),
         ]);
-        let paper_authors = HashMap::<String, Vec<(i64, String)>>::new();
-        let unidecode_char_map = HashMap::new();
+        let mut author_index = PaperAuthorIndex::default();
+        author_index
+            .extend(["p1", "p2"], &HashMap::new(), &HashMap::new())
+            .expect("papers without author rows index empty");
 
         let first_member_ids = {
             let signals = raw_arrow_summary_signals_for_members_cached(
@@ -794,8 +797,7 @@ mod tests {
                 &["m1".to_string()],
                 &features,
                 &signatures,
-                &paper_authors,
-                &unidecode_char_map,
+                &author_index,
             )
             .expect("first cache lookup");
             signals.member_signature_ids.clone()
@@ -808,8 +810,7 @@ mod tests {
                 &["m2".to_string()],
                 &features,
                 &signatures,
-                &paper_authors,
-                &unidecode_char_map,
+                &author_index,
             )
             .expect("second cache lookup");
             signals.member_signature_ids.clone()

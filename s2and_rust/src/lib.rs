@@ -11,6 +11,7 @@ use std::time::Instant;
 mod arrow_batch_lookup;
 mod arrow_dataset;
 mod artifact_hash;
+mod coauthors;
 mod constraints;
 mod feature_schema;
 mod features;
@@ -32,6 +33,7 @@ mod text_compat;
 
 use arrow_batch_lookup::IndexedArrowReadStats;
 use arrow_dataset::{ArrowDataset, ArrowDatasetResources};
+use coauthors::{CoauthorTables, NameGrams, PaperCoauthors, SignatureCoauthors};
 use constraints::{
     first_names_name_compatible, lasts_equivalent_for_constraint, same_prefix_tokens,
 };
@@ -60,8 +62,8 @@ pub(crate) use retrieval::*;
 pub(crate) use rust_featurizer::RustFeaturizer;
 use subblocking::*;
 use text_compat::{
-    canonical_name_count_keys_compat, canonicalize_name_parts_compat, compute_block_compat,
-    ensure_unidecode_for_text, normalize_text_compat_from_map, normalize_title_compat_from_map,
+    canonical_name_count_keys_compat, canonicalize_name_parts_compat, ensure_unidecode_for_text,
+    normalize_text_compat_from_map, normalize_title_compat_from_map,
 };
 
 fn py_len(s: &str) -> usize {
@@ -161,9 +163,7 @@ struct SignatureData {
     orcid: Option<String>,
     email: Option<String>,
     affiliations: Option<CounterData>,
-    coauthor_blocks: Option<HashSet<String>>,
-    coauthor_ngrams: Option<CounterData>,
-    coauthors: Option<HashSet<String>>,
+    coauthors: SignatureCoauthors,
     position: i64,
     paper_id: PaperId,
     name_counts: Option<NameCountsData>,
@@ -191,6 +191,7 @@ struct PaperData {
     predicted_language: Option<String>,
     language_reliability: f64,
     journal_ngrams: Option<CounterData>,
+    coauthors: PaperCoauthors,
     specter: Option<Vec<f32>>,
     specter_norm: Option<f64>,
 }

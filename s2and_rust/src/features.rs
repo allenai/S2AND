@@ -121,32 +121,6 @@ pub(crate) fn word_ngrams_counter_python_compat(
     out
 }
 
-pub(crate) fn char_ngrams_counter(text: &str) -> HashMap<String, usize> {
-    if text.is_empty() {
-        return HashMap::new();
-    }
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return HashMap::new();
-    }
-
-    let mut out: HashMap<String, usize> = HashMap::new();
-    for width in [2usize, 3usize, 4usize] {
-        if chars.len() < width {
-            continue;
-        }
-        for idx in 0..=(chars.len() - width) {
-            let window = &chars[idx..idx + width];
-            if window.iter().any(|ch| *ch == ' ') {
-                continue;
-            }
-            let gram: String = window.iter().collect();
-            *out.entry(gram).or_insert(0) += 1;
-        }
-    }
-    out
-}
-
 pub(crate) fn word_ngrams_counter(text: &str) -> HashMap<String, usize> {
     if text.is_empty() {
         return HashMap::new();
@@ -248,24 +222,6 @@ pub(crate) fn counter_jaccard_data(
     } else {
         score
     }
-}
-
-pub(crate) fn set_jaccard_data<T: Eq + std::hash::Hash>(
-    set1: &Option<HashSet<T>>,
-    set2: &Option<HashSet<T>>,
-) -> f64 {
-    let (Some(s1), Some(s2)) = (set1.as_ref(), set2.as_ref()) else {
-        return f64::NAN;
-    };
-    if s1.is_empty() || s2.is_empty() {
-        return f64::NAN;
-    }
-    let intersection = s1.intersection(s2).count();
-    let union = s1.len() + s2.len() - intersection;
-    if union == 0 {
-        return f64::NAN;
-    }
-    (intersection as f64) / (union as f64)
 }
 
 pub(crate) fn nanmin(a: f64, b: f64) -> f64 {

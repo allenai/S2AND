@@ -7,6 +7,8 @@ pub(crate) struct RustFeaturizer {
     signatures: Arc<HashMap<String, SignatureData>>,
     signature_ids: Arc<Vec<String>>,
     papers: Arc<HashMap<PaperId, PaperData>>,
+    /// Gram counts of each coauthor name, subtracted from a paper's to exclude a signature's own author.
+    name_grams: Arc<NameGrams>,
     name_tuples: Arc<HashMap<String, HashSet<String>>>,
     cluster_seeds_disallow: HashSet<(String, String)>,
     cluster_seeds_require: HashMap<String, ClusterId>,
@@ -351,11 +353,16 @@ impl RustFeaturizer {
         feats[columns::EMAIL_PREFIX_EQUAL] = email_prefix;
         feats[columns::EMAIL_SUFFIX_EQUAL] = email_suffix;
 
-        feats[columns::COAUTHOR_OVERLAP] =
-            set_jaccard_data(&s1.coauthor_blocks, &s2.coauthor_blocks);
-        feats[columns::COAUTHOR_SIMILARITY] =
-            counter_jaccard_data(&s1.coauthor_ngrams, &s2.coauthor_ngrams, 5000.0);
-        feats[columns::COAUTHOR_MATCH] = set_jaccard_data(&s1.coauthors, &s2.coauthors);
+        let coauthors = coauthors::coauthor_pair_features(
+            &p1.coauthors,
+            &s1.coauthors,
+            &p2.coauthors,
+            &s2.coauthors,
+            &self.name_grams,
+        );
+        feats[columns::COAUTHOR_OVERLAP] = coauthors.block_overlap;
+        feats[columns::COAUTHOR_SIMILARITY] = coauthors.gram_similarity;
+        feats[columns::COAUTHOR_MATCH] = coauthors.name_match;
 
         feats[columns::VENUE_OVERLAP] =
             counter_jaccard_data(&p1.venue_ngrams, &p2.venue_ngrams, f64::INFINITY);
@@ -1240,11 +1247,21 @@ impl RustFeaturizer {
         for (paper_id, preprocessed) in computed_papers {
             preprocessed_papers.insert(paper_id, preprocessed);
         }
+        let coauthor_tables = py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || {
+                CoauthorTables::build(
+                    preprocessed_papers
+                        .iter()
+                        .map(|(paper_id, paper)| (paper_id, paper.authors.as_slice())),
+                    preprocess,
+                )
+            })
+        })?;
         let computed_signatures = py.allow_threads(|| {
             let compute = || {
                 preprocess_stage_signatures(
                     &signature_inputs,
-                    &preprocessed_papers,
+                    &coauthor_tables,
                     &raw_name_counts,
                     &name_prefixes,
                     &affiliation_stopwords,
@@ -1259,9 +1276,13 @@ impl RustFeaturizer {
         for (sig_id, signature) in computed_signatures {
             signatures.insert(sig_id, signature);
         }
+        let (mut paper_coauthors, name_grams) = coauthor_tables.into_parts();
         let mut papers: HashMap<PaperId, PaperData> =
             HashMap::with_capacity(preprocessed_papers.len());
         for (paper_id, paper) in preprocessed_papers.into_iter() {
+            let coauthors = paper_coauthors
+                .remove(&paper_id)
+                .expect("every preprocessed paper has coauthor aggregates");
             let specter = specter_by_paper.get(&paper_id).cloned();
             let specter_norm = specter.as_ref().map(|values| vector_norm_f32(values));
             papers.insert(
@@ -1275,6 +1296,7 @@ impl RustFeaturizer {
                     predicted_language: paper.predicted_language,
                     language_reliability: paper.language_reliability,
                     journal_ngrams: paper.journal_ngrams,
+                    coauthors,
                     specter,
                     specter_norm,
                 },
@@ -1286,6 +1308,7 @@ impl RustFeaturizer {
             signatures: Arc::new(signatures),
             signature_ids: Arc::new(signature_ids),
             papers: Arc::new(papers),
+            name_grams: Arc::new(name_grams),
             name_tuples: Arc::new(name_tuples),
             cluster_seeds_disallow,
             cluster_seeds_require,
@@ -1311,6 +1334,7 @@ impl RustFeaturizer {
             signatures: Arc::clone(&self.signatures),
             signature_ids: Arc::clone(&self.signature_ids),
             papers: Arc::clone(&self.papers),
+            name_grams: Arc::clone(&self.name_grams),
             name_tuples: Arc::clone(&self.name_tuples),
             cluster_seeds_require: extract_cluster_seeds_require(cluster_seeds_require)?,
             cluster_seeds_disallow: extract_pair_set(cluster_seeds_disallow)?,

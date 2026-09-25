@@ -382,7 +382,7 @@ pub(crate) fn preprocess_stage_papers(
 
 pub(crate) fn preprocess_stage_signatures(
     signature_inputs: &[StageSignatureInput],
-    preprocessed_papers: &HashMap<PaperId, StagePaperPreprocessed>,
+    coauthor_tables: &CoauthorTables,
     raw_name_counts: &RawNameCountMaps,
     name_prefixes: &HashSet<String>,
     affiliation_stopwords: &HashSet<String>,
@@ -403,29 +403,7 @@ pub(crate) fn preprocess_stage_signatures(
                     name_prefixes,
                     Some(unidecode_char_map),
                 );
-            let mut coauthor_list: Vec<String> = Vec::new();
-            if let Some(preprocessed_paper) = preprocessed_papers.get(&entry.paper_id) {
-                for (author_position, author_name) in preprocessed_paper.authors.iter() {
-                    if *author_position != entry.position {
-                        coauthor_list.push(author_name.clone());
-                    }
-                }
-            }
-            let coauthors = if coauthor_list.is_empty() {
-                None
-            } else {
-                Some(coauthor_list.iter().cloned().collect::<HashSet<String>>())
-            };
-            let mut coauthor_blocks_set: HashSet<String> = HashSet::new();
-            for coauthor in coauthor_list.iter() {
-                coauthor_blocks_set.insert(compute_block_compat(coauthor));
-            }
-            let coauthor_blocks = if coauthor_blocks_set.is_empty() {
-                None
-            } else {
-                Some(coauthor_blocks_set)
-            };
-
+            let coauthors = coauthor_tables.signature(&entry.paper_id, entry.position);
             let normalized_affiliations: Vec<String> = if preprocess {
                 entry
                     .affiliation_values
@@ -448,18 +426,8 @@ pub(crate) fn preprocess_stage_signatures(
             } else {
                 String::new()
             };
-            let coauthor_text = if preprocess {
-                coauthor_list.join(" ")
-            } else {
-                String::new()
-            };
             let affiliations = if preprocess && !affiliation_text.is_empty() {
                 counter_data_from_usize_map(word_ngrams_counter(&affiliation_text))
-            } else {
-                None
-            };
-            let coauthor_ngrams = if preprocess && !coauthor_text.is_empty() {
-                counter_data_from_usize_map(char_ngrams_counter(&coauthor_text))
             } else {
                 None
             };
@@ -481,8 +449,6 @@ pub(crate) fn preprocess_stage_signatures(
                     orcid: normalized_orcid,
                     email: entry.email.clone(),
                     affiliations,
-                    coauthor_blocks,
-                    coauthor_ngrams,
                     coauthors,
                     position: entry.position,
                     paper_id: entry.paper_id.clone(),
@@ -633,59 +599,6 @@ pub(crate) fn build_name_counts_data_from_artifact(
         last: lookup(RawNameCountKind::Last, &keys.last),
         last_first_initial: lookup(RawNameCountKind::LastFirstInitial, &keys.last_first_initial),
     })
-}
-
-#[cfg(test)]
-mod blank_paper_author_tests {
-    use super::*;
-    use crate::name_counts::RawNameCountMaps;
-
-    #[test]
-    fn classic_preprocessing_retains_legacy_blank_coauthor_sets() {
-        let signature_inputs = vec![StageSignatureInput {
-            sig_id: "s1".to_string(),
-            paper_id: "p1".to_string(),
-            raw_first: "Alice".to_string(),
-            raw_middle: String::new(),
-            raw_last: "Smith".to_string(),
-            email: None,
-            position: 0,
-            affiliation_values: Vec::new(),
-            orcid: None,
-        }];
-        let papers = HashMap::from([(
-            "p1".to_string(),
-            StagePaperPreprocessed {
-                authors: vec![(0, "alice smith".to_string()), (1, String::new())],
-                year: None,
-                has_abstract: false,
-                predicted_language: None,
-                language_reliability: 0.0,
-                title_words: None,
-                title_chars: None,
-                venue_ngrams: None,
-                journal_ngrams: None,
-            },
-        )]);
-
-        let preprocessed = preprocess_stage_signatures(
-            &signature_inputs,
-            &papers,
-            &RawNameCountMaps::default(),
-            &HashSet::new(),
-            &HashSet::new(),
-            &HashMap::new(),
-            true,
-        );
-        let signature = &preprocessed[0].1;
-
-        assert_eq!(signature.coauthors, Some(HashSet::from([String::new()])));
-        assert_eq!(
-            signature.coauthor_blocks,
-            Some(HashSet::from([String::new()]))
-        );
-        assert!(signature.coauthor_ngrams.is_none());
-    }
 }
 
 #[cfg(test)]

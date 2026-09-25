@@ -149,7 +149,7 @@ def convert_release_arrow(source_root: Path, name: str, arrow_root: Path, name_c
         sources=benchmark_dataset_sources(source_root, name),
         output_dir=arrow_root / name,
         root_manifest_dir=arrow_root,
-        name_counts_index_root=name_counts_path.parent,
+        name_counts_index_root=name_counts_path,
         n_jobs=1,
         overwrite=True,
         skip_name_counts_index=False,

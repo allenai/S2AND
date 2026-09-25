@@ -156,7 +156,10 @@ const NAME_SHARDS: usize = 1 << NAME_SHARD_BITS;
 /// A name id is `(index within shard << NAME_SHARD_BITS) | shard`, where the
 /// shard comes from the name's hash, so shards intern in parallel. A planner
 /// keeps one index for its lifetime, so the query papers of every plan share
-/// ids with the seed papers they are compared against.
+/// ids with the seed papers they are compared against. A paper is indexed once
+/// and never refreshed; that is exact because a planner reads seed and query
+/// paper authors from its one Arrow dataset, so either read gives a paper the
+/// same rows.
 pub(crate) struct PaperAuthorIndex {
     name_shards: Vec<HashMap<String, u32>>,
     papers: HashMap<String, PaperAuthorNames>,

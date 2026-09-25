@@ -485,6 +485,50 @@ foreach ($Dataset in $BenchmarkDatasets) {
 }
 ```
 
+### Augmented training set
+
+The internal augmented fixed-pair set copies benchmark signatures under
+`<dataset>___<signature_id>` IDs, so it needs the same canonical names. Join it
+from the same exports and the original (pre-join) benchmark root, dropping its
+orcid-derived rows, which are not part of v1.3:
+
+```powershell
+$ReviewedAugmentedRoot = 'REVIEWED_AUGMENTED_ROOT'
+$CanonicalAugmentedRoot = "$ReviewedInputWork\augmented_canonical"
+uv run python scripts/convert_to_arrow.py join-canonical-augmented-names `
+  --augmented-dir $ReviewedAugmentedRoot `
+  --source-root $ReviewedBenchmarkRoot `
+  --canonical-names-root $CanonicalNamesRoot `
+  --drop-sources orcid `
+  --output-dir $CanonicalAugmentedRoot
+```
+
+The command checks that every remaining augmented signature still matches its
+original benchmark signature (the augmentation only shortened some first names
+to an initial), applies the source dataset's canonical names, re-shortens the
+first names the augmentation had shortened, and removes orcid signatures and
+every pair that touches one. A one-character original first name cannot show
+whether it was shortened, so it gets the full canonical first name; the report
+counts these rows. It publishes the outputs together, only after every check
+passes:
+
+| Output | Use in `release.json` |
+|---|---|
+| `augmented_signatures.json` | `signatures` for the augmented model and pairwise-evaluation datasets |
+| `train_pairs.csv`, `val_pairs.csv` | augmented model `train_pairs` and `val_pairs` (columns `signature_id_1`, `signature_id_2`, `label`) |
+| `test_pairs.json` | augmented pairwise-evaluation `pairs` (integer labels) |
+| `join_report.json` | review record: kept/dropped counts, changed fields, shortened and one-character first names |
+
+Augmented papers and embeddings are unchanged; use the reviewed originals. The
+2021 generator keyed papers by original paper ID, so orcid-only paper records
+remain but are no longer referenced, and a few paper IDs shared with orcid may
+carry orcid-derived paper augmentations.
+
+Every signatures file referenced by `release.json` must come from these joined
+outputs: the staged `$CanonicalBenchmarkRoot` files (or subsets derived from
+them) and `$CanonicalAugmentedRoot`. `prepare-run` does not check name
+provenance, so review this before freezing the run.
+
 These conversion commands expect the reviewed inputs and the `stages/`
 directory established by
 [Stage 2 of the release runbook](../../docs/release.md#stage-2-build-training-and-evaluation-data):

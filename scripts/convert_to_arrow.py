@@ -7,6 +7,7 @@ current S2AND raw-planner batch-index sidecars (S2ABI002).
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -281,6 +282,211 @@ def join_canonical_benchmark_names(
         "changed_signatures": changed_signature_count,
         "field_changes": field_divergence_counts,
     }
+
+
+AUGMENTED_SOURCE_SEPARATOR = "___"
+AUGMENTED_SIGNATURES_FILE = "augmented_signatures.json"
+AUGMENTED_TRAINING_PAIR_FILES = ("train_pairs.csv", "val_pairs.csv")
+AUGMENTED_TEST_PAIR_FILE = "test_pairs.csv"
+AUGMENTED_TEST_PAIRS_OUTPUT = "test_pairs.json"
+
+
+def _augmented_source(signature_id: str) -> tuple[str, str]:
+    source, separator, source_signature_id = signature_id.partition(AUGMENTED_SOURCE_SEPARATOR)
+    if not separator or not source or not source_signature_id:
+        raise ValueError(f"augmented signature ID must look like <dataset>___<signature_id>: {signature_id!r}")
+    return source, source_signature_id
+
+
+def join_canonical_augmented_names(
+    augmented_signatures: Mapping[str, Any],
+    source_signatures: Mapping[str, Mapping[str, Any]],
+    canonical_rows: Mapping[str, Any],
+    *,
+    drop_sources: frozenset[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Give augmented signatures their source datasets' canonical names.
+
+    The augmented training set copies signatures from the benchmark datasets under IDs of
+    the form ``<dataset>___<signature_id>``. Its generator changed only one name field: it
+    shortened about half of the first names to their first character, and copied middle
+    and last names unchanged. This join drops signatures from ``drop_sources``, checks
+    that every remaining signature still matches its original benchmark signature, then
+    replaces ``first``/``middle``/``last`` with the source dataset's canonical row,
+    shortening the canonical first name wherever the augmented one was shortened.
+
+    An original first name of one character cannot show whether it was shortened, so it
+    is treated as unshortened and receives the full canonical first name; the report
+    counts these rows.
+
+    Args:
+        augmented_signatures: Augmented signatures keyed by prefixed signature ID.
+        source_signatures: Original (pre-join) benchmark signatures, keyed by dataset and
+            then by the dataset's own signature ID.
+        canonical_rows: Canonical name rows (``signature_id``, ``first``, ``middle``,
+            ``last``) keyed by dataset, in the same format as the benchmark join.
+        drop_sources: Source datasets whose augmented signatures are removed.
+
+    Returns:
+        The joined signatures and a report with kept/dropped counts, changed fields, and
+        counts of re-shortened and one-character first names.
+
+    Raises:
+        ValueError: If an ID is malformed, a drop source matches no signature, a source
+            dataset or canonical row is missing, an augmented signature no longer matches
+            its original benchmark signature, or a canonical first name that must be
+            shortened does not start with a letter or digit.
+    """
+
+    fields = ("first", "middle", "last")
+    kept_by_source: dict[str, list[tuple[str, str]]] = {}
+    dropped_by_source: dict[str, int] = {}
+    for signature_id, signature in augmented_signatures.items():
+        if signature.get("signature_id") != signature_id:
+            raise ValueError(f"augmented signature key does not match signature_id: {signature_id!r}")
+        source, source_signature_id = _augmented_source(signature_id)
+        if source in drop_sources:
+            dropped_by_source[source] = dropped_by_source.get(source, 0) + 1
+        else:
+            kept_by_source.setdefault(source, []).append((signature_id, source_signature_id))
+
+    unmatched_drop_sources = sorted(drop_sources - dropped_by_source.keys())
+    if unmatched_drop_sources:
+        raise ValueError(f"drop sources match no augmented signatures: {unmatched_drop_sources}")
+    missing_sources = sorted(
+        source for source in kept_by_source if source not in source_signatures or source not in canonical_rows
+    )
+    if missing_sources:
+        raise ValueError(f"augmented join needs source signatures and canonical names for: {missing_sources}")
+
+    field_changes = {field: 0 for field in fields}
+    changed_signatures = 0
+    shortened_first_names = 0
+    single_character_first_names = 0
+    single_character_first_names_lengthened = 0
+    mismatches: list[str] = []
+    missing_rows: list[str] = []
+    unshortenable: list[str] = []
+    joined: dict[str, dict[str, Any]] = {}
+    for source in sorted(kept_by_source):
+        canonical_by_id = _mapping_by_id(
+            canonical_rows[source], id_key="signature_id", label=f"{source} canonical rows"
+        )
+        originals = source_signatures[source]
+        for signature_id, source_signature_id in sorted(kept_by_source[source]):
+            original = originals.get(source_signature_id)
+            canonical = canonical_by_id.get(source_signature_id)
+            if original is None or canonical is None:
+                missing_rows.append(signature_id)
+                continue
+            author_info = dict(augmented_signatures[signature_id]["author_info"])
+            original_info = original["author_info"]
+            original_first = original_info.get("first")
+            augmented_first = author_info.get("first")
+            shortened = bool(original_first) and len(original_first) > 1 and augmented_first == original_first[0]
+            if (
+                (augmented_first != original_first and not shortened)
+                or author_info.get("middle") != original_info.get("middle")
+                or author_info.get("last") != original_info.get("last")
+            ):
+                mismatches.append(signature_id)
+                continue
+            canonical_first = canonical["first"]
+            if shortened and canonical_first and not canonical_first[0].isalnum():
+                unshortenable.append(signature_id)
+                continue
+            if original_first and len(original_first) == 1:
+                single_character_first_names += 1
+                single_character_first_names_lengthened += int(bool(canonical_first) and len(canonical_first) > 1)
+            new_names = {
+                "first": canonical_first[0] if shortened and canonical_first else canonical_first,
+                "middle": canonical["middle"],
+                "last": canonical["last"],
+            }
+            changed = False
+            for field in fields:
+                if author_info.get(field) != new_names[field]:
+                    field_changes[field] += 1
+                    changed = True
+                author_info[field] = new_names[field]
+            changed_signatures += int(changed)
+            shortened_first_names += int(shortened)
+            joined[signature_id] = {**augmented_signatures[signature_id], "author_info": author_info}
+
+    if missing_rows:
+        raise ValueError(
+            f"{len(missing_rows)} augmented signatures have no original signature or canonical row, "
+            f"for example {missing_rows[:5]}"
+        )
+    if mismatches:
+        raise ValueError(
+            f"{len(mismatches)} augmented signatures no longer match their original benchmark signatures "
+            f"(first/middle/last), for example {mismatches[:5]}"
+        )
+    if unshortenable:
+        raise ValueError(
+            f"{len(unshortenable)} shortened augmented first names have canonical first names that do not start "
+            f"with a letter or digit, for example {unshortenable[:5]}"
+        )
+    return joined, {
+        "kept_signatures": {source: len(rows) for source, rows in sorted(kept_by_source.items())},
+        "dropped_signatures": dict(sorted(dropped_by_source.items())),
+        "changed_signatures": changed_signatures,
+        "field_changes": field_changes,
+        "shortened_first_names": shortened_first_names,
+        "single_character_first_names": single_character_first_names,
+        "single_character_first_names_lengthened": single_character_first_names_lengthened,
+    }
+
+
+def filter_augmented_pairs(
+    pair_path: Path,
+    *,
+    kept_signature_ids: set[str],
+    drop_sources: frozenset[str],
+) -> tuple[list[tuple[str, str, str, int]], int]:
+    """Drop pair rows that touch a dropped source dataset.
+
+    Args:
+        pair_path: Augmented fixed-pair CSV (``pair1``/``pairs1``/``signature_id_1`` style).
+        kept_signature_ids: Signature IDs that remain after the join.
+        drop_sources: Source datasets whose pairs are removed.
+
+    Returns:
+        Kept rows as ``(signature_id_1, signature_id_2, original_label, integer_label)``
+        in file order, and the number of dropped rows.
+
+    Raises:
+        ValueError: If the file violates the fixed-pair contract, every row is dropped, or
+            a kept row references a signature that is not in the joined signatures.
+    """
+
+    import pandas as pd
+
+    from s2and.data import _map_fixed_pair_labels
+
+    # Same reader and contract as ANDData fixed pairs; keep_default_na preserves raw labels.
+    raw = pd.read_csv(pair_path, sep=",", dtype=str, keep_default_na=False)
+    mapped = _map_fixed_pair_labels(raw, pair_path.name)
+    left_column, right_column, label_column = list(mapped.columns)
+    kept: list[tuple[str, str, str, int]] = []
+    unknown: set[str] = set()
+    for left, right, original_label, label in zip(
+        mapped[left_column].tolist(),
+        mapped[right_column].tolist(),
+        raw[label_column].tolist(),
+        mapped[label_column].tolist(),
+        strict=True,
+    ):
+        if _augmented_source(left)[0] in drop_sources or _augmented_source(right)[0] in drop_sources:
+            continue
+        unknown.update(signature_id for signature_id in (left, right) if signature_id not in kept_signature_ids)
+        kept.append((left, right, original_label, int(label)))
+    if unknown:
+        raise ValueError(f"{pair_path} references signatures missing from the joined set: {sorted(unknown)[:5]}")
+    if not kept:
+        raise ValueError(f"every pair in {pair_path} was dropped")
+    return kept, len(raw) - len(kept)
 
 
 def _altered_values(payload: Mapping[str, Any]) -> list[str]:
@@ -1152,6 +1358,84 @@ def _run_join_canonical_names(args: argparse.Namespace) -> None:
     print(json.dumps({**report, "output": str(args.output)}, indent=2, sort_keys=True))
 
 
+def _benchmark_signatures_path(source_root: Path, dataset: str) -> Path:
+    for name in (f"{dataset}_signatures.json", "signatures.json"):
+        path = source_root / dataset / name
+        if path.is_file():
+            return path
+    raise FileNotFoundError(f"No {dataset}_signatures.json or signatures.json under {source_root / dataset}")
+
+
+def _run_join_canonical_augmented_names(args: argparse.Namespace) -> None:
+    augmented_dir: Path = args.augmented_dir
+    output_dir: Path = args.output_dir
+    if output_dir.exists():
+        raise FileExistsError(f"output directory already exists: {output_dir}")
+    drop_sources = frozenset(args.drop_sources or ())
+    augmented_signatures = _load_json(augmented_dir / AUGMENTED_SIGNATURES_FILE)
+    if not isinstance(augmented_signatures, Mapping):
+        raise TypeError("augmented signatures must be a JSON object keyed by signature_id")
+    pair_files = [*AUGMENTED_TRAINING_PAIR_FILES, AUGMENTED_TEST_PAIR_FILE]
+    missing_pairs = [name for name in pair_files if not (augmented_dir / name).is_file()]
+    if missing_pairs:
+        raise FileNotFoundError(f"augmented directory is missing pair files: {missing_pairs}")
+
+    sources = sorted({_augmented_source(str(signature_id))[0] for signature_id in augmented_signatures} - drop_sources)
+    source_signatures: dict[str, Mapping[str, Any]] = {}
+    canonical_rows: dict[str, Any] = {}
+    for source in sources:
+        signatures = _load_json(_benchmark_signatures_path(args.source_root, source))
+        if not isinstance(signatures, Mapping):
+            raise TypeError(f"{source} benchmark signatures must be a JSON object keyed by signature_id")
+        rows = _load_json(args.canonical_names_root / f"{source}.json")
+        if not isinstance(rows, list):
+            raise TypeError(f"{source} canonical names must be a JSON list")
+        source_signatures[source] = signatures
+        canonical_rows[source] = rows
+
+    joined, report = join_canonical_augmented_names(
+        augmented_signatures,
+        source_signatures,
+        canonical_rows,
+        drop_sources=drop_sources,
+    )
+    filtered = {}
+    report["pairs"] = {}
+    for name in pair_files:
+        rows, dropped = filter_augmented_pairs(
+            augmented_dir / name,
+            kept_signature_ids=set(joined),
+            drop_sources=drop_sources,
+        )
+        filtered[name] = rows
+        report["pairs"][name] = {"kept": len(rows), "dropped": dropped}
+    report = {**report, "drop_sources": sorted(drop_sources), "output_dir": str(output_dir)}
+
+    # Publish all outputs together: build them in a sibling directory, then rename it.
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent))
+    try:
+        _write_json(staging_dir / AUGMENTED_SIGNATURES_FILE, joined)
+        for name in AUGMENTED_TRAINING_PAIR_FILES:
+            with (staging_dir / name).open("w", encoding="utf-8", newline="") as target:
+                writer = csv.writer(target, lineterminator="\n")
+                writer.writerow(["signature_id_1", "signature_id_2", "label"])
+                writer.writerows((left, right, original_label) for left, right, original_label, _ in filtered[name])
+        _write_json(
+            staging_dir / AUGMENTED_TEST_PAIRS_OUTPUT,
+            [
+                {"signature_id_1": left, "signature_id_2": right, "label": label}
+                for left, right, _, label in filtered[AUGMENTED_TEST_PAIR_FILE]
+            ],
+        )
+        _write_json(staging_dir / "join_report.json", report)
+        staging_dir.rename(output_dir)
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
 def _selected_runtime_dataset_names(
     *,
     datasets: Sequence[str] | None,
@@ -1287,6 +1571,40 @@ def _build_parser() -> argparse.ArgumentParser:
     canonical_names.add_argument("--canonical-names", type=Path, required=True)
     canonical_names.add_argument("--output", type=Path, required=True)
     canonical_names.set_defaults(func=_run_join_canonical_names)
+
+    augmented_names = subparsers.add_parser(
+        "join-canonical-augmented-names",
+        help=(
+            "Give the augmented training set its source datasets' canonical names, dropping signatures and pairs "
+            "from --drop-sources."
+        ),
+    )
+    augmented_names.add_argument(
+        "--augmented-dir",
+        type=Path,
+        required=True,
+        help="Directory with augmented_signatures.json, train_pairs.csv, val_pairs.csv, and test_pairs.csv.",
+    )
+    augmented_names.add_argument(
+        "--source-root",
+        type=Path,
+        required=True,
+        help="Original (pre-join) benchmark root with <dataset>/<dataset>_signatures.json or signatures.json.",
+    )
+    augmented_names.add_argument(
+        "--canonical-names-root",
+        type=Path,
+        required=True,
+        help="Directory with one <dataset>.json canonical-name export per source dataset.",
+    )
+    augmented_names.add_argument(
+        "--drop-sources",
+        nargs="*",
+        default=[],
+        help="Source datasets whose augmented signatures and pairs are removed (v1.3: orcid).",
+    )
+    augmented_names.add_argument("--output-dir", type=Path, required=True, help="Fresh output directory.")
+    augmented_names.set_defaults(func=_run_join_canonical_augmented_names)
 
     benchmark = subparsers.add_parser("benchmark", help="Convert benchmark dataset JSON/pickle files.")
     benchmark.add_argument("--source-root", type=Path, required=True)

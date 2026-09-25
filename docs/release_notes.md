@@ -212,6 +212,12 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Changed
 
+- `scripts/convert_to_arrow.py join-canonical-augmented-names` gives the
+  internal augmented training set its source datasets' canonical names,
+  re-shortening the first names the augmentation had cut to an initial, and
+  drops signatures and pairs from `--drop-sources` (v1.3: `orcid`). It writes
+  release-ready inputs: training pairs with `signature_id_1`/`signature_id_2`
+  columns and held-out pairs in the pairwise-evaluation JSON format.
 - `scripts/tutorial_for_predicting_with_the_prod_model.py` scores the bundle's
   recorded held-out blocks with the trainer's recorded seed, applies
   `--specter-suffix` to the JSON route as well as Arrow (no silent SPECTER1

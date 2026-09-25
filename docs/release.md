@@ -26,7 +26,7 @@ Four reviewed external inputs are not in this repository:
 
 | Input | Required shape | Role |
 |---|---|---|
-| Canonical benchmark names | One JSON file per benchmark, with exactly one row per dataset `signature_id` and `first`, `middle`, `last` | Required before Stage 2 can regenerate benchmarks |
+| Canonical benchmark names | One JSON file per benchmark, with exactly one row per dataset `signature_id` and `first`, `middle`, `last` | Required before Stage 2 can regenerate the benchmarks and join the augmented training set |
 | ORCID names | Query-ordered CSV with `raw_orcid`, `orcid`, `first_name`, and `middle` | Required before Stage 1 can build package assets |
 | Name counts | Query-ordered CSV with `first_name`, `last_name`, and `count` | Ordinary Stage 1 release input; its producer is already complete |
 | v1.21 baseline record | Reviewed cluster B3, pairwise aggregate/per-dataset AUROC and macro-F1, and performance p50 for the frozen populations/workload, plus source/model/data/environment/command identities | Ordinary Stage 0 input referenced from `release.json` by path and SHA-256; `prepare-run` verifies its identities and derives the scalar baselines |
@@ -187,6 +187,15 @@ uv run --no-project python scripts/run_ci_locally.py
       [Arrow command reference](../scripts/production/README.md#canonical-benchmark-names);
       retain raw names only for reviewed spot checks. Stage these source files
       outside the still-empty run directory.
+- [ ] Join the internal augmented training set against the same exports with
+      `join-canonical-augmented-names --drop-sources orcid`
+      ([command reference](../scripts/production/README.md#augmented-training-set))
+      and review its report. Use its outputs for the augmented model and
+      pairwise-evaluation entries in `release.json`. The orcid dataset and its
+      augmented rows are not part of v1.3.
+- [ ] Confirm that every signatures file `release.json` references comes from
+      the joined benchmark or augmented outputs (or subsets derived from them);
+      `prepare-run` does not check name provenance.
 - [ ] Review and freeze `release.json` using the
       [exact shape and example](../scripts/production/README.md#run-preparation):
       training/validation and held-out inputs, validation-only EPS grid and

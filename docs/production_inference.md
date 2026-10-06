@@ -448,7 +448,9 @@ explicitly for compatibility/reference execution.
 
 Request-time filtered Arrow reads validate sidecar magic, key column, file
 length, source file size, and whether the source changed during the read. They
-intentionally do not fingerprint the full source file per request. Run strict
+intentionally do not fingerprint the full source file per request, and a caller that
+writes and discards the tables per request may skip the write-side fingerprint too
+(`fingerprint_source=False`); such an index fails strict validation by design. Run strict
 fingerprint validation when publishing or deploying Arrow artifacts, and rebuild
 batch indexes after any source Arrow rewrite, including same-size rewrites.
 

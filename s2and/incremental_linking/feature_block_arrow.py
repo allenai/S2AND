@@ -42,6 +42,15 @@ NAME_COUNTS_INDEX_SCHEMA_VERSION = "name_counts_index_v1"
 NAME_COUNTS_ARROW_MANIFEST_SCHEMA_VERSION = "name_counts_arrow_v1"
 ARROW_PHYSICAL_LAYOUT_SCHEMA_VERSION = "s2and_arrow_physical_v1"
 ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION = "arrow_batch_lookup_index"
+# Header fingerprint of an index written with fingerprint_source=False.
+# Request-time readers compare size only; strict readers reject it.
+ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED = 0
+
+
+def _source_fingerprint_kind(fingerprint: int) -> str:
+    return "size_only" if int(fingerprint) == ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED else "fnv1a64_full_file"
+
+
 INCREMENTAL_QUERY_SIGNATURE_VIEWS = frozenset({"auto", "full", "initial_only"})
 _NAME_COUNTS_INDEX_MAGIC = b"S2NCI001"
 _ARROW_BATCH_LOOKUP_INDEX_MAGIC = b"S2ABI002"
@@ -547,6 +556,19 @@ def _read_arrow_batch_lookup_index_header(index_path: Path) -> dict[str, int | s
     return _decode_arrow_batch_lookup_index_header(index_path, header)
 
 
+_UNFINGERPRINTED_INDEX_MESSAGE = (
+    "index was written with fingerprint_source=False and cannot be strictly validated; "
+    "rebuild it with fingerprint_source=True"
+)
+
+
+def _raise_if_unfingerprinted(header: Mapping[str, int | str], *, index_path: Path, arrow_path: Path) -> None:
+    if int(header["source_fingerprint"]) == ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED:
+        raise ValueError(
+            f"Arrow batch lookup index '{index_path!s}' is stale for '{arrow_path!s}': {_UNFINGERPRINTED_INDEX_MESSAGE}"
+        )
+
+
 def _batch_lookup_index_source_mismatch(
     header: Mapping[str, int | str],
     *,
@@ -555,6 +577,8 @@ def _batch_lookup_index_source_mismatch(
 ) -> str | None:
     indexed_size = int(header["source_size"])
     indexed_fingerprint = int(header["source_fingerprint"])
+    if indexed_fingerprint == ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED:
+        return _UNFINGERPRINTED_INDEX_MESSAGE
     if indexed_size == int(source_size) and indexed_fingerprint == int(source_fingerprint):
         return None
     return (
@@ -612,6 +636,9 @@ def _read_arrow_batch_lookup_index_batch_indices(
     source_size = int(source_stat_before.st_size)
     source_snapshot: _ArrowSourceSnapshot | None = None
     if validate_source_fingerprint:
+        _raise_if_unfingerprinted(
+            _read_arrow_batch_lookup_index_header(index_path_obj), index_path=index_path_obj, arrow_path=arrow_path_obj
+        )
         source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context=context)
         source_size = source_snapshot.size
     expected_key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
@@ -732,6 +759,7 @@ def validate_arrow_batch_lookup_index(
     arrow_path_obj = Path(arrow_path)
     index_path_obj = Path(index_path)
     header = _read_arrow_batch_lookup_index_header(index_path_obj)
+    _raise_if_unfingerprinted(header, index_path=index_path_obj, arrow_path=arrow_path_obj)
     source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="validating batch lookup index")
     key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
     if int(header["key_column_hash"]) != key_column_hash:
@@ -813,24 +841,44 @@ def write_arrow_batch_lookup_index(
     table_name: str = "arrow",
     max_record_batch_rows: int | None = None,
     overwrite: bool = True,
+    fingerprint_source: bool = True,
 ) -> tuple[str, dict[str, int | str | bool]]:
-    """Write a Rust-readable key-hash to Arrow record-batch lookup index."""
+    """Write a Rust-readable key-hash to Arrow record-batch lookup index.
+
+    ``fingerprint_source=False`` skips the full-file FNV hash of ``arrow_path`` and
+    stores ``ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED`` in the header. Size and mtime are
+    checked only while this call runs; afterwards only the size is recorded, so readers can
+    detect size changes but not same-size rewrites. Use it only for files the caller just
+    wrote and will discard with the index. It cannot be combined with ``overwrite=False``:
+    reusing an existing index requires the fingerprint check.
+    """
 
     output_path = Path(index_path)
+    if not fingerprint_source and not overwrite:
+        raise ValueError(
+            "fingerprint_source=False cannot be combined with overwrite=False: "
+            "reusing an existing batch lookup index requires the full-file fingerprint check"
+        )
     if output_path.exists() and not overwrite:
         arrow_path_obj = Path(arrow_path)
         index_header = _read_arrow_batch_lookup_index_header(output_path)
-        source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="validating reusable batch lookup index")
         key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
+        if int(index_header["key_column_hash"]) != key_column_hash:
+            raise ValueError(
+                f"Arrow batch lookup index is stale for {arrow_path_obj!s}: {output_path!s} "
+                f"was built for a different key column. Rebuild it with overwrite=True."
+            )
+        _raise_if_unfingerprinted(index_header, index_path=output_path, arrow_path=arrow_path_obj)
+        source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="validating reusable batch lookup index")
         source_mismatch = _batch_lookup_index_source_mismatch(
             index_header,
             source_size=source_snapshot.size,
             source_fingerprint=source_snapshot.fingerprint,
         )
-        if int(index_header["key_column_hash"]) != key_column_hash or source_mismatch is not None:
+        if source_mismatch is not None:
             raise ValueError(
-                f"Arrow batch lookup index is stale for {arrow_path_obj!s}: {output_path!s}. "
-                "Rebuild it with overwrite=True."
+                f"Arrow batch lookup index is stale for {arrow_path_obj!s}: {output_path!s}: "
+                f"{source_mismatch}. Rebuild it with overwrite=True."
             )
         layout_stat = arrow_path_obj.stat()
         layout = arrow_ipc_physical_layout(arrow_path)
@@ -860,7 +908,7 @@ def write_arrow_batch_lookup_index(
             "record_count": int(index_header["record_count"]),
             "key_column_hash": int(index_header["key_column_hash"]),
             "source_fingerprint": int(index_header["source_fingerprint"]),
-            "source_fingerprint_kind": "fnv1a64_full_file",
+            "source_fingerprint_kind": _source_fingerprint_kind(int(index_header["source_fingerprint"])),
             "max_record_batch_rows": int(max_record_batch_rows or 0),
         }
 
@@ -878,7 +926,15 @@ def write_arrow_batch_lookup_index(
             table_name=table_name,
             max_record_batch_rows=max_record_batch_rows,
         )
-        source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="building batch lookup index")
+        if fingerprint_source:
+            source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="building batch lookup index")
+        else:
+            source_stat = arrow_path_obj.stat()
+            source_snapshot = _ArrowSourceSnapshot(
+                size=int(source_stat.st_size),
+                mtime_ns=int(source_stat.st_mtime_ns),
+                fingerprint=ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED,
+            )
         if _source_snapshot_matches_stat(source_snapshot, source_stat_before):
             break
     else:
@@ -925,7 +981,7 @@ def write_arrow_batch_lookup_index(
         "record_count": len(records),
         "key_column_hash": key_column_hash,
         "source_fingerprint": source_snapshot.fingerprint,
-        "source_fingerprint_kind": "fnv1a64_full_file",
+        "source_fingerprint_kind": _source_fingerprint_kind(source_snapshot.fingerprint),
         "record_batch_count": record_batch_count,
         "actual_max_batch_rows": max_batch_rows,
         "max_record_batch_rows": int(max_record_batch_rows or 0),
@@ -938,8 +994,17 @@ def write_raw_arrow_batch_lookup_indexes(
     *,
     max_record_batch_rows: Mapping[str, int] | int | None = RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     overwrite: bool = True,
+    fingerprint_source: bool = True,
 ) -> tuple[dict[str, str], dict[str, dict[str, int | str | bool]]]:
-    """Write optional batch lookup indexes for raw Arrow planner inputs."""
+    """Write optional batch lookup indexes for raw Arrow planner inputs.
+
+    Pass ``fingerprint_source=False`` when the caller just wrote these Arrow
+    files itself (request-time indexing). That skips a full-file FNV hash per table,
+    which is single-threaded Python and scales with bundle size. Size and mtime are
+    checked only while each index is written; afterwards only the size is recorded.
+    Mirrors ``read_arrow_batch_lookup_index_batch_indices_for_request`` on the read side.
+    Cannot be combined with ``overwrite=False``.
+    """
 
     output_path = Path(output_dir) if output_dir is not None else None
     indexed_paths = normalize_arrow_paths(paths, omit_none=True)
@@ -963,6 +1028,7 @@ def write_raw_arrow_batch_lookup_indexes(
             table_name=arrow_key,
             max_record_batch_rows=batch_limit,
             overwrite=overwrite,
+            fingerprint_source=fingerprint_source,
         )
         indexed_paths[index_key] = index_file
         metrics[index_key] = index_metrics

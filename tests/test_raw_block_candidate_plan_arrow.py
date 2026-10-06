@@ -2211,3 +2211,17 @@ def test_rust_featurizer_rejects_out_of_bounds_name_counts_index_record(
             10000.0,
             1,
         )
+
+
+@pytest.mark.parametrize("fingerprint_source", [True, False])
+def test_raw_arrow_candidate_planner_missing_query_is_key_error_for_request_time_index(
+    tmp_path: Path, fingerprint_source: bool
+) -> None:
+    paths = _base_arrow_paths(tmp_path)
+    indexed, _metrics = write_raw_arrow_batch_lookup_indexes(
+        paths, tmp_path / "idx", fingerprint_source=fingerprint_source
+    )
+    plan = _raw_candidate_plan_arrow(indexed, ["q1"], top_k=2, query_view="full", orcid_enabled=False, num_threads=1)
+    assert plan["query_signature_ids"] == ["q1"]
+    with pytest.raises(KeyError, match="missing from signatures"):
+        _raw_candidate_plan_arrow(indexed, ["nope"], top_k=2, query_view="full", orcid_enabled=False, num_threads=1)

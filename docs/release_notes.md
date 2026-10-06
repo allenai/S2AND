@@ -1,5 +1,10 @@
 # Release Notes
 
+## 0.51.2
+
+- Ships the package as `0.51.2` and pins optional Rust installs to `s2and-rust==0.51.2`.
+- Adds `fingerprint_source` to `write_arrow_batch_lookup_index` and `write_raw_arrow_batch_lookup_indexes` (default `True`, so existing callers are unchanged). Passing `False` skips the full-file FNV hash of each Arrow table and stores `ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED` in the header, for callers that just wrote the files themselves and index them per request; it cannot be combined with `overwrite=False`. Request-time readers (`read_arrow_batch_lookup_index_batch_indices_for_request`, Rust `open_for_request`) already compare size only and accept such indexes. Strict validation rejects them with an explicit message, and the Rust raw planner's missing-signature diagnostic no longer strict-validates an unfingerprinted index, so a missing query or seed signature still surfaces as `KeyError`. `source_fingerprint_kind` in the returned metrics reports `size_only` for them.
+
 ## 0.51.1
 
 - Ships the package as `0.51.1` and pins optional Rust installs to `s2and-rust==0.51.1`.

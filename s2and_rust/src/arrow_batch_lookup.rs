@@ -13,6 +13,8 @@ const ARROW_BATCH_LOOKUP_INDEX_HEADER_LEN: usize = 40;
 const ARROW_BATCH_LOOKUP_INDEX_RECORD_LEN: usize = 16;
 const ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN: &[u8] =
     b"s2and-arrow-batch-lookup-index-source\0";
+/// Header fingerprint written by Python when `fingerprint_source=False`.
+const ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED: u64 = 0;
 
 fn source_file_fingerprint(path: &str, source_size: u64) -> PyResult<u64> {
     let mut file = File::open(path).map_err(|err| {
@@ -44,27 +46,32 @@ struct ArrowBatchLookupIndex {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SourceValidationMode {
-    StrictFingerprint,
+    /// Full-file fingerprint check when the header carries a fingerprint, size-only
+    /// when it was written unfingerprinted. Used for diagnostics on request-time indexes.
+    StrictFingerprintIfPresent,
     RequestTimeSourceSize,
 }
 
 impl ArrowBatchLookupIndex {
-    #[allow(dead_code)]
-    fn open(path: &str, source_arrow_path: &str, key_column: &str) -> PyResult<Self> {
-        Self::open_with_source_validation(
-            path,
-            source_arrow_path,
-            key_column,
-            SourceValidationMode::StrictFingerprint,
-        )
-    }
-
     fn open_for_request(path: &str, source_arrow_path: &str, key_column: &str) -> PyResult<Self> {
         Self::open_with_source_validation(
             path,
             source_arrow_path,
             key_column,
             SourceValidationMode::RequestTimeSourceSize,
+        )
+    }
+
+    fn open_strict_if_fingerprinted(
+        path: &str,
+        source_arrow_path: &str,
+        key_column: &str,
+    ) -> PyResult<Self> {
+        Self::open_with_source_validation(
+            path,
+            source_arrow_path,
+            key_column,
+            SourceValidationMode::StrictFingerprintIfPresent,
         )
     }
 
@@ -130,7 +137,13 @@ impl ArrowBatchLookupIndex {
                  indexed size={indexed_source_size} current size={source_size}"
             )));
         }
-        if source_validation == SourceValidationMode::StrictFingerprint {
+        let check_fingerprint = match source_validation {
+            SourceValidationMode::StrictFingerprintIfPresent => {
+                indexed_source_fingerprint != ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED
+            }
+            SourceValidationMode::RequestTimeSourceSize => false,
+        };
+        if check_fingerprint {
             let source_fingerprint = source_file_fingerprint(source_arrow_path, source_size)?;
             if indexed_source_fingerprint != source_fingerprint {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -219,12 +232,15 @@ impl ArrowBatchLookupIndex {
     }
 }
 
-pub(crate) fn validate_arrow_batch_lookup_index(
+/// Strict fingerprint validation for a fingerprinted index; an index written without
+/// a fingerprint passes on size alone instead of being rejected.
+pub(crate) fn validate_arrow_batch_lookup_index_if_fingerprinted(
     path: &str,
     source_arrow_path: &str,
     key_column: &str,
 ) -> PyResult<()> {
-    ArrowBatchLookupIndex::open(path, source_arrow_path, key_column).map(|_| ())
+    ArrowBatchLookupIndex::open_strict_if_fingerprinted(path, source_arrow_path, key_column)
+        .map(|_| ())
 }
 
 #[derive(Clone, Copy, Default)]
@@ -346,14 +362,83 @@ mod tests {
         let index_path_str = index_path
             .to_str()
             .expect("temp path should be valid unicode");
-        let error =
-            match ArrowBatchLookupIndex::open(index_path_str, &source_path_str, "signature_id") {
-                Ok(_) => panic!("same-size middle rewrite must stale the index"),
-                Err(err) => err,
-            };
+        let error = match ArrowBatchLookupIndex::open_strict_if_fingerprinted(
+            index_path_str,
+            &source_path_str,
+            "signature_id",
+        ) {
+            Ok(_) => panic!("same-size middle rewrite must stale the index"),
+            Err(err) => err,
+        };
         assert!(py_err_message(error).contains("is stale"));
         ArrowBatchLookupIndex::open_for_request(index_path_str, &source_path_str, "signature_id")
             .expect("request-time source-size validation should avoid full-file fingerprinting");
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn unfingerprinted_index_is_accepted_on_size_and_fingerprinted_index_still_checked() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "s2and_arrow_index_unfingerprinted_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp test dir");
+        let source_path = temp_root.join("source.arrow");
+        let index_path = temp_root.join("source.index.bin");
+        let source_bytes = vec![b'a'; 4_096];
+        fs::write(&source_path, &source_bytes).expect("write source bytes");
+        let source_path_str = source_path
+            .to_str()
+            .expect("temp path should be valid unicode")
+            .to_string();
+        let index_path_str = index_path
+            .to_str()
+            .expect("temp path should be valid unicode")
+            .to_string();
+        let write_index = |fingerprint: u64| {
+            fs::write(
+                &index_path,
+                ARROW_BATCH_LOOKUP_INDEX_MAGIC
+                    .iter()
+                    .copied()
+                    .chain(0_u64.to_le_bytes())
+                    .chain((source_bytes.len() as u64).to_le_bytes())
+                    .chain(fnv64(b"signature_id").to_le_bytes())
+                    .chain(fingerprint.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+            )
+            .expect("write index bytes");
+        };
+
+        write_index(ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED);
+        ArrowBatchLookupIndex::open_strict_if_fingerprinted(
+            &index_path_str,
+            &source_path_str,
+            "signature_id",
+        )
+        .expect("if-present mode accepts an unfingerprinted index on size alone");
+        ArrowBatchLookupIndex::open_for_request(&index_path_str, &source_path_str, "signature_id")
+            .expect("request mode accepts an unfingerprinted index");
+
+        let stale_fingerprint =
+            source_file_fingerprint(&source_path_str, source_bytes.len() as u64)
+                .expect("hash source")
+                ^ 1;
+        write_index(stale_fingerprint);
+        let error = match ArrowBatchLookupIndex::open_strict_if_fingerprinted(
+            &index_path_str,
+            &source_path_str,
+            "signature_id",
+        ) {
+            Ok(_) => panic!("if-present mode must still strict-check a fingerprinted index"),
+            Err(err) => err,
+        };
+        assert!(py_err_message(error).contains("is stale"));
 
         fs::remove_dir_all(&temp_root).ok();
     }

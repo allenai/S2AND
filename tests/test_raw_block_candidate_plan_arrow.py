@@ -12,6 +12,7 @@ import pyarrow as pa
 import pytest
 
 import s2and.incremental_linking.retrieval as retrieval_module
+from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block import (
     write_arrow_batch_lookup_index,
     write_arrow_ipc_table,
@@ -752,6 +753,62 @@ def test_arrow_batch_lookup_index_accepts_transport_mtime_change(tmp_path: Path)
         overwrite=False,
     )
     assert reuse_metrics["reused"] is True
+
+
+@pytest.mark.parametrize("fingerprint_source", [True, False])
+def test_retained_batch_index_preserves_plan_and_missing_signature_errors(
+    tmp_path: Path, fingerprint_source: bool
+) -> None:
+    paths = base_arrow_paths(tmp_path, with_indexes=False)
+    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(
+        paths, tmp_path, fingerprint_source=fingerprint_source
+    )
+
+    plan = _raw_candidate_plan_arrow(indexed_paths, ["q1"])
+    assert plan["query_signature_ids"] == ["q1"]
+    assert plan["right_signature_ids"] == ["s1", "s2"]
+    with pytest.raises(KeyError, match="query signature_id 'missing_query' is missing from signatures"):
+        _raw_candidate_plan_arrow(indexed_paths, ["missing_query"])
+
+    write_ipc(
+        Path(indexed_paths["cluster_seeds"]),
+        pa.table({"signature_id": ["missing_seed"], "cluster_id": ["c_missing"]}),
+    )
+    with pytest.raises(KeyError, match="cluster seed signature_id 'missing_seed' is missing from signatures"):
+        _raw_candidate_plan_arrow(indexed_paths, ["q1"])
+
+
+@pytest.mark.parametrize("artifact_key", ["signatures", "signatures_batch_index"])
+def test_unfingerprinted_retained_index_still_requires_manifest_checksum(tmp_path: Path, artifact_key: str) -> None:
+    paths = base_arrow_paths(tmp_path, with_indexes=False)
+    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path, fingerprint_source=False)
+    write_test_arrow_artifact_manifest(tmp_path, indexed_paths)
+    artifact_path = Path(indexed_paths[artifact_key])
+    payload = bytearray(artifact_path.read_bytes())
+    payload[-1] ^= 1
+    artifact_path.write_bytes(payload)
+
+    with pytest.raises(ValueError, match=f"files.{artifact_key} checksum mismatch"):
+        ArrowDataset.open(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "header_offset,message",
+    [(16, "indexed size="), (24, "different key column"), (32, "indexed size/fingerprint=")],
+    ids=["source-size", "key-column", "nonzero-fingerprint"],
+)
+def test_retained_index_opt_out_preserves_other_header_checks(tmp_path: Path, header_offset: int, message: str) -> None:
+    paths = base_arrow_paths(tmp_path, with_indexes=False)
+    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path, fingerprint_source=False)
+    index_path = Path(indexed_paths["signatures_batch_index"])
+    payload = bytearray(index_path.read_bytes())
+    # For the fingerprint case, replace the zero sentinel with a stale nonzero hash.
+    payload[header_offset] ^= 1
+    index_path.write_bytes(payload)
+
+    # Bind the changed bytes so this exercises native index validation after SHA checks.
+    with pytest.raises(ValueError, match=message):
+        _raw_candidate_plan_arrow(indexed_paths, ["q1"])
 
 
 def test_arrow_batch_lookup_index_rejects_wrong_key_column_reuse(tmp_path: Path) -> None:

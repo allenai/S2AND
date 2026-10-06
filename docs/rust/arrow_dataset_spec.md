@@ -266,7 +266,13 @@ instead of the production `specter2.specter_batch_index.bin`.
 
 The batch-index format is S2AND-owned. Current writers and readers require
 format magic `S2ABI002`, which records the key-column hash and
-full-file source fingerprint in addition to key-to-batch records. Each record maps a
+full-file source fingerprint in addition to key-to-batch records. A fingerprint
+of zero is reserved for indexes written with `fingerprint_source=False` over
+caller-owned, request-scoped tables. Native dataset opens and Python request
+reads accept these indexes using the source size; native opens still validate
+the manifest SHA-256 inventory and all index structure checks. Strict Python
+index validation and index reuse reject them. Published artifacts must retain
+the default `fingerprint_source=True`. Each record maps a
 64-bit FNV-1a hash of the lookup key to an IPC record-batch index; the Rust
 reader verifies exact ids after loading the selected batches, so hash collisions
 do not change results. The file body must contain exactly the header-declared

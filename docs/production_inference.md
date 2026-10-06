@@ -75,6 +75,16 @@ public `format_version: 1`, validates the flat content inventory, checksums,
 table schemas, and batch indexes, then retains the exact files for the handle's
 lifetime.
 
+For caller-owned tables created and discarded with one request,
+`write_arrow_batch_lookup_index` and `write_raw_arrow_batch_lookup_indexes`
+accept `fingerprint_source=False`. This skips the native full-file FNV hash
+and records an unfingerprinted index. `ArrowDataset.open` accepts it after
+the usual manifest SHA-256, schema, index structure, and source-size checks;
+it does not skip manifest creation or checksum validation. Use the default
+`fingerprint_source=True` for published or reusable artifacts. Strict Python
+index validation rejects unfingerprinted indexes, and the opt-out cannot be
+combined with `overwrite=False`.
+
 Never edit an open root in place. Publish changed content at a new path and open
 a new handle. Request-local seed constraints are explicit prediction arguments,
 not mutations to the base dataset.

@@ -12,6 +12,8 @@ use crate::{fnv64, fnv64_update};
 pub(crate) const MAGIC: &[u8; 8] = b"S2ABI002";
 const HEADER_LEN: usize = 40;
 const RECORD_LEN: usize = 16;
+// Writers use zero when the caller explicitly skips the source FNV fingerprint.
+const UNFINGERPRINTED: u64 = 0;
 pub(crate) const SOURCE_HASH_DOMAIN: &[u8] = b"s2and-arrow-batch-lookup-index-source\0";
 
 fn source_fingerprint(
@@ -126,15 +128,18 @@ impl ArrowBatchLookupIndex {
                 source.label()
             )));
         }
-        let actual_fingerprint = source_fingerprint(source.reader(), source.label(), source_size)?;
-        if indexed_source_fingerprint != actual_fingerprint {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Arrow batch lookup index '{}' is stale for '{}': \
-                 indexed size/fingerprint=({indexed_source_size}, {indexed_source_fingerprint}) \
-                 current size/fingerprint=({source_size}, {actual_fingerprint})",
-                index_file.label(),
-                source.label()
-            )));
+        if indexed_source_fingerprint != UNFINGERPRINTED {
+            let actual_fingerprint =
+                source_fingerprint(source.reader(), source.label(), source_size)?;
+            if indexed_source_fingerprint != actual_fingerprint {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Arrow batch lookup index '{}' is stale for '{}': \
+                     indexed size/fingerprint=({indexed_source_size}, {indexed_source_fingerprint}) \
+                     current size/fingerprint=({source_size}, {actual_fingerprint})",
+                    index_file.label(),
+                    source.label()
+                )));
+            }
         }
         let expected_len = HEADER_LEN
             .checked_add(record_count.checked_mul(RECORD_LEN).ok_or_else(|| {

@@ -18,6 +18,12 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Breaking changes
 
+- Ports the 0.51.2 `fingerprint_source=False` index-writing option into the
+  1.0 runtime. The default remains full native FNV fingerprinting. Request-owned
+  indexes can omit that fingerprint; native dataset opens still verify manifest
+  SHA-256 checksums, source sizes, and index structure. Strict Python validation
+  and index reuse reject unfingerprinted indexes.
+
 - Code is licensed under MIT; distributed data assets use CC-BY-4.0. See
   [LICENSE](../LICENSE) and [LICENSE-DATA](../LICENSE-DATA). Rust distributions
   include the code license and notices for the bundled CLD2 dependency.

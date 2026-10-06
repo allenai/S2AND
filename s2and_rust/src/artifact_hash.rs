@@ -1,13 +1,12 @@
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use sha2::{Digest, Sha256};
-use std::fs::File;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+
+use crate::arrow_dataset::RetainedFile;
 
 const FNV64_OFFSET: u64 = 14695981039346656037;
 const FNV64_PRIME: u64 = 1099511628211;
-const ARROW_SOURCE_HASH_DOMAIN: &[u8] = b"s2and-arrow-batch-lookup-index-source\0";
 const READ_BUFFER_BYTES: usize = 1024 * 1024;
 
 #[inline(always)]
@@ -19,48 +18,29 @@ fn fnv64_update(mut digest: u64, bytes: &[u8]) -> u64 {
     digest
 }
 
-fn source_file_digests(
-    path: &Path,
-    source_size: u64,
-    include_sha256: bool,
-) -> io::Result<(Option<String>, u64)> {
-    let mut source = File::open(path)?;
-    let mut fingerprint = fnv64_update(FNV64_OFFSET, ARROW_SOURCE_HASH_DOMAIN);
-    fingerprint = fnv64_update(fingerprint, &source_size.to_le_bytes());
-    let mut sha256 = include_sha256.then(Sha256::new);
+fn reader_sha256(mut source: impl Read) -> io::Result<String> {
+    let mut sha256 = Sha256::new();
     let mut buffer = vec![0u8; READ_BUFFER_BYTES];
     loop {
         let byte_count = source.read(&mut buffer)?;
         if byte_count == 0 {
             break;
         }
-        let chunk = &buffer[..byte_count];
-        fingerprint = fnv64_update(fingerprint, chunk);
-        if let Some(digest) = sha256.as_mut() {
-            digest.update(chunk);
-        }
+        sha256.update(&buffer[..byte_count]);
     }
-    Ok((
-        sha256.map(|digest| format!("{:x}", digest.finalize())),
-        fingerprint,
-    ))
+    Ok(format!("{:x}", sha256.finalize()))
 }
 
 #[pyfunction]
-fn arrow_source_file_digests(
-    py: Python<'_>,
-    path: String,
-    source_size: u64,
-    include_sha256: bool,
-) -> PyResult<(Option<String>, u64)> {
-    let source_path = PathBuf::from(path);
-    let source_label = source_path.display().to_string();
-    py.allow_threads(move || source_file_digests(&source_path, source_size, include_sha256))
+fn _arrow_retained_file_sha256(py: Python<'_>, handle: isize, label: String) -> PyResult<String> {
+    let source = RetainedFile::from_raw_handle(handle, label)?;
+    py.allow_threads(|| reader_sha256(source.reader()))
         .map_err(|error| {
-            pyo3::exceptions::PyIOError::new_err(format!(
-                "failed to fingerprint Arrow source file {}: {}",
-                source_label, error
-            ))
+            crate::raw_arrow::arrow_io::io_error_to_py(
+                "failed to hash retained Arrow file",
+                source.label(),
+                error,
+            )
         })
 }
 
@@ -75,7 +55,7 @@ fn fnv64_utf8_batch(py: Python<'_>, values: Vec<String>) -> Vec<u64> {
 }
 
 pub(crate) fn add_to_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(arrow_source_file_digests, module)?)?;
+    module.add_function(wrap_pyfunction!(_arrow_retained_file_sha256, module)?)?;
     module.add_function(wrap_pyfunction!(fnv64_utf8_batch, module)?)?;
     Ok(())
 }

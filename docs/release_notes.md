@@ -18,11 +18,12 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Breaking changes
 
-- Ports the 0.51.2 `fingerprint_source=False` index-writing option into the
-  1.0 runtime. The default remains full native FNV fingerprinting. Request-owned
-  indexes can omit that fingerprint; native dataset opens still verify manifest
-  SHA-256 checksums, source sizes, and index structure. Strict Python validation
-  and index reuse reject unfingerprinted indexes.
+- Removes full-file Arrow source fingerprints and the `fingerprint_source`
+  writer option. Batch indexes now use `S2ABI003` with a 32-byte header; rebuild
+  older indexes and regenerate their dataset manifest. Validators and
+  `overwrite=False` reuse check structure and size, not source content identity.
+  `ArrowDataset.open` retains manifest SHA-256 checks; `open_trusted(paths)`
+  accepts caller-owned tables/indexes without a dataset manifest or checksum scan.
 
 - Code is licensed under MIT; distributed data assets use CC-BY-4.0. See
   [LICENSE](../LICENSE) and [LICENSE-DATA](../LICENSE-DATA). Rust distributions

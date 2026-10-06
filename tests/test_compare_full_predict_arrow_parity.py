@@ -247,5 +247,5 @@ def test_parity_arrow_writer_adds_current_raw_planner_indexes(tmp_path) -> None:
     indexed_paths, index_metrics, physical_layout = _write_raw_planner_indexes_and_layout(arrow_paths, tmp_path)
 
     assert indexed_paths["signatures_batch_index"].endswith("signatures.signatures_batch_index.bin")
-    assert index_metrics["signatures_batch_index"]["magic"] == "S2ABI002"
+    assert index_metrics["signatures_batch_index"]["magic"] == "S2ABI003"
     assert physical_layout["tables"]["signatures"]["batch_index_present"] is True

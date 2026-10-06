@@ -3,41 +3,14 @@ use arrow::record_batch::RecordBatch;
 use memmap2::Mmap;
 use pyo3::PyResult;
 use std::collections::HashSet;
-use std::io::Read;
 
-use crate::arrow_dataset::{RetainedFile, RetainedFileReader};
+use crate::arrow_dataset::RetainedFile;
+use crate::fnv64;
 use crate::raw_arrow::arrow_io::{arrow_error_to_py, io_error_to_py};
-use crate::{fnv64, fnv64_update};
 
-pub(crate) const MAGIC: &[u8; 8] = b"S2ABI002";
-const HEADER_LEN: usize = 40;
+pub(crate) const MAGIC: &[u8; 8] = b"S2ABI003";
+const HEADER_LEN: usize = 32;
 const RECORD_LEN: usize = 16;
-// Writers use zero when the caller explicitly skips the source FNV fingerprint.
-const UNFINGERPRINTED: u64 = 0;
-pub(crate) const SOURCE_HASH_DOMAIN: &[u8] = b"s2and-arrow-batch-lookup-index-source\0";
-
-fn source_fingerprint(
-    mut reader: RetainedFileReader,
-    label: &str,
-    source_size: u64,
-) -> PyResult<u64> {
-    let mut digest = fnv64(SOURCE_HASH_DOMAIN);
-    digest = fnv64_update(digest, &source_size.to_le_bytes());
-    let mut buffer = [0u8; 1024 * 1024];
-    loop {
-        let read_len = reader.read(&mut buffer).map_err(|err| {
-            io_error_to_py(
-                "failed to read Arrow IPC file fingerprint bytes",
-                label,
-                err,
-            )
-        })?;
-        if read_len == 0 {
-            return Ok(digest);
-        }
-        digest = fnv64_update(digest, &buffer[..read_len]);
-    }
-}
 
 pub(crate) struct ArrowBatchLookupIndex {
     bytes: Mmap,
@@ -109,8 +82,6 @@ impl ArrowBatchLookupIndex {
             u64::from_le_bytes(bytes[16..24].try_into().expect("fixed header"));
         let indexed_key_column_hash =
             u64::from_le_bytes(bytes[24..32].try_into().expect("fixed header"));
-        let indexed_source_fingerprint =
-            u64::from_le_bytes(bytes[32..40].try_into().expect("fixed header"));
         let expected_key_column_hash = fnv64(key_column.as_bytes());
         if indexed_key_column_hash != expected_key_column_hash {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -127,19 +98,6 @@ impl ArrowBatchLookupIndex {
                 index_file.label(),
                 source.label()
             )));
-        }
-        if indexed_source_fingerprint != UNFINGERPRINTED {
-            let actual_fingerprint =
-                source_fingerprint(source.reader(), source.label(), source_size)?;
-            if indexed_source_fingerprint != actual_fingerprint {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Arrow batch lookup index '{}' is stale for '{}': \
-                     indexed size/fingerprint=({indexed_source_size}, {indexed_source_fingerprint}) \
-                     current size/fingerprint=({source_size}, {actual_fingerprint})",
-                    index_file.label(),
-                    source.label()
-                )));
-            }
         }
         let expected_len = HEADER_LEN
             .checked_add(record_count.checked_mul(RECORD_LEN).ok_or_else(|| {

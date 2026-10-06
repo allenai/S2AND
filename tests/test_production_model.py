@@ -1157,9 +1157,17 @@ def test_normal_load_hashes_each_declared_file_exactly_once(finalization, monkey
 
     monkeypatch.setattr(production_model_module, "_sha256_file", counting_manifest_sha256)
     monkeypatch.setattr(incremental_artifact_module, "_sha256_file", counting_artifact_sha256)
-    load_production_model(output_bundle)
+    clusterer = load_production_model(output_bundle)
 
     manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
+    for classifier, model_file in (
+        (clusterer.classifier, "pairwise/main.lgb"),
+        (clusterer.nameless_classifier, "pairwise/nameless.lgb"),
+    ):
+        assert classifier is not None
+        expected_fingerprint = ("native_lightgbm", manifest["sha256"][model_file], classifier.n_features_in_)
+        assert classifier.cache_fingerprint() == expected_fingerprint
+        assert classifier.cache_fingerprint() == expected_fingerprint
     expected = sorted((output_bundle / relpath).resolve().as_posix() for relpath in manifest["sha256"])
     assert sorted(manifest_hashes) == expected
     assert standalone_artifact_hashes == []

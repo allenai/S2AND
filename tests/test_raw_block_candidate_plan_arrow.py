@@ -117,9 +117,7 @@ def _append_batch_index_record(
 ) -> None:
     path = Path(index_path)
     raw = path.read_bytes()
-    magic, record_count, source_size, key_column_hash, source_fingerprint = (
-        _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.unpack_from(raw, 0)
-    )
+    magic, record_count, source_size, key_column_hash = _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.unpack_from(raw, 0)
     offset = _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size
     record_size = _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
     records = [
@@ -141,7 +139,6 @@ def _append_batch_index_record(
             len(records),
             source_size,
             key_column_hash,
-            source_fingerprint,
         )
     )
     for record in records:
@@ -755,14 +752,9 @@ def test_arrow_batch_lookup_index_accepts_transport_mtime_change(tmp_path: Path)
     assert reuse_metrics["reused"] is True
 
 
-@pytest.mark.parametrize("fingerprint_source", [True, False])
-def test_retained_batch_index_preserves_plan_and_missing_signature_errors(
-    tmp_path: Path, fingerprint_source: bool
-) -> None:
+def test_retained_batch_index_preserves_plan_and_missing_signature_errors(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path, with_indexes=False)
-    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(
-        paths, tmp_path, fingerprint_source=fingerprint_source
-    )
+    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
     plan = _raw_candidate_plan_arrow(indexed_paths, ["q1"])
     assert plan["query_signature_ids"] == ["q1"]
@@ -779,9 +771,9 @@ def test_retained_batch_index_preserves_plan_and_missing_signature_errors(
 
 
 @pytest.mark.parametrize("artifact_key", ["signatures", "signatures_batch_index"])
-def test_unfingerprinted_retained_index_still_requires_manifest_checksum(tmp_path: Path, artifact_key: str) -> None:
+def test_retained_index_requires_manifest_checksum(tmp_path: Path, artifact_key: str) -> None:
     paths = base_arrow_paths(tmp_path, with_indexes=False)
-    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path, fingerprint_source=False)
+    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
     write_test_arrow_artifact_manifest(tmp_path, indexed_paths)
     artifact_path = Path(indexed_paths[artifact_key])
     payload = bytearray(artifact_path.read_bytes())
@@ -794,15 +786,14 @@ def test_unfingerprinted_retained_index_still_requires_manifest_checksum(tmp_pat
 
 @pytest.mark.parametrize(
     "header_offset,message",
-    [(16, "indexed size="), (24, "different key column"), (32, "indexed size/fingerprint=")],
-    ids=["source-size", "key-column", "nonzero-fingerprint"],
+    [(16, "indexed size="), (24, "different key column")],
+    ids=["source-size", "key-column"],
 )
-def test_retained_index_opt_out_preserves_other_header_checks(tmp_path: Path, header_offset: int, message: str) -> None:
+def test_retained_index_preserves_header_checks(tmp_path: Path, header_offset: int, message: str) -> None:
     paths = base_arrow_paths(tmp_path, with_indexes=False)
-    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path, fingerprint_source=False)
+    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
     index_path = Path(indexed_paths["signatures_batch_index"])
     payload = bytearray(index_path.read_bytes())
-    # For the fingerprint case, replace the zero sentinel with a stale nonzero hash.
     payload[header_offset] ^= 1
     index_path.write_bytes(payload)
 
@@ -827,7 +818,7 @@ def test_arrow_batch_lookup_index_rejects_wrong_key_column_reuse(tmp_path: Path)
         _raw_candidate_plan_arrow(indexed_paths, ["q1"])
 
 
-def test_arrow_batch_lookup_index_rejects_same_size_same_mtime_sampled_source_change(tmp_path: Path) -> None:
+def test_manifest_rejects_same_size_same_mtime_source_change(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path)
     filler_count = 30_000
     filler_ids = [f"x{index:013d}" for index in range(filler_count)]
@@ -854,6 +845,7 @@ def test_arrow_batch_lookup_index_rejects_same_size_same_mtime_sampled_source_ch
         batch_size=1000,
     )
     indexed_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
+    write_test_arrow_artifact_manifest(tmp_path, indexed_paths)
     signatures_path = Path(paths["signatures"])
     stat = signatures_path.stat()
     payload = signatures_path.read_bytes()
@@ -865,8 +857,8 @@ def test_arrow_batch_lookup_index_rejects_same_size_same_mtime_sampled_source_ch
     signatures_path.write_bytes(payload[:rewrite_offset] + new_value + payload[rewrite_offset + len(old_value) :])
     os.utime(signatures_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
 
-    with pytest.raises(ValueError, match="stale"):
-        _raw_candidate_plan_arrow(indexed_paths, ["q1"])
+    with pytest.raises(ValueError, match="files.signatures checksum mismatch"):
+        ArrowDataset.open(tmp_path)
 
 
 def test_rust_featurizer_from_arrow_dataset_deduplicates_unsorted_requested_ids(tmp_path: Path) -> None:

@@ -69,21 +69,41 @@ Incremental APIs always return their structured result.
 
 ## Immutable Arrow contract
 
-Production Arrow input is one manifest-backed immutable root. Open it once with
+Published Arrow input is one manifest-backed immutable root. Open it once with
 `ArrowDataset.open(root)`: opening requires `kind: "s2and_arrow_dataset"` and
 public `format_version: 1`, validates the flat content inventory, checksums,
 table schemas, and batch indexes, then retains the exact files for the handle's
 lifetime.
 
-For caller-owned tables created and discarded with one request,
-`write_arrow_batch_lookup_index` and `write_raw_arrow_batch_lookup_indexes`
-accept `fingerprint_source=False`. This skips the native full-file FNV hash
-and records an unfingerprinted index. `ArrowDataset.open` accepts it after
-the usual manifest SHA-256, schema, index structure, and source-size checks;
-it does not skip manifest creation or checksum validation. Use the default
-`fingerprint_source=True` for published or reusable artifacts. Strict Python
-index validation rejects unfingerprinted indexes, and the opt-out cannot be
-combined with `overwrite=False`.
+Opening computes the manifest SHA-256 once per retained file. Reusing the open
+handle does not hash files again. Production model cache identities likewise
+reuse the model hashes verified when loading the bundle.
+
+Batch indexes contain source sizes, key-column hashes, and key-to-batch records.
+They do not contain source fingerprints. Writers always build without a separate
+source checksum scan. Build tables and indexes together; `overwrite=False`
+checks existing index structure and source size, but the caller must guarantee
+that the pair belongs together. Rebuild indexes whenever the source changes.
+
+For trusted caller-owned inputs, skip the dataset manifest entirely:
+
+```python
+from s2and.arrow_inputs import ArrowDataset
+from s2and.incremental_linking.feature_block import write_raw_arrow_batch_lookup_indexes
+
+paths, _ = write_raw_arrow_batch_lookup_indexes(table_paths, request_directory)
+with ArrowDataset.open_trusted(paths) as dataset:
+    clusters, distances = clusterer.predict_from_arrow(block_signatures, dataset)
+```
+
+`open_trusted` accepts the same table/index path keys and returns the same owning
+handle as `open`. It performs no dataset checksum scans and still checks required tables,
+paired optional inputs, Arrow schemas, index structure, and source sizes. The
+caller is responsible for supplying matching, immutable tables and indexes.
+Optional name-count indexes keep their existing independent validation.
+Each trusted open gets a fresh generation ID, so prediction caches can be reused
+within that handle but cannot reuse entries from another trusted open. Its
+`root` property is the directory containing the signatures file.
 
 Never edit an open root in place. Publish changed content at a new path and open
 a new handle. Request-local seed constraints are explicit prediction arguments,

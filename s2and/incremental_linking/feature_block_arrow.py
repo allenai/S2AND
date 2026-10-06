@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import heapq
 import json
 import math
@@ -31,30 +30,23 @@ from s2and.incremental_linking.feature_block_contract import normalize_cluster_s
 from s2and.text import canonicalize_name_text
 
 INCREMENTAL_QUERY_SIGNATURE_VIEWS = frozenset({"auto", "full", "initial_only"})
-# Reserved header value for caller-owned, request-scoped indexes.
-ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED = 0
-_UNFINGERPRINTED_INDEX_MESSAGE = (
-    "index was written with fingerprint_source=False and cannot be strictly validated; "
-    "rebuild it with fingerprint_source=True"
-)
 _NAME_COUNTS_INDEX_MAGIC = b"S2NCI001"
-_ARROW_BATCH_LOOKUP_INDEX_MAGIC = b"S2ABI002"
+_ARROW_BATCH_LOOKUP_INDEX_MAGIC = b"S2ABI003"
 _NAME_COUNTS_INDEX_HASH_DOMAIN = b"s2and-name-counts-index-v1\x00"
-_ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN = b"s2and-arrow-batch-lookup-index-source\x00"
-_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES = 1024 * 1024
+_ARROW_BATCH_LOOKUP_INDEX_READ_BYTES = 1024 * 1024
 _NAME_COUNTS_INDEX_HEADER_STRUCT = struct.Struct("<8sQQQ")
 _NAME_COUNTS_INDEX_RECORD_STRUCT = struct.Struct("<QQQIId")
 _NAME_COUNTS_SORT_RUN_RECORD_STRUCT = struct.Struct("<QQdI")
 _NAME_COUNTS_SORT_BUFFER_RECORDS = 1_000_000
 _NAME_COUNTS_WRITE_BUFFER_BYTES = 1024 * 1024
-_ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT = struct.Struct("<8sQQQQ")
+_ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT = struct.Struct("<8sQQQ")
 _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT = struct.Struct("<QII")
 _ARROW_BATCH_LOOKUP_SORT_BUFFER_RECORDS = 1_000_000
 _ARROW_BATCH_LOOKUP_KEY_CHUNK_ROWS = 16_384
 _ARROW_BATCH_LOOKUP_WRITE_BUFFER_BYTES = 1024 * 1024
 _FNV64_OFFSET = 14695981039346656037
 _FNV64_PRIME = 1099511628211
-_ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS = 2
+_ARROW_BATCH_LOOKUP_INDEX_BUILD_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -64,21 +56,6 @@ class IncrementalQuerySignatureRequest:
     signature_id: str
     query_view: str
     query_author: str
-
-
-@dataclass(frozen=True)
-class _ArrowSourceSnapshot:
-    size: int
-    mtime_ns: int
-    fingerprint: int
-
-
-@dataclass(frozen=True)
-class _ArrowSourceDigests:
-    size: int
-    mtime_ns: int
-    sha256: str
-    fingerprint: int | None
 
 
 @dataclass
@@ -462,57 +439,21 @@ def _decode_arrow_batch_lookup_index_header(index_path: Path, header: bytes) -> 
         raise ValueError(f"Arrow batch lookup index is truncated: {index_path!s}")
     magic = header[:8]
     if magic != _ARROW_BATCH_LOOKUP_INDEX_MAGIC:
-        raise ValueError(f"Arrow batch lookup index has invalid magic bytes: {index_path!s}")
+        raise ValueError(
+            f"Arrow batch lookup index has invalid magic bytes: {index_path!s}. Rebuild it with overwrite=True."
+        )
     (
         _magic,
         record_count,
         source_size,
         key_column_hash,
-        source_fingerprint,
     ) = _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.unpack(header)
     return {
         "magic": magic.decode("ascii"),
         "record_count": int(record_count),
         "source_size": int(source_size),
         "key_column_hash": int(key_column_hash),
-        "source_fingerprint": int(source_fingerprint),
     }
-
-
-def _raise_if_unfingerprinted(*, index_path: Path, arrow_path: Path) -> None:
-    with index_path.open("rb") as infile:
-        header = _decode_arrow_batch_lookup_index_header(
-            index_path, infile.read(_ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size)
-        )
-    if int(header["source_fingerprint"]) == ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED:
-        raise ValueError(
-            f"Arrow batch lookup index '{index_path!s}' is stale for '{arrow_path!s}': {_UNFINGERPRINTED_INDEX_MESSAGE}"
-        )
-
-
-def _source_fingerprint_kind(fingerprint: int) -> str:
-    return "size_only" if fingerprint == ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED else "fnv1a64_full_file"
-
-
-def _batch_lookup_index_source_mismatch(
-    header: Mapping[str, int | str],
-    *,
-    source_size: int,
-    source_fingerprint: int | None,
-) -> str | None:
-    indexed_size = int(header["source_size"])
-    indexed_fingerprint = int(header["source_fingerprint"])
-    if indexed_fingerprint == ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED:
-        return _UNFINGERPRINTED_INDEX_MESSAGE
-    if indexed_size != int(source_size):
-        return f"indexed size={indexed_size} current size={int(source_size)}"
-    if source_fingerprint is None or indexed_fingerprint == int(source_fingerprint):
-        return None
-    return (
-        "indexed size/fingerprint="
-        f"({indexed_size}, {indexed_fingerprint}) current size/fingerprint="
-        f"({int(source_size)}, {int(source_fingerprint)})"
-    )
 
 
 def _arrow_batch_lookup_record_hash(index_mmap: mmap.mmap, record_index: int) -> int:
@@ -537,8 +478,8 @@ def _arrow_batch_lookup_lower_bound(index_mmap: mmap.mmap, record_count: int, ke
     return lower
 
 
-def _source_snapshot_matches_stat(snapshot: _ArrowSourceSnapshot, stat_result: os.stat_result) -> bool:
-    return snapshot.size == int(stat_result.st_size) and snapshot.mtime_ns == int(stat_result.st_mtime_ns)
+def _source_stats_match(before: os.stat_result, after: os.stat_result) -> bool:
+    return before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns
 
 
 def _raise_arrow_source_changed(path: Path, *, context: str) -> NoReturn:
@@ -551,7 +492,6 @@ def _read_arrow_batch_lookup_index_batch_indices(
     *,
     key_column: str,
     values: Iterable[Any],
-    validate_source_fingerprint: bool,
     context: str,
 ) -> set[int]:
     keep_hashes = {_fnv64_bytes(str(value).encode("utf-8")) for value in values}
@@ -561,11 +501,6 @@ def _read_arrow_batch_lookup_index_batch_indices(
     index_path_obj = Path(index_path)
     source_stat_before = arrow_path_obj.stat()
     source_size = int(source_stat_before.st_size)
-    source_snapshot: _ArrowSourceSnapshot | None = None
-    if validate_source_fingerprint:
-        _raise_if_unfingerprinted(index_path=index_path_obj, arrow_path=arrow_path_obj)
-        source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context=context)
-        source_size = source_snapshot.size
     expected_key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
     with index_path_obj.open("rb") as infile:
         with mmap.mmap(infile.fileno(), 0, access=mmap.ACCESS_READ) as index_mmap:
@@ -579,20 +514,7 @@ def _read_arrow_batch_lookup_index_batch_indices(
                     f"indexed hash={int(header['key_column_hash'])} expected hash={expected_key_column_hash} "
                     f"key_column={key_column!r}"
                 )
-            if validate_source_fingerprint:
-                if source_snapshot is None:
-                    raise AssertionError("source snapshot must be populated")
-                source_mismatch = _batch_lookup_index_source_mismatch(
-                    header,
-                    source_size=source_snapshot.size,
-                    source_fingerprint=source_snapshot.fingerprint,
-                )
-                if source_mismatch is not None:
-                    raise ValueError(
-                        f"Arrow batch lookup index '{index_path_obj!s}' is stale for '{arrow_path_obj!s}': "
-                        f"{source_mismatch}"
-                    )
-            elif int(header["source_size"]) != source_size:
+            if int(header["source_size"]) != source_size:
                 raise ValueError(
                     f"Arrow batch lookup index '{index_path_obj!s}' is stale for '{arrow_path_obj!s}': "
                     f"indexed size={int(header['source_size'])} current size={source_size}"
@@ -617,14 +539,7 @@ def _read_arrow_batch_lookup_index_batch_indices(
                     batch_indices.add(_arrow_batch_lookup_record_batch_index(index_mmap, record_index))
                     record_index += 1
     source_stat_after = arrow_path_obj.stat()
-    if validate_source_fingerprint:
-        if source_snapshot is None:
-            raise AssertionError("source snapshot must be populated")
-        if not _source_snapshot_matches_stat(source_snapshot, source_stat_after):
-            _raise_arrow_source_changed(arrow_path_obj, context=context)
-    elif int(source_stat_before.st_size) != int(source_stat_after.st_size) or int(
-        source_stat_before.st_mtime_ns
-    ) != int(source_stat_after.st_mtime_ns):
+    if not _source_stats_match(source_stat_before, source_stat_after):
         _raise_arrow_source_changed(arrow_path_obj, context=context)
     return batch_indices
 
@@ -636,14 +551,18 @@ def read_arrow_batch_lookup_index_batch_indices(
     key_column: str,
     values: Iterable[Any],
 ) -> set[int]:
-    """Return Arrow record-batch indices with strict source fingerprint validation."""
+    """Return matching batches after checking index magic, key, length, and source size.
+
+    The caller must provide an immutable, matching table/index pair. These checks
+    cannot detect a same-size table rewrite. Use ``validate_arrow_batch_lookup_index``
+    to additionally check every index record's ordering and batch bounds.
+    """
 
     return _read_arrow_batch_lookup_index_batch_indices(
         arrow_path,
         index_path,
         key_column=key_column,
         values=values,
-        validate_source_fingerprint=True,
         context="reading batch lookup index",
     )
 
@@ -657,9 +576,8 @@ def read_arrow_batch_lookup_index_batch_indices_for_request(
 ) -> set[int]:
     """Return Arrow record-batch indices for request-time filtered reads.
 
-    This keeps sidecar magic/key/length/source-size checks but intentionally
-    avoids hashing the whole Arrow IPC file on every prediction request. Use
-    `validate_arrow_batch_lookup_index` for offline strict fingerprint checks.
+    The caller must provide an immutable, matching table/index pair. Checks and
+    lookup behavior are the same as ``read_arrow_batch_lookup_index_batch_indices``.
     """
 
     return _read_arrow_batch_lookup_index_batch_indices(
@@ -667,7 +585,6 @@ def read_arrow_batch_lookup_index_batch_indices_for_request(
         index_path,
         key_column=key_column,
         values=values,
-        validate_source_fingerprint=False,
         context="reading request-time batch lookup index",
     )
 
@@ -679,7 +596,11 @@ def validate_arrow_batch_lookup_index(
     key_column: str,
     expected_row_count: int | None = None,
 ) -> dict[str, int | str]:
-    """Validate an index and its record-batch references without reading Arrow rows."""
+    """Validate source size, index structure, ordering, and record-batch bounds.
+
+    The caller must provide an immutable, matching table/index pair. Structural
+    validation does not prove that index keys match the current table contents.
+    """
 
     return _validate_arrow_batch_lookup_index(
         arrow_path=Path(arrow_path),
@@ -695,58 +616,24 @@ def _validate_arrow_batch_lookup_index(
     index_path: Path,
     key_column: str,
     expected_row_count: int | None = None,
-    expected_arrow_byte_count: int | None = None,
-    expected_arrow_sha256: str | None = None,
-    expected_index_byte_count: int | None = None,
-    expected_index_sha256: str | None = None,
-    validate_source_fingerprint: bool = True,
 ) -> dict[str, int | str]:
     """Stream and validate one Arrow table/index pair."""
 
-    _raise_if_unfingerprinted(index_path=index_path, arrow_path=arrow_path)
-    context = (
-        "validating generation-bound batch lookup index"
-        if expected_arrow_sha256 is not None
-        else "validating batch lookup index"
-    )
-    source_sha256: str | None = None
-    if expected_arrow_sha256 is None:
-        source_snapshot = _stable_source_file_snapshot(arrow_path, context=context)
-        source_size = source_snapshot.size
-        source_mtime_ns = source_snapshot.mtime_ns
-        source_fingerprint: int | None = source_snapshot.fingerprint
-    else:
-        source_digests = (
-            _stable_source_file_digests(arrow_path, context=context)
-            if validate_source_fingerprint
-            else _stable_source_file_sha256(arrow_path, context=context)
-        )
-        source_size = source_digests.size
-        source_mtime_ns = source_digests.mtime_ns
-        source_sha256 = source_digests.sha256
-        source_fingerprint = source_digests.fingerprint
-    if expected_arrow_byte_count is not None and source_size != expected_arrow_byte_count:
-        raise ValueError(f"Arrow artifact generation source byte_count mismatch: {arrow_path}")
-    if expected_arrow_sha256 is not None and source_sha256 != expected_arrow_sha256:
-        raise ValueError(f"Arrow artifact generation source checksum mismatch: {arrow_path}")
+    context = "validating batch lookup index"
+    source_stat_before = arrow_path.stat()
+    source_size = int(source_stat_before.st_size)
 
     import pyarrow as pa
 
     with pa.memory_map(str(arrow_path), "r") as source:
         record_batch_count = int(pa.ipc.open_file(source).num_record_batches)
     source_stat = arrow_path.stat()
-    if source_size != int(source_stat.st_size) or source_mtime_ns != int(source_stat.st_mtime_ns):
+    if not _source_stats_match(source_stat_before, source_stat):
         _raise_arrow_source_changed(arrow_path, context=context)
 
     index_stat_before = index_path.stat()
-    if expected_index_byte_count is not None and int(index_stat_before.st_size) != expected_index_byte_count:
-        raise ValueError(f"Arrow artifact generation index byte_count mismatch: {index_path}")
-
-    index_digest = hashlib.sha256() if expected_index_sha256 is not None else None
     with index_path.open("rb") as infile:
         header_bytes = infile.read(_ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size)
-        if index_digest is not None:
-            index_digest.update(header_bytes)
         header = _decode_arrow_batch_lookup_index_header(index_path, header_bytes)
         key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
         if int(header["key_column_hash"]) != key_column_hash:
@@ -755,14 +642,10 @@ def _validate_arrow_batch_lookup_index(
                 f"indexed hash={int(header['key_column_hash'])} expected hash={key_column_hash} "
                 f"key_column={key_column!r}"
             )
-        source_mismatch = _batch_lookup_index_source_mismatch(
-            header,
-            source_size=source_size,
-            source_fingerprint=source_fingerprint,
-        )
-        if source_mismatch is not None:
+        if int(header["source_size"]) != source_size:
             raise ValueError(
-                f"Arrow batch lookup index '{index_path!s}' is stale for '{arrow_path!s}': {source_mismatch}"
+                f"Arrow batch lookup index '{index_path!s}' is stale for '{arrow_path!s}': "
+                f"indexed size={int(header['source_size'])} current size={source_size}"
             )
         record_count = int(header["record_count"])
         if expected_row_count is not None and record_count != int(expected_row_count):
@@ -782,9 +665,7 @@ def _validate_arrow_batch_lookup_index(
 
         previous_hash: int | None = None
         observed_count = 0
-        while chunk := infile.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES):
-            if index_digest is not None:
-                index_digest.update(chunk)
+        while chunk := infile.read(_ARROW_BATCH_LOOKUP_INDEX_READ_BYTES):
             if len(chunk) % _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size != 0:
                 raise ValueError(f"Arrow batch lookup index is truncated: {index_path!s}")
             for key_hash, batch_index, _reserved in _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.iter_unpack(chunk):
@@ -811,17 +692,14 @@ def _validate_arrow_batch_lookup_index(
         index_stat_after.st_mtime_ns
     ):
         raise ValueError(f"Arrow batch lookup index changed while validating: {index_path!s}")
-    if index_digest is not None and index_digest.hexdigest() != expected_index_sha256:
-        raise ValueError(f"Arrow artifact generation index checksum mismatch: {index_path}")
     source_stat = arrow_path.stat()
-    if source_size != int(source_stat.st_size) or source_mtime_ns != int(source_stat.st_mtime_ns):
+    if not _source_stats_match(source_stat_before, source_stat):
         _raise_arrow_source_changed(arrow_path, context=context)
     return {
         "magic": str(header["magic"]),
         "record_count": record_count,
         "source_size": int(header["source_size"]),
         "key_column_hash": int(header["key_column_hash"]),
-        "source_fingerprint": int(header["source_fingerprint"]),
     }
 
 
@@ -846,7 +724,7 @@ def _iter_arrow_batch_lookup_sort_run(path: Path) -> Generator[tuple[int, int, i
     """Yield one exact sorted run in bounded chunks."""
 
     with path.open("rb") as source:
-        while chunk := source.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES):
+        while chunk := source.read(_ARROW_BATCH_LOOKUP_INDEX_READ_BYTES):
             if len(chunk) % _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size != 0:
                 raise ValueError(f"truncated Arrow batch lookup sort run: {path}")
             yield from _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.iter_unpack(chunk)
@@ -972,25 +850,16 @@ def write_arrow_batch_lookup_index(
     table_name: str = "arrow",
     max_record_batch_rows: int | None = None,
     overwrite: bool = True,
-    fingerprint_source: bool = True,
 ) -> tuple[str, dict[str, int | str | bool]]:
     """Write a Rust-readable key-hash to Arrow record-batch lookup index.
 
-    ``fingerprint_source=False`` skips the native full-file FNV hash and stores
-    ``ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED`` in the header. Use it only for
-    tables the caller just wrote and will discard with their indexes. Size and
-    mtime are checked during this call, but only size is stored in the index.
-    Request reads and native datasets accept these indexes; strict validation
-    and ``overwrite=False`` reuse require fingerprints. Dataset manifest
-    checksums remain required even when the index fingerprint is omitted.
+    Size and mtime are checked during this call; only source size is stored.
+    ``overwrite=False`` validates an existing index's size, structure, ordering,
+    row count, and batch bounds. The caller must guarantee that the reused index
+    and immutable table belong together: same-size content changes are not detected.
     """
 
     output_path = Path(index_path)
-    if not fingerprint_source and not overwrite:
-        raise ValueError(
-            "fingerprint_source=False cannot be combined with overwrite=False: "
-            "reusing an existing batch lookup index requires the full-file fingerprint check"
-        )
     if output_path.exists() and not overwrite:
         arrow_path_obj = Path(arrow_path)
         layout = arrow_ipc_physical_layout(arrow_path)
@@ -1013,15 +882,13 @@ def write_arrow_batch_lookup_index(
             "magic": index_metrics["magic"],
             "record_count": index_metrics["record_count"],
             "key_column_hash": index_metrics["key_column_hash"],
-            "source_fingerprint": index_metrics["source_fingerprint"],
-            "source_fingerprint_kind": "fnv1a64_full_file",
             "max_record_batch_rows": int(max_record_batch_rows or 0),
         }
 
     arrow_path_obj = Path(arrow_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     records: _ArrowBatchLookupRecords | None = None
-    source_snapshot: _ArrowSourceSnapshot | None = None
+    source_stat: os.stat_result | None = None
     key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
     tmp_path: Path | None = None
     with tempfile.TemporaryDirectory(
@@ -1029,7 +896,7 @@ def write_arrow_batch_lookup_index(
         prefix=f".{output_path.name}.sort.",
     ) as sort_tmp_text:
         sort_tmp = Path(sort_tmp_text)
-        for attempt in range(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS):
+        for attempt in range(_ARROW_BATCH_LOOKUP_INDEX_BUILD_ATTEMPTS):
             source_stat_before = arrow_path_obj.stat()
             attempt_dir = sort_tmp / f"attempt-{attempt}"
             attempt_dir.mkdir()
@@ -1041,21 +908,13 @@ def write_arrow_batch_lookup_index(
                 sort_run_dir=attempt_dir,
                 max_records_in_memory=_ARROW_BATCH_LOOKUP_SORT_BUFFER_RECORDS,
             )
-            if fingerprint_source:
-                source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="building batch lookup index")
-            else:
-                source_stat = arrow_path_obj.stat()
-                source_snapshot = _ArrowSourceSnapshot(
-                    size=int(source_stat.st_size),
-                    mtime_ns=int(source_stat.st_mtime_ns),
-                    fingerprint=ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED,
-                )
-            if _source_snapshot_matches_stat(source_snapshot, source_stat_before):
+            source_stat = arrow_path_obj.stat()
+            if _source_stats_match(source_stat_before, source_stat):
                 break
         else:
             _raise_arrow_source_changed(arrow_path_obj, context="building batch lookup index")
-        if source_snapshot is None or records is None:
-            raise AssertionError("source snapshot and sorted records must be populated")
+        if source_stat is None or records is None:
+            raise AssertionError("source stat and sorted records must be populated")
 
         try:
             with tempfile.NamedTemporaryFile(
@@ -1070,15 +929,14 @@ def write_arrow_batch_lookup_index(
                     _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.pack(
                         _ARROW_BATCH_LOOKUP_INDEX_MAGIC,
                         records.row_count,
-                        source_snapshot.size,
+                        int(source_stat.st_size),
                         key_column_hash,
-                        source_snapshot.fingerprint,
                     )
                 )
                 _write_sorted_arrow_batch_lookup_records(outfile, records)
                 outfile.flush()
                 os.fsync(outfile.fileno())
-            if not _source_snapshot_matches_stat(source_snapshot, arrow_path_obj.stat()):
+            if not _source_stats_match(source_stat, arrow_path_obj.stat()):
                 _raise_arrow_source_changed(arrow_path_obj, context="publishing batch lookup index")
             tmp_path.replace(output_path)
         except Exception:
@@ -1091,8 +949,6 @@ def write_arrow_batch_lookup_index(
         "row_count": records.row_count,
         "record_count": records.row_count,
         "key_column_hash": key_column_hash,
-        "source_fingerprint": source_snapshot.fingerprint,
-        "source_fingerprint_kind": _source_fingerprint_kind(source_snapshot.fingerprint),
         "record_batch_count": records.record_batch_count,
         "actual_max_batch_rows": records.max_batch_rows,
         "max_record_batch_rows": int(max_record_batch_rows or 0),
@@ -1105,16 +961,13 @@ def write_raw_arrow_batch_lookup_indexes(
     *,
     max_record_batch_rows: Mapping[str, int] | int | None = RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     overwrite: bool = True,
-    fingerprint_source: bool = True,
 ) -> tuple[dict[str, str], dict[str, dict[str, int | str | bool]]]:
-    """Write batch indexes, optionally omitting FNV hashes for request-owned files.
+    """Write batch indexes for immutable Arrow tables.
 
-    ``fingerprint_source=False`` follows ``write_arrow_batch_lookup_index``:
-    it requires ``overwrite=True`` and does not skip dataset manifest checksums.
+    ``overwrite=False`` performs structural reuse checks; the caller guarantees
+    that existing indexes and tables belong together.
     """
 
-    if not fingerprint_source and not overwrite:
-        raise ValueError("fingerprint_source=False cannot be combined with overwrite=False")
     output_path = Path(output_dir) if output_dir is not None else None
     indexed_paths = normalize_arrow_paths(paths, omit_none=True)
     metrics: dict[str, dict[str, int | str | bool]] = {}
@@ -1137,7 +990,6 @@ def write_raw_arrow_batch_lookup_indexes(
             table_name=arrow_key,
             max_record_batch_rows=batch_limit,
             overwrite=overwrite,
-            fingerprint_source=fingerprint_source,
         )
         indexed_paths[index_key] = index_file
         metrics[index_key] = index_metrics
@@ -1261,90 +1113,6 @@ def _fnv64_utf8_batch(values: Sequence[str]) -> list[int]:
     from s2and.runtime import load_s2and_rust_extension
 
     return [int(value) for value in load_s2and_rust_extension().fnv64_utf8_batch(list(values))]
-
-
-def _source_file_fingerprint_once(path: Path, *, source_size: int) -> int:
-    from s2and.runtime import load_s2and_rust_extension
-
-    _sha256, fingerprint = load_s2and_rust_extension().arrow_source_file_digests(
-        str(path),
-        int(source_size),
-        False,
-    )
-    return int(fingerprint)
-
-
-def _source_file_digests_once(path: Path, *, source_size: int) -> tuple[str, int]:
-    from s2and.runtime import load_s2and_rust_extension
-
-    sha256, fingerprint = load_s2and_rust_extension().arrow_source_file_digests(
-        str(path),
-        int(source_size),
-        True,
-    )
-    if not isinstance(sha256, str):  # pragma: no cover - native return contract
-        raise RuntimeError("native Arrow source digest omitted requested SHA-256")
-    return sha256, int(fingerprint)
-
-
-def _source_file_sha256_once(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as infile:
-        while chunk := infile.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _stable_source_file_sha256(path: Path, *, context: str) -> _ArrowSourceDigests:
-    for _attempt in range(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS):
-        before = path.stat()
-        sha256 = _source_file_sha256_once(path)
-        after = path.stat()
-        if int(before.st_size) == int(after.st_size) and int(before.st_mtime_ns) == int(after.st_mtime_ns):
-            return _ArrowSourceDigests(
-                size=int(after.st_size),
-                mtime_ns=int(after.st_mtime_ns),
-                sha256=sha256,
-                fingerprint=None,
-            )
-    _raise_arrow_source_changed(path, context=context)
-
-
-def _stable_source_file_digests(path: Path, *, context: str) -> _ArrowSourceDigests:
-    for _attempt in range(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS):
-        before = path.stat()
-        sha256, fingerprint = _source_file_digests_once(path, source_size=int(before.st_size))
-        after = path.stat()
-        if int(before.st_size) == int(after.st_size) and int(before.st_mtime_ns) == int(after.st_mtime_ns):
-            return _ArrowSourceDigests(
-                size=int(after.st_size),
-                mtime_ns=int(after.st_mtime_ns),
-                sha256=sha256,
-                fingerprint=int(fingerprint),
-            )
-    _raise_arrow_source_changed(path, context=context)
-
-
-def _source_digests_match_stat(digests: _ArrowSourceDigests, stat_result: os.stat_result) -> bool:
-    return digests.size == int(stat_result.st_size) and digests.mtime_ns == int(stat_result.st_mtime_ns)
-
-
-def _stable_source_file_snapshot(path: Path, *, context: str) -> _ArrowSourceSnapshot:
-    for _attempt in range(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS):
-        before = path.stat()
-        fingerprint = _source_file_fingerprint_once(path, source_size=int(before.st_size))
-        after = path.stat()
-        if int(before.st_size) == int(after.st_size) and int(before.st_mtime_ns) == int(after.st_mtime_ns):
-            return _ArrowSourceSnapshot(
-                size=int(after.st_size),
-                mtime_ns=int(after.st_mtime_ns),
-                fingerprint=int(fingerprint),
-            )
-    _raise_arrow_source_changed(path, context=context)
-
-
-def _source_file_fingerprint(path: Path) -> int:
-    return _stable_source_file_snapshot(path, context="fingerprinting source file").fingerprint
 
 
 def _name_counts_index_hashes(kind: str, name_bytes: bytes) -> tuple[int, int]:

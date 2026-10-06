@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import hashlib
 import os
+import struct
 from pathlib import Path
 
 import pytest
 
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
 from s2and.incremental_linking.feature_block import (
-    ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED,
     read_arrow_batch_lookup_index_batch_indices,
     validate_arrow_batch_lookup_index,
     write_arrow_batch_lookup_index,
@@ -36,7 +35,7 @@ def _write_tiny_index(tmp_path: Path) -> tuple[str, Path]:
         read_arrow_batch_lookup_index_batch_indices,
         feature_block_arrow_module.read_arrow_batch_lookup_index_batch_indices_for_request,
     ],
-    ids=["strict", "request"],
+    ids=["standalone", "request"],
 )
 def test_lookup_returns_every_batch_for_repeated_keys_and_omits_absent_keys(tmp_path: Path, lookup) -> None:
     """A paper's authors can span several batches, all of which must be selected."""
@@ -61,47 +60,6 @@ def test_lookup_returns_every_batch_for_repeated_keys_and_omits_absent_keys(tmp_
         assert lookup(path, index_path, key_column="paper_id", values=iter(requested)) == expected
 
 
-@pytest.mark.parametrize(
-    "byte_count",
-    [0, 3, 1024 * 1024 - 1, 1024 * 1024, 1024 * 1024 + 17],
-    ids=["empty", "known-abc", "before-buffer-boundary", "exact-buffer-boundary", "partial-final-buffer"],
-)
-def test_native_source_digests_match_v1_fingerprint_and_sha256(tmp_path: Path, byte_count: int) -> None:
-    """Verify real file hashing across native read-buffer boundaries and EOF."""
-    source_bytes = (
-        b"abc" if byte_count == 3 else bytes(range(256)) * (byte_count // 256) + bytes(range(byte_count % 256))
-    )
-    source_path = tmp_path / "source.bin"
-    source_path.write_bytes(source_bytes)
-    source_size = source_path.stat().st_size
-    expected_fingerprint = feature_block_arrow_module._fnv64_bytes(  # noqa: SLF001
-        feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN  # noqa: SLF001
-    )
-    expected_fingerprint = feature_block_arrow_module._fnv64_update(  # noqa: SLF001
-        expected_fingerprint,
-        source_size.to_bytes(8, "little", signed=False),
-    )
-    expected_fingerprint = feature_block_arrow_module._fnv64_update(  # noqa: SLF001
-        expected_fingerprint,
-        source_bytes,
-    )
-
-    observed_fingerprint = feature_block_arrow_module._source_file_fingerprint_once(  # noqa: SLF001
-        source_path,
-        source_size=source_size,
-    )
-    observed_sha256, observed_combined_fingerprint = feature_block_arrow_module._source_file_digests_once(  # noqa: SLF001
-        source_path,
-        source_size=source_size,
-    )
-
-    assert observed_fingerprint == expected_fingerprint
-    if source_bytes == b"abc":
-        assert expected_fingerprint == 11851141429550314739
-    assert observed_combined_fingerprint == expected_fingerprint
-    assert observed_sha256 == hashlib.sha256(source_bytes).hexdigest()
-
-
 def test_native_utf8_batch_hash_matches_python_fnv1a64() -> None:
     values = ["", "abc", "Renée", "李", "emoji-🧪"]
 
@@ -111,7 +69,7 @@ def test_native_utf8_batch_hash_matches_python_fnv1a64() -> None:
     ]
 
 
-def test_write_uses_bounded_sorted_runs_and_preserves_v1_bytes(
+def test_write_uses_bounded_sorted_runs_and_emits_v3_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -144,10 +102,6 @@ def test_write_uses_bounded_sorted_runs_and_preserves_v1_bytes(
 
     source_path = Path(path)
     source_size = source_path.stat().st_size
-    source_fingerprint = feature_block_arrow_module._source_file_fingerprint_once(  # noqa: SLF001
-        source_path,
-        source_size=source_size,
-    )
     records = sorted(
         (feature_block_arrow_module._fnv64_bytes(key.encode("utf-8")), row_index // 2, 0)  # noqa: SLF001
         for row_index, key in enumerate(keys)
@@ -158,12 +112,13 @@ def test_write_uses_bounded_sorted_runs_and_preserves_v1_bytes(
             len(keys),
             source_size,
             feature_block_arrow_module._fnv64_bytes(b"signature_id"),  # noqa: SLF001
-            source_fingerprint,
         )
     )
     for record in records:
         expected.extend(feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.pack(*record))  # noqa: SLF001
 
+    assert expected[:8] == b"S2ABI003"
+    assert len(expected) == 32 + 16 * len(keys)
     assert buffered_run_sizes == [2, 2, 2, 1]
     assert index_path.read_bytes() == expected
     assert not list(tmp_path.glob(f".{index_path.name}.*"))
@@ -214,10 +169,7 @@ def test_validation_rejects_out_of_bounds_record_batch_index(tmp_path: Path) -> 
         validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
 
 
-def test_write_reuse_fingerprints_source_once_and_validates_last_record(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_write_reuse_validates_last_record(tmp_path: Path) -> None:
     path, index_path = _write_tiny_index(tmp_path)
     payload = bytearray(index_path.read_bytes())
     header_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT  # noqa: SLF001
@@ -228,15 +180,6 @@ def test_write_reuse_fingerprints_source_once_and_validates_last_record(
     record_struct.pack_into(payload, last_record_offset, key_hash, 3, reserved)
     index_path.write_bytes(payload)
 
-    snapshot_calls: list[Path] = []
-    original_snapshot = feature_block_arrow_module._stable_source_file_snapshot  # noqa: SLF001
-
-    def record_snapshot(source_path: Path, *, context: str):
-        snapshot_calls.append(source_path)
-        return original_snapshot(source_path, context=context)
-
-    monkeypatch.setattr(feature_block_arrow_module, "_stable_source_file_snapshot", record_snapshot)
-
     with pytest.raises(ValueError, match="batch index 3 is out of bounds"):
         write_arrow_batch_lookup_index(
             path,
@@ -246,57 +189,9 @@ def test_write_reuse_fingerprints_source_once_and_validates_last_record(
             overwrite=False,
         )
 
-    assert snapshot_calls == [Path(path)]
 
-
-def test_raw_planner_index_rejects_same_size_unsampled_middle_rewrite_python(tmp_path: Path) -> None:
-    import pyarrow as pa
-
-    signature_ids = [f"key{index:013d}" for index in range(30_000)]
-    path = write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(signature_ids, type=pa.string()),
-                "payload": pa.array(["x" * 8] * len(signature_ids), type=pa.string()),
-            }
-        ),
-        tmp_path / "signatures.arrow",
-        max_record_batch_rows=1000,
-    )
-    index_path = tmp_path / "signatures.signatures_batch_index.bin"
-    write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", table_name="signatures")
-    payload = Path(path).read_bytes()
-    old_value = signature_ids[len(signature_ids) // 2].encode()
-    new_value = b"new0000000000000"
-    rewrite_offset = payload.index(old_value)
-    assert len(old_value) == len(new_value)
-    assert rewrite_offset > 65_536
-    assert rewrite_offset < len(payload) - 65_536
-    Path(path).write_bytes(payload[:rewrite_offset] + new_value + payload[rewrite_offset + len(old_value) :])
-
-    with pytest.raises(ValueError, match="stale"):
-        write_arrow_batch_lookup_index(
-            path,
-            index_path,
-            key_column="signature_id",
-            table_name="signatures",
-            overwrite=False,
-        )
-    with pytest.raises(ValueError, match="stale"):
-        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
-    with pytest.raises(ValueError, match="stale"):
-        read_arrow_batch_lookup_index_batch_indices(
-            path,
-            index_path,
-            key_column="signature_id",
-            values=[signature_ids[0]],
-        )
-
-
-@pytest.mark.parametrize("fingerprint_source", [True, False])
 def test_raw_planner_index_rejects_source_changed_while_building(
     tmp_path: Path,
-    fingerprint_source: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import pyarrow as pa
@@ -323,7 +218,6 @@ def test_raw_planner_index_rejects_source_changed_while_building(
             tmp_path / "signatures.signatures_batch_index.bin",
             key_column="signature_id",
             table_name="signatures",
-            fingerprint_source=fingerprint_source,
         )
 
 
@@ -332,15 +226,15 @@ def test_raw_planner_index_rejects_source_changed_while_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path, index_path = _write_tiny_index(tmp_path)
-    real_fingerprint_once = feature_block_arrow_module._source_file_fingerprint_once  # noqa: SLF001
+    real_lower_bound = feature_block_arrow_module._arrow_batch_lookup_lower_bound  # noqa: SLF001
 
-    def mutating_fingerprint_once(path_arg: Path, *, source_size: int) -> int:
-        fingerprint = real_fingerprint_once(path_arg, source_size=source_size)
-        stat = path_arg.stat()
-        os.utime(path_arg, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
-        return fingerprint
+    def mutating_lower_bound(*args):
+        result = real_lower_bound(*args)
+        stat = Path(path).stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+        return result
 
-    monkeypatch.setattr(feature_block_arrow_module, "_source_file_fingerprint_once", mutating_fingerprint_once)
+    monkeypatch.setattr(feature_block_arrow_module, "_arrow_batch_lookup_lower_bound", mutating_lower_bound)
 
     with pytest.raises(ValueError, match="changed while reading batch lookup index"):
         read_arrow_batch_lookup_index_batch_indices(
@@ -351,145 +245,99 @@ def test_raw_planner_index_rejects_source_changed_while_lookup(
         )
 
 
-def test_request_time_batch_lookup_does_not_fingerprint_source(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.parametrize("operation", ["lookup", "validate", "reuse"])
+def test_old_index_format_requires_rebuilding(tmp_path: Path, operation: str) -> None:
     path, index_path = _write_tiny_index(tmp_path)
-
-    def fail_fingerprint_once(path_arg: Path, *, source_size: int) -> int:
-        raise AssertionError(f"request-time lookup should not fingerprint {path_arg} size={source_size}")
-
-    monkeypatch.setattr(feature_block_arrow_module, "_source_file_fingerprint_once", fail_fingerprint_once)
-
-    assert feature_block_arrow_module.read_arrow_batch_lookup_index_batch_indices_for_request(
-        path,
-        index_path,
-        key_column="signature_id",
-        values=["s1"],
-    ) == {0}
+    current = index_path.read_bytes()
+    # A real v2 header includes the removed source fingerprint word.
+    index_path.write_bytes(b"S2ABI002" + current[8:32] + struct.pack("<Q", 123) + current[32:])
+    with pytest.raises(ValueError, match="invalid magic bytes.*Rebuild"):
+        if operation == "lookup":
+            read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="signature_id", values=["s1"])
+        elif operation == "validate":
+            validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+        else:
+            write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", overwrite=False)
 
 
-def _fail_fingerprint(path_arg: Path, *, source_size: int) -> int:
-    raise AssertionError(f"source fingerprint must not be computed for {path_arg} size={source_size}")
+def test_structural_reuse_preserves_bytes_and_does_not_claim_content_validation(tmp_path: Path) -> None:
+    import pyarrow as pa
 
-
-def _two_row_signatures_table(tmp_path: Path, pa) -> Path:
-    return Path(
-        write_arrow_ipc_table(
-            pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}),
-            tmp_path / "signatures.arrow",
-            max_record_batch_rows=1,
-        )
+    path, index_path = _write_tiny_index(tmp_path)
+    original_index = index_path.read_bytes()
+    original = Path(path).read_bytes()
+    assert b"s2" in original
+    Path(path).write_bytes(original.replace(b"s2", b"t2"))
+    with pa.memory_map(path, "r") as source:
+        assert pa.ipc.open_file(source).read_all()["signature_id"].to_pylist() == ["s1", "t2", "s3"]
+    metrics = validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+    assert metrics == {
+        "magic": "S2ABI003",
+        "record_count": 3,
+        "source_size": len(original),
+        "key_column_hash": feature_block_arrow_module._fnv64_bytes(b"signature_id"),  # noqa: SLF001
+    }
+    _, reused = write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", overwrite=False)
+    assert reused["reused"] is True
+    assert reused["magic"] == "S2ABI003"
+    assert index_path.read_bytes() == original_index
+    # The stale key remains reachable: the caller owns table/index pairing.
+    assert read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="signature_id", values=["s2"]) == {
+        1
+    }
+    assert (
+        read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="signature_id", values=["t2"]) == set()
     )
 
 
-def test_write_batch_lookup_index_can_skip_source_fingerprint(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pa = pytest.importorskip("pyarrow")
-    path = _two_row_signatures_table(tmp_path, pa)
-    index_path = tmp_path / "signatures.signatures_batch_index.bin"
-    monkeypatch.setattr(feature_block_arrow_module, "_source_file_fingerprint_once", _fail_fingerprint)
-
-    _, written = write_arrow_batch_lookup_index(
-        path, index_path, key_column="signature_id", table_name="signatures", fingerprint_source=False
-    )
-    assert written["reused"] is False
-    assert written["source_fingerprint"] == ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED
-    assert written["source_fingerprint_kind"] == "size_only"
-    assert feature_block_arrow_module.read_arrow_batch_lookup_index_batch_indices_for_request(
-        path, index_path, key_column="signature_id", values=["s1"]
-    ) == {0}
+@pytest.mark.parametrize("operation", ["lookup", "validate", "reuse"])
+def test_source_size_mismatch_is_still_rejected(tmp_path: Path, operation: str) -> None:
+    path, index_path = _write_tiny_index(tmp_path)
+    data = bytearray(index_path.read_bytes())
+    struct.pack_into("<Q", data, 16, Path(path).stat().st_size + 1)
+    index_path.write_bytes(data)
+    with pytest.raises(ValueError, match="stale.*indexed size"):
+        if operation == "lookup":
+            read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="signature_id", values=["s1"])
+        elif operation == "validate":
+            validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+        else:
+            write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", overwrite=False)
 
 
-def test_skip_source_fingerprint_cannot_reuse_an_existing_index(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    path = _two_row_signatures_table(tmp_path, pa)
-    index_path = tmp_path / "signatures.signatures_batch_index.bin"
-    write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", table_name="signatures")
-
-    with pytest.raises(ValueError, match="cannot be combined with overwrite=False"):
-        write_arrow_batch_lookup_index(
-            path,
-            index_path,
-            key_column="signature_id",
-            table_name="signatures",
-            overwrite=False,
-            fingerprint_source=False,
-        )
-    # also refused when no index exists yet, so the rule does not depend on disk state
-    with pytest.raises(ValueError, match="cannot be combined with overwrite=False"):
-        write_arrow_batch_lookup_index(
-            path,
-            tmp_path / "missing.bin",
-            key_column="signature_id",
-            table_name="signatures",
-            overwrite=False,
-            fingerprint_source=False,
-        )
-
-
-def test_strict_readers_reject_unfingerprinted_index_with_explicit_message(
+def test_source_changed_while_publishing_preserves_previous_index_and_cleans_temporary_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    pa = pytest.importorskip("pyarrow")
-    path = _two_row_signatures_table(tmp_path, pa)
-    index_path = tmp_path / "signatures.signatures_batch_index.bin"
-    write_arrow_batch_lookup_index(
-        path, index_path, key_column="signature_id", table_name="signatures", fingerprint_source=False
-    )
-    monkeypatch.setattr(feature_block_arrow_module, "_source_file_fingerprint_once", _fail_fingerprint)
-    message = "written with fingerprint_source=False"
+    path, index_path = _write_tiny_index(tmp_path)
+    previous = index_path.read_bytes()
+    original_write = feature_block_arrow_module._write_sorted_arrow_batch_lookup_records  # noqa: SLF001
 
-    with pytest.raises(ValueError, match=message):
-        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
-    with pytest.raises(ValueError, match=message):
-        read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="signature_id", values=["s1"])
-    with pytest.raises(ValueError, match=message):
-        write_arrow_batch_lookup_index(
-            path, index_path, key_column="signature_id", table_name="signatures", overwrite=False
-        )
-    monkeypatch.undo()
-    # a fresh fingerprinted write over it is the documented recovery
-    _, rewritten = write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", table_name="signatures")
-    assert rewritten["source_fingerprint_kind"] == "fnv1a64_full_file"
-    _, reused = write_arrow_batch_lookup_index(
-        path, index_path, key_column="signature_id", table_name="signatures", overwrite=False
-    )
-    assert reused["reused"] is True
-    assert reused["source_fingerprint_kind"] == "fnv1a64_full_file"
+    def mutate_after_write(*args):
+        original_write(*args)
+        stat = Path(path).stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    monkeypatch.setattr(feature_block_arrow_module, "_write_sorted_arrow_batch_lookup_records", mutate_after_write)
+    with pytest.raises(ValueError, match="changed while publishing batch lookup index"):
+        write_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+    assert index_path.read_bytes() == previous
+    assert not list(tmp_path.glob(f".{index_path.name}.*"))
 
 
-def test_write_raw_arrow_batch_lookup_indexes_passes_skip_fingerprint_through(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pa = pytest.importorskip("pyarrow")
-    signatures = write_arrow_ipc_table(
-        pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}),
-        tmp_path / "signatures.arrow",
-        max_record_batch_rows=1,
-    )
-    papers = write_arrow_ipc_table(
-        pa.table({"paper_id": pa.array(["p1", "p2"], type=pa.string())}),
-        tmp_path / "papers.arrow",
-        max_record_batch_rows=1,
-    )
-    monkeypatch.setattr(feature_block_arrow_module, "_source_file_fingerprint_once", _fail_fingerprint)
+def test_raw_indexes_can_be_created_and_structurally_reused(tmp_path: Path) -> None:
+    import pyarrow as pa
 
-    indexed_paths, metrics = write_raw_arrow_batch_lookup_indexes(
-        {"signatures": signatures, "papers": papers},
-        tmp_path / "idx",
-        fingerprint_source=False,
-    )
-    assert {"signatures_batch_index", "papers_batch_index"} <= set(indexed_paths)
-    assert {table_metrics["source_fingerprint_kind"] for table_metrics in metrics.values()} == {"size_only"}
-    with pytest.raises(ValueError, match="cannot be combined with overwrite=False"):
-        write_raw_arrow_batch_lookup_indexes(
-            {"signatures": signatures},
-            tmp_path / "idx2",
-            overwrite=False,
-            fingerprint_source=False,
-        )
+    paths = {
+        "signatures": write_arrow_ipc_table(
+            pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}), tmp_path / "signatures.arrow"
+        ),
+        "papers": write_arrow_ipc_table(
+            pa.table({"paper_id": pa.array(["p1", "p2"], type=pa.string())}), tmp_path / "papers.arrow"
+        ),
+    }
+    indexed, written = write_raw_arrow_batch_lookup_indexes(paths, tmp_path / "indexes", overwrite=False)
+    again, reused = write_raw_arrow_batch_lookup_indexes(paths, tmp_path / "indexes", overwrite=False)
+    assert again == indexed
+    assert {"signatures_batch_index", "papers_batch_index"} <= indexed.keys()
+    assert all(metrics["magic"] == "S2ABI003" and not metrics["reused"] for metrics in written.values())
+    assert all(metrics["reused"] for metrics in reused.values())

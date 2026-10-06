@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from types import MappingProxyType
 from typing import Any, BinaryIO
+from uuid import uuid4
 
 from s2and._sha256 import is_lowercase_sha256
 from s2and._sha256 import sha256_file as _sha256_file
@@ -499,17 +500,17 @@ def _load_artifact_specs(root: Path) -> tuple[str, Mapping[str, _ArtifactSpec]]:
 
 
 def _hash_retained_file(retained: _RetainedFile) -> tuple[int, str]:
+    from s2and.runtime import load_s2and_rust_extension
+
     with retained.lock:
         before = os.fstat(retained.handle.fileno())
-        retained.handle.seek(0)
-        digest = hashlib.sha256()
-        while chunk := retained.handle.read(1024 * 1024):
-            digest.update(chunk)
+        sha256 = load_s2and_rust_extension()._arrow_retained_file_sha256(
+            _raw_os_handle(retained.handle), str(retained.path)
+        )
         after = os.fstat(retained.handle.fileno())
-        retained.handle.seek(0)
     if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
         raise ValueError(f"Arrow artifact changed while opening: {retained.path}")
-    return int(after.st_size), digest.hexdigest()
+    return int(after.st_size), sha256
 
 
 def _open_retained_path(path: Path) -> BinaryIO:
@@ -629,7 +630,7 @@ def _construct_native_arrow_dataset(
 
 
 class ArrowDataset:
-    """One validated, owning handle for an immutable Arrow dataset root."""
+    """An owning handle for immutable Arrow files, verified or caller-trusted."""
 
     _active_uses: int
     _closed: bool
@@ -652,7 +653,7 @@ class ArrowDataset:
     )
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("ArrowDataset must be created with ArrowDataset.open(root)")
+        raise TypeError("ArrowDataset must be created with ArrowDataset.open(root) or ArrowDataset.open_trusted(paths)")
 
     @classmethod
     def open(
@@ -668,7 +669,69 @@ class ArrowDataset:
         if not resolved_root.is_dir():
             raise FileNotFoundError(f"Arrow dataset root is not a directory: {resolved_root}")
         generation_id, specs = _load_artifact_specs(resolved_root)
-        keys = set(specs)
+        return cls._open_files(
+            {key: spec.path for key, spec in specs.items()},
+            root=resolved_root,
+            generation_id=generation_id,
+            specs=specs,
+            require_specter=require_specter,
+            require_name_counts_index=require_name_counts_index,
+        )
+
+    @classmethod
+    def open_trusted(
+        cls,
+        paths: Mapping[str, str | os.PathLike[str]],
+        *,
+        require_specter: bool = False,
+        require_name_counts_index: bool = False,
+    ) -> ArrowDataset:
+        """Retain caller-owned files without a dataset manifest or checksum scans.
+
+        The caller guarantees that tables and indexes belong together and stay
+        immutable until the handle closes. Schemas, index structure, and source
+        sizes are still checked. Optional name-count indexes retain their own
+        validation. Unrelated path keys are ignored, as in dataset manifests.
+        Each open gets a fresh generation ID, isolating prediction caches.
+        """
+        resolved = {
+            key: Path(value)
+            for key, value in normalize_arrow_paths(
+                {key: value for key, value in paths.items() if key in _ARROW_IMMUTABLE_KEYS}
+            ).items()
+        }
+        missing = sorted(_REQUIRED_RUNTIME_KEYS - resolved.keys())
+        if missing:
+            raise MissingArrowArtifactError(
+                context="ArrowDataset.open_trusted",
+                required_keys=sorted(_REQUIRED_RUNTIME_KEYS),
+                missing_keys=missing,
+                missing_files={},
+                producer_hint="provide tables and their batch lookup indexes",
+            )
+        if ("specter" in resolved) != ("specter_batch_index" in resolved):
+            raise ValueError("Arrow paths must contain both specter and specter_batch_index or neither")
+        return cls._open_files(
+            resolved,
+            root=resolved["signatures"].parent,
+            generation_id=f"trusted:{uuid4().hex}",
+            specs=None,
+            require_specter=require_specter,
+            require_name_counts_index=require_name_counts_index,
+        )
+
+    @classmethod
+    def _open_files(
+        cls,
+        paths: Mapping[str, Path],
+        *,
+        root: Path,
+        generation_id: str,
+        specs: Mapping[str, _ArtifactSpec] | None,
+        require_specter: bool,
+        require_name_counts_index: bool,
+    ) -> ArrowDataset:
+        keys = set(paths)
         if require_specter and "specter" not in keys:
             raise MissingArrowArtifactError(
                 context="ArrowDataset.open",
@@ -688,22 +751,26 @@ class ArrowDataset:
 
         retained: dict[str, _RetainedFile] = {}
         try:
-            for key, spec in specs.items():
-                retained[key] = _RetainedFile(spec.content_path, _open_retained_path(spec.content_path))
-            for key, spec in specs.items():
-                byte_count, sha256 = _hash_retained_file(retained[key])
-                if byte_count != spec.byte_count:
-                    raise ValueError(f"Arrow artifact manifest files.{key}.byte_count mismatch: {spec.content_path}")
-                if sha256 != spec.sha256:
-                    raise ValueError(f"Arrow artifact manifest files.{key} checksum mismatch: {spec.content_path}")
+            for key, path in paths.items():
+                content_path = path / "manifest.json" if key == "name_counts_index" else path
+                retained[key] = _RetainedFile(content_path, _open_retained_path(content_path))
+            if specs is not None:
+                for key, spec in specs.items():
+                    byte_count, sha256 = _hash_retained_file(retained[key])
+                    if byte_count != spec.byte_count:
+                        raise ValueError(
+                            f"Arrow artifact manifest files.{key}.byte_count mismatch: {spec.content_path}"
+                        )
+                    if sha256 != spec.sha256:
+                        raise ValueError(f"Arrow artifact manifest files.{key} checksum mismatch: {spec.content_path}")
             for table_name in ("signatures", "papers", "paper_authors", "specter"):
                 if table_name in retained:
                     _validate_retained_arrow_schema(retained[table_name], table_name=table_name)
 
             name_counts_index: NameCountsIndex | None = None
-            if "name_counts_index" in specs:
-                name_counts_index = NameCountsIndex.open(specs["name_counts_index"].path)
-                if name_counts_index.manifest_sha256 != specs["name_counts_index"].sha256:
+            if "name_counts_index" in paths:
+                name_counts_index = NameCountsIndex.open(paths["name_counts_index"])
+                if specs is not None and name_counts_index.manifest_sha256 != specs["name_counts_index"].sha256:
                     raise ValueError("opened name-count manifest does not match the Arrow artifact manifest")
             native_name_counts = None if name_counts_index is None else name_counts_index._native
             native = _construct_native_arrow_dataset(retained, native_name_counts)
@@ -713,7 +780,7 @@ class ArrowDataset:
             raise
 
         dataset = object.__new__(cls)
-        dataset._root = resolved_root
+        dataset._root = root
         dataset._generation_id = generation_id
         dataset._files = retained
         dataset._name_counts_index = name_counts_index
@@ -725,6 +792,7 @@ class ArrowDataset:
 
     @property
     def root(self) -> Path:
+        """Manifest root, or the signatures directory for a trusted open."""
         return self._root
 
     @property

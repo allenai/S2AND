@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +15,26 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
 from s2and.incremental_linking.feature_block import write_arrow_ipc_table
 from tests.helpers import write_minimal_arrow_prediction_bundle
+
+
+def test_sha256_uses_retained_file_without_moving_cursor(tmp_path: Path) -> None:
+    """Hash the retained contents even when their path names a replacement."""
+    from s2and.arrow_inputs import _open_retained_path, _raw_os_handle
+    from s2and.runtime import load_s2and_rust_extension
+
+    native = load_s2and_rust_extension()
+    content = b"retained source contents" * 100_000
+    path = tmp_path / "source.arrow"
+    path.write_bytes(content)
+    expected_sha = hashlib.sha256(content).hexdigest()
+    with _open_retained_path(path) as source:
+        source.seek(17)
+        path.unlink()
+        path.write_bytes(b"replacement")
+        sha256 = native._arrow_retained_file_sha256(_raw_os_handle(source), str(path))
+        assert sha256 == expected_sha
+        assert source.tell() == 17
+        assert source.read(24) == content[17:41]
 
 
 def _native_features(dataset: ArrowDataset) -> np.ndarray:

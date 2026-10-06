@@ -1,7 +1,7 @@
 """Convert S2AND runtime inputs into direct-Rust Arrow artifacts.
 
 The runtime bundle writer emits bounded Arrow IPC file-format tables plus the
-current S2AND raw-planner batch-index sidecars (S2ABI002).
+current S2AND raw-planner batch-index sidecars (S2ABI003).
 """
 
 from __future__ import annotations

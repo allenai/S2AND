@@ -265,14 +265,15 @@ research-training bundle therefore uses `specter.specter_batch_index.bin`
 instead of the production `specter2.specter_batch_index.bin`.
 
 The batch-index format is S2AND-owned. Current writers and readers require
-format magic `S2ABI002`, which records the key-column hash and
-full-file source fingerprint in addition to key-to-batch records. A fingerprint
-of zero is reserved for indexes written with `fingerprint_source=False` over
-caller-owned, request-scoped tables. Native dataset opens and Python request
-reads accept these indexes using the source size; native opens still validate
-the manifest SHA-256 inventory and all index structure checks. Strict Python
-index validation and index reuse reject them. Published artifacts must retain
-the default `fingerprint_source=True`. Each record maps a
+format magic `S2ABI003`. Its 32-byte little-endian header is `<8sQQQ`: magic,
+record count, source byte count, and key-column hash. Each 16-byte `<QII>` record
+contains a key hash, batch index, and reserved zero. There is no full-file source
+fingerprint. Older batch indexes must be rebuilt with the current writer.
+Manifest-backed opens verify SHA-256 checksums; `open_trusted(paths)` skips the
+dataset manifest. Both retain source-size, schema, and index structure checks.
+Standalone validation and `overwrite=False` reuse check structure and size,
+not content identity; the producer must keep each table/index pair together.
+Each record maps a
 64-bit FNV-1a hash of the lookup key to an IPC record-batch index; the Rust
 reader verifies exact ids after loading the selected batches, so hash collisions
 do not change results. The file body must contain exactly the header-declared
@@ -779,8 +780,8 @@ Required physical-layout checks:
   them. A fixture without embeddings omits both `specter` and
   `specter_batch_index`.
 - Batch-index validation must not require source file mtimes to match. Object
-  store downloads can rewrite mtimes; validators use source size plus the
-  stored full-file source fingerprint for portable release artifacts.
+  store downloads can rewrite mtimes; index validators use source size and
+  structure. Dataset manifests bind portable release files with SHA-256.
 
 Recommended smoke checks:
 

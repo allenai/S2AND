@@ -91,7 +91,7 @@ pub(crate) struct RetainedFile {
 }
 
 impl RetainedFile {
-    fn from_raw_handle(raw: isize, label: String) -> PyResult<Self> {
+    pub(crate) fn from_raw_handle(raw: isize, label: String) -> PyResult<Self> {
         Ok(Self {
             file: Arc::new(duplicate_os_handle(raw, &label)?),
             label: Arc::from(label),
@@ -448,18 +448,13 @@ mod tests {
     }
 
     fn write_index(path: &Path, source: &Path, key_column: &str, value: &str) {
-        let source_bytes = std::fs::read(source).expect("read Arrow bytes");
-        let source_size = source_bytes.len() as u64;
-        let mut source_hash = crate::fnv64(crate::arrow_batch_lookup::SOURCE_HASH_DOMAIN);
-        source_hash = crate::fnv64_update(source_hash, &source_size.to_le_bytes());
-        source_hash = crate::fnv64_update(source_hash, &source_bytes);
+        let source_size = std::fs::metadata(source).expect("stat Arrow file").len();
         let bytes = crate::arrow_batch_lookup::MAGIC
             .iter()
             .copied()
             .chain(1u64.to_le_bytes())
             .chain(source_size.to_le_bytes())
             .chain(crate::fnv64(key_column.as_bytes()).to_le_bytes())
-            .chain(source_hash.to_le_bytes())
             .chain(crate::fnv64(value.as_bytes()).to_le_bytes())
             .chain(0u32.to_le_bytes())
             .chain(0u32.to_le_bytes())

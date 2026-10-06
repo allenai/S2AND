@@ -644,6 +644,9 @@ def _load_bundle_clusterer(
     nameless_classifier = NativeLightGBMBinaryClassifier(
         bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["pairwise_nameless_model"],
     )
+    # Manifest validation already hashed these immutable bundle files.
+    classifier._model_sha256 = manifest["sha256"][PAIRWISE_ONLY_MANIFEST_FILES["pairwise_main_model"]]
+    nameless_classifier._model_sha256 = manifest["sha256"][PAIRWISE_ONLY_MANIFEST_FILES["pairwise_nameless_model"]]
     for name, model, info in (
         ("main", classifier, featurizer_info),
         ("nameless", nameless_classifier, nameless_featurizer_info),

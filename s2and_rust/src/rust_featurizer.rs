@@ -1193,11 +1193,8 @@ impl RustFeaturizer {
                     "Arrow signatures reference missing paper_id '{paper_id}'"
                 )));
             };
-            let raw_authors = raw_authors_by_paper.remove(paper_id).ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Arrow paper_authors are missing rows for paper_id '{paper_id}'"
-                ))
-            })?;
+            // An empty source author list has no rows in the Arrow author table.
+            let raw_authors = raw_authors_by_paper.remove(paper_id).unwrap_or_default();
             let (predicted_language, language_reliability) = if raw_paper
                 .predicted_language
                 .is_some()

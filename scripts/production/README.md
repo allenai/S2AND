@@ -181,7 +181,9 @@ $PythonDist = "$DistRoot\python"
 $RustDist = "$DistRoot\rust"
 
 uv run --no-project python scripts/sync_version.py --check
-uv build --sdist --wheel --out-dir $PythonDist --clear
+$PackageVersion = (Get-Content -Raw VERSION).Trim()
+uv build --sdist --out-dir $PythonDist --clear
+uv build "$PythonDist\s2and-$PackageVersion.tar.gz" --wheel --out-dir $PythonDist
 uv run --no-project maturin build `
   --manifest-path s2and_rust/Cargo.toml `
   --release `
@@ -196,6 +198,7 @@ uv run --no-project python `
 
 The verifier requires the package's tuple and ORCID runtime assets and rejects
 packaged model/default paths.
+The fresh source archive excludes stale files from the checkout's `build/` directory.
 
 For a bounded local Arrow layout check:
 

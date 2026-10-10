@@ -11,8 +11,12 @@ The alias threshold remains two. EVENT counts can contain multiple contributions
 The selected study table contains 5,974 prefix pairs across 1,606 outer keys.
 Its SHA256 is `332067cf29651fd077a50dc4d1754bf3f407b5b463dceb03f774810bec6aede5`.
 The saved file is `prefix/giant_followup/target_counts/tables/event_10_all.json` under the local experiment output root.
-The packaged prefix data and manifest are absent from this checkout. Release preparation must create the packaged artifact.
-This commit records the decision and fixes the Arrow boundary; it does not replace production count files or models.
+The selected table and tuple-dependency manifest are now packaged under `s2and/data/`.
+The publication writer uses compact JSON. The packaged data SHA256 is `e866a498593ca8b9b132bec4da6abd3fabde28cbdad0f3f1749ce17ab0c8ee3b`.
+The packaged values match the saved study table exactly. The corpus pass does not repeat.
+Both the clean wheel and source distribution pass the release inventory and byte-equality checks.
+The [Stage 1 checklist](release.md#stage-1-generate-runtime-data) requires these assets before publication.
+The release workflow enforces the distribution checks. Production models remain external artifacts.
 
 The source pass covers 699,054,083 mentions with surnames. Five indexes cover 75,085 benchmark keys; seven Arrow bundles contain 766,133 signatures.
 LODO uses 70 fresh LightGBM fits with fixed 1.21 parameters, eight CPU threads, and deterministic mode.

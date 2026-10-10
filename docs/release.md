@@ -171,6 +171,12 @@ uv run --no-project python scripts/run_ci_locally.py
       packaged tuple byte-for-byte and load that checked-in artifact through
       the production loader. Regenerate it only for an intentional source or
       canonicalization-policy change.
+- [ ] Reuse reviewed saved counts when their source and policy remain unchanged.
+      The [2026-10-09 experiment](name_count_experiment_20261009_results.md)
+      selects plain mention counts and EVENT threshold 10 with alias threshold 2.
+      The selected prefix table and tuple-dependency manifest are already in `s2and/data/`.
+      Verify their recorded identities before any model fit or distribution build.
+      Repeat the corpus pass only after a source or count-policy change.
 - [ ] Export warehouse rows through any working authenticated client. Review
       the SQL, required columns, row bounds, and spot checks documented in the
       [count command reference](../scripts/production/README.md#count-artifacts)

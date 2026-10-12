@@ -11293,3 +11293,279 @@ wally,wolodymyr
 yakov,yasha
 yosef,yosi
 yulii,yulij
+achilleas,achillefs
+agnes,anyes
+ajan,alan
+aleksandr,alexandre
+aleksei,alex
+aleksei,alexsey
+aleksey,alexsey
+alexandera,alexandra
+alexei,alexsey
+andreas,andy
+andreas,anreas
+andrew,andrzej
+antonello,antonio
+anvze,anze
+ashu,ashwani
+bahrain,bahram
+bartflomiej,bartllomiej
+bartflomiej,bartlomiej
+bartllomiej,bartlomiej
+bartolome,bartomeu
+bernardo,berndt
+bernd,bernhard
+bing nian,bn
+bing song,bs
+bingsong,bs
+brice oliver,brice olivier
+cai dain,cai dian
+cai dain,cd
+cai dian,cd
+caidian,cd
+cg,chun gui
+cg,chungui
+chang jiang,cj
+chang sun,chong sun
+changjang,cj
+chao hisen,chao hsien
+chen sheng,cs
+chensheng,cs
+constantin,constantln
+constantine,costas
+cumrum,cumrun
+curtin,curtis
+daciberg,dacilberg
+danieel,daniel
+davidson,davision
+davidson,davison
+davision,davison
+demcsthenes,demos
+demcsthenes,demosthenes
+dieter,dietrich
+dimitri,dmitrii
+dmitri,dmtri
+dmitrij,dmtri
+dong hui,donhui
+dong lianf,dong liang
+dong sheng,ds
+dongsheng,ds
+eckehard,eokehard
+edouard,edwabd
+eduard,eh
+edwabd,edward
+elisabesth,elisabeth
+ernest,errest
+fang hau,fang hua
+feihui,feihul
+filippo,fillippo
+francesco,franco
+francisco,frank
+franciscus,frank
+francois,frangois
+francois,frarnois
+fred,friedrich
+frederic,friedrich
+frederick,friedrich
+gabriblla,gabriella
+gautam,goutam
+gayong,gayoung
+giampaolo,giampolo
+giuseppe,giusepppe
+goekce,gokce
+greg,greig
+gregory,grezgorz
+gregory,grigorii
+gregory,grigory
+gregory,grzegorz
+grezgorz,grzegorz
+guo hua,guo jua
+hans heinrich,heinrich
+hans josef,hj
+hao huai,hh
+hao huai,hou huai
+harrtmuth,hartmuth
+hf,hua fu
+hh,hou huai
+hj,hyeonjoon
+hj,hyun jong
+hl,hong lin
+hom yi,horng yih
+hrachya,hratchia
+hrachya,hratchya
+hratchia,hratchya
+iannis,ioannis
+jainwei,jian wei
+james,jem
+janos,john
+je,jie
+jean franccois,jean francois
+jean laurent,jl
+ji aan,jia an
+jia mo,jm
+jiamo,jm
+jian she,js
+jianahua,jianhua
+jifi,jiri
+joakim,jokaim
+joao,jooa
+joaquim,joaquira
+josha,joshua
+julio,juulio
+junichi,juntchi
+kang lin,kl
+kang ling,kl
+kanglin,kl
+karin,katrin
+karl heinz,kh
+kasimierz,kazimierz
+ken ichi,ken iti
+king kup,king lup
+kiyomoto,kiyotomo
+kou bin,kuo bin
+ladislaus,laszlo
+lbica,lubica
+lenny,leonid
+li zhu,lz
+lian rong,lr
+maiete,maite
+make,malte
+makus,markus
+marcella,marcelle
+marcus,mark
+marie helene,mh
+masiur,mosiur
+mi seun,mi suen
+michaa,michal
+michaeel,michael
+michael,miclael
+michael,misha
+ml,mu lin
+mohammad,mohammmad
+natan,nathan
+neetika,nitika
+nematollah,nematullah
+niccusor,nicusor
+nicholay,nick
+nicholay,nickolay
+nick,nicolaos
+ocker,okker
+ocker,okkie
+oezguer,ozgur
+okker,okkie
+palo,paolo
+paraminta,paramita
+pascal,paschalis
+petia,petya
+petr,piet
+phil,phlip
+philip,phlip
+philipp,phillippe
+philippe,phillip
+pierluigi,pl
+pun xun,puxun
+qh,qing hua
+rajiah,rajish
+rakesh,rankesh
+randal,randy
+randolph,randoplh
+rd,rolf dieter
+ricard,richard
+roderich,roderick
+rohollah,rohoollah
+sailajananda,sailjananda
+salvatore,salvo
+sang beom,sang bum
+sarka,sharka
+sarmishtha,sarmistha
+saurabh,sourav
+sc,shu chen
+schin ichi,shin ichi
+schin ichi,shin iehi
+segev,seveg
+semen,simon
+semyon,simon
+sergeii,sergey
+sergej,serguei
+she sheng,ss
+sheng qin,shenqqin
+shengqin,shenqqin
+shi huo,shi kuo
+shin ichi,shin iehi
+shinich,shinici
+shinichi,shinici
+shiu yuen,siu yuen
+shoichi,syoichi
+shorokou,shoroku
+shoschichi,shoshichi
+shou xian,sx
+shouxian,sx
+shuang shi,ss
+shuangshi,ss
+shubhendra,subendra
+shubhendra,subhendra
+siamak,siamk
+sidney,sydney
+sigbjoern,sigbjorn
+sin,syn
+stepan,stephan
+stoian,stoyan
+subendra,subhendra
+subhadittya,subhaditya
+sudhir,sundir
+szabocls,szabolcs
+tetstuo,tetsuo
+thomas,toma
+tile,tilo
+tomas,tomavs
+tonatiuh,tonatiuii
+tsau,tsay
+ulrick,ulrik
+uros,urovs
+vasiliy,vasyl
+veniamin,venya
+vicent,vincente
+vicente,vincent
+vojtech,vojtyech
+vyacheslav,vyatcheslav
+wei li,wl
+wei xing,wx
+wei zhou,wz
+wen feng,wf
+wenfei,wenfie
+wiesaw,wieslaw
+wiesiek,wieslaw
+willem,willy
+woiciech,wojciech
+woiciech,wojtek
+wojciech,wojeciech
+xc,xin chou
+xc,xinchou
+xh,xin hua
+xh,xinhua
+xh,xiu hua
+xiaoyong,xy
+xie guo,xiguo
+xing he,xinhe
+xue chai,xue hai
+xue yao,xy
+yan qiu,yan qui
+yeimkuan,yeimkunn
+yeong hun,young hoon
+yi sheng,ys
+ying yu,yinyu
+yishau,yishay
+yosef,yossi
+yoshihiio,yoshihiro
+yoshitaka,yositaka
+you ming,yu ming
+youn lang,youn long
+ys,yu sheng
+yu zhi,yz
+zen,zhen
+zhao,zhoa
+zhi peng,zi peng
+zhipeng,zi peng
+zhu hao,zu hao
+zi jin,zj
+zijin,zj

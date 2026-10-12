@@ -25,7 +25,7 @@ def test_checked_in_source_reproduces_canonical_name_tuples_byte_exactly(tmp_pat
 
     assert regenerated_path.read_bytes() == expected_path.read_bytes()
     artifact = load_name_tuple_artifact(expected_path)
-    assert len(artifact.pairs) == 5054
+    assert len(artifact.pairs) == 5330
     assert artifact.data_sha256 == hashlib.sha256(expected_path.read_bytes()).hexdigest()
 
 
@@ -45,19 +45,28 @@ def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
     assert artifact.pairs.isdisjoint(excluded)
 
 
-def test_gold_alias_additions_remove_real_first_name_vetoes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("evidence_file", "expected_count", "required_pair"),
+    [
+        ("name_tuple_gold_additions_20261012.csv", 27, ("jeremiah", "jerry")),
+        ("name_tuple_model_additions_20261012.csv", 276, ("bernd", "bernhard")),
+    ],
+)
+def test_gold_alias_additions_remove_real_first_name_vetoes(
+    tmp_path: Path, evidence_file: str, expected_count: int, required_pair: tuple[str, str]
+) -> None:
     """Preserve verified name variants without changes to the constraint policy."""
     from s2and.consts import LARGE_DISTANCE
     from s2and.feature_port import _get_rust_featurizer
     from tests.helpers import build_arrow_training_dataset
     from tests.incremental_test_helpers import _dataset
 
-    evidence_path = Path(__file__).resolve().parents[1] / "docs/release_evidence/name_tuple_gold_additions_20261012.csv"
+    evidence_path = Path(__file__).resolve().parents[1] / "docs/release_evidence" / evidence_file
     with evidence_path.open(encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream))
     pairs = [(row["name_a"], row["name_b"]) for row in rows]
-    assert len(pairs) == len(set(pairs)) == 27
-    assert ("jeremiah", "jerry") in pairs
+    assert len(pairs) == len(set(pairs)) == expected_count
+    assert required_pair in pairs
     names = [(first.replace(" ", "-"), "", "Smith") for pair in pairs for first in pair]
     dataset = _dataset(names, {})
     packaged = load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt").pairs

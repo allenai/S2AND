@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import gzip
 import hashlib
 import json
@@ -24,7 +25,7 @@ def test_checked_in_source_reproduces_canonical_name_tuples_byte_exactly(tmp_pat
 
     assert regenerated_path.read_bytes() == expected_path.read_bytes()
     artifact = load_name_tuple_artifact(expected_path)
-    assert len(artifact.pairs) == 5027
+    assert len(artifact.pairs) == 5054
     assert artifact.data_sha256 == hashlib.sha256(expected_path.read_bytes()).hexdigest()
 
 
@@ -42,6 +43,43 @@ def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
     assert len(excluded) == 923
     assert accepted <= artifact.pairs
     assert artifact.pairs.isdisjoint(excluded)
+
+
+def test_gold_alias_additions_remove_real_first_name_vetoes(tmp_path: Path) -> None:
+    """Preserve verified name variants without changes to the constraint policy."""
+    from s2and.consts import LARGE_DISTANCE
+    from s2and.feature_port import _get_rust_featurizer
+    from tests.helpers import build_arrow_training_dataset
+    from tests.incremental_test_helpers import _dataset
+
+    evidence_path = Path(__file__).resolve().parents[1] / "docs/release_evidence/name_tuple_gold_additions_20261012.csv"
+    with evidence_path.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    pairs = [(row["name_a"], row["name_b"]) for row in rows]
+    assert len(pairs) == len(set(pairs)) == 27
+    assert ("jeremiah", "jerry") in pairs
+    names = [(first.replace(" ", "-"), "", "Smith") for pair in pairs for first in pair]
+    dataset = _dataset(names, {})
+    packaged = load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt").pairs
+    assert set(pairs) <= packaged
+    dataset.name_tuples = set(packaged) - set(pairs)
+    for index in range(len(pairs)):
+        left, right = str(2 * index), str(2 * index + 1)
+        assert dataset.get_constraint(left, right) == LARGE_DISTANCE
+        assert dataset.get_constraint(right, left) == LARGE_DISTANCE
+    dataset.name_tuples = set(packaged)
+    for index in range(len(pairs)):
+        left, right = str(2 * index), str(2 * index + 1)
+        assert dataset.get_constraint(left, right) is None
+        assert dataset.get_constraint(right, left) is None
+    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow")
+    native = _get_rust_featurizer(arrow_dataset)
+    signature_indices = {signature_id: index for index, signature_id in enumerate(native.signature_ids())}
+    for index in range(len(pairs)):
+        left, right = str(2 * index), str(2 * index + 1)
+        assert native.get_constraints_block_upper_triangle_indexed(
+            [signature_indices[left], signature_indices[right]], num_threads=1
+        )[2] == [None]
 
 
 def test_loader_reads_data_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

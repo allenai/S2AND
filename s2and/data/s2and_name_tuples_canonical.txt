@@ -881,6 +881,7 @@ dam,dan
 damian,damien
 damian,damion
 dan,dj
+dana,daniela
 danajeyan,dananjeyan
 daneil,daniel
 daneila,daniela
@@ -1348,6 +1349,7 @@ feyza,feyze
 fhathuwani,fhatuwani
 fiametta,fiammetta
 fiamma,fiammetta
+fido,fridolin
 filip,fillip
 filipo,filippo
 filippo,fillipo
@@ -1483,6 +1485,7 @@ george,giorgos
 george,gyorgy
 georges,geroges
 georgi,georgy
+georgi,gia
 georgia,georgina
 georgie,georgina
 georgii,georgiy
@@ -1590,6 +1593,9 @@ graziele,grazieli
 gregg,gregory
 greggory,gregory
 gregor,grzegorz
+gregori,gregory
+gregori,grigori
+gregory,grigori
 gregory,grigoriy
 greta,gretta
 griffin,grifin
@@ -1681,6 +1687,7 @@ hangwu,hanwu
 hangxi,hanxi
 hank,henry
 hans joerg,hans jorg
+hans juergen,hans jurgen
 hansjoerg,hansjorg
 haralabos,haralampos
 hardwig,hartwig
@@ -1724,6 +1731,7 @@ henrietta,henriette
 henrry,henry
 heorhii,heorhiy
 herbert,herbet
+herbert,herbi
 herbert,herbie
 herman,hermen
 hermann,herrmann
@@ -1745,6 +1753,7 @@ hion suck,hyun suck
 hionsuck,hyunsuck
 hiromichi,hiromishi
 hiromichi,hromichi
+hiroshi,hirosi
 his,hsi
 hisahi,hisashi
 hitoshi,hitotshi
@@ -1894,6 +1903,7 @@ ishmael,ismael
 isidora,izidora
 isidre,isidro
 ismaeil,ismail
+israel,izrail
 itaru,itraru
 itzhak,itzik
 iulia,iuliia
@@ -1908,6 +1918,7 @@ ja,juan
 jaap,jacob
 jabar,jabbar
 jacco,jacob
+jack,jacob
 jack,john
 jackie,jacky
 jackie,jacqueline
@@ -1948,6 +1959,7 @@ james,jim
 james,jimmy
 jamile,jamille
 jan,johan
+jan,johann
 jan,johannes
 jan,john
 jan douwe,jaun douwe
@@ -2018,6 +2030,7 @@ jeorg,joerg
 jeramiah,jeremiah
 jeremey,jeremy
 jeremiah,jeremy
+jeremiah,jerry
 jeremy,jerremy
 jeremy,jerry
 jernimo,jeronimo
@@ -2161,6 +2174,7 @@ jonatahn,jonathan
 jonathan,jonathon
 jonathan,jonnathan
 jonathan,jonny
+jonathan,joss
 jonathon,jonthon
 jonchul,jongchul
 joneyeon,jongyeon
@@ -2257,6 +2271,7 @@ kalayanam,kalyanam
 kalayanmoy,kalyanmoy
 kalayanrao,kalyanrao
 kalina,kalyna
+kallia,kalliopi
 kamal,kamel
 kamal edin,kamal el din
 kamaledin,kamaleldin
@@ -2294,6 +2309,7 @@ katerina,katherine
 kateryina,kateryna
 katharina,kathrin
 katharine,katherine
+katharine,katy
 katharyn,kathryn
 katherine,kathrine
 katherine,kathryn
@@ -2425,6 +2441,7 @@ kourosh,kurosh
 kovalevskij,kovalevsky
 krasimir,krassimir
 krikhtina,krykhtina
+kris,krzysztof
 krishjanis,krisjanis
 krishnaswamy,krishnaswarmy
 krishnednu,krishnendu
@@ -2680,6 +2697,9 @@ ludmila,ludmyla
 ludmila,lyudmila
 ludmila,lyudmyla
 ludmyla,lyudmyla
+ludvig,ludwig
+ludvig,lyudvig
+ludwig,lyudvig
 luidmila,lyudmila
 luiiz,luiz
 luis,luiz
@@ -2787,6 +2807,7 @@ mannu deep,manudeep
 mannudeep,manudeep
 manoel,manuel
 manogaran,manoharan
+manolo,manuel
 manoochcher,manoochehr
 mansoor,mansour
 mansoor,mansur
@@ -3015,6 +3036,7 @@ mikail,mikhail
 mikalaj,mikola
 mikhael,mikhail
 mikhael,mikhales
+mikhael,misha
 mikhail,mikhal
 mikhail,misha
 mikhail,mishail
@@ -4073,6 +4095,7 @@ shin,sin
 shinichio,shinichiro
 shinichiro,shinichro
 shinske,shinsuke
+shinya,sinya
 shiva prakash,shivprakash
 shivakumara,sivakumara
 shivaprakash,shivprakash
@@ -4630,6 +4653,7 @@ walaska,waleska
 waldemar,waldermar
 waleed,walid
 walerij,walery
+wally,wolodymyr
 walter,walther
 wance,wence
 wangli,wanli
@@ -4748,6 +4772,7 @@ yafang,yanfang
 yafeng,yangfeng
 yahia,yahya
 yakiv,yakov
+yakov,yasha
 yalcin,yalcln
 yana,yanna
 yaneth,yanhet
@@ -4862,6 +4887,7 @@ yoon,yun
 yoon hoi,yun hoi
 yoonhoi,yunhoi
 yooseok,yoosoek
+yosef,yosi
 yosef,yousef
 yoshihiro,yoshihro
 yoshihiro,yoshjiro
@@ -4907,6 +4933,7 @@ yuli,yuly
 yulia,yuliia
 yulia,yuliya
 yulia,yulya
+yulii,yulij
 yuliia,yuliy
 yuliia,yuliya
 yuliya,yulliya

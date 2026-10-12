@@ -35,6 +35,12 @@ spaces in storage, but `canonical_lasts_equivalent` ignores spaces when
 comparing them: `ou yang` equals `ouyang`. Dash variants become spaces during
 canonicalization, before this comparison.
 
+Full middle names also use `same_prefix_tokens` before a full-token conflict
+causes a veto. For example, `meg` matches `megan`, and `ch` matches `charles`.
+The rule compares aligned tokens up to the shorter list, as for first names.
+Middle initial conflicts still cause a veto. Seed, ORCID, surname, and first-name
+rules retain their precedence. Middle names do not use the alias tuple file.
+
 The live authorities are `s2and.text`, its Rust implementation, and
 [the frozen examples](../tests/fixtures/canonical_name_examples.json).
 Tuple and ORCID runtime rules live in

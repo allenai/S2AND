@@ -22,8 +22,9 @@ The ORCID supplement lacks 76 label entries for 75 unique signature IDs.
 
 The alias file controls first-name compatibility only.
 First-name Meg/Megan and Ch/Charles already pass the prefix rule.
-Their middle-name forms can fail the separate full-token rule, which does not consult this file.
-No middle-name, surname, seed, ORCID, or first-initial constraint policy changes occur.
+Before the middle-prefix policy change, their middle-name forms fail the separate full-token rule, which does not consult this file.
+The alias commit changes no middle-name, surname, seed, ORCID, or first-initial constraint policy.
+The separate [middle-prefix policy](middle_name_prefix_policy_20261012.md) permits these middle-name forms.
 
 The artifact hash changes with these additions.
 Regenerate dependent ORCID prefix counts under the release contract.

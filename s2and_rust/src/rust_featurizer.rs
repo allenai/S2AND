@@ -590,7 +590,8 @@ impl RustFeaturizer {
                 let conflicting_full_names = !middle_1_words.is_empty()
                     && !middle_2_words.is_empty()
                     && middle_1_words.is_disjoint(&middle_2_words)
-                    && middle_1_chars != middle_2_chars;
+                    && middle_1_chars != middle_2_chars
+                    && !same_prefix_tokens(middle1_str, middle2_str);
 
                 if conflicting_initials || conflicting_full_names {
                     return Some(high_value);

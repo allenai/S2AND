@@ -53,6 +53,7 @@ from s2and.text import (
     normalize_orcid_compact,
     normalize_text,
     normalize_title,
+    same_prefix_tokens,
 )
 from s2and.thread_config import resolve_n_jobs
 
@@ -1411,8 +1412,8 @@ class ANDData:
            - first initials disagree
            - first names are neither compatible prefixes nor known aliases
              from `self.name_tuples`
-           - middle-name evidence is mutually conflicting (initials or full
-             middle tokens)
+           - middle initials conflict, or full middle tokens conflict without
+             compatible aligned prefixes
 
         If no hard rule applies, return `None`.
 
@@ -1558,6 +1559,7 @@ class ANDData:
                         and len(middle_2_words) > 0
                         and len(middle_1_words.intersection(middle_2_words)) == 0
                         and set("".join(middle_1_words)) != set("".join(middle_2_words))
+                        and not same_prefix_tokens(middle_1_text, middle_2_text)
                     )
                     if conflicting_initials or conflicting_full_names:
                         return high_value

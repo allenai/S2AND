@@ -2,7 +2,8 @@
 
 All requested label and feature treatments complete. No incremental model fit occurs in this task.
 The durable root is `D:/local-unsynced/s2and_v1.3_train_20261012/incremental_treatments_20261013`.
-Use `source_bundle_treated` for final source inputs. Preserve the original source bundle.
+The portable dataset root is `D:/local-unsynced/s2and_v1.3_upload_20261013/linker_source`.
+Use this root for upload and future fits. Preserve the original source bundle.
 
 | Treatment | Result |
 | --- | --- |
@@ -17,6 +18,7 @@ Use `source_bundle_treated` for final source inputs. Preserve the original sourc
 | Final source | 2,035,853 rows across ten tables; 2,869 additional components; no open requested targets. |
 | Feature context | Additional components change retrieval frequencies. A matched probe finds 19 changed values across 11 unchanged-window rows. |
 | Final features | All ten tables complete: 2,035,841 rows and 53 features. Retained targets match source labels. No query group disappears. |
+| Portable dataset | 180 physical files; 8.64 GB; internal count index; 14 updated manifests. Relocated native loaders accept all 13 datasets. |
 
 Initial-only review packets mask query first and middle names, ORCID, and the query author row in paper rosters.
 Each source table retains its original fields, order, types, and Pandas metadata. Source tables contain 15, 16, or 17 fields.
@@ -29,6 +31,11 @@ Of retained table views, 72 lose a positive candidate and eight gain one.
 Existing feature filters omit seven positive self-component rows and five rows outside the current retrieval window.
 All 235 active selected windows and their 3,931 source rows have features.
 Final work uses 68,795,671 pair computations, 37.85 minutes, and 11.49 GiB peak RAM. CPU capacity adds a 4.81-minute wait.
+
+The portable export preserves all 166 payload hashes and 2,035,853 source rows. It has no filesystem links or external operational paths.
+`scripts/production/model/export_linker_source_bundle.py` derives dataset names from the manifest. The assembler enforces the same portability checks.
+All 16 export tests pass, including patents, source removal, relocation, and Windows junction cases.
+Export commands and checks are in `D:/local-unsynced/s2and_v1.3_upload_20261013/run_evidence`.
 
 `review_evidence` preserves complete packets, rosters, decisions, the corrected replay, and copy checks.
 `automatic_labels` preserves gold compilers, accepted ledgers, and target proofs. Source application reports remain in `source_bundle_treated`.

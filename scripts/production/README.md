@@ -820,6 +820,25 @@ per-dataset copies. The final public-data manifest takes `release_version` from
 the prepared model plan and records `kind: "s2and_public_data"` plus public
 `format_version: 1`; the operator does not enter the version again.
 
+After a label or candidate treatment, export the updated assembled source bundle.
+Use this command for each release. This includes a future patents release:
+
+```powershell
+uv run python scripts/production/model/export_linker_source_bundle.py `
+  --source-bundle "$RunRoot\stages\linker_source_bundle_treated" `
+  --output-source-bundle "$RunRoot\stages\linker_source_bundle_portable"
+```
+
+The output directory must be new. The exporter copies the actual shared count
+index, replaces dataset index paths, and updates collection manifest hashes.
+Dataset names come from the collection manifest. The command rejects filesystem
+links and operational paths outside the output. It verifies every Arrow dataset,
+label table, and required split file.
+
+The assembler also requires this portable
+output contract. Upload the complete portable directory. Retain labels and
+candidate memberships as Parquet files; the runtime data already use Arrow.
+
 ## Pairwise model
 
 Run the release trainer from the prepared model plan:

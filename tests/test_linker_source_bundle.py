@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
+import subprocess
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -24,7 +27,11 @@ from s2and.incremental_linking.feature_block import (
 )
 from s2and.incremental_linking_training.classic import load_bundle
 from s2and.incremental_linking_training.source_bundle_preflight import preflight_source_rows
-from scripts.production.model.linker_source_bundle import assemble_source_bundle
+from scripts.production.model.linker_source_bundle import (
+    assemble_source_bundle,
+    export_portable_source_bundle,
+    validate_portable_source_bundle,
+)
 from scripts.verification.validate_local_arrow_release import validate_release_root
 from tests.helpers import tiny_name_counts_tuple
 
@@ -142,7 +149,7 @@ def _write_arrow_root(
     _write_json(root / "manifest.json", root_manifest)
 
 
-def _write_linker_inputs(root: Path, *, leak: bool) -> None:
+def _write_linker_inputs(root: Path, *, leak: bool, dataset: str = "replay_demo") -> None:
     label_paths = {
         "train_path": "labels/train.parquet",
         "classic_gate_source_path": "labels/calibration.parquet",
@@ -163,7 +170,7 @@ def _write_linker_inputs(root: Path, *, leak: bool) -> None:
             {
                 "query_group_id": [query_group_id],
                 "base_group_id": [base_group_id],
-                "dataset": ["replay_demo"],
+                "dataset": [dataset],
                 "query_view": ["full"],
                 "candidate_component_key": ["component-1"],
                 "retrieval_rank": [1],
@@ -171,7 +178,7 @@ def _write_linker_inputs(root: Path, *, leak: bool) -> None:
             }
         ).to_parquet(path, index=False)
 
-    candidate_path = root / "components" / "replay_demo_members.parquet"
+    candidate_path = root / "components" / f"{dataset}_members.parquet"
     candidate_path.parent.mkdir(parents=True)
     pd.DataFrame(
         {
@@ -201,7 +208,7 @@ def _write_linker_inputs(root: Path, *, leak: bool) -> None:
         "assets": {
             "candidate_members": {
                 "root": "components",
-                "datasets": {"replay_demo": "components/replay_demo_members.parquet"},
+                "datasets": {dataset: f"components/{dataset}_members.parquet"},
             },
             "featureless_rows": {"root": "labels", "files": label_paths},
             "splits": {
@@ -493,3 +500,137 @@ def test_assembly_rejects_original_manifest_metadata(tmp_path: Path, field: str,
 
     with pytest.raises(ValueError, match=message):
         assemble_source_bundle(**inputs)
+
+
+def _external_index_source(tmp_path: Path) -> tuple[Path, Path]:
+    source = tmp_path / "source"
+    _write_arrow_root(source, dataset="patents", replay=True)
+    _write_linker_inputs(source, leak=False, dataset="patents")
+    external_index = tmp_path / "external" / "name_counts_index"
+    external_index.parent.mkdir()
+    shutil.move(source / "name_counts_index", external_index)
+    manifest_path = source / "datasets" / "patents" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["paths"]["name_counts_index"] = Path(os.path.relpath(external_index, manifest_path.parent)).as_posix()
+    _write_json(manifest_path, manifest)
+    collection_path = source / "manifest.json"
+    collection = json.loads(collection_path.read_text(encoding="utf-8"))
+    collection["dataset_manifests"]["patents"]["sha256"] = _sha256(manifest_path)
+    _write_json(collection_path, collection)
+    return source, external_index
+
+
+def test_portable_export_survives_source_removal_and_directory_relocation(tmp_path: Path) -> None:
+    source, external_index = _external_index_source(tmp_path)
+    original_hashes = {
+        path.relative_to(source).as_posix(): _sha256(path)
+        for directory in ("components", "labels", "splits")
+        for path in (source / directory).rglob("*")
+        if path.is_file()
+    }
+    output = tmp_path / "export"
+    report = export_portable_source_bundle(source_bundle=source, output_source_bundle=output)
+    assert report["datasets"] == ["patents"]
+    assert report["selected_source_rows"] == 4
+    assert report["name_counts_manifest_sha256"] == _sha256(external_index / "manifest.json")
+    assert all(_sha256(output / relative) == digest for relative, digest in original_hashes.items())
+    moved = tmp_path / "different" / "directory"
+    shutil.copytree(output, moved)
+    shutil.rmtree(source)
+    shutil.rmtree(external_index.parent)
+    shutil.rmtree(output)
+    assert not source.exists()
+    assert not external_index.exists()
+    assert validate_portable_source_bundle(moved)["datasets"] == ["patents"]
+    with ExitStack() as arrow_stack:
+        rows, datasets = preflight_source_rows(
+            load_bundle(moved), name_counts_index_root=moved / "name_counts_index", arrow_stack=arrow_stack
+        )
+        assert rows == 4
+        assert datasets["patents"].name_counts_index is not None
+        assert Path(datasets["patents"].name_counts_index.path) == moved / "name_counts_index"
+        first = tiny_name_counts_tuple()[0]
+        key = next(iter(first))
+        values = datasets["patents"].name_counts_index.lookup_many([key], [None], [None], [None])
+        assert values[0][0] == first[key]
+    labels = pd.read_parquet(moved / "labels" / "train.parquet")
+    members = pd.read_parquet(moved / "components" / "patents_members.parquet")
+    assert labels[["dataset", "label"]].to_dict("records") == [{"dataset": "patents", "label": 1}]
+    assert members.to_dict("records") == [
+        {"candidate_component_key": "component-1", "member_index": 0, "signature_id": "s1"}
+    ]
+
+
+def test_portable_export_rejects_existing_and_overlapping_outputs(tmp_path: Path) -> None:
+    source, _external_index = _external_index_source(tmp_path)
+    with pytest.raises(FileExistsError, match="must not exist"):
+        export_portable_source_bundle(source_bundle=source, output_source_bundle=source)
+    with pytest.raises(ValueError, match="must not overlap"):
+        export_portable_source_bundle(source_bundle=source, output_source_bundle=source / "export")
+
+
+def test_portable_export_does_not_recertify_changed_arrow_payload(tmp_path: Path) -> None:
+    source, _external_index = _external_index_source(tmp_path)
+    papers = source / "datasets" / "patents" / "papers.arrow"
+    papers.write_bytes(papers.read_bytes().replace(b"Notes", b"WRONG"))
+    with pytest.raises(ValueError, match="inventory mismatch"):
+        export_portable_source_bundle(source_bundle=source, output_source_bundle=tmp_path / "export")
+
+
+def test_portable_export_rejects_external_support_paths(tmp_path: Path) -> None:
+    source, _external_index = _external_index_source(tmp_path)
+    bundle_path = source / "bundle.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle["models"]["classic"]["train_path"] = "../external/train.parquet"
+    _write_json(bundle_path, bundle)
+    with pytest.raises(ValueError, match="escapes the source bundle"):
+        export_portable_source_bundle(source_bundle=source, output_source_bundle=tmp_path / "export")
+
+
+def _link_directory(path: Path, target: Path) -> None:
+    if os.name == "nt":
+        quoted_path = str(path).replace("'", "''")
+        quoted_target = str(target).replace("'", "''")
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"New-Item -ItemType Junction -Path '{quoted_path}' -Target '{quoted_target}' -ErrorAction Stop",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            pytest.skip(f"Directory junction is unavailable: {result.stderr}")
+    else:
+        try:
+            path.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"Directory symlink is unavailable: {exc}")
+
+
+def test_portable_export_rejects_output_inside_link_target_before_copy(tmp_path: Path) -> None:
+    source, _external_index = _external_index_source(tmp_path)
+    target = tmp_path / "external-labels"
+    shutil.move(source / "labels", target)
+    _link_directory(source / "labels", target)
+    output = target / "export"
+    with pytest.raises(ValueError, match="overlaps a copied directory target"):
+        export_portable_source_bundle(source_bundle=source, output_source_bundle=output)
+    assert not output.exists()
+
+
+def test_portable_export_materializes_a_nonoverlapping_support_link(tmp_path: Path) -> None:
+    source, _external_index = _external_index_source(tmp_path)
+    target = tmp_path / "external-labels"
+    shutil.move(source / "labels", target)
+    _link_directory(source / "labels", target)
+    output = tmp_path / "export"
+    report = export_portable_source_bundle(source_bundle=source, output_source_bundle=output)
+    assert report["selected_source_rows"] == 4
+    assert not (output / "labels").is_symlink()
+    assert not getattr((output / "labels").lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    assert _sha256(output / "labels" / "train.parquet") == _sha256(target / "train.parquet")

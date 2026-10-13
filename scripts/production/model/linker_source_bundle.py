@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import stat
 import sys
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
@@ -17,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import (  # noqa: E402
+    ArrowDataset,
     _load_artifact_specs,
     build_arrow_artifact_manifest,
     read_arrow_collection_root,
@@ -148,6 +151,138 @@ def _validate_support_root(source_root: Path) -> None:
         raise ValueError(f"linker support root contains reserved assembled paths: {conflicts}")
 
 
+def _validate_bundle_paths(root: Path, *, resolve_links: bool = True) -> None:
+    """Reject support paths that cannot survive a directory relocation."""
+
+    bundle = _read_json(root / "bundle.json")
+
+    def check(value: Any, field: str) -> None:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"bundle.{field} must be a non-empty relative path")
+        relative = Path(value)
+        resolved = (root / relative).resolve() if resolve_links else Path(os.path.abspath(root / relative))
+        if relative.is_absolute() or not resolved.is_relative_to(root.resolve()):
+            raise ValueError(f"bundle.{field} escapes the source bundle: {value!r}")
+        if not resolved.exists():
+            raise FileNotFoundError(f"bundle.{field}: {resolved}")
+
+    def assets(value: Any, field: str) -> None:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                assets(child, f"{field}.{key}")
+        else:
+            check(value, field)
+
+    def model_paths(value: Any, field: str) -> None:
+        if not isinstance(value, Mapping):
+            return
+        for key, child in value.items():
+            child_field = f"{field}.{key}"
+            if str(key).endswith("_path") and child is not None:
+                check(child, child_field)
+            elif str(key).endswith("_paths") and isinstance(child, Mapping):
+                assets(child, child_field)
+            else:
+                model_paths(child, child_field)
+
+    assets(bundle["assets"], "assets")
+    model_paths(bundle["models"], "models")
+    runtime_root = bundle.get("runtime_contract", {}).get("arrow_dataset_root")
+    if runtime_root is not None:
+        check(runtime_root, "runtime_contract.arrow_dataset_root")
+
+
+def validate_portable_source_bundle(root: Path) -> dict[str, Any]:
+    """Verify all operational paths and payloads within one portable root."""
+
+    root = root.resolve()
+    for directory, names, files in os.walk(root):
+        for name in (*names, *files):
+            path = Path(directory) / name
+            metadata = path.lstat()
+            if path.is_symlink() or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise ValueError(f"portable source bundle contains a filesystem link: {path}")
+    _validate_bundle_paths(root)
+    entries = _dataset_manifests(root)
+    shared_index = root / "name_counts_index"
+    index_sha256 = sha256_file(shared_index / "manifest.json")
+    for manifest_path in entries.values():
+        if not manifest_path.is_relative_to(root):
+            raise ValueError(f"dataset manifest escapes the source bundle: {manifest_path}")
+        manifest = _read_json(manifest_path)
+        for key, value in manifest["paths"].items():
+            resolved = _resolved_manifest_artifact_path(manifest_path, value, key=key)
+            if not resolved.is_relative_to(root):
+                raise ValueError(f"{manifest_path} paths.{key} escapes the source bundle")
+            if key == "name_counts_index" and resolved != shared_index:
+                raise ValueError(f"{manifest_path} must bind the shared name_counts_index")
+    _validate_root_name_counts_binding(root, authoritative_manifest_sha256=index_sha256)
+    bundle = load_bundle(root)
+    validate_source_bundle_support_files(bundle)
+    with ExitStack() as arrow_stack:
+        selected_rows, datasets = preflight_source_rows(
+            bundle, name_counts_index_root=shared_index, arrow_stack=arrow_stack
+        )
+        # Unreferenced datasets can become active after a future label update.
+        for name, manifest_path in entries.items():
+            if name not in datasets:
+                arrow_stack.enter_context(
+                    ArrowDataset.open(manifest_path.parent, require_specter=True, require_name_counts_index=True)
+                )
+    return {
+        "dataset_count": len(entries),
+        "datasets": sorted(entries),
+        "name_counts_manifest_sha256": index_sha256,
+        "selected_source_rows": selected_rows,
+        "source_bundle": str(root),
+    }
+
+
+def export_portable_source_bundle(*, source_bundle: Path, output_source_bundle: Path) -> dict[str, Any]:
+    """Copy an assembled source bundle and its count index into a fresh root."""
+
+    source_bundle = source_bundle.resolve()
+    output_source_bundle = output_source_bundle.resolve()
+    if output_source_bundle.exists():
+        raise FileExistsError("portable source bundle output directory must not exist")
+    if output_source_bundle.is_relative_to(source_bundle) or source_bundle.is_relative_to(output_source_bundle):
+        raise ValueError("portable source bundle input and output directories must not overlap")
+    _validate_bundle_paths(source_bundle, resolve_links=False)
+    entries = _dataset_manifests(source_bundle)
+    indexes = []
+    for manifest_path in entries.values():
+        manifest = _read_json(manifest_path)
+        indexes.append(
+            _resolved_manifest_artifact_path(
+                manifest_path, manifest["paths"].get("name_counts_index"), key="name_counts_index"
+            )
+        )
+    index = indexes[0]
+    if output_source_bundle.is_relative_to(index):
+        raise ValueError("portable source bundle output must not be inside the count index")
+    require_name_counts_index_artifact(
+        index, context="portable source bundle export", producer_hint="bind a valid shared count index"
+    )
+    _validate_root_name_counts_binding(
+        source_bundle, authoritative_manifest_sha256=sha256_file(index / "manifest.json")
+    )
+    visited: set[Path] = set()
+    for directory, names, _files in os.walk(source_bundle, followlinks=True):
+        resolved = Path(directory).resolve()
+        if output_source_bundle.is_relative_to(resolved):
+            raise ValueError(f"portable output overlaps a copied directory target: {resolved}")
+        if resolved in visited:
+            names.clear()
+            continue
+        visited.add(resolved)
+        if Path(directory) == source_bundle and "name_counts_index" in names:
+            names.remove("name_counts_index")
+    _copy_arrow_root_without_name_counts(source_bundle, output_source_bundle)
+    shutil.copytree(index, output_source_bundle / "name_counts_index")
+    _rebind_dataset_manifests(output_source_bundle, name_counts_index=output_source_bundle / "name_counts_index")
+    return validate_portable_source_bundle(output_source_bundle)
+
+
 def assemble_source_bundle(
     *,
     source_root: Path,
@@ -220,20 +355,13 @@ def assemble_source_bundle(
         release_version=release_version,
     )
 
-    bundle = load_bundle(output_source_bundle)
-    validate_source_bundle_support_files(bundle)
-    with ExitStack() as arrow_stack:
-        selected_source_rows, _arrow_datasets = preflight_source_rows(
-            bundle,
-            name_counts_index_root=output_source_bundle / "name_counts_index",
-            arrow_stack=arrow_stack,
-        )
+    source_report = validate_portable_source_bundle(output_source_bundle)
     validate_release_root(output_data_root)
     return {
         "data_root": str(output_data_root),
         "name_counts_manifest_sha256": authoritative_manifest_sha256,
         "release_version": release_version,
-        "selected_source_rows": selected_source_rows,
+        "selected_source_rows": source_report["selected_source_rows"],
         "source_bundle": str(output_source_bundle),
     }
 

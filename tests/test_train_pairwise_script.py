@@ -14,6 +14,8 @@ from s2and.arrow_provenance import ArrowProvenanceError, write_conversion_proven
 from scripts.production.model import train_pairwise
 from tests.helpers import pairwise_training_args as _args
 
+REQUIRED_ARROW_SOURCE_ROLES = ("signatures", "papers", "specter_embeddings")
+
 
 def _artifact_authority(
     *,
@@ -76,7 +78,7 @@ def _write_arrow_root(tmp_path: Path, plan_path: Path) -> Path:
         (dataset_dir / "manifest.json").write_text(json.dumps({"files": {}}), encoding="utf-8")
         write_conversion_provenance(
             dataset_dir,
-            sources={role: Path(files[role]["path"]) for role in train_pairwise.ARROW_SOURCE_ROLES},
+            sources={role: Path(files[role]["path"]) for role in REQUIRED_ARROW_SOURCE_ROLES},
             converter={"script": "test"},
         )
     return arrow_root
@@ -131,7 +133,7 @@ def test_preflight_rejects_plans_outside_the_v13_population(tmp_path: Path, data
         train_pairwise._preflight_pairwise(args)
 
 
-@pytest.mark.parametrize("role", train_pairwise.ARROW_SOURCE_ROLES)
+@pytest.mark.parametrize("role", REQUIRED_ARROW_SOURCE_ROLES)
 def test_preflight_rejects_arrow_converted_from_different_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -139,16 +141,14 @@ def test_preflight_rejects_arrow_converted_from_different_sources(
 ) -> None:
     plan_path = _write_model_plan(tmp_path)
     arrow_root = _write_arrow_root(tmp_path, plan_path)
-    other_signatures = tmp_path / "other_signatures.json"
-    other_signatures.write_text("different content, same role\n", encoding="utf-8")
+    other_source = tmp_path / f"other_{role}"
+    other_source.write_text("different content, same role\n", encoding="utf-8")
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     write_conversion_provenance(
         arrow_root / "kisti",
         sources={
-            source_role: other_signatures
-            if source_role == role
-            else Path(plan["datasets"]["kisti"][source_role]["path"])
-            for source_role in train_pairwise.ARROW_SOURCE_ROLES
+            source_role: other_source if source_role == role else Path(plan["datasets"]["kisti"][source_role]["path"])
+            for source_role in REQUIRED_ARROW_SOURCE_ROLES
         },
         converter={"script": "test"},
     )

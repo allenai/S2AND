@@ -29,10 +29,13 @@ production model and public-data version is `1.3`, on a separate version axis.
   [LICENSE](../LICENSE) and [LICENSE-DATA](../LICENSE-DATA). Rust distributions
   include the code license and notices for the bundled CLD2 dependency.
 - Release preparation resolves augmented source identities when checking
-  held-out overlap. Pairwise training rejects augmented benchmark signatures
-  outside the actual source training blocks, including validation, test, and
-  omitted signatures. Regenerate the reviewed augmented training pairs if this
-  guard rejects a run; it does not silently filter the data.
+  held-out overlap in both directions: augmented training cannot contain held-out
+  benchmark signatures, and augmented evaluation cannot contain benchmark
+  model-development signatures. Before any featurization, pairwise training
+  rejects augmented members outside the actual source training blocks, including
+  validation, test, and omitted signatures. `convert_to_arrow.py
+  filter-augmented-pairs` writes reproducible filtered training/evaluation files
+  and counts from a draft release and the training seed, preserving originals.
 - Arrow bulk prediction keeps zero-valued caller supervision as distance
   overrides during initial-only attachment, rather than treating them as
   mandatory incremental links. Standalone incremental requests retain their

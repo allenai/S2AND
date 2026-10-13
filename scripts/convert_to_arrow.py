@@ -1508,6 +1508,200 @@ def _run_join_canonical_augmented_names(args: argparse.Namespace) -> None:
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
+def _read_augmented_pair_csv(path: Path) -> tuple[list[str], list[list[str]], tuple[int, int]]:
+    """Validate fixed-pair labels while retaining all CSV cell values and rows."""
+    import pandas as pd
+
+    from s2and.data import _map_fixed_pair_labels
+
+    with path.open(encoding="utf-8", newline="") as source:
+        csv_text = source.read()
+    records = list(csv.reader(StringIO(csv_text)))
+    if not records or len(set(records[0])) != len(records[0]):
+        raise ValueError(f"{path} must have a unique fixed-pair CSV header")
+    header, rows = records[0], records[1:]
+    if any(len(row) != len(header) for row in rows):
+        raise ValueError(f"{path} contains a row whose width differs from its header")
+    mapped = _map_fixed_pair_labels(pd.read_csv(StringIO(csv_text)), path.name)
+    return header, rows, (header.index(str(mapped.columns[0])), header.index(str(mapped.columns[1])))
+
+
+def _run_filter_augmented_pairs(args: argparse.Namespace) -> None:
+    """Write reviewed-input candidates without changing the draft release or sources."""
+    from scripts.production.model.augmented_leakage import (
+        PRODUCTION_AUGMENTED_SOURCES,
+        training_members_from_sources,
+    )
+    from scripts.production.model.release_pairwise import (
+        _block_signature_ids,
+        _csv_pair_identities,
+        _heldout_pair_identities,
+        _signature_ids,
+    )
+
+    output_root: Path = args.output_root
+    if output_root.exists():
+        raise FileExistsError(f"output directory already exists: {output_root}")
+    if args.random_seed < 0:
+        raise ValueError("--random-seed must be non-negative")
+    release_path = args.release.resolve()
+    source_paths: dict[str, Path] = {"release": release_path}
+    source_hashes: dict[str, str] = {"release": _file_sha256(release_path)}
+    draft = _load_json(release_path)
+
+    def source(role: str, raw_path: Any) -> Path:
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ValueError(f"{role} must name a source path in the draft release")
+        path = _source_file(_resolve_manifest_path(raw_path, release_path.parent).resolve())
+        source_paths[role] = path
+        source_hashes[role] = _file_sha256(path)
+        return path
+
+    models = draft["model"]["datasets"]
+    augmented = models["augmented"]
+    train_path = source("model.augmented.train_pairs", augmented["train_pairs"])
+    val_path = source("model.augmented.val_pairs", augmented["val_pairs"])
+    val_bytes = val_path.read_bytes()
+    test_path = source("evaluation.augmented.pairs", draft["evaluation"]["pairwise"]["augmented"]["pairs"])
+    train_header, train_rows, train_indices = _read_augmented_pair_csv(train_path)
+    _, val_rows, val_indices = _read_augmented_pair_csv(val_path)
+    test_records = _load_json(test_path)
+    _heldout_pair_identities(test_path, context="augmented evaluation pairs")
+
+    def identity(signature_id: str) -> tuple[str, str]:
+        name, original_id = _augmented_source(signature_id)
+        if name not in PRODUCTION_AUGMENTED_SOURCES:
+            raise ValueError(f"Unknown augmented source prefix {name!r} in {signature_id!r}")
+        return name, original_id
+
+    train_identities = [tuple(identity(row[index]) for index in train_indices) for row in train_rows]
+    for row in val_rows:
+        for index in val_indices:
+            identity(row[index])
+    test_identities = [(identity(row["signature_id_1"]), identity(row["signature_id_2"])) for row in test_records]
+    required_sources = {name for row in train_identities for name, _ in row} - {"medline"}
+    missing_sources = required_sources - models.keys()
+    if missing_sources:
+        raise ValueError(f"Draft model is missing augmented training source datasets: {sorted(missing_sources)}")
+
+    training: dict[str, set[str]] = {}
+    development: dict[str, set[str]] = {}
+    for name, files in models.items():
+        if name == "augmented":
+            continue
+        if "clusters" in files:
+            model_files = {
+                role: source(f"model.{name}.{role}", files[role]) for role in ("signatures", "papers", "clusters")
+            }
+            training[name] = training_members_from_sources(name, model_files, random_seed=args.random_seed)
+            development[name] = _signature_ids(model_files["signatures"], context=f"model {name!r}")
+        else:
+            split_members = {
+                split: {
+                    sid
+                    for pair in _csv_pair_identities(
+                        source(f"model.{name}.{split}", files[split]), context=f"{name!r} {split}"
+                    )
+                    for sid in pair
+                }
+                for split in ("train_pairs", "val_pairs")
+            }
+            training[name] = split_members["train_pairs"]
+            development[name] = split_members["train_pairs"] | split_members["val_pairs"]
+
+    external_heldout: dict[str, set[str]] = {}
+    for name, files in draft["evaluation"]["pairwise"].items():
+        if name != "augmented":
+            pairs = _heldout_pair_identities(
+                source(f"evaluation.pairwise.{name}.pairs", files["pairs"]), context=f"{name!r} evaluation"
+            )
+            external_heldout.setdefault(name, set()).update(sid for pair in pairs for sid in pair)
+    for name, files in draft["evaluation"].get("cluster", {}).items():
+        external_heldout.setdefault(name, set()).update(
+            _block_signature_ids(
+                source(f"evaluation.cluster.{name}.blocks", files["blocks"]), context=f"{name!r} evaluation"
+            )
+        )
+
+    def select(
+        identities: Sequence[tuple[tuple[str, str], ...]], raw_labels: list[str], *, split: str
+    ) -> tuple[list[int], dict[str, Any]]:
+        kept: list[int] = []
+        reasons: dict[str, int] = {}
+        retained_labels: dict[str, int] = {}
+        removed_labels: dict[str, int] = {}
+        for index, row in enumerate(identities):
+            row_reasons: set[str] = set()
+            for name, original_id in row:
+                if split == "train":
+                    if name in training and original_id not in training[name]:
+                        row_reasons.add(f"{name}:outside_training_split")
+                    if original_id in external_heldout.get(name, set()):
+                        row_reasons.add(f"{name}:external_heldout")
+                elif original_id in development.get(name, set()):
+                    row_reasons.add(f"{name}:model_development_population")
+            if row_reasons:
+                removed_labels[raw_labels[index]] = removed_labels.get(raw_labels[index], 0) + 1
+                for reason in row_reasons:
+                    reasons[reason] = reasons.get(reason, 0) + 1
+            else:
+                kept.append(index)
+                retained_labels[raw_labels[index]] = retained_labels.get(raw_labels[index], 0) + 1
+        return kept, {
+            "input_rows": len(identities),
+            "retained_rows": len(kept),
+            "removed_rows": len(identities) - len(kept),
+            "removed_rows_by_reason": dict(sorted(reasons.items())),
+            "retained_rows_by_raw_label": dict(sorted(retained_labels.items())),
+            "removed_rows_by_raw_label": dict(sorted(removed_labels.items())),
+        }
+
+    train_kept, train_report = select(
+        train_identities, [row[train_header.index("label")] for row in train_rows], split="train"
+    )
+    test_kept, test_report = select(test_identities, [str(row["label"]) for row in test_records], split="test")
+    report = {
+        "random_seed": args.random_seed,
+        "sources": {
+            role: {"path": str(path), "sha256": source_hashes[role]} for role, path in sorted(source_paths.items())
+        },
+        "train": train_report,
+        "validation": {"input_rows": len(val_rows), "retained_rows": len(val_rows), "removed_rows": 0},
+        "test": test_report,
+        "reason_counts_note": "A removed row can have multiple reasons; removed_rows counts each row once.",
+    }
+    if not train_kept or not test_kept:
+        raise ValueError(
+            "Filtering leaves no training or no held-out pairs. Review the model/evaluation population design; "
+            f"do not bypass the leakage guards. Counts: {json.dumps(report, sort_keys=True)}"
+        )
+    changed = [role for role, path in source_paths.items() if _file_sha256(path) != source_hashes[role]]
+    if changed:
+        raise ValueError(f"Sources changed while filtering augmented pairs: {changed}")
+
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{output_root.name}.staging-", dir=output_root.parent) as staging_raw:
+        staging = Path(staging_raw)
+        with (staging / "train_pairs.csv").open("w", encoding="utf-8", newline="") as output:
+            writer = csv.writer(output, lineterminator="\n")
+            writer.writerow(train_header)
+            writer.writerows(train_rows[index] for index in train_kept)
+        (staging / "val_pairs.csv").write_bytes(val_bytes)
+        kept_test_records = [test_records[index] for index in test_kept]
+        with (staging / "test_pairs.csv").open("w", encoding="utf-8", newline="") as output:
+            writer = csv.writer(output, lineterminator="\n")
+            writer.writerow(["signature_id_1", "signature_id_2", "label"])
+            writer.writerows((row["signature_id_1"], row["signature_id_2"], row["label"]) for row in kept_test_records)
+        (staging / "test_pairs.json").write_text(json.dumps(kept_test_records, indent=2) + "\n", encoding="utf-8")
+        report["outputs"] = {
+            name: {"path": str(output_root.resolve() / name), "sha256": _file_sha256(staging / name)}
+            for name in ("train_pairs.csv", "val_pairs.csv", "test_pairs.csv", "test_pairs.json")
+        }
+        _write_json(staging / "filter_report.json", report)
+        staging.rename(output_root)
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
 def _selected_runtime_dataset_names(
     *,
     datasets: Sequence[str] | None,
@@ -1673,6 +1867,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     augmented_names.add_argument("--output-dir", type=Path, required=True, help="Fresh output directory.")
     augmented_names.set_defaults(func=_run_join_canonical_augmented_names)
+
+    filtered_pairs = subparsers.add_parser(
+        "filter-augmented-pairs", help="Filter augmented pairs against a draft release's frozen source populations."
+    )
+    filtered_pairs.add_argument("--release", type=Path, required=True)
+    filtered_pairs.add_argument("--random-seed", type=int, required=True)
+    filtered_pairs.add_argument(
+        "--output-root", type=Path, required=True, help="Fresh output directory; never overwritten."
+    )
+    filtered_pairs.set_defaults(func=_run_filter_augmented_pairs)
 
     benchmark = subparsers.add_parser("benchmark", help="Convert benchmark dataset JSON/pickle files.")
     benchmark.add_argument("--source-root", type=Path, required=True)

@@ -44,7 +44,10 @@ def test_fit_classic_fits_real_booster_and_logistic_gate(tmp_path: Path) -> None
     assert np.any(gate_weights != 0)
 
 
-@pytest.mark.parametrize("augmented_population", ["train", "validation", "test", "omitted", "changed-provenance"])
+@pytest.mark.parametrize(
+    "augmented_population",
+    ["train", "validation", "test", "omitted", "changed-provenance", "unknown-train", "unknown-validation"],
+)
 def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -83,6 +86,8 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         preprocess=False,
         random_seed=args.random_seed,
         name_counts_index=None,
+        train_pairs_size=args.train_pairs_size,
+        val_pairs_size=args.validation_pairs_size,
     )
     train, val, test = selection.split_cluster_signatures()
     safe = next(iter(train.values()))[0]
@@ -92,7 +97,32 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         "test": next(iter(test.values()))[0],
         "omitted": "not-in-model-plan",
         "changed-provenance": next(iter(train.values()))[1],
+        "unknown-train": next(iter(train.values()))[1],
+        "unknown-validation": next(iter(val.values()))[0],
     }[augmented_population]
+    unknown_ids = frozenset()
+    if augmented_population.startswith("unknown-"):
+        unknown_ids = frozenset({next(iter(train.values()))[1], next(iter(val.values()))[0]})
+        (dataset_files["clusters"].parent / "restored_unknown_signature_ids_20261009.json").write_text(
+            json.dumps(sorted(unknown_ids)), encoding="utf-8"
+        )
+    from s2and.featurizer import resolve_selection_pairs
+
+    expected_pairs = resolve_selection_pairs(selection)
+    expected_rows = [
+        sum(left not in unknown_ids and right not in unknown_ids for left, right, _ in pairs)
+        for pairs in expected_pairs
+    ]
+    real_featurizer = train_pairwise.build_verified_rust_featurizer
+    built_members = []
+
+    def checked_featurizer(*args, **kwargs):
+        members = kwargs["signature_ids"]
+        assert not members & unknown_ids
+        built_members.append(members)
+        return real_featurizer(*args, **kwargs)
+
+    monkeypatch.setattr(train_pairwise, "build_verified_rust_featurizer", checked_featurizer)
     augmented_pairs = tmp_path / "augmented_train.csv"
     augmented_pairs.write_text(
         f"signature_id_1,signature_id_2,label\nqian___{safe},qian___{target},1\n", encoding="utf-8"
@@ -164,9 +194,10 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     result = train_pairwise.train_pairwise_bundle(args)
 
     summary = result["training_summary"]
-    assert summary["main_train_rows"] == 24
-    assert summary["main_val_rows"] == 6
-    assert summary["nameless_train_rows"] == 24
+    assert summary["main_train_rows"] == expected_rows[0]
+    assert summary["main_val_rows"] == expected_rows[1]
+    assert summary["nameless_train_rows"] == expected_rows[0]
+    assert built_members
     assert summary["main_pairwise_best_params"]
     assert summary["nameless_pairwise_best_params"]
     from s2and.production_training_contract import block_membership_sha256, frozen_test_blocks
@@ -198,6 +229,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         (args.output_dir / "reproducibility" / "pairwise_training_config.json").read_text(encoding="utf-8")
     )
     assert training_config["featurization_backend"] == "rust_from_provenance_bound_arrow"
+    assert training_config["unknown_signature_inputs"]["qian"]["signature_count"] == len(unknown_ids)
     assert training_config["dataset_inputs"]["qian"]["arrow_dir"] == str(arrow_dir)
     assert training_config["dataset_inputs"]["qian"]["arrow_conversion_provenance_sha256"] == sha256_file(
         arrow_dir / "conversion_provenance.json"
@@ -206,3 +238,60 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     assert config["cluster_model"] == {"eps": 0.5, "linkage": "average"}
     assert list(matrix_work_dir.iterdir()) == []
     assert args.output_dir.is_dir()
+
+
+def test_all_augmented_sources_are_checked_before_any_dataset_featurization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files_by_name = {name: write_pairwise_dataset(tmp_path / "data", name) for name in ("qian", "kisti")}
+    args = pairwise_training_args(tmp_path)
+    members = {}
+    for name, files in files_by_name.items():
+        dataset = ANDData(
+            signatures=str(files["signatures"]),
+            papers=str(files["papers"]),
+            clusters=str(files["clusters"]),
+            name=name,
+            preprocess=False,
+            name_counts_index=None,
+            random_seed=args.random_seed,
+        )
+        train, val, _ = dataset.split_cluster_signatures()
+        members[name] = next(iter((train if name == "qian" else val).values()))[0]
+    pair_path = tmp_path / "augmented_train.csv"
+    pair_path.write_text(
+        f"signature_id_1,signature_id_2,label\nqian___{members['qian']},kisti___{members['kisti']},0\n",
+        encoding="utf-8",
+    )
+    work_dir = tmp_path / "matrix-work"
+    work_dir.mkdir()
+    plan = train_pairwise.PairwisePreflightPlan(
+        output_dir=tmp_path / "bundle",
+        release_version="9.9",
+        dataset_names=("qian", "kisti"),
+        datasets={
+            **{name: ModelDataset(files=files, sha256=source_sha256(files)) for name, files in files_by_name.items()},
+            "augmented": ModelDataset(files={"train_pairs": pair_path}, sha256={"train_pairs": sha256_file(pair_path)}),
+        },
+        model_plan_sha256="0" * 64,
+        arrow_dirs={},
+        arrow_provenance_sha256={},
+        matrix_work_dir=work_dir,
+        matrix_work_free_bytes=1_000_000_000,
+        total_ram_bytes=None,
+    )
+    monkeypatch.setattr(train_pairwise, "_preflight_pairwise", lambda _args: plan)
+    monkeypatch.setattr(
+        train_pairwise,
+        "load_packaged_artifact_authority",
+        lambda **_kwargs: pytest.fail("all leakage checks must precede runtime artifact loading"),
+    )
+    monkeypatch.setattr(
+        train_pairwise,
+        "_featurize_selection",
+        lambda *_args, **_kwargs: pytest.fail("unsafe data reached featurization"),
+    )
+    with pytest.raises(ValueError, match="'kisti' signatures outside its training split"):
+        train_pairwise.train_pairwise_bundle(args)
+    assert not plan.output_dir.exists()
+    assert list(work_dir.iterdir()) == []

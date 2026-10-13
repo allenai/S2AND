@@ -1,6 +1,13 @@
 # S2AND 1.0.0 / model-data v1.3 release
 
-Status date: 2026-09-25
+Status date: 2026-10-12
+
+The [October 12 data record](release_evidence/data_preparation_20261012.md) supplies the current release inputs.
+Benchmark, augmented, count, linker, and Arrow preparation is complete.
+Use those prepared inputs for the production fit.
+Preserve accepted raw name parts. Do not repeat canonical-name joins on these inputs.
+The runtime owns name normalization.
+The reviewed baseline and final evaluation plan remain open.
 
 This is the sole release policy and dependency-ordered operator sequence for
 the `s2and==1.0.0` and `s2and-rust==1.0.0` packages with production model and
@@ -210,11 +217,15 @@ uv run --no-project python scripts/run_ci_locally.py
       `prepare-run` does not check name provenance.
 - [ ] Restrict augmented training pairs to the original identities in each
       frozen benchmark's actual training split, using the selected training
-      seed. Exclude its validation, test, and omitted signatures. Preserve the
-      reviewed source data and write a new pair file with retained/removed counts.
-      `prepare-run` checks prefixed copies against external held-out identities;
-      the trainer rejects copies outside its actual benchmark training blocks.
-      Neither check filters the pairs for the operator.
+      seed. Exclude its validation, test, and omitted signatures. Also exclude
+      benchmark model-development identities from augmented evaluation pairs.
+      Run [filter-augmented-pairs](../scripts/production/README.md#filter-augmented-pairs)
+      on the draft `release.json`, write to a new directory outside the run,
+      and review its counts and hashes. Update the draft's augmented pair paths
+      and the reviewed baseline for the resulting evaluation population.
+      `prepare-run` checks both leakage directions; the trainer checks every
+      benchmark's augmented training members before any featurization and has
+      no access to held-out pair files.
 - [ ] Review and freeze `release.json` using the
       [exact shape and example](../scripts/production/README.md#run-preparation):
       training/validation and held-out inputs, validation-only EPS grid and

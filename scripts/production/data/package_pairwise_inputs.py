@@ -26,7 +26,10 @@ BENCHMARKS = ("aminer", "arnetminer", "inspire", "kisti", "pubmed", "qian", "zbm
 
 
 def package_pairwise_inputs(
-    prepared_root: Path, output_root: Path, *, datasets: Sequence[str] = BENCHMARKS,
+    prepared_root: Path,
+    output_root: Path,
+    *,
+    datasets: Sequence[str] = BENCHMARKS,
 ) -> dict[str, Any]:
     """Preserve source bytes and bind both Arrow collections to a shared index."""
     prepared = prepared_root.resolve()
@@ -38,9 +41,13 @@ def package_pairwise_inputs(
     for name in datasets:
         if Path(name).name != name or name in {".", ".."} or ":" in name or "\\" in name:
             raise ValueError(f"Invalid dataset name: {name}")
-    arrow_sources = {mode: prepared / "arrow" / folder for mode, folder in (
-        ("model", "release"), ("evaluation", "evaluation"),
-    )}
+    arrow_sources = {
+        mode: prepared / "arrow" / folder
+        for mode, folder in (
+            ("model", "release"),
+            ("evaluation", "evaluation"),
+        )
+    }
     expected_datasets = set(datasets) | {"augmented"}
     for source in arrow_sources.values():
         if set(_dataset_manifests(source)) != expected_datasets:
@@ -49,7 +56,8 @@ def package_pairwise_inputs(
             raise ValueError("Output must remain outside source Arrow collections")
     output.mkdir(parents=True)
     shutil.copytree(
-        prepared / "name_counts_global" / "name_counts_index", output / "name_counts_index",
+        prepared / "name_counts_global" / "name_counts_index",
+        output / "name_counts_index",
     )
     shutil.copyfile(REPO_ROOT / "LICENSE-DATA", output / "LICENSE.txt")
     sources: dict[str, dict[str, dict[str, dict[str, str]]]] = {"model": {}, "evaluation": {}}
@@ -88,12 +96,16 @@ def package_pairwise_inputs(
 
     augmented: dict[str, dict[str, str]] = {}
     for role, filename in (
-        ("signatures", "augmented_signatures.json"), ("papers", "augmented_papers.json"),
-        ("specter_embeddings", "augmented_specter2.pkl"), ("train_pairs", "train_pairs.csv"),
-        ("val_pairs", "val_pairs.csv"), ("pairs", "test_pairs.json"),
+        ("signatures", "augmented_signatures.json"),
+        ("papers", "augmented_papers.json"),
+        ("specter_embeddings", "augmented_specter2.pkl"),
+        ("train_pairs", "train_pairs.csv"),
+        ("val_pairs", "val_pairs.csv"),
+        ("pairs", "test_pairs.json"),
     ):
         augmented[role] = copy_file(
-            prepared / "augmented" / filename, output / "sources" / "augmented" / filename,
+            prepared / "augmented" / filename,
+            output / "sources" / "augmented" / filename,
         )
     shared_roles = ("signatures", "papers", "specter_embeddings")
     sources["model"]["augmented"] = {role: augmented[role] for role in (*shared_roles, "train_pairs", "val_pairs")}
@@ -110,7 +122,9 @@ def package_pairwise_inputs(
                 pass
         collections[mode] = destination.relative_to(output).as_posix()
     result = {
-        "release_version": "1.3", "sources": sources, "arrow": collections,
+        "release_version": "1.3",
+        "sources": sources,
+        "arrow": collections,
         "name_counts_index": "name_counts_index",
         "scope": "Pairwise data inputs; final production plans require reviewed evaluation gates",
     }

@@ -90,9 +90,18 @@ def source_vectors(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def candidates(
-    name: str, source: Path, *, prepared_root: Path, unknown_filename: str,
-    seed: int, pair_seed: int, train_candidates: int, train_pool_cap: int,
-    evaluation_candidates: int, train_positive_cap: int, evaluation_positive_cap: int,
+    name: str,
+    source: Path,
+    *,
+    prepared_root: Path,
+    unknown_filename: str,
+    seed: int,
+    pair_seed: int,
+    train_candidates: int,
+    train_pool_cap: int,
+    evaluation_candidates: int,
+    train_positive_cap: int,
+    evaluation_positive_cap: int,
     negative_multiplier: float,
 ) -> tuple[dict, dict]:
     """Select bounded known pairs from the actual source populations."""
@@ -122,7 +131,9 @@ def candidates(
             }
             known = {block: ids for block, ids in known.items() if ids}
             selections[split] = dataset.pair_sampling(
-                train_candidates if split == "train" else evaluation_candidates, [], known,
+                train_candidates if split == "train" else evaluation_candidates,
+                [],
+                known,
             )
             if split == "train":
                 selections[split] = selections[split][:train_pool_cap]
@@ -147,8 +158,15 @@ def candidates(
 
 
 def make_variant(
-    name: str, sid: str, original_signature: dict, original_paper: dict, *,
-    old_paper: dict, cached_paper: dict | None, rng: random.Random, omission_rate: float,
+    name: str,
+    sid: str,
+    original_signature: dict,
+    original_paper: dict,
+    *,
+    old_paper: dict,
+    cached_paper: dict | None,
+    rng: random.Random,
+    omission_rate: float,
 ) -> tuple[dict, dict, Counter[str]]:
     """Own one paper variant and preserve accepted raw name fields."""
     original_pid = str(original_signature["paper_id"])
@@ -177,9 +195,7 @@ def make_variant(
     if drop_first and signature["author_info"]["first"]:
         signature["author_info"]["first"] = signature["author_info"]["first"][0]
     if drop_coauthors:
-        paper["authors"] = [
-            row for row in paper["authors"] if row["position"] == signature["author_info"]["position"]
-        ]
+        paper["authors"] = [row for row in paper["authors"] if row["position"] == signature["author_info"]["position"]]
     cached = cached_paper
     old_title = normalize_text(old_paper["title"])
     source_match = old_paper["title"] == original_paper["title"]
@@ -204,7 +220,10 @@ def make_variant(
 
 
 def vector_action(
-    paper: dict, original_paper: dict, *, has_source_vector: bool,
+    paper: dict,
+    original_paper: dict,
+    *,
+    has_source_vector: bool,
 ) -> Literal["absent", "reuse", "refresh"]:
     """Use exact text equality and retain absence for blank variants."""
     if not any((paper.get(field) or "").strip() for field in ("title", "abstract")):
@@ -214,12 +233,21 @@ def vector_action(
 
 
 def build_augmentation(
-    *, prepared_root: Path, legacy_root: Path, output: Path, datasets: tuple[str, ...] = DATASETS,
+    *,
+    prepared_root: Path,
+    legacy_root: Path,
+    output: Path,
+    datasets: tuple[str, ...] = DATASETS,
     unknown_filename: str = "restored_unknown_signature_ids_20261009.json",
-    seed: int = 1111, pair_seed: int = 12455678, train_candidates: int = 100000,
-    train_pool_cap: int = 25000, evaluation_candidates: int = 10000,
-    train_positive_cap: int = 10000, evaluation_positive_cap: int = 1000,
-    negative_multiplier: float = 1.5, omission_rate: float = 0.5,
+    seed: int = 1111,
+    pair_seed: int = 12455678,
+    train_candidates: int = 100000,
+    train_pool_cap: int = 25000,
+    evaluation_candidates: int = 10000,
+    train_positive_cap: int = 10000,
+    evaluation_positive_cap: int = 1000,
+    negative_multiplier: float = 1.5,
+    omission_rate: float = 0.5,
 ) -> dict[str, Any]:
     """Create fresh variants from accepted names and current split labels."""
     destination = output
@@ -239,10 +267,18 @@ def build_augmentation(
     for name in datasets:
         source = prepared_root / "benchmark_source" / name
         signatures, selected = candidates(
-            name, source, prepared_root=prepared_root, unknown_filename=unknown_filename, seed=seed,
-            pair_seed=pair_seed, train_candidates=train_candidates, train_pool_cap=train_pool_cap,
-            evaluation_candidates=evaluation_candidates, train_positive_cap=train_positive_cap,
-            evaluation_positive_cap=evaluation_positive_cap, negative_multiplier=negative_multiplier,
+            name,
+            source,
+            prepared_root=prepared_root,
+            unknown_filename=unknown_filename,
+            seed=seed,
+            pair_seed=pair_seed,
+            train_candidates=train_candidates,
+            train_pool_cap=train_pool_cap,
+            evaluation_candidates=evaluation_candidates,
+            train_positive_cap=train_positive_cap,
+            evaluation_positive_cap=evaluation_positive_cap,
+            negative_multiplier=negative_multiplier,
         )
         wanted = sorted({sid for rows in selected.values() for left, right, _ in rows for sid in (left, right)})
         needed = {str(signatures[sid]["paper_id"]) for sid in wanted}
@@ -258,8 +294,14 @@ def build_augmentation(
             original_pid = str(original_signature["paper_id"])
             original_paper = papers[original_pid]
             signature, paper, variant_counts = make_variant(
-                name, sid, original_signature, original_paper, old_paper=old_papers[original_pid],
-                cached_paper=old_augmented.get(original_pid), rng=rng, omission_rate=omission_rate,
+                name,
+                sid,
+                original_signature,
+                original_paper,
+                old_paper=old_papers[original_pid],
+                cached_paper=old_augmented.get(original_pid),
+                rng=rng,
+                omission_rate=omission_rate,
             )
             counts.update(variant_counts)
             augmented_sid, augmented_pid = signature["signature_id"], signature["paper_id"]
@@ -341,8 +383,12 @@ def build_augmentation(
 
     return report
 
+
 def finalize_augmentation(
-    *, root: Path, prepared_root: Path, datasets: tuple[str, ...] = DATASETS,
+    *,
+    root: Path,
+    prepared_root: Path,
+    datasets: tuple[str, ...] = DATASETS,
     unknown_filename: str = "restored_unknown_signature_ids_20261009.json",
 ) -> dict[str, Any]:
     """Attach exact vectors and verify source labels and split boundaries."""
@@ -438,8 +484,7 @@ def finalize_augmentation(
             mask = np.random.RandomState(seed).rand(len(frame)) < (0.8 / 0.9)
             for split, rows in (("train", frame[mask]), ("val", frame[~mask])):
                 allowed_pairs[split] = {
-                    tuple(sorted((str(left), str(right))))
-                    for left, right, _ in rows.itertuples(index=False, name=None)
+                    tuple(sorted((str(left), str(right)))) for left, right, _ in rows.itertuples(index=False, name=None)
                 }
             for split in ("train", "test"):
                 frame = _map_fixed_pair_labels(pd.read_csv(source / f"{split}_pairs.csv"), f"medline {split}")

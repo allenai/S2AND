@@ -81,7 +81,9 @@ def _review(handoff: Path, units_path: Path) -> tuple[set[Query], set[Relation],
 
 
 def _gold(
-    root: Path, datasets: Sequence[str], unknown_filename: str,
+    root: Path,
+    datasets: Sequence[str],
+    unknown_filename: str,
 ) -> tuple[dict[str, dict[str, str]], list[Path]]:
     result = {}
     inputs = []
@@ -124,15 +126,22 @@ def _read_rows(path: Path, columns: Sequence[str] | None = None) -> pd.DataFrame
 
 def _counts(rows: pd.DataFrame) -> dict[str, Any]:
     return {
-        "rows": len(rows), "query_views": int(rows["query_group_id"].nunique()),
+        "rows": len(rows),
+        "query_views": int(rows["query_group_id"].nunique()),
         "positive_rows": int(rows["label"].sum()),
         "dataset_rows": {str(key): int(value) for key, value in rows["dataset"].value_counts().items()},
     }
 
 
 def prepare_linker_support(
-    *, source_root: Path, benchmark_labels_root: Path, review_handoff: Path, review_units: Path,
-    unknown_filename: str, output_root: Path, report_path: Path,
+    *,
+    source_root: Path,
+    benchmark_labels_root: Path,
+    review_handoff: Path,
+    review_units: Path,
+    unknown_filename: str,
+    output_root: Path,
+    report_path: Path,
     benchmark_datasets: Sequence[str] = BENCHMARK_DATASETS,
 ) -> dict[str, Any]:
     """Write corrected labels and active splits without new identity judgments.
@@ -183,9 +192,16 @@ def prepare_linker_support(
     for relative in files.values():
         path = _child(source_root, relative)
         inputs.append(path)
-        rows = _read_rows(path, columns=[
-            "dataset", "query_signature_id", "query_group_id", "candidate_component_key", "supervision_type",
-        ])
+        rows = _read_rows(
+            path,
+            columns=[
+                "dataset",
+                "query_signature_id",
+                "query_group_id",
+                "candidate_component_key",
+                "supervision_type",
+            ],
+        )
         for dataset, query, group, component, supervision in rows.itertuples(index=False, name=None):
             relation = (str(dataset), str(query), str(component))
             group_key = (str(dataset), str(group))
@@ -200,8 +216,9 @@ def prepare_linker_support(
                 candidate = members[str(dataset)][str(component)] - {str(query)}
                 positive = author is not None and any(known.get(signature) == author for signature in candidate)
                 reason = (
-                    "unknown_query" if author is None else
-                    "unknown_negative_candidate"
+                    "unknown_query"
+                    if author is None
+                    else "unknown_negative_candidate"
                     if not positive and any(signature not in known for signature in candidate)
                     else None
                 )
@@ -217,13 +234,15 @@ def prepare_linker_support(
         inputs.extend(path for path in sorted((source_root / directory).rglob("*")) if path.is_file())
     assignment_base = {
         (str(dataset), str(group)): str(base)
-        for dataset, group, base in assignments[["dataset", "query_group_id", "base_group_id"]]
-        .itertuples(index=False, name=None)
+        for dataset, group, base in assignments[["dataset", "query_group_id", "base_group_id"]].itertuples(
+            index=False, name=None
+        )
     }
     canonical_base: dict[Query, str] = {}
     for relative in files.values():
         rows = _read_rows(
-            _child(source_root, relative), columns=["dataset", "query_signature_id", "query_group_id"],
+            _child(source_root, relative),
+            columns=["dataset", "query_signature_id", "query_group_id"],
         )
         for dataset, query, group in rows.itertuples(index=False, name=None):
             if (str(dataset), str(group)) in excluded or f"{dataset}:{query}" in conflicting:
@@ -236,10 +255,17 @@ def prepare_linker_support(
         rows = table.to_pandas(use_threads=False)
         before_counts[key] = _counts(rows)
         keep, labels, bases = [], [], []
-        for dataset, query, group, component, supervision, label, base in rows[[
-            "dataset", "query_signature_id", "query_group_id", "candidate_component_key",
-            "supervision_type", "label", "base_group_id",
-        ]].itertuples(index=False, name=None):
+        for dataset, query, group, component, supervision, label, base in rows[
+            [
+                "dataset",
+                "query_signature_id",
+                "query_group_id",
+                "candidate_component_key",
+                "supervision_type",
+                "label",
+                "base_group_id",
+            ]
+        ].itertuples(index=False, name=None):
             relation = (str(dataset), str(query), str(component))
             group_key = (str(dataset), str(group))
             keep.append(group_key not in excluded and f"{dataset}:{query}" not in conflicting)
@@ -280,12 +306,12 @@ def prepare_linker_support(
             classic[key] = relative
     classic["stratified_eval_test_split"].update(assignments_path=active_relative, summary_path=active_summary_relative)
     bundle["notes"] += (
-        " Derived support uses accepted gold and ORCID decisions."
-        " Active assignments preserve each surviving split."
+        " Derived support uses accepted gold and ORCID decisions. Active assignments preserve each surviving split."
     )
     (output_root / "bundle.json").write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
     shutil.copy2(
-        review_handoff / "orcid_error_query_signatures.json", output_root / "orcid_error_query_signatures.json",
+        review_handoff / "orcid_error_query_signatures.json",
+        output_root / "orcid_error_query_signatures.json",
     )
     result = load_bundle(output_root)
     validate_source_bundle_support_files(result)
@@ -293,8 +319,10 @@ def prepare_linker_support(
     train_path = _child(output_root, files["train_path"])
     train_table = pq.read_table(train_path, use_threads=False)
     train, train_filter = _apply_classic_train_holdout_filter(
-        train_table.to_pandas(use_threads=False), holdout_query_group_ids=set(holdout.query_group_ids),
-        holdout_base_group_ids=set(holdout.base_group_ids), holdout_sources=list(holdout.sources),
+        train_table.to_pandas(use_threads=False),
+        holdout_query_group_ids=set(holdout.query_group_ids),
+        holdout_base_group_ids=set(holdout.base_group_ids),
+        holdout_sources=list(holdout.sources),
     )
     if train.empty:
         raise ValueError("Support train table has no rows after the holdout filter")
@@ -305,14 +333,20 @@ def prepare_linker_support(
             held_signatures.update(
                 (str(dataset), str(query)) for dataset, query in rows.itertuples(index=False, name=None)
             )
-    if any((str(dataset), str(query)) in held_signatures for dataset, query
-           in train[["dataset", "query_signature_id"]].itertuples(index=False, name=None)):
+    if any(
+        (str(dataset), str(query)) in held_signatures
+        for dataset, query in train[["dataset", "query_signature_id"]].itertuples(index=False, name=None)
+    ):
         raise ValueError("The production train filter retains a held signature identity")
     _write_rows(train_path, train, train_table.schema)
     bound = {}
     for split in ("calibration_fit", "calibration_check", "test"):
         rows, selected = _load_classic_stratified_eval_rows(
-            result, classic, classic["stratified_eval_test_split"], splits=[split], include_calibration_source=True,
+            result,
+            classic,
+            classic["stratified_eval_test_split"],
+            splits=[split],
+            include_calibration_source=True,
         )
         bound[split] = {"rows": len(rows), "query_views": len(selected), "positive_rows": int(rows["label"].sum())}
     active_identities = _assignment_signatures(active)
@@ -328,11 +362,16 @@ def prepare_linker_support(
             if sha256_file(path) != sha256_file(output_root / path.relative_to(source_root)):
                 raise ValueError(f"Changed frozen support: {path}")
     report = {
-        "output_root": str(output_root), "tables": after, "original_assignment_rows": len(assignments),
-        "active_assignment_rows": len(active), "removed_assignment_rows": len(assignments) - len(active),
-        "orcid_excluded_query_signatures": len(errors), "legacy_cross_split_signature_identities": sorted(conflicting),
+        "output_root": str(output_root),
+        "tables": after,
+        "original_assignment_rows": len(assignments),
+        "active_assignment_rows": len(active),
+        "removed_assignment_rows": len(assignments) - len(active),
+        "orcid_excluded_query_signatures": len(errors),
+        "legacy_cross_split_signature_identities": sorted(conflicting),
         "excluded_query_views_by_reason": dict(Counter(reason for reasons in excluded.values() for reason in reasons)),
-        "train_holdout_filter": train_filter, "active_split_loader_counts": bound,
+        "train_holdout_filter": train_filter,
+        "active_split_loader_counts": bound,
         "active_assignments": _identity(output_root / active_relative),
         "inputs": [_identity(path) for path in dict.fromkeys(inputs)],
     }
@@ -346,7 +385,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     pa.set_io_thread_count(1)
     parser = argparse.ArgumentParser(description=__doc__)
     for option in (
-        "source-root", "benchmark-labels-root", "review-handoff", "review-units", "output-root", "report-path",
+        "source-root",
+        "benchmark-labels-root",
+        "review-handoff",
+        "review-units",
+        "output-root",
+        "report-path",
     ):
         parser.add_argument(f"--{option}", type=Path, required=True)
     parser.add_argument("--unknown-filename", required=True)

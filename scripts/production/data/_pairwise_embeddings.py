@@ -22,7 +22,12 @@ def _save(path: Path, value: dict[str, Any]) -> None:
 
 
 def encode_refresh(
-    *, root: Path, models_root: Path, batch_size: int = 16, device: str = "cuda", n_jobs: int = 1,
+    *,
+    root: Path,
+    models_root: Path,
+    batch_size: int = 16,
+    device: str = "cuda",
+    n_jobs: int = 1,
 ) -> None:
     """Resume local inference only for the same input and pinned model metadata."""
     if batch_size < 1 or n_jobs < 1:
@@ -66,21 +71,30 @@ def encode_refresh(
         completed = 0
         vectors = np.lib.format.open_memmap(vector_path, mode="w+", dtype=np.float32, shape=(len(rows), 768))
         progress = {
-            "input_sha256": input_sha, "rows": len(rows), "completed_rows": 0,
-            "started_utc": datetime.now(UTC).isoformat(), "models": models,
+            "input_sha256": input_sha,
+            "rows": len(rows),
+            "completed_rows": 0,
+            "started_utc": datetime.now(UTC).isoformat(),
+            "models": models,
         }
         _save(progress_path, progress)
     for start in range(completed, len(rows), batch_size):
         batch = rows[start : start + batch_size]
         texts = [(row["title"] or "") + tokenizer.sep_token + (row["abstract"] or "") for row in batch]
         encoded = tokenizer(
-            texts, padding=True, truncation=True, return_tensors="pt", return_token_type_ids=False, max_length=512,
+            texts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+            return_token_type_ids=False,
+            max_length=512,
         ).to(device)
         precision = torch.autocast("cuda", dtype=torch.float16) if device.startswith("cuda") else nullcontext()
         with torch.inference_mode(), precision:
             output = model(**encoded).last_hidden_state[:, 0, :].float().cpu().numpy()
         if (
-            output.shape != (len(batch), 768) or not np.isfinite(output).all()
+            output.shape != (len(batch), 768)
+            or not np.isfinite(output).all()
             or not (np.linalg.norm(output, axis=1) > 0).all()
         ):
             raise ValueError("Invalid SPECTER2 output vectors")

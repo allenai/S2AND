@@ -51,7 +51,16 @@ from s2and.production_training_contract import (  # noqa: E402
     load_model_plan,
     load_packaged_artifact_authority,
 )
-from scripts.production.model.augmented_leakage import require_training_members, source_members  # noqa: E402
+from scripts.production.model.augmented_leakage import (  # noqa: E402
+    require_training_members,
+    source_members,
+    training_members_from_sources,
+)
+from scripts.production.model.unknown_signatures import (  # noqa: E402
+    augmented_unknown_ids,
+    exclude_unknown_pairs,
+    load_unknown_signatures,
+)
 
 logger = logging.getLogger("s2and")
 
@@ -268,6 +277,7 @@ def _featurize_selection(
     n_jobs: int,
     nameless_featurizer_info: FeaturizationInfo,
     total_ram_bytes: int | None,
+    unknown_signature_ids: frozenset[str] = frozenset(),
 ) -> tuple[TupleOfArrays, TupleOfArrays]:
     """Featurize release train/validation pairs and never resolve a test split.
 
@@ -276,6 +286,15 @@ def _featurize_selection(
     """
 
     train_pairs, val_pairs = resolve_selection_pairs(dataset)
+    selected_counts = (len(train_pairs), len(val_pairs))
+    train_pairs = exclude_unknown_pairs(train_pairs, unknown_signature_ids)
+    val_pairs = exclude_unknown_pairs(val_pairs, unknown_signature_ids)
+    logger.info(
+        "unknown pair exclusions dataset=%s train=%d validation=%d",
+        dataset.name,
+        selected_counts[0] - len(train_pairs),
+        selected_counts[1] - len(val_pairs),
+    )
     rust_featurizer = build_verified_rust_featurizer(
         dataset,
         arrow_dataset,
@@ -385,15 +404,30 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     """Train pairwise models and write the pairwise production bundle stage."""
 
     plan = _preflight_pairwise(args)
+    unknown_inputs = {name: load_unknown_signatures(plan.datasets[name].files) for name in plan.dataset_names}
+    unknown_ids = {name: source.ids for name, source in unknown_inputs.items()}
+    unknown_ids["augmented"] = augmented_unknown_ids(unknown_ids)
     augmented_pairs = pd.read_csv(plan.datasets["augmented"].files["train_pairs"])
     pair_frame = _map_fixed_pair_labels(augmented_pairs, "augmented train")
     augmented_members = source_members(
-        (str(left), str(right)) for left, right in pair_frame.iloc[:, :2].itertuples(index=False, name=None)
+        (str(left), str(right))
+        for left, right in pair_frame.iloc[:, :2].itertuples(index=False, name=None)
+        if str(left) not in unknown_ids["augmented"] and str(right) not in unknown_ids["augmented"]
     )
     unknown_sources = set(augmented_members) - set(DEFAULT_SOURCE_DATASET_NAMES) - {"medline"}
     if unknown_sources:
         raise ValueError(f"Augmented training has unsupported source datasets: {sorted(unknown_sources)}")
     del augmented_pairs, pair_frame
+    # Resolve every benchmark before allocating any feature matrices. Keep the
+    # per-dataset check below as well, against the actual selection object.
+    for dataset_name in plan.dataset_names:
+        dataset_input = plan.datasets[dataset_name]
+        if dataset_input.split_mode == "random_blocks":
+            require_training_members(
+                augmented_members,
+                dataset_name,
+                training_members_from_sources(dataset_name, dataset_input.files, random_seed=int(args.random_seed)),
+            )
     artifact_authority = load_packaged_artifact_authority(
         name_counts_index_root=Path(args.name_counts_index_root),
     )
@@ -404,6 +438,8 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         plan,
         artifact_hashes=artifact_hashes,
     )
+    training_config["unknown_signature_inputs"] = {name: source.binding() for name, source in unknown_inputs.items()}
+    training_config["unknown_signature_policy"] = "exclude_pair_endpoints; retain_eps_inputs; score_known_members_only"
     os.environ["OMP_NUM_THREADS"] = str(int(args.n_jobs))
     logger.info(
         "pairwise resources n_jobs=%d matrix_work_dir=%s free_bytes=%d total_ram_bytes=%s",
@@ -487,6 +523,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                     n_jobs=int(args.n_jobs),
                     nameless_featurizer_info=nameless_featurizer_info,
                     total_ram_bytes=plan.total_ram_bytes,
+                    unknown_signature_ids=unknown_ids[dataset_name],
                 )
             staged = _stage_dataset_features(
                 matrix_work_dir,

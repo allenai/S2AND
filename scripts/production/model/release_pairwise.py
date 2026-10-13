@@ -29,6 +29,7 @@ from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.eval import b3_precision_recall_fscore, pairwise_probability_metrics  # noqa: E402
 from s2and.feature_port import build_verified_rust_featurizer, featurize_pairs_with_rust  # noqa: E402
+from s2and.metrics import _validated_cluster_partition_coverage  # noqa: E402
 from s2and.production_bundle import finalize_pairwise_eps  # noqa: E402
 from s2and.production_bundle_contract import PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES  # noqa: E402
 from s2and.production_model import _load_pairwise_staging_model, load_production_model  # noqa: E402
@@ -46,6 +47,7 @@ from scripts.production.model.run_binding import (  # noqa: E402
     load_run_binding,
     require_run_binding_matches,
 )
+from scripts.production.model.unknown_signatures import augmented_unknown_ids, load_unknown_signatures  # noqa: E402
 from scripts.verification.validate_local_arrow_release import validate_release_root  # noqa: E402
 
 _BASELINE_METRIC_CONTRACT = {
@@ -673,9 +675,37 @@ def _check_release_leakage(
         name: _block_signature_ids(files["blocks"], context=f"cluster evaluation {name!r}")
         for name, files in cluster_paths.items()
     }
+    if "augmented" in pair_identities:
+        evaluation_members = source_members(pair_identities["augmented"])
+        for name, files in model_paths.items():
+            if name == "augmented":
+                continue
+            if set(files) == _FIXED_MODEL_ROLES:
+                development = {
+                    signature_id
+                    for split in ("train_pairs", "val_pairs")
+                    for pair in _csv_pair_identities(files[split], context=f"{name!r} {split}")
+                    for signature_id in pair
+                }
+            else:
+                development = _signature_ids(files["signatures"], context=f"model signatures {name!r}")
+            overlap = evaluation_members.get(name, set()) & development
+            if overlap:
+                raise ValueError(
+                    f"Release preparation: augmented evaluation contains model {name!r} signatures: "
+                    f"count={len(overlap)} sample={sorted(overlap)[:5]}. "
+                    "Exclude the complete benchmark development population from augmented evaluation."
+                )
     if "augmented" in model_paths:
+        unknown_ids = augmented_unknown_ids(
+            {name: load_unknown_signatures(files).ids for name, files in model_paths.items()}
+        )
         augmented = source_members(
-            _csv_pair_identities(model_paths["augmented"]["train_pairs"], context="augmented train pairs")
+            (left, right)
+            for left, right in _csv_pair_identities(
+                model_paths["augmented"]["train_pairs"], context="augmented train pairs"
+            )
+            if left not in unknown_ids and right not in unknown_ids
         )
         heldout = {
             name: pair_signatures.get(name, set()) | block_signatures.get(name, set())
@@ -1267,11 +1297,25 @@ def evaluate_pairs(args: argparse.Namespace) -> dict[str, Any]:
 def _b3_report(
     true_clusters: Mapping[str, Sequence[str]],
     predicted_clusters: Mapping[str, Sequence[str]],
+    unknown_signature_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
+    if unknown_signature_ids:
+        # Full inference must cover unknowns before the score removes their fallback labels.
+        _validated_cluster_partition_coverage(dict(true_clusters), dict(predicted_clusters))
+        true_clusters, predicted_clusters = (
+            {
+                cluster: known
+                for cluster, members in partition.items()
+                if (known := [signature for signature in members if signature not in unknown_signature_ids])
+            }
+            for partition in (true_clusters, predicted_clusters)
+        )
     precision, recall, f1, per_signature, _, _ = b3_precision_recall_fscore(
         dict(true_clusters),
         dict(predicted_clusters),
     )
+    if unknown_signature_ids and not per_signature:
+        raise ValueError("B3 requires at least one known signature")
     report = {
         "precision": float(precision),
         "recall": float(recall),
@@ -1445,6 +1489,13 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
     original_eps = _unit_float(clusterer.cluster_model.eps, label="Source EPS")
     try:
         for name, dataset_spec in datasets:
+            unknown_source = load_unknown_signatures(dataset_spec.files)
+            unknown_bindings = config.get("unknown_signature_inputs")
+            if unknown_bindings is None:
+                if unknown_source.ids:
+                    raise ValueError("EPS calibration requires a bundle trained with unknown-signature exclusions")
+            elif unknown_bindings.get(name) != unknown_source.binding():
+                raise ValueError(f"Unknown-signature sidecar changed after training for {name!r}")
             dataset = _load_anddata(
                 name,
                 dataset_spec.files,
@@ -1481,7 +1532,7 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
                     dists=distances,
                     total_ram_bytes=args.total_ram_bytes,
                 )
-                metrics_by_eps[eps][name] = _b3_report(true_clusters, predicted)
+                metrics_by_eps[eps][name] = _b3_report(true_clusters, predicted, unknown_source.ids)
             del distances, dataset, val_blocks, true_clusters
             gc.collect()
     finally:

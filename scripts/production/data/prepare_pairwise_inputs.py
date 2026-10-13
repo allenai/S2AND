@@ -50,7 +50,12 @@ def members(clusters: dict) -> dict[str, str]:
 
 
 def dataset_for_split(
-    name: str, signatures: dict, clusters: dict, *, seed: int = 1111, n_jobs: int = 1,
+    name: str,
+    signatures: dict,
+    clusters: dict,
+    *,
+    seed: int = 1111,
+    n_jobs: int = 1,
 ) -> ANDData:
     """Use the real splitter without text features or predictions."""
     paper_ids = {str(signature["paper_id"]) for signature in signatures.values()}
@@ -97,10 +102,18 @@ def link(source: Path, target: Path) -> None:
 
 
 def prepare_benchmark(
-    name: str, *, source_root: Path, output_root: Path, fixed_pair_root: Path,
-    correction_receipt: Path | None = None, correction_root: Path | None = None,
+    name: str,
+    *,
+    source_root: Path,
+    output_root: Path,
+    fixed_pair_root: Path,
+    correction_receipt: Path | None = None,
+    correction_root: Path | None = None,
     unknown_filename: str = "restored_unknown_signature_ids_20261009.json",
-    seed: int = 1111, pair_seed: int = 12455678, evaluation_pairs: int = 10000, n_jobs: int = 1,
+    seed: int = 1111,
+    pair_seed: int = 12455678,
+    evaluation_pairs: int = 10000,
+    n_jobs: int = 1,
 ) -> dict:
     """Prepare accepted raw names, current gold, and nested release splits."""
     root = output_root / "benchmark_source"
@@ -249,8 +262,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     for option in ("prepared-root", "legacy-root", "output"):
         augmentation.add_argument(f"--{option}", type=Path, required=True)
     for option, default in (
-        ("train-candidates", 100000), ("train-pool-cap", 25000), ("evaluation-candidates", 10000),
-        ("train-positive-cap", 10000), ("evaluation-positive-cap", 1000),
+        ("train-candidates", 100000),
+        ("train-pool-cap", 25000),
+        ("evaluation-candidates", 10000),
+        ("train-positive-cap", 10000),
+        ("evaluation-positive-cap", 1000),
     ):
         augmentation.add_argument(f"--{option}", type=int, default=default)
     augmentation.add_argument("--negative-multiplier", type=float, default=1.5)
@@ -296,8 +312,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not 0 <= args.omission_rate <= 1 or args.negative_multiplier <= 0:
                 parser.error("Require 0 <= --omission-rate <= 1 and positive --negative-multiplier")
             for option in (
-                "train_candidates", "train_pool_cap", "evaluation_candidates",
-                "train_positive_cap", "evaluation_positive_cap",
+                "train_candidates",
+                "train_pool_cap",
+                "evaluation_candidates",
+                "train_positive_cap",
+                "evaluation_positive_cap",
             ):
                 if options[option] < 1:
                     parser.error(f"--{option.replace('_', '-')} must be positive")
@@ -314,8 +333,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 from scripts.production.data._pairwise_embeddings import encode_refresh
 
                 encode_refresh(
-                    root=args.root / "embedding_refresh", models_root=models_root,
-                    batch_size=batch_size, device=device, n_jobs=args.n_jobs,
+                    root=args.root / "embedding_refresh",
+                    models_root=models_root,
+                    batch_size=batch_size,
+                    device=device,
+                    n_jobs=args.n_jobs,
                 )
             report = finalize_augmentation(**options)
     print(json.dumps(report), flush=True)
@@ -324,4 +346,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

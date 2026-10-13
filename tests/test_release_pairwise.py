@@ -340,25 +340,86 @@ def test_prepare_run_rejects_leakage_before_writes(tmp_path, fixture_kwargs, mes
 
 
 @pytest.mark.parametrize("heldout_id", ["rt1", "ct1"])
-def test_prepare_run_rejects_augmented_copies_of_heldout_signatures(tmp_path: Path, heldout_id: str) -> None:
+@pytest.mark.parametrize("unknown", [False, True], ids=["known", "unknown"])
+def test_prepare_run_checks_augmented_copies_of_heldout_signatures(
+    tmp_path: Path,
+    heldout_id: str,
+    unknown: bool,
+) -> None:
     fixture = _release_fixture(tmp_path)
     # Rename the fixed-pair population without changing its otherwise disjoint pairs.
     model = fixture.payload["model"]["datasets"]
     model["augmented"] = model.pop("fixed")
     pairwise = fixture.payload["evaluation"]["pairwise"]
     pairwise["augmented"] = pairwise.pop("fixed")
+    _write_json(
+        Path(pairwise["augmented"]["pairs"]),
+        [{"signature_id_1": "random___at1", "signature_id_2": "random___at2", "label": 1}],
+    )
     baseline = json.loads(fixture.baseline_record.read_text(encoding="utf-8"))
     for values in (baseline["populations"]["pairwise"], baseline["metrics"]["pairwise_datasets"]):
         values["augmented"] = values.pop("fixed")
+    baseline["populations"]["pairwise"]["augmented"]["pairs"] = _sha256(Path(pairwise["augmented"]["pairs"]))
     _write_json(fixture.baseline_record, baseline)
     fixture.payload["evaluation"]["baseline"]["sha256"] = _sha256(fixture.baseline_record)
     Path(model["augmented"]["train_pairs"]).write_text(
         f"signature_id_1,signature_id_2,label\nrandom___{heldout_id},random___safe,1\n", encoding="utf-8"
     )
     _write_json(fixture.release, fixture.payload)
+    if unknown:
+        sidecar = Path(model["random"]["clusters"]).parent / "restored_unknown_signature_ids_20261009.json"
+        _write_json(sidecar, [heldout_id])
+        release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
+        assert (fixture.run_dir / "model_plan.json").is_file()
+        return
     with pytest.raises(ValueError, match="augmented training contains held-out 'random' signatures"):
         release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
     assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}
+
+
+@pytest.mark.parametrize(
+    ("source_id", "message"),
+    [
+        ("random___r1", "augmented evaluation contains model 'random' signatures"),
+        ("fixed___f1", "augmented evaluation contains model 'fixed' signatures"),
+        ("fixed___f3", "augmented evaluation contains model 'fixed' signatures"),
+        ("unprefixed", "Invalid augmented source signature ID"),
+        ("random___heldout", None),
+    ],
+    ids=["random-development", "fixed-train", "fixed-validation", "malformed-prefix", "disjoint-control"],
+)
+def test_prepare_run_checks_augmented_evaluation_against_model_population(
+    tmp_path: Path, source_id: str, message: str | None
+) -> None:
+    fixture = _release_fixture(tmp_path)
+    # No augmented training dataset: the reverse guard still applies.
+    augmented_evaluation = _dataset_files(
+        tmp_path / "inputs",
+        "evaluation_augmented",
+        {
+            "signatures": {source_id: {}, "random___external": {}},
+            "papers": {},
+            "specter_embeddings": {},
+            "pairs": [{"signature_id_1": source_id, "signature_id_2": "random___external", "label": 1}],
+        },
+    )
+    fixture.payload["evaluation"]["pairwise"]["augmented"] = augmented_evaluation
+    baseline = json.loads(fixture.baseline_record.read_text())
+    baseline["populations"]["pairwise"]["augmented"] = {
+        role: _sha256(Path(path)) for role, path in augmented_evaluation.items()
+    }
+    baseline["metrics"]["pairwise_datasets"]["augmented"] = {"auroc": 0.9005, "macro_f1": 0.804}
+    _write_json(fixture.baseline_record, baseline)
+    fixture.payload["evaluation"]["baseline"]["sha256"] = _sha256(fixture.baseline_record)
+    _write_json(fixture.release, fixture.payload)
+
+    if message is None:
+        release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
+        assert (fixture.run_dir / "model_plan.json").is_file()
+    else:
+        with pytest.raises(ValueError, match=message):
+            release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
+        assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}
 
 
 def test_prepare_run_requires_a_fresh_directory_and_code_owned_gate_maxima(tmp_path: Path) -> None:
@@ -816,6 +877,61 @@ def test_calibrate_eps_binds_plan_reuses_matrices_applies_floors_and_smallest_ti
     assert finalizations[0]["new_eps"] == pytest.approx(0.2)
     assert "expected_old_eps" not in finalizations[0]
     assert args.output_bundle.is_dir() and args.output_report.is_file()
+
+
+@pytest.mark.parametrize("sidecar_change", [None, "changed", "removed", "unbound"])
+def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sidecar_change: str | None,
+) -> None:
+    from scripts.production.model.unknown_signatures import load_unknown_signatures
+
+    actual_b3_report = release_pairwise._b3_report
+    fixture = _release_fixture(tmp_path, eps_grid=[0.3, 0.6])
+    model_plan, _ = _prepare(fixture)
+    bundle = _calibration_bundle(tmp_path, model_plan)
+    files = {role: Path(path) for role, path in fixture.model["random"].items()}
+    sidecar = files["clusters"].parent / "restored_unknown_signature_ids_20261009.json"
+    _write_json(sidecar, ["s2"])
+    config_path = bundle / "reproducibility" / "pairwise_training_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if sidecar_change != "unbound":
+        config["unknown_signature_inputs"] = {"random": load_unknown_signatures(files).binding()}
+        _write_json(config_path, config)
+    if sidecar_change == "changed":
+        _write_json(sidecar, [])
+    elif sidecar_change == "removed":
+        sidecar.unlink()
+    clusterer = _StubCalibrationClusterer()
+    _patch_calibration(monkeypatch, clusterer, {0.3: 1.0, 0.6: 1.0})
+    monkeypatch.setattr(release_pairwise, "_b3_report", actual_b3_report)
+    featurizer_calls = _patch_rust_featurizers(monkeypatch)
+    args = argparse.Namespace(
+        source_bundle=bundle,
+        model_plan=model_plan,
+        output_bundle=tmp_path / "calibrated",
+        output_report=tmp_path / "calibration.json",
+        name_counts_index_root=tmp_path / "counts",
+        arrow_root=tmp_path / "converted",
+        n_jobs=1,
+        total_ram_bytes=2048,
+    )
+    if sidecar_change is not None:
+        message = "trained with unknown-signature" if sidecar_change == "unbound" else "sidecar changed"
+        with pytest.raises(ValueError, match=message):
+            release_pairwise.calibrate_eps(args)
+        assert not featurizer_calls
+        assert not args.output_bundle.exists()
+        return
+    report = release_pairwise.calibrate_eps(args)
+    assert featurizer_calls[0]["signature_ids"] == {"s1", "s2"}
+    assert report["validation_identities"]["random"]["signature_count"] == 2
+    for trial in report["trials"]:
+        assert trial["datasets"]["random"]["signature_count"] == 1
+        assert trial["signature_count"] == 1
+        assert trial["signature_weighted"]["f1"] == 1.0
+    assert len([event for event in clusterer.events if event[0] == "predict"]) == 2
 
 
 def test_calibrate_eps_rejects_a_different_model_plan_binding_before_model_load(

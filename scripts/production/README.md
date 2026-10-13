@@ -445,6 +445,22 @@ dataset is not part of v1.3, and pair-labeled `medline` is published but not
 trained on directly. Replace the single `random` example with exactly those
 eight reviewed entries before running the trainer below.
 
+Keep each export's `restored_unknown_signature_ids_*.json` beside its cluster file.
+The trainer excludes pairs with an unknown endpoint from both train and validation selections.
+It also excludes augmented copies under `<dataset>___<signature_id>` IDs.
+The trainer preserves pair order and does not replace excluded pairs.
+Legacy inputs without uncertainty sidecars declare no unknowns.
+Multiple sidecars in one label directory cause an error.
+
+EPS calibration retains unknown signatures in its validation blocks and predictions.
+B³ removes unknown members from both score partitions after inference.
+Thus fallback memberships cannot change the score denominators for known signatures.
+EPS weights use the number of known signatures in each score.
+Each calibration dataset requires at least one known validation signature.
+
+The training configuration records sidecar paths, hashes, and counts.
+Calibration rejects a sidecar change after the model fit.
+
 `model_plan.json` has the single owner-selected `release_version`, training and
 validation inputs, and EPS policy, but no held-out path.
 `evaluation_plan.json` has held-out inputs, gates, baseline
@@ -551,6 +567,47 @@ Every signatures file referenced by `release.json` must come from these joined
 outputs: the staged `$CanonicalBenchmarkRoot` files (or subsets derived from
 them) and `$CanonicalAugmentedRoot`. `prepare-run` does not check name
 provenance, so review this before freezing the run.
+
+### Filter augmented pairs
+
+After selecting the exact benchmark model populations in a draft `release.json`,
+filter the augmented pairs using the same seed that will train the model:
+
+```powershell
+$TrainingSeed = 1111
+$FilteredAugmentedRoot = "$ReviewedInputWork\augmented_filtered"
+uv run python scripts/convert_to_arrow.py filter-augmented-pairs `
+  --release "$RunRoot\release.json" `
+  --random-seed $TrainingSeed `
+  --output-root $FilteredAugmentedRoot
+if ($LASTEXITCODE -ne 0) { throw 'Augmented pair filtering failed' }
+```
+
+The output directory must be new. The command preserves source files and the
+draft release file. It resolves training membership through the trainer's actual
+`ANDData` block split, preserving source order. Training pairs survive only when
+both benchmark members belong to their source training splits; MEDLINE members
+remain eligible because MEDLINE is not directly trained. Evaluation pairs are
+removed if either member belongs to a benchmark's model-development population,
+including validation records used for tuning. This matches `prepare-run`'s
+population-disjointness rule and is stricter than checking training blocks alone.
+
+Use the resulting `train_pairs.csv` and unchanged `val_pairs.csv` for the
+augmented model entry, and `test_pairs.json` for augmented evaluation `pairs`.
+Augmented validation is preserved because the production trainer excludes it
+from its tuning union and EPS calibration uses only random-block benchmarks.
+`test_pairs.csv` contains the same retained evaluation rows for public Arrow
+conversion. Keep the joined signatures, papers, and embeddings unchanged.
+Review the report's retained/removed counts, label balance, seed, source hashes,
+and output hashes before updating the draft paths. Regenerate the reviewed
+baseline for the changed evaluation population, then run `prepare-run`.
+Train with `--random-seed $TrainingSeed`; changing the seed or source population
+requires filtering again. The trainer checks all source splits before the first
+feature allocation and rechecks the dataset used for selection.
+
+A full-benchmark model population can leave no eligible augmented evaluation
+pairs. The command rejects empty training/evaluation outputs. Revise the reviewed
+model/evaluation population design in that case; do not bypass the overlap check.
 
 These conversion commands expect the reviewed inputs and the `stages/`
 directory established by
@@ -815,12 +872,14 @@ Arrow data to use the release name-count index, and to contain exactly the JSON
 signatures. See [release Arrow conversions](#release-arrow-conversions).
 
 `prepare-run` rejects augmented training copies of external held-out signatures
-by resolving their `<dataset>___<signature>` identities. The trainer also rejects
-augmented copies outside each benchmark's actual training blocks, including
-validation, internal test, and IDs omitted from its model-plan population. These
-checks stop the run; they never edit the source pairs. Prepare reviewed augmented
-training pairs restricted to the frozen source training populations and seed.
-Preserving the old JSON order is insufficient when the population changes.
+and augmented evaluation copies of benchmark model-development signatures by
+resolving their `<dataset>___<signature>` identities. The trainer rejects augmented
+training copies outside each benchmark's actual training blocks, including
+validation, internal test, and IDs omitted from its model-plan population, before
+featurizing any dataset. It does not read held-out inputs. These guards never edit
+source pairs; use [filter-augmented-pairs](#filter-augmented-pairs) to create reviewed
+replacements using the frozen source populations and seed. Preserving the old
+JSON order is insufficient when the population changes.
 
 Each command builds the featurizer only for the signatures it scores: the
 selected pairs' members, or the members of the blocks being clustered.

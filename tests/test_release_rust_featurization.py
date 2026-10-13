@@ -214,6 +214,72 @@ def test_rust_features_match_python_on_the_selected_training_pairs(release_input
         assert not np.isnan(replaced[0]).any()
 
 
+@pytest.mark.parametrize("unknown_scope", ["partial", "all"])
+def test_unknowns_leave_supervised_pairs_but_retain_dataset_and_features(
+    release_inputs: dict[str, Any],
+    unknown_scope: str,
+) -> None:
+    reference, dataset, train_pairs, val_pairs = _selections(release_inputs)
+    unknown = frozenset({str(train_pairs[0][0]), str(val_pairs[0][1])})
+    if unknown_scope == "all":
+        unknown = frozenset(dataset.signatures)
+    expected = [
+        [pair for pair in pairs if str(pair[0]) not in unknown and str(pair[1]) not in unknown]
+        for pairs in (train_pairs, val_pairs)
+    ]
+    original_blocks = dataset.get_blocks()
+    assert reference.name_counts_manifest_sha256 is not None
+    with _open(release_inputs) as arrow_dataset:
+        observed = train_pairwise._featurize_selection(
+            dataset,
+            arrow_dataset,
+            MAIN_INFO,
+            name_counts_manifest_sha256=reference.name_counts_manifest_sha256,
+            n_jobs=1,
+            nameless_featurizer_info=NAMELESS_INFO,
+            total_ram_bytes=None,
+            unknown_signature_ids=unknown,
+        )
+    for pairs, arrays in zip(expected, observed, strict=True):
+        _assert_features_match(_python_features(pairs, reference), arrays)
+    assert dataset.get_blocks() == original_blocks
+    assert unknown <= set(dataset.signatures)
+
+
+def test_unknown_signature_retains_its_effect_on_cluster_predictions(release_inputs: dict[str, Any]) -> None:
+    dataset = _json_dataset(release_inputs, selection_only=True)
+    first, unknown, second = next(iter(dataset.get_blocks().values()))[:3]
+    classifier = LGBMClassifier(n_estimators=1, n_jobs=1, verbosity=-1).fit(
+        np.zeros((2, len(MAIN_INFO.selected_feature_indices()))),
+        [0, 1],
+    )
+    clusterer = Clusterer(
+        MAIN_INFO,
+        classifier,
+        cluster_model=FastCluster(linkage="average", eps=0.5),
+        n_jobs=1,
+        use_default_constraints_as_supervision=False,
+    )
+    predictions, _ = clusterer.predict(
+        {"block": [first, unknown, second]},
+        dataset,
+        dists={"block": np.array([0.1, 0.8, 0.1])},
+    )
+    assert _canonical_partition(predictions) == [sorted([first, unknown, second])]
+    score = release_pairwise._b3_report(
+        {"a": [first, unknown], "b": [second]},
+        predictions,
+        frozenset({unknown}),
+    )
+    assert score == {"precision": 0.5, "recall": 1.0, "f1": 0.667, "signature_count": 2}
+    without_unknown, _ = clusterer.predict(
+        {"block": [first, second]},
+        dataset,
+        dists={"block": np.array([0.8])},
+    )
+    assert len(without_unknown) == 2
+
+
 def test_rust_distances_give_python_partitions_at_every_eps(release_inputs: dict[str, Any]) -> None:
     """Release clustering (selection-only dataset, Rust distances) partitions like Python fused predict."""
 

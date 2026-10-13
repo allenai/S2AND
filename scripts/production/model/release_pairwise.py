@@ -55,7 +55,11 @@ from scripts.production.model.run_binding import (  # noqa: E402
     load_run_binding,
     require_run_binding_matches,
 )
-from scripts.production.model.unknown_signatures import augmented_unknown_ids, load_unknown_signatures  # noqa: E402
+from scripts.production.model.unknown_signatures import (  # noqa: E402
+    augmented_unknown_ids,
+    exclude_unknown_pairs,
+    load_unknown_signatures,
+)
 from scripts.verification.validate_local_arrow_release import validate_release_root  # noqa: E402
 
 _BASELINE_METRIC_CONTRACT = {
@@ -1449,6 +1453,142 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
+def _heldout_input_specs(path: Path) -> tuple[str, dict[str, dict[str, tuple[Path, str]]]]:
+    """Resolve the prepared snapshot's exact pair and block populations."""
+
+    payload = _read_json(path)
+    if not isinstance(payload, Mapping):
+        raise ValueError("Held-out inputs must contain a JSON object")
+    version = payload.get("release_version")
+    if not isinstance(version, str) or not version or version.strip() != version:
+        raise ValueError("Held-out inputs require a release_version")
+    sources = _object(payload.get("sources"), label="inputs.sources", keys={"model", "evaluation"})
+    datasets: dict[str, dict[str, tuple[Path, str]]] = {}
+    block_roles = _PAIR_ROLES | {"clusters", "blocks", "unknown_signatures"}
+    for name, files in _named_objects(sources["evaluation"], label="inputs.sources.evaluation").items():
+        if set(files) not in (_PAIR_ROLES, _PAIR_ROLES | {"unknown_signatures"}, block_roles):
+            raise ValueError(f"Held-out dataset {name!r} has unsupported file roles")
+        datasets[name] = {}
+        for role, raw_spec in files.items():
+            spec = _object(raw_spec, label=f"heldout.{name}.{role}", keys={"path", "sha256"})
+            resolved = _resolve_path(spec["path"], base=path.parent, label=f"heldout.{name}.{role}")
+            datasets[name][role] = _plan_file_spec(
+                {"path": str(resolved), "sha256": spec["sha256"]}, label=f"heldout.{name}.{role}"
+            )
+    if not any("blocks" in files for files in datasets.values()):
+        raise ValueError("Held-out inputs require at least one block population")
+    return version, datasets
+
+
+def evaluate_heldout(args: argparse.Namespace) -> dict[str, Any]:
+    """Score prepared outer holdouts with one complete model and no baseline."""
+
+    output_path = Path(args.output_report).resolve()
+    if output_path.exists():
+        raise FileExistsError(f"Evaluation output already exists: {output_path}")
+    inputs_path = Path(args.inputs_json).resolve()
+    version, specs = _heldout_input_specs(inputs_path)
+    model_dir = Path(args.model).resolve()
+    model_plan_path = inputs_path.parent / "model_plan.json"
+    model_plan_digest = _sha256_file(model_plan_path)
+    _training_config(model_dir, model_plan_sha256=model_plan_digest)
+    artifacts, clusterer = _evaluation_model(args)
+    if clusterer.production_model_release_version != version:
+        raise ValueError("Held-out inputs and complete model release versions differ")
+    clusterer.n_jobs = int(args.n_jobs)
+    arrow_root = Path(args.arrow_root).resolve()
+    arrow_manifest = arrow_root / "manifest.json"
+    arrow_datasets, _replays, _version = read_arrow_collection_root(arrow_manifest)
+    if set(arrow_datasets) != set(specs):
+        raise ValueError("Held-out Arrow collection differs from the declared evaluation datasets")
+
+    verified = {name: _verified_files(files, label=f"heldout.{name}") for name, files in specs.items()}
+    unknown_sources = {name: load_unknown_signatures(files) for name, files in verified.items()}
+    for name, files in verified.items():
+        if "unknown_signatures" in files and unknown_sources[name].path != files["unknown_signatures"]:
+            raise ValueError(f"Declared uncertainty sidecar differs from the label sidecar for {name!r}")
+    augmented_unknowns = augmented_unknown_ids({name: source.ids for name, source in unknown_sources.items()})
+    pair_reports: dict[str, Any] = {}
+    cluster_reports: dict[str, Any] = {}
+    b3_metrics: dict[str, dict[str, Any]] = {}
+    all_labels: list[np.ndarray] = []
+    all_main: list[np.ndarray] = []
+    all_nameless: list[np.ndarray] = []
+    for name, files in verified.items():
+        pairs = _labeled_pairs(files["pairs"], name=name)
+        unknown_ids = augmented_unknowns if name == "augmented" else unknown_sources[name].ids
+        selected_pairs = exclude_unknown_pairs(pairs, unknown_ids)
+        dataset = _load_anddata(
+            name, files, mode="train" if "blocks" in files else "inference", name_tuples=artifacts.name_tuples.pairs
+        )
+        blocks = _normalized_blocks(files["blocks"], name=name) if "blocks" in files else None
+        if blocks is not None:
+            if {key: sorted(members) for key, members in blocks.items()} != {
+                key: sorted(members) for key, members in dataset.get_blocks().items()
+            }:
+                raise ValueError(f"Held-out blocks differ from the complete source population for {name!r}")
+            if not unknown_ids <= set(dataset.signatures):
+                raise ValueError(f"Unknown signatures fall outside the held-out source for {name!r}")
+        selected_ids = {str(pair[index]) for pair in selected_pairs for index in (0, 1)}
+        if blocks is not None:
+            selected_ids.update(signature for members in blocks.values() for signature in members)
+        with _release_rust_featurizer(
+            arrow_root,
+            name,
+            source_sha256=_spec_sha256(specs[name]),
+            dataset=dataset,
+            signature_ids=selected_ids,
+            artifacts=artifacts,
+            n_jobs=int(args.n_jobs),
+        ) as rust_featurizer:
+            metrics, labels, main, nameless = _pairwise_predictions(selected_pairs, rust_featurizer, clusterer, args)
+            pair_reports[name] = {"metrics": metrics, "unknown_pairs_removed": len(pairs) - len(selected_pairs)}
+            all_labels.append(labels)
+            all_main.append(main)
+            all_nameless.append(nameless)
+            if blocks is not None:
+                true_clusters = dataset.construct_cluster_to_signatures(blocks)
+                seeded = rust_featurizer.with_cluster_seeds(
+                    dataset.cluster_seeds_require, dataset.cluster_seeds_disallow
+                )
+                predicted, _ = clusterer.predict_from_rust_featurizer(
+                    blocks,
+                    seeded,
+                    cluster_seeds_disallow=(
+                        dataset.cluster_seeds_disallow if clusterer.use_default_constraints_as_supervision else None
+                    ),
+                    total_ram_bytes=args.total_ram_bytes,
+                )
+                b3_metrics[name] = _b3_report(true_clusters, predicted, unknown_ids)
+                cluster_reports[name] = {
+                    "metrics": b3_metrics[name],
+                    "blocks": len(blocks),
+                    "inference_signatures": sum(map(len, blocks.values())),
+                    "unknown_signatures": len(unknown_ids),
+                }
+        print(json.dumps({"event": "heldout_dataset_complete", "dataset": name}), flush=True)
+    aggregate, _ = pairwise_metrics(np.concatenate(all_labels), np.concatenate(all_main), np.concatenate(all_nameless))
+    report = {
+        "candidate_model_manifest_sha256": _sha256_file(model_dir / "manifest.json"),
+        "inputs_manifest_sha256": _sha256_file(inputs_path),
+        "model_plan_sha256": model_plan_digest,
+        "arrow_root_manifest_sha256": _sha256_file(arrow_manifest),
+        "input_artifact_hashes": artifacts.hashes,
+        "evaluation_sources": {name: _spec_sha256(files) for name, files in specs.items()},
+        "clusterer_config": {
+            "eps": float(clusterer.cluster_model.eps),
+            "use_default_constraints_as_supervision": bool(clusterer.use_default_constraints_as_supervision),
+            "suppress_orcid": bool(clusterer.suppress_orcid),
+            "dont_merge_cluster_seeds": bool(clusterer.dont_merge_cluster_seeds),
+        },
+        "pairwise": {"aggregation": "all_pairs", "aggregate": aggregate, "datasets": pair_reports},
+        "cluster": {"datasets": cluster_reports, **_aggregate_b3(b3_metrics)},
+    }
+    _reject_nonfinite_json(report, label="heldout metrics")
+    _write_fresh_json(output_path, report)
+    return report
+
+
 def _paths_overlap(left: Path, right: Path) -> bool:
     return left == right or left.is_relative_to(right) or right.is_relative_to(left)
 
@@ -1852,6 +1992,15 @@ def build_parser() -> argparse.ArgumentParser:
         evaluator.add_argument("--output-report", type=Path, required=True)
         evaluator.add_argument("--n-jobs", type=_positive_int, default=1)
         evaluator.set_defaults(handler=handler)
+    heldout = commands.add_parser("evaluate-heldout", help="Score prepared outer holdouts without a baseline.")
+    heldout.add_argument("--inputs-json", type=Path, required=True)
+    heldout.add_argument("--model", type=Path, required=True)
+    heldout.add_argument("--arrow-root", type=Path, required=True, help=arrow_root_help)
+    heldout.add_argument("--name-counts-index-root", type=Path, required=True)
+    heldout.add_argument("--output-report", type=Path, required=True)
+    heldout.add_argument("--n-jobs", type=_positive_int, default=1)
+    heldout.add_argument("--total-ram-bytes", type=_positive_int)
+    heldout.set_defaults(handler=evaluate_heldout)
     return parser
 
 

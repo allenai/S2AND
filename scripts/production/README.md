@@ -224,6 +224,28 @@ uv run python scripts/verification/validate_local_arrow_release.py `
 Use `scripts/convert_to_arrow.py validate --dataset-dir ...` when a deep table
 scan is required.
 
+## Exact held-out metrics
+
+Evaluate the complete model on the snapshot's declared outer holdouts and fixed pairs:
+
+```powershell
+uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-heldout `
+  --inputs-json "$Snapshot/pairwise/inputs.json" `
+  --model "$RunRoot/complete/production_model_v1.3" `
+  --arrow-root "$Snapshot/pairwise/arrow/evaluation" `
+  --name-counts-index-root "$Snapshot/name_counts_index" `
+  --output-report "$RunRoot/reports/heldout_metrics.json" `
+  --n-jobs 20 `
+  --total-ram-bytes 137438953472
+```
+
+The command verifies source hashes, Arrow provenance, common artifacts, and the model's fit-plan identity.
+It uses saved production constraints for B3 prediction.
+Unknown signatures remain in prediction context but do not supply supervised scores.
+The report contains pairwise metrics, B3 metrics, counts, and input identities.
+It requires no baseline and makes no comparison claim.
+Keep fresh incremental identity tests and inherited safe-action reports separate.
+
 ## Promotion policy
 
 The commands below apply release acceptance gates.

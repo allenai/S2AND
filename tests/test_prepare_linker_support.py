@@ -216,3 +216,142 @@ def test_reject_train_holdout_identity_that_legacy_base_ids_hide(tmp_path: Path)
         pd.concat([rows, extra], ignore_index=True).to_parquet(path, index=False)
     with pytest.raises(ValueError, match="retains a held signature identity"):
         prepare_linker_support(**args)
+
+
+def _append_source_row(source: Path, relative: str, row: dict[str, Any]) -> None:
+    path = source / relative
+    rows = pd.read_parquet(path)
+    row["row_index"] = len(rows)
+    extra = pd.DataFrame([row]).astype({"label": "int32", "row_index": "int64", "retrieval_rank": "int64"})
+    pd.concat([rows, extra], ignore_index=True).to_parquet(path, index=False)
+
+
+def _add_assignment(source: Path, query: str, split: str) -> None:
+    path = source / "splits/seed13.csv"
+    assignments = pd.read_csv(path)
+    row = _row(query)
+    payload = {key: row[key] for key in ("query_group_id", "base_group_id", "dataset", "source_key")}
+    pd.concat([assignments, pd.DataFrame([{**payload, "split": split}])], ignore_index=True).to_csv(path, index=False)
+
+
+def test_external_holdout_excludes_train_and_calibration_views_and_preserves_test_context(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    source = args["source_root"]
+    _append_source_row(source, "labels/train.parquet", _row("positive", view="initial_only"))
+    _append_source_row(source, "labels/calibration.parquet", _row("other_cal"))
+    _append_source_row(source, "labels/eval.parquet", _row("cal_fit", view="initial_only"))
+    gold_path = args["benchmark_labels_root"] / "pubmed/pubmed_clusters.json"
+    gold = json.loads(gold_path.read_text())
+    gold["same"]["signature_ids"].append("other_cal")
+    _json(gold_path, gold)
+    _add_assignment(source, "other_cal", "calibration_fit")
+    external = tmp_path / "external"
+    identities = ["positive", "cal_fit", "eval_test", "member"]
+    _json(external / "pubmed/pubmed_signatures.json", {signature: {} for signature in identities})
+    _json(external / "pubmed/test_blocks.json", {"reserved": identities})
+    component_hash = sha256_file(source / "components/pubmed.parquet")
+    report = prepare_linker_support(**args, external_holdout_root=external)
+    train = pd.read_parquet(args["output_root"] / "labels/train.parquet")
+    assert "positive" not in set(train["query_signature_id"])
+    assert report["external_holdout_filter"]["train_path"]["removed_rows"] == 2
+    assert report["external_holdout_filter"]["train_path"]["removed_query_views"] == 2
+    active = pd.read_csv(Path(report["active_assignments"]["path"]))
+    assert not active["query_group_id"].eq("pubmed:cal_fit:full").any()
+    for path in ("labels/calibration.parquet", "labels/eval.parquet"):
+        rows = pd.read_parquet(args["output_root"] / path)
+        assert "cal_fit" not in set(rows["query_signature_id"])
+    assert "pubmed:eval_test:full" in set(active.loc[active["split"].eq("test"), "query_group_id"])
+    assert "eval_test" in set(pd.read_parquet(args["output_root"] / "labels/eval.parquet")["query_signature_id"])
+    assert sha256_file(args["output_root"] / "components/pubmed.parquet") == component_hash
+    assert report["external_holdout_query_signatures"] == 4
+    assert report["active_split_loader_counts"]["calibration_fit"]["query_views"] == 2
+
+
+def test_reject_external_holdout_membership_mismatch_before_output(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    external = tmp_path / "external"
+    _json(external / "pubmed/pubmed_signatures.json", {"positive": {}})
+    _json(external / "pubmed/test_blocks.json", {"reserved": ["other"]})
+    with pytest.raises(ValueError, match="signature/block membership mismatch"):
+        prepare_linker_support(**args, external_holdout_root=external)
+    assert not args["output_root"].exists()
+
+
+def test_test_annotations_distinguish_endpoint_eps_paper_and_unaudited_datasets(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    source = args["source_root"]
+    for query in ("eps_only", "paper_only", "unexposed"):
+        _append_source_row(source, "labels/eval.parquet", _row(query))
+        _add_assignment(source, query, "test")
+    gold_path = args["benchmark_labels_root"] / "pubmed/pubmed_clusters.json"
+    gold = json.loads(gold_path.read_text())
+    gold["same"]["signature_ids"].extend(["eps_only", "paper_only", "unexposed"])
+    _json(gold_path, gold)
+    audit_path = tmp_path / "exposure.csv"
+    pd.DataFrame(
+        [
+            {
+                "dataset": "pubmed",
+                "query_signature_id": "eval_test",
+                "pairwise_exposure": "actual_train_pair_endpoint",
+                "same_signature": True,
+                "same_paper": True,
+            },
+            {
+                "dataset": "pubmed",
+                "query_signature_id": "eps_only",
+                "pairwise_exposure": "validation_population",
+                "same_signature": True,
+                "same_paper": True,
+            },
+            {
+                "dataset": "pubmed",
+                "query_signature_id": "paper_only",
+                "pairwise_exposure": "actual_train_pair_endpoint",
+                "same_signature": False,
+                "same_paper": True,
+            },
+        ]
+    ).to_csv(audit_path, index=False)
+    report = prepare_linker_support(**args, pairwise_exposure_path=audit_path)
+    active = pd.read_csv(Path(report["active_assignments"]["path"]))
+    annotations = pd.read_csv(report["test_exposure_annotations"]["output"]["path"])
+    assert set(annotations["query_group_id"]) == set(active.loc[active["split"].eq("test"), "query_group_id"])
+    by_query = annotations.set_index("query_signature_id")
+    assert bool(by_query.loc["eval_test", "query_pairwise_endpoint_exposed"])
+    assert not bool(by_query.loc["eval_test", "query_eps_selection_exposed"])
+    assert bool(by_query.loc["eps_only", "query_eps_selection_exposed"])
+    assert not bool(by_query.loc["eps_only", "query_pairwise_endpoint_exposed"])
+    assert bool(by_query.loc["paper_only", "paper_pairwise_or_eps_exposed"])
+    assert not bool(by_query.loc["paper_only", "query_pairwise_endpoint_exposed"])
+    assert bool(by_query.loc["unexposed", "query_and_paper_unexposed_in_dataset_audit"])
+    assert pd.isna(by_query.loc["restored", "query_and_paper_unexposed_in_dataset_audit"])
+    assert not bool(by_query.loc["restored", "upstream_dataset_audit_available"])
+    assert annotations["evaluation_population"].eq("inherited_regression").all()
+
+
+def test_calibration_source_only_test_assignment_preserves_rows_as_regression(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    source = args["source_root"]
+    _append_source_row(source, "labels/calibration.parquet", _row("cal_only_test"))
+    _add_assignment(source, "cal_only_test", "test")
+    gold_path = args["benchmark_labels_root"] / "pubmed/pubmed_clusters.json"
+    gold = json.loads(gold_path.read_text())
+    gold["same"]["signature_ids"].append("cal_only_test")
+    _json(gold_path, gold)
+    original_assignments_hash = sha256_file(source / "splits/seed13.csv")
+    component_hash = sha256_file(source / "components/pubmed.parquet")
+    report = prepare_linker_support(**args)
+    active = pd.read_csv(report["active_assignments"]["path"])
+    assert "pubmed:cal_only_test:full" not in set(active["query_group_id"])
+    assert report["active_split_loader_counts"]["test"]["query_views"] == 2
+    assert report["unscorable_test_assignments"]["count"] == 1
+    regression = pd.read_csv(report["unscorable_test_assignments"]["output"]["path"])
+    assert regression["query_group_id"].tolist() == ["pubmed:cal_only_test:full"]
+    assert regression["split"].tolist() == ["test"]
+    assert regression["reason"].tolist() == ["unavailable_in_public_evaluation_sources"]
+    calibration = pd.read_parquet(args["output_root"] / "labels/calibration.parquet")
+    preserved = calibration.loc[calibration["query_signature_id"].eq("cal_only_test")]
+    assert preserved["label"].tolist() == [1]
+    assert sha256_file(args["output_root"] / "splits/seed13.csv") == original_assignments_hash
+    assert sha256_file(args["output_root"] / "components/pubmed.parquet") == component_hash

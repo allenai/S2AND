@@ -403,7 +403,7 @@ def test_reusable_raw_arrow_candidate_planner_owns_lookup_index_snapshots(tmp_pa
     ("table_name", "message", "missing_paper"),
     [
         ("papers", "signatures reference missing paper_id", "p1"),
-        ("paper_authors", "paper_authors Arrow input is missing rows for paper_id", "p_q"),
+        ("papers", "signatures reference missing paper_id", "p_q"),
     ],
 )
 def test_raw_arrow_candidate_planner_requires_paper_metadata(
@@ -422,6 +422,45 @@ def test_raw_arrow_candidate_planner_requires_paper_metadata(
             _raw_candidate_planner_from_query_signatures(paths, ["q1"])
         else:
             planner.plan(["q1"])
+
+
+@pytest.mark.parametrize("empty_roster_papers", [("p_q",), ("p1",), ("p_q", "p1", "p2")])
+def test_raw_arrow_candidate_plans_accept_empty_paper_author_lists(
+    tmp_path: Path, empty_roster_papers: tuple[str, ...]
+) -> None:
+    """Preserve absent coauthor evidence for valid papers without author rows."""
+    paths = base_arrow_paths(tmp_path, with_indexes=False)
+    with pa.memory_map(paths["paper_authors"], "r") as source:
+        authors = pa.ipc.open_file(source).read_all()
+    keep = pa.array([paper_id not in empty_roster_papers for paper_id in authors["paper_id"].to_pylist()])
+    retained_authors = authors.filter(keep)
+    paths["paper_authors"] = write_ipc(tmp_path / "paper_authors_empty_lists.arrow", retained_authors)
+    paths, _ = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
+
+    online = _raw_candidate_plan_arrow(paths, ["q1"])
+    labeled = native_labeled_plan(
+        paths,
+        ["q1", "q1"],
+        ["full", "full"],
+        ["q1-full", "q1-full"],
+        ["c_match", "c_other"],
+        np.asarray([1, 2], dtype=np.uint16),
+        {"c_match": ["s1"], "c_other": ["s2"]},
+        orcid_enabled=False,
+        num_threads=1,
+    )
+
+    for plan in (online, labeled):
+        assert set(plan["row_component_keys"]) == {"c_match", "c_other"}
+        assert set(plan["right_signature_ids"]) == {"s1", "s2"}
+        matching_row = plan["row_component_keys"].index("c_match")
+        assert plan["coauthor_overlap"][matching_row] == 0
+        if "p_q" in empty_roster_papers:
+            np.testing.assert_array_equal(plan["row_query_has_coauthors"], np.zeros(2, dtype=np.uint8))
+        if "p1" in empty_roster_papers:
+            assert plan["row_candidate_cluster_max_paper_author_count"][matching_row] == 0
+    with pa.memory_map(paths["paper_authors"], "r") as source:
+        assert pa.ipc.open_file(source).read_all().equals(retained_authors)
 
 
 def test_raw_arrow_candidate_planner_rejects_duplicate_query_signature_request_rows(tmp_path: Path) -> None:

@@ -50,6 +50,8 @@ uv run --no-sync python scripts/production/data/prepare_linker_support.py `
   --source-root <accepted-linker-support-root> --benchmark-labels-root <prepared-root>/benchmark_source `
   --review-handoff <review-directory> --review-units <review-units.json> `
   --unknown-filename restored_unknown_signature_ids_20261009.json `
+  --external-holdout-root <portable-pairwise-root>/sources/evaluation `
+  --pairwise-exposure-path <query-exposure-audit.csv> `
   --output-root <prepared-root>/linker_support --report-path <separate-report.json>
 
 uv run --no-sync python scripts/production/data/prepare_linker_replay.py `
@@ -60,6 +62,13 @@ uv run --no-sync python scripts/production/data/prepare_linker_replay.py `
 
 The review directory contains `SHA256SUMS`, `final_linker_review.jsonl`, and `orcid_error_query_signatures.json`.
 The support command uses current gold labels and accepted ORCID review decisions. It excludes uncertain query views and conflicting lifecycle identities.
+
+The optional external holdout root excludes reserved query identities from train and calibration. It preserves their assigned test views and candidate context.
+The optional exposure audit writes separate test annotations for pairwise endpoints, EPS selection, and paper overlap. It preserves regression test labels.
+These annotations do not establish independence across datasets or past model selection.
+
+The active test allocation requires rows in the public evaluation sources. Calibration-only test views remain in a separate regression assignment file.
+The producer preserves their source rows and original lifecycle records.
 
 The replay command preserves signature identities and order. It replaces matched benchmark metadata and vectors with accepted current records. It preserves giant-block source records.
 

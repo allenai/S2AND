@@ -285,7 +285,6 @@ mod additional_cluster_seed_disallow_tests {
 fn validate_required_raw_arrow_paper_metadata(
     required_paper_ids: &HashSet<String>,
     papers: &HashMap<String, RawArrowPaper>,
-    paper_authors: &HashMap<String, Vec<(i64, String)>>,
 ) -> PyResult<()> {
     let mut required_paper_ids = required_paper_ids
         .iter()
@@ -298,14 +297,6 @@ fn validate_required_raw_arrow_paper_metadata(
     {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Arrow signatures reference missing paper_id '{paper_id}' in papers Arrow input"
-        )));
-    }
-    if let Some(paper_id) = required_paper_ids
-        .iter()
-        .find(|paper_id| !paper_authors.contains_key(**paper_id))
-    {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "paper_authors Arrow input is missing rows for paper_id '{paper_id}'"
         )));
     }
     Ok(())
@@ -636,7 +627,7 @@ fn read_reusable_raw_arrow_query_inputs(
         });
     let (papers, paper_index_stats, read_papers_secs) = papers_result?;
     let (paper_authors, paper_author_index_stats, read_paper_authors_secs) = paper_authors_result?;
-    validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, &paper_authors)?;
+    validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers)?;
     let (raw_specter_by_paper_id, specter_index_stats, read_specter_secs) =
         raw_specter_by_paper_id_result?;
     let specter_by_paper_id = raw_specter_by_paper_id.map(|values| {
@@ -822,7 +813,7 @@ impl RawBlockQueryCandidatePlanner {
         let (papers, paper_index_stats, read_papers_secs) = papers_result?;
         let (paper_authors, paper_author_index_stats, read_paper_authors_secs) =
             paper_authors_result?;
-        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, &paper_authors)?;
+        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers)?;
         let (raw_specter_by_paper_id, specter_index_stats, read_specter_secs) =
             raw_specter_by_paper_id_result?;
         let (raw_name_counts, read_name_counts_secs) = raw_name_counts_result?;

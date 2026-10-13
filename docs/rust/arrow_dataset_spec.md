@@ -397,6 +397,10 @@ Arrow handoff.
 
 One row per paper-author child row. Required columns:
 
+A paper with an empty or absent source author list has no child rows.
+Raw candidate planners accept this representation and use absent coauthor evidence.
+Every signature must still reference an existing row in `papers.arrow`.
+
 | Column | Arrow type | Nulls | Meaning |
 |---|---:|---:|---|
 | `paper_id` | `string` | no | Referenced paper id |

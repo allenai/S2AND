@@ -1091,6 +1091,7 @@ def _finalize_arrow_rust_bundle_metadata(
     output_bundle_root: Path,
     target: Mapping[str, Any],
     selected_keys: Sequence[str],
+    retrieval_top_k: int,
 ) -> OfficialBundle:
     payload = json.loads((output_bundle_root / "bundle.json").read_text(encoding="utf-8"))
     feature_count = int(target["feature_count"])
@@ -1134,6 +1135,8 @@ def _finalize_arrow_rust_bundle_metadata(
             classic_model[table_key] = relpath
     classic_model["feature_columns"] = list(target["features"])
     classic_model["best_params"] = dict(target["params"])
+    classic_model["retrieval_top_k"] = retrieval_top_k
+    classic_model["classic_gate_calibration_retrieval_limit"] = retrieval_top_k
     payload["expected_metrics"] = {"classic": _target_expected_metrics(target)}
     (output_bundle_root / "bundle.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -1416,6 +1419,7 @@ def _materialize_arrow_rust_feature_bundle(
             output_bundle_root=output_bundle_root,
             target=target,
             selected_keys=materialized_keys,
+            retrieval_top_k=retrieval_top_k,
         ),
         summaries,
     )
@@ -1647,7 +1651,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         work_dir = Path(work.name)
         artifact_dir = work_dir / LINKER_STAGING_DIRNAME
         feature_bundle_root = work_dir / "training_features"
-        feature_bundle, _featureization_summaries = _materialize_arrow_rust_feature_bundle(
+        feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
             source_bundle=source_bundle,
             output_bundle_root=feature_bundle_root,
             target=target,
@@ -1668,7 +1672,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         active_params = dict(feature_bundle.models["classic"]["best_params"])
 
         train_materialization_summary = next(
-            summary for summary in _featureization_summaries if summary["table_key"] == "train_path"
+            summary for summary in featureization_summaries if summary["table_key"] == "train_path"
         )
         calibrated = fit_classic(
             feature_bundle,
@@ -1700,7 +1704,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         shutil.rmtree(artifact_dir)
 
         evaluation_feature_bundle_root = work_dir / "evaluation_features"
-        evaluation_feature_bundle, _evaluation_featureization_summaries = _materialize_arrow_rust_feature_bundle(
+        evaluation_feature_bundle, evaluation_featureization_summaries = _materialize_arrow_rust_feature_bundle(
             source_bundle=source_bundle,
             output_bundle_root=evaluation_feature_bundle_root,
             target=target,
@@ -1737,13 +1741,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "pairwise_bundle_binding": pairwise_binding,
         "input_artifact_hashes": artifact_hashes,
         "observed_metrics": observed,
+        "evaluation_summary": summary,
+        "feature_materialization_summaries": {
+            "training": featureization_summaries,
+            "evaluation": evaluation_featureization_summaries,
+        },
         "query_predictions": evaluation.query_predictions,
         "feature_nan_policy": feature_nan_policy,
         "artifact_summary": artifact_summary,
         "component_scope": "block-local",
     }
-    work.cleanup()
     _write_json(output_dir / "linker_evaluation_report.json", result)
+    work.cleanup()
     return result
 
 

@@ -119,6 +119,8 @@ uv run --no-sync python scripts/production/model/train_linker_and_finalize.py `
 ```
 
 The finalizer computes features, fits once, writes the complete model, reloads it, and evaluates the declared linker test split.
+The derived feature configuration aligns gate calibration with the active retrieval window.
+The run report retains evaluation diagnostics and both feature summaries.
 Its complete output uses the calibrated model's basename.
 The complete model includes the incremental booster, gate metadata, and target JSON.
 The pairwise-only input remains unchanged.

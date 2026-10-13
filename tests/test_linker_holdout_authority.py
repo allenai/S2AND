@@ -147,6 +147,23 @@ def test_real_fit_retains_early_exclusion_counts(tmp_path: Path) -> None:
     assert fitted.training_summary["train_holdout_filter_summary"] == early
 
 
+def test_fit_rejects_gate_window_mismatch_before_classifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = write_classic_tiny_bundle(tmp_path / "bundle")
+    bundle.models["classic"].pop("retrieval_top_k")
+    bundle.models["classic"]["classic_gate_calibration_retrieval_limit"] = 5
+    assert bundle.models["classic"].get("retrieval_top_k", classic.DEFAULT_RETRIEVAL_TOP_K) == 25
+
+    def no_classifier(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("classifier construction must not precede gate window rejection")
+
+    monkeypatch.setattr(classic, "_build_classic_classifier", no_classifier)
+    with pytest.raises(ValueError, match="5 != 25"):
+        classic.fit_classic(bundle, n_jobs=1)
+
+
 @pytest.mark.parametrize("remove_all", [False, True])
 def test_materializer_filters_before_structural_or_feature_work(
     tmp_path: Path,

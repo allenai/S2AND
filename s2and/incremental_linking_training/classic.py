@@ -1997,6 +1997,13 @@ def fit_classic(
     retrieval_top_k = int(spec.get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K))
     if retrieval_top_k <= 0:
         raise ValueError("classic.retrieval_top_k must be positive")
+    configured_calibration_limit = int(spec.get("classic_gate_calibration_retrieval_limit", retrieval_top_k))
+    if configured_calibration_limit != retrieval_top_k:
+        raise ValueError(
+            "classic_gate_calibration_retrieval_limit must match classic.retrieval_top_k: "
+            f"{configured_calibration_limit} != {retrieval_top_k}"
+        )
+    calibration_limit = retrieval_top_k
     monotone_constraints = _resolve_classic_monotone_constraints(spec, feature_columns)
     train_df = _read_csv(_resolve_path(bundle, spec["train_path"]), compression="gzip")
     train_df, unlabeled_singleton_filter_summary = _drop_unlabeled_singleton_orcid_rows(
@@ -2066,13 +2073,6 @@ def fit_classic(
         model.predict_proba(_classic_feature_matrix(gate_source_eval, feature_columns)),
         dtype=np.float64,
     )[:, 1]
-    configured_calibration_limit = int(spec.get("classic_gate_calibration_retrieval_limit", retrieval_top_k))
-    if configured_calibration_limit != retrieval_top_k:
-        raise ValueError(
-            "classic_gate_calibration_retrieval_limit must match classic.retrieval_top_k: "
-            f"{configured_calibration_limit} != {retrieval_top_k}"
-        )
-    calibration_limit = retrieval_top_k
     gate_source_query_choices = _score_eval_candidate_rows(
         gate_source_eval,
         gate_source_probabilities,

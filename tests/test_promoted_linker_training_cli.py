@@ -334,7 +334,18 @@ def test_arrow_rust_materialization_passes_dataset_handle_to_native_planner(
         arrow_dataset.close()
 
 
-def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("source_classic", "retrieval_top_k"),
+    [
+        ({"classic_gate_calibration_retrieval_limit": 5}, 25),
+        ({"retrieval_top_k": 7, "classic_gate_calibration_retrieval_limit": 5}, 7),
+    ],
+)
+def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(
+    tmp_path: Path,
+    source_classic: dict[str, int],
+    retrieval_top_k: int,
+) -> None:
     source_root = tmp_path / "source"
     output_root = tmp_path / "output"
     source_files = {
@@ -358,11 +369,14 @@ def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tm
                 "files": source_files,
             },
         },
-        "models": {"classic": {}},
+        "models": {"classic": source_classic},
         "expected_metrics": {},
     }
     source_root.mkdir(parents=True, exist_ok=True)
     (source_root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    source_bytes = {
+        path.relative_to(source_root): path.read_bytes() for path in source_root.rglob("*") if path.is_file()
+    }
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     for relpath in source_files.values():
@@ -373,7 +387,7 @@ def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tm
     source_bundle = promoted_train.load_bundle(source_root)
     assert source_bundle.root == source_root.resolve()
     assert source_bundle.bundle_name == "arrow_source"
-    assert source_bundle.models == {"classic": {}}
+    assert source_bundle.models == {"classic": source_classic}
     assert source_bundle.expected_metrics == {}
 
     bundle = promoted_train._finalize_arrow_rust_bundle_metadata(  # noqa: SLF001
@@ -381,8 +395,18 @@ def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tm
         output_bundle_root=output_root,
         target={"feature_count": 1, "features": ["f0"], "params": {"n_estimators": 10}, "metrics": {}},
         selected_keys=list(source_files),
+        retrieval_top_k=retrieval_top_k,
     )
 
+    assert bundle.models["classic"]["retrieval_top_k"] == retrieval_top_k
+    assert bundle.models["classic"]["classic_gate_calibration_retrieval_limit"] == retrieval_top_k
+    assert bundle.models["classic"]["feature_columns"] == ["f0"]
+    assert bundle.models["classic"]["best_params"] == {"n_estimators": 10}
+    persisted = json.loads((output_root / "bundle.json").read_text(encoding="utf-8"))
+    assert persisted["models"]["classic"]["retrieval_top_k"] == retrieval_top_k
+    assert persisted["models"]["classic"]["classic_gate_calibration_retrieval_limit"] == retrieval_top_k
+    assert source_bundle.models == {"classic": source_classic}
+    assert {path: (source_root / path).read_bytes() for path in source_bytes} == source_bytes
     assert bundle.assets["corrected_feature_rows"]["root"] == "features_corrected"
     assert bundle.models["classic"]["s_park_eval_path"] == "features_corrected/s_park.parquet"
     assert bundle.models["classic"]["s_lee_eval_path"] == "features_corrected/s_lee.parquet"
@@ -533,6 +557,8 @@ def test_release_serializes_complete_bundle_before_evaluation(
     )
     summary = {
         "training_summary": {"rows": 3, "positive_rows": 1},
+        "abstain_rule": {"calibration_metrics": {"accuracy": 0.75}},
+        "overall_s2and_eval": {"w25": {"overall": {"accuracy": 0.5}}},
         "stratified_eval_test_split": {
             "overall": {
                 "test": {
@@ -568,6 +594,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
     _stub_preflight(monkeypatch)
 
     training_authorities: list[Any] = []
+    stage_summaries: dict[str, list[dict[str, Any]]] = {}
 
     def materialize(**_kwargs: Any) -> tuple[Any, list[dict[str, Any]]]:
         stage = "materialize_training" if "materialize_training" not in order else "materialize_evaluation"
@@ -576,7 +603,8 @@ def test_release_serializes_complete_bundle_before_evaluation(
         else:
             assert "holdout_identities" not in _kwargs
         order.append(stage)
-        return bundle, list(FULL_MATERIALIZATION_SUMMARIES)
+        stage_summaries[stage] = [{**item, "stage": stage} for item in FULL_MATERIALIZATION_SUMMARIES]
+        return bundle, stage_summaries[stage]
 
     monkeypatch.setattr(
         promoted_train,
@@ -666,11 +694,14 @@ def test_release_serializes_complete_bundle_before_evaluation(
     assert result["pairwise_bundle_binding"] == {"test": "binding"}
     assert result["complete_model_path"] == str(output_dir / "pairwise-stage")
     assert result["query_predictions"]["rows"] == 1
+    assert result["evaluation_summary"] == summary
+    assert result["feature_materialization_summaries"] == {
+        "training": stage_summaries["materialize_training"],
+        "evaluation": stage_summaries["materialize_evaluation"],
+    }
     assert set(output_dir.iterdir()) == {
         output_dir / "pairwise-stage",
         output_dir / "linker_evaluation_report.json",
     }
-    assert (
-        json.loads((output_dir / "linker_evaluation_report.json").read_text(encoding="utf-8"))["query_predictions"]
-        == result["query_predictions"]
-    )
+    written_report = json.loads((output_dir / "linker_evaluation_report.json").read_text(encoding="utf-8"))
+    assert written_report == result

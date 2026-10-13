@@ -18,9 +18,11 @@ Centralized reference for supported S2AND environment variables.
 |----------|--------|---------|-------------|
 | `S2AND_PATH_CONFIG` | `<path>` | `s2and/data/path_config.json` | Path to the JSON data-path config. Use when data lives outside the package default path. |
 
-Artifact compatibility is not configurable through the environment. Model
-bundles record the exact generating runtime, and independently readable Arrow
-and name-count data declares public format `1`.
+Artifact compatibility is not configurable through the environment.
+Models declare supported format and feature-contract versions plus ordered feature names.
+The generating runtime records provenance.
+Arrow and name-count data use public format `1`, independently of the package version.
+Installed Python and Rust package versions still match for their internal interfaces.
 
 ## Threading & Parallelism
 

@@ -1,7 +1,7 @@
 """Match augmented pair members to their original benchmark identities."""
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 
 PRODUCTION_AUGMENTED_SOURCES = frozenset(
@@ -10,18 +10,24 @@ PRODUCTION_AUGMENTED_SOURCES = frozenset(
 
 
 def training_members_from_sources(name: str, files: Mapping[str, Path], *, random_seed: int) -> set[str]:
-    """Resolve the trainer's actual training split without reading held-out inputs.
+    """Resolve the actual fit population without access to held-out inputs.
 
     Args:
         name: Benchmark dataset name.
-        files: Model source files containing signatures, papers, and clusters.
+        files: Model files with clusters or fixed train pairs.
         random_seed: Seed used by the production pairwise trainer.
 
     Returns:
-        Signature IDs in the benchmark's training blocks.
+        Signature IDs in the fit population.
     """
 
-    from s2and.data import ANDData
+    import pandas as pd
+
+    from s2and.data import ANDData, _map_fixed_pair_labels
+
+    if "train_pairs" in files:
+        pairs = _map_fixed_pair_labels(pd.read_csv(files["train_pairs"]), f"{name} train pairs")
+        return {str(value) for pair in pairs.iloc[:, :2].itertuples(index=False, name=None) for value in pair}
 
     dataset = ANDData(
         signatures=str(files["signatures"]),
@@ -49,6 +55,19 @@ def source_members(pairs: Iterable[tuple[str, str]]) -> dict[str, set[str]]:
                 raise ValueError(f"Invalid augmented source signature ID: {signature_id!r}")
             members[dataset].add(original_id)
     return dict(members)
+
+
+def require_declared_sources(
+    augmented: Mapping[str, set[str]],
+    declared_dataset_names: Collection[str],
+    *,
+    context: str,
+) -> None:
+    """Reject copies from datasets absent from the declared model population."""
+    # MEDLINE remains an augmentation-only source in existing production inputs.
+    undeclared = set(augmented) - (set(declared_dataset_names) - {"augmented"}) - {"medline"}
+    if undeclared:
+        raise ValueError(f"{context} has undeclared source datasets: {sorted(undeclared)}")
 
 
 def reject_heldout_members(augmented: Mapping[str, set[str]], heldout: Mapping[str, set[str]], *, context: str) -> None:

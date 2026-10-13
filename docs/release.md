@@ -1,476 +1,196 @@
-# S2AND 1.0.0 / model-data v1.3 release
+# S2AND release process
 
-Status date: 2026-10-12
+This guide defines the production release process.
+The Python and Rust package version is `1.0.0`.
+The next model and research snapshot version is `1.3`.
+Public Arrow and name-count data use format `1`.
 
-The [October 12 data record](release_evidence/data_preparation_20261012.md) supplies the current release inputs.
-Benchmark, augmented, count, linker, and Arrow preparation is complete.
-Use those prepared inputs for the production fit.
-Preserve accepted raw name parts. Do not repeat canonical-name joins on these inputs.
-The runtime owns name normalization.
-The reviewed baseline and final evaluation plan remain open.
+The current local model is a pairwise-only stage.
+A complete production release still requires an incremental fit, final evaluation, and publication.
+The next pairwise fit includes `inventors_s2and` and starts from the complete corrected snapshot.
+No published model or S3 location is declared here before publication.
 
-This is the sole release policy and dependency-ordered operator sequence for
-the `s2and==1.0.0` and `s2and-rust==1.0.0` packages with production model and
-public-data version `1.3`.
-[scripts/production/README.md](../scripts/production/README.md) is the command
-reference.
+## Release inputs
 
-One trusted owner operates the release. The commands validate scientific
-inputs and runtime compatibility; they do not create an independent provenance
-or attestation chain.
+Use one final corrected snapshot as the input to each release.
+It contains the output of all accepted additions and corrections.
+It preserves full paper text, current labels, uncertainty masks, embeddings, producer sidecars, and exact split identities.
+It also contains augmented records and complete incremental task definitions.
+Do not reconstruct accepted corrections from historical review archives.
 
-| Version axis | Fixed release version |
-|---|---|
-| Python package (`s2and`) | `1.0.0` |
-| Rust package (`s2and-rust`) | `1.0.0` |
-| Production model | `1.3` |
-| Public data | `1.3` |
-| Public Arrow/name-count format | `1` |
+The current benchmark masters retain full text where available.
+The seven giant replay sources lack full abstract text.
+Preserve their available current records and vectors; a new abstract-based encoding needs another source of full abstracts.
 
-## Current external inputs
-
-Four reviewed external inputs are not in this repository:
-
-| Input | Required shape | Role |
-|---|---|---|
-| Canonical benchmark names | One JSON file per benchmark, with exactly one row per dataset `signature_id` and `first`, `middle`, `last` | Required before Stage 2 can regenerate the benchmarks and join the augmented training set |
-| ORCID names | Query-ordered CSV with `raw_orcid`, `orcid`, `first_name`, `middle`, and `last_name` | Required before Stage 1 can build package assets |
-| Name counts | Query-ordered CSV with `first_name`, `last_name`, and `count` | Ordinary Stage 1 release input; its producer is already complete |
-| v1.21 baseline record | Reviewed cluster B3, pairwise aggregate/per-dataset AUROC and macro-F1, and performance p50 for the frozen populations/workload, plus source/model/data/environment/command identities | Ordinary Stage 0 input referenced from `release.json` by path and SHA-256; `prepare-run` verifies its identities and derives the scalar baselines |
-
-Do not replace the canonical or ORCID input with a fixture or relabel a legacy
-artifact. The canonical join rejects duplicate, missing, and extra IDs. The
-ORCID producer requires reviewed row and expansion bounds and the surname field;
-the previous four-column CSV is rejected. First-name pairs must share a nonempty
-canonical surname after removing spaces, and each distinct first-name pair counts
-at most once per ORCID. See the [count-generation contract](../scripts/production/README.md)
-for surname matching, skipped empty names, and unchanged expansion/alias rules.
-
-The first two are the remaining implementation prerequisites carried into this
-runbook. The name counts, historical baseline, and other benchmark/linker data
-are ordinary release inputs.
+The [data guide](data.md) defines the audience, artifact layout, and update rules.
+The [production command reference](../scripts/production/README.md) contains executable commands.
+Keep source snapshots and fit outputs in separate directories.
 
 ## Fixed decisions
 
-- Model and public data version: `1.3`.
-- The release model is one complete external bundle, never a packaged default.
-  Its manifest records `kind: "s2and_model"`, release `1.3`, exact generating
-  runtime `1.0.0`, calibrated EPS state, and the checksum inventory.
-- Runtime data consists of canonical tuple text, ORCID JSON with its tuple
-  dependency, and the direct-file name-count index in public format `1`,
-  without compatibility readers.
-- Python and `s2and-rust` remain separate distributions and both support
-  Python 3.11, 3.12, and 3.13. Their installed package versions must match
-  exactly.
-- The owner chooses release version `1.3` once in `release.json`; the prepared
-  model plan supplies it to model training and final public-data assembly.
-- EPS is selected from validation data only.
-- Pairwise training precedes EPS selection. Linker inputs are materialized from
-  the final pairwise boosters and feature contract, and the linker is fit once.
-- An EPS-only change does not invalidate linker features or the linker fit.
-- The complete bundle is serialized, reloaded, and evaluated without a second fit.
-- The final package commit is the exact commit dispatched for release.
-- Local CI is exactly
-  `uv run --no-project python scripts/run_ci_locally.py`.
-- Publication is the no-input `.github/workflows/release-rust.yml` workflow on
-  `main`; its protected `pypi` environment publishes Rust before Python.
+- Keep one common binary name-count index and complete production model in versioned Git LFS assets.
+- Keep small name tuples and ORCID prefix counts in normal Git and the Python wheel.
+- Publish corrected research data to S3 without a second model or count index.
+- Use supported formats and schemas for dataset compatibility.
+- Bind models to feature-contract versions, ordered feature names, and exact required artifact hashes.
+- Treat the model's generating runtime version as provenance.
+- Require matched installed Python and Rust package versions for their internal interfaces.
+- Reject old unversioned model stages; rebuild or explicitly export them under the current contract.
+- Select pairwise hyperparameters and EPS from development data.
+- Keep test metrics separate from model selection.
+- Recompute incremental features after a pairwise booster or feature-contract change.
+- Retain incremental features after an EPS-only change when their other inputs stay fixed.
+- Publish only a complete serialized model after evaluation through that same model.
 
 ## Operating rules
 
-Use a fresh local, unsynchronized run root outside Google Drive. Never reuse
-stage outputs. Initially create only the root and `release.json`;
-`prepare-run` creates the other entries:
+Start expensive stages with a tiny real sample.
+Use an explicit workload bound and the approved CPU and memory limits.
+Keep logs, a process ID, and a reproducible command for long jobs.
+Preserve source files and failed output evidence.
+Use a fresh output path for each changed dataset or model stage.
+Follow the active repository instructions for long jobs.
 
-```text
-D:\s2and-v1.3-YYYYMMDD-attempt-N\
-  release.json
-  model_plan.json
-  evaluation_plan.json
-  run_binding.json  # added after the complete candidate exists
-  stages\
-  reports\
-  final\
-```
+Count changes can require a warehouse export.
+Dataset refreshes can require local SPECTER2 encoder files.
+These inputs are required only when their current artifacts change.
+A historical baseline is not a prerequisite for snapshot preparation or a pairwise fit.
 
-For every warehouse query, conversion, training run, and performance run:
+## Stage 0: choose the input snapshot
 
-1. run a bounded fixture first;
-2. review the full command, cost, RAM, threads, and expected runtime;
-3. run long work detached or through a scheduler with durable logs; and
-4. retain native outputs, logs, and reviewed count or metric summaries.
+1. Select the final corrected master records and accepted incremental dataset.
+2. Select the exact common name-count index and packaged tuple/ORCID assets.
+3. Declare fit datasets, split identities, pair lists, and the EPS policy.
+4. Verify the declared workload and resource bounds.
+5. Keep the selected snapshot immutable for the run.
 
-Freeze one source commit before full production work. If behavior changes,
-commit again and rerun every affected downstream stage.
-
-Before using full inputs, rehearse the release boundaries from a clean checkout:
-
-```powershell
-uv run pytest -q `
-  tests/test_convert_s2and_mini_to_arrow.py `
-  tests/test_join_canonical_augmented_names.py `
-  tests/test_augmented_training_leakage.py `
-  tests/test_generate_name_counts_script.py `
-  tests/test_generate_orcid_name_prefix_counts.py `
-  tests/test_real_tiny_trainers.py `
-  tests/test_release_pairwise.py `
-  tests/test_smoke_installed_incremental_arrow.py
-```
-
-This bounded rehearsal must pass without warehouse access. It exercises the
-canonical join, both count producers, real tiny trainers, prepared-plan and
-candidate-binding orchestration, gates, and the installed-artifact smoke
-contract.
-
-## Stage 0: freeze external choices and source
-
-- [ ] Supply and review all four external inputs listed above.
-- [ ] Confirm the synchronized Python/Rust package version remains `1.0.0` and
-      the package/model/data matrix above is unchanged. Verify it through the
-      [version-bump workflow](development.md#version-bumping), then confirm
-      both package versions are unused:
-
-```powershell
-$Version = (Get-Content -Raw VERSION).Trim()
-foreach ($Project in @('s2and', 's2and-rust')) {
-  $Status = curl.exe `
-    --silent `
-    --output NUL `
-    --write-out '%{http_code}' `
-    "https://pypi.org/pypi/$Project/$Version/json"
-  if ($LASTEXITCODE -ne 0 -or $Status -ne '404') {
-    throw "$Project==$Version is not unused on PyPI"
-  }
-}
-$Tag = "v$Version"
-$null = git ls-remote --exit-code --tags origin "refs/tags/$Tag"
-if ($LASTEXITCODE -eq 0) {
-  throw "remote tag $Tag already exists"
-}
-if ($LASTEXITCODE -ne 2) {
-  throw "could not verify that remote tag $Tag is unused"
-}
-```
-
-- [ ] Freeze the evaluation populations, metrics, gates, and logical
-      performance workload. Verify that the reviewed v1.21 baseline record was
-      measured at compatible commit
-      `e54c6ba9c0e3ca4c2b5a40dcaa9a55c2c771d87d`, observed runtime EPS `0.65`,
-      and matches those exact populations/workload. Retain its raw results,
-      commands, environment, threads, and machine identity. This historical
-      analysis is the sole pre-Stage-5 held-out prediction; its results cannot
-      change the frozen choices or v1.3 behavior.
-- [ ] Commit the implementation, workflow, metadata, and version changes needed
-      for full production work.
-- [ ] Run `uv lock --check`, then the executable local CI authority:
-
-```powershell
-uv run --no-project python scripts/run_ci_locally.py
-```
-
-- [ ] Record this production source commit. Any later behavior change
-      invalidates every affected downstream result.
+The current patents input is the existing `inventors_s2and` subset with 2,500 blocks.
+It has 41,468 signatures, 41,316 papers, gold labels, and vectors.
+It is not the full patents corpus.
+Some papers occur in more than one block split.
+Do not describe its block split as a whole-paper independent split.
 
 ## Stage 1: generate runtime data
 
-- [ ] Use a fresh artifact workspace outside the still-uncreated run
-      directory.
-- [ ] Confirm the full-source canonical tuple regression reproduces the
-      packaged tuple byte-for-byte and load that checked-in artifact through
-      the production loader. Regenerate it only for an intentional source or
-      canonicalization-policy change.
-- [ ] Reuse reviewed saved counts when their source and policy remain unchanged.
-      The [2026-10-09 experiment](name_count_experiment_20261009_results.md)
-      selects plain mention counts and EVENT threshold 10 with alias threshold 2.
-      The selected prefix table and tuple-dependency manifest are already in `s2and/data/`.
-      Verify their recorded identities before any model fit or distribution build.
-      Repeat the corpus pass only after a source or count-policy change.
-- [ ] Export warehouse rows through any working authenticated client. Review
-      the SQL, required columns, row bounds, and spot checks documented in the
-      [count command reference](../scripts/production/README.md#count-artifacts)
-      before feeding rows to the pure count transformations.
-- [ ] Run bounded count fixtures, then convert the reviewed full exports into
-      fresh paths.
-- [ ] Review counts, missing values, normalization, and loader round trips.
-- [ ] Copy both ORCID runtime files to their declared package-data paths. Keep
-      the checked-in tuple unchanged and the large public-format-1 name-count
-      index external.
-- [ ] Build the local wheel and sdist and run
-      `verify_production_model_distributions.py`. It must find the tuple and
-      ORCID assets and reject a packaged default model. Write this preliminary
-      build outside the run directory.
+Reuse unchanged common assets.
+Regenerate a common asset only when its source data or semantics change.
+The ORCID producer preserves the surname rule and excludes the 14 reviewed groups.
+Run the focused producer checks before a bounded rebuild.
+See [the count commands](../scripts/production/README.md#count-artifacts).
+
+Do not put the large index into the Python wheel.
+Verify that the wheel contains the canonical tuple and both ORCID runtime files.
+See [distribution checks](../scripts/production/README.md#distribution-and-arrow-checks).
 
 ## Stage 2: build training and evaluation data
 
-- [ ] Join the reviewed canonical benchmark-name export into exactly the
-      fields consumed by `ANDData` using the
-      [Arrow command reference](../scripts/production/README.md#canonical-benchmark-names);
-      retain raw names only for reviewed spot checks. Stage these source files
-      outside the still-empty run directory.
-- [ ] Join the internal augmented training set against the same exports with
-      `join-canonical-augmented-names --drop-sources orcid`
-      ([command reference](../scripts/production/README.md#augmented-training-set))
-      and review its report. Use its outputs for the augmented model and
-      pairwise-evaluation entries in `release.json`. The orcid dataset and its
-      augmented rows are not part of v1.3.
-- [ ] Confirm that every signatures file `release.json` references comes from
-      the joined benchmark or augmented outputs (or subsets derived from them);
-      `prepare-run` does not check name provenance.
-- [ ] Restrict augmented training pairs to the original identities in each
-      frozen benchmark's actual training split, using the selected training
-      seed. Exclude its validation, test, and omitted signatures. Also exclude
-      benchmark model-development identities from augmented evaluation pairs.
-      Run [filter-augmented-pairs](../scripts/production/README.md#filter-augmented-pairs)
-      on the draft `release.json`, write to a new directory outside the run,
-      and review its counts and hashes. Update the draft's augmented pair paths
-      and the reviewed baseline for the resulting evaluation population.
-      `prepare-run` checks both leakage directions; the trainer checks every
-      benchmark's augmented training members before any featurization and has
-      no access to held-out pair files.
-- [ ] Review and freeze `release.json` using the
-      [exact shape and example](../scripts/production/README.md#run-preparation):
-      training/validation and held-out inputs, validation-only EPS grid and
-      floors, the reviewed historical baseline-record path and SHA-256, gates,
-      the exact performance Arrow root/workload, every parity-fixture content
-      identity and workload option, and the public-root-declared subblocking
-      dataset name, component-members identity, and full graph workload.
-- [ ] Put the reviewed `release.json` alone in a fresh run root and run
-      `release_pairwise.py prepare-run`.
-- [ ] Inspect the resulting `model_plan.json` and `evaluation_plan.json`.
-      Confirm the model plan contains training and validation identities only,
-      with no held-out path or reference.
-- [ ] Convert one benchmark and one linker-replay fixture to Arrow outside the
-      run root, then convert the full reviewed datasets into the prepared
-      run's fresh `stages/` roots.
-- [ ] Convert every model-plan dataset, and any held-out population with
-      its own files, into the release Arrow working roots described in the
-      [release Arrow conversions](../scripts/production/README.md#release-arrow-conversions)
-      reference. Training, calibration, and evaluation compute features from
-      these roots and reject any conversion whose provenance does not match
-      the plan's source digests.
-- [ ] Regenerate linker-replay Arrow from reviewed raw JSON, SPECTER2 inputs,
-      and the final name counts; validate it with production loaders.
-- [ ] Stage only the reviewed linker support files and the frozen assignment
-      CSV/summary, verify their declared hashes, and run
-      `linker_source_bundle.py` once. It assembles and preflights the fresh
-      linker-source and public-data roots using the prepared model plan's
-      release version; do not carry a legacy `datasets/` directory into the
-      support root. The final public root contains one `name_counts_index/`
-      shared by its benchmark and replay dataset manifests.
-- [ ] Confirm the final data-root manifest has
-      `kind: "s2and_public_data"`, `release_version: "1.3"`, and
-      `format_version: 1`, and that every declared nested manifest checksum
-      matches.
+Apply new corrections directly to a copy of the previous corrected snapshot.
+Preserve useful record fields and current labels.
+Regenerate augmentation from the accepted records and declared source identities.
+Reuse SPECTER2 vectors only when their input text remains unchanged.
+Encode changed informative text and informative text without a source vector.
+Retain the declared encoder model, adapter, tokenizer, pooling, and truncation recipe.
+
+Package the corrected records, pairwise inputs, benchmark projections, and complete incremental inputs with `package_corrected_datasets.py`.
+The producer writes `pairwise/model_plan.json` and portable paths to one shared count index.
+Validate the assembled snapshot after relocation.
+Check record counts, gold coverage, masks, pair endpoints, split assignments, and native Arrow opens.
+See [the preparation commands](../scripts/production/data/README.md).
+
+Dataset manifests declare the fit population rather than a fixed seven-source list.
+The patents dataset uses the name `inventors_s2and`.
+Unknown signatures remain in inference context but do not supply supervised labels.
+Training and external evaluation must satisfy the declared identity overlap rules.
 
 ## Stage 3: train the pairwise model
 
-- [ ] Run bounded training fixtures, then reviewed full training with durable
-      logs and the frozen plan.
-- [ ] Review the complete training report: search, selection, resource use,
-      and finite selected validation metrics.
-- [ ] Confirm the pairwise-only bundle is explicitly
-      `eps_calibration: "pending"`, reloads only through the pending-stage
-      loader, records the model plan's `release_version` and exact
-      `generated_by_runtime`, and both boosters round-trip through Rust.
-- [ ] Check the actual native scoring plans for both newly trained boosters.
-      The search can produce trees larger than the fast kernels support, so
-      fixture eligibility does not establish candidate eligibility. Run:
+Run `train_pairwise.py` with the snapshot's model plan, fit Arrow root, and common index.
+Use a separate run output and matrix workspace.
+The trainer searches main and nameless models from the declared datasets.
+It writes an immutable pairwise-only stage with EPS marked `pending`.
+It does not require an evaluation baseline or a historical release record.
+
+Review finite validation metrics, source counts, pair counts, and resource use.
+Verify both boosters after serialization.
+Check the actual trained boosters' native scoring plans:
 
 ```powershell
-$env:S2AND_PAIRWISE_MODEL_DIR = "$RunRoot\stages\pairwise\production_model_v1.3\pairwise"
+$env:S2AND_PAIRWISE_MODEL_DIR = '<pairwise-stage>/pairwise'
 uv run cargo test --manifest-path s2and_rust/Cargo.toml --lib --no-default-features `
   release_bundle_uses_native_fast_plans -- --ignored --nocapture
-if ($LASTEXITCODE -ne 0) { throw 'Candidate boosters do not both use native fast plans' }
 Remove-Item Env:S2AND_PAIRWISE_MODEL_DIR
 ```
 
-Set the directory to the actual candidate's `pairwise/` folder. A failure requires
-reviewing the candidate and its representative latency; do not silently change
-the scientific search space merely to satisfy the performance check.
-- [ ] Confirm training had no held-out prediction, metric, path, or lookup capability.
+A failed native fast-plan check requires representative latency measurements and a candidate review.
+Do not silently change the scientific search space to satisfy this check.
 
 ## Stage 4: select EPS and freeze linker inputs
 
-- [ ] Calibrate EPS against validation inputs and the frozen model plan.
-      Confirm the source was pending, the fresh sibling is
-      `eps_calibration: "calibrated"`, and only clusterer configuration and
-      bundle metadata changed. Retain the source/output manifest identities
-      recorded in the calibration report.
-- [ ] Freeze the already assembled linker-source root, public-data root, final
-      pairwise bundle, name-count index, reviewed 53-feature linker target,
-      compute resources, and held-out populations before fitting.
+Calibrate EPS from validation data with `release_pairwise.py calibrate-eps`.
+Calibration writes a fresh calibrated sibling and preserves both boosters.
+Verify that only clusterer configuration and bundle metadata change.
 
-A pairwise-booster, feature-contract, linker-source, or linker-target change
-requires fresh linker features and a fresh fit. An EPS-only change does not.
+Freeze the calibrated pairwise model, corrected incremental source, common assets, linker target, and fit resources.
+Recheck safe-action labels if query evidence or profile memberships change.
+A pairwise model change requires new incremental features; it does not automatically invalidate manual judgments.
 
 ## Stage 5: fit, evaluate, and approve
 
-For the v1.3 candidate, held-out access before this stage is limited to
-identity and overlap preflight. The frozen v1.21 baseline described in Stage 0
-is the only historical exception. Do not materialize v1.3 held-out features,
-predictions, or metrics until the model, populations, metrics, baselines,
-thresholds, and performance workload are frozen.
+Freeze evaluation populations, metrics, thresholds, and representative performance workloads before candidate scores are available.
+Distinguish independent release tests from inherited regression tests.
+Compare old and new models on the same population when a matched comparison is required.
+Do not compare historical rates from different data or split populations as a matched baseline.
 
-- [ ] Run `train_linker_and_finalize.py` once, using the final calibrated
-      pairwise bundle and the frozen inputs. The command materializes linker
-      features, fits once, serializes and reloads the complete bundle, then
-      evaluates the linker source bundle's frozen evaluation split. Retain
-      `linker_evaluation_report.json`; this split is separate from the
-      pairwise/cluster populations in `evaluation_plan.json`.
-- [ ] Confirm the complete bundle metadata binds the feature contract, both
-      boosters, and the exact linker target.
-- [ ] Run `release_pairwise.py bind-candidate` with the complete model and
-      final public-data root. It first validates the complete public release
-      and verifies that the candidate training configuration and model feature
-      contract use its shared name-count index and the packaged tuple/ORCID
-      artifacts. Review the fresh `run_binding.json`; it must bind the prepared
-      model/evaluation plan contents, baseline record, candidate manifest, and
-      public-data root manifest. The performance Arrow root is a separate
-      artifact bound through the evaluation-plan content identity; do not
-      require it to equal the assembled public-data root.
-- [ ] Produce pairwise, cluster, parity, and performance reports from the
-      reloaded complete bundle. Produce subblocking quality from the frozen
-      Arrow and candidate-component inputs; it does not consume the model.
-- [ ] Confirm every model-dependent held-out metric came from that reloaded
-      bundle without a second fit.
-- [ ] Confirm all five component reports carry the same
-      `run_binding_sha256`, put them in `reports/`, then run
-      `release_pairwise.py evaluate-release` with the frozen
-      `evaluation_plan.json` and `run_binding.json`.
-- [ ] Confirm parity rejected any fixture or workload drift and subblocking
-      rejected any alternate public root, undeclared dataset selection,
-      component-members file, or graph workload before writing its report.
-- [ ] Require every numeric gate to pass and the performance workload to match
-      the frozen performance Arrow root and workload exactly.
-- [ ] Retain component reports for diagnosis and the aggregate decision.
+Run `train_linker_and_finalize.py` once against the calibrated model and snapshot.
+The command computes fresh features, fits the linker, writes a complete sibling, reloads it, and evaluates its declared test split.
+Retain the stratified test report separately from full-source diagnostic reports.
+Full-source diagnostics can include gate-calibration queries.
 
-- [ ] Resolve every "Update at v1.3 release" note in the docs, tutorials, and
-      READMEs (`git grep -n "Update at v1.3 release"`), including the
-      `docs/README.md` paragraph that describes the convention; only this
-      runbook's own checklist lines may remain. `README.md` and
-      `s2and_rust/README.md` are the PyPI descriptions published in Stage 6, so
-      notes that need final model/data URLs use the owner-selected Stage 7
-      locations.
-- [ ] PyPI cannot resolve relative links, so pin both READMEs' repository
-      links to the release tag (they resolve once Stage 7 pushes the tag):
+The public loader requires the two pairwise prediction fixtures and complete incremental artifact.
+Evaluate pairwise, cluster, linker, parity, subblocking quality, and representative performance through the final contract.
+Model-dependent release metrics must use the serialized complete model without a second fit.
+Use the prepared evaluation plan and run binding when the existing gate tools require them.
+Their baseline record belongs to promotion, not the input or fit stages.
 
-```powershell
-$Version = (Get-Content -Raw VERSION).Trim()
-$Base = "https://github.com/allenai/S2AND/blob/v$Version"
-$Utf8 = New-Object System.Text.UTF8Encoding($false)
-$Readme = (Resolve-Path README.md).Path
-$Text = [IO.File]::ReadAllText($Readme)
-$Text = [regex]::Replace($Text, 'https://github\.com/allenai/S2AND/blob/(?:main|v[0-9][^/]*)/', "$Base/")
-$Text = [regex]::Replace($Text, '\]\((?!https?://|#|mailto:)([^)\s]+)\)', { param($m) "]($Base/$($m.Groups[1].Value))" })
-[IO.File]::WriteAllText($Readme, $Text, $Utf8)
-$RustReadme = (Resolve-Path s2and_rust\README.md).Path
-$RustText = [regex]::Replace([IO.File]::ReadAllText($RustReadme), 'https://github\.com/allenai/S2AND/blob/(?:main|v[0-9][^/]*)/', "$Base/")
-[IO.File]::WriteAllText($RustReadme, $RustText, $Utf8)
-git diff -- README.md s2and_rust/README.md
-```
-
-- [ ] After final package assets and release metadata are present, commit the
-      release tree, rerun `run_ci_locally.py` and version checks, and record
-      this as the final package commit.
-- [ ] From that exact commit, build the distributions, install them into an
-      empty environment, and run pairwise and incremental prediction against
-      the real external complete model, public data root, and name-count index.
-      Use `$DistRoot = "$RunRoot\stages\local-dist"` and follow the
-      [distribution build](../scripts/production/README.md#distribution-and-arrow-checks)
-      and
-      [installed release smoke command](../scripts/production/README.md#installed-release-smoke).
-      The workflow's synthetic installed smoke does not replace this.
-      A behavior-changing difference from the production source commit
-      invalidates every affected production result.
+Require the declared gates to pass before publication.
+Retain reports for failed gates.
+A metric, population, threshold, or workload change after test inspection requires a new evaluation decision.
+A changed selection policy requires untouched test data for confirmation.
 
 ## Stage 6: publish packages
 
-Push the exact final commit to `main`, then confirm the remote ref before
-dispatching the no-input workflow:
+Run required project checks from the final source commit.
+Build both distributions from that commit.
+Verify wheel and source archive contents.
+Install the candidate distributions in an empty environment outside the checkout.
+Run bulk and incremental prediction with the real complete model and combined data root.
+The workflow's synthetic smoke does not replace this check.
+See [installed release smoke](../scripts/production/README.md#installed-release-smoke).
 
-```powershell
-$ReleaseCommit = (git rev-parse HEAD).Trim()
-git fetch origin main
-if ((git rev-parse origin/main).Trim() -ne $ReleaseCommit) {
-  throw "origin/main is not the reviewed release commit"
-}
-gh workflow run release-rust.yml --ref main
-gh run list `
-  --workflow release-rust.yml `
-  --event workflow_dispatch `
-  --branch main `
-  --commit $ReleaseCommit `
-  --limit 1 `
-  --json databaseId,headSha,status,conclusion,url
-gh run watch REVIEWED_RUN_ID --exit-status
-```
-
-Before approving the protected `pypi` environment, verify the selected run's
-`headSha` is `$ReleaseCommit`, record its ID/URL, and rerun the PyPI and
-remote-tag absence checks from Stage 0. A published Rust version followed by an already-existing
-Python version would be an irreversible partial release.
-
-Both publish jobs (`publish-rust` and `publish-s2and`) use the `pypi`
-environment. If that environment requires reviewers, expect two approvals: the
-second arrives after the Rust packages are already live. Complete every check
-above before the first approval, then approve the second promptly.
-
-The workflow must:
-
-1. reject any non-`main` ref, then run tests and version checks;
-2. build and verify Python distributions and Windows, macOS, manylinux, and
-   musllinux Rust artifacts;
-3. clean-install both distributions and run the synthetic installed bulk and
-   incremental Arrow smoke;
-4. publish the already-built Rust distributions through the PyPI environment;
-5. wait with bounded retries for that exact Rust version to install; and
-6. publish the already-built Python distributions.
+Publish through `.github/workflows/release-rust.yml` from the reviewed `main` commit.
+Verify the workflow commit before approval of its protected PyPI environment.
+Confirm both package versions are absent before the first irreversible publish.
+The workflow publishes Rust first and then the matching Python package.
+Do not dispatch publication before model and data acceptance are complete.
 
 ## Stage 7: finish
 
-- [ ] Publish the reviewed model and public data to immutable owner-selected
-      locations, download them again, verify their manifest identities, and
-      record the immutable URLs and hashes. Confirm they match the locations
-      written into the docs when the "Update at v1.3 release" notes were
-      resolved.
-- [ ] Install the exact public Python and Rust versions together in a fresh
-      environment and rerun the
-      [real bulk and incremental smoke](../scripts/production/README.md#installed-release-smoke)
-      against those downloaded model/data bytes, with
-      `uv pip install ... "s2and==$Version" "s2and-rust==$Version"`.
-- [ ] Tag the exact final commit and verify the tag before pushing it:
+Publish the common large assets to Git LFS under a versioned release path.
+Release `1.3` uses `artifacts/common/v1.3` for the index and accepted complete model.
+Publish the research snapshot to an immutable S3 prefix without common assets.
+Download both parts into one local root.
+Verify hashes and repeat installed bulk and incremental smoke checks.
 
-```powershell
-$Version = (Get-Content -Raw VERSION).Trim()
-$Tag = "v$Version"
-git tag -a $Tag $ReleaseCommit -m "S2AND $Version"
-if ((git rev-list -n 1 $Tag) -ne $ReleaseCommit) {
-  throw "release tag does not name the final commit"
-}
-git push origin $Tag
-gh release create $Tag `
-  --verify-tag `
-  --title "S2AND $Version" `
-  --notes-file REVIEWED_RELEASE_NOTES.md
-```
-
-The reviewed notes contain the package/model/data version matrix, immutable
-model and data URLs plus manifest identities, evaluation decision, and known
-format breaks.
+Record the package, model, research snapshot, and format versions in the release notes.
+Record the common Git ref, asset paths, S3 prefix, manifest hashes, and evaluation decision.
+Replace unpublished placeholders only with verified download locations.
+Tag the exact reviewed source commit.
 
 ## Invalidation rules
 
-- A normalization, tuple, count, ORCID, benchmark, assignment, or Arrow change
-  invalidates every downstream result that consumed it.
-- A pairwise booster, feature-contract, linker-source, or linker-target change
-  invalidates linker features and the linker fit. An EPS-only change does not.
-- A linker source or target change invalidates the complete model and its
-  evaluation.
-- A population, metric, baseline, threshold, performance-root, or
-  performance-workload change
-  invalidates its report. If changed after seeing a held-out result, evaluation
-  requires a genuinely untouched holdout; rerunning the same holdout is not
-  valid confirmation.
-- A package-content or version change requires rebuilding distributions and
-  rerunning both synthetic and real installed-artifact checks.
-- Any behavior-changing source commit requires rerunning every affected stage
-  and publishing only from the newly verified commit.
+An input change invalidates the downstream results that consume it.
+A pairwise booster or feature-contract change invalidates incremental features and the linker fit.
+An EPS-only change does not invalidate unchanged incremental features.
+A source-label or profile-membership change requires checks of affected task labels and features.
+A package change requires new distributions and installed artifact checks.
+A runtime implementation change requires new affected evaluation evidence, even when the artifact contract version remains compatible.

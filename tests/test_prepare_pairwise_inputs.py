@@ -42,18 +42,30 @@ def inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         for position in (2, 0, 3, 1):
             sid = str(block * 4 + position)
             signatures[sid] = {
-                "signature_id": sid, "paper_id": pid,
+                "signature_id": sid,
+                "paper_id": pid,
                 "author_info": {
-                    "first": "Jae-Hoon", "middle": "M", "last": "van der Lee", "suffix": None,
-                    "position": position, "block": f"b{block}", "affiliations": ["Institute"], "emails": [],
+                    "first": "Jae-Hoon",
+                    "middle": "M",
+                    "last": "van der Lee",
+                    "suffix": None,
+                    "position": position,
+                    "block": f"b{block}",
+                    "affiliations": ["Institute"],
+                    "emails": [],
                 },
             }
         for group in range(2):
             cid = f"c{block}-{group}"
             clusters[cid] = {"signature_ids": [str(block * 4 + group * 2 + index) for index in range(2)]}
         papers[pid] = {
-            "paper_id": pid, "title": "Current title", "abstract": "", "references": ["ref"],
-            "venue": "Venue", "journal_name": "Journal", "year": 2020,
+            "paper_id": pid,
+            "title": "Current title",
+            "abstract": "",
+            "references": ["ref"],
+            "venue": "Venue",
+            "journal_name": "Journal",
+            "year": 2020,
             "authors": [{"author_name": "Author", "position": index} for index in range(4)],
         }
     for root in (source, legacy):
@@ -73,8 +85,13 @@ def prepare(inputs: tuple[Path, Path, Path], **options: Any) -> dict:
     source, legacy, output = inputs
     with threadpool_limits(limits=1):
         return prepare_benchmark(
-            "qian", source_root=source, fixed_pair_root=legacy, output_root=output,
-            unknown_filename="unknown.json", evaluation_pairs=10, **options,
+            "qian",
+            source_root=source,
+            fixed_pair_root=legacy,
+            output_root=output,
+            unknown_filename="unknown.json",
+            evaluation_pairs=10,
+            **options,
         )
 
 
@@ -83,9 +100,16 @@ def augment(inputs: tuple[Path, Path, Path], destination: Path, **options: Any) 
     _, legacy, prepared = inputs
     with threadpool_limits(limits=1):
         return build_augmentation(
-            prepared_root=prepared, legacy_root=legacy, output=destination, datasets=("qian",),
-            unknown_filename="unknown.json", train_candidates=100, train_pool_cap=100,
-            evaluation_candidates=10, train_positive_cap=5, evaluation_positive_cap=2,
+            prepared_root=prepared,
+            legacy_root=legacy,
+            output=destination,
+            datasets=("qian",),
+            unknown_filename="unknown.json",
+            train_candidates=100,
+            train_pool_cap=100,
+            evaluation_candidates=10,
+            train_positive_cap=5,
+            evaluation_positive_cap=2,
             **options,
         )
 
@@ -112,6 +136,38 @@ def test_names_order_and_nested_real_split(inputs: tuple[Path, Path, Path]) -> N
     assert list(model) == [sid for sid in original if sid not in external]
 
 
+def test_corrected_source_does_not_require_addition_history(inputs: tuple[Path, Path, Path]) -> None:
+    source, _, output = inputs
+    (source / "qian" / "qian_added_signatures.json").unlink()
+    prepare(inputs)
+    assert not (output / "benchmark_source" / "qian" / "qian_added_signatures.json").exists()
+    actual = read(output / "benchmark_source" / "qian" / "qian_signatures.json")
+    original = read(source / "qian" / "qian_signatures.json")
+    assert list(actual) == list(original)
+    assert all(actual[sid]["author_info"]["first"] == row["author_info"]["first"] for sid, row in original.items())
+
+
+def test_augmentation_uses_corrected_source_without_legacy(inputs: tuple[Path, Path, Path], tmp_path: Path) -> None:
+    pytest.importorskip("ijson")
+    prepare(inputs)
+    _, _, prepared = inputs
+    destination = tmp_path / "augmented_current"
+    with threadpool_limits(limits=1):
+        report = build_augmentation(
+            prepared_root=prepared,
+            output=destination,
+            datasets=("qian",),
+            unknown_filename="unknown.json",
+            train_candidates=100,
+            train_pool_cap=100,
+            evaluation_candidates=10,
+            train_positive_cap=5,
+            evaluation_positive_cap=2,
+        )
+    assert report["datasets"]["qian"]
+    finalize_augmentation(root=destination, prepared_root=prepared, datasets=("qian",), unknown_filename="unknown.json")
+
+
 def test_correction_restores_unknown_and_keeps_known_move(inputs: tuple[Path, Path, Path], tmp_path: Path) -> None:
     source, _, output = inputs
     original_path = source / "qian" / "qian_clusters.json"
@@ -122,10 +178,20 @@ def test_correction_restores_unknown_and_keeps_known_move(inputs: tuple[Path, Pa
     stage_path = tmp_path / "corrections" / "qian" / "qian_clusters.json"
     write(stage_path, staged)
     receipt = tmp_path / "receipt.json"
-    write(receipt, {"datasets": {"qian": {
-        "before_sha256": sha(original_path), "staged_sha256": sha(stage_path),
-        "unlabeled_ids": ["3"], "rows": 1, "moved": 1,
-    }}})
+    write(
+        receipt,
+        {
+            "datasets": {
+                "qian": {
+                    "before_sha256": sha(original_path),
+                    "staged_sha256": sha(stage_path),
+                    "unlabeled_ids": ["3"],
+                    "rows": 1,
+                    "moved": 1,
+                }
+            }
+        },
+    )
     prepare(inputs, correction_receipt=receipt, correction_root=tmp_path / "corrections")
     current = members(read(output / "benchmark_source" / "qian" / "qian_clusters.json"))
     assert current["2"] == "c0-0"
@@ -147,14 +213,19 @@ def test_variant_ownership_and_real_pair_guard(inputs: tuple[Path, Path, Path], 
     assert all(row["author_info"]["first"] == "Jae-Hoon" for row in signatures.values())
     _, _, prepared = inputs
     result = finalize_augmentation(
-        root=destination, prepared_root=prepared, datasets=("qian",), unknown_filename="unknown.json",
+        root=destination,
+        prepared_root=prepared,
+        datasets=("qian",),
+        unknown_filename="unknown.json",
     )
     assert result["vector_rows"] == len(signatures)
 
 
 @pytest.mark.parametrize("mutation", ["heldout", "unknown", "label", "source"])
 def test_finalizer_rejects_bad_training_pairs(
-    inputs: tuple[Path, Path, Path], tmp_path: Path, mutation: str,
+    inputs: tuple[Path, Path, Path],
+    tmp_path: Path,
+    mutation: str,
 ) -> None:
     prepare(inputs)
     destination = tmp_path / "augmented"
@@ -218,14 +289,18 @@ def test_missing_blank_vectors_remain_absent(inputs: tuple[Path, Path, Path], tm
     assert report["unique_embedding_texts_to_refresh"] == 0
     assert read(destination / "vector_ids.json") == []
     result = finalize_augmentation(
-        root=destination, prepared_root=prepared, datasets=("qian",), unknown_filename="unknown.json",
+        root=destination,
+        prepared_root=prepared,
+        datasets=("qian",),
+        unknown_filename="unknown.json",
     )
     assert result["vector_rows"] == 0
     assert result["absent_blank_vectors"] == report["signature_count"]
 
 
 def test_dropped_last_text_does_not_queue_separator_only_vectors(
-    inputs: tuple[Path, Path, Path], tmp_path: Path,
+    inputs: tuple[Path, Path, Path],
+    tmp_path: Path,
 ) -> None:
     source, _, _ = inputs
     paper_path = source / "qian" / "qian_papers.json"
@@ -243,19 +318,39 @@ def test_dropped_last_text_does_not_queue_separator_only_vectors(
 
 def test_variants_keep_separate_author_rows_and_raw_compound_names() -> None:
     paper = {
-        "paper_id": "p", "title": "Title", "abstract": "Abstract", "references": [],
-        "venue": None, "journal_name": None,
+        "paper_id": "p",
+        "title": "Title",
+        "abstract": "Abstract",
+        "references": [],
+        "venue": None,
+        "journal_name": None,
         "authors": [{"position": 0}, {"position": 1}],
     }
     signatures: list[dict[str, Any]] = [
-        {"signature_id": str(index), "paper_id": "p", "author_info": {
-            "first": "Jae-Hoon", "middle": "M", "last": "van der Lee", "position": index, "affiliations": [],
-        }}
+        {
+            "signature_id": str(index),
+            "paper_id": "p",
+            "author_info": {
+                "first": "Jae-Hoon",
+                "middle": "M",
+                "last": "van der Lee",
+                "position": index,
+                "affiliations": [],
+            },
+        }
         for index in range(2)
     ]
     variants = [
-        make_variant("qian", str(index), signature, paper, old_paper=paper, cached_paper=None,
-                     rng=random.Random(1111), omission_rate=1)
+        make_variant(
+            "qian",
+            str(index),
+            signature,
+            paper,
+            old_paper=paper,
+            cached_paper=None,
+            rng=random.Random(1111),
+            omission_rate=1,
+        )
         for index, signature in enumerate(signatures)
     ]
     assert variants[0][0]["paper_id"] != variants[1][0]["paper_id"]
@@ -264,8 +359,14 @@ def test_variants_keep_separate_author_rows_and_raw_compound_names() -> None:
     assert len(paper["authors"]) == 2
     assert all(signature["author_info"]["first"] == "Jae-Hoon" for signature in signatures)
     full, _, _ = make_variant(
-        "qian", "0", signatures[0], paper, old_paper=paper, cached_paper=None,
-        rng=random.Random(1111), omission_rate=0,
+        "qian",
+        "0",
+        signatures[0],
+        paper,
+        old_paper=paper,
+        cached_paper=None,
+        rng=random.Random(1111),
+        omission_rate=0,
     )
     assert full["author_info"]["first"] == "Jae-Hoon"
     assert full["author_info"]["middle"] == "M"
@@ -273,30 +374,57 @@ def test_variants_keep_separate_author_rows_and_raw_compound_names() -> None:
 
 @pytest.mark.parametrize(
     ("title", "abstract", "has_vector", "expected"),
-    [("", "", False, "absent"), (" ", "", True, "absent"),
-     ("Title", "Abstract", False, "refresh"), ("Title", "Abstract", True, "reuse"),
-     ("Title", "", True, "refresh")],
+    [
+        ("", "", False, "absent"),
+        (" ", "", True, "absent"),
+        ("Title", "Abstract", False, "refresh"),
+        ("Title", "Abstract", True, "reuse"),
+        ("Title", "", True, "refresh"),
+    ],
 )
 def test_vector_policy_without_stream_dependencies(title: str, abstract: str, has_vector: bool, expected: str) -> None:
-    assert vector_action(
-        {"title": title, "abstract": abstract}, {"title": "Title", "abstract": "Abstract"},
-        has_source_vector=has_vector,
-    ) == expected
+    assert (
+        vector_action(
+            {"title": title, "abstract": abstract},
+            {"title": "Title", "abstract": "Abstract"},
+            has_source_vector=has_vector,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize("cache_title", ["French translation of version 3.0", "unicode standard version"])
 def test_translation_cache_preserves_version_numbers(cache_title: str) -> None:
     original = {
-        "paper_id": "p", "title": "Unicode Standard Version 8.0", "abstract": "", "references": [],
-        "venue": None, "journal_name": None, "authors": [],
+        "paper_id": "p",
+        "title": "Unicode Standard Version 8.0",
+        "abstract": "",
+        "references": [],
+        "venue": None,
+        "journal_name": None,
+        "authors": [],
     }
-    signature = {"signature_id": "s", "paper_id": "p", "author_info": {
-        "first": "Jae-Hoon", "middle": None, "last": "Lee", "position": 0, "affiliations": [],
-    }}
+    signature = {
+        "signature_id": "s",
+        "paper_id": "p",
+        "author_info": {
+            "first": "Jae-Hoon",
+            "middle": None,
+            "last": "Lee",
+            "position": 0,
+            "affiliations": [],
+        },
+    }
     old = {**original, "title": "Unicode Standard Version 3.0"}
     _, variant, counts = make_variant(
-        "qian", "s", signature, original, old_paper=old, cached_paper={"title": cache_title},
-        rng=random.Random(1111), omission_rate=0,
+        "qian",
+        "s",
+        signature,
+        original,
+        old_paper=old,
+        cached_paper={"title": cache_title},
+        rng=random.Random(1111),
+        omission_rate=0,
     )
     assert variant["title"] == original["title"]
     assert not counts["cached_translation_applied"]
@@ -312,15 +440,34 @@ def test_translation_cache_preserves_version_numbers(cache_title: str) -> None:
 )
 def test_translation_cache_requires_exact_source_title(old_title: str, current_title: str) -> None:
     paper = {
-        "paper_id": "p", "title": current_title, "abstract": "", "references": [],
-        "venue": None, "journal_name": None, "authors": [],
+        "paper_id": "p",
+        "title": current_title,
+        "abstract": "",
+        "references": [],
+        "venue": None,
+        "journal_name": None,
+        "authors": [],
     }
-    signature = {"signature_id": "s", "paper_id": "p", "author_info": {
-        "first": "Jae-Hoon", "middle": None, "last": "Lee", "position": 0, "affiliations": [],
-    }}
+    signature = {
+        "signature_id": "s",
+        "paper_id": "p",
+        "author_info": {
+            "first": "Jae-Hoon",
+            "middle": None,
+            "last": "Lee",
+            "position": 0,
+            "affiliations": [],
+        },
+    }
     _, variant, counts = make_variant(
-        "qian", "s", signature, paper, old_paper={**paper, "title": old_title},
-        cached_paper={"title": "French translation"}, rng=random.Random(1111), omission_rate=0,
+        "qian",
+        "s",
+        signature,
+        paper,
+        old_paper={**paper, "title": old_title},
+        cached_paper={"title": "French translation"},
+        rng=random.Random(1111),
+        omission_rate=0,
     )
     assert variant["title"] == current_title
     assert counts["cached_translation_source_change"] == 1

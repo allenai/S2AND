@@ -12,6 +12,7 @@ v1.3 release work is complete. Release operators must follow
 | Script | What it does |
 |---|---|
 | `production/model/train_pairwise.py` | Release-only training of the pairwise half of a native `production_model_vX.Y/` bundle |
+| `production/data/package_corrected_datasets.py` | Package the final corrected records, pairwise populations, and complete incremental tasks with one common index |
 | `production/model/train_linker_and_finalize.py` | One-fit complete-bundle linker finalization, reload, and evaluation |
 | `production/model/release_pairwise.py` | Validation-only EPS calibration plus measurement components and `evaluate-release` aggregation into one report |
 | `production/model/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs (release Stage 2) |
@@ -26,10 +27,10 @@ v1.3 release work is complete. Release operators must follow
 | `tutorial_for_predicting_with_the_prod_model.py` | Guide to predicting with a complete production bundle, Arrow input by default; JSON fixtures are opt-in |
 | `tutorial.ipynb` | Notebook walkthrough of the S2AND pipeline on the legacy JSON benchmark files |
 
-> **Update at v1.3 release:** both tutorials need artifacts that are not
-> published yet. The script needs a complete v1.3 bundle; the notebook needs a
-> public-format-1 name-count index. Update this note once they run against the
-> published data.
+The compatible public release remains unpublished.
+The script requires a complete model and format-1 Arrow input.
+The notebook requires the format-1 name-count index.
+Use [the data guide](../docs/data.md) for the common assets and corrected snapshot.
 
 ### Dataset creation & preprocessing
 

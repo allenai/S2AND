@@ -52,6 +52,18 @@ def _dataset_manifests(root: Path) -> dict[str, Path]:
     return dataset_manifests
 
 
+def _portable_dataset_manifests(root: Path) -> dict[str, Path]:
+    """Return dataset manifests from a generic or public source bundle."""
+
+    entries, replay_bundles, _release_version = read_arrow_collection_root(root / "manifest.json")
+    for bundle_name, manifest_path in replay_bundles.items():
+        nested, nested_replays, release_version = read_arrow_collection_root(manifest_path)
+        if nested_replays or release_version is not None:
+            raise ValueError(f"Replay manifest must contain a generic Arrow collection: {manifest_path}")
+        entries.update({f"{bundle_name}/{name}": path for name, path in nested.items()})
+    return entries
+
+
 def _resolved_manifest_artifact_path(manifest_path: Path, raw_path: Any, *, key: str) -> Path:
     if not isinstance(raw_path, str) or not raw_path:
         raise ValueError(f"{manifest_path} paths.{key} must be a non-empty string")
@@ -71,10 +83,12 @@ def _validate_root_name_counts_binding(
     root: Path,
     *,
     authoritative_manifest_sha256: str,
+    dataset_manifests: Mapping[str, Path] | None = None,
 ) -> None:
     """Require every dataset manifest to bind the authoritative count index."""
 
-    for dataset, manifest_path in _dataset_manifests(root).items():
+    entries = _dataset_manifests(root) if dataset_manifests is None else dataset_manifests
+    for dataset, manifest_path in entries.items():
         manifest = _read_json(manifest_path)
         paths = manifest.get("paths")
         if not isinstance(paths, Mapping):
@@ -112,37 +126,86 @@ def _copy_arrow_root_without_name_counts(source: Path, destination: Path) -> Non
     shutil.copytree(source, destination, ignore=ignore)
 
 
+def _validate_copy_output(source: Path, output: Path) -> None:
+    """Reject directory cycles and overlapping outputs before a copy."""
+
+    visited: set[Path] = set()
+    ancestors_by_directory: dict[Path, frozenset[Path]] = {}
+    for directory, names, _files in os.walk(source, followlinks=True):
+        directory_path = Path(directory)
+        resolved = directory_path.resolve()
+        ancestors = ancestors_by_directory.get(directory_path.parent, frozenset())
+        if resolved in ancestors:
+            raise ValueError(f"Input contains a cyclic directory link: {directory_path}")
+        ancestors_by_directory[directory_path] = ancestors | {resolved}
+        if output.is_relative_to(resolved):
+            raise ValueError(f"portable output overlaps a copied directory target: {resolved}")
+        if resolved in visited:
+            names.clear()
+            continue
+        visited.add(resolved)
+        if directory_path == source and "name_counts_index" in names:
+            names.remove("name_counts_index")
+
+
+def _rebind_dataset_manifest(manifest_path: Path, *, name_counts_index: Path) -> None:
+    """Verify payloads before a shared-index path update."""
+
+    # A rebuild must not repair invalid metadata or changed payloads.
+    _load_artifact_specs(manifest_path.parent)
+    manifest = _read_json(manifest_path)
+    paths = manifest.get("paths")
+    if not isinstance(paths, Mapping):
+        raise ValueError(f"{manifest_path} must contain paths")
+    resolved_paths = {
+        str(key): (
+            name_counts_index
+            if str(key) == "name_counts_index"
+            else _resolved_manifest_artifact_path(manifest_path, value, key=str(key))
+        )
+        for key, value in paths.items()
+    }
+    rebuilt = build_arrow_artifact_manifest(resolved_paths, manifest_path.parent)
+    if rebuilt["files"] != manifest["files"]:
+        raise ValueError(f"Arrow artifact inventory mismatch before index relocation: {manifest_path}")
+    manifest["paths"]["name_counts_index"] = rebuilt["paths"]["name_counts_index"]
+    write_arrow_artifact_manifest(manifest, manifest_path.parent)
+
+
 def _rebind_dataset_manifests(root: Path, *, name_counts_index: Path) -> None:
     """Verify each original generation before relocating its shared-index path."""
 
     entries = _dataset_manifests(root)
     for manifest_path in entries.values():
-        # Validate the original metadata without hashing payloads a second time.
-        # Rebuilding first would silently repair invalid kinds, versions or fields.
-        _load_artifact_specs(manifest_path.parent)
-        manifest = _read_json(manifest_path)
-        paths = manifest.get("paths")
-        if not isinstance(paths, Mapping):
-            raise ValueError(f"{manifest_path} must contain paths")
-        resolved_paths = {
-            str(key): (
-                name_counts_index
-                if str(key) == "name_counts_index"
-                else _resolved_manifest_artifact_path(manifest_path, value, key=str(key))
-            )
-            for key, value in paths.items()
-        }
-        rebuilt = build_arrow_artifact_manifest(resolved_paths, manifest_path.parent)
-        if rebuilt["files"] != manifest["files"]:
-            raise ValueError(f"Arrow artifact inventory mismatch before index relocation: {manifest_path}")
-        manifest["paths"]["name_counts_index"] = rebuilt["paths"]["name_counts_index"]
-        write_arrow_artifact_manifest(manifest, manifest_path.parent)
+        _rebind_dataset_manifest(manifest_path, name_counts_index=name_counts_index)
     _write_root_manifest(
         root,
         dataset_manifests={
             dataset: manifest_path.relative_to(root.resolve()).as_posix() for dataset, manifest_path in entries.items()
         },
     )
+
+
+def _rebind_portable_dataset_manifests(root: Path, *, name_counts_index: Path) -> None:
+    """Preserve public collection fields and replay references after export."""
+
+    main, replays, _release_version = read_arrow_collection_root(root / "manifest.json")
+    collections = {root / "manifest.json": main}
+    for manifest_path in replays.values():
+        datasets, nested_replays, release_version = read_arrow_collection_root(manifest_path)
+        if nested_replays or release_version is not None:
+            raise ValueError(f"Replay manifest must contain a generic Arrow collection: {manifest_path}")
+        collections[manifest_path] = datasets
+    for manifest_path in {path for entries in collections.values() for path in entries.values()}:
+        _rebind_dataset_manifest(manifest_path, name_counts_index=name_counts_index)
+    for collection_path, entries in reversed(list(collections.items())):
+        payload = _read_json(collection_path)
+        for name, manifest_path in entries.items():
+            payload["dataset_manifests"][name]["sha256"] = sha256_file(manifest_path)
+        if collection_path == root / "manifest.json":
+            for name, manifest_path in replays.items():
+                payload["replay_bundles"][name]["sha256"] = sha256_file(manifest_path)
+        collection_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _validate_support_root(source_root: Path) -> None:
@@ -203,7 +266,7 @@ def validate_portable_source_bundle(root: Path) -> dict[str, Any]:
             if path.is_symlink() or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
                 raise ValueError(f"portable source bundle contains a filesystem link: {path}")
     _validate_bundle_paths(root)
-    entries = _dataset_manifests(root)
+    entries = _portable_dataset_manifests(root)
     shared_index = root / "name_counts_index"
     index_sha256 = sha256_file(shared_index / "manifest.json")
     for manifest_path in entries.values():
@@ -216,19 +279,22 @@ def validate_portable_source_bundle(root: Path) -> dict[str, Any]:
                 raise ValueError(f"{manifest_path} paths.{key} escapes the source bundle")
             if key == "name_counts_index" and resolved != shared_index:
                 raise ValueError(f"{manifest_path} must bind the shared name_counts_index")
-    _validate_root_name_counts_binding(root, authoritative_manifest_sha256=index_sha256)
+    _validate_root_name_counts_binding(root, authoritative_manifest_sha256=index_sha256, dataset_manifests=entries)
     bundle = load_bundle(root)
     validate_source_bundle_support_files(bundle)
     with ExitStack() as arrow_stack:
         selected_rows, datasets = preflight_source_rows(
             bundle, name_counts_index_root=shared_index, arrow_stack=arrow_stack
         )
+        opened_roots = {dataset.root.resolve() for dataset in datasets.values()}
         # Unreferenced datasets can become active after a future label update.
-        for name, manifest_path in entries.items():
-            if name not in datasets:
+        for manifest_path in entries.values():
+            dataset_root = manifest_path.parent.resolve()
+            if dataset_root not in opened_roots:
                 arrow_stack.enter_context(
-                    ArrowDataset.open(manifest_path.parent, require_specter=True, require_name_counts_index=True)
+                    ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True)
                 )
+                opened_roots.add(dataset_root)
     return {
         "dataset_count": len(entries),
         "datasets": sorted(entries),
@@ -248,7 +314,7 @@ def export_portable_source_bundle(*, source_bundle: Path, output_source_bundle: 
     if output_source_bundle.is_relative_to(source_bundle) or source_bundle.is_relative_to(output_source_bundle):
         raise ValueError("portable source bundle input and output directories must not overlap")
     _validate_bundle_paths(source_bundle, resolve_links=False)
-    entries = _dataset_manifests(source_bundle)
+    entries = _portable_dataset_manifests(source_bundle)
     indexes = []
     for manifest_path in entries.values():
         manifest = _read_json(manifest_path)
@@ -264,22 +330,16 @@ def export_portable_source_bundle(*, source_bundle: Path, output_source_bundle: 
         index, context="portable source bundle export", producer_hint="bind a valid shared count index"
     )
     _validate_root_name_counts_binding(
-        source_bundle, authoritative_manifest_sha256=sha256_file(index / "manifest.json")
+        source_bundle,
+        authoritative_manifest_sha256=sha256_file(index / "manifest.json"),
+        dataset_manifests=entries,
     )
-    visited: set[Path] = set()
-    for directory, names, _files in os.walk(source_bundle, followlinks=True):
-        resolved = Path(directory).resolve()
-        if output_source_bundle.is_relative_to(resolved):
-            raise ValueError(f"portable output overlaps a copied directory target: {resolved}")
-        if resolved in visited:
-            names.clear()
-            continue
-        visited.add(resolved)
-        if Path(directory) == source_bundle and "name_counts_index" in names:
-            names.remove("name_counts_index")
+    _validate_copy_output(source_bundle, output_source_bundle)
     _copy_arrow_root_without_name_counts(source_bundle, output_source_bundle)
     shutil.copytree(index, output_source_bundle / "name_counts_index")
-    _rebind_dataset_manifests(output_source_bundle, name_counts_index=output_source_bundle / "name_counts_index")
+    _rebind_portable_dataset_manifests(
+        output_source_bundle, name_counts_index=output_source_bundle / "name_counts_index"
+    )
     return validate_portable_source_bundle(output_source_bundle)
 
 

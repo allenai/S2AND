@@ -1,28 +1,34 @@
 # Training and Evaluation
 
-This document describes Arrow-native research training and evaluation.
+This guide describes research training and evaluation through the API.
+It uses the corrected research snapshot and the same common name-count index as inference.
+The examples expose test metrics for direct research inspection.
+Production release selection uses development data and keeps candidate test scores separate until the declared release evaluation.
+See [the production commands](../scripts/production/README.md#pairwise-model) for the maintained production trainer.
+See [the release process](release.md) for model acceptance and publication.
 
-> **Update at v1.3 release:** verify these examples against the published
-> canonical model and data roots. Recorded production test splits require the
-> exact training population; a full public benchmark cannot replace a training
-> subset. Use the release evaluation plan for independently held-out populations.
+## Production snapshot inputs
 
-The examples are research/API examples and intentionally make a test split
-available for immediate inspection. They are not the v1.3 release protocol.
-Release training must keep pairwise, clustering, and linker test identities
-sealed until the one-shot Stage 5 evaluation. Follow
-[release.md](release.md), not the example order below, for
-production work.
+The production pairwise trainer reads `pairwise/model_plan.json` from the complete corrected snapshot.
+It computes features from `pairwise/arrow/release` and the one shared `name_counts_index`.
+The plan declares its datasets, including `inventors_s2and` when patents form part of the fit population.
+The trainer has no fixed seven-source requirement.
+Use a separate output directory for models and matrix work.
+A historical baseline is not required for this fit.
+
+The snapshot preserves full corrected records for later corrections and embedding updates.
+Runtime Arrow projections alone do not retain all useful source text.
+The [data guide](data.md) explains source records, incremental tasks, formats, and compatibility.
 
 ## Build a Rust-backed training dataset
 
 The maintained training constructor consumes an open, manifest-backed
 `ArrowDataset`. Ground-truth clusters remain JSON by design, but signatures,
 papers, paper authors, embeddings, batch indexes, and name counts come from the
-same immutable Arrow bundle.
+same corrected snapshot and common index.
 
-The example below expects a canonical training root produced by
-`scripts/convert_to_arrow.py`. This migration branch does not bundle one.
+The example requires a manifest-backed training root from the corrected snapshot.
+Set `bundle_dir` to the selected dataset's fit Arrow directory.
 
 ```python
 import json
@@ -193,7 +199,7 @@ model and clusterer, but a publishable bundle also needs the promoted linker
 and validated release artifacts. See the
 [bundle contract](production_inference.md#complete-model-bundles) for required
 files, feature provenance, checksums, and staged publication. Follow the
-[v1.3 release runbook](release.md) for pairwise training, validation-only EPS
+[release process](release.md) for pairwise training, validation-only EPS
 selection, linker finalization, and evaluation through the reloaded bundle.
 
 Linker training excludes complete holdout query and base identities before

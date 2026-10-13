@@ -47,14 +47,12 @@ This installs the latest version available from the configured package index.
 The `1.0.0` packages are coordinated `s2and==1.0.0` and `s2and-rust==1.0.0`
 with model/public-data version `1.3`.
 
-> **Update at v1.3 release:** until `1.0.0` is published, this command installs
-> an earlier release rather than this worktree. Use the checkout flow below for
-> pre-release validation.
+The coordinated `1.0.0` release remains unpublished.
+Use the checkout flow below for the current development runtime.
 
 ## Repo checkout
 
-Hydrate the LFS-managed LightGBM parity fixtures after cloning and after
-switching to a branch that changes them:
+Fetch Git LFS common assets and LightGBM parity fixtures after clone or a relevant release-ref change:
 
 ```bash
 git lfs install

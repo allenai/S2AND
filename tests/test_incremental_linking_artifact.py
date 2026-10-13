@@ -21,7 +21,11 @@ from s2and.incremental_linking.artifact import (
     load_incremental_linking_artifact,
     save_incremental_linking_artifact,
 )
-from s2and.incremental_linking.contracts import canonical_json_digest
+from s2and.incremental_linking.contracts import (
+    INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
+    INCREMENTAL_LINKER_FORMAT_VERSION,
+    canonical_json_digest,
+)
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from tests.promoted_linking_helpers import (
     build_tiny_promoted_booster,
@@ -35,6 +39,9 @@ _TEST_TARGET_SPEC = {"variant": "test"}
 def _valid_metadata_payload() -> dict[str, Any]:
     return {
         "booster_sha256": "a" * 64,
+        "feature_contract_version": INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
+        "feature_names": list(promoted_linker_feature_columns()),
+        "format_version": INCREMENTAL_LINKER_FORMAT_VERSION,
         "gate_config": tiny_logistic_gate_config(),
         "generated_by_runtime": __version__,
         "kind": INCREMENTAL_LINKER_KIND,
@@ -97,6 +104,9 @@ def test_artifact_lifecycle_preserves_predictions_and_immutable_identity(tmp_pat
 
     assert set(metadata) == {
         "booster_sha256",
+        "feature_contract_version",
+        "feature_names",
+        "format_version",
         "gate_config",
         "generated_by_runtime",
         "kind",
@@ -235,9 +245,9 @@ def test_metadata_rejects_invalid_fields() -> None:
     ("field", "value", "message"),
     (
         ("kind", "not-a-linker", "kind must be"),
-        ("generated_by_runtime", "0.0.0", "runtime mismatch"),
+        ("generated_by_runtime", " ", "generated_by_runtime must be a nonempty trimmed string"),
     ),
-    ids=("wrong-kind", "runtime-mismatch"),
+    ids=("wrong-kind", "invalid-producer-version"),
 )
 def test_load_rejects_wrong_identity_before_booster_io(
     tmp_path: Path,
@@ -254,6 +264,64 @@ def test_load_rejects_wrong_identity_before_booster_io(
 
     with pytest.raises(ValueError, match=message):
         load_incremental_linking_artifact(artifact_dir)
+
+
+@pytest.mark.parametrize("field", ("format_version", "feature_contract_version"))
+@pytest.mark.parametrize("value", (None, True, 1.0, 2))
+def test_load_rejects_unsupported_contract_before_booster_io(tmp_path: Path, field: str, value: object) -> None:
+    artifact_dir = _write_fake_artifact(tmp_path / "artifact")
+    metadata_path = artifact_dir / METADATA_FILENAME
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload[field] = value
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    (artifact_dir / BOOSTER_FILENAME).unlink()
+
+    with pytest.raises(ValueError, match=f"{field} must equal supported version"):
+        load_incremental_linking_artifact(artifact_dir)
+
+
+def test_load_rejects_changed_column_order_with_equal_width(tmp_path: Path) -> None:
+    artifact_dir = _write_fake_artifact(tmp_path / "artifact")
+    metadata_path = artifact_dir / METADATA_FILENAME
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    columns = payload["feature_names"]
+    columns[0], columns[1] = columns[1], columns[0]
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    (artifact_dir / BOOSTER_FILENAME).unlink()
+
+    with pytest.raises(ValueError, match="feature_names must match the runtime ordered feature names"):
+        load_incremental_linking_artifact(artifact_dir)
+
+
+def test_load_rejects_unversioned_metadata(tmp_path: Path) -> None:
+    artifact_dir = _write_fake_artifact(tmp_path / "artifact")
+    metadata_path = artifact_dir / METADATA_FILENAME
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    for field in ("feature_contract_version", "feature_names", "format_version"):
+        del payload[field]
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="metadata fields do not match the current contract"):
+        load_incremental_linking_artifact(artifact_dir)
+
+
+def test_artifact_accepts_different_producer_runtime_with_equal_contract(tmp_path: Path) -> None:
+    booster, fixture = build_tiny_promoted_booster()
+    artifact_dir = tmp_path / "artifact"
+    metadata = save_incremental_linking_artifact(
+        booster,
+        artifact_dir,
+        gate_config=tiny_logistic_gate_config(),
+        target_spec=_TEST_TARGET_SPEC,
+        pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
+    )
+    metadata["generated_by_runtime"] = "0.0.0"
+    (artifact_dir / METADATA_FILENAME).write_text(json.dumps(metadata), encoding="utf-8")
+
+    loaded = load_incremental_linking_artifact(artifact_dir)
+    np.testing.assert_allclose(
+        loaded.predict_probabilities(fixture), np.asarray(booster.predict(fixture)), rtol=1e-10, atol=1e-10
+    )
 
 
 def test_load_always_verifies_booster_hash_before_loading_scorer(

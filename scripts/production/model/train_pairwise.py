@@ -52,6 +52,7 @@ from s2and.production_training_contract import (  # noqa: E402
     load_packaged_artifact_authority,
 )
 from scripts.production.model.augmented_leakage import (  # noqa: E402
+    require_declared_sources,
     require_training_members,
     source_members,
     training_members_from_sources,
@@ -64,8 +65,7 @@ from scripts.production.model.unknown_signatures import (  # noqa: E402
 
 logger = logging.getLogger("s2and")
 
-# v1.3 trains on seven public benchmarks plus the internal fixed-pair "augmented" set; the internal
-# "orcid" dataset is excluded, and pair-labeled "medline" is covered only through "augmented".
+# Historical plan examples use these names; each model plan declares its actual datasets.
 DEFAULT_SOURCE_DATASET_NAMES = ("aminer", "arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath")
 DEFAULT_TRAIN_PAIRS_SIZE = 100_000
 DEFAULT_VALIDATION_PAIRS_SIZE = 10_000
@@ -142,8 +142,6 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
 
     if not bool(args.run_full):
         raise SystemExit("production training requires --run-full")
-    dataset_names = (*DEFAULT_SOURCE_DATASET_NAMES, "augmented")
-
     output_dir = Path(args.output_dir).resolve()
     if output_dir.exists():
         raise SystemExit(f"--output-dir must name a new directory: {output_dir}")
@@ -159,13 +157,11 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     if args.model_plan is None:
         raise SystemExit("production training requires --model-plan")
     model_plan = load_model_plan(Path(args.model_plan).resolve())
-    expected_modes = {
-        **{name: "random_blocks" for name in DEFAULT_SOURCE_DATASET_NAMES},
-        "augmented": "fixed_pairs",
-    }
-    observed_modes = {name: dataset.split_mode for name, dataset in model_plan.datasets.items()}
-    if observed_modes != expected_modes:
-        raise SystemExit("model plan datasets disagree with the production dataset set")
+    dataset_names = tuple(model_plan.datasets)
+    if "augmented" in model_plan.datasets and model_plan.datasets["augmented"].split_mode != "fixed_pairs":
+        raise SystemExit("model plan augmented dataset requires fixed train and validation pairs")
+    if not any(dataset.split_mode == "random_blocks" for dataset in model_plan.datasets.values()):
+        raise SystemExit("model plan requires a random-block dataset for EPS calibration")
 
     arrow_root = Path(args.arrow_root).resolve()
     arrow_dirs = {name: arrow_root / name for name in dataset_names}
@@ -406,23 +402,22 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     plan = _preflight_pairwise(args)
     unknown_inputs = {name: load_unknown_signatures(plan.datasets[name].files) for name in plan.dataset_names}
     unknown_ids = {name: source.ids for name, source in unknown_inputs.items()}
-    unknown_ids["augmented"] = augmented_unknown_ids(unknown_ids)
-    augmented_pairs = pd.read_csv(plan.datasets["augmented"].files["train_pairs"])
-    pair_frame = _map_fixed_pair_labels(augmented_pairs, "augmented train")
-    augmented_members = source_members(
-        (str(left), str(right))
-        for left, right in pair_frame.iloc[:, :2].itertuples(index=False, name=None)
-        if str(left) not in unknown_ids["augmented"] and str(right) not in unknown_ids["augmented"]
-    )
-    unknown_sources = set(augmented_members) - set(DEFAULT_SOURCE_DATASET_NAMES) - {"medline"}
-    if unknown_sources:
-        raise ValueError(f"Augmented training has unsupported source datasets: {sorted(unknown_sources)}")
-    del augmented_pairs, pair_frame
-    # Resolve every benchmark before allocating any feature matrices. Keep the
-    # per-dataset check below as well, against the actual selection object.
+    augmented_members: dict[str, set[str]] = {}
+    if "augmented" in plan.datasets:
+        unknown_ids["augmented"] = augmented_unknown_ids(unknown_ids)
+        augmented_pairs = pd.read_csv(plan.datasets["augmented"].files["train_pairs"])
+        pair_frame = _map_fixed_pair_labels(augmented_pairs, "augmented train")
+        augmented_members = source_members(
+            (str(left), str(right))
+            for left, right in pair_frame.iloc[:, :2].itertuples(index=False, name=None)
+            if str(left) not in unknown_ids["augmented"] and str(right) not in unknown_ids["augmented"]
+        )
+        require_declared_sources(augmented_members, plan.dataset_names, context="Augmented training")
+        del augmented_pairs, pair_frame
+    # This check prevents copies outside each source fit population from entering the model fit.
     for dataset_name in plan.dataset_names:
         dataset_input = plan.datasets[dataset_name]
-        if dataset_input.split_mode == "random_blocks":
+        if dataset_name in augmented_members:
             require_training_members(
                 augmented_members,
                 dataset_name,

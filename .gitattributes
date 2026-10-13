@@ -1,3 +1,7 @@
 * text=auto eol=lf
 
 tests/fixtures/rust_lightgbm/*.lgb filter=lfs diff=lfs merge=lfs -text
+artifacts/common/**/name_counts_index/*.bin filter=lfs diff=lfs merge=lfs -text
+artifacts/common/**/name_counts_index/manifest.json -text whitespace=cr-at-eol
+artifacts/common/**/production_model_*/pairwise/*.lgb filter=lfs diff=lfs merge=lfs -text
+artifacts/common/**/production_model_*/incremental_linker/*.lgb filter=lfs diff=lfs merge=lfs -text

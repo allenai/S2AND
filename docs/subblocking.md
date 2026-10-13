@@ -10,10 +10,9 @@ returns only the final subblock dictionary.
 `N` becomes the maximum subblock size. Every emitted subblock is expected to
 have at most `N` signatures.
 
-> **Update at v1.3 release:** both routes load the packaged ORCID prefix-count
-> files on entry (see [ORCID policy](#orcid-policy)). The current pre-release
-> tree does not contain them, so any call with `batching_threshold` set raises
-> `FileNotFoundError` until Stage 1 of the release commits them.
+Both routes use the packaged ORCID prefix counts under the [ORCID policy](#orcid-policy).
+The committed producer excludes the 14 reviewed groups and preserves the shared-surname rule.
+The wheel contains the count JSON and its tuple-dependency manifest.
 
 ## Default fallback
 

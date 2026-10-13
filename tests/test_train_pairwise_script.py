@@ -120,17 +120,58 @@ def test_preflight_loads_test_free_direct_path_plan(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "dataset_names",
     [
-        (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "orcid", "augmented"),
-        (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES[:-1], "augmented"),
+        (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "inventors_s2and", "augmented"),
+        (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES[1:], "patents", "augmented"),
+        ("patents", "qian"),
     ],
-    ids=["includes-excluded-orcid", "missing-benchmark"],
+    ids=["adds-inventors", "excludes-aminer", "without-augmentation"],
 )
-def test_preflight_rejects_plans_outside_the_v13_population(tmp_path: Path, dataset_names) -> None:
-    assert "orcid" not in train_pairwise.DEFAULT_SOURCE_DATASET_NAMES
-    args = _args(tmp_path, model_plan=_write_model_plan(tmp_path, dataset_names))
+def test_preflight_uses_only_declared_datasets(tmp_path: Path, dataset_names: tuple[str, ...]) -> None:
+    plan_path = _write_model_plan(tmp_path, dataset_names)
+    arrow_root = _write_arrow_root(tmp_path, plan_path)
+    args = _args(tmp_path, model_plan=plan_path, arrow_root=arrow_root)
 
-    with pytest.raises(SystemExit, match="disagree with the production dataset set"):
+    plan = train_pairwise._preflight_pairwise(args)
+    config = train_pairwise._training_config(args, plan, artifact_hashes={})
+
+    assert plan.dataset_names == dataset_names
+    assert tuple(plan.arrow_dirs) == dataset_names
+    assert config["source_dataset_names"] == list(dataset_names)
+
+
+def test_preflight_requires_a_cluster_population_for_eps(tmp_path: Path) -> None:
+    args = _args(tmp_path, model_plan=_write_model_plan(tmp_path, ("augmented",)))
+
+    with pytest.raises(SystemExit, match="requires a random-block dataset for EPS calibration"):
         train_pairwise._preflight_pairwise(args)
+
+
+def test_preflight_requires_fixed_augmented_pairs(tmp_path: Path) -> None:
+    plan_path = _write_model_plan(tmp_path, ("patents", "augmented"))
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    files = payload["datasets"]["augmented"]
+    files.pop("train_pairs")
+    files["clusters"] = files.pop("val_pairs")
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+    args = _args(tmp_path, model_plan=plan_path)
+
+    with pytest.raises(SystemExit, match="augmented dataset requires fixed train and validation pairs"):
+        train_pairwise._preflight_pairwise(args)
+
+
+def test_training_without_augmented_data_reaches_artifact_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan_path = _write_model_plan(tmp_path, ("patents",))
+    args = _args(tmp_path, model_plan=plan_path, arrow_root=_write_arrow_root(tmp_path, plan_path))
+
+    def stop_at_authority(**_kwargs: Any) -> None:
+        raise RuntimeError("reached artifact authority")
+
+    monkeypatch.setattr(train_pairwise, "load_packaged_artifact_authority", stop_at_authority)
+    with pytest.raises(RuntimeError, match="reached artifact authority"):
+        train_pairwise.train_pairwise_bundle(args)
 
 
 @pytest.mark.parametrize("role", REQUIRED_ARROW_SOURCE_ROLES)

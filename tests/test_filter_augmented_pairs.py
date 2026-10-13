@@ -22,13 +22,13 @@ def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
         writer.writerows(rows)
 
 
-def _fixture(tmp_path: Path) -> dict[str, Any]:
-    model_files = write_pairwise_dataset(tmp_path / "data")
+def _fixture(tmp_path: Path, *, name: str = "qian") -> dict[str, Any]:
+    model_files = write_pairwise_dataset(tmp_path / "data", name=name)
     reference = ANDData(
         signatures=str(model_files["signatures"]),
         papers=str(model_files["papers"]),
         clusters=str(model_files["clusters"]),
-        name="qian",
+        name=name,
         mode="train",
         preprocess=False,
         random_seed=1111,
@@ -42,7 +42,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     test_id = next(iter(test.values()))[0]
 
     def prefix(sid: str) -> str:
-        return f"qian___{sid}"
+        return f"{name}___{sid}"
 
     # Reordered columns, extra metadata, and duplicate rows all survive filtering.
     header = ["label", "signature_id_2", "note", "signature_id_1"]
@@ -52,7 +52,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
         list(safe),
         ["NO", prefix(train_ids[0]), "validation", prefix(val_id)],
         ["0", prefix(train_ids[0]), "test", prefix(test_id)],
-        ["0", prefix(train_ids[0]), "omitted", "qian___omitted"],
+        ["0", prefix(train_ids[0]), "omitted", prefix("omitted")],
         ["1", "medline___new2", "MEDLINE only in augmented", "medline___new1"],
         ["NO", "medline___new2", "external MEDLINE holdout", "medline___heldout"],
     ]
@@ -60,17 +60,17 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     _write_csv(train_path, header, train_rows)
     _write_csv(val_path, header, [["YES", prefix(val_id), "unchanged", prefix(train_ids[0])]])
     safe_test = {
-        "signature_id_1": "qian___external1",
-        "signature_id_2": "qian___external2",
+        "signature_id_1": prefix("external1"),
+        "signature_id_2": prefix("external2"),
         "label": 0,
         "review_metadata": {"note": "preserve exact record values"},
     }
     test_rows = [
-        {"signature_id_1": prefix(sid), "signature_id_2": "qian___external1", "label": 1}
+        {"signature_id_1": prefix(sid), "signature_id_2": prefix("external1"), "label": 1}
         for sid in (train_ids[0], val_id, test_id)
     ] + [
         safe_test,
-        {**safe_test, "signature_id_2": "qian___external3"},
+        {**safe_test, "signature_id_2": prefix("external3")},
         {"signature_id_1": "medline___test1", "signature_id_2": "medline___test2", "label": 1},
     ]
     test_path.write_text(json.dumps(test_rows), encoding="utf-8")
@@ -83,7 +83,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     release = {
         "model": {
             "datasets": {
-                "qian": {role: str(path.relative_to(tmp_path)) for role, path in model_files.items()},
+                name: {role: str(path.relative_to(tmp_path)) for role, path in model_files.items()},
                 "augmented": {"train_pairs": train_path.name, "val_pairs": val_path.name},
             }
         },
@@ -128,8 +128,9 @@ def _run(release: Path, output: Path, *, seed: str = "1111") -> subprocess.Compl
     )
 
 
-def test_filter_augmented_pairs_cli_matches_real_split_and_preserves_sources(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path)
+@pytest.mark.parametrize("name", ["qian", "inventors_s2and"])
+def test_filter_augmented_pairs_cli_matches_real_split_and_preserves_sources(tmp_path: Path, name: str) -> None:
+    fixture = _fixture(tmp_path, name=name)
     original = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     output = tmp_path / "filtered"
     result = _run(fixture["release"], output)
@@ -146,7 +147,7 @@ def test_filter_augmented_pairs_cli_matches_real_split_and_preserves_sources(tmp
     assert report["test"]["retained_rows_by_raw_label"] == {"0": 2, "1": 1}
     assert report["train"]["removed_rows_by_reason"] == {
         "medline:external_heldout": 1,
-        "qian:outside_training_split": 3,
+        f"{name}:outside_training_split": 3,
     }
     with (output / "train_pairs.csv").open(newline="", encoding="utf-8") as stream:
         assert list(csv.reader(stream)) == [fixture["train_header"], *(fixture["train_rows"][i] for i in (0, 1, 5))]
@@ -171,8 +172,8 @@ def test_filter_augmented_pairs_cli_matches_real_split_and_preserves_sources(tmp
 @pytest.mark.parametrize(
     ("case", "message"),
     [
-        ("unknown-prefix", "Unknown augmented source prefix"),
-        ("missing-model", "missing augmented training source datasets"),
+        ("unknown-prefix", "undeclared source datasets"),
+        ("missing-model", "undeclared source datasets"),
         ("empty-train", "Filtering leaves no training or no held-out pairs"),
         ("empty-test", "Filtering leaves no training or no held-out pairs"),
         ("negative-seed", "must be non-negative"),

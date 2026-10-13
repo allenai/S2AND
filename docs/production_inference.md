@@ -1,15 +1,14 @@
 # Production Inference
 
-S2AND distributes no production model and declares no default.
-`load_production_model()` without a path therefore raises; callers must pass an
-explicit compatible bundle. Use the previous compatible S2AND release when
-reproducing v1.21 behavior.
+Inference users need the common complete model and binary name-count index.
+These large assets use versioned Git LFS paths.
+Small canonical name tuples and ORCID prefix counts ship in the Python wheel.
+The research S3 snapshot does not contain another copy of the common assets.
+See [the data guide](data.md) for the combined local layout.
 
-> **Update at v1.3 release:** the component behavior in this document is
-> implemented, but a releasable v1.3 bundle and public-format-1 data do not
-> exist yet, so the inference examples cannot run. At release, point readers to
-> the published bundle and data locations here. Until then, use
-> [release.md](release.md) for execution order and acceptance requirements.
+The compatible release locations remain unpublished.
+Pass an explicit complete model path to `load_production_model`.
+The loader does not select a default model.
 
 ## Load a production model
 
@@ -322,10 +321,9 @@ above.
 
 ## Complete model bundles
 
-A complete bundle contains the pairwise boosters, clusterer configuration,
-promoted incremental linker, reproducibility target, and a manifest that binds
-its release, exact generating runtime, EPS lifecycle, and checksums. The
-important runtime layout is:
+A complete bundle contains both pairwise boosters, prediction fixtures, calibrated EPS, the incremental linker, and its target.
+The manifest binds the model format, feature contract, ordered features, release identity, lifecycle, and checksums.
+The runtime layout is:
 
 ```text
 production_model_vX.Y/
@@ -343,17 +341,19 @@ production_model_vX.Y/
     incremental_linker_training_target.json
 ```
 
-The root manifest has exactly `kind: "s2and_model"`, `release_version`,
-`generated_by_runtime`, `eps_calibration`, and `sha256`.
-`generated_by_runtime` must exactly equal the installed `s2and` and
-`s2and-rust` version. The checksum inventory determines whether the bundle is
-pairwise-only or complete; `bundle_kind` is not serialized. Pairwise-only
-bundles may be `pending` or `calibrated`, while complete bundles must be
-`calibrated`. Runtime paths are fixed by the contract rather than serialized
-again. The pairwise training config and summary may also appear, but only
-together as a reproducibility pair. The loader requires exact checksum
-coverage for the derived paths, hashes every declared file once, and ignores
-unrelated files that are not part of the runtime contract.
+The root manifest contains `kind: "s2and_model"`, `format_version: 1`, and `feature_contract_version: 1`.
+It also contains `feature_names`, `release_version`, `generated_by_runtime`, `eps_calibration`, and `sha256`.
+`feature_names` declares the exact main and nameless column order.
+The loader checks supported contract versions and feature names.
+`generated_by_runtime` records provenance; it does not require an exact installed package-version match.
+The installed Python and Rust packages still require matched versions for their internal interfaces.
+
+The exact checksum inventory determines whether the bundle is pairwise-only or complete.
+`bundle_kind` is not serialized.
+Pairwise-only stages can have pending or calibrated EPS; complete models require calibrated EPS.
+The pairwise training config and summary must both exist or both be absent.
+The loader hashes each declared file and checks both mandatory prediction fixtures.
+It rejects unversioned model stages instead of a silent legacy fallback.
 
 Pairwise production training records `name_tuples_data_sha256`,
 `name_counts_manifest_sha256`, and `orcid_prefix_counts_data_sha256` in
@@ -362,11 +362,10 @@ Export and load compare tuple/ORCID data hashes with the canonical package
 artifacts; the exact name-count manifest and complete ordered feature contract
 are also bound into model and linker provenance.
 
-The linker's fixed-role metadata records `kind: "s2and_incremental_linker"`,
-the exact generating runtime, its booster checksum, and digests binding the
-pairwise bundle and complete training target JSON. The complete bundle keeps
-that target at `reproducibility/incremental_linker_training_target.json`;
-finalization and loading reject a mismatch.
+The linker metadata records `kind: "s2and_incremental_linker"`, format and feature-contract versions, ordered feature names, and generating-runtime provenance.
+Its checksums bind the booster, pairwise bundle, and complete target JSON.
+The complete model retains the target at `reproducibility/incremental_linker_training_target.json`.
+Finalization and load reject a mismatch.
 
 `load_production_model(path)` rejects legacy pickles, incomplete directories,
 and `pairwise_only` manifests. A pairwise-only bundle is an internal training
@@ -440,17 +439,12 @@ Production contracts bind that hash and require the manifest's tuple hash
 to match the canonical name-tuple artifact. The package declares both ORCID
 runtime paths.
 
-> **Update at v1.3 release:** the current pre-release tree contains neither
-> ORCID file, so subblocking and distribution verification fail until Stage 1
-> of the v1.3 runbook generates, reviews, and copies the approved pair. Remove
-> this note once both files are committed.
-
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key
 otherwise. Production feature contracts bind the exact name-count manifest,
-the ORCID and name-tuple data hashes, and the linker. The model root's exact
-generating-runtime match owns behavioral compatibility; legacy artifacts are
-rejected rather than adapted.
+the ORCID and name-tuple data hashes, and the linker.
+Feature-contract versions and ordered names define compatible feature behavior.
+Unversioned artifacts require an explicit rebuild or export.
 
 Direct Arrow/Rust prediction reuses validated immutable native state within the
 process, and the bounded altered-profile presplit memo is a private in-process

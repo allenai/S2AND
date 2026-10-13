@@ -6,6 +6,9 @@ from collections.abc import Iterable
 from typing import Literal, cast
 
 PRODUCTION_MODEL_KIND = "s2and_model"
+PRODUCTION_MODEL_FORMAT_VERSION = 1
+# Feature semantics require a new contract version even when column names stay equal.
+PAIRWISE_FEATURE_CONTRACT_VERSION = 1
 PAIRWISE_PREDICTION_FIXTURE_TOLERANCE = 1e-10
 
 BundleKind = Literal["pairwise_only", "complete"]

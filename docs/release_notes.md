@@ -7,14 +7,11 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Status
 
-- **Unreleased migration state (Update at v1.3 release: replace this bullet
-  with the published version matrix and artifact locations):** the
-  artifact-independent `1.0.0` code and release hardening are implemented. The reviewed canonical benchmark-name
-  and ORCID source exports are still needed; production artifact generation,
-  the v1.3 retrain, and release quality/scale measurements follow them. The legacy
-  v1.21/v1.0-v1.2 models are not packaged and are rejected by the canonical
-  loader, so 1.0.0 is not yet a usable production release. See
-  [release.md](release.md).
+- The compatible complete model and research snapshot remain unpublished.
+  The corrected source snapshot supports the next update cycle without historical correction archives.
+  The next pairwise fit includes the existing `inventors_s2and` subset.
+  Incremental fit, final acceptance, and publication remain separate steps.
+  See [the release process](release.md).
 
 ### Breaking changes
 
@@ -48,10 +45,16 @@ production model and public-data version is `1.3`, on a separate version axis.
   Overwrite removes stale optional pair files, and conversion detects source
   changes before publishing the root manifest.
 
-- The production pairwise training population drops the internal `orcid`
-  dataset: v1.3 trains on `aminer`, `arnetminer`, `inspire`, `kisti`, `pubmed`,
-  `qian`, and `zbmath` in random-block mode plus `augmented` in fixed-pair mode.
-  Model plans that still list `orcid` are rejected.
+- The production trainer accepts the dataset names declared by the model plan instead of a fixed seven-source set.
+  The next `1.3` fit includes `inventors_s2and` and the accepted augmented dataset.
+  Internal `orcid` is not a declared input to that fit.
+- `package_corrected_datasets.py` produces a portable corrected snapshot with complete incremental support and one common count index.
+  Common large assets use Git LFS; the S3 research payload excludes a second common asset copy.
+  Corrected source records preserve full paper text where available.
+  Existing giant replay sources do not supply full abstract text.
+- Models declare format and feature-contract versions plus ordered feature names.
+  The generating runtime is provenance rather than an exact model-loader package-version lock.
+  Installed Python and Rust packages still require matched versions.
 - `ANDData(preprocess=False)` no longer builds per-signature coauthor sets:
   `author_info_coauthors` and `author_info_coauthor_blocks` stay `None`. Python
   featurization, which already requires `preprocess=True`, is the only reader
@@ -362,14 +365,14 @@ production model and public-data version is `1.3`, on a separate version axis.
   data SHA-256 values plus the exact name-count manifest SHA-256 in the feature
   contract; bundle export and load require exact matches, and the linker
   binding covers all three through its ordered feature-contract digest. Model
-  roots use one fixed-role manifest with release version, exact generating
-  runtime, EPS lifecycle, and checksum inventory. Clusterer configuration and
-  scorer fixtures have no independent schema/version counters. Historical
+  roots use one fixed-role manifest with format and feature-contract versions, ordered features, runtime provenance, EPS lifecycle, and checksums.
+  Historical
   commit `e54c6ba` documents the published v1.21
   loader's explicit clustering-threshold override to `0.65` for versions
   `1.2`/`1.21`; the stored threshold is stale. The current canonical loader has
-  no legacy override, so a v1.21 baseline must use that compatible historical
-  runtime. Newly tuned canonical bundles use their own `clusterer.json` value.
+  no legacy override.
+  An optional historical model comparison requires its compatible runtime.
+  New canonical models use their own `clusterer.json` value.
 - The release workflow has no evidence inputs. It tests the exact commit,
   builds and installs Python and Rust artifacts outside the source tree, runs
   platform wheel smokes, and enforces the `main` ref in the workflow itself

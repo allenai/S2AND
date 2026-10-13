@@ -14,10 +14,9 @@ uv pip install s2and
 `s2and[rust]` extra no longer exists. At runtime the two installed package
 versions must match exactly.
 
-> **Update at v1.3 release:** this README is the `s2and-rust` PyPI description.
-> Until the coordinated `1.0.0` packages are published, the worktree pins
-> `s2and-rust==1.0.0` and PyPI serves only earlier versions, so use a local
-> same-checkout build instead.
+The coordinated `1.0.0` release remains unpublished.
+Use a local same-checkout build for the current development runtime.
+Model compatibility uses supported format and feature contracts rather than an exact generating-runtime version.
 
 When working from a checkout, use a local build so `s2and` and `s2and-rust`
 come from the same tree.

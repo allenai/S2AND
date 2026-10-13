@@ -12,7 +12,6 @@ from typing import Any, cast
 import lightgbm as lgb
 import numpy as np
 
-from s2and import __version__
 from s2and._sha256 import is_lowercase_sha256
 from s2and._sha256 import sha256_file as _sha256_file
 from s2and.featurizer import FeaturizationInfo
@@ -37,11 +36,13 @@ from s2and.production_bundle_contract import (
     CALIBRATED_EPS_CALIBRATION,
     COMPLETE_BUNDLE_KIND,
     COMPLETE_MANIFEST_FILES,
+    PAIRWISE_FEATURE_CONTRACT_VERSION,
     PAIRWISE_ONLY_BUNDLE_KIND,
     PAIRWISE_ONLY_MANIFEST_FILES,
     PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
     PENDING_EPS_CALIBRATION,
     PENDING_PAIRWISE_EPS,
+    PRODUCTION_MODEL_FORMAT_VERSION,
     PRODUCTION_MODEL_KIND,
     BundleKind,
     EpsCalibration,
@@ -288,6 +289,9 @@ def _validate_manifest(
     manifest = _read_json(manifest_path)
     expected_manifest_fields = {
         "eps_calibration",
+        "feature_contract_version",
+        "feature_names",
+        "format_version",
         "generated_by_runtime",
         "kind",
         "release_version",
@@ -304,11 +308,19 @@ def _validate_manifest(
     release_version = manifest["release_version"]
     if not isinstance(release_version, str) or not release_version or release_version.strip() != release_version:
         raise ValueError("Production model bundle release_version must be a nonempty trimmed string")
-    if manifest["generated_by_runtime"] != __version__:
-        raise ValueError(
-            "Production model bundle runtime mismatch: "
-            f"generated={manifest['generated_by_runtime']!r} installed={__version__!r}"
-        )
+    for field, expected in (
+        ("format_version", PRODUCTION_MODEL_FORMAT_VERSION),
+        ("feature_contract_version", PAIRWISE_FEATURE_CONTRACT_VERSION),
+    ):
+        if type(manifest[field]) is not int or manifest[field] != expected:
+            raise ValueError(f"Production model bundle {field} must equal supported version {expected}")
+    generated_by_runtime = manifest["generated_by_runtime"]
+    if (
+        not isinstance(generated_by_runtime, str)
+        or not generated_by_runtime
+        or generated_by_runtime.strip() != generated_by_runtime
+    ):
+        raise ValueError("Production model bundle generated_by_runtime must be a nonempty trimmed string")
 
     expected_hashes = manifest["sha256"]
     if not isinstance(expected_hashes, dict):
@@ -527,6 +539,7 @@ def pairwise_bundle_binding(
     )
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
+    _validate_pairwise_feature_names(manifest, featurizer_info, nameless_info)
     return _pairwise_binding_from_validated_parts(manifest, clusterer_config, featurizer_info, nameless_info)
 
 
@@ -540,14 +553,17 @@ def _pairwise_binding_from_validated_parts(
 
     feature_contract = dict(clusterer_config["feature_contract"])
     ordered_feature_contract = {
+        "feature_contract_version": manifest["feature_contract_version"],
         "feature_contract": feature_contract,
         "main": {
             "features_to_use": list(featurizer_info.features_to_use),
             "selected_feature_indices": list(_selected_feature_indices(featurizer_info)),
+            "feature_names": featurizer_info.get_feature_names(),
         },
         "nameless": {
             "features_to_use": list(nameless_info.features_to_use),
             "selected_feature_indices": list(_selected_feature_indices(nameless_info)),
+            "feature_names": nameless_info.get_feature_names(),
         },
     }
     return {
@@ -555,6 +571,18 @@ def _pairwise_binding_from_validated_parts(
         "main_booster_sha256": str(manifest["sha256"][PAIRWISE_ONLY_MANIFEST_FILES["pairwise_main_model"]]),
         "nameless_booster_sha256": str(manifest["sha256"][PAIRWISE_ONLY_MANIFEST_FILES["pairwise_nameless_model"]]),
     }
+
+
+def _validate_pairwise_feature_names(
+    manifest: Mapping[str, Any],
+    main_info: FeaturizationInfo,
+    nameless_info: FeaturizationInfo,
+) -> None:
+    """Reject columns that differ from the declared runtime feature contract."""
+
+    expected = {"main": main_info.get_feature_names(), "nameless": nameless_info.get_feature_names()}
+    if manifest["feature_names"] != expected:
+        raise ValueError("Production model bundle feature_names must match the runtime ordered feature names")
 
 
 def _config_choice(payload: dict[str, Any], key: str, *, allowed: frozenset[str]) -> str:
@@ -638,6 +666,7 @@ def _load_bundle_clusterer(
             feature_contract.get(NAME_COUNTS_MANIFEST_SHA256_FIELD),
             context=f"Production bundle {bundle_dir} feature_contract",
         )
+    _validate_pairwise_feature_names(manifest, featurizer_info, nameless_featurizer_info)
     classifier = NativeLightGBMBinaryClassifier(
         bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["pairwise_main_model"],
     )

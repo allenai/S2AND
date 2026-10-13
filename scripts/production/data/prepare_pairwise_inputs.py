@@ -237,8 +237,11 @@ def prepare_benchmark(
         }
         report["external_test_pairs"] = len(test_pairs)
         report["external_pair_labels"] = {str(label): sum(row[2] == label for row in test_pairs) for label in (0, 1)}
-    for filename in (f"{name}_papers.json", f"{name}_specter2.pkl", f"{name}_added_signatures.json"):
+    for filename in (f"{name}_papers.json", f"{name}_specter2.pkl"):
         shutil.copyfile(source / filename, destination / filename)
+    added_signatures = source / f"{name}_added_signatures.json"
+    if added_signatures.is_file():
+        shutil.copyfile(added_signatures, destination / added_signatures.name)
     if name != "medline":
         for mode in ("model_source", "evaluation_source"):
             for filename in (f"{name}_papers.json", f"{name}_specter2.pkl"):
@@ -259,8 +262,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     benchmark.add_argument("--correction-root", type=Path)
     benchmark.add_argument("--evaluation-pairs", type=int, default=10000)
     augmentation = stages.add_parser("augmentation", help="Create fresh omissions and vector refresh inputs")
-    for option in ("prepared-root", "legacy-root", "output"):
+    for option in ("prepared-root", "output"):
         augmentation.add_argument(f"--{option}", type=Path, required=True)
+    augmentation.add_argument("--legacy-root", type=Path, help="Reuse explicitly supplied cached translations")
     for option, default in (
         ("train-candidates", 100000),
         ("train-pool-cap", 25000),

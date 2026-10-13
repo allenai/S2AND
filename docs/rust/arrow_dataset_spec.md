@@ -1,4 +1,4 @@
-﻿# Arrow Dataset Specification
+# Arrow Dataset Specification
 
 This document defines the Arrow artifact contract for engineers assembling
 datasets for direct Rust S2AND routes. These artifacts are used by
@@ -789,17 +789,16 @@ Required physical-layout checks:
 
 Recommended smoke checks:
 
-> **Update at v1.3 release:** these commands need public-format-1 data. The
-> currently published Arrow release (and any local copy of it under
-> `s2and/data/`) predates format `1`, so `validate` rejects it with a manifest
-> field mismatch, and no compatible model bundle exists yet. At release, point
-> these examples at the published v1.3 data root and bundle.
+These commands require a format-1 corrected snapshot and compatible complete model.
+The public release locations remain unpublished.
+Use the snapshot's exact fit projection for evaluation of model-recorded internal test splits.
+A full benchmark projection does not replace that population.
 
 PowerShell:
 
 ```powershell
 uv run python scripts/convert_to_arrow.py validate `
-  --dataset-dir s2and/data/qian `
+  --dataset-dir <corrected-snapshot>/pairwise/arrow/release/qian `
   --require-embeddings `
   --require-name-counts-index
 ```
@@ -808,7 +807,7 @@ uv run python scripts/convert_to_arrow.py validate `
 uv run python scripts/eval_prod_models.py `
   --dataset full `
   --use-arrow `
-  --arrow-data-root s2and/data `
+  --arrow-data-root <corrected-snapshot>/pairwise/arrow/release `
   --datasets qian `
   --specter2-model-path path\to\production_model_bundle `
   --n_jobs 4
@@ -818,22 +817,22 @@ Bash:
 
 ```bash
 uv run python scripts/convert_to_arrow.py validate \
-  --dataset-dir s2and/data/qian \
+  --dataset-dir <corrected-snapshot>/pairwise/arrow/release/qian \
   --require-embeddings \
   --require-name-counts-index
 
 uv run python scripts/eval_prod_models.py \
   --dataset full \
   --use-arrow \
-  --arrow-data-root s2and/data \
+  --arrow-data-root <corrected-snapshot>/pairwise/arrow/release \
   --datasets qian \
   --specter2-model-path /path/to/production_model_bundle \
   --n_jobs 4
 ```
 
 The eval command should report `use_arrow=True` and the resolved absolute
-`Arrow data root` corresponding to the explicit `s2and/data` argument after the
-public Arrow release has been synced locally. There is no implicit Arrow root.
+`Arrow data root` for the explicit fit projection.
+There is no implicit Arrow root.
 JSON/ANDData evaluation or training instead requires
 explicit `--json-data-root`, `--name-tuples-path`, and
 `--name-counts-index-root`; it does not discover those inputs from package

@@ -1,127 +1,159 @@
-# Release data preparation
+# Corrected research snapshot
 
-Use these commands for reproducible release inputs. Keep large data outside Git. Commit code, tests, and the release evidence record.
+Use the final output of all accepted additions and corrections as the master dataset.
+The next correction cycle starts from that output.
+Old review archives and pre-correction records are not required inputs.
+Keep full paper text, current labels, uncertainty masks, vectors, and exact identities in the master.
+Keep model outputs outside the immutable dataset root.
 
-Preserve accepted raw name parts. The runtime owns name normalization. A second normalization pass can change compound first names.
+## Package the current inputs
 
-Use a fresh output directory for each stage. These commands preserve source files. Check a small dataset before a full run.
+The current accepted augmentation and incremental treatments remain unchanged for the next pairwise fit.
+The patents input uses the dataset name `inventors_s2and`.
+It contains the existing 2,500-block subset, not the entire patents corpus.
 
-## Benchmark and augmented inputs
+```powershell
+uv run --no-sync python scripts/production/data/package_corrected_datasets.py `
+  --corrected-source-root <final-corrected-master> `
+  --pairwise-inputs-root <prepared-pairwise-package> `
+  --public-data-root <prepared-public-root> `
+  --linker-source-bundle <accepted-incremental-root> `
+  --corrected-replay-root <current-replay-raw-root> `
+  --corrected-replay-embeddings-root <current-replay-vector-root> `
+  --name-counts-index <common-name-counts-index> `
+  --output-root <new-combined-snapshot>
+```
 
-The `benchmarks` command applies reviewed cluster corrections and preserves uncertain signature membership. The uncertainty sidecar excludes these signatures from supervised labels.
+The producer copies complete corrected sources and exact fit/evaluation inputs.
+The paired replay options preserve accepted raw replay records and vectors.
+They are optional, but the complete release snapshot supplies both.
+It writes `pairwise/inputs.json` and `pairwise/model_plan.json` with relative paths.
+It includes fit/evaluation Arrow projections, benchmark projections, and the complete incremental source dataset.
+All projections reference one physical count index at the snapshot root.
+It validates hashes, boundaries, source identities, and native loaders.
+A changed package requires a new output path.
 
-Seed 1111 reserves the outer test blocks for external evaluation. The production trainer splits the remaining blocks again. Seed 12455678 controls pair samples.
+The default EPS grid runs from `0.00` to `1.00` at steps of `0.01`.
+Both default minimum F1 floors equal zero.
+Set `--eps-grid`, `--minimum-dataset-f1`, and `--minimum-signature-weighted-f1` for a different declared policy.
+These options do not authorize a model fit.
+
+Move a small real package to another directory before the full publication package.
+Verify the model plan and native Arrow datasets from the new directory.
+Verify incremental labels, membership tables, and split assignments there.
+The package does not use directory junctions or external support paths.
+
+## Prepare the next data update
+
+Copy the previous `corrected_sources` into a fresh work directory.
+Apply new record and label corrections there.
+Preserve raw name parts; the runtime owns canonical normalization.
+A second normalization pass can change compound first names.
+Preserve record order and exact split identities unless the new release deliberately replaces them.
+
+Prepare benchmark populations from the corrected records:
 
 ```powershell
 uv run --no-sync --with ijson --with orjson python scripts/production/data/prepare_pairwise_inputs.py benchmarks `
-  --source-root <accepted-benchmark-root> --fixed-pair-root s2and/data-backup `
-  --correction-receipt <stage-receipt.json> --correction-root <reviewed-cluster-root> `
-  --output <prepared-root> --seed 1111 --pair-seed 12455678 --n-jobs 1
+  --source-root <corrected-source-root> `
+  --fixed-pair-root <current-fixed-pair-root> `
+  --output <prepared-root> `
+  --datasets <declared-dataset-names> `
+  --seed 1111 --pair-seed 12455678 --n-jobs 1
+```
 
+The optional correction receipt and correction root apply only when a separate new correction overlay exists.
+The producer does not require `<dataset>_added_signatures.json`.
+It preserves that sidecar when supplied.
+Current cluster labels and uncertainty masks remain authoritative.
+Unknown signatures remain available for inference but do not supply supervised labels.
+
+Seed 1111 reserves the declared outer test blocks.
+The production trainer splits the remaining development blocks again.
+Seed 12455678 controls pair samples.
+Preserve exact populations and pair lists because source order also affects selection.
+A block split does not guarantee whole-paper independence.
+
+## Regenerate augmentation only when required
+
+Use the accepted augmented records unchanged when their inputs and policy remain valid.
+A source correction or new augmentation policy can require new derived records and pair labels.
+Generate omission variants from the current corrected records:
+
+```powershell
 uv run --no-sync --with ijson --with orjson python scripts/production/data/prepare_pairwise_inputs.py augmentation `
-  --prepared-root <prepared-root> --legacy-root <historical-data-root> `
-  --output <prepared-root>/augmented --seed 1111 --pair-seed 12455678 --n-jobs 1
+  --prepared-root <prepared-root> --output <prepared-root>/augmented `
+  --datasets <declared-dataset-names> `
+  --seed 1111 --pair-seed 12455678 --n-jobs 1
+```
 
+`--legacy-root` is optional and supplies existing translation caches.
+It is not a required historical source dataset.
+Reuse a translation only when its original source title equals the current source title.
+Do not request new translations as part of this process.
+
+The bounded defaults use 100,000 train candidates and 10,000 evaluation candidates per dataset.
+The six omission probabilities equal `0.5`.
+The source identities use `<dataset>___<signature_id>`.
+Training pairs must satisfy the actual source training membership rules.
+Evaluation pairs must remain outside the declared development population.
+
+## Embedding updates
+
+Reuse SPECTER2 vectors when their input text remains unchanged.
+Encode changed informative text and informative text without a source vector.
+Keep absent vectors for blank text.
+Use the declared local encoder model, adapter, tokenizer, pooling, and truncation configuration.
+
+```powershell
 uv run --no-sync --with ijson --with orjson python scripts/production/data/prepare_pairwise_inputs.py finalize `
   --root <prepared-root>/augmented --prepared-root <prepared-root> `
+  --datasets <declared-dataset-names> `
   --encode --models-root <local-pinned-model-root> --device cuda --batch-size 16 --n-jobs 1
 ```
 
-The bounded augmentation defaults use 100,000 train candidates and 10,000 evaluation candidates per dataset. Six omission probabilities equal 0.5.
+The encoder dependencies load only with `--encode`.
+Use the environment that contains Torch and the required adapters.
+Set `TOKENIZERS_PARALLELISM=false` before that process starts.
+Do not describe runtime Arrow tables as a replacement for the full corrected paper text.
+The seven current giant replay sources contain abstract presence instead of full abstracts.
+Preserve their available records and cached vectors.
+A new abstract-based encoding for those giants requires another source of full abstract text.
 
-Reuse a cached translation only when its original source title exactly equals the current raw title. Do not request new translations.
+## Incremental data updates
 
-Reuse current SPECTER2 vectors when the text stays unchanged. Encode only changed informative text and informative text without a source vector. Preserve absence for blank text.
+Reuse the corrected incremental source tables, labels, and assignments when their task evidence remains valid.
+Profile-member changes and query evidence changes require affected label checks.
+A changed pairwise model requires fresh incremental feature computation.
+The production finalizer performs that computation from the corrected source dataset.
+A feature change alone does not automatically require new manual labels.
 
-The encoder requires local model files. Its optional dependencies load only with `--encode`. Use the model environment that contains Torch and adapters.
+The dataset contains full-name and initial-only task views.
+Keep their judgments scoped to the supplied evidence.
+An abstention means the attachment lacks sufficient support under the safe-action target.
+Do not convert every abstention into a different-author label.
 
-Set `TOKENIZERS_PARALLELISM=false` for the encoder. Set `CARGO_BUILD_JOBS=1` if that environment needs a native extension build.
+Retain exposure annotations for pairwise, EPS, and paper overlap.
+Keep regression-only test views distinct from active release evaluation assignments.
+Adding components can alter retrieval features for other queries in the same block.
+Recompute the affected block's features.
 
-## Global name counts
+## Arrow projections and publication
 
-Use the full source corpus for the production index. A research query subset does not cover production names.
+Use `scripts/convert_to_arrow.py` for changed record/vector projections.
+Build tables and batch indexes together.
+Carry current cluster labels and uncertainty masks into the prepared projections.
+`package_pairwise_inputs.py` packages the exact fit/evaluation populations before the combined snapshot step.
+Use `linker_source_bundle.py` only when the accepted support or replay Arrow roots change.
 
-See [the count producer instructions](../counts/README.md). The Parquet producer requires DuckDB 1.5 or later and explicit workload bounds.
+The snapshot uses Arrow IPC, Parquet, JSON, and CSV according to the current contracts.
+It is not an all-IPC dataset.
+Precomputed features are derived caches and do not replace the corrected master.
 
-## Linker support and replay inputs
+Publish common large assets through Git LFS.
+Publish the research snapshot to S3 without `name_counts_index` or a production model copy.
+The downloaded S3 files require their exact common index beside them.
+Verify the combined local root after both downloads.
 
-```powershell
-uv run --no-sync python scripts/production/data/prepare_linker_support.py `
-  --source-root <accepted-linker-support-root> --benchmark-labels-root <prepared-root>/benchmark_source `
-  --review-handoff <review-directory> --review-units <review-units.json> `
-  --unknown-filename restored_unknown_signature_ids_20261009.json `
-  --external-holdout-root <portable-pairwise-root>/sources/evaluation `
-  --pairwise-exposure-path <query-exposure-audit.csv> `
-  --output-root <prepared-root>/linker_support --report-path <separate-report.json>
-
-uv run --no-sync python scripts/production/data/prepare_linker_replay.py `
-  --raw-root <original-replay-raw-root> --embeddings-root <original-replay-vector-root> `
-  --benchmark-root <prepared-root>/benchmark_source --output-root <prepared-root>/replay_source `
-  --run-full --n-jobs 1
-```
-
-The review directory contains `SHA256SUMS`, `final_linker_review.jsonl`, and `orcid_error_query_signatures.json`.
-The support command uses current gold labels and accepted ORCID review decisions. It excludes uncertain query views and conflicting lifecycle identities.
-
-The optional external holdout root excludes reserved query identities from train and calibration. It preserves their assigned test views and candidate context.
-The optional exposure audit writes separate test annotations for pairwise endpoints, EPS selection, and paper overlap. It preserves regression test labels.
-These annotations do not establish independence across datasets or past model selection.
-
-The active test allocation requires rows in the public evaluation sources. Calibration-only test views remain in a separate regression assignment file.
-The producer preserves their source rows and original lifecycle records.
-
-The replay command preserves signature identities and order. It replaces matched benchmark metadata and vectors with accepted current records. It preserves giant-block source records.
-
-## Arrow exports and portable packages
-
-```powershell
-uv run --no-sync python scripts/convert_to_arrow.py benchmark `
-  --source-root <prepared-root>/benchmark_source --output-root <prepared-root>/arrow/benchmark `
-  --name-counts-index-root <prepared-root>/name_counts_global/name_counts_index --run-full --n-jobs 12
-
-uv run --no-sync python scripts/convert_to_arrow.py linker-replay `
-  --raw-root <prepared-root>/replay_source/raw --embeddings-root <prepared-root>/replay_source/embeddings `
-  --output-root <prepared-root>/arrow/replay `
-  --name-counts-index-root <prepared-root>/name_counts_global/name_counts_index --run-full --n-jobs 1
-```
-
-Copy each uncertainty sidecar beside its exported cluster file. Bind both files with hashes in the export evidence. The converter does not copy these masks.
-
-Convert `populations/model_source` and `populations/evaluation_source` with the same benchmark command. Use output roots `arrow/release` and `arrow/evaluation`.
-
-Convert augmented feature files once. Use a feature-only source directory. The converter registers the staging collection automatically.
-
-```powershell
-$TaskRoot = '<prepared-root>'
-$TaskFeatures = Join-Path $TaskRoot 'augmented_feature_source/augmented'
-New-Item -ItemType Directory -Path $TaskFeatures
-foreach ($TaskFile in @('augmented_signatures.json', 'augmented_papers.json', 'augmented_specter2.pkl')) {
-  Copy-Item -LiteralPath (Join-Path "$TaskRoot/augmented" $TaskFile) -Destination $TaskFeatures
-}
-uv run --no-sync python scripts/convert_to_arrow.py benchmark `
-  --source-root "$TaskRoot/augmented_feature_source" --output-root "$TaskRoot/arrow/augmented_staging" `
-  --datasets augmented --name-counts-index-root "$TaskRoot/name_counts_global/name_counts_index" --n-jobs 2
-uv run --no-sync python -c 'import shutil, sys; from pathlib import Path; from scripts.convert_to_arrow import _upsert_root_manifest; p = Path(sys.argv[1]); roots = [p / "arrow" / mode for mode in ("release", "evaluation")]; [(shutil.copytree(p / "arrow/augmented_staging/augmented", r / "augmented"), _upsert_root_manifest(r, dataset_name="augmented", dataset_dir=r / "augmented")) for r in roots]' $TaskRoot
-```
-
-The final command copies identical feature bytes into both private collections. It also adds each augmented root-manifest entry.
-All three Arrow collections share the same parent directory. Their relative count-index paths therefore remain valid.
-
-```powershell
-uv run --no-sync python scripts/production/data/package_pairwise_inputs.py `
-  --prepared-root <prepared-root> --output-root <portable-pairwise-root>
-
-uv run --no-sync python scripts/production/model/linker_source_bundle.py `
-  --source-root <prepared-root>/linker_support `
-  --benchmark-arrow-root <prepared-root>/arrow/benchmark --replay-arrow-root <prepared-root>/arrow/replay `
-  --name-counts-index <prepared-root>/name_counts_global/name_counts_index --model-plan <versioned-model-plan.json> `
-  --output-source-bundle <portable-linker-source-root> --output-data-root <portable-public-data-root>
-```
-
-The private package contains source snapshots, relative paths, hashes, both Arrow collections, and one shared count index. It verifies source identity and native loaders.
-
-The public assembler verifies lifecycle source rows and the release root. A data-only assembly plan establishes the release version. It does not authorize production model fits.
-
-Keep total concurrent CPU use within the approved limit. Large INSPIRE exports also require a memory limit. Retain logs, process IDs, and final output checks.
-
-See [the October 12 release record](../../../docs/release_evidence/data_preparation_20261012.md) for this run's inputs, counts, outputs, and open items.
+See [the production commands](../README.md) for the model fit and EPS calibration.
+See [the release process](../../../docs/release.md) for acceptance and publication.

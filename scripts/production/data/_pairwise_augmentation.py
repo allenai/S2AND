@@ -235,8 +235,8 @@ def vector_action(
 def build_augmentation(
     *,
     prepared_root: Path,
-    legacy_root: Path,
     output: Path,
+    legacy_root: Path | None = None,
     datasets: tuple[str, ...] = DATASETS,
     unknown_filename: str = "restored_unknown_signature_ids_20261009.json",
     seed: int = 1111,
@@ -252,7 +252,7 @@ def build_augmentation(
     """Create fresh variants from accepted names and current split labels."""
     destination = output
     destination.mkdir(parents=True, exist_ok=False)
-    old_augmented = read(legacy_root / "augmented/augmented_papers.json")
+    old_augmented = read(legacy_root / "augmented/augmented_papers.json") if legacy_root is not None else {}
     rng = random.Random(seed)
     all_signatures, all_papers, pairs, vectors, refresh, refresh_positions = (
         {},
@@ -283,7 +283,9 @@ def build_augmentation(
         wanted = sorted({sid for rows in selected.values() for left, right, _ in rows for sid in (left, right)})
         needed = {str(signatures[sid]["paper_id"]) for sid in wanted}
         papers = selected_papers(source / f"{name}_papers.json", needed)
-        old_papers = selected_papers(legacy_root / name / f"{name}_papers.json", needed)
+        old_papers = (
+            selected_papers(legacy_root / name / f"{name}_papers.json", needed) if legacy_root is not None else papers
+        )
         matrix, keys = source_vectors(source / f"{name}_specter2.pkl")
         positions = {str(key): index for index, key in enumerate(keys)}
         if len(positions) != len(keys):

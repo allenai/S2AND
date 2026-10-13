@@ -19,6 +19,7 @@ mod ingest_dataset;
 mod language_detection;
 mod lightgbm_booster;
 mod name_counts;
+pub mod name_normalization;
 mod orcid;
 mod pair_indexing;
 mod promoted_linker;
@@ -856,6 +857,7 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(get_build_info, m)?)?;
     artifact_hash::add_to_module(m)?;
+    name_normalization::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(raw_arrow_labeled_candidate_plan, m)?)?;
     promoted_linker::add_to_module(m)?;
     lightgbm_booster::add_to_module(m)?;

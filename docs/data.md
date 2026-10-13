@@ -1,157 +1,162 @@
 # Data and Models
 
-This document covers dataset download, public artifact layout, and
-`path_config.json`. Canonical-name rules live in
-[canonical_names.md](canonical_names.md).
+S2AND has one common artifact set and one corrected research snapshot.
+The research snapshot contains the final output of all accepted additions and corrections.
+Use that snapshot as the input to the next correction cycle.
+Historical correction archives are not required.
 
-> **Update at v1.3 release:** the currently published Arrow release and shared
-> name counts predate public format `1`. They are not a compatible production
-> release unit for this branch, and current validation rejects them. At
-> release, replace the download commands below with the published v1.3 data
-> location and size. See the [v1.3 release runbook](release.md).
+## Choose the required data
+
+| User | Required content | Distribution |
+| --- | --- | --- |
+| Inference | Complete production model and binary name-count index | Versioned Git LFS assets |
+| Research | Common assets plus corrected records, labels, embeddings, exact splits, and incremental tasks | S3 research snapshot |
+| Release owner | Research snapshot plus maintained preparation and training scripts | Same snapshot and this repository |
+
+Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.
+Research data does not contain a second count index or production model.
+The complete model contains both pairwise boosters, calibrated EPS, the incremental linker, and required prediction fixtures.
+See [the inference contract](production_inference.md#complete-model-bundles).
 
 ## Dataset download
 
-Download the currently published historical Arrow release into `s2and/data/`
-only for migration, research, or source-data work:
+The current common count index is available from PR 80's `canonical-v2-migration` branch.
+The complete model and research S3 release remain unpublished.
+The release notes will identify the common Git ref, model path, research S3 prefix, and manifest hashes.
+Do not use an older public Arrow prefix with this runtime.
+Older manifests lack the required public format `1` contract.
+
+Common repository paths for release `1.3` are:
+
+- `artifacts/common/v1.3/name_counts_index`
+- `artifacts/common/v1.3/production_model_v1.3`
+
+The complete model path receives the accepted model after its fit and evaluation.
+Fetch the common assets at the Git ref declared by the release notes:
 
 ```bash
-uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
+git lfs pull --include="artifacts/common/v1.3/**"
 ```
 
-Expected size is about `10.1 GiB`. Its manifests predate public format `1`, so
-current runtime/release validation deliberately rejects it. A v1.3 production
-root must be regenerated through the release runbook.
+Use `artifacts/common/v1.3` as the local root when the research files share that root.
+The S3 download then adds research files beside the existing index without another index copy.
+Exclude `name_counts_index/*` and `production_model_*/**` from the research upload.
 
-> **Update at v1.3 release:** add the published v1.3 public-data root here as
-> the primary download, and label the command above as the historical release.
+Use one local root for the common count index and research snapshot:
 
-Download the legacy JSON/pickle S2AND release only when you need paper-era
-JSON/pickle inputs for canonical S2-block `ANDData` workflows. The current API
-does not restore the release's original/given-block partition inside
-`ANDData`:
-
-```bash
-uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release s2and/data/
+```text
+release-root/
+  name_counts_index/       # Common Git LFS asset; one physical copy
+  production_model_vX.Y/   # Common Git LFS asset
+  manifest.json           # Research public-data manifest
+  corrected_sources/      # Complete best-known records and labels
+  corrected_replay/       # Available giant replay records and vectors
+  pairwise/
+    inputs.json
+    model_plan.json
+    sources/              # Exact fit and evaluation source populations
+    arrow/                # Fit and evaluation Arrow projections
+  benchmarks/             # Full benchmark Arrow projections
+  replay_manifest.json
+  bundle.json             # Incremental source configuration
+  labels/
+  components/
+  splits/
+  datasets/               # Incremental replay Arrow projections
 ```
 
-Expected legacy release size is about `55.5 GiB`.
+The S3 snapshot contains the research files in this layout.
+Fetch its matching common index separately into `release-root/name_counts_index`.
+Inference users do not need `corrected_sources`, benchmark labels, or incremental training tasks.
+Dataset manifests use portable paths to the one common index.
 
-The promoted-linker replay subbundle can also be downloaded by itself:
+The release publisher must exclude common assets from the S3 research upload.
+A standalone local export can contain its own index for transfer.
+Such an export is not the canonical combined publication.
 
-```bash
-uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow/s2and_and_big_blocks_linker_dataset_20260525 s2and/data/s2and_and_big_blocks_linker_dataset_20260525
-```
+## Corrected source records
 
-`s2and/data/s2and_and_big_blocks_linker_dataset_20260525` is the conventional
-local name for the previously published replay subbundle. Its manifests predate
-public format `1`, so it is now a legacy historical input and
-is rejected by strict v1.3 validation. Regenerate the replay bundle before
-linker training as required by the
-[v1.3 runbook](release.md#stage-2-build-training-and-evaluation-data).
+`corrected_sources` contains the final records after additions and corrections, not the earlier inputs or correction history.
+It preserves signature identities, record order, full paper text, current labels, uncertainty masks, embeddings, and required producer sidecars.
+Full abstracts permit later text corrections and SPECTER2 updates.
+Runtime Arrow paper tables retain abstract presence rather than full abstract text.
+They therefore do not replace the corrected source records.
 
-The Arrow release stores runtime signatures, papers, paper authors, and SPECTER
-rows as Arrow IPC files. It intentionally does not duplicate legacy `raw/`,
-`embeddings/`, or precomputed `features_corrected/` directories.
+Benchmark masters preserve full text where it exists.
+The seven current giant replay sources supply abstract presence, not full abstract text.
+The snapshot preserves their available current records and vectors.
+New abstract-based vectors for those giants require another source of full abstracts.
 
-Both Arrow/Rust inference and Python `ANDData` consume the shared
-`name_counts_index/`. Python callers pass `NAME_COUNTS_INDEX_PATH` or an open
-`NameCountsIndex` handle. The SHA-256 of the validated native manifest is the
-publication and model identity. Its manifest contains exactly
-`kind: "s2and_name_counts"`, `format_version: 1`, and the byte count plus
-SHA-256 for each fixed binary role. One self-contained published root contains
-one index; its benchmark and replay dataset manifests reference that shared
-directory.
+Benchmark cluster gold remains in `clusters.json` files.
+Pair-labeled datasets use explicit pair files.
+Unknown signatures remain available for inference but do not supply supervised labels.
+Exact pair lists and split identities preserve the experiment population; a random seed alone is insufficient.
 
-## Production model bundles
+The snapshot also contains augmented records and their explicit pair labels.
+Augmented source identities link each derived record to its corrected source signature.
+Maintain those identities when the source dataset changes.
 
-No default production model is distributed; evaluation and validation tools
-take an explicit bundle path. The v1.3 model is an external bundle, not package
-data. Its layout and manifest are specified in
-[production_inference.md](production_inference.md#complete-model-bundles), and
-[release.md](release.md) owns how it is trained, calibrated, and evaluated.
+## Incremental tasks
 
-The reviewed 53-feature linker target is retained as
-`tests/fixtures/incremental_linker_training_target.json`. Prediction logic does
-not consume it, but finalization embeds the reviewed target in the complete
-bundle and the model manifest binds its checksum.
+The incremental dataset includes query identities, query views, seed-profile memberships, candidate memberships, labels, and exact split assignments.
+It distinguishes full-name queries from initial-only queries.
+Its binary target describes a safe attachment action.
+An abstention label can indicate insufficient evidence; it does not necessarily indicate different authors.
 
-The previous promoted-linker replay data is published under the Arrow release
-prefix. Use the standalone download only to audit historical inputs; do not use
-it as the v1.3 source bundle without regenerated assignments, Arrow data, and
-pairwise-derived inputs. Pass a source bundle explicitly with
-`--source-bundle-root` to `scripts/production/model/train_linker_and_finalize.py`;
-the release command has no implicit replay-bundle default.
+Use the declared fit, calibration, and test assignments.
+Keep inherited regression tests distinct from independent release evaluation.
+Exposure annotations describe known pairwise, EPS, and paper overlap.
+They do not prove independence from every past model or dataset.
+
+## File formats and compatibility
+
+Runtime records and vectors use Arrow IPC.
+Incremental support uses Parquet, JSON, and CSV where those formats form the current contract.
+Cluster labels remain JSON; fixed pairs and some split assignments remain CSV.
+The snapshot is not an all-IPC dataset.
+Precomputed features are optional derived caches, not the corrected source of truth.
+
+Dataset manifests require `kind: "s2and_arrow_dataset"`, `format_version: 1`, portable `paths`, and a checksum inventory.
+Name-count manifests require `kind: "s2and_name_counts"` and `format_version: 1`.
+Dataset and index compatibility depends on their formats and schemas, not an exact Python package version.
+Models additionally bind feature meanings, ordered feature names, and exact required artifact hashes.
+Python and Rust packages must still have compatible internal interfaces; the current install requires matched package versions.
+
+Do not edit an open Arrow root.
+Publish changed records at a new path.
+Build Arrow tables and their batch indexes together.
+See [the public format specification](rust/arrow_dataset_spec.md) for table and manifest contracts.
+
+## Update rules
+
+| Change | Required update |
+| --- | --- |
+| Correct records or labels; add or remove a dataset | Publish a new corrected snapshot and rebuild affected projections and derived inputs |
+| Change paper text | Refresh affected embeddings with the declared encoder recipe |
+| Change feature calculations | Recompute affected feature tables and retrain affected models |
+| Change a pairwise booster | Recompute incremental features and retrain the incremental model |
+| Change EPS alone | Re-evaluate affected partitions; retain unchanged incremental features |
+| Change profile membership or query evidence | Recheck affected safe-action labels and recompute affected block features |
+| Change common assets | Publish changed assets once and bind affected models to their hashes |
+
+Added components can change retrieval statistics for other queries within the same block.
+A feature change alone does not require manual relabels if the label evidence and task scope remain valid.
+Each release identifies its exact snapshot, feature contract, model, and common assets.
 
 ## Configuring `s2and/data/path_config.json`
 
-`s2and/data/path_config.json`, or the file named by the `S2AND_PATH_CONFIG`
-environment variable, sets `main_data_dir`. Its one consumer is the default
-name-count index path for classic `ANDData`,
-`<main_data_dir>/name_counts_index` (`s2and.consts.NAME_COUNTS_INDEX_PATH`).
-Arrow routes and the production scripts take explicit paths instead.
-
-Example:
+Classic `ANDData` defaults to `<main_data_dir>/name_counts_index`.
+`s2and/data/path_config.json`, or the file named by `S2AND_PATH_CONFIG`, sets `main_data_dir`.
+Arrow routes and production scripts take explicit paths.
 
 ```json
 {
-  "main_data_dir": "/absolute/path/to/your/s2and/data"
+  "main_data_dir": "/absolute/path/to/release-root"
 }
 ```
 
-Guidance:
+Set `main_data_dir` to the directory that contains the common index.
+The checked-in placeholder falls back to the package data directory with a warning.
+Other values must name an existing directory.
 
-- Set `main_data_dir` to the directory that contains `name_counts_index/`.
-- The checked-in file keeps the placeholder value
-  `"absolute path of wherever you downloaded the data to"`. Only that exact
-  value falls back to the package's `s2and/data/` directory (with a warning);
-  any other value must be an existing directory.
-- Archived AI2-internal scripts under `scripts/archive/` read an extra
-  `internal_data_dir` key; add it to your own config if you rerun one. Current
-  code does not use it.
-
-## Dataset file expectations
-
-Arrow production/eval workflows use each dataset's `manifest.json` to resolve:
-
-- `signatures.arrow`
-- `papers.arrow`
-- `paper_authors.arrow`
-- one selected embedding table under manifest key `specter`; production and
-  evaluation bundles use physical `specter2.arrow` (an explicit historical
-  SPECTER1 research-training bundle may instead use `specter.arrow`)
-- raw-planner `*_batch_index.bin` sidecars
-- shared `name_counts_index/`
-- eval-only labels when metrics are requested: clusters JSON, or fixed-pair
-  CSVs (`train_pairs.csv`, `test_pairs.csv`, optional `val_pairs.csv`) for
-  pair-labeled benchmarks such as MEDLINE
-
-Dataset manifests require `kind: "s2and_arrow_dataset"`,
-`format_version: 1`, portable `paths`, and a flat `files` inventory mapping
-each immutable semantic role to `byte_count` and lowercase `sha256`.
-Request-time query/seed sidecars are not part of that inventory. Older local
-Arrow directories without this contract must be reconverted; relabeling their
-manifests is not sufficient.
-
-Legacy-input workflows use the standard S2AND JSON files below, but current
-`ANDData` always groups them by `author_info.block`; it ignores any
-`author_info.given_block` field:
-
-- signatures
-- papers
-- clusters
-- optional cluster seeds
-- SPECTER embeddings
-
-The tutorial script supports Arrow by default when a dataset manifest exists,
-and JSON only when `--input-format json` is requested or Arrow artifacts are
-absent. Present but invalid Arrow artifacts, including the historical
-pre-format-1 release, raise an error instead of falling back to JSON. JSON mode
-supports:
-
-- mini-dataset naming such as `<dataset>_papers.json`
-- plain fixture naming such as `papers.json`
-
-See [production_inference.md](production_inference.md) for the minimal inference
-input contract, and [training.md](training.md) for training-mode dataset
-requirements.
+See [the production commands](../scripts/production/README.md) for snapshot preparation and model fits.

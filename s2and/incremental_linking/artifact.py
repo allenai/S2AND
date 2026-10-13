@@ -18,6 +18,8 @@ from s2and._sha256 import is_lowercase_sha256
 from s2and._sha256 import sha256_file as _sha256_file
 from s2and.incremental_linking.contracts import (
     DEFAULT_RETRIEVAL_TOP_K,
+    INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
+    INCREMENTAL_LINKER_FORMAT_VERSION,
     canonical_json_digest,
 )
 from s2and.incremental_linking.features import promoted_linker_feature_columns
@@ -30,6 +32,9 @@ INCREMENTAL_LINKER_KIND = "s2and_incremental_linker"
 _METADATA_FIELDS = frozenset(
     {
         "booster_sha256",
+        "feature_contract_version",
+        "feature_names",
+        "format_version",
         "gate_config",
         "generated_by_runtime",
         "kind",
@@ -59,11 +64,21 @@ def _validated_metadata(payload: Any) -> tuple[dict[str, Any], NumpyLogisticGate
         )
     if payload["kind"] != INCREMENTAL_LINKER_KIND:
         raise ValueError(f"Incremental linker artifact kind must be {INCREMENTAL_LINKER_KIND!r}")
-    if payload["generated_by_runtime"] != __version__:
-        raise ValueError(
-            "Incremental linker artifact runtime mismatch: "
-            f"generated={payload['generated_by_runtime']!r} installed={__version__!r}"
-        )
+    for field, expected in (
+        ("format_version", INCREMENTAL_LINKER_FORMAT_VERSION),
+        ("feature_contract_version", INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION),
+    ):
+        if type(payload[field]) is not int or payload[field] != expected:
+            raise ValueError(f"Incremental linker artifact {field} must equal supported version {expected}")
+    if payload["feature_names"] != list(promoted_linker_feature_columns()):
+        raise ValueError("Incremental linker artifact feature_names must match the runtime ordered feature names")
+    generated_by_runtime = payload["generated_by_runtime"]
+    if (
+        not isinstance(generated_by_runtime, str)
+        or not generated_by_runtime
+        or generated_by_runtime.strip() != generated_by_runtime
+    ):
+        raise ValueError("Incremental linker artifact generated_by_runtime must be a nonempty trimmed string")
 
     retrieval_top_k = payload["retrieval_top_k"]
     if isinstance(retrieval_top_k, bool) or not isinstance(retrieval_top_k, int) or retrieval_top_k <= 0:
@@ -199,6 +214,9 @@ def save_incremental_linking_artifact(
         booster.save_model(str(booster_path))
         metadata: dict[str, Any] = {
             "booster_sha256": _sha256_file(booster_path),
+            "feature_contract_version": INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
+            "feature_names": list(promoted_linker_feature_columns()),
+            "format_version": INCREMENTAL_LINKER_FORMAT_VERSION,
             "gate_config": dict(gate_config),
             "generated_by_runtime": __version__,
             "kind": INCREMENTAL_LINKER_KIND,

@@ -23,12 +23,14 @@ from s2and.model_pairwise import _validated_classifier_features, lightgbm_booste
 from s2and.production_bundle_contract import (
     CALIBRATED_EPS_CALIBRATION,
     COMPLETE_BUNDLE_KIND,
+    PAIRWISE_FEATURE_CONTRACT_VERSION,
     PAIRWISE_ONLY_BUNDLE_KIND,
     PAIRWISE_ONLY_MANIFEST_FILES,
     PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
     PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
     PENDING_EPS_CALIBRATION,
     PENDING_PAIRWISE_EPS,
+    PRODUCTION_MODEL_FORMAT_VERSION,
     PRODUCTION_MODEL_KIND,
     BundleKind,
     EpsCalibration,
@@ -198,8 +200,16 @@ def write_production_manifest(
             raise FileNotFoundError(f"Production bundle file is missing or not a regular file: {path}")
         sha256[relpath] = _sha256_file(path)
 
+    clusterer_config = _read_json(bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["clusterer_config"])
+    feature_names = {
+        key: FeaturizationInfo(features_to_use=clusterer_config[field]["features_to_use"]).get_feature_names()
+        for key, field in (("main", "featurizer_info"), ("nameless", "nameless_featurizer_info"))
+    }
     manifest = {
         "eps_calibration": eps_calibration,
+        "feature_contract_version": PAIRWISE_FEATURE_CONTRACT_VERSION,
+        "feature_names": feature_names,
+        "format_version": PRODUCTION_MODEL_FORMAT_VERSION,
         "generated_by_runtime": __version__,
         "kind": PRODUCTION_MODEL_KIND,
         "release_version": release_version,

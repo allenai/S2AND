@@ -342,6 +342,21 @@ def test_prepare_run_rejects_leakage_before_writes(tmp_path, fixture_kwargs, mes
     assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}
 
 
+@pytest.mark.parametrize("source_name", ["aminer", "inventors_s2and"])
+def test_prepare_run_rejects_undeclared_augmented_sources_before_writes(tmp_path: Path, source_name: str) -> None:
+    fixture = _release_fixture(tmp_path)
+    model = fixture.payload["model"]["datasets"]
+    model["augmented"] = model.pop("fixed")
+    Path(model["augmented"]["train_pairs"]).write_text(
+        f"signature_id_1,signature_id_2,label\n{source_name}___s1,medline___s2,1\n", encoding="utf-8"
+    )
+    _write_json(fixture.release, fixture.payload)
+
+    with pytest.raises(ValueError, match=rf"undeclared source datasets.*{source_name}"):
+        release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
+    assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}
+
+
 @pytest.mark.parametrize("heldout_id", ["rt1", "ct1"])
 @pytest.mark.parametrize("unknown", [False, True], ids=["known", "unknown"])
 def test_prepare_run_checks_augmented_copies_of_heldout_signatures(

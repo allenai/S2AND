@@ -1,94 +1,72 @@
-# S2AND Docs
+# S2AND documentation
 
-This directory holds user guides, reference specifications, release
-operations, and contributor notes. Project overview and install quick start:
-[../README.md](../README.md).
+The guides describe the current runtime and the corrected dataset release process.
+The compatible model and research download locations remain unpublished.
+The [release process](release.md) states the remaining fit, evaluation, and publication steps.
+The [project README](../README.md) provides the installation and workflow overview.
 
-## Project status
+## Start with your goal
 
-[release.md](release.md) is the sole v1.3 release policy and runbook, and the
-one place that records release status. Current-behavior docs do not imply that
-canonical artifacts or a v1.3 model have already been published. Callouts
-labeled **Update at v1.3 release** mark workflows that cannot work until the
-v1.3 model and public-format-1 data exist;
-[release.md](release.md#stage-5-fit-evaluate-and-approve) requires resolving
-every one of them (`git grep -n "Update at v1.3 release"`) before the final
-package commit.
+| Goal | Guide |
+| --- | --- |
+| Run the model on your own records | [Production inference](production_inference.md) |
+| Obtain the common assets and corrected research snapshot | [Data and models](data.md) |
+| Correct data, add a dataset, or release another model | [Release process](release.md) |
+| Prepare a new corrected snapshot | [Data preparation commands](../scripts/production/data/README.md) |
+| Fit the production model | [Production commands](../scripts/production/README.md) |
+| Run a research API experiment | [Training and evaluation](training.md) |
 
-## User guides
+One complete corrected snapshot supports research and the next correction cycle.
+Common large assets use Git LFS; research data uses S3 without a second common asset copy.
+Small name tuples and ORCID counts remain in normal Git and the wheel.
+The [data guide](data.md) defines the shared local layout and update rules.
 
-- Install and setup: [install.md](install.md)
-- Data download, layout, and `path_config.json`: [data.md](data.md)
-- Production inference: [production_inference.md](production_inference.md)
-- Training and evaluation: [training.md](training.md)
-- Large blocks and subblocking: [subblocking.md](subblocking.md)
-- Threading and parallelism: [threading.md](threading.md)
-- Environment variables: [environment.md](environment.md)
-- Reproducibility and paper-era notes: [root README](../README.md#reproducibility)
+## Runtime guides
 
-## Reference
+- [Install and setup](install.md)
+- [Large blocks and subblocking](subblocking.md)
+- [Thread and memory controls](threading.md)
+- [Environment variables](environment.md)
+- [Canonical name rules](canonical_names.md)
+- [Public Arrow and name-count formats](rust/arrow_dataset_spec.md)
 
-- Canonical name rules: [canonical_names.md](canonical_names.md)
-- Public Arrow/name-count formats and the direct Rust dataset schema:
-  [rust/arrow_dataset_spec.md](rust/arrow_dataset_spec.md)
-- Release notes: [release_notes.md](release_notes.md)
+## Contributor guides
 
-## Release operations
+- [Development and local CI](development.md)
+- [Test guide](../tests/README.md)
+- [Native package overview](../s2and_rust/README.md)
+- [Script catalog](../scripts/README.md)
+- [Release notes](release_notes.md)
 
-- v1.3 release policy and runbook: [release.md](release.md)
-- Production command reference, in release-stage order:
-  [../scripts/production/README.md](../scripts/production/README.md),
-  including the
-  [promoted incremental performance report](../scripts/production/README.md#promoted-incremental-performance-report)
-- Maintained, verification, and archived script catalog:
-  [../scripts/README.md](../scripts/README.md)
+## Historical evidence
 
-## Contributors
-
-- Development workflow, local CI, and native build troubleshooting:
-  [development.md](development.md), including
-  [runtime routing verification](development.md#runtime-routing-verification)
-- Test suite guide and evidence standard: [../tests/README.md](../tests/README.md)
-- Native `s2and-rust` package overview and local build:
-  [../s2and_rust/README.md](../s2and_rust/README.md)
-
-## Evidence and measurements
-
-- Bulk Arrow optimization measurements:
-  [initial optimizations](rust/profiling/2026-09-04-bulk-optimizations.md) and
-  [specialization follow-up](rust/profiling/2026-09-04-bulk-followup.md)
-- Manual review of legacy name-tuple aliases:
-  [release_evidence/name_tuple_legacy_adjudication_v1.md](release_evidence/name_tuple_legacy_adjudication_v1.md)
-
-Dated profiling snapshots under `rust/profiling/` are immutable historical
-evidence. Their dates and commands are preserved intentionally; they are not
-current commands or release gates.
+Dated records in `release_evidence` and `rust/profiling` describe their named runs.
+They are not current preparation commands or mandatory inputs to a new correction cycle.
+The corrected snapshot already contains accepted corrections.
+Use historical records only for questions about those prior decisions or measurements.
+The original paper process belongs to the [paper branch](../README.md#reproducibility).
 
 ## Glossary
 
 | Term | Meaning |
-|---|---|
-| Signature | One author position on one paper: the unit S2AND clusters. |
-| Block | Signatures sharing a blocking key (`author_info.block`, for example `j smith`). Clustering happens within a block. |
-| Subblock | A bounded partition of a large block; see [subblocking.md](subblocking.md). |
-| Cluster, profile | A set of signatures predicted or recorded as one author. |
-| Seeds | Existing assignments supplied with a request: `cluster_seeds_require` maps signatures to existing profile IDs, and `cluster_seeds_disallow` lists signature pairs that must not be linked. |
-| Claimed profile | An existing profile whose membership is supplied as required seeds; prediction preserves it. |
-| Altered profile | A claimed profile listed in `altered_cluster_signatures`. Incremental linking scores new papers against its natural components, then restores the original profile; bulk prediction ignores the marker. |
-| Initial-only | A signature whose first name is only an initial (for example `J.`). |
-| Bulk (full-block) prediction | Clustering every signature in the requested blocks: `predict` / `predict_from_arrow`. |
-| Incremental prediction, query | Attaching new signatures (queries: requested signatures absent from `cluster_seeds_require`) to existing seed profiles: `predict_incremental` / `predict_incremental_from_arrow`. |
-| Pairwise model | The LightGBM boosters that score signature pairs: `main`, and `nameless`, which excludes name features. |
-| EPS | The distance threshold for average-linkage agglomerative clustering, selected on validation data only. |
-| Promoted incremental linker | The learned link-or-abstain model (a LightGBM booster over 53 linker features) that attaches queries on the Arrow incremental route and initial-only groups after Arrow subblocking. |
-| Raw planner | The Rust candidate planner that reads raw Arrow tables through batch indexes to retrieve candidate seed components for each query. |
-| Batch index | An S2AND-generated `*_batch_index.bin` sidecar that maps lookup keys to Arrow record batches; required by `ArrowDataset.open(...)`. |
-| Pairwise-only vs complete bundle | A training-stage bundle with only the pairwise boosters (EPS `pending` or `calibrated`) vs the loadable production bundle that adds the linker. |
-| Version axes | Package version (`s2and` and `s2and-rust`, `1.0.0`), model/public-data release version (`1.3`), and public Arrow/name-count format (`1`). |
-| `canonical_v2` | The name and feature normalization behavior shipped with `1.0.0`; see [canonical_names.md](canonical_names.md). |
-
-## Scope notes
-
-- User guides and reference docs describe current behavior, knobs, and
-  verification commands.
-- The vendored `s2and_rust/vendor/cld2/README.md` is third-party documentation.
+| --- | --- |
+| Signature | One author position on a paper |
+| Block | Signatures with the same canonical author block key |
+| Subblock | A bounded partition of a large block |
+| Cluster or profile | Signatures assigned to one author |
+| Query | A requested signature outside the supplied existing profile memberships |
+| Seeds | Required profile memberships and disallowed pair relations supplied with a request |
+| Initial-only view | A task whose query evidence contains an initial instead of a full first name |
+| Pairwise model | Main and nameless LightGBM boosters that score signature pairs |
+| EPS | The average-linkage distance threshold selected from validation data |
+| Incremental linker | The 53-feature link-or-abstain model and gate |
+| Safe-action label | Whether the supplied evidence supports attachment to the complete candidate profile |
+| Corrected snapshot | Complete current records, accepted labels, masks, vectors, and exact task/split definitions |
+| Common assets | Complete model and count index reused by inference and research |
+| Runtime Arrow projection | Fast runtime tables derived from corrected records; full abstract text remains in the corrected source |
+| Batch index | A `*_batch_index.bin` sidecar that maps lookup keys to Arrow record batches |
+| Pairwise-only stage | Both pairwise boosters with pending or calibrated EPS; not a complete inference model |
+| Complete model | Calibrated pairwise stage plus incremental artifact, required fixtures, and target |
+| Format version | Supported serialization/schema contract, separate from the Python package version |
+| Feature-contract version | Supported feature semantics plus ordered feature names |
+| Generating runtime | Model provenance; not an exact model-loader package-version lock |

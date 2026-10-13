@@ -44,7 +44,11 @@ from s2and.production_training_contract import (  # noqa: E402
     load_packaged_artifact_authority,
 )
 from s2and.subblocking import GraphSubblockingConfig  # noqa: E402
-from scripts.production.model.augmented_leakage import reject_heldout_members, source_members  # noqa: E402
+from scripts.production.model.augmented_leakage import (  # noqa: E402
+    reject_heldout_members,
+    require_declared_sources,
+    source_members,
+)
 from scripts.production.model.run_binding import (  # noqa: E402
     build_run_binding_identity,
     build_run_binding_payload,
@@ -711,6 +715,7 @@ def _check_release_leakage(
             )
             if left not in unknown_ids and right not in unknown_ids
         )
+        require_declared_sources(augmented, tuple(model_paths), context="Augmented training")
         heldout = {
             name: pair_signatures.get(name, set()) | block_signatures.get(name, set())
             for name in pair_signatures.keys() | block_signatures.keys()

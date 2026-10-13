@@ -1529,7 +1529,7 @@ def _read_augmented_pair_csv(path: Path) -> tuple[list[str], list[list[str]], tu
 def _run_filter_augmented_pairs(args: argparse.Namespace) -> None:
     """Write reviewed-input candidates without changing the draft release or sources."""
     from scripts.production.model.augmented_leakage import (
-        PRODUCTION_AUGMENTED_SOURCES,
+        require_declared_sources,
         training_members_from_sources,
     )
     from scripts.production.model.release_pairwise import (
@@ -1570,8 +1570,7 @@ def _run_filter_augmented_pairs(args: argparse.Namespace) -> None:
 
     def identity(signature_id: str) -> tuple[str, str]:
         name, original_id = _augmented_source(signature_id)
-        if name not in PRODUCTION_AUGMENTED_SOURCES:
-            raise ValueError(f"Unknown augmented source prefix {name!r} in {signature_id!r}")
+        require_declared_sources({name: {original_id}}, tuple(models), context="augmented source")
         return name, original_id
 
     train_identities = [tuple(identity(row[index]) for index in train_indices) for row in train_rows]

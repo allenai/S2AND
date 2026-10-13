@@ -634,3 +634,12 @@ def test_portable_export_materializes_a_nonoverlapping_support_link(tmp_path: Pa
     assert not (output / "labels").is_symlink()
     assert not getattr((output / "labels").lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
     assert _sha256(output / "labels" / "train.parquet") == _sha256(target / "train.parquet")
+
+
+def test_portable_export_rejects_a_cyclic_directory_link_before_copy(tmp_path: Path) -> None:
+    source, _external_index = _external_index_source(tmp_path)
+    _link_directory(source / "labels" / "loop", source)
+    output = tmp_path / "export"
+    with pytest.raises(ValueError, match="cyclic directory link"):
+        export_portable_source_bundle(source_bundle=source, output_source_bundle=output)
+    assert not output.exists()

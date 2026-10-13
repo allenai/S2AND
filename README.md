@@ -1,63 +1,34 @@
 # S2AND
 
-S2AND provides the S2AND author-name-disambiguation benchmark datasets and the reference model described in the paper [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421) by Shivashankar Subramanian, Daniel King, Doug Downey, and Sergey Feldman.
+S2AND provides author-name-disambiguation datasets and the reference model from [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421).
+The model predicts author clusters from paper and author records.
 
-> **Update at v1.3 release:** this development branch contains the simplified
-> `1.0.0` runtime, but it is not yet a complete production release. Canonical
-> artifacts and the model bundle `production_model_v1.3` still need to be
-> generated, retrained, evaluated, and published, so the model-dependent and
-> data-dependent workflows below do not work yet. The coordinated Python and
-> Rust package version is fixed at `1.0.0`; the production model and public-data
-> release version is `1.3`, and independently readable Arrow/name-count data
-> uses public format `1`. Release operators must use
-> [docs/release.md](docs/release.md). This README is also the PyPI description,
-> so every "Update at v1.3 release" note must be resolved before publication.
+This branch prepares Python/Rust runtime `1.0.0` and model/data release `1.3`.
+The complete model and compatible research snapshot are not yet published.
+Use [the release process](docs/release.md) for current preparation, fit, evaluation, and publication steps.
 
-S2AND requires the `s2and-rust` extension, which is installed with the package.
-Classic `ANDData` methods run in Python and methods that take an open
-`ArrowDataset` run in Rust; neither falls back to the other. Production model
-loading and the large-scale runtime require the Rust package.
+## Choose a workflow
 
-## What S2AND Provides
-
-- The S2AND datasets used for author name disambiguation research.
-- Versioned production model artifacts used by Semantic Scholar.
-- Training, evaluation, and inference APIs in Python.
-- A required Rust extension for production model scoring and large-scale runtime paths.
-
-## Choose a Workflow
-
-| Use case | Start here | Details |
+| Goal | Required input | Guide |
 | --- | --- | --- |
-| Run the released model on your own data | [Quick Start](#quick-start) | [docs/production_inference.md](docs/production_inference.md) |
-| Download the benchmark datasets | [Download Data](#download-data) | [docs/data.md](docs/data.md) |
-| Train or evaluate a model | [Training and Evaluation](#training-and-evaluation) | [docs/training.md](docs/training.md) |
-| Run large-scale inference | [Runtime and Scaling](#runtime-and-scaling) | [docs/subblocking.md](docs/subblocking.md), [docs/threading.md](docs/threading.md) |
-| Train and publish the v1.3 production release | [Release runbook](docs/release.md) | [Production command reference](scripts/production/README.md) |
-| Work on the repo itself | [Development](#development) | [docs/development.md](docs/development.md) |
+| Run the production model | Common model and name-count index; your records and vectors | [Production inference](docs/production_inference.md) |
+| Use corrected research data | Common assets plus the complete S3 research snapshot | [Data and models](docs/data.md) |
+| Correct data or release another model | The same corrected snapshot and maintained scripts | [Release process](docs/release.md) |
+| Train or evaluate with the API | Manifest-backed dataset and labels | [Training and evaluation](docs/training.md) |
+| Use current name normalization and small alias artifacts | Source checkout; optional count-index download | [Canonical names](docs/canonical_names.md#access-the-current-rules-and-artifacts) |
+| Work on the repository | Source checkout and development environment | [Development](docs/development.md) |
 
-All guides are indexed in [docs/README.md](docs/README.md), which also has a
-glossary of S2AND terms.
+Common large assets use Git LFS.
+Small name tuples and ORCID prefix counts ship in normal Git and the Python wheel.
+The research snapshot uses S3 and does not duplicate the common model or count index.
+It contains the final output of accepted additions and corrections, with full records, labels, masks, embeddings, and exact splits.
+Use that output as the starting point for future corrections.
 
 ## Install
 
 S2AND supports Python 3.11, 3.12, and 3.13.
-
-Package install:
-
-```bash
-uv pip install s2and
-```
-
-This installs the latest version on the configured package index. Starting with
-`1.0.0`, that install includes the exactly matched `s2and-rust` runtime.
-
-> **Update at v1.3 release:** until `s2and==1.0.0` is published, this command
-> installs an earlier release in which `s2and-rust` is an optional extra. Use a
-> source checkout to validate the unreleased `1.0.0` worktree.
-
-Repo checkout (requires Rust; see [docs/install.md](docs/install.md) for OS
-prerequisites, environment activation, and WSL notes):
+The `1.0.0` package requires the exactly matched `s2and-rust` package.
+Until publication, use a source checkout:
 
 ```bash
 git lfs install
@@ -65,146 +36,110 @@ git lfs pull
 uv sync --extra dev
 ```
 
-`uv sync` builds the matching Rust extension from `s2and_rust/`. Repeat
-`git lfs pull` after switching to a branch that changes the LFS-managed
-LightGBM test fixtures. If a Rust change is not picked up, see
-[build recovery](docs/install.md#build-the-rust-extension-from-source).
+`uv sync` builds the native extension from `s2and_rust/`.
+See [installation prerequisites](docs/install.md) for operating-system dependencies and build recovery.
+Pull LFS assets after a branch or release-ref change that affects those files.
 
-## Download Data
+## Download data
 
-> **Update at v1.3 release:** no compatible production model or public-format-1
-> data has been published yet. The Arrow release below is the historical,
-> pre-format-1 release: this branch's `ArrowDataset.open(...)` and release
-> validation reject it, so it is useful only for migration and source-data work.
-> Use the previous published S2AND release for working v1.21 inference. At
-> release, replace this note and the command below with the published v1.3 data
-> location and size. See [docs/release.md](docs/release.md) and
-> [docs/data.md](docs/data.md#dataset-download).
+The compatible release locations remain unpublished.
+The release notes will provide the common Git ref, model path, S3 prefix, and hashes.
+The [data guide](docs/data.md#dataset-download) defines the local layout and download requirements for each user group.
+Historical Arrow prefixes do not satisfy the current format-1 contract.
 
-The AWS CLI is not a runtime dependency; `uvx` installs and runs it in an
-isolated environment for this command:
+Inference users need the common assets and their own data.
+Research users place the S3 snapshot beside the one common index.
+Classic `ANDData` selects that index through [path configuration](docs/data.md#configuring-s2anddatapath_configjson).
+Arrow and production script calls use explicit paths.
 
-```bash
-uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
+## Quick start
+
+Load the complete model from an explicit path:
+
+```python
+from s2and.arrow_inputs import ArrowDataset
+from s2and.production_model import load_production_model
+
+clusterer = load_production_model('/path/to/production_model_v1.3', n_jobs=8)
+blocks = {'j smith': ['signature_1', 'signature_2']}
+with ArrowDataset.open('/path/to/your_arrow_dataset') as dataset:
+    clusters, distances = clusterer.predict_from_arrow(
+        blocks,
+        dataset,
+        total_ram_bytes=32 * 1024**3,
+    )
 ```
 
-Expected size is about `10.1 GiB`; use a narrower S3 prefix when only one
-dataset is needed. The prior v1.21 model is available only from its compatible
-release and Git history; it is not packaged or loadable on this branch.
+Replace the paths and signature IDs with your complete model and validated dataset.
+The loader rejects pickles and pairwise-only stages.
+The [inference guide](docs/production_inference.md) describes raw inputs, embeddings, constraints, incremental calls, and bundle compatibility.
 
-Classic `ANDData` finds its default name-count index at
-`<main_data_dir>/name_counts_index`, where `main_data_dir` comes from
-`s2and/data/path_config.json` (or the file named by `S2AND_PATH_CONFIG`). Arrow
-routes and the production scripts take explicit paths instead. See
-[docs/data.md](docs/data.md#configuring-s2anddatapath_configjson).
+## Training and evaluation
 
-## Quick Start
+The maintained production pairwise trainer reads `pairwise/model_plan.json` from the corrected research snapshot.
+It uses declared dataset names, including `inventors_s2and` when the plan includes patents.
+The [production commands](scripts/production/README.md#pairwise-model) describe pairwise fit, validation-only EPS selection, and incremental finalization.
+A historical baseline is not a prerequisite for a pairwise fit.
+Final release acceptance remains a separate step.
 
-> **Update at v1.3 release:** replace this note with a short load-and-predict
-> example that uses the published v1.3 bundle and data. Until then there is no
-> compatible production model, so production inference cannot run; training
-> and evaluation are described below.
+The [research API guide](docs/training.md) provides smaller experiments and direct metric inspection.
+These examples do not replace the release test policy.
 
-`load_production_model(path)` accepts one explicit complete native bundle. It
-does not discover a default or accept pairwise-only training stages. Full
-inference details, including the Python and Rust routes, are in
-[docs/production_inference.md](docs/production_inference.md).
+## Runtime and scaling
 
-## Training and Evaluation
+- `ANDData` prediction uses Python; Arrow prediction uses Rust.
+- `batching_threshold` enables subblocks for full prediction and caps incremental query batches.
+- `total_ram_bytes` controls the major memory allocation bounds.
+- `n_jobs` controls concurrency; model load defaults to one job unless you specify another value.
 
-[docs/training.md](docs/training.md) walks through building a Rust-backed
-training dataset from a canonical Arrow root, featurizing pairs, training the
-pairwise model, fitting the clusterer, and evaluating both. Those examples are
-research/API examples: they materialize test features for immediate
-evaluation. The v1.3 release instead keeps test identities and scores sealed
-until the one-shot evaluation in Stage 5 of the
-[release runbook](docs/release.md).
-
-## Runtime and Scaling
-
-- **Routes:** `ANDData` methods use Python; `predict_from_arrow(...,
-  arrow_dataset)` and `predict_incremental_from_arrow(..., arrow_dataset)` use
-  Rust. No environment variable changes these routes, and Rust routes fail
-  explicitly if `s2and-rust` is missing or a different version. See
-  [execution routes](docs/production_inference.md#explicit-execution-routes).
-- **Large blocks:** `batching_threshold` on full-block prediction enables
-  subblocking ([docs/subblocking.md](docs/subblocking.md)); on
-  `predict_incremental_from_arrow` it caps the queries per linker batch.
-  `total_ram_bytes` is the main memory-control knob.
-
-  > **Update at v1.3 release:** subblocking loads the packaged ORCID
-  > prefix-count files, which Stage 1 of the release generates. Until they are
-  > copied into `s2and/data/`, a call that reaches ORCID-based subblocking without
-  > explicitly supplied counts raises `FileNotFoundError`. Setting a threshold
-  > alone does not imply that this path is reached.
-- **Concurrency:** `n_jobs` is the main concurrency knob. A loaded production
-  bundle keeps `n_jobs=1` unless you pass
-  `load_production_model(path, n_jobs=N)`. Set thread-related environment
-  variables before importing heavy compute libraries ([docs/threading.md](docs/threading.md),
-  [docs/environment.md](docs/environment.md)).
+Set thread environment variables before heavy-library imports.
+See [subblocking](docs/subblocking.md), [threading](docs/threading.md), and [environment settings](docs/environment.md).
 
 ## Development
 
 ```bash
 uv run pytest -q
 uv run ruff check .
-uv run ruff format .
+uv run ruff format --check .
 uv run ty check s2and
-uv run --no-project python scripts/run_ci_locally.py  # shared local/hosted CI
+uv run --no-project python scripts/run_ci_locally.py
 ```
 
-The full test suite needs the native extension that `uv sync --extra dev`
-builds. [docs/development.md](docs/development.md) covers the CI jobs, the
-static-check fast path without a native build, native build troubleshooting,
-and version bumping (`VERSION` is the source of truth for both packages).
+The tests require the native extension from the development setup.
+See [the development guide](docs/development.md) for focused checks and native build recovery.
 
 ## Reproducibility
 
-The original paper experiments used the `s2and_paper` branch with Python
-`3.7.9`. Start in that branch with an isolated environment:
+The original paper experiments use the `s2and_paper` branch and Python `3.7.9`.
+Use that branch's pinned environment and experiment commands for those results.
+Archived scripts are historical references, not supported production entrypoints.
+See [the archive catalog](scripts/README.md#archived-historical-artifacts).
 
-```bash
-git checkout s2and_paper
-uv venv --python 3.7.9
-```
-
-Install the pinned environment from that branch's `paper_experiments_env.txt`,
-then rerun its paper experiment commands. The selected artifacts retained in
-`scripts/archive/` are historical references, not supported current entrypoints
-or substitutes for the paper branch; see the
-[archive catalog](scripts/README.md#archived-historical-artifacts).
-
-Use paper-era seed artifacts such as `full_union_seed_*.pickle` with the paper
-branch. Some historical model pickles contain a dictionary with a `clusterer`
-key rather than a bare clusterer. Current S2AND neither distributes nor loads
-production-model pickles. Reproduce later historical releases with their
-compatible release or Git history; current model loading and publication follow
-the [native-bundle contract](docs/production_inference.md#complete-model-bundles)
-and [release runbook](docs/release.md).
+The current process starts from a complete corrected snapshot.
+It preserves exact pair and split identities and uses versioned native models.
+See [the release process](docs/release.md) for compatible artifacts and update rules.
 
 ## Licensing
 
-S2AND code is licensed under the MIT License ([LICENSE](LICENSE)). S2AND data,
-including the benchmark datasets and the data files in this repository, is
-licensed under the Creative Commons Attribution 4.0 International License
-([LICENSE-DATA](LICENSE-DATA)). Data releases published before v1.3 keep the
-license they were published with. Some affiliation data comes directly from the
-Microsoft Academic Graph.
+S2AND code uses the MIT License ([LICENSE](LICENSE)).
+S2AND data uses the Creative Commons Attribution 4.0 International License ([LICENSE-DATA](LICENSE-DATA)).
+Earlier data releases retain their published licenses.
+Some affiliation data comes from the Microsoft Academic Graph.
 
 ## Citation
 
-If you use S2AND in your research, please cite [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421).
+Cite [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421) when you use S2AND in research.
 
 ```text
 @inproceedings{subramanian2021s2and,
-      title={{S}2{AND}: {A} {B}enchmark and {E}valuation {S}ystem for {A}uthor {N}ame {D}isambiguation},
-      author={Subramanian, Shivashankar and King, Daniel and Downey, Doug and Feldman, Sergey},
-      year={2021},
-      publisher = {Association for Computing Machinery},
-      address = {New York, NY, USA},
-      booktitle = {{JCDL} '21: Proceedings of the {ACM/IEEE} Joint Conference on Digital Libraries in 2021},
-      series = {JCDL '21}
+  title={{S}2{AND}: {A} {B}enchmark and {E}valuation {S}ystem for {A}uthor {N}ame {D}isambiguation},
+  author={Subramanian, Shivashankar and King, Daniel and Downey, Doug and Feldman, Sergey},
+  year={2021},
+  publisher={Association for Computing Machinery},
+  address={New York, NY, USA},
+  booktitle={{JCDL} '21: Proceedings of the {ACM/IEEE} Joint Conference on Digital Libraries in 2021},
+  series={JCDL '21}
 }
 ```
 
-S2AND is an open-source project developed by the Allen Institute for Artificial Intelligence (AI2).
+The Allen Institute for Artificial Intelligence develops S2AND.

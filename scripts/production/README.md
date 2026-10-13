@@ -1,179 +1,191 @@
 # Production commands
 
-This is a command reference. The dependency-ordered v1.3 sequence is
-[../../docs/release.md](../../docs/release.md); sections below follow its stages:
-count artifacts and distribution checks (Stage 1), run preparation, Arrow
-conversion and linker-source assembly (Stage 2), pairwise training (Stage 3),
-EPS calibration (Stage 4), and finalization, evaluation, and installed smoke
-(Stage 5 onward).
+Use the complete corrected snapshot for production fits.
+This is the output of all accepted additions and corrections, not a reconstruction from old source archives.
+The [release process](../../docs/release.md) separates data preparation, fit, acceptance, and publication.
+The [data guide](../../docs/data.md) defines common Git LFS assets and the S3 research snapshot.
+
+## Corrected snapshot
+
+Create a fresh combined local root:
+
+```powershell
+uv run --no-sync python scripts/production/data/package_corrected_datasets.py `
+  --corrected-source-root <final-corrected-master> `
+  --pairwise-inputs-root <prepared-pairwise-package> `
+  --public-data-root <prepared-public-root> `
+  --linker-source-bundle <accepted-incremental-root> `
+  --corrected-replay-root <current-replay-raw-root> `
+  --corrected-replay-embeddings-root <current-replay-vector-root> `
+  --name-counts-index <common-name-counts-index> `
+  --output-root <new-combined-snapshot>
+```
+
+The output contains full corrected records, exact pairwise populations, benchmark Arrow tables, and complete incremental support.
+`pairwise/model_plan.json` declares the production fit datasets and EPS policy.
+The default EPS grid uses steps of `0.01` from `0.00` to `1.00`; both minimum F1 floors equal zero.
+Use explicit EPS options to declare a different policy.
+All operational paths remain relative to the snapshot.
+One physical `name_counts_index` serves all Arrow datasets.
+The dataset manifests bind the common index's exact hash.
+Exclude that index from the S3 payload.
+
+A future data correction starts from `corrected_sources` in this snapshot.
+Historical review archives and separate pre-correction inputs are not required.
+The two replay options preserve current raw records and vectors for future updates.
+Supply both options together when the snapshot includes replay sources.
+See [data preparation](data/README.md) for augmentation and embedding updates.
+
+## Pairwise model
+
+Set the snapshot and separate output paths before the fit:
+
+```powershell
+$Snapshot = '<combined-snapshot>'
+$RunRoot = '<fresh-fit-output>'
+$PairwiseModel = "$RunRoot/pairwise/production_model_v1.3"
+
+uv run --no-sync python scripts/production/model/train_pairwise.py `
+  --model-plan "$Snapshot/pairwise/model_plan.json" `
+  --arrow-root "$Snapshot/pairwise/arrow/release" `
+  --name-counts-index-root "$Snapshot/name_counts_index" `
+  --output-dir $PairwiseModel `
+  --matrix-work-dir "$RunRoot/matrix-work" `
+  --total-ram-bytes 137438953472 `
+  --n-jobs 20 `
+  --run-full
+```
+
+The example uses 20 jobs and 128 GiB of RAM.
+Use the approved limits for the actual run.
+The output directory must be new.
+The matrix workspace must be empty and local.
+The trainer reads only model-development inputs; it does not require a historical baseline or an evaluation plan.
+
+The model plan declares dataset names instead of a fixed seven-source set.
+It can include `inventors_s2and` with the benchmark datasets and augmented fixed pairs.
+The current patents snapshot has 2,500 blocks, 41,468 signatures, and 41,316 papers.
+Its block split can share papers; it is not whole-paper independent.
+Existing augmented records remain unchanged for the next patents-inclusive fit.
+
+Use `--help` for pair-count, search, and seed options.
+`--n-jobs` also sets `OMP_NUM_THREADS` for the run.
+Source order affects pair selection, so keep the exact source records and declared splits.
+The trainer rejects invalid augmented source membership before feature allocation.
+Unknown signatures remain in inference context but do not supply supervised labels.
+
+The output is an immutable pairwise-only model with `eps_calibration: "pending"` and placeholder EPS `0.5`.
+It contains both boosters and both required prediction fixtures.
+The model manifest declares format and feature-contract versions and ordered main/nameless features.
+The generating runtime is provenance, not an exact package-version lock.
+Unversioned stages require an explicit rebuild or export.
+
+## EPS calibration
+
+Select EPS from validation data with the same model plan:
+
+```powershell
+$CalibratedModel = "$RunRoot/calibrated/production_model_v1.3"
+uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-eps `
+  --source-bundle $PairwiseModel `
+  --model-plan "$Snapshot/pairwise/model_plan.json" `
+  --output-bundle $CalibratedModel `
+  --output-report "$RunRoot/eps_calibration_report.json" `
+  --name-counts-index-root "$Snapshot/name_counts_index" `
+  --arrow-root "$Snapshot/pairwise/arrow/release" `
+  --total-ram-bytes 137438953472 `
+  --n-jobs 20
+```
+
+The EPS grid and minimum floors come from the model plan.
+Calibration uses validation B3 partitions and the fixed aggregation and tie-break policy.
+It writes a fresh calibrated sibling and preserves the boosters.
+An EPS-only change does not invalidate incremental features.
+A booster or feature-contract change requires new incremental features and a fresh linker fit.
+
+## Complete model and linker evaluation
+
+Freeze incremental task labels, assignments, target, and evaluation policy before the fit:
+
+```powershell
+uv run --no-sync python scripts/production/model/train_linker_and_finalize.py `
+  --source-bundle-root $Snapshot `
+  --target-json tests/fixtures/incremental_linker_training_target.json `
+  --pairwise-model-path $CalibratedModel `
+  --name-counts-index-root "$Snapshot/name_counts_index" `
+  --output-dir "$RunRoot/complete" `
+  --n-jobs 20 `
+  --total-ram-bytes 137438953472
+```
+
+The finalizer computes features, fits once, writes the complete model, reloads it, and evaluates the declared linker test split.
+Its complete output uses the calibrated model's basename.
+The complete model includes the incremental booster, gate metadata, and target JSON.
+The pairwise-only input remains unchanged.
+The linker binds the exact pairwise feature contract and both boosters.
+
+The safe-action target is not universal identity gold.
+An abstention can indicate ambiguity or insufficient evidence.
+Recheck affected labels when query evidence or profile membership changes.
+A new pairwise model requires fresh features but does not automatically require new manual judgments.
+Added components can change other queries' features within the same block.
+
+Linker reports distinguish stratified test results from full-source diagnostics.
+The latter can include gate-calibration queries.
+Use the stratified test results for the declared held-out evaluation.
+Keep exposure annotations and inherited regression results separate from claims of independent test performance.
 
 ## Count artifacts
 
-The checked-in reviewed source deterministically reproduces the checked-in
-canonical tuple artifact byte-for-byte; CI enforces that invariant. Ordinary
-releases use `s2and/data/s2and_name_tuples_canonical.txt` directly. Run the
-generator only when intentionally changing its reviewed source or
-canonicalization policy:
+Reuse unchanged common assets.
+Small tuple and ORCID files remain in normal Git and the wheel.
+The binary name-count index uses Git LFS and remains outside the wheel.
+Release `1.3` uses `artifacts/common/v1.3/name_counts_index`.
+The accepted complete model uses `artifacts/common/v1.3/production_model_v1.3`.
+See [the count producers](counts/README.md) for source columns, workload bounds, and native index construction.
+
+The reviewed tuple source reproduces the canonical artifact byte-for-byte:
 
 ```powershell
-uv run python scripts/production/generate_canonical_name_tuples.py `
+uv run --no-sync python scripts/production/generate_canonical_name_tuples.py `
   --source s2and/data/s2and_unnormalized_filtered_name_tuples.txt `
-  --output path/to/fresh/s2and_name_tuples_canonical.txt
+  --output <fresh-output>/s2and_name_tuples_canonical.txt
 ```
 
-The count producers are module entry points:
+Regenerate it only when the source or canonical rules change.
+Generate global counts from the full source corpus rather than a research query subset:
 
 ```powershell
-uv run python -m scripts.production.counts.generate_name_counts --help
-uv run python -m scripts.production.counts.generate_orcid_name_prefix_counts --help
+uv run --no-sync --with 'duckdb>=1.5,<2' python -m scripts.production.counts.generate_name_counts_from_parquet `
+  --input-manifest <approved-name-count-export.json> `
+  --expected-source-rows <approved-row-count> `
+  --expected-source-mentions <approved-mention-count> `
+  --threads 4 --memory-limit 12GB `
+  --output-dir <fresh-count-output>
+
+uv run --no-sync python -m scripts.production.counts.generate_orcid_name_prefix_counts `
+  --input-csv <orcid-name-export.csv> `
+  --guardrails-json <approved-orcid-bounds.json> `
+  --output-dir <fresh-orcid-output>
 ```
 
-Full runs consume reviewed CSV exports and follow the
-[release operating rules](../../docs/release.md#operating-rules). The
-repository has no warehouse client or credentials.
+The ORCID input contains `raw_orcid,orcid,first_name,middle,last_name` in the required source order.
+The producer enforces the shared nonempty surname rule and the 14-group exclusion.
+The surname comparison removes spaces after canonicalization; `Ou Yang` and `Ouyang` match.
+Pairs must share their own surname key; surname agreement is not transitive.
 
-Export name counts with this reviewed query, setting the limit to
-`max_source_rows + 1`:
+Copy the approved ORCID JSON and tuple-dependency manifest to these package paths:
 
-```sql
-select coalesce(first_name, '') as first_name,
-       coalesce(last_name, '') as last_name,
-       count(*) as count
-from content.authors
-group by coalesce(first_name, ''), coalesce(last_name, '')
-order by first_name, last_name
-limit <MAX_SOURCE_ROWS_PLUS_ONE>;
-```
+- `s2and/data/first_k_letter_counts_from_orcid.json`
+- `s2and/data/first_k_letter_counts_from_orcid.manifest.json`
 
-Save exactly `first_name,last_name,count`, then run:
-
-```powershell
-uv run python -m scripts.production.counts.generate_name_counts `
-  --input-csv path/to/reviewed_name_counts.csv `
-  --guardrails-json path/to/name_count_guardrails.json `
-  --output-dir path/to/fresh/count_publication
-```
-
-The native index is written at
-`path/to/fresh/count_publication/name_counts_index`.
-The guardrail file has exactly four positive integer fields. This is a shape
-example, not a reviewed full-run bound:
-
-```json
-{
-  "min_source_rows": 1,
-  "max_source_rows": 100,
-  "min_keys_per_mapping": 1,
-  "max_keys_per_mapping": 100
-}
-```
-
-Each minimum must be no greater than its matching maximum.
-
-The historical warehouse query below preserves its Crossref source policy and
-uses the same limit convention. It now includes the required surname field.
-For the refreshed 2026-09-25 export, retain all refreshed sources, preserve
-`last_name`, rename `middle_name` to `middle`, preserve the original ORCID as
-`raw_orcid`, and normalize/sort `orcid` before writing the reviewed CSV. The
-historical query's source filter does not apply to that refreshed export.
-
-```sql
-with source_rows as (
-  select pae.corpus_paper_id, pae.orcid as raw_orcid, pae.position,
-         pae.first_name, pa.middle, pae.last_name,
-         upper(regexp_replace(
-           regexp_substr(
-             coalesce(pae.orcid, ''),
-             '(?<![0-9x])[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{3}[0-9x](?![0-9x])',
-             1, 1, 'ip'
-           ),
-           '[-‐‑‒–—−﹘﹣－]'
-         )) as canonical_orcid_compact
-  from content_ext.paper_authors_orcids pae
-  join content_ext.papers p
-    on pae.corpus_paper_id = p.corpus_paper_id
-  join content_ext.paper_authors pa
-    on pae.corpus_paper_id = pa.corpus_paper_id
-   and pae.position = pa.position + 1
-   and lower(pae.last_name) = lower(pa.last)
-  join content_ext.authors au
-    on pa.corpus_author_id = au.corpus_author_id
-  where pae.source = 'Crossref'
-    and nullif(trim(coalesce(pae.first_name, '')), '') is not null
-)
-select raw_orcid,
-       case when canonical_orcid_compact = '' then null
-            else substring(canonical_orcid_compact, 1, 4) || '-'
-              || substring(canonical_orcid_compact, 5, 4) || '-'
-              || substring(canonical_orcid_compact, 9, 4) || '-'
-              || substring(canonical_orcid_compact, 13, 4)
-       end as orcid,
-       first_name, middle, last_name
-from source_rows
-order by orcid nulls last, first_name, middle, last_name, corpus_paper_id, position
-limit <MAX_SOURCE_ROWS_PLUS_ONE>;
-```
-
-Save exactly `raw_orcid,orcid,first_name,middle,last_name`, preserving query
-order. The previous four-column input is rejected. Run:
-
-```powershell
-uv run python -m scripts.production.counts.generate_orcid_name_prefix_counts `
-  --input-csv path/to/reviewed_orcid_names.csv `
-  --guardrails-json path/to/orcid_guardrails.json `
-  --output-dir path/to/fresh/orcid_counts
-```
-
-The ORCID guardrail file has exactly five positive integer fields. Again,
-these values demonstrate the shape only:
-
-```json
-{
-  "min_source_rows": 1,
-  "max_source_rows": 100,
-  "max_names_per_orcid": 100,
-  "max_pair_keys": 1000000,
-  "min_orcid_pair_keys": 1
-}
-```
-
-It requires `min_source_rows <= max_source_rows`,
-`max_names_per_orcid >= 2`, and
-`min_orcid_pair_keys <= max_pair_keys`.
-
-ORCID name pairs require a shared nonempty surname key. The producer canonicalizes
-the surname and removes spaces for comparison, matching the existing
-`canonical_lasts_equivalent` policy: `Ou Yang` and `Ouyang` match. Rows whose
-canonical first name or surname is empty are skipped. Within each ORCID, each
-distinct first-name pair contributes once if both names occur with at least one
-shared surname key, even when that pair occurs under several surnames. Matching
-is not transitive: if Alice and Alicia share Smith, and Alicia and Allison share
-Jones, Alice and Allison do not qualify without their own shared surname key.
-
-`max_names_per_orcid` still limits distinct first names across the ORCID, not
-separately within each surname. Prefix-event construction and thresholds are
-otherwise unchanged: distinct qualifying first-name pairs can contribute to the
-same prefix pair. Alias counts at least 2 supply only prefix pairs absent after
-the ORCID threshold; they are not added to retained ORCID counts.
-
-The name-count index format is specified in the
-[Arrow dataset spec](../../docs/rust/arrow_dataset_spec.md#name-counts).
-
-ORCID generation uses the packaged canonical tuple and writes one JSON file
-plus a minimal tuple-dependency manifest. Both are loaded and semantically
-validated directly.
-
-Copy the reviewed outputs to these exact package paths:
-
-| Output | Package path |
-|---|---|
-| ORCID JSON | `s2and/data/first_k_letter_counts_from_orcid.json` |
-| ORCID manifest | `s2and/data/first_k_letter_counts_from_orcid.manifest.json` |
+A tuple or ORCID asset change requires affected model exports to bind the new hashes.
+Models reject a mismatch with required package assets.
 
 ## Distribution and Arrow checks
 
 Build one local-platform candidate of each distribution and verify the Python
-wheel/sdist contents. Use a fresh external `$DistRoot` for the Stage 1 asset
+wheel/sdist contents. Use a fresh external `$DistRoot` for the asset
 check and `$RunRoot\stages\local-dist` for the final candidate:
 
 ```powershell
@@ -210,9 +222,18 @@ uv run python scripts/verification/validate_local_arrow_release.py `
 Use `scripts/convert_to_arrow.py validate --dataset-dir ...` when a deep table
 scan is required.
 
-## Run preparation
+## Promotion policy
 
-Start a fresh run directory containing only the reviewed `release.json`.
+The commands below apply release acceptance gates.
+They are not prerequisites for snapshot preparation, pairwise fit, or EPS calibration.
+Freeze their populations, metric contracts, thresholds, and workloads before candidate scores are available.
+A matched baseline uses those same inputs and workloads.
+Historical rates from different data or splits are not a matched comparison.
+The current acceptance CLI requires a baseline record; this requirement belongs to promotion.
+
+## Run preparation for promotion
+
+Prepare this separate acceptance plan after the fit inputs are fixed.
 Preparation checks train/validation/held-out identity overlap and writes the
 two plans used by later stages:
 
@@ -343,7 +364,7 @@ release values:
       }
     },
     "baseline": {
-      "path": "../inputs/reviewed_v1.21_baseline.json",
+      "path": "../inputs/matched_baseline.json",
       "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     },
     "gates": {
@@ -438,554 +459,18 @@ Fixed-pair training and validation CSVs use `signature_id_1`, `signature_id_2`,
 and `label` columns. Columns are selected by name, so their order does not
 matter. Labels may be `YES`/`NO` or `1`/`0`.
 
-The production trainer accepts exactly the v1.3 population: `aminer`,
-`arnetminer`, `inspire`, `kisti`, `pubmed`, `qian`, and `zbmath` in random-block
-mode, plus the internal `augmented` set in fixed-pair mode. The internal `orcid`
-dataset is not part of v1.3, and pair-labeled `medline` is published but not
-trained on directly. Replace the single `random` example with exactly those
-eight reviewed entries before running the trainer below.
-
-Keep each export's `restored_unknown_signature_ids_*.json` beside its cluster file.
-The trainer excludes pairs with an unknown endpoint from both train and validation selections.
-It also excludes augmented copies under `<dataset>___<signature_id>` IDs.
-The trainer preserves pair order and does not replace excluded pairs.
-Legacy inputs without uncertainty sidecars declare no unknowns.
-Multiple sidecars in one label directory cause an error.
-
-EPS calibration retains unknown signatures in its validation blocks and predictions.
-B³ removes unknown members from both score partitions after inference.
-Thus fallback memberships cannot change the score denominators for known signatures.
-EPS weights use the number of known signatures in each score.
-Each calibration dataset requires at least one known validation signature.
-
-Held-out cluster evaluation uses the same uncertainty rule.
-It retains unknown signatures in inference and scores only known labels.
-An evaluation population without known labels causes an error.
-
-The training configuration records sidecar paths, hashes, and counts.
-Calibration rejects a sidecar change after the model fit.
-
-`model_plan.json` has the single owner-selected `release_version`, training and
-validation inputs, and EPS policy, but no held-out path.
-`evaluation_plan.json` has held-out inputs, gates, baseline
-scalars derived from the verified record, that record's SHA-256, the reviewed
-performance Arrow-root identity/workload, and exact parity and subblocking
-content/workload identities. Operational paths are retained for execution but
-excluded from the canonical run digest. Changing content, a selected
-subblocking dataset name declared by the public root, or a measured workload
-starts a new run.
-
-## Canonical benchmark names
-
-Join the reviewed upstream names by signature ID before Arrow conversion:
+Before candidate reports, bind the complete model and combined snapshot to the prepared acceptance plans:
 
 ```powershell
-uv run python scripts/convert_to_arrow.py join-canonical-names `
-  --signatures path/to/dataset_signatures.json `
-  --canonical-names path/to/canonical_names.json `
-  --output path/to/canonical_signatures.json
+uv run --no-sync python scripts/production/model/release_pairwise.py bind-candidate `
+  --run-root <acceptance-run-root> `
+  --candidate-model "$RunRoot/complete/production_model_v1.3" `
+  --public-data-root $Snapshot
 ```
 
-The canonical input is a JSON list with `signature_id`, `first`, `middle`, and
-`last`. The command refuses an existing output, duplicate IDs, and any
-missing/extra ID; it reports changed signatures and per-field differences.
-One canonical JSON must contain exactly one dataset's signature IDs; a global
-all-dataset file is rejected as having extras.
-
-First stage the canonical benchmark source outside the run directory. Replace
-the `REVIEWED_*` placeholders with the reviewed paths and resource value:
-
-```powershell
-$RunRoot = 'D:\s2and-v1.3-YYYYMMDD-attempt-N'
-$ReviewedInputWork = 'D:\s2and-v1.3-reviewed-inputs'
-$CanonicalNamesRoot = 'REVIEWED_CANONICAL_NAMES_ROOT'
-$ReviewedBenchmarkRoot = 'REVIEWED_BENCHMARK_ROOT'
-$ReviewedReplayRawRoot = 'REVIEWED_REPLAY_RAW_ROOT'
-$ReviewedReplayEmbeddingsRoot = 'REVIEWED_REPLAY_EMBEDDINGS_ROOT'
-$NameCountsIndex = 'REVIEWED_NAME_COUNTS_INDEX'
-$NJobs = REVIEWED_N_JOBS
-$BenchmarkDatasets = @(
-  'aminer','arnetminer','inspire','kisti','medline','pubmed','qian','zbmath'
-)
-$CanonicalBenchmarkRoot = "$ReviewedInputWork\benchmark_source_canonical"
-
-New-Item -ItemType Directory -Path $CanonicalBenchmarkRoot | Out-Null
-foreach ($Dataset in $BenchmarkDatasets) {
-  $RawDataset = Join-Path $ReviewedBenchmarkRoot $Dataset
-  $StagedDataset = Join-Path $CanonicalBenchmarkRoot $Dataset
-  New-Item -ItemType Directory -Path $StagedDataset | Out-Null
-  Get-ChildItem -LiteralPath $RawDataset -File |
-    Where-Object { $_.Name -notin @("${Dataset}_signatures.json", 'signatures.json') } |
-    Copy-Item -Destination $StagedDataset
-  $RawSignatures = Join-Path $RawDataset "${Dataset}_signatures.json"
-  if (-not (Test-Path -LiteralPath $RawSignatures)) {
-    $RawSignatures = Join-Path $RawDataset 'signatures.json'
-  }
-  uv run python scripts/convert_to_arrow.py join-canonical-names `
-    --signatures $RawSignatures `
-    --canonical-names (Join-Path $CanonicalNamesRoot "$Dataset.json") `
-    --output (Join-Path $StagedDataset "${Dataset}_signatures.json")
-}
-```
-
-### Augmented training set
-
-The internal augmented fixed-pair set copies benchmark signatures under
-`<dataset>___<signature_id>` IDs, so it needs the same canonical names. Join it
-from the same exports and the original (pre-join) benchmark root, dropping its
-orcid-derived rows, which are not part of v1.3:
-
-```powershell
-$ReviewedAugmentedRoot = 'REVIEWED_AUGMENTED_ROOT'
-$CanonicalAugmentedRoot = "$ReviewedInputWork\augmented_canonical"
-uv run python scripts/convert_to_arrow.py join-canonical-augmented-names `
-  --augmented-dir $ReviewedAugmentedRoot `
-  --source-root $ReviewedBenchmarkRoot `
-  --canonical-names-root $CanonicalNamesRoot `
-  --drop-sources orcid `
-  --output-dir $CanonicalAugmentedRoot
-```
-
-The command checks that every remaining augmented signature still matches its
-original benchmark signature (the augmentation only shortened some first names
-to an initial), applies the source dataset's canonical names, re-shortens the
-first names the augmentation had shortened, and removes orcid signatures and
-every pair that touches one. A one-character original first name cannot show
-whether it was shortened, so it gets the full canonical first name; the report
-counts these rows. It publishes the outputs together, only after every check
-passes:
-
-| Output | Use in `release.json` |
-|---|---|
-| `augmented_signatures.json` | `signatures` for the augmented model and pairwise-evaluation datasets |
-| `train_pairs.csv`, `val_pairs.csv` | augmented model `train_pairs` and `val_pairs` (columns `signature_id_1`, `signature_id_2`, `label`) |
-| `test_pairs.json` | augmented pairwise-evaluation `pairs` (integer labels) |
-| `join_report.json` | review record: kept/dropped counts, changed fields, shortened and one-character first names |
-
-Augmented papers and embeddings are unchanged; use the reviewed originals. The
-2021 generator keyed papers by original paper ID, so orcid-only paper records
-remain but are no longer referenced, and a few paper IDs shared with orcid may
-carry orcid-derived paper augmentations.
-
-Every signatures file referenced by `release.json` must come from these joined
-outputs: the staged `$CanonicalBenchmarkRoot` files (or subsets derived from
-them) and `$CanonicalAugmentedRoot`. `prepare-run` does not check name
-provenance, so review this before freezing the run.
-
-### Filter augmented pairs
-
-After selecting the exact benchmark model populations in a draft `release.json`,
-filter the augmented pairs using the same seed that will train the model:
-
-```powershell
-$TrainingSeed = 1111
-$FilteredAugmentedRoot = "$ReviewedInputWork\augmented_filtered"
-uv run python scripts/convert_to_arrow.py filter-augmented-pairs `
-  --release "$RunRoot\release.json" `
-  --random-seed $TrainingSeed `
-  --output-root $FilteredAugmentedRoot
-if ($LASTEXITCODE -ne 0) { throw 'Augmented pair filtering failed' }
-```
-
-The output directory must be new. The command preserves source files and the
-draft release file. It resolves training membership through the trainer's actual
-`ANDData` block split, preserving source order. Training pairs survive only when
-both benchmark members belong to their source training splits; MEDLINE members
-remain eligible because MEDLINE is not directly trained. Evaluation pairs are
-removed if either member belongs to a benchmark's model-development population,
-including validation records used for tuning. This matches `prepare-run`'s
-population-disjointness rule and is stricter than checking training blocks alone.
-
-Use the resulting `train_pairs.csv` and unchanged `val_pairs.csv` for the
-augmented model entry, and `test_pairs.json` for augmented evaluation `pairs`.
-Augmented validation is preserved because the production trainer excludes it
-from its tuning union and EPS calibration uses only random-block benchmarks.
-`test_pairs.csv` contains the same retained evaluation rows for public Arrow
-conversion. Keep the joined signatures, papers, and embeddings unchanged.
-Review the report's retained/removed counts, label balance, seed, source hashes,
-and output hashes before updating the draft paths. Regenerate the reviewed
-baseline for the changed evaluation population, then run `prepare-run`.
-Train with `--random-seed $TrainingSeed`; changing the seed or source population
-requires filtering again. The trainer checks all source splits before the first
-feature allocation and rechecks the dataset used for selection.
-
-A full-benchmark model population can leave no eligible augmented evaluation
-pairs. The command rejects empty training/evaluation outputs. Revise the reviewed
-model/evaluation population design in that case; do not bypass the overlap check.
-
-These conversion commands expect the reviewed inputs and the `stages/`
-directory established by
-[Stage 2 of the release runbook](../../docs/release.md#stage-2-build-training-and-evaluation-data):
-
-```powershell
-$ReplayDatasets = @(
-  'a_khan','a_silva','arnetminer','h_wang','inspire','j_smith','kisti',
-  'pubmed','qian','s_gupta','s_lee','s_park','zbmath'
-)
-$BenchmarkArrowRoot = "$RunRoot\stages\benchmark_arrow"
-$ReplayArrowRoot = "$RunRoot\stages\replay_arrow"
-$DatasetLicense = (Resolve-Path LICENSE-DATA).Path  # CC-BY-4.0 data license
-uv run python scripts/convert_to_arrow.py benchmark `
-  --source-root $CanonicalBenchmarkRoot `
-  --output-root $BenchmarkArrowRoot `
-  --datasets $BenchmarkDatasets `
-  --name-counts-index-root $NameCountsIndex `
-  --n-jobs $NJobs
-
-Copy-Item -LiteralPath $DatasetLicense `
-  -Destination (Join-Path $BenchmarkArrowRoot 'LICENSE.txt')
-
-uv run python scripts/convert_to_arrow.py linker-replay `
-  --raw-root $ReviewedReplayRawRoot `
-  --embeddings-root $ReviewedReplayEmbeddingsRoot `
-  --output-root $ReplayArrowRoot `
-  --datasets $ReplayDatasets `
-  --name-counts-index-root $NameCountsIndex `
-  --n-jobs $NJobs
-```
-
-The commands require fresh output paths for the reviewed full set. The
-benchmark source is
-`<root>/<dataset>/<dataset>_signatures.json` plus its other benchmark files.
-Each benchmark's labels are validated and published with it: clusters JSON, or
-`train_pairs.csv`/`test_pairs.csv` (optional `val_pairs.csv`) for the
-pair-labeled MEDLINE benchmark.
-Replay source is `<raw>/<dataset>/{signatures.json,papers.json}` plus
-`<embeddings>/<dataset>/specter2.pkl`. Both conversions reference the same
-reviewed external name-count index directory; they do not copy it into each
-intermediate Arrow root. The assembler below copies it once into each final
-self-contained publication root. Like the model and assembler commands, the
-converters take the index directory itself. The CC-BY-4.0 data license (`LICENSE-DATA`) is
-copied once into the benchmark root as `LICENSE.txt`, because that root becomes
-the base of the final public-data publication.
-
-Run the bounded `ANDData -> Arrow -> Rust` feature-parity fixture before this
-full export.
-
-### Release Arrow conversions
-
-Pairwise training, EPS calibration, and held-out pair and cluster evaluation need
-one Arrow conversion of each plan dataset's exact JSON files, under the root each
-command receives as `--arrow-root`. Convert every model-plan dataset, including
-`augmented`, into a working root that is not published. Stage only the plan's
-feature-source files, including the joined canonical-name signatures, in benchmark layout
-(`<root>/<dataset>/<dataset>_signatures.json`, `_papers.json`, `_specter2.pkl`,
-optional `_clusters.json`). Keep `train_pairs.csv` and `val_pairs.csv` at their
-original model-plan paths; the trainer reads them there. Do not copy pair-label
-files into this private feature-source root: benchmark conversion otherwise
-requires a complete public fixed-pair dataset, including `test_pairs.csv`, while
-the augmented join intentionally exports held-out pairs as `test_pairs.json`.
-The frozen `model_plan.json` contains absolute paths to the reviewed source files.
-
-```powershell
-$ReleaseFeatureSourceRoot = "$RunRoot\stages\release_feature_sources"
-New-Item -ItemType Directory -Path $ReleaseFeatureSourceRoot -ErrorAction Stop | Out-Null
-$ModelPlan = Get-Content -LiteralPath "$RunRoot\model_plan.json" -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-foreach ($DatasetInput in $ModelPlan.datasets.PSObject.Properties) {
-  $DatasetName = $DatasetInput.Name
-  $StagedDataset = Join-Path $ReleaseFeatureSourceRoot $DatasetName
-  New-Item -ItemType Directory -Path $StagedDataset -ErrorAction Stop | Out-Null
-  $FeatureFilenames = @{
-    signatures = "${DatasetName}_signatures.json"
-    papers = "${DatasetName}_papers.json"
-    specter_embeddings = "${DatasetName}_specter2.pkl"
-    clusters = "${DatasetName}_clusters.json"
-  }
-  foreach ($Role in $FeatureFilenames.Keys) {
-    $SourceSpec = $DatasetInput.Value.PSObject.Properties[$Role]
-    if ($null -ne $SourceSpec) {
-      Copy-Item -LiteralPath $SourceSpec.Value.path `
-        -Destination (Join-Path $StagedDataset $FeatureFilenames[$Role]) -ErrorAction Stop
-    }
-  }
-}
-uv run python scripts/convert_to_arrow.py benchmark `
-  --source-root $ReleaseFeatureSourceRoot `
-  --output-root "$RunRoot\stages\release_arrow" `
-  --datasets aminer arnetminer inspire kisti pubmed qian zbmath augmented `
-  --name-counts-index-root $NameCountsIndex `
-  --n-jobs $NJobs
-```
-
-Held-out populations whose files differ from the training files need their own
-conversion root, such as `stages\evaluation_arrow`, with one directory per
-evaluation dataset name. Provenance binds each conversion to its source digests,
-so a root converted from different or stale files is rejected rather than used.
-Random-block held-out populations must be disjoint from the model population,
-so their conversions are separate. Fixed-pair `augmented` may reuse a conversion
-if all feature-source digests match; the staging loop below also works by making
-a fresh conversion. When pairwise and cluster entries share a dataset name,
-their signatures, papers, and embeddings must have identical digests for one
-evaluation root to serve both.
-
-```powershell
-$EvaluationFeatureSourceRoot = "$RunRoot\stages\evaluation_feature_sources"
-$EvaluationArrowRoot = "$RunRoot\stages\evaluation_arrow"
-$EvaluationPlan = Get-Content -LiteralPath "$RunRoot\evaluation_plan.json" -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-$EvaluationInputs = @{}
-foreach ($Kind in @('pairwise', 'cluster')) {
-  foreach ($Entry in $EvaluationPlan.$Kind.PSObject.Properties) {
-    if ($EvaluationInputs.ContainsKey($Entry.Name)) {
-      foreach ($Role in @('signatures', 'papers', 'specter_embeddings')) {
-        if ($EvaluationInputs[$Entry.Name].$Role.sha256 -ne $Entry.Value.$Role.sha256) {
-          throw "Different $Role populations for $($Entry.Name); use separate pairwise and cluster conversion roots."
-        }
-      }
-    } else {
-      $EvaluationInputs[$Entry.Name] = $Entry.Value
-    }
-  }
-}
-New-Item -ItemType Directory -Path $EvaluationFeatureSourceRoot -ErrorAction Stop | Out-Null
-$FeatureFilenames = @{
-  signatures = 'signatures.json'
-  papers = 'papers.json'
-  specter_embeddings = 'specter2.pkl'
-}
-foreach ($DatasetName in ($EvaluationInputs.Keys | Sort-Object)) {
-  $StagedDataset = Join-Path $EvaluationFeatureSourceRoot $DatasetName
-  New-Item -ItemType Directory -Path $StagedDataset -ErrorAction Stop | Out-Null
-  foreach ($Role in $FeatureFilenames.Keys) {
-    $Source = $EvaluationInputs[$DatasetName].$Role
-    if ((Get-FileHash -LiteralPath $Source.path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Source.sha256) {
-      throw "Frozen evaluation source changed: $DatasetName/$Role"
-    }
-    Copy-Item -LiteralPath $Source.path -Destination (Join-Path $StagedDataset "${DatasetName}_$($FeatureFilenames[$Role])") -ErrorAction Stop
-  }
-}
-uv run python scripts/convert_to_arrow.py benchmark `
-  --source-root $EvaluationFeatureSourceRoot `
-  --output-root $EvaluationArrowRoot `
-  --datasets ($EvaluationInputs.Keys | Sort-Object) `
-  --name-counts-index-root $NameCountsIndex `
-  --n-jobs $NJobs
-if ($LASTEXITCODE -ne 0) { throw 'Evaluation Arrow conversion failed' }
-```
-
-These are feature-only conversions. Leave held-out pair labels, cluster truth,
-and block selections at their frozen evaluation-plan paths.
-
-The production tutorial and `eval_prod_models.py` use test blocks recorded from
-the **complete model-plan population**. They reject full public benchmarks when
-the model plan used a subset. Keep `stages\release_arrow` for those recorded-split
-checks. Use `release_pairwise.py evaluate-pairs` and `evaluate-clusters` with
-`evaluation_plan.json` and `stages\evaluation_arrow` for release held-out metrics.
-Do not bypass the population digest or substitute a fresh random test split.
-
-## Linker source and data roots
-
-`linker_source_bundle.py` copies reviewed inputs into a fresh linker source
-bundle and public data root.
-
-Stage only the reviewed support files—`bundle.json`, `components/`, `labels/`,
-and `splits/`—in a fresh support root. Do not include a legacy `datasets/`
-directory: the assembler reserves that name for the fresh replay Arrow data and
-rejects a support root that contains it. Install the
-reviewed assignments and summary at the paths declared by both split
-references in `bundle.json`:
-
-```text
-splits/combined_query_split_assignments_base_group_seed13.csv
-splits/summary_base_group_seed13.json
-```
-
-Their reviewed SHA-256 values are respectively:
-
-```text
-b67b7ba7a5258b99d71f624ae12a2b5c6f938ba207215d1b7ebf63b791eadc64
-51cc222218f1ac3906bfcae3d8c1e0f070dcc6c0eb815cd5aaea6908d9b40106
-```
-
-The assignments CSV has 23,572 data rows and no `base_group_id` shared across
-splits.
-
-Verify those hashes, then assemble and preflight once:
-
-```powershell
-uv run python scripts/production/model/linker_source_bundle.py `
-  --model-plan "$RunRoot\model_plan.json" `
-  --source-root "$RunRoot\stages\linker_support" `
-  --benchmark-arrow-root "$RunRoot\stages\benchmark_arrow" `
-  --replay-arrow-root "$RunRoot\stages\replay_arrow" `
-  --name-counts-index $NameCountsIndex `
-  --output-source-bundle "$RunRoot\stages\linker_source_bundle" `
-  --output-data-root "$RunRoot\stages\public_data_root"
-```
-
-The command refuses existing outputs, loads all referenced data, checks
-base-group split disjointness, and reports selected rows. A failure starts a
-fresh attempt. The data root contains one shared `name_counts_index/`;
-benchmark and replay dataset manifests point to it rather than carrying
-per-dataset copies. The final public-data manifest takes `release_version` from
-the prepared model plan and records `kind: "s2and_public_data"` plus public
-`format_version: 1`; the operator does not enter the version again.
-
-After a label or candidate treatment, export the updated assembled source bundle.
-Use this command for each release. This includes a future patents release:
-
-```powershell
-uv run python scripts/production/model/export_linker_source_bundle.py `
-  --source-bundle "$RunRoot\stages\linker_source_bundle_treated" `
-  --output-source-bundle "$RunRoot\stages\linker_source_bundle_portable"
-```
-
-The output directory must be new. The exporter copies the actual shared count
-index, replaces dataset index paths, and updates collection manifest hashes.
-Dataset names come from the collection manifest. The command rejects filesystem
-links and operational paths outside the output. It verifies every Arrow dataset,
-label table, and required split file.
-
-The assembler also requires this portable
-output contract. Upload the complete portable directory. Retain labels and
-candidate memberships as Parquet files; the runtime data already use Arrow.
-
-## Pairwise model
-
-Run the release trainer from the prepared model plan:
-
-```powershell
-uv run python scripts/production/model/train_pairwise.py `
-  --model-plan path/to/run/model_plan.json `
-  --name-counts-index-root path/to/name_counts_index `
-  --arrow-root path/to/run/stages/release_arrow `
-  --matrix-work-dir D:/local-unsynced/s2and-matrix-work `
-  --output-dir path/to/run/stages/pairwise/production_model_vX.Y `
-  --validation-pairs-size REVIEWED_VALIDATION_PAIRS_SIZE `
-  --n-jobs REVIEWED_N_JOBS `
-  --run-full
-```
-
-`--n-jobs` defaults to 25 and also overwrites `OMP_NUM_THREADS` for the run, so
-pass the reviewed value explicitly. Run `--help` for the other defaulted
-options (`--n-iter`, `--train-pairs-size`, `--random-seed`,
-`--total-ram-bytes`).
-
-The output is a pairwise-only bundle whose manifest records
-`kind: "s2and_model"`, the model plan's `release_version`, the exact
-`generated_by_runtime`, `eps_calibration: "pending"`, and its checksum
-inventory. It uses placeholder EPS `0.5`. Calibration writes a fresh
-pairwise-only sibling with
-`eps_calibration: "calibrated"`. Only that calibrated sibling is accepted by
-linker training and finalization; neither pairwise-only state is a complete
-runtime production model.
-
-The trainer has one full-release mode. It requires an external name-count
-index, an empty local matrix workspace, finite validation metrics, and explicit
-acknowledgement of the expensive run. It cannot resolve held-out test paths.
-
-Training, EPS calibration, and pair and cluster evaluation select pairs, blocks,
-seeds, and truth from the plan's JSON files, loaded without name normalization,
-SPECTER, or name counts, then compute features and distances with the Rust
-featurizer. That featurizer reads `--arrow-root/<dataset>/`: a
-`convert_to_arrow.py` conversion of the same JSON files. Each conversion writes
-`conversion_provenance.json`, which records the SHA-256 of signatures, papers,
-selected embeddings, and optional cluster JSON. Public pair CSVs are declared
-but are not content-bound by the current Arrow manifest or conversion provenance;
-retain and check a separately reviewed checksum inventory when distributing them.
-The release plan separately hashes its declared pair inputs. Converter revision
-and options are informational, not an enforced semantic-version policy. Regenerate
-conversions when converter feature semantics change, even if source hashes match.
-Provenance also records absolute source paths for the operator's audit trail;
-review that metadata before public distribution. A conversion outside a Git
-checkout records unavailable Git revision/status as `null` with a warning.
-Before any work starts, the commands reject a dataset whose provenance does not
-name the plan's exact `signatures`, `papers`, and `specter_embeddings` digests,
-or whose tables differ from the recorded conversion. They also require the
-Arrow data to use the release name-count index, and to contain exactly the JSON
-signatures. See [release Arrow conversions](#release-arrow-conversions).
-
-`prepare-run` rejects augmented training copies of external held-out signatures
-and augmented evaluation copies of benchmark model-development signatures by
-resolving their `<dataset>___<signature>` identities. The trainer rejects augmented
-training copies outside each benchmark's actual training blocks, including
-validation, internal test, and IDs omitted from its model-plan population, before
-featurizing any dataset. It does not read held-out inputs. These guards never edit
-source pairs; use [filter-augmented-pairs](#filter-augmented-pairs) to create reviewed
-replacements using the frozen source populations and seed. Preserving the old
-JSON order is insufficient when the population changes.
-
-Each command builds the featurizer only for the signatures it scores: the
-selected pairs' members, or the members of the blocks being clustered.
-
-## EPS calibration
-
-Run `release_pairwise.py calibrate-eps` against validation data using only the
-frozen model plan:
-
-```powershell
-uv run python scripts/production/model/release_pairwise.py `
-  calibrate-eps `
-  --source-bundle path/to/run/stages/pairwise/production_model_vX.Y `
-  --model-plan path/to/run/model_plan.json `
-  --output-bundle path/to/run/stages/calibrated/production_model_vX.Y `
-  --output-report path/to/run/reports/eps_calibration_report.json `
-  --name-counts-index-root path/to/name_counts_index `
-  --arrow-root path/to/run/stages/release_arrow
-```
-
-The EPS grid and floors come from the plan; objective, aggregation, and
-smallest-EPS tie-break are fixed in code. EPS calibration does not fit the
-release linker. An EPS-only change does not invalidate linker features or
-require a new linker fit. A pairwise-booster or feature-contract change does.
-
-## Complete model and linker evaluation
-
-After held-out populations and gates are frozen, train the linker exactly once
-against the final calibrated pairwise bundle:
-
-```powershell
-uv run python scripts/production/model/train_linker_and_finalize.py `
-  --source-bundle-root path/to/run/stages/linker_source_bundle `
-  --target-json tests/fixtures/incremental_linker_training_target.json `
-  --pairwise-model-path path/to/run/stages/calibrated/production_model_vX.Y `
-  --name-counts-index-root path/to/run/stages/linker_source_bundle/name_counts_index `
-  --output-dir path/to/run/stages/linker_release `
-  --n-jobs REVIEWED_N_JOBS `
-  --total-ram-bytes REVIEWED_LINKER_RAM_BYTES
-```
-
-Use the name-count index inside the assembled source bundle. Assembly copies
-the reviewed index there and binds its Arrow datasets to that exact path;
-linker preflight requires the bound path even when another copy has identical
-contents.
-
-The retained 53-feature target has SHA-256
-`00e842566e339c2a8df4384f923d78aef0f51f01840c265bba5d27d0e45dbc04`. The
-command enforces the 53 feature columns but not this digest, so verify the
-hash before running. Changing the target is a new target-selection decision and
-requires a new fit.
-
-The command materializes features, fits once, writes the complete bundle,
-reloads it, and then evaluates held-out linker data through the reloaded model.
-The complete model directory takes the basename of `--pairwise-model-path`, so
-the calibrated input above produces
-`stages/linker_release/production_model_vX.Y`; the retained report is
-`stages/linker_release/linker_evaluation_report.json`. The linker retains its
-runtime binding to the pairwise feature contract and both boosters; that check
-prevents a silent wrong-answer model mismatch.
-
-After the complete candidate and public-data root are final, bind them to the
-prepared plans before producing acceptance reports:
-
-```powershell
-uv run python scripts/production/model/release_pairwise.py `
-  bind-candidate `
-  --run-root path/to/run `
-  --candidate-model path/to/run/stages/linker_release/production_model_vX.Y `
-  --public-data-root path/to/run/stages/public_data_root
-```
-
-This writes fresh `run_binding.json`. Its `run_binding_sha256` canonically
-binds the location-independent model/evaluation plan identities, reviewed
-baseline-record SHA-256, complete candidate manifest, and public-data root
-manifest. Candidate binding first validates the complete public-data release,
-then verifies that the candidate training configuration and model feature
-contract use the same name-count authority as that release and the packaged
-tuple/ORCID artifacts, and that the model was trained from this run's model
-plan.
-
-Runtime callers load the complete bundle by explicit path; see
-[loading a production model](../../docs/production_inference.md#load-a-production-model).
+The acceptance model plan must identify the same fit inputs, EPS policy, and model-plan content as the candidate's training record.
+Check this binding before report generation.
+Do not substitute a full benchmark projection for the declared fit or evaluation population.
 
 ## Evaluation
 
@@ -1041,7 +526,7 @@ uv run python scripts/production/model/release_pairwise.py evaluate-pairs `
   --evaluation-plan path/to/run/evaluation_plan.json `
   --run-binding path/to/run/run_binding.json `
   --name-counts-index-root path/to/name_counts_index `
-  --arrow-root path/to/run/stages/evaluation_arrow `
+  --arrow-root "$Snapshot/pairwise/arrow/evaluation" `
   --output-report path/to/run/reports/pairwise_evaluation_report.json `
   --n-jobs REVIEWED_N_JOBS `
   --total-ram-bytes REVIEWED_TOTAL_RAM_BYTES
@@ -1051,13 +536,13 @@ uv run python scripts/production/model/release_pairwise.py evaluate-clusters `
   --evaluation-plan path/to/run/evaluation_plan.json `
   --run-binding path/to/run/run_binding.json `
   --name-counts-index-root path/to/name_counts_index `
-  --arrow-root path/to/run/stages/evaluation_arrow `
+  --arrow-root "$Snapshot/pairwise/arrow/evaluation" `
   --output-report path/to/run/reports/cluster_evaluation_report.json `
   --n-jobs REVIEWED_N_JOBS
 
 uv run python scripts/verification/compare_graph_subblocking_arrow_quality.py `
-  --public-data-root path/to/run/stages/public_data_root `
-  --arrow-root path/to/run/stages/public_data_root/REVIEWED_DATASET `
+  --public-data-root $Snapshot `
+  --arrow-root "$Snapshot/benchmarks/REVIEWED_DATASET" `
   --evaluation-plan path/to/run/evaluation_plan.json `
   --run-binding path/to/run/run_binding.json `
   --output-dir path/to/run/reports `
@@ -1147,7 +632,7 @@ root before Python imports `s2and`:
 
 ```powershell
 $DistRoot = "$RunRoot\stages\local-dist"
-$PublicDataRoot = "$RunRoot\stages\public_data_root"
+$PublicDataRoot = $Snapshot
 $SmokeVenv = "$RunRoot\stages\installed-smoke-venv"
 $SmokePython = "$SmokeVenv\Scripts\python.exe"
 $PathConfig = "$RunRoot\stages\installed-smoke-path-config.json"
@@ -1168,7 +653,7 @@ Push-Location $RunRoot
 uv run --no-project --python $SmokePython python `
   "$Repo\scripts\verification\smoke_installed_incremental_arrow.py" `
   release-candidate `
-  --model-dir "$RunRoot\stages\linker_release\production_model_v1.3" `
+  --model-dir "$RunRoot/complete/production_model_v1.3" `
   --data-root $PublicDataRoot `
   --dataset REVIEWED_DATASET `
   --signature-ids REVIEWED_SEED_1 REVIEWED_SEED_2 REVIEWED_QUERY

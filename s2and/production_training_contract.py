@@ -182,7 +182,14 @@ def load_model_plan(path: Path) -> ModelPlan:
     observed_digests: dict[Path, str] = {}
     datasets: dict[str, ModelDataset] = {}
     for name, raw_files in raw_datasets.items():
-        if not isinstance(name, str) or not name or not isinstance(raw_files, dict):
+        if (
+            not isinstance(name, str)
+            or not name
+            or Path(name).name != name
+            or name in {".", ".."}
+            or any(separator in name for separator in ("/", "\\", ":"))
+            or not isinstance(raw_files, dict)
+        ):
             raise ValueError("invalid model dataset")
         if frozenset(raw_files) not in {_RANDOM_BLOCK_ROLES, _FIXED_PAIR_ROLES}:
             raise ValueError("invalid model dataset roles")
@@ -192,14 +199,12 @@ def load_model_plan(path: Path) -> ModelPlan:
                 raise ValueError("invalid model file")
             raw_path = raw_spec["path"]
             expected_digest = raw_spec["sha256"]
-            if (
-                not isinstance(raw_path, str)
-                or not raw_path
-                or not Path(raw_path).is_absolute()
-                or not is_lowercase_sha256(expected_digest)
-            ):
+            if not isinstance(raw_path, str) or not raw_path or not is_lowercase_sha256(expected_digest):
                 raise ValueError("invalid model file")
-            file_path = Path(raw_path).resolve()
+            file_path = Path(raw_path)
+            if not file_path.is_absolute():
+                file_path = Path(path).resolve().parent / file_path
+            file_path = file_path.resolve()
             if file_path not in observed_digests:
                 observed_digests[file_path] = sha256_file(file_path)
             if observed_digests[file_path] != expected_digest:

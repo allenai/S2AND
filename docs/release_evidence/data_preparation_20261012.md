@@ -34,8 +34,15 @@ The Qian command replay matches the accepted preparation outputs. The real 51-te
 [Preparation commands](../../scripts/production/data/README.md) cover benchmark preparation, augmentation, vector refresh, linker support, replay, Arrow conversion, and portable packages.
 [Global count evidence](name_counts_global_20261012.json) records the complete production index.
 
-The public benchmark Arrow export passes validation. Replay export, private export, and final portable packages remain active.
-The intended portable roots are `public_data_v1.3`, `linker_source_bundle`, and `pairwise_inputs_v1.3` beneath the output root.
+All exports and portable packages are complete. Source hashes, native loaders, split boundaries, and uncertainty masks pass validation.
+The portable roots are `public_data_v1.3`, `linker_source_bundle`, and `pairwise_inputs_v1.3` beneath the output root.
+The public root contains 8 benchmarks and 13 replay datasets. The private package contains 8 fit and 8 evaluation datasets.
+The linker source preflight accepts all 2,036,340 support rows. Both package jobs finish with exit code zero.
+
+The public package preserves 81 absent MEDLINE vectors and 270,668 absent legacy replay vectors. It does not manufacture replacement vectors.
+The corrected augmented Arrow vectors match all 121,537 source vectors exactly. The package uses the corrected `datasets/<name>` replay layout.
+
+Final evidence: `logs/assembly_run.json`, `logs/package_private.run.json`, `private_arrow_validation.json`, and `logs/arrow_benchmark_evidence/assembly_companion_checks.json` beneath the output root.
 
 ## Next release stage
 

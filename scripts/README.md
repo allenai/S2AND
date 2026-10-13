@@ -53,6 +53,7 @@ Use [the data guide](../docs/data.md) for the common assets and corrected snapsh
 | `verification/validate_local_arrow_release.py` | Non-network local Arrow release-root smoke; checks manifests, checksum fields, required files, batch-index paths, replay bundle manifests, and `name_counts_index` targets without scanning large Arrow tables |
 | `verification/verify_production_model_distributions.py` | Verify wheel/sdist bytes, require canonical tuple/ORCID assets, and reject packaged default/model paths |
 | `verification/smoke_installed_incremental_arrow.py` | Installed-wheel synthetic canonical Arrow/linker smoke; the release runbook additionally requires one smoke with the real v1.3 bundle |
+| `verification/evaluate_incremental_gold.py` | Freeze bounded gold identity cases before scores; test positive and author-absent profiles through the complete model's public Arrow API |
 | `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
 | `verification/profile_promoted_incremental_arrow.py` | Produce the release performance report from a bounded promoted incremental Arrow workload |
 | `verification/compare_graph_subblocking_arrow_quality.py` | Produce the release subblocking-quality report by comparing Python and Rust graph subblocking on the frozen Arrow and component inputs |

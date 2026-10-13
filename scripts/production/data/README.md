@@ -48,7 +48,7 @@ See [the count producer instructions](../counts/README.md). The Parquet producer
 ```powershell
 uv run --no-sync python scripts/production/data/prepare_linker_support.py `
   --source-root <accepted-linker-support-root> --benchmark-labels-root <prepared-root>/benchmark_source `
-  --review-handoff <final-review.jsonl> --review-units <review-units.json> `
+  --review-handoff <review-directory> --review-units <review-units.json> `
   --unknown-filename restored_unknown_signature_ids_20261009.json `
   --output-root <prepared-root>/linker_support --report-path <separate-report.json>
 
@@ -58,6 +58,7 @@ uv run --no-sync python scripts/production/data/prepare_linker_replay.py `
   --run-full --n-jobs 1
 ```
 
+The review directory contains `SHA256SUMS`, `final_linker_review.jsonl`, and `orcid_error_query_signatures.json`.
 The support command uses current gold labels and accepted ORCID review decisions. It excludes uncertain query views and conflicting lifecycle identities.
 
 The replay command preserves signature identities and order. It replaces matched benchmark metadata and vectors with accepted current records. It preserves giant-block source records.
@@ -79,7 +80,23 @@ Copy each uncertainty sidecar beside its exported cluster file. Bind both files 
 
 Convert `populations/model_source` and `populations/evaluation_source` with the same benchmark command. Use output roots `arrow/release` and `arrow/evaluation`.
 
-Convert augmented feature files once. The feature source directory contains signatures, papers, and vectors only. Add this dataset to both private Arrow collections.
+Convert augmented feature files once. Use a feature-only source directory. The converter registers the staging collection automatically.
+
+```powershell
+$TaskRoot = '<prepared-root>'
+$TaskFeatures = Join-Path $TaskRoot 'augmented_feature_source/augmented'
+New-Item -ItemType Directory -Path $TaskFeatures
+foreach ($TaskFile in @('augmented_signatures.json', 'augmented_papers.json', 'augmented_specter2.pkl')) {
+  Copy-Item -LiteralPath (Join-Path "$TaskRoot/augmented" $TaskFile) -Destination $TaskFeatures
+}
+uv run --no-sync python scripts/convert_to_arrow.py benchmark `
+  --source-root "$TaskRoot/augmented_feature_source" --output-root "$TaskRoot/arrow/augmented_staging" `
+  --datasets augmented --name-counts-index-root "$TaskRoot/name_counts_global/name_counts_index" --n-jobs 2
+uv run --no-sync python -c 'import shutil, sys; from pathlib import Path; from scripts.convert_to_arrow import _upsert_root_manifest; p = Path(sys.argv[1]); roots = [p / "arrow" / mode for mode in ("release", "evaluation")]; [(shutil.copytree(p / "arrow/augmented_staging/augmented", r / "augmented"), _upsert_root_manifest(r, dataset_name="augmented", dataset_dir=r / "augmented")) for r in roots]' $TaskRoot
+```
+
+The final command copies identical feature bytes into both private collections. It also adds each augmented root-manifest entry.
+All three Arrow collections share the same parent directory. Their relative count-index paths therefore remain valid.
 
 ```powershell
 uv run --no-sync python scripts/production/data/package_pairwise_inputs.py `

@@ -282,3 +282,46 @@ def test_vector_policy_without_stream_dependencies(title: str, abstract: str, ha
         {"title": title, "abstract": abstract}, {"title": "Title", "abstract": "Abstract"},
         has_source_vector=has_vector,
     ) == expected
+
+
+@pytest.mark.parametrize("cache_title", ["French translation of version 3.0", "unicode standard version"])
+def test_translation_cache_preserves_version_numbers(cache_title: str) -> None:
+    original = {
+        "paper_id": "p", "title": "Unicode Standard Version 8.0", "abstract": "", "references": [],
+        "venue": None, "journal_name": None, "authors": [],
+    }
+    signature = {"signature_id": "s", "paper_id": "p", "author_info": {
+        "first": "Jae-Hoon", "middle": None, "last": "Lee", "position": 0, "affiliations": [],
+    }}
+    old = {**original, "title": "Unicode Standard Version 3.0"}
+    _, variant, counts = make_variant(
+        "qian", "s", signature, original, old_paper=old, cached_paper={"title": cache_title},
+        rng=random.Random(1111), omission_rate=0,
+    )
+    assert variant["title"] == original["title"]
+    assert not counts["cached_translation_applied"]
+    if cache_title.startswith("French"):
+        assert counts["cached_translation_source_change"] == 1
+    else:
+        assert not counts["cached_translation_source_change"]
+
+
+@pytest.mark.parametrize(
+    ("old_title", "current_title"),
+    [("Actual Title", "actual title"), ("Formula x+y", "Formula x-y")],
+)
+def test_translation_cache_requires_exact_source_title(old_title: str, current_title: str) -> None:
+    paper = {
+        "paper_id": "p", "title": current_title, "abstract": "", "references": [],
+        "venue": None, "journal_name": None, "authors": [],
+    }
+    signature = {"signature_id": "s", "paper_id": "p", "author_info": {
+        "first": "Jae-Hoon", "middle": None, "last": "Lee", "position": 0, "affiliations": [],
+    }}
+    _, variant, counts = make_variant(
+        "qian", "s", signature, paper, old_paper={**paper, "title": old_title},
+        cached_paper={"title": "French translation"}, rng=random.Random(1111), omission_rate=0,
+    )
+    assert variant["title"] == current_title
+    assert counts["cached_translation_source_change"] == 1
+    assert not counts["cached_translation_applied"]

@@ -182,7 +182,7 @@ def make_variant(
         ]
     cached = cached_paper
     old_title = normalize_text(old_paper["title"])
-    source_match = old_title == normalize_text(original_paper["title"])
+    source_match = old_paper["title"] == original_paper["title"]
     if cached and cached["title"] != old_title:
         if source_match:
             paper["title"] = cached["title"]

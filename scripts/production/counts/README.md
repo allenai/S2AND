@@ -33,7 +33,7 @@ Use a new output directory.
 This example uses the reviewed September 25 export population.
 
 ```powershell
-uv run --no-sync --with 'duckdb>=1.4,<2' python -m scripts.production.counts.generate_name_counts_from_parquet `
+uv run --no-sync --with 'duckdb>=1.5,<2' python -m scripts.production.counts.generate_name_counts_from_parquet `
   --input-manifest path/to/reviewed/manifest.json `
   --output-dir path/to/new/count-publication `
   --expected-source-rows 89695371 `

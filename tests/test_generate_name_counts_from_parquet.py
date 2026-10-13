@@ -15,7 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-pytest.importorskip("duckdb")
+pytest.importorskip("duckdb", minversion="1.5")
 
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_counts_index import NameCountsIndex

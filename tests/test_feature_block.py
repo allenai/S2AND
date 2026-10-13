@@ -887,6 +887,7 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot(
         lambda: SimpleNamespace(
             NameCountsIndex=CountingNativeNameCountsIndex,
             _ArrowDataset=real_extension._ArrowDataset,
+            _arrow_retained_file_sha256=real_extension._arrow_retained_file_sha256,
         ),
     )
 

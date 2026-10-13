@@ -46,6 +46,6 @@ Final evidence: `logs/assembly_run.json`, `logs/package_private.run.json`, `priv
 
 ## Next release stage
 
-Freeze the production code and complete its checks. Set the versioned baseline, EPS grid, evaluation gates, and resource plan.
-Fit the main and nameless pair models. Select EPS on validation partitions. Fit and evaluate the linker with the reserved lifecycle splits.
+The subsequent [pairwise fit and EPS selection](pairwise_training_20261013.md) are complete.
+Set the release evaluation policy. Fit and evaluate the linker with the reserved lifecycle splits.
 Apply the release quality and parity gates before S3 publication. This data preparation run does not fit production models or upload artifacts.

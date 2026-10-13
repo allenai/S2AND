@@ -1125,6 +1125,42 @@ def test_cluster_evaluator_loads_complete_model_before_plan_and_ignores_pair_dig
     assert model.prediction_calls == [({"b": ["ct1", "ct2"]}, {("ct1", "ct2")} if constraints_enabled else None, None)]
 
 
+@pytest.mark.parametrize("all_unknown", [False, True])
+def test_cluster_evaluator_retains_unknown_inference_and_scores_known_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    all_unknown: bool,
+) -> None:
+    fixture = _release_fixture(tmp_path)
+    _, evaluation_plan = _prepare(fixture)
+    labels = Path(fixture.cluster["random"]["clusters"])
+    unknown = ["ct1", "ct2"] if all_unknown else ["ct2"]
+    _write_json(labels.parent / "restored_unknown_signature_ids_20261009.json", unknown)
+    model = _patch_evaluation_model(monkeypatch, [])
+    monkeypatch.setattr(
+        release_pairwise,
+        "_load_anddata",
+        lambda name, *_args, **_kwargs: argparse.Namespace(
+            name=name,
+            construct_cluster_to_signatures=lambda _blocks: {"a": ["ct1"], "b": ["ct2"]},
+            cluster_seeds_require={},
+            cluster_seeds_disallow=set(),
+        ),
+    )
+    features = _patch_rust_featurizers(monkeypatch)
+    args = _evaluation_args(fixture, evaluation_plan, output=tmp_path / "clusters_report.json")
+    if all_unknown:
+        with pytest.raises(ValueError, match="at least one known signature"):
+            release_pairwise.evaluate_clusters(args)
+        assert not args.output_report.exists()
+    else:
+        report = release_pairwise.evaluate_clusters(args)
+        assert report["signature_weighted"] == {"precision": 1.0, "recall": 1.0, "f1": 1.0}
+        assert report["datasets"]["random"]["metrics"]["signature_count"] == 1
+    assert features[0]["signature_ids"] == {"ct1", "ct2"}
+    assert model.prediction_calls[0][0] == {"b": ["ct1", "ct2"]}
+
+
 def test_pairwise_predictions_forward_the_ram_budget_to_rust_featurization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

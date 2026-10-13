@@ -1418,7 +1418,7 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 total_ram_bytes=None,
             )
-        metrics[name] = _b3_report(true_clusters, predicted)
+        metrics[name] = _b3_report(true_clusters, predicted, load_unknown_signatures(files).ids)
         dataset_reports[name] = {"metrics": metrics[name]}
     report = {
         "datasets": dataset_reports,

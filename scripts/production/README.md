@@ -458,6 +458,10 @@ Thus fallback memberships cannot change the score denominators for known signatu
 EPS weights use the number of known signatures in each score.
 Each calibration dataset requires at least one known validation signature.
 
+Held-out cluster evaluation uses the same uncertainty rule.
+It retains unknown signatures in inference and scores only known labels.
+An evaluation population without known labels causes an error.
+
 The training configuration records sidecar paths, hashes, and counts.
 Calibration rejects a sidecar change after the model fit.
 

@@ -15,6 +15,8 @@ import pytest
 from s2and.arrow_inputs import PUBLIC_DATA_KIND
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.contracts import canonical_json_digest
+from s2and.production_bundle import write_production_manifest
+from s2and.production_bundle_contract import COMPLETE_MANIFEST_FILES
 from s2and.subblocking import GraphSubblockingConfig
 from scripts.production.model import release_pairwise
 from scripts.production.model.run_binding import (
@@ -24,6 +26,7 @@ from scripts.production.model.run_binding import (
     model_plan_content_identity,
     require_run_binding_matches,
 )
+from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
 
 
 def _sha256(path: Path) -> str:
@@ -492,13 +495,22 @@ def _binding_candidate(fixture, model_plan):
     return candidate, paths["reproducibility/pairwise_training_config.json"], manifest
 
 
+@pytest.mark.parametrize("historical_prefix_sha256", ("e" * 64, "f" * 64), ids=("same-prefix", "old-prefix"))
 def test_bind_candidate_writes_one_content_based_run_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    historical_prefix_sha256: str,
 ) -> None:
     fixture = _release_fixture(tmp_path)
     model_plan, evaluation_plan = _prepare(fixture)
     candidate, training_config, candidate_manifest = _binding_candidate(fixture, model_plan)
+    config_payload = json.loads(training_config.read_text(encoding="utf-8"))
+    config_payload["input_artifact_hashes"]["orcid_prefix_counts_data_sha256"] = historical_prefix_sha256
+    _write_json(training_config, config_payload)
+    manifest_payload = json.loads(candidate_manifest.read_text(encoding="utf-8"))
+    manifest_payload["sha256"]["reproducibility/pairwise_training_config.json"] = _sha256(training_config)
+    _write_json(candidate_manifest, manifest_payload)
+    historical_config_bytes = training_config.read_bytes()
 
     public_data_root = fixture.run_dir / "stages" / "public_data_root"
     public_manifest, _dataset_manifest = _write_public_data_root(public_data_root)
@@ -549,6 +561,7 @@ def test_bind_candidate_writes_one_content_based_run_identity(
     assert binding["public_data_root_manifest_sha256"] != evaluation["performance"]["arrow_root_manifest_sha256"]
     assert validated_public_roots == [public_data_root]
     assert observed_authority_roots == [public_data_root / "name_counts_index"]
+    assert training_config.read_bytes() == historical_config_bytes
     assert set(binding) == {
         "baseline_record_sha256",
         "candidate_model_manifest_sha256",
@@ -557,6 +570,82 @@ def test_bind_candidate_writes_one_content_based_run_identity(
         "public_data_root_manifest_sha256",
         "run_binding_sha256",
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "digest"),
+    (
+        ("name_counts_manifest_sha256", "0" * 64),
+        ("name_tuples_data_sha256", "0" * 64),
+        ("orcid_prefix_counts_data_sha256", None),
+        ("orcid_prefix_counts_data_sha256", "invalid"),
+        ("orcid_prefix_counts_data_sha256", "F" * 64),
+        ("unexpected_sha256", "f" * 64),
+    ),
+    ids=("name-count-drift", "tuple-drift", "missing-prefix", "malformed-prefix", "uppercase-prefix", "extra-key"),
+)
+def test_bind_candidate_requires_valid_pairwise_training_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, digest: str | None
+) -> None:
+    fixture = _release_fixture(tmp_path)
+    model_plan, _evaluation_plan = _prepare(fixture)
+    candidate, training_config, candidate_manifest = _binding_candidate(fixture, model_plan)
+    config_payload = json.loads(training_config.read_text(encoding="utf-8"))
+    if digest is None:
+        config_payload["input_artifact_hashes"].pop(field)
+    else:
+        config_payload["input_artifact_hashes"][field] = digest
+    _write_json(training_config, config_payload)
+    manifest_payload = json.loads(candidate_manifest.read_text(encoding="utf-8"))
+    manifest_payload["sha256"]["reproducibility/pairwise_training_config.json"] = _sha256(training_config)
+    _write_json(candidate_manifest, manifest_payload)
+    public_data_root = fixture.run_dir / "stages" / "public_data_root"
+    _write_public_data_root(public_data_root)
+    monkeypatch.setattr(release_pairwise, "load_packaged_artifact_authority", lambda **_kwargs: _artifact_authority())
+    monkeypatch.setattr(release_pairwise, "validate_release_root", lambda _root: {})
+
+    def unexpected_model_load(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("Invalid training provenance reaches the model loader")
+
+    monkeypatch.setattr(release_pairwise, "load_production_model", unexpected_model_load)
+    with pytest.raises(ValueError, match="Candidate pairwise training artifact hashes|different artifact authority"):
+        release_pairwise.bind_candidate(
+            argparse.Namespace(run_root=fixture.run_dir, candidate_model=candidate, public_data_root=public_data_root)
+        )
+    assert not (fixture.run_dir / "run_binding.json").exists()
+
+
+def test_bind_candidate_rejects_old_runtime_prefix_even_with_valid_training_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import s2and.production_model as production_model
+
+    fixture = _release_fixture(tmp_path)
+    model_plan, _evaluation_plan = _prepare(fixture)
+    candidate = fixture.run_dir / "final" / "production_model_v1.3"
+    runtime_hashes = {**_artifact_authority().hashes, "orcid_prefix_counts_data_sha256": "f" * 64}
+    monkeypatch.setattr(production_model, "canonical_artifact_hashes", lambda: runtime_hashes)
+    write_synthetic_pairwise_bundle(candidate, artifact_hashes=runtime_hashes, release_version="1.3")
+    _write_json(
+        candidate / "reproducibility/pairwise_training_config.json",
+        {"input_artifact_hashes": runtime_hashes, "model_plan_sha256": _sha256(model_plan)},
+    )
+    _write_json(candidate / "reproducibility/pairwise_training_summary.json", {"pair_count": 1})
+    # The loader checks the runtime contract before it reads the linker artifact.
+    for relpath in COMPLETE_MANIFEST_FILES.values():
+        path = candidate / relpath
+        if not path.exists():
+            _write_text(path, "unused")
+    write_production_manifest(candidate, release_version="1.3", bundle_kind="complete", eps_calibration="calibrated")
+    public_data_root = fixture.run_dir / "stages" / "public_data_root"
+    _write_public_data_root(public_data_root)
+    monkeypatch.setattr(release_pairwise, "load_packaged_artifact_authority", lambda **_kwargs: _artifact_authority())
+    monkeypatch.setattr(release_pairwise, "validate_release_root", lambda _root: {})
+    with pytest.raises(ValueError, match="orcid_prefix_counts_data_sha256 does not match"):
+        release_pairwise.bind_candidate(
+            argparse.Namespace(run_root=fixture.run_dir, candidate_model=candidate, public_data_root=public_data_root)
+        )
+    assert not (fixture.run_dir / "run_binding.json").exists()
 
 
 def test_bind_candidate_rejects_mismatched_release_authorities_and_training_plan(

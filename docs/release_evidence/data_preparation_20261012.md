@@ -17,7 +17,7 @@ The root contains logs, run commands, input hashes, and validation reports.
 | Remaining benchmark population | 691,714 signatures; the trainer applies its internal split |
 | Augmented data | 121,537 signature-specific variants; 134,184 train, 16,611 validation, and 16,142 external test pairs |
 | Cached translations | 3,123 accepted; 286 rejected because raw source titles differ |
-| ORCID prefix table | 6,134 pairs; tuple SHA-256 `0bcb523ebf8e6f7020883d96cc2822f402f212069214fa23e56b6e7bc0b01f0c` |
+| ORCID prefix table | 6,079 pairs after the [14-group exclusion](orcid_prefix_exclusion_20261013.md); tuple SHA-256 `0bcb523ebf8e6f7020883d96cc2822f402f212069214fa23e56b6e7bc0b01f0c` |
 | Global count index | 89,695,371 source rows; 699,054,083 eligible mentions; 45,474,003 keys |
 | Linker support | 2,036,340 rows; 23,010 active lifecycle assignments; 19 reviewed erroneous ORCID queries excluded |
 | Linker replay | 13 datasets; 1,449,889 signatures |

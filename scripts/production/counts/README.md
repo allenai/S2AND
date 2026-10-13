@@ -1,5 +1,30 @@
 # Global name counts from Parquet
 
+## ORCID prefix evidence
+
+Use `generate_orcid_name_prefix_counts` for the final ORCID prefix artifact.
+The producer excludes 14 mixed-identity ORCID groups from the September 25 manual review.
+`EXCLUDED_ORCID_GROUPS` contains the reviewed identifiers.
+The producer records excluded group and row counts in its result log.
+It preserves raw source data and requires matching, nonempty canonical surnames for all retained ORCID evidence.
+It retains the EVENT threshold of 10 and the curated alias threshold of 2.
+The exclusion does not affect curated aliases or the separate runtime same-ORCID subblocking rule.
+The artifact and manifest formats remain unchanged.
+The [October 13 release record](../../../docs/release_evidence/orcid_prefix_exclusion_20261013.md) contains the applied counts and artifact identity.
+
+```powershell
+uv run --no-sync python -m scripts.production.counts.generate_orcid_name_prefix_counts `
+  --input-csv path/to/reviewed/sorted-orcid-names.csv `
+  --guardrails-json path/to/reviewed/guardrails.json `
+  --output-dir path/to/new/prefix-publication
+```
+
+The CSV requires `raw_orcid,orcid,first_name,middle,last_name` in this order.
+Sort its rows by canonical ORCID.
+Supply exact source bounds and reviewed name-expansion bounds.
+
+## Global name-count index
+
 Use `generate_name_counts_from_parquet` for large reviewed name-count exports.
 The producer sums plain mention counts across the complete source population.
 It applies the current canonical name rules and retains counts above one.

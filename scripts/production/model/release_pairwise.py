@@ -32,7 +32,11 @@ from s2and.feature_port import build_verified_rust_featurizer, featurize_pairs_w
 from s2and.metrics import _validated_cluster_partition_coverage  # noqa: E402
 from s2and.production_bundle import finalize_pairwise_eps  # noqa: E402
 from s2and.production_bundle_contract import PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES  # noqa: E402
-from s2and.production_model import _load_pairwise_staging_model, load_production_model  # noqa: E402
+from s2and.production_model import (  # noqa: E402
+    EXPLICIT_RELEASE_ARTIFACT_HASH_FIELDS,
+    _load_pairwise_staging_model,
+    load_production_model,
+)
 from s2and.production_training_contract import (  # noqa: E402
     ModelPlan,
     ProductionArtifactAuthority,
@@ -899,7 +903,18 @@ def bind_candidate(args: argparse.Namespace) -> dict[str, str]:
     training_config = _read_json(training_config_path)
     if not isinstance(training_config, Mapping) or not training_config:
         raise ValueError("candidate pairwise training config must be a nonempty object")
-    if training_config.get("input_artifact_hashes") != artifact_authority.hashes:
+    training_hashes = _object(
+        training_config.get("input_artifact_hashes"),
+        label="Candidate pairwise training artifact hashes",
+        keys=set(EXPLICIT_RELEASE_ARTIFACT_HASH_FIELDS),
+    )
+    for field, digest in training_hashes.items():
+        _lowercase_sha256(digest, label=f"Candidate pairwise training artifact hashes.{field}")
+    # Prefix counts affect subblocks, but do not supply pairwise features or EPS calibration.
+    if any(
+        training_hashes[field] != artifact_authority.hashes[field]
+        for field in ("name_counts_manifest_sha256", "name_tuples_data_sha256")
+    ):
         raise ValueError("Candidate model was trained from a different artifact authority")
     if training_config["model_plan_sha256"] != model_plan.sha256:
         raise ValueError("Candidate model was trained from a different model plan")

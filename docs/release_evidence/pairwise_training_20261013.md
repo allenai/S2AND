@@ -23,6 +23,8 @@ The calibrated bundle preserves both booster hashes. The selected EPS maximizes 
 Unknown signatures remain in cluster inference. Scores exclude their fallback labels.
 
 The calibrated pairwise bundle is `stages/calibrated/production_model_v1.3` beneath the run root.
+The [October 13 prefix exclusion](orcid_prefix_exclusion_20261013.md) produces the current runtime copy at `stages/calibrated_no14/production_model_v1.3`.
+Both boosters, training records, prediction fixtures, and EPS remain unchanged. The original bundle retains the artifact identity from its fit.
 Evidence files are `pairwise_output_checks.json`, `reports/eps_calibration_report.json`, `logs/pairwise.run.json`, and `logs/eps.run.json`.
 The clean source passes full local CI. The later held-out uncertainty correction passes 55 focused checks and does not change the fit or EPS results.
 

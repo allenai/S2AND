@@ -40,6 +40,26 @@ MIN_ORCID_COUNT = 10
 MIN_ALIAS_COUNT = 2
 DEFAULT_MAX_NAMES_PER_ORCID = 100
 PROGRESS_EVERY = 100_000
+# The September 25 review identifies mixed identities under these ORCIDs.
+# Exclude whole groups because the review does not establish each row's owner.
+EXCLUDED_ORCID_GROUPS = frozenset(
+    {
+        "0000-0000-0000-0001",
+        "0000-0001-2345-6789",
+        "0000-0001-7511-2910",
+        "0000-0002-1028-8971",
+        "0000-0002-1825-0097",
+        "0000-0002-3752-9683",
+        "0000-0002-4011-3590",
+        "0000-0002-5024-6186",
+        "0000-0002-5571-8349",
+        "0000-0002-5982-8983",
+        "0000-0003-1855-6181",
+        "0000-0003-3393-8460",
+        "0000-0003-3895-7409",
+        "0009-0004-4499-3929",
+    }
+)
 GUARDRAIL_FIELDS = frozenset(
     {
         "max_source_rows",
@@ -153,11 +173,13 @@ def build_prefix_counts_from_sorted_rows(
     comparison ignores canonical spaces, as within-block name constraints do.
     Each distinct first-name pair contributes once per ORCID even when it shares
     several surnames; different first-name pairs retain separate prefix events.
+    The 14 reviewed mixed-identity groups supply no ORCID evidence. Curated
+    aliases remain independent of this exclusion and the surname rule.
     """
 
     if max_names_per_orcid < 2:
         raise ValueError("max_names_per_orcid must be at least 2")
-    metrics = Counter[str]()
+    metrics = Counter[str](excluded_orcid_rows=0, excluded_orcid_groups=0)
     orcid_counts: Counter[tuple[str, str]] = Counter()
     current_orcid: str | None = None
     current_name_lasts: dict[str, set[str]] = {}
@@ -224,7 +246,12 @@ def build_prefix_counts_from_sorted_rows(
             continue
         if previous_orcid is not None and orcid < previous_orcid:
             raise ValueError("ORCID source rows must be sorted by canonical orcid")
+        new_orcid = orcid != previous_orcid
         previous_orcid = orcid
+        if orcid in EXCLUDED_ORCID_GROUPS:
+            metrics["excluded_orcid_rows"] += 1
+            metrics["excluded_orcid_groups"] += int(new_orcid)
+            continue
 
         name_key = (raw_first, raw_middle)
         normalized_first = canonical_first_cache.get(name_key)
@@ -376,6 +403,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "output_dir": str(output_dir),
         "guardrails": guardrails,
         "name_tuples_sha256": name_tuples.data_sha256,
+        "excluded_orcid_groups": sorted(EXCLUDED_ORCID_GROUPS),
     }
     emit_jsonl({"event": "orcid_prefix_plan", "plan": plan})
     rows = _load_reviewed_csv_rows(source)

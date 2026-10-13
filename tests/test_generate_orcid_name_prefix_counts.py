@@ -20,7 +20,7 @@ from s2and.orcid_prefix_counts import (
 )
 from scripts.production.counts import generate_orcid_name_prefix_counts as generator
 
-ORCID_1 = "0000-0000-0000-0001"
+ORCID_1 = "0000-0000-0000-0000"
 NAME_TUPLES_PATH = Path(PROJECT_ROOT_PATH) / "s2and" / "data" / "s2and_name_tuples_canonical.txt"
 NAME_TUPLES_SHA256 = hashlib.sha256(NAME_TUPLES_PATH.read_bytes()).hexdigest()
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +69,7 @@ def _csv_args(
 def _publication_rows() -> list[dict[str, object]]:
     return [
         {"orcid": f"0000-0000-0000-{index:04d}", "first_name": first, "middle": None, "last_name": "Smith"}
-        for index in range(10)
+        for index in range(100, 110)
         for first in ("Alice", "Amy")
     ]
 
@@ -203,6 +203,63 @@ def test_builder_deduplicates_rows() -> None:
     assert metrics["source_rows"] == 2
     assert duplicate_metrics["source_rows"] == 3
     assert metrics["orcid_pair_keys_after_threshold"] > 0
+
+
+@pytest.mark.parametrize("orcid", [*sorted(generator.EXCLUDED_ORCID_GROUPS), "https://orcid.org/0000-0002-1825-0097"])
+def test_reviewed_group_supplies_no_evidence_even_with_matching_surnames(orcid: str) -> None:
+    rows = [{"orcid": orcid, "first_name": first, "last_name": "Smith"} for first in ("Al", "Amy", "Ava", "Al")]
+    counts, metrics = generator.build_prefix_counts_from_sorted_rows(rows, [], min_orcid_count=1, max_names_per_orcid=2)
+
+    assert counts == {}
+    assert metrics["source_rows"] == metrics["excluded_orcid_rows"] == 4
+    assert metrics["excluded_orcid_groups"] == 1
+    assert metrics.get("accepted_rows", 0) == metrics.get("orcid_groups", 0) == 0
+
+
+def test_exclusion_preserves_adjacent_groups_and_alias_fallback() -> None:
+    rows = [
+        {"orcid": orcid, "first_name": first, "last_name": last}
+        for orcid in (ORCID_1, "0000-0000-0000-0001", "0000-0000-0000-0002")
+        for first, last in (("Al", "Smith"), ("Amy", "Smith"), ("Ava", "Jones"))
+    ]
+    aliases = [("al", "amy"), ("al", "amya"), ("al", "amyb")]
+    counts, metrics = generator.build_prefix_counts_from_sorted_rows(rows, aliases, min_orcid_count=3)
+
+    assert counts == {"al": {"am": 3, "amy": 3}}
+    assert metrics["source_rows"] == 9
+    assert metrics["accepted_rows"] == 6
+    assert metrics["orcid_groups"] == 2
+    assert metrics["excluded_orcid_rows"] == 3
+    assert metrics["excluded_orcid_groups"] == 1
+    without_aliases, _ = generator.build_prefix_counts_from_sorted_rows(rows, [], min_orcid_count=1)
+    assert without_aliases == {"al": {"am": 2, "amy": 2}}
+
+
+def test_excluded_groups_still_require_sorted_source() -> None:
+    rows = [
+        {"orcid": orcid, "first_name": "Al", "last_name": "Smith"}
+        for orcid in ("0000-0000-0000-0002", "0000-0000-0000-0001")
+    ]
+    with pytest.raises(ValueError, match="sorted by canonical orcid"):
+        generator.build_prefix_counts_from_sorted_rows(rows, [])
+
+
+def test_cli_excludes_reviewed_group_before_publication(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rows = sorted(
+        [
+            *_publication_rows(),
+            {"orcid": "0000-0000-0000-0001", "first_name": "Al", "last_name": "Smith"},
+            {"orcid": "0000-0000-0000-0001", "first_name": "Amy", "last_name": "Smith"},
+        ],
+        key=lambda row: str(row["orcid"]),
+    )
+    assert generator.main(_csv_args(tmp_path, rows)) == 0
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(records[0]["plan"]["excluded_orcid_groups"]) == 14
+    assert records[-1]["metrics"]["excluded_orcid_groups"] == 1
+    assert records[-1]["metrics"]["excluded_orcid_rows"] == 2
+    loaded = load_canonical_orcid_prefix_counts(tmp_path / "publication")
+    assert loaded.counts["al"]["am"] == 10
 
 
 @pytest.mark.parametrize(

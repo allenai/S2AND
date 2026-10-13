@@ -445,9 +445,13 @@ def test_cluster_release_reuses_index_and_preserves_seed_policy_and_block_order(
     observed: list[dict[str, list[str]]] = []
     original_report = release_pairwise._b3_report
 
-    def report(truth: Any, predicted: dict[str, list[str]]) -> dict[str, Any]:
+    def report(
+        truth: Any,
+        predicted: dict[str, list[str]],
+        unknown_signature_ids: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
         observed.append(predicted)
-        return original_report(truth, predicted)
+        return original_report(truth, predicted, unknown_signature_ids)
 
     monkeypatch.setattr(release_pairwise, "_b3_report", report)
     index_builds = 0

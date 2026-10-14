@@ -30,7 +30,7 @@ import numpy as np
 try:
     import ijson  # type: ignore[unresolved-import]
 except ModuleNotFoundError:
-    ijson = None
+    ijson = None  # ty: ignore[invalid-assignment]
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CLUSTER_LOG_INTERVAL = 250_000

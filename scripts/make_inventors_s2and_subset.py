@@ -26,7 +26,7 @@ from sklearn.model_selection import train_test_split
 try:
     import ijson
 except ModuleNotFoundError:
-    ijson = None
+    ijson = None  # ty: ignore[invalid-assignment]
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SIGNATURE_LOG_INTERVAL = 500_000

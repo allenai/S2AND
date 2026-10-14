@@ -61,6 +61,9 @@ dev = [
   "maturin>=1.14.1",
   # Test the optional ORCID count producer without making orjson a core dependency.
   "orjson>=3.11.9,<4",
+  # Run the release data-preparation and Parquet count-producer tests instead of skipping them.
+  "ijson>=3.3,<4",
+  "duckdb>=1.5,<2",
 ]
 
 [tool.setuptools]

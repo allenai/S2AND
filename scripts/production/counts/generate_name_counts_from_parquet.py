@@ -267,8 +267,9 @@ def build_name_counts_from_parquet(
                 "format_version": PUBLIC_DATA_FORMAT_VERSION,
                 "files": manifest_files,
             }
+            # Models bind this manifest's SHA-256, so its bytes must not depend on the OS.
             (pending / "manifest.json").write_text(
-                json.dumps(publication, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                json.dumps(publication, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
             )
             index = native.NameCountsIndex.open(str(pending))
             index_sha256 = str(index.name_counts_manifest_sha256)

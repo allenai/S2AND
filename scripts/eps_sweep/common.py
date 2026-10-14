@@ -27,7 +27,8 @@ def write_json(path: Path, payload: Any) -> None:
     """Write pretty JSON with a trailing newline."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Reviewed EPS writes checksummed model files with this helper.
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
 
 
 def sha1_text(value: str) -> str:

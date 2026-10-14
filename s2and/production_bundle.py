@@ -61,7 +61,10 @@ class ProductionBundleSummary:
 
 def _write_json(path: Path, payload: Mapping[str, Any], *, allow_nan: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=allow_nan) + "\n", encoding="utf-8")
+    # Checksummed artifacts must have the same bytes on every OS.
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=allow_nan) + "\n", encoding="utf-8", newline="\n"
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:

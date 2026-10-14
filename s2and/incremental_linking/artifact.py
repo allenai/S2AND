@@ -228,6 +228,7 @@ def save_incremental_linking_artifact(
         (staging_dir / METADATA_FILENAME).write_text(
             json.dumps(metadata, indent=2, sort_keys=True, allow_nan=False) + "\n",
             encoding="utf-8",
+            newline="\n",
         )
         load_incremental_linking_artifact(staging_dir)
         _publish_immutable_artifact(staging_dir, artifact_dir)

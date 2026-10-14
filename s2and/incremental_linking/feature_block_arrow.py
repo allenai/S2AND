@@ -1353,7 +1353,8 @@ def write_name_counts_index(
             "files": manifest_files,
         }
         manifest_path = temporary_index_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # Models bind this manifest's SHA-256, so its bytes must not depend on the OS.
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
         with manifest_path.open("r+b") as manifest_input:
             os.fsync(manifest_input.fileno())
         fsync_directory(temporary_index_dir)

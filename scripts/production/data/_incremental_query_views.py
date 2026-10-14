@@ -62,6 +62,9 @@ def mask_initial_query_rows(
     own_rows = [row for row in roster if row["position"] == position]
     if len(own_rows) > 1:
         raise ValueError("Query roster repeats author_position")
+    # Coauthor features read every other roster row, so an unmatched full name would stay visible.
+    if roster and not own_rows:
+        raise ValueError("Query roster has no row at author_position")
     signature["author_first"] = parts.first[:1]
     signature["author_middle"] = ""
     author = " ".join(

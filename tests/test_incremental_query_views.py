@@ -17,7 +17,7 @@ from s2and.incremental_linking.feature_block_arrow import write_name_counts_inde
 from s2and.incremental_linking.gate_buckets import first_name_bucket_from_token_view
 from s2and.incremental_linking.retrieval import RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS
 from s2and.runtime import load_s2and_rust_extension
-from scripts.production.data._incremental_query_views import append_initial_query_views
+from scripts.production.data._incremental_query_views import append_initial_query_views, mask_initial_query_rows
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 from tests.raw_arrow_helpers import base_arrow_paths
 
@@ -231,3 +231,25 @@ def test_invalid_queries_fail_before_dataset_changes(tmp_path: Path, queries: li
     empty = append_initial_query_views(root, [])
     assert empty.source_to_initial == empty.source_paper_ids == empty.initial_paper_ids == {}
     assert json.loads((root / "manifest.json").read_text())["files"]["specter"]["sha256"] == before["specter.arrow"]
+
+
+def test_masking_rejects_a_roster_without_the_query_position() -> None:
+    signature = {
+        "signature_id": "q",
+        "paper_id": "p",
+        "author_first": "Jonathan",
+        "author_middle": "Q",
+        "author_last": "Smith",
+        "author_suffix": None,
+        "author_position": 3,
+    }
+    roster = [
+        {"paper_id": "p", "position": 2, "author_name": "Jonathan Q Smith"},
+        {"paper_id": "p", "position": 0, "author_name": "Ann Lee"},
+    ]
+    with pytest.raises(ValueError, match="no row at author_position"):
+        mask_initial_query_rows([signature], roster, "q")
+    assert roster[0]["author_name"] == "Jonathan Q Smith"
+    # A paper without roster rows has no full name to hide.
+    mask_initial_query_rows([signature], [], "q")
+    assert (signature["author_first"], signature["author_middle"]) == ("j", "")

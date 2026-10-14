@@ -128,8 +128,9 @@ def _release_fixture(
         )
     }
     cluster = {
+        # Label sidecars are found beside clusters, so this population keeps its own directory.
         "random": _dataset_files(
-            inputs,
+            inputs / "cluster_evaluation",
             "evaluation_cluster_random",
             {
                 "signatures": {"ct1": {}, "ct2": {}},
@@ -184,7 +185,10 @@ def _release_fixture(
                 "workload": workload,
             },
             "populations": {
-                "cluster": population_identity(cluster),
+                # The evaluation plan freezes each cluster population's uncertainty sidecar or its absence.
+                "cluster": {
+                    name: {**files, "unknown_signatures": None} for name, files in population_identity(cluster).items()
+                },
                 "pairwise": population_identity(pairwise),
             },
             "provenance": {
@@ -305,9 +309,12 @@ def test_prepare_run_writes_three_simple_authorities_without_reading_heldout_ans
         "performance",
         "subblocking",
     }
+    assert {name: files["unknown_signatures"] for name, files in evaluation["cluster"].items()} == {"random": None}
     for datasets in (model["datasets"], evaluation["pairwise"], evaluation["cluster"]):
         for files in datasets.values():
             for spec in files.values():
+                if spec is None:
+                    continue
                 assert set(spec) == {"path", "sha256"}
                 assert Path(spec["path"]).is_absolute()
                 assert spec["sha256"] == _sha256(Path(spec["path"]))
@@ -800,7 +807,8 @@ def test_evaluation_content_identity_excludes_only_operational_paths(tmp_path: P
     for population in ("pairwise", "cluster"):
         for files in relocated[population].values():
             for spec in files.values():
-                spec["path"] = str(relocated_root / "evaluation" / "input")
+                if spec is not None:
+                    spec["path"] = str(relocated_root / "evaluation" / "input")
 
     assert evaluation_plan_content_identity(first) == evaluation_plan_content_identity(relocated)
     relocated["subblocking"]["dataset"] = "different"
@@ -1241,6 +1249,20 @@ def test_cluster_evaluator_loads_complete_model_before_plan_and_ignores_pair_dig
     assert model.prediction_calls == [({"b": ["ct1", "ct2"]}, {("ct1", "ct2")} if constraints_enabled else None, None)]
 
 
+def _declare_cluster_sidecar(fixture: argparse.Namespace, unknown: list[str]) -> Path:
+    """Write and declare one cluster uncertainty sidecar in release.json and its baseline."""
+
+    labels = Path(fixture.cluster["random"]["clusters"])
+    sidecar = _write_json(labels.parent / "restored_unknown_signature_ids_20261009.json", unknown)
+    fixture.payload["evaluation"]["cluster"]["random"]["unknown_signatures"] = str(sidecar)
+    baseline = json.loads(fixture.baseline_record.read_text(encoding="utf-8"))
+    baseline["populations"]["cluster"]["random"]["unknown_signatures"] = _sha256(sidecar)
+    _write_json(fixture.baseline_record, baseline)
+    fixture.payload["evaluation"]["baseline"]["sha256"] = _sha256(fixture.baseline_record)
+    _write_json(fixture.release, fixture.payload)
+    return sidecar
+
+
 @pytest.mark.parametrize("all_unknown", [False, True])
 def test_cluster_evaluator_retains_unknown_inference_and_scores_known_labels(
     tmp_path: Path,
@@ -1248,10 +1270,8 @@ def test_cluster_evaluator_retains_unknown_inference_and_scores_known_labels(
     all_unknown: bool,
 ) -> None:
     fixture = _release_fixture(tmp_path)
+    _declare_cluster_sidecar(fixture, ["ct1", "ct2"] if all_unknown else ["ct2"])
     _, evaluation_plan = _prepare(fixture)
-    labels = Path(fixture.cluster["random"]["clusters"])
-    unknown = ["ct1", "ct2"] if all_unknown else ["ct2"]
-    _write_json(labels.parent / "restored_unknown_signature_ids_20261009.json", unknown)
     model = _patch_evaluation_model(monkeypatch, [])
     monkeypatch.setattr(
         release_pairwise,
@@ -1275,6 +1295,56 @@ def test_cluster_evaluator_retains_unknown_inference_and_scores_known_labels(
         assert report["datasets"]["random"]["metrics"]["signature_count"] == 1
     assert features[0]["signature_ids"] == {"ct1", "ct2"}
     assert model.prediction_calls[0][0] == {"b": ["ct1", "ct2"]}
+
+
+@pytest.mark.parametrize("change", ["added", "changed", "removed"])
+def test_cluster_evaluator_rejects_uncertainty_sidecar_drift_after_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    fixture = _release_fixture(tmp_path)
+    sidecar = Path(fixture.cluster["random"]["clusters"]).parent / "restored_unknown_signature_ids_20261009.json"
+    if change != "added":
+        _declare_cluster_sidecar(fixture, ["ct2"])
+    _, evaluation_plan = _prepare(fixture)
+    if change == "added":
+        _write_json(sidecar, ["ct2"])
+    elif change == "changed":
+        _write_json(sidecar, ["ct1"])
+    else:
+        sidecar.unlink()
+    model = _patch_evaluation_model(monkeypatch, [])
+    features = _patch_rust_featurizers(monkeypatch)
+    args = _evaluation_args(fixture, evaluation_plan, output=tmp_path / "clusters_report.json")
+    message = {
+        "added": "Undeclared unknown-signature sidecar",
+        "changed": "changed after its declaration",
+        "removed": "Declared unknown-signature sidecar is missing",
+    }[change]
+    with pytest.raises(ValueError, match=message):
+        release_pairwise.evaluate_clusters(args)
+    assert not features
+    assert not model.prediction_calls
+    assert not args.output_report.exists()
+
+
+def test_prepare_run_rejects_an_undeclared_cluster_uncertainty_sidecar(tmp_path: Path) -> None:
+    fixture = _release_fixture(tmp_path)
+    _write_json(Path(fixture.cluster["random"]["clusters"]).parent / "restored_unknown_signature_ids_x.json", ["ct2"])
+    with pytest.raises(ValueError, match="Undeclared unknown-signature sidecar"):
+        _prepare(fixture)
+    assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}
+
+
+def test_evaluation_plan_without_frozen_uncertainty_identity_requires_new_preparation(tmp_path: Path) -> None:
+    fixture = _release_fixture(tmp_path)
+    _, evaluation_plan = _prepare(fixture)
+    payload = json.loads(evaluation_plan.read_text(encoding="utf-8"))
+    del payload["cluster"]["random"]["unknown_signatures"]
+    _write_json(evaluation_plan, payload)
+    with pytest.raises(ValueError, match="must declare unknown_signatures or null"):
+        release_pairwise._load_evaluation_plan(evaluation_plan)
 
 
 def test_pairwise_predictions_forward_the_ram_budget_to_rust_featurization(

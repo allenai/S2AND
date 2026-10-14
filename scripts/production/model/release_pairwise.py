@@ -59,6 +59,7 @@ from scripts.production.model.run_binding import (  # noqa: E402
 from scripts.production.model.unknown_signatures import (  # noqa: E402
     augmented_unknown_ids,
     exclude_unknown_pairs,
+    load_declared_unknown_signatures,
     load_unknown_signatures,
     same_unknown_content,
 )
@@ -76,6 +77,7 @@ _RANDOM_MODEL_ROLES = _COMMON_MODEL_ROLES | {"clusters"}
 _FIXED_MODEL_ROLES = _COMMON_MODEL_ROLES | {"train_pairs", "val_pairs"}
 _PAIR_ROLES = frozenset({"signatures", "papers", "specter_embeddings", "pairs"})
 _CLUSTER_ROLES = frozenset({"signatures", "papers", "specter_embeddings", "clusters", "blocks"})
+_UNKNOWN_ROLE = "unknown_signatures"
 # Plan roles that determine Rust pair features; each Arrow conversion must match them.
 _ARROW_SOURCE_ROLES = ("signatures", "papers", "specter_embeddings")
 _PARITY_WORKLOAD_KEYS = frozenset(
@@ -125,6 +127,8 @@ class EvaluationPlan:
 
     pairwise: Mapping[str, Mapping[str, tuple[Path, str]]]
     cluster: Mapping[str, Mapping[str, tuple[Path, str]]]
+    # One frozen uncertainty sidecar per cluster dataset; None declares that none exists.
+    cluster_unknowns: Mapping[str, tuple[Path, str] | None]
     arrow_root: Path
     workload: Mapping[str, Any]
     parity: Mapping[str, Any]
@@ -565,16 +569,31 @@ def _lowercase_sha256(value: Any, *, label: str) -> str:
     return value
 
 
-def _snapshot_content_identities(datasets: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, str]]:
-    """Project prepared dataset snapshots to their location-independent identities."""
+def _snapshot_content_identities(datasets: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, str | None]]:
+    """Project prepared dataset snapshots to their location-independent identities.
+
+    A declared-absent uncertainty sidecar keeps its role with a null identity.
+    """
 
     return {
         name: {
-            role: _lowercase_sha256(spec["sha256"], label=f"{name}.{role}.sha256")
+            role: None
+            if spec is None and role == _UNKNOWN_ROLE
+            else _lowercase_sha256(spec["sha256"], label=f"{name}.{role}.sha256")
             for role, spec in sorted(files.items())
         }
         for name, files in sorted(datasets.items())
     }
+
+
+def _snapshot_unknown_sidecar(raw_path: Any, *, clusters: Path, base: Path, label: str) -> dict[str, str] | None:
+    """Freeze one cluster population's uncertainty sidecar, or its declared absence."""
+
+    declared = None if raw_path is None else _resolve_path(raw_path, base=base, label=label)
+    source = load_declared_unknown_signatures({"clusters": clusters}, declared)
+    if source.path is None or source.sha256 is None:
+        return None
+    return {"path": str(source.path), "sha256": source.sha256}
 
 
 def _validate_baseline_provenance(value: Any) -> None:
@@ -806,12 +825,25 @@ def prepare_run(args: argparse.Namespace) -> dict[str, str]:
     evaluation_datasets: dict[str, dict[str, Any]] = {"pairwise": {}, "cluster": {}}
     for kind, roles in (("pairwise", _PAIR_ROLES), ("cluster", _CLUSTER_ROLES)):
         for name, dataset in _named_objects(evaluation[kind], label=f"evaluation.{kind}").items():
-            paths, snapshots = _snapshot_dataset(
+            raw_unknown = None
+            if kind == "cluster" and isinstance(dataset, Mapping):
+                dataset = dict(dataset)
+                raw_unknown = dataset.pop(_UNKNOWN_ROLE, None)
+            paths, file_snapshots = _snapshot_dataset(
                 dataset,
                 base=run_dir,
                 label=f"evaluation.{kind}.{name}",
                 allowed_roles=(roles,),
             )
+            snapshots: dict[str, dict[str, str] | None] = dict(file_snapshots)
+            if kind == "cluster":
+                # Baseline and candidate scores must use the same frozen exclusions.
+                snapshots[_UNKNOWN_ROLE] = _snapshot_unknown_sidecar(
+                    raw_unknown,
+                    clusters=paths["clusters"],
+                    base=run_dir,
+                    label=f"evaluation.cluster.{name}.{_UNKNOWN_ROLE}",
+                )
             evaluation_paths[kind][name] = paths
             evaluation_datasets[kind][name] = snapshots
     performance = _object(
@@ -1051,7 +1083,23 @@ def _load_evaluation_plan(path: Path) -> EvaluationPlan:
         },
     )
     pairwise = _load_plan_datasets(payload["pairwise"], label="pairwise", roles=_PAIR_ROLES)
-    cluster = _load_plan_datasets(payload["cluster"], label="cluster", roles=_CLUSTER_ROLES)
+    raw_cluster = _named_objects(payload["cluster"], label="cluster")
+    cluster_unknowns: dict[str, tuple[Path, str] | None] = {}
+    for name, dataset in raw_cluster.items():
+        if not isinstance(dataset, Mapping) or _UNKNOWN_ROLE not in dataset:
+            raise ValueError(f"cluster.{name} must declare {_UNKNOWN_ROLE} or null; prepare the run again to freeze it")
+        raw_unknown = dataset[_UNKNOWN_ROLE]
+        cluster_unknowns[name] = (
+            None if raw_unknown is None else _plan_file_spec(raw_unknown, label=f"cluster.{name}.{_UNKNOWN_ROLE}")
+        )
+    cluster = _load_plan_datasets(
+        {
+            name: {role: spec for role, spec in dataset.items() if role != _UNKNOWN_ROLE}
+            for name, dataset in raw_cluster.items()
+        },
+        label="cluster",
+        roles=_CLUSTER_ROLES,
+    )
     parity = _load_parity_plan(payload["parity"])
     subblocking = _load_subblocking_plan(payload["subblocking"])
     performance = _object(
@@ -1082,6 +1130,7 @@ def _load_evaluation_plan(path: Path) -> EvaluationPlan:
     return EvaluationPlan(
         pairwise=pairwise,
         cluster=cluster,
+        cluster_unknowns=cluster_unknowns,
         arrow_root=Path(raw_arrow_root),
         workload=cast(Mapping[str, Any], performance["workload"]),
         parity=parity,
@@ -1413,6 +1462,12 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
     for name, specs in plan.cluster.items():
         files = _verified_files(specs, label=f"cluster.{name}")
+        unknown_spec = plan.cluster_unknowns[name]
+        unknown = load_declared_unknown_signatures(
+            files,
+            None if unknown_spec is None else unknown_spec[0],
+            expected_sha256=None if unknown_spec is None else unknown_spec[1],
+        )
         blocks = _normalized_blocks(files["blocks"], name=name)
         dataset = _load_anddata(
             name,
@@ -1445,7 +1500,7 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 total_ram_bytes=None,
             )
-        metrics[name] = _b3_report(true_clusters, predicted, load_unknown_signatures(files).ids)
+        metrics[name] = _b3_report(true_clusters, predicted, unknown.ids)
         dataset_reports[name] = {"metrics": metrics[name]}
     report = {
         "datasets": dataset_reports,
@@ -1541,10 +1596,15 @@ def evaluate_heldout(args: argparse.Namespace) -> dict[str, Any]:
     if set(arrow_datasets) != set(specs):
         raise ValueError("Held-out Arrow collection differs from the declared evaluation datasets")
 
-    unknown_sources = {name: load_unknown_signatures(files) for name, files in verified.items()}
-    for name, files in verified.items():
-        if "unknown_signatures" in files and unknown_sources[name].path != files["unknown_signatures"]:
-            raise ValueError(f"Declared uncertainty sidecar differs from the label sidecar for {name!r}")
+    # An omitted sidecar declares that none exists; an added one must not change scores.
+    unknown_sources = {
+        name: load_declared_unknown_signatures(
+            files,
+            files.get(_UNKNOWN_ROLE),
+            expected_sha256=specs[name][_UNKNOWN_ROLE][1] if _UNKNOWN_ROLE in files else None,
+        )
+        for name, files in verified.items()
+    }
     augmented_unknowns = augmented_unknown_ids({name: source.ids for name, source in unknown_sources.items()})
     pair_reports: dict[str, Any] = {}
     cluster_reports: dict[str, Any] = {}

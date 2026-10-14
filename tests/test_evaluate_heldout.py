@@ -391,3 +391,21 @@ def test_heldout_rejects_model_population_that_overlaps_the_outer_test(
     with pytest.raises(ValueError, match=r"contains (test|model .qian.) signatures"):
         release_pairwise.evaluate_heldout(fixture)
     assert not fixture.output_report.exists()
+
+
+def test_heldout_rejects_an_undeclared_uncertainty_sidecar(
+    heldout_fixture: argparse.Namespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = heldout_fixture
+    inputs = json.loads(fixture.inputs_json.read_text(encoding="utf-8"))
+    augmented_signatures = (
+        fixture.inputs_json.parent / inputs["sources"]["evaluation"]["augmented"]["signatures"]["path"]
+    )
+    _write(augmented_signatures.parent / "restored_unknown_signature_ids_late.json", [f"qian___{fixture.keep[0]}"])
+    monkeypatch.setattr(
+        release_pairwise, "_pairwise_predictions", lambda *_args: pytest.fail("undeclared mask reaches scoring")
+    )
+    with pytest.raises(ValueError, match="Undeclared unknown-signature sidecar"):
+        release_pairwise.evaluate_heldout(fixture)
+    assert not fixture.output_report.exists()

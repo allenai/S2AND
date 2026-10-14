@@ -56,6 +56,39 @@ def load_unknown_signatures(files: Mapping[str, Path]) -> UnknownSignatures:
     return UnknownSignatures(frozenset(ids), path, hashlib.sha256(contents).hexdigest())
 
 
+def load_declared_unknown_signatures(
+    files: Mapping[str, Path],
+    declared: Path | None,
+    *,
+    expected_sha256: str | None = None,
+) -> UnknownSignatures:
+    """Read score exclusions only from the sidecar that the evaluation authority declares.
+
+    Args:
+        files: Label files; the sidecar must sit beside ``clusters`` or ``signatures``.
+        declared: The declared sidecar, or ``None`` for a declared absence.
+        expected_sha256: The frozen digest of the declared sidecar.
+
+    Returns:
+        The declared exclusions, or no exclusions for a declared absence.
+
+    Raises:
+        ValueError: If a sidecar is added, removed, moved, or changed after the declaration.
+    """
+    source = load_unknown_signatures(files)
+    if declared is None:
+        if source.path is not None:
+            raise ValueError(f"Undeclared unknown-signature sidecar beside the labels: {source.path}")
+        return source
+    if source.path is None:
+        raise ValueError(f"Declared unknown-signature sidecar is missing beside the labels: {declared}")
+    if source.path != Path(declared).resolve():
+        raise ValueError(f"Declared unknown-signature sidecar is not the sidecar beside the labels: {declared}")
+    if expected_sha256 is not None and source.sha256 != expected_sha256:
+        raise ValueError(f"Unknown-signature sidecar changed after its declaration: {declared}")
+    return source
+
+
 def same_unknown_content(binding: Any, source: UnknownSignatures) -> bool:
     """Compare a recorded sidecar binding with a loaded sidecar, ignoring its location.
 

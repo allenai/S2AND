@@ -309,6 +309,11 @@ reports/
 final/            # created by prepare-run; no current command writes to it
 ```
 
+Each cluster population declares its uncertainty sidecar as a path, or `null` when none exists.
+Omit the field only when no `restored_unknown_signature_ids_*.json` file sits beside its clusters.
+The evaluation plan freezes the sidecar digest or `null`. The baseline record must use the same identity.
+`evaluate-clusters` rejects a sidecar that is added, changed, or removed after preparation.
+
 This is the smallest random-split `release.json` shape accepted by
 `prepare-run`; it demonstrates the schema and path binding only. Paths are
 resolved relative to the run directory. The numbers are examples, not reviewed
@@ -347,7 +352,8 @@ release values:
         "papers": "../inputs/test/random_papers.json",
         "specter_embeddings": "../inputs/test/random_specter2.pkl",
         "clusters": "../inputs/test/random_clusters.json",
-        "blocks": "../inputs/test/random_blocks.json"
+        "blocks": "../inputs/test/random_blocks.json",
+        "unknown_signatures": "../inputs/test/restored_unknown_signature_ids_20261009.json"
       }
     },
     "performance": {
@@ -485,7 +491,8 @@ and its workload must equal the `release.json` workload:
         "papers": "<lowercase SHA-256>",
         "specter_embeddings": "<lowercase SHA-256>",
         "clusters": "<lowercase SHA-256>",
-        "blocks": "<lowercase SHA-256>"
+        "blocks": "<lowercase SHA-256>",
+        "unknown_signatures": "<lowercase SHA-256 or null>"
       }
     }
   },

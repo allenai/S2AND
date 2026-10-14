@@ -16,7 +16,6 @@ def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
         "sync_deps",
         lambda *, lock_present: (_ for _ in ()).throw(AssertionError("lint must not sync project dependencies")),
     )
-    monkeypatch.setattr(run_ci, "top_level_script_files", lambda: ["scripts/run_ci_locally.py"])
     monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append(args))
 
     run_ci.run_lint_job()
@@ -26,16 +25,7 @@ def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
         ["run", "--no-project", "python", "scripts/sync_version.py", "--check"],
         ["run", "--no-project", "python", "scripts/sync_feature_schema.py", "--check"],
         ["tool", "run", "--isolated", ruff_requirement, "check", "s2and", "scripts", "tests"],
-        ["tool", "run", "--isolated", ruff_requirement, "format", "--check", "s2and"],
-        [
-            "tool",
-            "run",
-            "--isolated",
-            ruff_requirement,
-            "format",
-            "--check",
-            "scripts/run_ci_locally.py",
-        ],
+        ["tool", "run", "--isolated", ruff_requirement, "format", "--check", "s2and", "scripts", "tests"],
     ]
 
 

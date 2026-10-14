@@ -439,7 +439,9 @@ def test_cluster_release_reuses_index_and_preserves_seed_policy_and_block_order(
     monkeypatch.setattr(release_pairwise, "require_run_binding_matches", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(release_pairwise, "_evaluation_model", lambda _args: (_authority(release_inputs), clusterer))
     monkeypatch.setattr(
-        release_pairwise, "_load_evaluation_plan", lambda _path: SimpleNamespace(cluster={"qian": specs})
+        release_pairwise,
+        "_load_evaluation_plan",
+        lambda _path: SimpleNamespace(cluster={"qian": specs}, cluster_unknowns={"qian": None}),
     )
     monkeypatch.setattr(release_pairwise, "_load_anddata", lambda *_args, **_kwargs: dataset)
     observed: list[dict[str, list[str]]] = []

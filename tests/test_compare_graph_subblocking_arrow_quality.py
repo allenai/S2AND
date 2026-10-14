@@ -275,7 +275,10 @@ def release_inputs(tmp_path: Path) -> SimpleNamespace:
             "predict_seconds_p50": 1.0,
         },
         "cluster": {
-            "dummy": {role: file_spec for role in ("signatures", "papers", "specter_embeddings", "clusters", "blocks")}
+            "dummy": {
+                **{role: file_spec for role in ("signatures", "papers", "specter_embeddings", "clusters", "blocks")},
+                "unknown_signatures": None,
+            }
         },
         "gates": {
             "cluster_signature_weighted_b3_f1_max_drop": 0.005,

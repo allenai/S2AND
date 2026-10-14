@@ -1716,6 +1716,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             name_counts_index_root=name_counts_index_root,
             arrow_stack=arrow_stack,
         )
+        # A misspelled dataset name must not silently fall back to block-local candidates.
+        if unknown_local := query_local_candidate_datasets - set(arrow_datasets):
+            raise ValueError(f"--query-local-candidate-dataset names absent datasets: {sorted(unknown_local)}")
         clusterer = load_clusterer(
             args.pairwise_model_path,
             n_jobs=int(args.n_jobs),
@@ -1839,6 +1842,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "feature_nan_policy": feature_nan_policy,
         "artifact_summary": artifact_summary,
         "component_scope": "block-local",
+        "query_local_candidate_datasets": sorted(query_local_candidate_datasets),
     }
     _write_json(output_dir / "linker_evaluation_report.json", result)
     work.cleanup()

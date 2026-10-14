@@ -260,6 +260,30 @@ def test_run_rejects_name_count_binding_before_materialization(
     assert not output_dir.exists()
 
 
+def test_run_rejects_unknown_query_local_dataset_before_model_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = {"features": ["f0"], "feature_count": 1, "params": {"n_estimators": 1}, "metrics": {}}
+    bundle = promoted_train.OfficialBundle(
+        root=(tmp_path / "source").resolve(), bundle_name="preflight", assets={}, models={}, expected_metrics={}
+    )
+    monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
+    monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
+    _stub_preflight(monkeypatch)
+    monkeypatch.setattr(promoted_train, "preflight_source_rows", lambda *_args, **_kwargs: (1, {"toy": object()}))
+    monkeypatch.setattr(
+        promoted_train, "load_clusterer", lambda *_args, **_kwargs: pytest.fail("misspelled dataset reached model load")
+    )
+    output_dir = tmp_path / "output"
+    args = promoted_train.build_parser().parse_args(
+        [*COMMON_TRAINING_ARGS, "--output-dir", str(output_dir), "--query-local-candidate-dataset", "tyo"]
+    )
+    with pytest.raises(ValueError, match="absent datasets"):
+        promoted_train.run(args)
+    assert not output_dir.exists()
+
+
 def test_arrow_rust_materialization_passes_dataset_handle_to_native_planner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

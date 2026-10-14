@@ -14,6 +14,13 @@ from typing import Any
 import numpy as np
 import pyarrow as pa
 
+CHECKPOINT_ROWS = 1024
+
+
+def checkpoint_due(stop: int, saved: int, rows: int) -> bool:
+    """Save progress after each 1,024 new rows for any batch size, and at completion."""
+    return stop - saved >= CHECKPOINT_ROWS or stop == rows
+
 
 def _save(path: Path, value: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -78,6 +85,7 @@ def encode_refresh(
             "models": models,
         }
         _save(progress_path, progress)
+    saved = completed
     for start in range(completed, len(rows), batch_size):
         batch = rows[start : start + batch_size]
         texts = [(row["title"] or "") + tokenizer.sep_token + (row["abstract"] or "") for row in batch]
@@ -100,7 +108,8 @@ def encode_refresh(
             raise ValueError("Invalid SPECTER2 output vectors")
         vectors[start : start + len(batch)] = output
         stop = start + len(batch)
-        if stop % 1024 == 0 or stop == len(rows):
+        if checkpoint_due(stop, saved, len(rows)):
+            saved = stop
             vectors.flush()
             progress.update(completed_rows=stop, elapsed_seconds=time.perf_counter() - started)
             _save(progress_path, progress)

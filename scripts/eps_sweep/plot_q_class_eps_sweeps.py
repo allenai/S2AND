@@ -156,7 +156,7 @@ def plot(args: argparse.Namespace) -> Path:
         0.075,
         0.012,
         f"Rows: eps_overall.tsv; scope=overall/all; weight={args.weight}. "
-        f"EPS labels at 0.05 steps: {label_dataset}. Stars use diagnostic accuracy.",
+        f"EPS labels at 0.05 steps: {label_dataset}. Stars use diagnostic accuracy. Within-subblock pairs only.",
         fontsize=8,
         color="#555555",
     )

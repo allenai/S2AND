@@ -122,6 +122,8 @@ Set `--reference-eps` to the actual initial EPS for another release.
 The diagnostic plot uses query/label weights to match the original recall/separation plot.
 Each star marks the highest tested diagnostic accuracy for its source.
 Stars do not select release EPS or maximize B3.
+The diagnostic plot excludes pairs from separate subblocks.
+Inspect their counts in `eps_boundary_pairs.tsv`.
 Use `--weight weight_query_class_balanced` for the previous equal-query view.
 Keep completed output directories immutable.
 Use a new output directory and the same verified distance-cache directory for a refined grid.

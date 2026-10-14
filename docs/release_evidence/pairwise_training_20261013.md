@@ -1,5 +1,8 @@
 # Version 1.3 pairwise fit and EPS selection
 
+This record describes the earlier fit without patents.
+The [patent-inclusive candidate](production_candidate_20261013.md) supersedes this model for the current release.
+
 The run root is `D:/local-unsynced/s2and_v1.3_train_20261012`.
 The frozen training source is `922d56195e0c7cd74684cad950b861b21e62e225`.
 The model-plan SHA-256 is `529c9dcc3eb657f21bc7396e11efb21e6831d5662ea1ba7e428485a54485e070`.

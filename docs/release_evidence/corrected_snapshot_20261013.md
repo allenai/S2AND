@@ -1,5 +1,8 @@
 # Corrected release snapshot
 
+This record describes the original preparation snapshot.
+The [candidate record](production_candidate_20261013.md) identifies the latest snapshot with corrected dev assignments and frozen identity tests.
+
 The corrected snapshot is ready for the next pairwise fit.
 No production model fit or S3 upload occurs in this preparation task.
 

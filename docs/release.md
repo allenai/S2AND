@@ -5,10 +5,10 @@ The Python and Rust package version is `1.0.0`.
 The next model and research snapshot version is `1.3`.
 Public Arrow and name-count data use format `1`.
 
-The current local model is a pairwise-only stage.
-A complete production release still requires an incremental fit, final evaluation, and publication.
-The next pairwise fit includes `inventors_s2and` and starts from the complete corrected snapshot.
-No published model or S3 location is declared here before publication.
+The current complete candidate includes the patent-inclusive pairwise fit and incremental fit.
+The [candidate record](release_evidence/production_candidate_20261013.md) gives metrics, dev/test roles, and remaining acceptance limits.
+A production release still requires final acceptance and publication.
+No final release model or S3 location is declared here before acceptance and publication.
 
 ## Release inputs
 
@@ -143,8 +143,15 @@ Do not compare historical rates from different data or split populations as a ma
 
 Run `train_linker_and_finalize.py` once against the calibrated model and snapshot.
 The command computes fresh features, fits the linker, writes a complete sibling, reloads it, and evaluates its declared test split.
-Retain the stratified test report separately from full-source diagnostic reports.
-Full-source diagnostics can include gate-calibration queries.
+The classic booster fits train rows.
+Both calibration splits select gate features and fit gate coefficients; they serve as dev populations.
+Retain existing manual dev labels after verified query-paper exposure exclusions.
+
+Prior development includes the inherited test population, so its stratified scores provide regression evidence.
+Full-source diagnostics can also include gate-calibration queries.
+Use [evaluate_incremental_gold.py](../scripts/verification/evaluate_incremental_gold.py) for frozen fresh identity cases through the complete model.
+Identity gold differs from manual safe-action labels.
+Keep these reports separate.
 
 The public loader requires the two pairwise prediction fixtures and complete incremental artifact.
 Evaluate pairwise, cluster, linker, parity, subblocking quality, and representative performance through the final contract.

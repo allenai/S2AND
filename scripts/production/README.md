@@ -126,6 +126,13 @@ The complete model includes the incremental booster, gate metadata, and target J
 The pairwise-only input remains unchanged.
 The linker binds the exact pairwise feature contract and both boosters.
 
+The fixed classic booster target uses 53 features and 675 trees.
+The booster fits train rows.
+Both `calibration_fit` and `calibration_check` select gate features and fit gate coefficients.
+Both splits serve as dev populations.
+Retain existing manual dev labels.
+Exclude verified query-paper exposure before gate calibration.
+
 The safe-action target is not universal identity gold.
 An abstention can indicate ambiguity or insufficient evidence.
 Recheck affected labels when query evidence or profile membership changes.
@@ -134,8 +141,12 @@ Added components can change other queries' features within the same block.
 
 Linker reports distinguish stratified test results from full-source diagnostics.
 The latter can include gate-calibration queries.
-Use the stratified test results for the declared held-out evaluation.
-Keep exposure annotations and inherited regression results separate from claims of independent test performance.
+Prior development includes the inherited test population.
+Its stratified test scores provide regression evidence.
+
+Use [evaluate_incremental_gold.py](../verification/evaluate_incremental_gold.py) for frozen fresh identity cases and the complete serialized model.
+Identity gold differs from manual safe-action labels.
+Keep their reports separate.
 
 ## Count artifacts
 
@@ -653,6 +664,8 @@ on a failed gate.
 Install the exact candidate wheels into an empty environment and run from
 outside the checkout. The path config must select the downloaded public-data
 root before Python imports `s2and`:
+
+The smoke command uses an 8 GiB budget. The common count index alone exceeds the previous 2 GB budget.
 
 ```powershell
 $DistRoot = "$RunRoot\stages\local-dist"

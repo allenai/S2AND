@@ -20,8 +20,9 @@ See [the inference contract](production_inference.md#complete-model-bundles).
 
 ## Dataset download
 
-The current common count index is available from PR 80's `canonical-v2-migration` branch.
-The complete model and research S3 release remain unpublished.
+The common count index and complete candidate model are available from PR 80's `canonical-v2-migration` branch.
+The model remains a release candidate. The research S3 release remains unpublished.
+The [candidate record](release_evidence/production_candidate_20261013.md) gives its results and limits.
 The release notes will identify the common Git ref, model path, research S3 prefix, and manifest hashes.
 Do not use an older public Arrow prefix with this runtime.
 Older manifests lack the required public format `1` contract.
@@ -31,7 +32,8 @@ Common repository paths for release `1.3` are:
 - `artifacts/common/v1.3/name_counts_index`
 - `artifacts/common/v1.3/production_model_v1.3`
 
-The complete model path receives the accepted model after its fit and evaluation.
+The complete model path contains the current candidate.
+The release notes will identify the accepted Git ref after final acceptance.
 Fetch the common assets at the Git ref declared by the release notes:
 
 ```bash

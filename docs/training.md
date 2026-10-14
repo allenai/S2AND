@@ -210,13 +210,20 @@ retrieval statistics for retained queries stay unchanged. The same identity
 authority is checked again before fitting, and diagnostics retain the early
 exclusion counts. Frozen test labels and features are not needed for this check.
 
-Linker reports distinguish two evaluation populations. The
-`stratified_eval_test_split.overall.test` result scores the held-out test queries
-and supplies the official release metrics. The `overall_s2and_eval`,
-`hwang_cleaned_eval`, and `overall_<dataset>_eval` results are full-source
-diagnostics: they can include queries used to calibrate the gate. Use the
-stratified test result when assessing held-out performance; the full-source
-diagnostics describe the broader evaluation-source population.
+The classic booster uses the fixed target.
+It fits train rows.
+Both `calibration_fit` and `calibration_check` select gate features and fit gate coefficients.
+Both splits serve as dev populations.
+Retain existing manual dev labels after verified query-paper exposure exclusions.
+
+The report's `evaluation_summary` contains stratified test results and full-source diagnostics.
+`stratified_eval_test_split.overall.test` reports inherited regression performance.
+Prior development includes this test population.
+The `overall_s2and_eval`, `hwang_cleaned_eval`, and `overall_<dataset>_eval` diagnostics can include gate-calibration queries.
+
+Use [evaluate_incremental_gold.py](../scripts/verification/evaluate_incremental_gold.py) for frozen fresh identity cases and the complete serialized model.
+Identity gold differs from manual safe-action labels.
+Keep identity and safe-action reports separate.
 
 After a complete bundle passes the release gates, reload it explicitly:
 

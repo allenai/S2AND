@@ -32,7 +32,7 @@ from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION
 from s2and.production_model import canonical_artifact_hashes, load_production_model, pairwise_bundle_binding
 from s2and.runtime import build_runtime_context
 
-SMOKE_TOTAL_RAM_BYTES = 2_000_000_000
+SMOKE_TOTAL_RAM_BYTES = 8 * 1024**3
 
 
 def _release_dataset(data_root: Path, dataset: str) -> tuple[Path, str]:

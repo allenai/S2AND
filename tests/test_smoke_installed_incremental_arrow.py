@@ -17,10 +17,11 @@ from tests.helpers import tiny_name_counts_tuple
 
 @pytest.fixture(autouse=True)
 def _stable_smoke_rss(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The common index makes RSS exceed the old 2 GB smoke budget.
     monkeypatch.setattr(
         memory_budget,
         "current_rss_bytes_best_effort",
-        lambda _total: (100_000_000, "test"),
+        lambda _total: (2_700_000_000, "test"),
     )
 
 

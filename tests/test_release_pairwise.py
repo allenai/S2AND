@@ -358,12 +358,14 @@ def test_prepare_run_rejects_undeclared_augmented_sources_before_writes(tmp_path
     assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}
 
 
+@pytest.mark.parametrize("split", ["train_pairs", "val_pairs"])
 @pytest.mark.parametrize("heldout_id", ["rt1", "ct1"])
 @pytest.mark.parametrize("unknown", [False, True], ids=["known", "unknown"])
 def test_prepare_run_checks_augmented_copies_of_heldout_signatures(
     tmp_path: Path,
     heldout_id: str,
     unknown: bool,
+    split: str,
 ) -> None:
     fixture = _release_fixture(tmp_path)
     # Rename the fixed-pair population without changing its otherwise disjoint pairs.
@@ -381,7 +383,11 @@ def test_prepare_run_checks_augmented_copies_of_heldout_signatures(
     baseline["populations"]["pairwise"]["augmented"]["pairs"] = _sha256(Path(pairwise["augmented"]["pairs"]))
     _write_json(fixture.baseline_record, baseline)
     fixture.payload["evaluation"]["baseline"]["sha256"] = _sha256(fixture.baseline_record)
-    Path(model["augmented"]["train_pairs"]).write_text(
+    for role, left in (("train_pairs", "random___safe1"), ("val_pairs", "random___safe2")):
+        Path(model["augmented"][role]).write_text(
+            f"signature_id_1,signature_id_2,label\n{left},random___safe3,1\n", encoding="utf-8"
+        )
+    Path(model["augmented"][split]).write_text(
         f"signature_id_1,signature_id_2,label\nrandom___{heldout_id},random___safe,1\n", encoding="utf-8"
     )
     _write_json(fixture.release, fixture.payload)
@@ -391,7 +397,8 @@ def test_prepare_run_checks_augmented_copies_of_heldout_signatures(
         release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
         assert (fixture.run_dir / "model_plan.json").is_file()
         return
-    with pytest.raises(ValueError, match="augmented training contains held-out 'random' signatures"):
+    population = "training" if split == "train_pairs" else "validation"
+    with pytest.raises(ValueError, match=f"augmented {population} contains held-out 'random' signatures"):
         release_pairwise.prepare_run(argparse.Namespace(release=fixture.release))
     assert {path.name for path in fixture.run_dir.iterdir()} == {"release.json"}
 

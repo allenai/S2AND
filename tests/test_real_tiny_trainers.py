@@ -297,3 +297,74 @@ def test_all_augmented_sources_are_checked_before_any_dataset_featurization(
         train_pairwise.train_pairwise_bundle(args)
     assert not plan.output_dir.exists()
     assert list(work_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("source_split", ["train", "validation"])
+def test_augmented_validation_copies_must_come_from_the_source_validation_split(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_split: str,
+) -> None:
+    data_dir = tmp_path / "data"
+    dataset_files = write_pairwise_dataset(data_dir)
+    args = pairwise_training_args(tmp_path, output_dir=tmp_path / "production_model_v9.9")
+    selection = ANDData(
+        signatures=str(dataset_files["signatures"]),
+        papers=str(dataset_files["papers"]),
+        clusters=str(dataset_files["clusters"]),
+        name="qian",
+        mode="train",
+        preprocess=False,
+        random_seed=args.random_seed,
+        name_counts_index=None,
+    )
+    train, val, _test = selection.split_cluster_signatures()
+    train_ids = [signature for members in train.values() for signature in members]
+    val_ids = [signature for members in val.values() for signature in members]
+    augmented_files = {"train_pairs": tmp_path / "augmented_train.csv", "val_pairs": tmp_path / "augmented_val.csv"}
+    augmented_files["train_pairs"].write_text(
+        f"signature_id_1,signature_id_2,label\nqian___{train_ids[0]},qian___{train_ids[1]},1\n", encoding="utf-8"
+    )
+    validation_source = train_ids if source_split == "train" else val_ids
+    augmented_files["val_pairs"].write_text(
+        f"signature_id_1,signature_id_2,label\nqian___{val_ids[0]},qian___{validation_source[-1]},1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        train_pairwise,
+        "_preflight_pairwise",
+        lambda _args: train_pairwise.PairwisePreflightPlan(
+            output_dir=args.output_dir,
+            release_version="9.9",
+            dataset_names=("qian",),
+            datasets={
+                "qian": ModelDataset(files=dataset_files, sha256=source_sha256(dataset_files)),
+                "augmented": ModelDataset(
+                    files=augmented_files,
+                    sha256={role: sha256_file(path) for role, path in augmented_files.items()},
+                ),
+            },
+            model_plan_sha256="0" * 64,
+            model_plan_content_sha256="1" * 64,
+            arrow_dirs={},
+            arrow_provenance_sha256={},
+            matrix_work_dir=tmp_path,
+            matrix_work_free_bytes=1_000_000_000,
+            total_ram_bytes=None,
+        ),
+    )
+
+    class GuardPassed(Exception):
+        pass
+
+    def stop_after_guard(**_kwargs: object) -> None:
+        raise GuardPassed
+
+    monkeypatch.setattr(train_pairwise, "load_packaged_artifact_authority", stop_after_guard)
+    if source_split == "train":
+        with pytest.raises(ValueError, match="Augmented validation contains 'qian' signatures outside its validation"):
+            train_pairwise.train_pairwise_bundle(args)
+    else:
+        with pytest.raises(GuardPassed):
+            train_pairwise.train_pairwise_bundle(args)
+    assert not args.output_dir.exists()

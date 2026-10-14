@@ -54,8 +54,9 @@ from s2and.production_training_contract import (  # noqa: E402
 from scripts.production.model.augmented_leakage import (  # noqa: E402
     require_declared_sources,
     require_training_members,
+    require_validation_members,
     source_members,
-    training_members_from_sources,
+    split_members_from_sources,
 )
 from scripts.production.model.unknown_signatures import (  # noqa: E402
     augmented_unknown_ids,
@@ -406,26 +407,37 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     unknown_inputs = {name: load_unknown_signatures(plan.datasets[name].files) for name in plan.dataset_names}
     unknown_ids = {name: source.ids for name, source in unknown_inputs.items()}
     augmented_members: dict[str, set[str]] = {}
+    augmented_validation_members: dict[str, set[str]] = {}
     if "augmented" in plan.datasets:
         unknown_ids["augmented"] = augmented_unknown_ids(unknown_ids)
-        augmented_pairs = pd.read_csv(plan.datasets["augmented"].files["train_pairs"])
-        pair_frame = _map_fixed_pair_labels(augmented_pairs, "augmented train")
-        augmented_members = source_members(
-            (str(left), str(right))
-            for left, right in pair_frame.iloc[:, :2].itertuples(index=False, name=None)
-            if str(left) not in unknown_ids["augmented"] and str(right) not in unknown_ids["augmented"]
-        )
-        require_declared_sources(augmented_members, plan.dataset_names, context="Augmented training")
-        del augmented_pairs, pair_frame
-    # This check prevents copies outside each source fit population from entering the model fit.
+        for role, population, members in (
+            ("train_pairs", "training", augmented_members),
+            ("val_pairs", "validation", augmented_validation_members),
+        ):
+            if role not in plan.datasets["augmented"].files:
+                continue
+            pair_frame = _map_fixed_pair_labels(
+                pd.read_csv(plan.datasets["augmented"].files[role]), f"augmented {population}"
+            )
+            members.update(
+                source_members(
+                    (str(left), str(right))
+                    for left, right in pair_frame.iloc[:, :2].itertuples(index=False, name=None)
+                    if str(left) not in unknown_ids["augmented"] and str(right) not in unknown_ids["augmented"]
+                )
+            )
+            require_declared_sources(members, plan.dataset_names, context=f"Augmented {population}")
+            del pair_frame
+    # Copies outside each source fit population must not enter the fit, and validation
+    # copies outside the source validation population must not select the model.
     for dataset_name in plan.dataset_names:
         dataset_input = plan.datasets[dataset_name]
-        if dataset_name in augmented_members:
-            require_training_members(
-                augmented_members,
-                dataset_name,
-                training_members_from_sources(dataset_name, dataset_input.files, random_seed=int(args.random_seed)),
+        if dataset_name in augmented_members or dataset_name in augmented_validation_members:
+            training, validation = split_members_from_sources(
+                dataset_name, dataset_input.files, random_seed=int(args.random_seed)
             )
+            require_training_members(augmented_members, dataset_name, training)
+            require_validation_members(augmented_validation_members, dataset_name, validation)
     artifact_authority = load_packaged_artifact_authority(
         name_counts_index_root=Path(args.name_counts_index_root),
     )
@@ -495,6 +507,11 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                     augmented_members,
                     dataset_name,
                     {signature_id for members in train_blocks.values() for signature_id in members},
+                )
+                require_validation_members(
+                    augmented_validation_members,
+                    dataset_name,
+                    {signature_id for members in val_blocks.values() for signature_id in members},
                 )
                 cluster_test_splits[dataset_name] = {
                     "block_membership_sha256": block_membership_sha256(anddata.get_blocks()),

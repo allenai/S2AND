@@ -714,19 +714,21 @@ def _check_release_leakage(
         unknown_ids = augmented_unknown_ids(
             {name: load_unknown_signatures(files).ids for name, files in model_paths.items()}
         )
-        augmented = source_members(
-            (left, right)
-            for left, right in _csv_pair_identities(
-                model_paths["augmented"]["train_pairs"], context="augmented train pairs"
-            )
-            if left not in unknown_ids and right not in unknown_ids
-        )
-        require_declared_sources(augmented, tuple(model_paths), context="Augmented training")
         heldout = {
             name: pair_signatures.get(name, set()) | block_signatures.get(name, set())
             for name in pair_signatures.keys() | block_signatures.keys()
         }
-        reject_heldout_members(augmented, heldout, context="Release preparation")
+        # Validation pairs select the model, so held-out copies there leak as surely as in training.
+        for split, population in (("train_pairs", "training"), ("val_pairs", "validation")):
+            augmented = source_members(
+                (left, right)
+                for left, right in _csv_pair_identities(
+                    model_paths["augmented"][split], context=f"augmented {population} pairs"
+                )
+                if left not in unknown_ids and right not in unknown_ids
+            )
+            require_declared_sources(augmented, tuple(model_paths), context=f"Augmented {population}")
+            reject_heldout_members(augmented, heldout, context="Release preparation", population=population)
     for name, files in model_paths.items():
         if set(files) == _FIXED_MODEL_ROLES:
             if name not in pair_identities:
@@ -1454,6 +1456,36 @@ def evaluate_clusters(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
+def _heldout_model_sources(path: Path) -> dict[str, dict[str, str]]:
+    """Read the snapshot's declared model sources as role digests."""
+
+    sources = _object(_read_json(path).get("sources"), label="inputs.sources", keys={"model", "evaluation"})
+    return {
+        name: {
+            role: _lowercase_sha256(
+                _object(spec, label=f"inputs.sources.model.{name}.{role}", keys={"path", "sha256"})["sha256"],
+                label=f"inputs.sources.model.{name}.{role}.sha256",
+            )
+            for role, spec in files.items()
+        }
+        for name, files in _named_objects(sources["model"], label="inputs.sources.model").items()
+    }
+
+
+def _require_heldout_model_sources(path: Path, plan: ModelPlan) -> None:
+    """Reject a snapshot whose declared model sources are not the verified fit plan."""
+
+    declared = _heldout_model_sources(path)
+    planned = {name: dict(dataset.sha256) for name, dataset in plan.datasets.items()}
+    # The plan has no uncertainty role; the training record binds that sidecar instead.
+    projected = {
+        name: {role: digest for role, digest in files.items() if role != "unknown_signatures"}
+        for name, files in declared.items()
+    }
+    if projected != planned:
+        raise ValueError("Held-out inputs declare model sources that differ from the verified model plan")
+
+
 def _heldout_input_specs(path: Path) -> tuple[str, dict[str, dict[str, tuple[Path, str]]]]:
     """Resolve the prepared snapshot's exact pair and block populations."""
 
@@ -1492,6 +1524,13 @@ def evaluate_heldout(args: argparse.Namespace) -> dict[str, Any]:
     model_dir = Path(args.model).resolve()
     model_plan = load_model_plan(inputs_path.parent / "model_plan.json")
     _training_config(model_dir, plan=model_plan, original_plan=_original_plan_arg(args))
+    _require_heldout_model_sources(inputs_path, model_plan)
+    verified = {name: _verified_files(files, label=f"heldout.{name}") for name, files in specs.items()}
+    _check_release_leakage(
+        {name: dict(dataset.files) for name, dataset in model_plan.datasets.items()},
+        {name: {"pairs": files["pairs"]} for name, files in verified.items()},
+        {name: {"blocks": files["blocks"]} for name, files in verified.items() if "blocks" in files},
+    )
     artifacts, clusterer = _evaluation_model(args)
     if clusterer.production_model_release_version != version:
         raise ValueError("Held-out inputs and complete model release versions differ")
@@ -1502,7 +1541,6 @@ def evaluate_heldout(args: argparse.Namespace) -> dict[str, Any]:
     if set(arrow_datasets) != set(specs):
         raise ValueError("Held-out Arrow collection differs from the declared evaluation datasets")
 
-    verified = {name: _verified_files(files, label=f"heldout.{name}") for name, files in specs.items()}
     unknown_sources = {name: load_unknown_signatures(files) for name, files in verified.items()}
     for name, files in verified.items():
         if "unknown_signatures" in files and unknown_sources[name].path != files["unknown_signatures"]:

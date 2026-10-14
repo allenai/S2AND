@@ -268,6 +268,8 @@ A model that records only plan bytes, such as v1.3, also needs `--original-model
 That file must hash to the recorded bytes and have the same content as the snapshot plan.
 For v1.3, use `D:/local-unsynced/s2and_v1.3_train_20261012/model_plan.json`.
 `bind-candidate` and `calibrate-eps` accept the same option.
+The command also requires `sources.model` to equal the verified plan.
+It rejects model or augmented train and validation members in the outer test populations.
 It uses saved production constraints for B3 prediction.
 Unknown signatures remain in prediction context but do not supply supervised scores.
 The report contains pairwise metrics, B3 metrics, counts, and input identities.

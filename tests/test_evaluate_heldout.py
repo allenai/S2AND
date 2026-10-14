@@ -348,3 +348,46 @@ def test_byte_only_training_record_requires_original_plan_proof(
     _write(plan_path, changed)
     with pytest.raises(ValueError, match="different model plan"):
         release_pairwise._require_trained_plan(record, load_model_plan(plan_path), original_plan=original)
+
+
+def test_heldout_rejects_model_sources_that_differ_from_the_plan(heldout_fixture: argparse.Namespace) -> None:
+    fixture = heldout_fixture
+    inputs = json.loads(fixture.inputs_json.read_text(encoding="utf-8"))
+    inputs["sources"]["model"]["qian"]["signatures"]["sha256"] = "0" * 64
+    _write(fixture.inputs_json, inputs)
+    with pytest.raises(ValueError, match="differ from the verified model plan"):
+        release_pairwise.evaluate_heldout(fixture)
+    assert not fixture.output_report.exists()
+
+
+def test_heldout_rejects_model_population_that_overlaps_the_outer_test(
+    heldout_fixture: argparse.Namespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = heldout_fixture
+    pairwise_root = fixture.inputs_json.parent
+    plan_path = pairwise_root / "model_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    model_files = {role: pairwise_root / spec["path"] for role, spec in plan["datasets"]["qian"].items()}
+    leaked = fixture.keep[0]
+    signatures = json.loads(model_files["signatures"].read_text(encoding="utf-8"))
+    signatures[leaked] = json.loads(fixture.files["signatures"].read_text(encoding="utf-8"))[leaked]
+    _write(model_files["signatures"], signatures)
+    clusters = json.loads(model_files["clusters"].read_text(encoding="utf-8"))
+    clusters["leaked"] = {"cluster_id": "leaked", "signature_ids": [leaked], "model_version": -1}
+    _write(model_files["clusters"], clusters)
+    inputs = json.loads(fixture.inputs_json.read_text(encoding="utf-8"))
+    for role in ("signatures", "clusters"):
+        digest = sha256_file(model_files[role])
+        plan["datasets"]["qian"][role]["sha256"] = digest
+        inputs["sources"]["model"]["qian"][role]["sha256"] = digest
+    _write(plan_path, plan)
+    _write(fixture.inputs_json, inputs)
+    # A real model for the altered plan does not exist; the overlap check itself stays real.
+    monkeypatch.setattr(release_pairwise, "_training_config", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        release_pairwise, "_pairwise_predictions", lambda *_args: pytest.fail("leaked inputs reach prediction")
+    )
+    with pytest.raises(ValueError, match=r"contains (test|model .qian.) signatures"):
+        release_pairwise.evaluate_heldout(fixture)
+    assert not fixture.output_report.exists()

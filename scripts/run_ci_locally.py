@@ -53,6 +53,8 @@ REPO = repo_root()
 PYTEST_REPORT_FLAGS = ["-ra"]
 # ty's Python version and rule ignores come from [tool.ty] in pyproject.toml.
 TY_PYTHON_PLATFORM = os.environ.get("S2AND_CI_TY_PLATFORM", "linux")
+# Release tooling lives below scripts/; scripts/archive keeps retired code outside type checks.
+ACTIVE_NESTED_SCRIPT_DIRS = ["scripts/eps_sweep", "scripts/production", "scripts/verification"]
 TY_SCRIPT_EXTRA_IGNORES = [
     "unresolved-reference",
     "unresolved-attribute",
@@ -188,17 +190,14 @@ def run_lint_job() -> None:
     run_uv(["run", "--no-project", "python", "scripts/sync_version.py", "--check"])
     run_uv(["run", "--no-project", "python", "scripts/sync_feature_schema.py", "--check"])
     run_uv(isolated_tool_args(ruff_requirement, "check", "s2and", "scripts", "tests"))
-    run_uv(isolated_tool_args(ruff_requirement, "format", "--check", "s2and"))
-    script_files = top_level_script_files()
-    if script_files:
-        run_uv(isolated_tool_args(ruff_requirement, "format", "--check", *script_files))
+    run_uv(isolated_tool_args(ruff_requirement, "format", "--check", "s2and", "scripts", "tests"))
 
 
 def run_ty_checks() -> None:
     platform_args = ["--python-platform", TY_PYTHON_PLATFORM]
     run_uv(uv_run_args("ty", "check", "s2and", *platform_args))
 
-    script_files = top_level_script_files()
+    script_files = [*top_level_script_files(), *ACTIVE_NESTED_SCRIPT_DIRS]
     if script_files:
         script_ignore_args: list[str] = []
         for rule in TY_SCRIPT_EXTRA_IGNORES:

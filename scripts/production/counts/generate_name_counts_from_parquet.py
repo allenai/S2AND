@@ -28,6 +28,14 @@ KINDS = ("first", "last", "first_last", "last_first_initial")
 _BATCH_ROWS = 100_000
 
 
+def _aggregate(con: duckdb.DuckDBPyConnection, query: str) -> tuple[Any, ...]:
+    """Return the single row that an aggregate query always produces."""
+    row = con.execute(query).fetchone()
+    if row is None:
+        raise RuntimeError(f"Aggregate query returned no row: {query}")
+    return row
+
+
 def _sha256(path: Path) -> str:
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
@@ -150,10 +158,11 @@ def build_name_counts_from_parquet(
                 con.execute(
                     "CREATE TABLE raw AS SELECT first_name,last_name,mention_count FROM read_parquet(?)", [files]
                 )
-            rows, mentions, bad = con.execute(
+            rows, mentions, bad = _aggregate(
+                con,
                 "SELECT count(*),sum(mention_count),count(*) FILTER "
-                "(WHERE mention_count IS NULL OR mention_count<1) FROM raw"
-            ).fetchone()
+                "(WHERE mention_count IS NULL OR mention_count<1) FROM raw",
+            )
             if bad or rows != expected_source_rows or mentions != expected_source_mentions:
                 raise ValueError(f"Source population differs: rows={rows}, mentions={mentions}, invalid_counts={bad}")
             report.update(source_rows=rows, source_mentions=mentions)
@@ -191,7 +200,7 @@ def build_name_counts_from_parquet(
                     "JOIN map_first f ON r.first_name IS NOT DISTINCT FROM f.first_name "
                     "JOIN map_last l ON r.last_name IS NOT DISTINCT FROM l.last_name"
                 )
-            if con.execute("SELECT count(*) FROM canonical").fetchone()[0] != rows:
+            if _aggregate(con, "SELECT count(*) FROM canonical")[0] != rows:
                 raise ValueError("Canonical map join changes the source population")
             specs = {
                 "first": ("cfirst", "length(cfirst)>1"),
@@ -210,9 +219,9 @@ def build_name_counts_from_parquet(
                         f"CREATE TABLE {table} AS SELECT {expression} AS key,sum(mention_count)::BIGINT AS count "
                         f"FROM canonical WHERE {gate} GROUP BY 1 HAVING sum(mention_count)>1"
                     )
-                count, total, minimum, maximum = con.execute(
-                    f"SELECT count(*),sum(count),min(count),max(count) FROM {table}"
-                ).fetchone()
+                count, total, minimum, maximum = _aggregate(
+                    con, f"SELECT count(*),sum(count),min(count),max(count) FROM {table}"
+                )
                 if count and (minimum <= 1 or maximum > 2**53):
                     raise ValueError(f"Index counts exceed the exact positive-integer range: {kind}")
                 hashed = output / f"hashed_{kind}.parquet"

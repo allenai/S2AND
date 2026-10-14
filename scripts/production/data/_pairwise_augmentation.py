@@ -49,6 +49,10 @@ def selected_papers(path: Path, needed: set[str]) -> dict:
     return result
 
 
+# The public opcode list gives the same map as the unstubbed pickletools.code2op.
+_PICKLE_OPCODES = {opcode.code: opcode for opcode in pickletools.opcodes}
+
+
 def source_vectors(path: Path) -> tuple[np.ndarray, np.ndarray]:
     """Map current large exports and load small float32 tuple exports."""
     spans, ops = [], []
@@ -57,7 +61,7 @@ def source_vectors(path: Path) -> tuple[np.ndarray, np.ndarray]:
             code = stream.read(1)
             if not code:
                 raise ValueError("Missing pickle STOP")
-            opcode = pickletools.code2op[code.decode("latin1")]  # ty: ignore[unresolved-attribute]
+            opcode = _PICKLE_OPCODES[code.decode("latin1")]
             if opcode.name in {"BINBYTES", "BINBYTES8", "BYTEARRAY8"}:
                 width = 4 if opcode.name == "BINBYTES" else 8
                 length = struct.unpack("<I" if width == 4 else "<Q", stream.read(width))[0]

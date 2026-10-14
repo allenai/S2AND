@@ -19,25 +19,42 @@ def _json(path: Path, payload: Any) -> None:
 
 
 def _row(
-    query: str, component: str = "same", label: int = 1, *, dataset: str = "pubmed",
-    view: str = "full", supervision: str = "labeled", base: str | None = None,
+    query: str,
+    component: str = "same",
+    label: int = 1,
+    *,
+    dataset: str = "pubmed",
+    view: str = "full",
+    supervision: str = "labeled",
+    base: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "dataset": dataset, "query_group_id": f"{dataset}:{query}:{view}",
-        "base_group_id": base or f"{dataset}:{query}", "query_signature_id": query,
-        "query_view": view, "candidate_component_key": component, "candidate_cluster_id": component,
-        "label": label, "retrieval_rank": 1, "supervision_type": supervision,
+        "dataset": dataset,
+        "query_group_id": f"{dataset}:{query}:{view}",
+        "base_group_id": base or f"{dataset}:{query}",
+        "query_signature_id": query,
+        "query_view": view,
+        "candidate_component_key": component,
+        "candidate_cluster_id": component,
+        "label": label,
+        "retrieval_rank": 1,
+        "supervision_type": supervision,
         "source_key": "s2and_eval" if dataset == "pubmed" else "hwang_eval",
-        "source_kind": "public_test", "split": "source", "query_first_token": "a",
+        "source_kind": "public_test",
+        "split": "source",
+        "query_first_token": "a",
     }
 
 
 def _fixture(root: Path) -> dict[str, Any]:
     source, gold, handoff = root / "source", root / "gold", root / "handoff"
     train_rows = [
-        _row("positive", label=0), _row("negative", label=1), _row("self", component="self", label=1),
+        _row("positive", label=0),
+        _row("negative", label=1),
+        _row("self", component="self", label=1),
         _row("partial", component="mixed", label=0),
-        _row("unknown_query", label=0), _row("bad_candidate"),
+        _row("unknown_query", label=0),
+        _row("bad_candidate"),
         _row("bad_candidate", component="unknown", label=0),
         _row("holdout", view="initial_only", base="old:holdout"),
         _row("error0", dataset="h_wang", view="initial_only", supervision="labeled"),
@@ -55,9 +72,12 @@ def _fixture(root: Path) -> dict[str, Any]:
     assignments = [
         {**{key: row[key] for key in ("query_group_id", "base_group_id", "dataset", "source_key")}, "split": split}
         for row, split in (
-            (cal_rows[0], "calibration_fit"), (eval_rows[0], "test"),
-            (eval_rows[1], "calibration_fit"), (eval_rows[2], "calibration_fit"),
-            (hwang_rows[0], "calibration_check"), (hwang_rows[1], "test"),
+            (cal_rows[0], "calibration_fit"),
+            (eval_rows[0], "test"),
+            (eval_rows[1], "calibration_fit"),
+            (eval_rows[2], "calibration_fit"),
+            (hwang_rows[0], "calibration_check"),
+            (hwang_rows[1], "test"),
             *[(row, "test") for row in hwang_rows[3:]],
         )
     ]
@@ -69,13 +89,17 @@ def _fixture(root: Path) -> dict[str, Any]:
         ):
             row = _row(query, view=view, base=base)
             eval_rows.append(row)
-            assignments.append({
-                **{key: row[key] for key in ("query_group_id", "base_group_id", "dataset", "source_key")},
-                "split": split,
-            })
+            assignments.append(
+                {
+                    **{key: row[key] for key in ("query_group_id", "base_group_id", "dataset", "source_key")},
+                    "split": split,
+                }
+            )
     files = {
-        "train_path": "labels/train.parquet", "classic_gate_source_path": "labels/calibration.parquet",
-        "s2and_eval_path": "labels/eval.parquet", "hwang_eval_path": "labels/hwang.parquet",
+        "train_path": "labels/train.parquet",
+        "classic_gate_source_path": "labels/calibration.parquet",
+        "s2and_eval_path": "labels/eval.parquet",
+        "hwang_eval_path": "labels/hwang.parquet",
     }
     for (_key, relative), rows in zip(files.items(), (train_rows, cal_rows, eval_rows, hwang_rows), strict=True):
         frame = pd.DataFrame(rows)
@@ -85,59 +109,99 @@ def _fixture(root: Path) -> dict[str, Any]:
         path = source / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         frame.to_parquet(path, index=False)
-    member_rows = [("same", "member"), ("mixed", "member"), ("mixed", "unknown_member"),
-                   ("unknown", "unknown_member"), ("self", "self")]
+    member_rows = [
+        ("same", "member"),
+        ("mixed", "member"),
+        ("mixed", "unknown_member"),
+        ("unknown", "unknown_member"),
+        ("self", "self"),
+    ]
     member_path = source / "components/pubmed.parquet"
     member_path.parent.mkdir(parents=True)
-    pd.DataFrame({"candidate_component_key": [row[0] for row in member_rows],
-                  "signature_id": [row[1] for row in member_rows]}).to_parquet(member_path, index=False)
+    pd.DataFrame(
+        {"candidate_component_key": [row[0] for row in member_rows], "signature_id": [row[1] for row in member_rows]}
+    ).to_parquet(member_path, index=False)
     split_path = source / "splits/seed13.csv"
     split_path.parent.mkdir(parents=True)
     pd.DataFrame(assignments).to_csv(split_path, index=False)
     pd.DataFrame({"base_group_id": ["pubmed:cal_fit"]}).to_csv(source / "splits/internal.csv", index=False)
     _json(source / "splits/summary.json", {"assignment_rows": len(assignments), "split_counts": {}})
-    _json(source / "bundle.json", {
-        "bundle_name": "test", "notes": "Test source.", "expected_metrics": {},
-        "assets": {
-            "featureless_rows": {"files": files},
-            "candidate_members": {"datasets": {"pubmed": "components/pubmed.parquet"}},
-            "splits": {"assignments_path": "splits/seed13.csv", "summary_path": "splits/summary.json"},
-        },
-        "models": {"classic": {
-            "classic_gate_internal_eval_base_groups_path": "splits/internal.csv",
-            "promoted_stratified_gate": {"calibration_splits": ["calibration_fit", "calibration_check"],
-                                         "test_split": "test"},
-            "stratified_eval_test_split": {
-                "assignments_path": "splits/seed13.csv", "summary_path": "splits/summary.json",
+    _json(
+        source / "bundle.json",
+        {
+            "bundle_name": "test",
+            "notes": "Test source.",
+            "expected_metrics": {},
+            "assets": {
+                "featureless_rows": {"files": files},
+                "candidate_members": {"datasets": {"pubmed": "components/pubmed.parquet"}},
+                "splits": {"assignments_path": "splits/seed13.csv", "summary_path": "splits/summary.json"},
             },
-        }},
-    })
-    same = ["member", "positive", "partial", "cal_fit", "eval_test", "holdout", "bad_candidate",
-            *[f"leak{index}" for index in range(18)]]
-    _json(gold / "pubmed/pubmed_clusters.json", {
-        "same": {"signature_ids": same}, "negative": {"signature_ids": ["negative"]},
-        "self": {"signature_ids": ["self"]}, "unknown": {"signature_ids": ["unknown_query", "unknown_member"]},
-    })
+            "models": {
+                "classic": {
+                    "classic_gate_internal_eval_base_groups_path": "splits/internal.csv",
+                    "promoted_stratified_gate": {
+                        "calibration_splits": ["calibration_fit", "calibration_check"],
+                        "test_split": "test",
+                    },
+                    "stratified_eval_test_split": {
+                        "assignments_path": "splits/seed13.csv",
+                        "summary_path": "splits/summary.json",
+                    },
+                }
+            },
+        },
+    )
+    same = [
+        "member",
+        "positive",
+        "partial",
+        "cal_fit",
+        "eval_test",
+        "holdout",
+        "bad_candidate",
+        *[f"leak{index}" for index in range(18)],
+    ]
+    _json(
+        gold / "pubmed/pubmed_clusters.json",
+        {
+            "same": {"signature_ids": same},
+            "negative": {"signature_ids": ["negative"]},
+            "self": {"signature_ids": ["self"]},
+            "unknown": {"signature_ids": ["unknown_query", "unknown_member"]},
+        },
+    )
     _json(gold / "pubmed/unknown.json", ["unknown_query", "unknown_member"])
     _json(handoff / "orcid_error_query_signatures.json", [["h_wang", f"error{index}"] for index in range(19)])
-    (handoff / "final_linker_review.jsonl").write_text('{}\n', encoding="utf-8")
-    (handoff / "SHA256SUMS").write_text("".join(
-        f"{sha256_file(handoff / name)}  {name}\n"
-        for name in ("final_linker_review.jsonl", "orcid_error_query_signatures.json")
-    ), encoding="utf-8")
+    (handoff / "final_linker_review.jsonl").write_text("{}\n", encoding="utf-8")
+    (handoff / "SHA256SUMS").write_text(
+        "".join(
+            f"{sha256_file(handoff / name)}  {name}\n"
+            for name in ("final_linker_review.jsonl", "orcid_error_query_signatures.json")
+        ),
+        encoding="utf-8",
+    )
     units = root / "units.json"
     _json(units, [{"kind": "big_block_orcid_group", "dataset": "h_wang", "pairs": [["restored", "same"]]}])
     return {
-        "source_root": source, "benchmark_labels_root": gold, "review_handoff": handoff, "review_units": units,
-        "unknown_filename": "unknown.json", "benchmark_datasets": ["pubmed"],
-        "output_root": root / "output", "report_path": root / "report.json",
+        "source_root": source,
+        "benchmark_labels_root": gold,
+        "review_handoff": handoff,
+        "review_units": units,
+        "unknown_filename": "unknown.json",
+        "benchmark_datasets": ["pubmed"],
+        "output_root": root / "output",
+        "report_path": root / "report.json",
     }
 
 
 def test_current_targets_masks_orcid_and_split_identity_contract(tmp_path: Path) -> None:
     args = _fixture(tmp_path)
-    original = {path.relative_to(args["source_root"]): sha256_file(path)
-                for path in args["source_root"].rglob("*") if path.is_file()}
+    original = {
+        path.relative_to(args["source_root"]): sha256_file(path)
+        for path in args["source_root"].rglob("*")
+        if path.is_file()
+    }
     report = prepare_linker_support(**args)
     output = args["output_root"]
     train = pd.read_parquet(output / "labels/train.parquet")
@@ -158,8 +222,9 @@ def test_current_targets_masks_orcid_and_split_identity_contract(tmp_path: Path)
     assert report["active_split_loader_counts"]["calibration_check"]["query_views"] == 1
     assert report["active_split_loader_counts"]["test"]["query_views"] == 2
     frozen = pd.read_csv(args["source_root"] / "splits/seed13.csv")
-    pd.testing.assert_frame_equal(active, frozen.loc[frozen["query_group_id"].isin(active["query_group_id"])]
-                                  .reset_index(drop=True))
+    pd.testing.assert_frame_equal(
+        active, frozen.loc[frozen["query_group_id"].isin(active["query_group_id"])].reset_index(drop=True)
+    )
     for relative, digest in original.items():
         assert sha256_file(args["source_root"] / relative) == digest
         if relative.parts[0] in {"components", "splits"}:

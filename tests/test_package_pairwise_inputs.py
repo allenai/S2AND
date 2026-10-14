@@ -38,7 +38,8 @@ def prepared(tmp_path: Path) -> Path:
         convert_release_arrow(root, "augmented", arrow, index)
     for filename, first, second in (("train_pairs.csv", "0-0", "0-1"), ("val_pairs.csv", "0-2", "0-3")):
         (root / "augmented" / filename).write_text(
-            f"signature_id_1,signature_id_2,label\nsignature-{first},signature-{second},1\n", encoding="utf-8",
+            f"signature_id_1,signature_id_2,label\nsignature-{first},signature-{second},1\n",
+            encoding="utf-8",
         )
     (root / "augmented" / "test_pairs.json").write_text(
         json.dumps([{"signature_id_1": "signature-1-0", "signature_id_2": "signature-1-1", "label": 1}]),
@@ -55,7 +56,9 @@ def test_package_preserves_sources_and_opens_after_copy(prepared: Path, tmp_path
     for mode, collection in result["arrow"].items():
         for name in ("qian", "augmented"):
             with ArrowDataset.open(
-                portable / collection / name, require_specter=True, require_name_counts_index=True,
+                portable / collection / name,
+                require_specter=True,
+                require_name_counts_index=True,
             ) as dataset:
                 assert dataset.name_counts_index is not None
             manifest = json.loads((portable / collection / name / "manifest.json").read_text())

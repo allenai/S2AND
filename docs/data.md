@@ -122,6 +122,12 @@ They do not prove independence from every past model or dataset.
 
 ## File formats and compatibility
 
+Giant-block EPS review uses the same research snapshot.
+Its seven giant Arrow datasets, profile memberships, dev labels, and initial-query source map need no second S3 copy.
+Calibration reference files and review outputs are derived sidecars.
+Keep them distinct from untouched final test data.
+See [giant-block EPS review](eps_calibration.md) for their production commands.
+
 Runtime records and vectors use Arrow IPC.
 Incremental support uses Parquet, JSON, and CSV where those formats form the current contract.
 Cluster labels remain JSON; fixed pairs and some split assignments remain CSV.

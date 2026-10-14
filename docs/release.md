@@ -40,6 +40,7 @@ Keep source snapshots and fit outputs in separate directories.
 - Require matched installed Python and Rust package versions for their internal interfaces.
 - Reject old unversioned model stages; rebuild or explicitly export them under the current contract.
 - Select pairwise hyperparameters and EPS from development data.
+- Review giant-block EPS curves before the final operating-point decision.
 - Keep test metrics separate from model selection.
 - Recompute incremental features after a pairwise booster or feature-contract change.
 - Retain incremental features after an EPS-only change when their other inputs stay fixed.
@@ -130,6 +131,7 @@ Do not silently change the scientific search space to satisfy this check.
 Calibrate EPS from validation data with `release_pairwise.py calibrate-eps`.
 Calibration writes a fresh calibrated sibling and preserves both boosters.
 Verify that only clusterer configuration and bundle metadata change.
+This benchmark selection supplies the initial EPS for giant-block review.
 
 Freeze the calibrated pairwise model, corrected incremental source, common assets, linker target, and fit resources.
 Recheck safe-action labels if query evidence or profile memberships change.
@@ -147,6 +149,12 @@ The command computes fresh features, fits the linker, writes a complete sibling,
 The classic booster fits train rows.
 Both calibration splits select gate features and fit gate coefficients; they serve as dev populations.
 Retain existing manual dev labels after verified query-paper exposure exclusions.
+
+Complete [giant-block EPS review](eps_calibration.md) before final release evaluation.
+Use ORCID-masked B3 curves for identity quality and the original safe-action plot as a diagnostic.
+The release owner selects the final EPS after both views and benchmark validation.
+Apply the reviewed EPS to a fresh complete model without another fit.
+Freeze that package before final acceptance tests.
 
 Prior development includes the inherited test population, so its stratified scores provide regression evidence.
 Full-source diagnostics can also include gate-calibration queries.

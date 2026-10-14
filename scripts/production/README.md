@@ -106,6 +106,10 @@ uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-e
 The EPS grid and minimum floors come from the model plan.
 Calibration uses validation B3 partitions and the fixed aggregation and tie-break policy.
 It writes a fresh calibrated sibling and preserves the boosters.
+This benchmark calibration supplies the initial EPS.
+Complete [giant-block EPS review](../../docs/eps_calibration.md) after the complete candidate exists and before final release evaluation.
+Use both ORCID-masked identity B3 and the safe-action diagnostic plot.
+Apply the manual EPS choice with `scripts/eps_sweep/apply_reviewed_eps.py`.
 An EPS-only change does not invalidate incremental features.
 A booster or feature-contract change requires new incremental features and a fresh linker fit.
 

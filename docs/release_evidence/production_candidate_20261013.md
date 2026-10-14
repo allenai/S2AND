@@ -13,6 +13,8 @@ Manifest SHA-256: `c7199d52e3ccdfb7fe24d745bd9f7bbbf86df453bc89b783015a623db99ee
 | Incremental booster | 53 | 675 |
 
 EPS is 0.55. The gate uses 240 derived features.
+EPS 0.55 is the benchmark-validation choice.
+[Giant-block EPS review](../eps_calibration.md) remains pending before final acceptance.
 Pairwise uses seven benchmarks and the existing non-patent augmented dataset.
 The verified reused fit has 804,716 train pairs, 60,064 validation pairs, and 50 trials per head.
 All 33 source-role hashes and eight Arrow provenance records match the selected inputs.

@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import pickle
 import sys
@@ -85,10 +86,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--arrow-root", type=Path, required=True)
+    parser.add_argument(
+        "--replay-bundle", default=None, help="Select a declared replay catalog from a combined snapshot."
+    )
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--gold-path", type=Path, default=None)
+    parser.add_argument("--score-mode", choices=["safe-action-proxy", "orcid-b3"], default="safe-action-proxy")
+    parser.add_argument(
+        "--reference-exclusions",
+        type=Path,
+        default=None,
+        help="Exclude whole ORCID groups named by held-out signature IDs.",
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--distance-cache-dir", type=Path, default=None)
     parser.add_argument("--n-jobs", type=int, default=8)
+    parser.add_argument("--total-ram-bytes", type=int, default=48 * 1024**3)
     parser.add_argument("--batching-threshold", type=int, default=5000)
     parser.add_argument("--pair-chunk-size", type=int, default=1_000_000)
     parser.add_argument(
@@ -166,6 +179,8 @@ def _validate_args(args: argparse.Namespace) -> None:
 
     if args.n_jobs <= 0:
         raise ValueError("--n-jobs must be > 0")
+    if args.total_ram_bytes <= 0:
+        raise ValueError("--total-ram-bytes must be > 0")
     if args.batching_threshold <= 0:
         raise ValueError("--batching-threshold must be > 0")
     if args.pair_chunk_size <= 0:
@@ -174,10 +189,16 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--eps-step must be > 0")
     if args.eps_stop < args.eps_start:
         raise ValueError("--eps-stop must be >= --eps-start")
+    if not all(math.isfinite(value) for value in (args.eps_start, args.eps_stop, args.eps_step)):
+        raise ValueError("EPS grid values must be finite")
+    if not all(math.isfinite(value) and 0 <= value <= 1 for value in _eps_values(args, None)):
+        raise ValueError("EPS values must be finite and within [0, 1]")
     if args.max_subblocks is not None and args.max_subblocks <= 0:
         raise ValueError("--max-subblocks must be > 0 when set")
     if args.compute_missing_dists and args.max_subblocks is None and not args.allow_full_run:
         raise ValueError("--compute-missing-dists requires --max-subblocks or explicit --allow-full-run")
+    if args.score_mode == "orcid-b3" and (args.use_orcid_subblocking or not args.suppress_orcid_constraints):
+        raise ValueError("ORCID-B3 requires hidden ORCID constraints and hidden ORCID subblocking")
 
 
 def _gold_path(args: argparse.Namespace) -> Path:
@@ -276,8 +297,12 @@ def _read_arrow_signatures_for_planning(
 
     selected_columns = required.union({"author_orcid"}.intersection(table.column_names))
     table = table.select(sorted(selected_columns))
-    target_values = pa.array(sorted(target_signature_ids), type=table["signature_id"].type)
     pc_any = cast(Any, pc)
+    excluded = getattr(args, "_excluded_signature_ids", frozenset())
+    if excluded:
+        excluded_values = pa.array(sorted(excluded), type=table["signature_id"].type)
+        table = table.filter(pc_any.invert(pc_any.is_in(table["signature_id"], value_set=excluded_values)))
+    target_values = pa.array(sorted(target_signature_ids), type=table["signature_id"].type)
     target_table = table.filter(pc_any.is_in(table["signature_id"], value_set=target_values))
     found_target_ids = {str(signature_id) for signature_id in target_table["signature_id"].to_pylist()}
     missing_target_ids = sorted(target_signature_ids - found_target_ids)
@@ -534,6 +559,7 @@ def _cache_metadata(
         "pair_chunk_size": int(args.pair_chunk_size),
         "use_orcid_subblocking": bool(args.use_orcid_subblocking),
         "suppress_orcid_constraints": bool(args.suppress_orcid_constraints),
+        "orcid_feature_ids_hidden": bool(args.suppress_orcid_constraints),
         "distance_source": "arrow-rust",
     }
 
@@ -635,6 +661,7 @@ def _load_cached_distance(path: Path, expected_metadata: Mapping[str, Any]) -> A
         "signature_ids_digest",
         "use_orcid_subblocking",
         "suppress_orcid_constraints",
+        "orcid_feature_ids_hidden",
     ]:
         if metadata.get(key) != expected_metadata.get(key):
             raise ValueError(f"Distance cache metadata mismatch for {path}: key={key}")
@@ -656,6 +683,7 @@ def _build_arrow_featurizer(
         name_tuples=None,
         preprocess=True,
         num_threads=int(clusterer.n_jobs),
+        use_orcid_id=not bool(clusterer.suppress_orcid),
     )
 
 
@@ -724,6 +752,7 @@ def _ensure_distance_caches(
                 {block_key: signature_ids},
                 rust_featurizer,
                 pair_chunk_size=int(args.pair_chunk_size),
+                total_ram_bytes=args.total_ram_bytes,
             )
             seconds = time.perf_counter() - started
             metadata = _cache_metadata(args, block_key, signature_ids, arrow_generation_id)
@@ -1046,6 +1075,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     _configure_runtime_environment(args)
 
     output_dir = _output_dir(args).resolve()
+    if any((output_dir / name).exists() for name in ("eps_b3.tsv", "eps_overall.tsv", "summary.json")):
+        raise FileExistsError("Use a fresh sweep output; reuse --distance-cache-dir for unchanged distances")
     output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -1058,11 +1089,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     from s2and.production_model import load_production_model
 
-    dataset_root = arrow_dataset_dir(args.arrow_root.resolve(), args.dataset)
-    gold = _load_gold(_gold_path(args))
-    gold = gold[gold["dataset"].astype(str) == str(args.dataset)].copy()
-    if gold.empty:
-        raise ValueError(f"No gold rows for dataset={args.dataset}")
+    dataset_root = arrow_dataset_dir(args.arrow_root.resolve(), args.dataset, args.replay_bundle)
+    gold = None
+    gold_selection: dict[str, Any] = {}
+    if args.score_mode == "safe-action-proxy":
+        gold = _load_gold(_gold_path(args))
+        gold = gold[gold["dataset"].astype(str) == str(args.dataset)].copy()
+        if gold.empty:
+            raise ValueError(f"No gold rows for dataset={args.dataset}")
+        gold_summary_path = _gold_path(args).parent / "summary.json"
+        if gold_summary_path.is_file():
+            gold_selection = json.loads(gold_summary_path.read_text(encoding="utf-8"))
 
     clusterer = load_production_model(args.model_path)
     clusterer.n_jobs = int(args.n_jobs)
@@ -1077,14 +1114,46 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         require_specter=True,
         require_name_counts_index=True,
     ) as arrow_dataset:
+        identity_reference = None
+        reference_stats: dict[str, Any] = {}
+        if args.score_mode == "orcid-b3":
+            from scripts.eps_sweep.orcid_b3 import planning_targets, read_reference
+
+            identity_reference, excluded, reference_stats = read_reference(
+                arrow_dataset, args.arrow_root.resolve(), args.dataset, args.reference_exclusions
+            )
+            args._excluded_signature_ids = excluded
+            gold = planning_targets(args.dataset, identity_reference)
+            reference_path = output_dir / "orcid_reference.parquet"
+            pd.DataFrame(
+                {"signature_id": list(identity_reference), "orcid": list(identity_reference.values())}
+            ).to_parquet(reference_path, index=False)
+            reference_stats["sha256"] = _hash_file(reference_path)
+        assert gold is not None
         target_signature_ids = set(gold["query_signature_id"].astype(str)) | set(
             gold["member_signature_id"].astype(str)
         )
         planning_state = _read_arrow_signatures_for_planning(args, arrow_dataset, target_signature_ids)
         selected_subblocks, plan = _plan_subblocks(args, clusterer, planning_state, gold, arrow_dataset)
         plan["model_eps"] = model_eps
+        plan["model_manifest_sha256"] = _hash_file(args.model_path / "manifest.json")
+        plan["score_mode"] = args.score_mode
+        plan["reference"] = reference_stats
+        plan["limited_run"] = (
+            args.max_subblocks is not None or gold_selection.get("max_queries_per_dataset") is not None
+        )
+        plan["gold_selection"] = {
+            key: gold_selection.get(key) for key in ("task_splits", "max_queries_per_dataset", "target_kind")
+        }
+        plan["reference_exclusions_sha256"] = (
+            _hash_file(args.reference_exclusions) if args.reference_exclusions else None
+        )
+        plan["use_orcid_subblocking"] = bool(args.use_orcid_subblocking)
+        plan["suppress_orcid_constraints"] = bool(args.suppress_orcid_constraints)
+        plan["total_ram_bytes"] = int(args.total_ram_bytes)
         plan["eps_values"] = _eps_values(args, model_eps)
-        plan["gold_path"] = str(_gold_path(args).resolve())
+        plan["gold_path"] = str(_gold_path(args).resolve()) if identity_reference is None else None
+        plan["gold_sha256"] = _hash_file(_gold_path(args)) if identity_reference is None else None
         plan["model_path"] = str(args.model_path.resolve())
         plan["arrow_root"] = str(args.arrow_root.resolve())
         plan["arrow_manifest"] = str(dataset_root / "manifest.json")
@@ -1097,7 +1166,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if args.dry_run:
             return {"plan": plan, "outputs": {"plan": str(output_dir / "plan.json")}}
 
-        cache_dir = output_dir / "distance_caches"
+        cache_dir = args.distance_cache_dir.resolve() if args.distance_cache_dir else output_dir / "distance_caches"
         cache_rows = _ensure_distance_caches(args, clusterer, selected_subblocks, cache_dir, arrow_dataset)
         pd.DataFrame(cache_rows).to_csv(output_dir / "distance_caches.tsv", sep="\t", index=False)
         linkage_blocks, linkage_rows = _build_linkage_blocks(
@@ -1112,26 +1181,39 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     signature_to_subblock = _signature_to_subblock(selected_subblocks)
     score_frames: list[pd.DataFrame] = []
     boundary_frames: list[pd.DataFrame] = []
+    b3_rows: list[dict[str, Any]] = []
     assignment_dir = output_dir / "assignments"
     if args.write_assignments:
         assignment_dir.mkdir(exist_ok=True)
     for eps in _eps_values(args, model_eps):
+        scores = None
         started = time.perf_counter()
         assignments = _cluster_assignments_for_eps(
             eps=eps,
             linkage_blocks=linkage_blocks,
         )
         seconds = time.perf_counter() - started
-        scores, boundary_scores = _score_assignments(gold, assignments, signature_to_subblock, eps)
-        scores["cluster_seconds"] = round(seconds, 6)
-        boundary_scores["cluster_seconds"] = round(seconds, 6)
-        score_frames.append(scores)
-        boundary_frames.append(boundary_scores)
+        if identity_reference is not None:
+            from scripts.eps_sweep.orcid_b3 import score_assignments
+
+            b3_row = score_assignments(identity_reference, assignments, eps)
+            b3_row["cluster_seconds"] = round(seconds, 6)
+            b3_rows.append(b3_row)
+            logging.info("eps=%s orcid_b3=%s coverage=%s", eps, b3_row["f1"], b3_row["reference_coverage"])
+        else:
+            scores, boundary_scores = _score_assignments(gold, assignments, signature_to_subblock, eps)
+            scores["cluster_seconds"] = round(seconds, 6)
+            boundary_scores["cluster_seconds"] = round(seconds, 6)
+            score_frames.append(scores)
+            boundary_frames.append(boundary_scores)
         if args.write_assignments:
             assignment_path = assignment_dir / f"assignments_eps_{str(eps).replace('.', 'p')}.parquet"
             pd.DataFrame(
                 {"signature_id": list(assignments.keys()), "cluster_id": list(assignments.values())}
             ).to_parquet(assignment_path, index=False)
+        if identity_reference is not None:
+            continue
+        assert scores is not None
         overall = scores[
             (scores["scope_type"] == "overall")
             & (scores["scope_value"] == "all")
@@ -1146,6 +1228,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             _loggable_metric(overall["false_merge_rate"]),
             seconds,
         )
+
+    if identity_reference is not None:
+        b3 = pd.DataFrame(b3_rows)
+        b3.to_csv(output_dir / "eps_b3.tsv", sep="\t", index=False)
+        summary = {
+            "plan": plan,
+            "distance_cache_rows": cache_rows,
+            "linkage_rows": linkage_rows,
+            "outputs": {"plan": str(output_dir / "plan.json"), "eps_b3": str(output_dir / "eps_b3.tsv")},
+        }
+        summary["plan_sha256"] = _hash_file(output_dir / "plan.json")
+        summary["score_sha256"] = _hash_file(output_dir / "eps_b3.tsv")
+        write_json(output_dir / "summary.json", summary)
+        return summary
 
     scores_all = pd.concat(score_frames, ignore_index=True)
     boundary_all = pd.concat(boundary_frames, ignore_index=True)
@@ -1171,6 +1267,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "eps_overall": str(output_dir / "eps_overall.tsv"),
         },
     }
+    summary["plan_sha256"] = _hash_file(output_dir / "plan.json")
+    summary["score_sha256"] = _hash_file(output_dir / "eps_overall.tsv")
     write_json(output_dir / "summary.json", summary)
     return summary
 

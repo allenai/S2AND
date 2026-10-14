@@ -49,7 +49,11 @@ Use [the data guide](../docs/data.md) for the common assets and corrected snapsh
 | Script | What it does |
 |---|---|
 | `eval_prod_models.py` | Evaluate an explicitly supplied SPECTER2 bundle on full, inventors_s2and, or mini datasets. Requires an explicit `--arrow-data-root` or `--json-data-root` (JSON also needs `--name-counts-index-root` and `--name-tuples-path`). Non-training evaluation uses the test blocks recorded in the bundle, rejects `--seed`, and auto-uses Arrow when complete artifacts exist; SPECTER1 is an explicit `--train` research comparison only. |
-| `eps_sweep/sweep_eps_on_linking_gold.py` | Research EPS sweep over linking gold; it is not the validation-only pairwise-stage selector/finalizer used by the release |
+| `eps_sweep/sweep_eps_on_linking_gold.py` | Giant-block release EPS curves with hidden-ORCID identity B3 or safe-action diagnostics; reuse native distances and linkage trees |
+| `eps_sweep/build_linking_eps_gold.py` | Expand active dev candidate labels into diagnostic pairs; exclude test queries and initial-query origins |
+| `eps_sweep/plot_b3_eps_sweeps.py` | Plot completed giant-block B3 curves for manual EPS review |
+| `eps_sweep/plot_q_class_eps_sweeps.py` | Plot the original recall/separation diagnostic for manual EPS review |
+| `eps_sweep/apply_reviewed_eps.py` | Apply the explicit reviewed EPS to a fresh complete model and preserve all trained weights |
 | `verification/validate_local_arrow_release.py` | Non-network local Arrow release-root smoke; checks manifests, checksum fields, required files, batch-index paths, replay bundle manifests, and `name_counts_index` targets without scanning large Arrow tables |
 | `verification/verify_production_model_distributions.py` | Verify wheel/sdist bytes, require canonical tuple/ORCID assets, and reject packaged default/model paths |
 | `verification/smoke_installed_incremental_arrow.py` | Installed-wheel synthetic canonical Arrow/linker smoke; the release runbook additionally requires one smoke with the real v1.3 bundle |

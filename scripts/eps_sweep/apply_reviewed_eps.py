@@ -9,9 +9,11 @@ import json
 import math
 import shutil
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -20,7 +22,32 @@ if str(PROJECT_ROOT) not in sys.path:
 from s2and._sha256 import sha256_file
 from s2and.production_bundle import _staged_production_bundle
 from s2and.production_model import load_production_model
-from scripts.eps_sweep.common import read_sweep_curve, write_json
+from scripts.eps_sweep.common import (
+    RELEASE_GIANT_DATASETS,
+    SINGLETON_INCLUSIVE_CURVE,
+    read_singleton_inclusive_curve,
+    read_sweep_curve,
+    write_json,
+)
+from scripts.eps_sweep.orcid_b3 import REFERENCE_POLICY, final_test_query_identities
+
+TestIdentityLoader = Callable[[Path, str], frozenset[str]]
+
+
+def _require_test_separated_reference(
+    sweep_root: Path, dataset: str, plan: dict[str, Any], test_identities: TestIdentityLoader
+) -> dict[str, Any]:
+    """Recheck that the reference used for the curve contains no final-test record."""
+    stats = plan.get("reference")
+    if not isinstance(stats, dict) or stats.get("reference_policy") != REFERENCE_POLICY:
+        raise ValueError(f"The EPS reference does not exclude final-test identities: {dataset}")
+    reference_path = sweep_root / dataset / "orcid_reference.parquet"
+    if sha256_file(reference_path) != stats.get("sha256"):
+        raise ValueError(f"The EPS reference changes after its sweep: {dataset}")
+    reference = set(pd.read_parquet(reference_path, columns=["signature_id"])["signature_id"].astype(str))
+    if overlap := reference & test_identities(Path(plan["arrow_root"]), dataset):
+        raise ValueError(f"The EPS reference contains final-test records: {dataset} {sorted(overlap)[:5]}")
+    return stats
 
 
 def apply_reviewed_eps(
@@ -31,13 +58,18 @@ def apply_reviewed_eps(
     eps: float,
     review_note: str,
     report_path: Path,
+    *,
+    release_datasets: Sequence[str] = RELEASE_GIANT_DATASETS,
+    test_identities: TestIdentityLoader = final_test_query_identities,
 ) -> dict[str, Any]:
-    """Reject stale or bounded curves and preserve all trained artifact bytes."""
+    """Reject stale, bounded, partial, or test-overlapping curves and preserve all trained artifact bytes."""
     source, output, report_path = source.resolve(), output.resolve(), report_path.resolve()
     if not math.isfinite(eps) or not 0 <= eps <= 1:
         raise ValueError("EPS must be finite and within [0, 1]")
     if not review_note.strip() or not datasets:
         raise ValueError("A manual review note and dataset list are required")
+    if len(set(datasets)) != len(datasets) or set(datasets) != set(release_datasets):
+        raise ValueError(f"Release EPS review requires exactly the frozen datasets: {sorted(release_datasets)}")
     if output.exists() or report_path.exists():
         raise FileExistsError("Use new model and review-report paths")
     if source in output.parents or output in source.parents:
@@ -73,10 +105,16 @@ def apply_reviewed_eps(
             raise ValueError(f"Unknown EPS score mode: {dataset}")
         if not curve[metric_columns].map(lambda value: math.isfinite(value) and 0 <= value <= 1).all().all():
             raise ValueError(f"Invalid EPS metrics: {dataset}")
+        reference = _require_test_separated_reference(sweep_root, dataset, plan, test_identities)
+        diagnostic = read_singleton_inclusive_curve(sweep_root, dataset, plan)
+        if not diagnostic["reference_coverage"].eq(1).all():
+            raise ValueError(f"Incomplete singleton-inclusive ORCID reference coverage: {dataset}")
         plans[dataset] = {
             "plan_sha256": sha256_file(plan_path),
             "scores_sha256": sha256_file(score_path),
+            "singleton_inclusive_scores_sha256": sha256_file(sweep_root / dataset / SINGLETON_INCLUSIVE_CURVE),
             "score_mode": plan["score_mode"],
+            "reference": reference,
         }
     load_production_model(source)
     manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))

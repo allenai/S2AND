@@ -34,12 +34,19 @@ Historical thresholds do not replace current release review.
 Treat EPS reference labels as development data.
 Freeze the giant dataset list, EPS grid, subblock size, input snapshot, and model before the sweep.
 Keep final test labels out of EPS selection.
-If final tests share giant identities, pass `--reference-exclusions` with their signature IDs, one per line.
-A listed signature excludes its entire ORCID group from the reference score.
-Its records remain available as inference context.
+The B3 sweep reads the snapshot's frozen final-test assignments.
+It resolves each initial-only query copy to its source record through the snapshot map.
+A final-test record excludes its entire ORCID group from both reference views.
+Excluded records remain available as inference context.
+`plan.json` reports the excluded groups, their signature count, and their fraction of ORCID references.
+The sweep stops if a final-test record remains in a reference.
 
 The identity view uses repeated ORCID references after normalization.
 It excludes the 14 reviewed mixed-identity groups and synthetic initial-query copies.
+It also excludes each record in `orcid_error_query_signatures.json`; the rest of that ORCID group remains.
+A second B3 curve, `eps_b3_with_singletons.tsv`, also keeps one-record ORCID groups.
+Those records cannot lose recall, but a wrong merge lowers their precision.
+That curve is diagnostic; the repeated view selects EPS.
 ORCID IDs remain hidden from native features, constraints, and subblocking repair.
 Unknown identities remain in inference context; B3 scores only known references.
 Full curves retain cross-subblock split errors.
@@ -120,6 +127,7 @@ Plots reject missing datasets, incomplete grids, and mixed models.
 ## Review and apply EPS
 
 Review B3 precision, recall, and F1 for every giant.
+Compare the repeated curves (solid) with the singleton-inclusive curves (dashed).
 Review the diagnostic plot and its subblock-boundary counts.
 Check full reference coverage and the matched benchmark validation curve.
 Verify booster hashes before reuse of a benchmark validation report.
@@ -134,6 +142,8 @@ uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
 ```
 
 The command rejects stale models, partial curves, hidden-label violations, and bounded smoke results.
+It requires exactly the seven frozen giants and both complete curves for each.
+It reads the final-test assignments again and rejects a reference that contains a final-test record.
 It requires identity B3 curves; the safe-action plot remains diagnostic evidence.
 It writes a fresh complete model and preserves every trained artifact byte.
 Only `clusterer.json` and `manifest.json` change.

@@ -28,6 +28,10 @@ from tests.test_production_model import _write_synthetic_linker
 def _curve(root: Path, model_hash: str = "a" * 64, limited: bool = False, mode: str = "orcid-b3") -> Path:
     dataset = root / "unit"
     dataset.mkdir(parents=True)
+    reference = dataset / "orcid_reference.parquet"
+    pd.DataFrame({"signature_id": ["r1", "r2"], "orcid": ["o", "o"], "repeated": [True, True]}).to_parquet(
+        reference, index=False
+    )
     plan = {
         "model_manifest_sha256": model_hash,
         "score_mode": mode,
@@ -35,8 +39,14 @@ def _curve(root: Path, model_hash: str = "a" * 64, limited: bool = False, mode: 
         "eps_values": [0.55, 0.65],
         "use_orcid_subblocking": False,
         "suppress_orcid_constraints": True,
+        "arrow_root": str(root / "snapshot"),
+        "reference": {"reference_policy": orcid_b3.REFERENCE_POLICY, "sha256": sha256_file(reference)},
     }
     write_json(dataset / "plan.json", plan)
+    diagnostic = dataset / "eps_b3_with_singletons.tsv"
+    pd.DataFrame(
+        {"eps": [0.55, 0.65], "precision": [0.9, 0.7], "recall": [0.8, 1], "f1": [0.85, 0.82], "reference_coverage": 1}
+    ).to_csv(diagnostic, sep="\t", index=False)
     if mode == "orcid-b3":
         scores = dataset / "eps_b3.tsv"
         pd.DataFrame(
@@ -60,9 +70,29 @@ def _curve(root: Path, model_hash: str = "a" * 64, limited: bool = False, mode: 
         ).to_csv(scores, sep="\t", index=False)
     write_json(
         dataset / "summary.json",
-        {"plan_sha256": sha256_file(dataset / "plan.json"), "score_sha256": sha256_file(scores)},
+        {
+            "plan_sha256": sha256_file(dataset / "plan.json"),
+            "score_sha256": sha256_file(scores),
+            "singleton_inclusive_score_sha256": sha256_file(diagnostic),
+        },
     )
     return dataset
+
+
+def _apply(
+    tmp_path: Path, source: Path, *, test_ids: frozenset[str] = frozenset(), datasets: tuple[str, ...] = ("unit",)
+):
+    return apply_reviewed_eps(
+        source,
+        tmp_path / "output",
+        tmp_path / "curves",
+        list(datasets),
+        0.65,
+        "Fixture review",
+        tmp_path / "review.json",
+        release_datasets=("unit",),
+        test_identities=lambda _root, _dataset: test_ids,
+    )
 
 
 def test_orcid_b3_matches_standard_metric_and_retains_boundary_splits() -> None:
@@ -91,6 +121,7 @@ def test_orcid_reference_normalizes_ids_and_excludes_copies(tmp_path: Path) -> N
     rows[2]["author_orcid"] = "https://orcid.org/0000-0002-1825-0097"
     rows.append({**rows[2], "signature_id": "bad_copy"})
     rows.append({**rows[0], "signature_id": "visibleq:copy"})
+    rows.append({**rows[0], "signature_id": "lonely", "author_orcid": "0000-0001-5000-0007"})
     paths = write_arrow_tables_bundle(tmp_path / "raw", {"signatures": pa.Table.from_pylist(rows, schema=table.schema)})
     write_test_arrow_artifact_manifest(tmp_path / "raw", {**raw, **paths})
     map_path = tmp_path / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
@@ -102,15 +133,49 @@ def test_orcid_reference_normalizes_ids_and_excludes_copies(tmp_path: Path) -> N
         + "\n",
         encoding="utf-8",
     )
+    other = "0000-0001-5000-0007"
     with ArrowDataset.open(Path(paths["signatures"]).parent) as dataset:
-        reference, clones, stats = orcid_b3.read_reference(dataset, tmp_path, "unit")
-        assert reference == {"q1": valid, "s1": valid}
-        assert clones == {"visibleq:copy"}
-        assert stats["excluded_mixed_orcid_rows"] == 2
-        exclusions = tmp_path / "holdout.txt"
-        exclusions.write_text("visibleq:copy\n", encoding="utf-8")
+        reference = orcid_b3.read_reference(
+            dataset, tmp_path, "unit", test_identities=frozenset(), error_records=frozenset()
+        )
+        assert reference.repeated == {"q1": valid, "s1": valid}
+        assert reference.with_singletons == {"q1": valid, "s1": valid, "lonely": other}
+        assert reference.excluded_copies == {"visibleq:copy"}
+        assert reference.stats["excluded_mixed_orcid_rows"] == 2
+        assert reference.stats["reference_policy"] == orcid_b3.REFERENCE_POLICY
+        # A final-test record removes its complete ORCID group, not only its own row.
+        separated = orcid_b3.read_reference(
+            dataset, tmp_path, "unit", test_identities=frozenset({"lonely"}), error_records=frozenset()
+        )
+        assert separated.with_singletons == {"q1": valid, "s1": valid}
+        assert separated.stats["excluded_final_test_orcid_groups"] == 1
+        assert separated.stats["excluded_final_test_group_signatures"] == 1
         with pytest.raises(ValueError, match="No repeated ORCID"):
-            orcid_b3.read_reference(dataset, tmp_path, "unit", exclusions)
+            orcid_b3.read_reference(
+                dataset, tmp_path, "unit", test_identities=frozenset({"q1"}), error_records=frozenset()
+            )
+        # A reviewed wrong ORCID removes only that record.
+        corrected = orcid_b3.read_reference(
+            dataset, tmp_path, "unit", test_identities=frozenset(), error_records=frozenset({"lonely"})
+        )
+        assert corrected.with_singletons == {"q1": valid, "s1": valid}
+        assert corrected.stats["excluded_reviewed_error_records"] == 1
+
+
+def test_final_test_identities_resolve_copies_and_reject_unmapped_or_missing_rows() -> None:
+    assignments = pd.DataFrame({"dataset": ["unit", "unit", "other"], "query_group_id": ["g1", "g2", "g3"]})
+    rows = pd.DataFrame(
+        {
+            "dataset": ["unit", "unit", "unit", "other"],
+            "query_group_id": ["g1", "g1", "g2", "g3"],
+            "query_signature_id": ["s1", "s1", "visibleq:c", "s9"],
+        }
+    )
+    assert orcid_b3.resolve_test_query_identities(rows, assignments, {"visibleq:c": "s2"}, "unit") == {"s1", "s2"}
+    with pytest.raises(ValueError, match="no source record"):
+        orcid_b3.resolve_test_query_identities(rows, assignments, {}, "unit")
+    with pytest.raises(ValueError, match="no label rows"):
+        orcid_b3.resolve_test_query_identities(rows[rows["query_group_id"] != "g2"], assignments, {}, "unit")
 
 
 def test_native_eps_featurizer_hides_orcid_ids(tmp_path: Path) -> None:
@@ -173,6 +238,53 @@ def test_review_rejects_diagnostic_or_bounded_curves(tmp_path: Path, mode: str, 
     (source / "manifest.json").write_text("{}", encoding="utf-8")
     _curve(tmp_path / "curves", sha256_file(source / "manifest.json"), limited, mode)
     with pytest.raises(ValueError, match=message):
+        _apply(tmp_path, source)
+
+
+@pytest.mark.parametrize(
+    "change", ["partial-datasets", "old-policy", "test-overlap", "stale-diagnostic", "no-diagnostic"]
+)
+def test_review_requires_frozen_test_separated_curves(tmp_path: Path, change: str) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    dataset = _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    test_ids = frozenset()
+    datasets: tuple[str, ...] = ("unit",)
+    message = {
+        "partial-datasets": "exactly the frozen datasets",
+        "old-policy": "does not exclude final-test",
+        "test-overlap": "contains final-test records",
+        "stale-diagnostic": "singleton-inclusive EPS scores change",
+        "no-diagnostic": "singleton-inclusive EPS scores change|No such file",
+    }[change]
+    if change == "partial-datasets":
+        datasets = ("unit", "unit")
+    elif change == "old-policy":
+        plan = json.loads((dataset / "plan.json").read_text(encoding="utf-8"))
+        del plan["reference"]["reference_policy"]
+        write_json(dataset / "plan.json", plan)
+        summary = json.loads((dataset / "summary.json").read_text(encoding="utf-8"))
+        summary["plan_sha256"] = sha256_file(dataset / "plan.json")
+        write_json(dataset / "summary.json", summary)
+    elif change == "test-overlap":
+        test_ids = frozenset({"r2"})
+    elif change == "stale-diagnostic":
+        path = dataset / "eps_b3_with_singletons.tsv"
+        path.write_bytes(path.read_bytes() + b"\n")
+    else:
+        (dataset / "eps_b3_with_singletons.tsv").unlink()
+    with pytest.raises((ValueError, FileNotFoundError), match=message):
+        _apply(tmp_path, source, test_ids=test_ids, datasets=datasets)
+    assert not (tmp_path / "output").exists()
+
+
+def test_release_review_requires_every_frozen_giant(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    with pytest.raises(ValueError, match="exactly the frozen datasets"):
         apply_reviewed_eps(
             source, tmp_path / "output", tmp_path / "curves", ["unit"], 0.65, "Fixture review", tmp_path / "review.json"
         )
@@ -192,10 +304,9 @@ def test_eps_only_update_preserves_real_complete_artifacts(tmp_path: Path) -> No
     ).bundle_dir
     before = {path.relative_to(source).as_posix(): path.read_bytes() for path in source.rglob("*") if path.is_file()}
     _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
-    output = tmp_path / "reviewed"
-    apply_reviewed_eps(
-        source, output, tmp_path / "curves", ["unit"], 0.65, "Synthetic fixture decision", tmp_path / "review.json"
-    )
+    output = tmp_path / "output"
+    report = _apply(tmp_path, source)
+    assert report["sweep_plans"]["unit"]["reference"]["reference_policy"] == orcid_b3.REFERENCE_POLICY
     after = {path.relative_to(output).as_posix(): path.read_bytes() for path in output.rglob("*") if path.is_file()}
     assert before.keys() == after.keys()
     assert {path for path in before if before[path] != after[path]} == {"clusterer.json", "manifest.json"}

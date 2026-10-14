@@ -41,6 +41,7 @@ from s2and.incremental_linking_training.classic import _drop_unlabeled_singleton
 from scripts.eps_sweep.common import (
     DEFAULT_GOLD_ROOT,
     DEFAULT_OUTPUT_ROOT,
+    SINGLETON_INCLUSIVE_CURVE,
     arrow_dataset_dir,
     sha1_text,
     write_json,
@@ -92,12 +93,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--gold-path", type=Path, default=None)
     parser.add_argument("--score-mode", choices=["safe-action-proxy", "orcid-b3"], default="safe-action-proxy")
-    parser.add_argument(
-        "--reference-exclusions",
-        type=Path,
-        default=None,
-        help="Exclude whole ORCID groups named by held-out signature IDs.",
-    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--distance-cache-dir", type=Path, default=None)
     parser.add_argument("--n-jobs", type=int, default=8)
@@ -1115,18 +1110,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         require_name_counts_index=True,
     ) as arrow_dataset:
         identity_reference = None
+        diagnostic_reference = None
         reference_stats: dict[str, Any] = {}
         if args.score_mode == "orcid-b3":
-            from scripts.eps_sweep.orcid_b3 import planning_targets, read_reference
-
-            identity_reference, excluded, reference_stats = read_reference(
-                arrow_dataset, args.arrow_root.resolve(), args.dataset, args.reference_exclusions
+            from scripts.eps_sweep.orcid_b3 import (
+                final_test_query_identities,
+                planning_targets,
+                read_reference,
+                reviewed_error_records,
             )
-            args._excluded_signature_ids = excluded
-            gold = planning_targets(args.dataset, identity_reference)
+
+            snapshot_root = args.arrow_root.resolve()
+            reference = read_reference(
+                arrow_dataset,
+                snapshot_root,
+                args.dataset,
+                test_identities=final_test_query_identities(snapshot_root, args.dataset),
+                error_records=reviewed_error_records(snapshot_root, args.dataset),
+            )
+            identity_reference = reference.repeated
+            diagnostic_reference = reference.with_singletons
+            reference_stats = reference.stats
+            args._excluded_signature_ids = reference.excluded_copies
+            # The singleton-inclusive reference contains the repeated one, so one plan covers both curves.
+            gold = planning_targets(args.dataset, diagnostic_reference)
             reference_path = output_dir / "orcid_reference.parquet"
             pd.DataFrame(
-                {"signature_id": list(identity_reference), "orcid": list(identity_reference.values())}
+                {
+                    "signature_id": list(diagnostic_reference),
+                    "orcid": list(diagnostic_reference.values()),
+                    "repeated": [signature in identity_reference for signature in diagnostic_reference],
+                }
             ).to_parquet(reference_path, index=False)
             reference_stats["sha256"] = _hash_file(reference_path)
         assert gold is not None
@@ -1145,9 +1159,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         plan["gold_selection"] = {
             key: gold_selection.get(key) for key in ("task_splits", "max_queries_per_dataset", "target_kind")
         }
-        plan["reference_exclusions_sha256"] = (
-            _hash_file(args.reference_exclusions) if args.reference_exclusions else None
-        )
         plan["use_orcid_subblocking"] = bool(args.use_orcid_subblocking)
         plan["suppress_orcid_constraints"] = bool(args.suppress_orcid_constraints)
         plan["total_ram_bytes"] = int(args.total_ram_bytes)
@@ -1182,6 +1193,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     score_frames: list[pd.DataFrame] = []
     boundary_frames: list[pd.DataFrame] = []
     b3_rows: list[dict[str, Any]] = []
+    diagnostic_rows: list[dict[str, Any]] = []
     assignment_dir = output_dir / "assignments"
     if args.write_assignments:
         assignment_dir.mkdir(exist_ok=True)
@@ -1199,6 +1211,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             b3_row = score_assignments(identity_reference, assignments, eps)
             b3_row["cluster_seconds"] = round(seconds, 6)
             b3_rows.append(b3_row)
+            assert diagnostic_reference is not None
+            diagnostic_rows.append(score_assignments(diagnostic_reference, assignments, eps))
             logging.info("eps=%s orcid_b3=%s coverage=%s", eps, b3_row["f1"], b3_row["reference_coverage"])
         else:
             scores, boundary_scores = _score_assignments(gold, assignments, signature_to_subblock, eps)
@@ -1232,14 +1246,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if identity_reference is not None:
         b3 = pd.DataFrame(b3_rows)
         b3.to_csv(output_dir / "eps_b3.tsv", sep="\t", index=False)
+        pd.DataFrame(diagnostic_rows).to_csv(output_dir / SINGLETON_INCLUSIVE_CURVE, sep="\t", index=False)
         summary = {
             "plan": plan,
             "distance_cache_rows": cache_rows,
             "linkage_rows": linkage_rows,
-            "outputs": {"plan": str(output_dir / "plan.json"), "eps_b3": str(output_dir / "eps_b3.tsv")},
+            "outputs": {
+                "plan": str(output_dir / "plan.json"),
+                "eps_b3": str(output_dir / "eps_b3.tsv"),
+                "eps_b3_with_singletons": str(output_dir / SINGLETON_INCLUSIVE_CURVE),
+            },
         }
         summary["plan_sha256"] = _hash_file(output_dir / "plan.json")
         summary["score_sha256"] = _hash_file(output_dir / "eps_b3.tsv")
+        summary["singleton_inclusive_score_sha256"] = _hash_file(output_dir / SINGLETON_INCLUSIVE_CURVE)
         write_json(output_dir / "summary.json", summary)
         return summary
 

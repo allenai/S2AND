@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,10 @@ from s2and.arrow_inputs import read_arrow_collection_root
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GOLD_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_gold"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_sweeps_arrow"
+# Release EPS review uses exactly these giant datasets; generic sweeps may use any dataset.
+RELEASE_GIANT_DATASETS = ("a_khan", "a_silva", "h_wang", "j_smith", "s_gupta", "s_lee", "s_park")
+# Diagnostic B3 curve that keeps one-record ORCID groups and their merge penalties.
+SINGLETON_INCLUSIVE_CURVE = "eps_b3_with_singletons.tsv"
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -75,3 +80,20 @@ def read_sweep_curve(root: Path, dataset: str, score_mode: str) -> tuple[dict[st
     if not curve[metrics].map(lambda value: math.isfinite(value) and 0 <= value <= 1).all().all():
         raise ValueError(f"Invalid EPS metrics: {dataset}")
     return plan, curve
+
+
+def read_singleton_inclusive_curve(root: Path, dataset: str, plan: Mapping[str, Any]) -> pd.DataFrame:
+    """Read the completed diagnostic curve that a release review must also inspect."""
+    dataset_root = root / dataset
+    summary = json.loads((dataset_root / "summary.json").read_text(encoding="utf-8"))
+    path = dataset_root / SINGLETON_INCLUSIVE_CURVE
+    if summary.get("singleton_inclusive_score_sha256") != sha256_file(path):
+        raise ValueError(f"The singleton-inclusive EPS scores change after completion: {dataset}")
+    curve = pd.read_csv(path, sep="\t")
+    if curve["eps"].duplicated().any() or set(curve["eps"].round(10)) != {
+        round(value, 10) for value in plan["eps_values"]
+    }:
+        raise ValueError(f"Incomplete singleton-inclusive EPS curve: {dataset}")
+    if not curve[["precision", "recall", "f1"]].map(lambda value: math.isfinite(value) and 0 <= value <= 1).all().all():
+        raise ValueError(f"Invalid singleton-inclusive EPS metrics: {dataset}")
+    return curve

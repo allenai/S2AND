@@ -5,6 +5,14 @@ This is the output of all accepted additions and corrections, not a reconstructi
 The [release process](../../docs/release.md) separates data preparation, fit, acceptance, and publication.
 The [data guide](../../docs/data.md) defines common Git LFS assets and the S3 research snapshot.
 
+Release `1.3` excludes patent data.
+Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
+Incremental inputs contain the 13 inherited non-patent datasets.
+The patent-free complete candidate passes fit, evaluation, and installed Arrow inference checks.
+The [candidate record](../../docs/release_evidence/production_candidate_20261013.md) gives model hashes, input populations, evaluation results, and remaining limits.
+The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
+The snapshot passes relocation checks.
+
 ## Corrected snapshot
 
 Create a fresh combined local root:
@@ -63,10 +71,8 @@ The matrix workspace must be empty and local.
 The trainer reads only model-development inputs; it does not require a historical baseline or an evaluation plan.
 
 The model plan declares dataset names instead of a fixed seven-source set.
-It can include `inventors_s2and` with the benchmark datasets and augmented fixed pairs.
-The current patents snapshot has 2,500 blocks, 41,468 signatures, and 41,316 papers.
-Its block split can share papers; it is not whole-paper independent.
-Existing augmented records remain unchanged for the next patents-inclusive fit.
+The current release plan excludes `inventors_s2and`.
+Existing augmented records derive from non-patent sources and remain part of release `1.3`.
 
 Use `--help` for pair-count, search, and seed options.
 `--n-jobs` also sets `OMP_NUM_THREADS` for the run.
@@ -154,7 +160,8 @@ Reuse unchanged common assets.
 Small tuple and ORCID files remain in normal Git and the wheel.
 The binary name-count index uses Git LFS and remains outside the wheel.
 Release `1.3` uses `artifacts/common/v1.3/name_counts_index`.
-The accepted complete model uses `artifacts/common/v1.3/production_model_v1.3`.
+The complete model target is `artifacts/common/v1.3/production_model_v1.3`.
+This path contains the verified patent-free candidate. Final release acceptance remains pending.
 See [the count producers](counts/README.md) for source columns, workload bounds, and native index construction.
 
 The reviewed tuple source reproduces the canonical artifact byte-for-byte:

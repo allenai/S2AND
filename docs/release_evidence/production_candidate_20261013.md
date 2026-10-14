@@ -1,62 +1,60 @@
-# Patent-inclusive production candidate
+# Patent-free version 1.3 production candidate
 
-The complete candidate is available in PR 80. Final release acceptance remains open.
-Run root: `D:/local-unsynced/s2and_v1.3_patents_train_20261013`.
-Resources: 20 jobs, 128 GiB, no paid API.
-Source commits: pairwise `5806868`; incremental/evaluation `92718a8`; smoke fix `1ffe94f`.
-
+Release `1.3` excludes patent data from pairwise and incremental supervision.
+This candidate replaces the patent-inclusive package from commit `7e183c1`.
 The repository model is `artifacts/common/v1.3/production_model_v1.3`.
-Its 11 files match the evaluated model byte for byte: 38,879,902 bytes.
-Manifest SHA-256: `d60b4fea7d480e4a2e7f2cd6d8d82f5c96261f613fe2ba663a49fe466f039e97`.
+Its 11 files total 25,958,235 bytes and match the evaluated package.
+Manifest SHA-256: `c7199d52e3ccdfb7fe24d745bd9f7bbbf86df453bc89b783015a623db99eed9f`.
 
 | Component | Features | Saved trees |
 | --- | ---: | ---: |
-| Main pairwise | 33 | 708 |
-| Nameless pairwise | 17 | 922 |
+| Main pairwise | 33 | 1,600 |
+| Nameless pairwise | 17 | 238 |
 | Incremental booster | 53 | 675 |
 
-The gate selects 240 derived features. EPS is 0.62.
-Pairwise uses 904,716 train pairs and 70,064 validation pairs across nine sources, with 50 trials per head.
-Incremental uses 1,454,422 rows, with 99,545 positives. It has no patent incremental train or dev tasks.
+EPS is 0.55. The gate uses 240 derived features.
+Pairwise uses seven benchmarks and the existing non-patent augmented dataset.
+The verified reused fit has 804,716 train pairs, 60,064 validation pairs, and 50 trials per head.
+All 33 source-role hashes and eight Arrow provenance records match the selected inputs.
+Both boosters retain their original bytes and fit records.
 
-Use `D:/local-unsynced/s2and_release_inputs_20261013/ready/complete_datasets_clean_calibration` for the current corrected snapshot.
-Its 661 files total 40,442,140,813 bytes. S3 research excludes the common index: 656 files, 38,049,114,397 bytes.
-The dev treatment excludes 662 fit and 674 check views through verified query-paper exposure.
-The remaining 4,946 fit and 4,941 check views both select or fit the gate.
-Excluded views remain outside booster fit. All labels and memberships remain unchanged.
+Incremental uses 13 non-patent datasets, 1,454,422 train rows, and 99,545 positive rows.
+Dev retains 4,946 fit queries and 4,941 check queries. Both dev groups fit or select the gate.
+The source snapshot preserves 4,051 initial-query origins.
+The trainer excludes each origin record from its derived query's candidate profiles.
+Two matched native feature checks pass within `1e-5`; they do not establish universal parity.
 
-The fresh identity test freezes before candidate scores: 396 positive and 303 author-absent cases.
-Patents supply 547 contexts from 368 unique queries. Profiles use corrected gold and original names.
-Identity gold differs from manual safe-action targets. Arnetminer and PubMed have no eligible fresh cases.
-
-| Fresh source | Correct links / positives | False links / author-absent cases |
-| --- | ---: | ---: |
-| AMiner | No positive cases | 0 / 13 |
-| INSPIRE | 61 / 70 | 0 / 6 |
-| Patents | 286 / 292 | 20 / 255 |
-| KISTI | 5 / 8 | 2 / 12 |
-| QIAN | 14 / 14 | 0 / 6 |
-| zbMATH | 11 / 12 | 2 / 11 |
-
-All 699 cases complete: 19 false abstentions, 24 false links, no wrong-candidate links.
-Keep these cases as tests. Use separate patent dev tasks for further changes.
-The screen covers declared model/dev papers, known authors, and exact titles; other aliases and common-asset influence remain unverified.
-
-| Other population | Result |
+| Evaluation population | Result |
 | --- | --- |
-| Validation AUROC, main / nameless | 0.993110 / 0.965091 |
-| Validation signature-weighted B3 F1 | 0.957430 |
-| Outer pairwise AUROC / macro F1 | 0.989617 / 0.955113 |
-| Outer B3 F1, signature-weighted / dataset-macro | 0.959267 / 0.955125 |
-| Inherited accuracy / link precision / recall | 0.968165 / 0.992191 / 0.971857 |
-| Inherited errors, 10,837 queries | 267 false abstentions; 58 false links; 20 wrong-candidate links |
+| Fixed pairwise test, 86,142 pairs | AUROC 0.989868; macro F1 0.954902 |
+| Seven benchmark test sets, 2,157 blocks | Signature-weighted B3 F1 about 0.961 |
+| Inherited test, 10,837 queries | Accuracy 0.965304; link precision 0.991275; link recall 0.969210 |
+| Inherited errors | 289 false abstentions; 62 false links; 25 wrong-candidate links |
+| Retained identity regression, 152 cases | 90/104 correct links; 47/48 correct abstentions; no wrong-candidate links |
 
-Outer evaluation uses 96,142 pairs, 2,407 blocks, and 78,970 signatures; 1,566 unknown signatures remain in inference context.
-These block splits share some papers. Inherited incremental scores provide regression evidence because prior development includes that test population.
+The standard cluster report uses dataset metrics rounded to three decimal places.
+Cluster inference retains 1,566 unknown signatures; scores use 72,853 known signatures.
+Some block splits share papers. They do not establish whole-paper isolation.
+Prior development and score inspection include these incremental test populations.
+These tests supply regression evidence rather than independent release confirmation.
+Identity gold differs from manual safe-action labels.
+The previous recorded inherited accuracy is 0.968165, with an older query-feature treatment and patent-inclusive pairwise scores.
+These two recorded rates do not isolate the effect of patent removal.
 
-The main booster uses the general native score path. Installed candidate wheels pass bulk and incremental Arrow inference outside the checkout.
-The smoke budget is 8 GiB; its former 2 GB budget fails below actual RSS.
-All nine diagnostic runtime requests preserve profiles and signatures.
-Default constraint checks pass for 64 queries, 400 profiles, and 4,726 seeds: 7.518 seconds, 3.77 GiB peak RSS.
-Times exclude model load and Arrow open. They do not establish an improvement or whole-block performance.
-Formal acceptance and S3/PyPI publication remain pending.
+The corrected snapshot is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
+It has 613 files and 40,268,461,989 logical bytes, including one shared count index.
+The S3 research payload excludes that index: 608 files and 37,875,435,573 bytes.
+Large immutable files share physical bytes with the preserved preparation snapshot through hard links.
+All operational paths resolve inside the package after relocation.
+The retained external gold file contains 152 cases with valid block, query, and member references.
+
+The fit exits zero in 73 minutes 40 seconds. Peak trainer RSS is 11.784 GiB.
+The approved bounds are 20 cores and 128 GiB; no paid API is used.
+The complete package reloads and passes held-out evaluation and installed bulk/incremental Arrow inference.
+Installed inference uses the existing matching Python and Rust runtime outside the checkout.
+These small runtime checks do not establish latency for large blocks.
+
+Run root: `D:/local-unsynced/s2and_incremental_fresh_20261014`.
+Exact commands: `nonpat_commands.json`. Reports and process records remain under `reports`, `stages`, and `logs`.
+The original patent research outputs remain outside the release payload.
+Final release acceptance and S3/PyPI publication remain pending.

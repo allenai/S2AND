@@ -16,3 +16,20 @@ def test_common_model_json_bytes_match_manifest() -> None:
             if Path(relative_path).suffix == ".json":
                 artifact_path = manifest_path.parent / relative_path
                 assert hashlib.sha256(artifact_path.read_bytes()).hexdigest() == expected_sha256, artifact_path
+
+
+def test_v13_pairwise_source_population() -> None:
+    """Keep the version 1.3 artifact within the approved source population."""
+    model_root = Path(__file__).resolve().parents[1] / "artifacts" / "common" / "v1.3" / "production_model_v1.3"
+    config_path = model_root / "reproducibility" / "pairwise_training_config.json"
+    config = json.loads(config_path.read_bytes())
+    assert config["source_dataset_names"] == [
+        "aminer",
+        "arnetminer",
+        "inspire",
+        "kisti",
+        "pubmed",
+        "qian",
+        "zbmath",
+        "augmented",
+    ]

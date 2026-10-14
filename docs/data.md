@@ -20,9 +20,13 @@ See [the inference contract](production_inference.md#complete-model-bundles).
 
 ## Dataset download
 
-The common count index and complete candidate model are available from PR 80's `canonical-v2-migration` branch.
-The model remains a release candidate. The research S3 release remains unpublished.
-The [candidate record](release_evidence/production_candidate_20261013.md) gives its results and limits.
+The common count index is available from PR 80's `canonical-v2-migration` branch.
+Release `1.3` excludes patent data.
+Its pairwise data contains eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
+Its incremental data contains the 13 inherited non-patent datasets.
+The patent-free complete candidate passes fit, evaluation, and installed Arrow inference checks.
+The [candidate record](release_evidence/production_candidate_20261013.md) gives its model hashes, input populations, evaluation results, and remaining limits.
+The research S3 release remains unpublished.
 The release notes will identify the common Git ref, model path, research S3 prefix, and manifest hashes.
 Do not use an older public Arrow prefix with this runtime.
 Older manifests lack the required public format `1` contract.
@@ -32,7 +36,7 @@ Common repository paths for release `1.3` are:
 - `artifacts/common/v1.3/name_counts_index`
 - `artifacts/common/v1.3/production_model_v1.3`
 
-The complete model path contains the current candidate.
+The complete model path contains the verified patent-free candidate.
 The release notes will identify the accepted Git ref after final acceptance.
 Fetch the common assets at the Git ref declared by the release notes:
 
@@ -75,6 +79,12 @@ Dataset manifests use portable paths to the one common index.
 The release publisher must exclude common assets from the S3 research upload.
 A standalone local export can contain its own index for transfer.
 Such an export is not the canonical combined publication.
+
+The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
+The snapshot passes relocation checks.
+Its 613 files total 40,268,461,989 logical bytes, including one common count index.
+The S3 research payload excludes that index: 608 files and 37,875,435,573 bytes.
+Patent records and research task packets remain outside the release inputs.
 
 ## Corrected source records
 

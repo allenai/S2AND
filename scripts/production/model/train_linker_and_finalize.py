@@ -13,7 +13,7 @@ import tempfile
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +107,7 @@ class ArrowRustDatasetContext:
     cluster_seeds_require: dict[str, str]
     cluster_seeds_disallow: frozenset[tuple[str, str]]
     max_block_component_size: int
+    initial_query_sources: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -288,6 +289,7 @@ def _clean_arrow_rust_structural_rows(
     query_ids_before = set(rows["query_group_id"].astype(str))
     positive_query_ids_before = set(rows.loc[labels == 1, "query_group_id"].astype(str))
     dataset_summaries: list[dict[str, Any]] = []
+    initial_query_sources = _load_initial_query_sources(source_bundle.root)
 
     for dataset_name, dataset_rows in rows.groupby(rows["dataset"].astype(str), sort=False):
         membership = _arrow_component_membership_summary(
@@ -299,6 +301,8 @@ def _clean_arrow_rust_structural_rows(
         local = dataset_rows[["candidate_component_key", "query_signature_id", "label"]].copy()
         local["candidate_component_key"] = local["candidate_component_key"].astype(str)
         local["query_signature_id"] = local["query_signature_id"].astype(str)
+        origins = initial_query_sources.get(str(dataset_name), {})
+        local["query_signature_id"] = local["query_signature_id"].map(origins).fillna(local["query_signature_id"])
         local["_global_index"] = dataset_rows.index.to_numpy(dtype=np.int64)
         local = local.merge(membership, on="candidate_component_key", how="left", validate="many_to_one")
         if local["_component_member_count"].isna().any():
@@ -391,6 +395,25 @@ def _component_member_ids_by_key(path: Path) -> dict[str, tuple[str, ...]]:
     for component_key, group in members.groupby("candidate_component_key", sort=False):
         out[str(component_key)] = tuple(str(value) for value in group.sort_values("member_index")["signature_id"])
     return out
+
+
+def _load_initial_query_sources(root: Path) -> dict[str, dict[str, str]]:
+    """Read source identities for derived initial-only query records."""
+    path = root / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
+    if not path.exists():
+        return {}
+    sources: dict[str, dict[str, str]] = {}
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        row = json.loads(line)
+        keys = ("dataset", "source_query_signature_id", "initial_query_signature_id")
+        if not isinstance(row, dict) or any(not isinstance(row.get(key), str) or not row[key] for key in keys):
+            raise ValueError(f"Invalid initial-query source map row: {path}:{line_number}")
+        dataset_sources = sources.setdefault(row["dataset"], {})
+        clone = row["initial_query_signature_id"]
+        if clone in dataset_sources:
+            raise ValueError(f"Duplicate initial-query source map identity: {row['dataset']}/{clone}")
+        dataset_sources[clone] = row["source_query_signature_id"]
+    return sources
 
 
 def _load_arrow_seed_constraints(
@@ -525,6 +548,7 @@ def _build_arrow_rust_dataset_context(
         cluster_seeds_require=cluster_seeds_require,
         cluster_seeds_disallow=cluster_seeds_disallow,
         max_block_component_size=int(max_block_component_size),
+        initial_query_sources=_load_initial_query_sources(source_bundle.root).get(dataset_name, {}),
     )
 
 
@@ -842,11 +866,30 @@ def _materialize_arrow_rust_dataset_rows(
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
     retrieval_top_k: int = DEFAULT_RETRIEVAL_TOP_K,
+    query_local_candidates: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any], np.ndarray]:
     started = time.perf_counter()
     dataset_name = context.dataset_name
     source_rows = rows.reset_index(drop=True).copy()
     source_row_count = len(source_rows)
+    component_members = context.component_members
+    if query_local_candidates:
+        if source_rows["query_group_id"].nunique() != 1:
+            raise ValueError("Query-local candidate materialization requires one query group")
+        component_keys = dict.fromkeys(source_rows["candidate_component_key"].astype(str))
+        component_members = {key: context.component_members[key] for key in component_keys}
+    query_ids = set(source_rows["query_signature_id"].astype(str))
+    query_origins = {
+        query: context.initial_query_sources[query] for query in query_ids if query in context.initial_query_sources
+    }
+    removed_queries = set(query_origins.values())
+    if any(removed_queries.intersection(members) for members in component_members.values()):
+        if source_rows["query_group_id"].nunique() != 1:
+            raise ValueError("Origin-query exclusion requires one query group")
+        component_members = {
+            key: tuple(member for member in members if member not in removed_queries)
+            for key, members in component_members.items()
+        }
     rust_module = feature_port._require_rust_runtime()  # noqa: SLF001
     plan_fn = rust_module.raw_arrow_labeled_candidate_plan
 
@@ -862,7 +905,7 @@ def _materialize_arrow_rust_dataset_rows(
             candidate_rows["query_group_id"].astype(str).tolist(),
             candidate_rows["candidate_component_key"].astype(str).tolist(),
             stored_ranks.tolist(),
-            context.component_members,
+            component_members,
             orcid_enabled=not PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
             num_threads=max(1, int(n_jobs)),
             max_exemplars=int(max_exemplars),
@@ -893,16 +936,25 @@ def _materialize_arrow_rust_dataset_rows(
         num_threads=max(1, int(n_jobs)),
     )
     signature_id_to_index = _signature_id_to_index(featurizer)
+    request_seeds = dict(context.cluster_seeds_require)
+    request_seeds.update(
+        {query: request_seeds[origin] for query, origin in query_origins.items() if origin in request_seeds}
+    )
+    clone_by_origin = {origin: query for query, origin in query_origins.items()}
+    request_disallows = {
+        (clone_by_origin.get(left, left), clone_by_origin.get(right, right))
+        for left, right in context.cluster_seeds_disallow
+    }
     # Share prepared native features and restrict request seeds to this shard.
     featurizer = featurizer.with_cluster_seeds(
         {
-            signature_id: context.cluster_seeds_require[signature_id]
+            signature_id: request_seeds[signature_id]
             for signature_id in signature_id_to_index
-            if signature_id in context.cluster_seeds_require
+            if signature_id in request_seeds
         },
         {
             (left, right)
-            for left, right in context.cluster_seeds_disallow
+            for left, right in request_disallows
             if left in signature_id_to_index and right in signature_id_to_index
         },
     )
@@ -915,7 +967,7 @@ def _materialize_arrow_rust_dataset_rows(
     )
     row_seed_bypass = _arrow_row_seed_bypass_mask(
         dataset_rows,
-        cluster_seeds_require=context.cluster_seeds_require,
+        cluster_seeds_require=request_seeds,
     )
     pair_row_indices = np.asarray(batch.pair_row_indices, dtype=np.uint32)
     pair_labels, constraint_summary = _resolve_arrow_rust_pair_labels(
@@ -1161,6 +1213,7 @@ def _materialize_arrow_rust_feature_bundle(
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
     arrow_datasets: Mapping[str, ArrowDataset],
+    query_local_candidate_datasets: frozenset[str] = frozenset(),
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
     _copy_bundle_support_files(source_bundle, output_bundle_root)
     classic_spec = source_bundle.models.get("classic")
@@ -1175,6 +1228,8 @@ def _materialize_arrow_rust_feature_bundle(
     table_plan_order: list[str] = []
     pending_by_dataset: dict[str, list[ArrowRustPendingShard]] = {}
     component_membership_cache: dict[str, pd.DataFrame] = {}
+    initial_query_sources = _load_initial_query_sources(source_bundle.root)
+    candidate_signature_cache: dict[str, set[str]] = {}
 
     def append_empty_selection_summary(
         *,
@@ -1299,6 +1354,20 @@ def _materialize_arrow_rust_feature_bundle(
         materialized_keys.append(table_key)
         for dataset_name, dataset_rows in labels.groupby(labels["dataset"].astype(str), sort=False):
             dataset_name = str(dataset_name)
+            affected_queries: set[str] = set()
+            if dataset_name in initial_query_sources:
+                if dataset_name not in candidate_signature_cache:
+                    member_path = _resolve_path(
+                        source_bundle, str(source_bundle.assets["candidate_members"]["datasets"][dataset_name])
+                    )
+                    candidate_signature_cache[dataset_name] = set(
+                        pd.read_parquet(member_path, columns=["signature_id"])["signature_id"].astype(str)
+                    )
+                affected_queries = {
+                    query
+                    for query, origin in initial_query_sources[dataset_name].items()
+                    if origin in candidate_signature_cache[dataset_name]
+                }
             query_identities = dataset_rows[["query_signature_id", "query_view"]].astype(str)
             group_identity_counts = query_identities.groupby(dataset_rows["query_group_id"].astype(str)).nunique()
             inconsistent_groups = group_identity_counts.index[group_identity_counts.gt(1).any(axis=1)]
@@ -1310,18 +1379,34 @@ def _materialize_arrow_rust_feature_bundle(
             # The native plan allows one view per signature. Keep each complete
             # query together while sharing the dataset context across its views.
             for query_view, view_rows in dataset_rows.groupby(dataset_rows["query_view"].astype(str), sort=False):
-                partial_path = partial_dir / (
-                    f"{_safe_dataset_filename(dataset_name)}__{_safe_dataset_filename(str(query_view))}.parquet"
-                )
-                pending_by_dataset.setdefault(dataset_name, []).append(
-                    ArrowRustPendingShard(
-                        table_key=table_key,
-                        dataset_name=dataset_name,
-                        rows=view_rows.reset_index(drop=True),
-                        row_positions=view_rows.index.to_numpy(dtype=np.int64),
-                        partial_path=partial_path,
+                local_candidates = dataset_name in query_local_candidate_datasets
+                affected_mask = view_rows["query_signature_id"].astype(str).isin(affected_queries)
+                if local_candidates:
+                    row_groups = list(view_rows.groupby(view_rows["query_group_id"].astype(str), sort=False))
+                elif bool(affected_mask.any()):
+                    row_groups = list(
+                        view_rows.loc[affected_mask].groupby(view_rows.loc[affected_mask, "query_group_id"], sort=False)
                     )
-                )
+                    unaffected = view_rows.loc[~affected_mask]
+                    if not unaffected.empty:
+                        row_groups.insert(0, (None, unaffected))
+                else:
+                    row_groups = [(None, view_rows)]
+                for group_index, (_group_id, group_rows) in enumerate(row_groups):
+                    suffix = f"__query{group_index}" if local_candidates or bool(affected_mask.any()) else ""
+                    partial_path = partial_dir / (
+                        f"{_safe_dataset_filename(dataset_name)}__"
+                        f"{_safe_dataset_filename(str(query_view))}{suffix}.parquet"
+                    )
+                    pending_by_dataset.setdefault(dataset_name, []).append(
+                        ArrowRustPendingShard(
+                            table_key=table_key,
+                            dataset_name=dataset_name,
+                            rows=group_rows.reset_index(drop=True),
+                            row_positions=group_rows.index.to_numpy(dtype=np.int64),
+                            partial_path=partial_path,
+                        )
+                    )
 
     for dataset_name, shards in pending_by_dataset.items():
         print(
@@ -1368,6 +1453,7 @@ def _materialize_arrow_rust_feature_bundle(
                     pairwise_model_nan_value=float(pairwise_model_nan_value),
                     pairwise_aggregate_nan_value=float(pairwise_aggregate_nan_value),
                     retrieval_top_k=retrieval_top_k,
+                    **({"query_local_candidates": True} if dataset_name in query_local_candidate_datasets else {}),
                 )
                 _write_arrow_rust_partial(
                     shard=shard,
@@ -1613,6 +1699,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     pairwise_aggregate_nan_value = 0.0
     feature_nan_policy = _feature_nan_policy_summary()
     source_bundle = load_bundle(args.source_bundle_root)
+    query_local_candidate_datasets = frozenset(getattr(args, "query_local_candidate_dataset", ()))
     training_table_keys, calibration_query_ids, evaluation_table_keys = _release_table_plan(source_bundle)
     _assert_output_paths_outside_inputs(
         output_dir=output_dir,
@@ -1666,6 +1753,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             pairwise_model_nan_value=pairwise_model_nan_value,
             pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
             arrow_datasets=arrow_datasets,
+            query_local_candidate_datasets=query_local_candidate_datasets,
         )
 
         started = time.perf_counter()
@@ -1717,6 +1805,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             pairwise_model_nan_value=pairwise_model_nan_value,
             pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
             arrow_datasets=arrow_datasets,
+            query_local_candidate_datasets=query_local_candidate_datasets,
         )
     evaluation = evaluate_classic(
         evaluation_feature_bundle,
@@ -1776,6 +1865,12 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--name-counts-index-root", type=Path, required=True)
     parser.add_argument("--n-jobs", type=_positive_int, default=20)
     parser.add_argument("--total-ram-bytes", type=_positive_int, default=DEFAULT_TOTAL_RAM_BYTES)
+    parser.add_argument(
+        "--query-local-candidate-dataset",
+        action="append",
+        default=[],
+        help="Use each query group's source profiles as its candidate catalog. Repeat for each dataset.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

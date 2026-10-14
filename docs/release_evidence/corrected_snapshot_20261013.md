@@ -1,12 +1,15 @@
 # Corrected release snapshot
 
 This record describes the original preparation snapshot.
-The [candidate record](production_candidate_20261013.md) identifies the latest snapshot with corrected dev assignments and frozen identity tests.
+Its patent-inclusive population is historical; release `1.3` now excludes patents.
+The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
+The selected snapshot passes relocation checks.
+The [candidate record](production_candidate_20261013.md) gives its current counts, model hashes, and evaluation results.
 
-The corrected snapshot is ready for the next pairwise fit.
+This record retains the original snapshot's counts and hashes.
 No production model fit or S3 upload occurs in this preparation task.
 
-Use `D:/local-unsynced/s2and_release_inputs_20261013/ready/complete_datasets`.
+The original snapshot path is `D:/local-unsynced/s2and_release_inputs_20261013/ready/complete_datasets`.
 The ready plan is `pairwise/model_plan.json` within that root.
 The production trainer accepts that relative plan after relocation.
 
@@ -49,4 +52,5 @@ Exclude `name_counts_index/*` from the S3 research upload.
 The actual relocated root passes public, source, artifact, and production pairwise preflight checks.
 Run evidence, commands, and logs remain in `D:/local-unsynced/s2and_release_inputs_20261013/run_evidence`.
 The bounded build preserves its failed license check; the producer fix adds the public license before validation.
-The next stage retrains pairwise heads with patents, then selects EPS and refreshes incremental inputs.
+Release `1.3` uses the [patent-free pairwise fit](pairwise_training_20261013.md) and the verified [complete candidate](production_candidate_20261013.md).
+Final release acceptance and S3/PyPI publication remain pending.

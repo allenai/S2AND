@@ -1,7 +1,7 @@
 # Version 1.3 pairwise fit and EPS selection
 
-This record describes the earlier fit without patents.
-The [patent-inclusive candidate](production_candidate_20261013.md) supersedes this model for the current release.
+This record describes the selected patent-free pairwise fit for release `1.3`.
+The release no longer uses the [patent-inclusive candidate](production_candidate_20261013.md).
 
 The run root is `D:/local-unsynced/s2and_v1.3_train_20261012`.
 The frozen training source is `922d56195e0c7cd74684cad950b861b21e62e225`.
@@ -31,6 +31,7 @@ Both boosters, training records, prediction fixtures, and EPS remain unchanged. 
 Evidence files are `pairwise_output_checks.json`, `reports/eps_calibration_report.json`, `logs/pairwise.run.json`, and `logs/eps.run.json`.
 The clean source passes full local CI. The later held-out uncertainty correction passes 55 focused checks and does not change the fit or EPS results.
 
-This is a pairwise-only bundle. Linker feature generation, linker fit, and held-out evaluation remain pending.
+This record describes the pairwise-only stage.
+The [complete candidate](production_candidate_20261013.md) adds fresh incremental features and a verified linker fit.
 Historical metrics use different data and splits. They do not establish improvement for this release.
-Final release acceptance policy and S3 publication remain pending.
+Final release acceptance and S3/PyPI publication remain pending.

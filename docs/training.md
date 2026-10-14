@@ -11,7 +11,9 @@ See [the release process](release.md) for model acceptance and publication.
 
 The production pairwise trainer reads `pairwise/model_plan.json` from the complete corrected snapshot.
 It computes features from `pairwise/arrow/release` and the one shared `name_counts_index`.
-The plan declares its datasets, including `inventors_s2and` when patents form part of the fit population.
+Release `1.3` excludes patent data from its source records, pairwise fit, and incremental inputs.
+Its pairwise plan declares eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
+Its incremental source contains the 13 inherited non-patent datasets.
 The trainer has no fixed seven-source requirement.
 Use a separate output directory for models and matrix work.
 A historical baseline is not required for this fit.
@@ -19,6 +21,9 @@ A historical baseline is not required for this fit.
 The snapshot preserves full corrected records for later corrections and embedding updates.
 Runtime Arrow projections alone do not retain all useful source text.
 The [data guide](data.md) explains source records, incremental tasks, formats, and compatibility.
+The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
+The snapshot passes relocation checks.
+The [candidate record](release_evidence/production_candidate_20261013.md) gives results from its complete patent-free model fit and evaluation.
 
 ## Build a Rust-backed training dataset
 
@@ -205,10 +210,13 @@ selection, linker finalization, and evaluation through the reloaded bundle.
 Linker training excludes complete holdout query and base identities before
 feature materialization, using identity columns from the source tables even
 when only calibration rows are materialized for fitting. An overlap excludes
-the whole training query. Candidate component context remains complete so
-retrieval statistics for retained queries stay unchanged. The same identity
-authority is checked again before fitting, and diagnostics retain the early
-exclusion counts. Frozen test labels and features are not needed for this check.
+the whole training query.
+Holdout exclusion preserves each retained query's declared candidate context.
+The trainer uses origin maps to remove original queries from candidate profiles.
+
+The same identity authority is checked again before the fit.
+Diagnostics retain the early exclusion counts.
+Frozen test labels and features are not required for this check.
 
 The classic booster uses the fixed target.
 It fits train rows.

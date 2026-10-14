@@ -5,8 +5,11 @@ The Python and Rust package version is `1.0.0`.
 The next model and research snapshot version is `1.3`.
 Public Arrow and name-count data use format `1`.
 
-The current complete candidate includes the patent-inclusive pairwise fit and incremental fit.
-The [candidate record](release_evidence/production_candidate_20261013.md) gives metrics, dev/test roles, and remaining acceptance limits.
+Release `1.3` excludes patent data.
+Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
+Incremental inputs contain the 13 inherited non-patent datasets.
+The patent-free complete candidate passes fit, evaluation, and installed Arrow inference checks.
+The [candidate record](release_evidence/production_candidate_20261013.md) gives model hashes, input populations, evaluation results, and remaining limits.
 A production release still requires final acceptance and publication.
 No final release model or S3 location is declared here before acceptance and publication.
 
@@ -64,11 +67,9 @@ A historical baseline is not a prerequisite for snapshot preparation or a pairwi
 4. Verify the declared workload and resource bounds.
 5. Keep the selected snapshot immutable for the run.
 
-The current patents input is the existing `inventors_s2and` subset with 2,500 blocks.
-It has 41,468 signatures, 41,316 papers, gold labels, and vectors.
-It is not the full patents corpus.
-Some papers occur in more than one block split.
-Do not describe its block split as a whole-paper independent split.
+The selected local input path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
+The snapshot passes relocation checks.
+It excludes `inventors_s2and` from corrected records, Arrow data, pairwise plans, and incremental inputs.
 
 ## Stage 1: generate runtime data
 
@@ -98,7 +99,7 @@ Check record counts, gold coverage, masks, pair endpoints, split assignments, an
 See [the preparation commands](../scripts/production/data/README.md).
 
 Dataset manifests declare the fit population rather than a fixed seven-source list.
-The patents dataset uses the name `inventors_s2and`.
+The current release declares seven non-patent benchmarks and non-patent augmentation.
 Unknown signatures remain in inference context but do not supply supervised labels.
 Training and external evaluation must satisfy the declared identity overlap rules.
 

@@ -9,8 +9,12 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 - The compatible complete model and research snapshot remain unpublished.
   The corrected source snapshot supports the next update cycle without historical correction archives.
-  The next pairwise fit includes the existing `inventors_s2and` subset.
-  Incremental fit, final acceptance, and publication remain separate steps.
+  Release `1.3` excludes patent data.
+  Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
+  Incremental inputs contain the 13 inherited non-patent datasets.
+  The complete patent-free candidate passes fit, evaluation, and installed Arrow inference checks.
+  Final acceptance and S3/PyPI publication remain pending.
+  See [the candidate record](release_evidence/production_candidate_20261013.md) for results and limits.
   See [the release process](release.md).
 
 ### Breaking changes
@@ -46,7 +50,7 @@ production model and public-data version is `1.3`, on a separate version axis.
   changes before publishing the root manifest.
 
 - The production trainer accepts the dataset names declared by the model plan instead of a fixed seven-source set.
-  The next `1.3` fit includes `inventors_s2and` and the accepted augmented dataset.
+  The `1.3` fit excludes `inventors_s2and` and retains the accepted non-patent augmented dataset.
   Internal `orcid` is not a declared input to that fit.
 - `package_corrected_datasets.py` produces a portable corrected snapshot with complete incremental support and one common count index.
   Common large assets use Git LFS; the S3 research payload excludes a second common asset copy.

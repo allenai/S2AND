@@ -8,9 +8,13 @@ Keep model outputs outside the immutable dataset root.
 
 ## Package the current inputs
 
-The current accepted augmentation and incremental treatments remain unchanged for the next pairwise fit.
-The patents input uses the dataset name `inventors_s2and`.
-It contains the existing 2,500-block subset, not the entire patents corpus.
+Reuse accepted augmentation when source identities and omission policy remain valid.
+Release `1.3` excludes patent data.
+Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
+Incremental inputs contain the 13 inherited non-patent datasets.
+The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
+The snapshot passes relocation checks.
+The [candidate record](../../../docs/release_evidence/production_candidate_20261013.md) gives its current counts, model hashes, and evaluation results.
 
 ```powershell
 uv run --no-sync python scripts/production/data/package_corrected_datasets.py `
@@ -74,6 +78,10 @@ Seed 12455678 controls pair samples.
 Preserve exact populations and pair lists because source order also affects selection.
 A block split does not guarantee whole-paper independence.
 
+Add `--model-exclusions <reserved-scope.json>` for fresh incremental dev and test populations.
+The producer reserves declared blocks, authors, and query papers from model development inputs.
+It preserves the exact outer test population.
+
 ## Regenerate augmentation only when required
 
 Use the accepted augmented records unchanged when their inputs and policy remain valid.
@@ -121,6 +129,9 @@ Preserve their available records and cached vectors.
 A new abstract-based encoding for those giants requires another source of full abstract text.
 
 ## Incremental data updates
+
+Initial-only rows use query and paper copies; original master and profile records retain full names.
+The trainer uses origin maps to exclude original queries from candidate profiles.
 
 Reuse the corrected incremental source tables, labels, and assignments when their task evidence remains valid.
 Profile-member changes and query evidence changes require affected label checks.

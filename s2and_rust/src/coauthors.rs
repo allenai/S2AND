@@ -26,10 +26,11 @@ use crate::PaperId;
 /// Denominator cap of the coauthor-similarity Jaccard (Python `counter_jaccard(..., denominator_max=5000)`).
 const GRAM_SIMILARITY_DENOMINATOR_MAX: f64 = 5000.0;
 
-/// Largest bound below which every integer count has an exact f32 value.
-/// Limiting aggregate totals preserves exact count and sum representability
-/// when computing the coauthor features' f32 counter values.
-const MAX_EXACT_F32_INTEGER: u64 = 1 << 24;
+/// Largest accepted coauthor n-gram total for one paper.
+/// The check keeps the stored `u32` total from truncation. The value keeps the
+/// input range of the former f32 counters; counts are now integers and
+/// similarities use f64.
+const MAX_PAPER_GRAM_TOTAL: u64 = 1 << 24;
 
 /// One paper's authors, aggregated once for every signature on it.
 #[derive(Clone, Default)]
@@ -205,9 +206,9 @@ impl PaperEntry {
                 _ => grams.push((key, count)),
             }
         }
-        if gram_total > MAX_EXACT_F32_INTEGER {
+        if gram_total > MAX_PAPER_GRAM_TOTAL {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "paper {paper_id:?} has {gram_total} coauthor n-grams; at most 2^24 are exact"
+                "paper {paper_id:?} has {gram_total} coauthor n-grams; the limit is {MAX_PAPER_GRAM_TOTAL}"
             )));
         }
         Ok(Self {

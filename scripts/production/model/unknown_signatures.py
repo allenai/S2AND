@@ -7,6 +7,7 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 LabeledPair = tuple[str, str, int | float]
 
@@ -53,6 +54,22 @@ def load_unknown_signatures(files: Mapping[str, Path]) -> UnknownSignatures:
             raise ValueError(f"Unknown-signature sidecar contains duplicate IDs: {path}")
         ids.add(value)
     return UnknownSignatures(frozenset(ids), path, hashlib.sha256(contents).hexdigest())
+
+
+def same_unknown_content(binding: Any, source: UnknownSignatures) -> bool:
+    """Compare a recorded sidecar binding with a loaded sidecar, ignoring its location.
+
+    Args:
+        binding: One ``UnknownSignatures.binding()`` value from a training record.
+        source: The sidecar loaded beside the current labels.
+
+    Returns:
+        Whether the recorded and current sidecars have the same bytes and ID count.
+    """
+    if not isinstance(binding, Mapping) or {"sha256", "signature_count"} - set(binding):
+        return False
+    current = source.binding()
+    return binding["sha256"] == current["sha256"] and binding["signature_count"] == current["signature_count"]
 
 
 def augmented_unknown_ids(unknown_ids: Mapping[str, frozenset[str]]) -> frozenset[str]:

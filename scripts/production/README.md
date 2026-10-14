@@ -262,6 +262,12 @@ uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-he
 ```
 
 The command verifies source hashes, Arrow provenance, common artifacts, and the model's fit-plan identity.
+The plan identity uses dataset names, file roles, file digests, the release version, and the EPS policy.
+File locations are not part of that identity, so a relocated snapshot matches its model.
+A model that records only plan bytes, such as v1.3, also needs `--original-model-plan <path>`.
+That file must hash to the recorded bytes and have the same content as the snapshot plan.
+For v1.3, use `D:/local-unsynced/s2and_v1.3_train_20261012/model_plan.json`.
+`bind-candidate` and `calibrate-eps` accept the same option.
 It uses saved production constraints for B3 prediction.
 Unknown signatures remain in prediction context but do not supply supervised scores.
 The report contains pairwise metrics, B3 metrics, counts, and input identities.

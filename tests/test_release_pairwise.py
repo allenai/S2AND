@@ -17,6 +17,7 @@ from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.production_bundle import write_production_manifest
 from s2and.production_bundle_contract import COMPLETE_MANIFEST_FILES
+from s2and.production_training_contract import load_model_plan
 from s2and.subblocking import GraphSubblockingConfig
 from scripts.production.model import release_pairwise
 from scripts.production.model.run_binding import (
@@ -572,6 +573,7 @@ def test_bind_candidate_writes_one_content_based_run_identity(
     assert binding["baseline_record_sha256"] == evaluation["baseline_record_sha256"]
     assert binding["model_plan_content_sha256"] == canonical_json_digest(model_plan_content_identity(model))
     assert model_plan_content_identity(model)["release_version"] == "1.3"
+    assert binding["model_plan_content_sha256"] == load_model_plan(model_plan).content_sha256
     assert binding["public_data_root_manifest_sha256"] == _sha256(public_manifest)
     assert binding["public_data_root_manifest_sha256"] != evaluation["performance"]["arrow_root_manifest_sha256"]
     assert validated_public_roots == [public_data_root]
@@ -983,7 +985,7 @@ def test_calibrate_eps_binds_plan_reuses_matrices_applies_floors_and_smallest_ti
     assert args.output_bundle.is_dir() and args.output_report.is_file()
 
 
-@pytest.mark.parametrize("sidecar_change", [None, "changed", "removed", "unbound"])
+@pytest.mark.parametrize("sidecar_change", [None, "relocated", "changed", "removed", "unbound"])
 def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1002,6 +1004,9 @@ def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if sidecar_change != "unbound":
         config["unknown_signature_inputs"] = {"random": load_unknown_signatures(files).binding()}
+        if sidecar_change == "relocated":
+            # The training machine recorded another location for the same sidecar bytes.
+            config["unknown_signature_inputs"]["random"]["path"] = str(tmp_path / "elsewhere" / sidecar.name)
         _write_json(config_path, config)
     if sidecar_change == "changed":
         _write_json(sidecar, [])
@@ -1021,7 +1026,7 @@ def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
         n_jobs=1,
         total_ram_bytes=2048,
     )
-    if sidecar_change is not None:
+    if sidecar_change not in {None, "relocated"}:
         message = "trained with unknown-signature" if sidecar_change == "unbound" else "sidecar changed"
         with pytest.raises(ValueError, match=message):
             release_pairwise.calibrate_eps(args)

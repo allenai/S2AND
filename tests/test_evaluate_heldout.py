@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from s2and.model import Clusterer
 from s2and.production_bundle import finalize_production_bundle, write_pairwise_production_bundle
 from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION
 from s2and.production_model import load_production_model, pairwise_bundle_binding
-from s2and.production_training_contract import load_packaged_artifact_authority
+from s2and.production_training_contract import load_model_plan, load_packaged_artifact_authority
 from scripts.production.model import release_pairwise
 from tests.pairwise_release_helpers import convert_release_arrow, write_pairwise_artifacts, write_pairwise_dataset
 from tests.promoted_linking_helpers import (
@@ -41,8 +42,23 @@ def heldout_fixture(tmp_path: Path) -> argparse.Namespace:
     files = write_pairwise_dataset(source_root)
     signatures = json.loads(files["signatures"].read_text(encoding="utf-8"))
     keep = list(signatures)[:4]
-    _write(files["signatures"], {key: signatures[key] for key in keep})
     clusters = json.loads(files["clusters"].read_text(encoding="utf-8"))
+    model_root = source_root / "model" / "qian"
+    model_files = {
+        "signatures": model_root / "qian_signatures.json",
+        "clusters": model_root / "qian_clusters.json",
+        "papers": model_root / files["papers"].name,
+        "specter_embeddings": model_root / files["specter_embeddings"].name,
+    }
+    model_root.mkdir(parents=True)
+    for role in ("papers", "specter_embeddings"):
+        model_files[role].write_bytes(files[role].read_bytes())
+    _write(model_files["signatures"], {key: value for key, value in signatures.items() if key not in keep})
+    _write(
+        model_files["clusters"],
+        {key: value for key, value in clusters.items() if value["signature_ids"][0] not in keep},
+    )
+    _write(files["signatures"], {key: signatures[key] for key in keep})
     _write(files["clusters"], {key: value for key, value in clusters.items() if value["signature_ids"][0] in keep})
     blocks = files["signatures"].parent / "test_blocks.json"
     _write(blocks, {"a adams": keep})
@@ -87,10 +103,17 @@ def heldout_fixture(tmp_path: Path) -> argparse.Namespace:
     arrow_root = pairwise_root / "arrow" / "evaluation"
     convert_release_arrow(source_root, "qian", arrow_root, counts_path)
     convert_release_arrow(source_root, "augmented", arrow_root, counts_path)
+
+    def _relative_specs(dataset_files: dict[str, Path]) -> dict[str, dict[str, str]]:
+        return {
+            role: {"path": path.relative_to(pairwise_root).as_posix(), "sha256": sha256_file(path)}
+            for role, path in sorted(dataset_files.items())
+        }
+
     input_payload = {
         "release_version": "9.9",
         "sources": {
-            "model": {},
+            "model": {"qian": _relative_specs(model_files)},
             "evaluation": {
                 name: {
                     role: {"path": path.relative_to(pairwise_root).as_posix(), "sha256": sha256_file(path)}
@@ -103,7 +126,15 @@ def heldout_fixture(tmp_path: Path) -> argparse.Namespace:
     inputs_path = pairwise_root / "inputs.json"
     _write(inputs_path, input_payload)
     model_plan_path = pairwise_root / "model_plan.json"
-    _write(model_plan_path, {"release_version": "9.9", "datasets": {}, "eps": {"grid": [0.5]}})
+    _write(
+        model_plan_path,
+        {
+            "release_version": "9.9",
+            "datasets": {"qian": _relative_specs(model_files)},
+            "eps": {"grid": [0.5], "minimum_dataset_f1": 0.0, "minimum_signature_weighted_f1": 0.0},
+        },
+    )
+    model_plan = load_model_plan(model_plan_path)
     stage = tmp_path / "pairwise-stage"
     source_clusterer = write_synthetic_pairwise_bundle(
         tmp_path / "model-source", artifact_hashes=authority.hashes, release_version="9.9"
@@ -115,7 +146,8 @@ def heldout_fixture(tmp_path: Path) -> argparse.Namespace:
         eps_calibration=CALIBRATED_EPS_CALIBRATION,
         pairwise_training_config={
             "training_scope": "production_full",
-            "model_plan_sha256": sha256_file(model_plan_path),
+            "model_plan_sha256": model_plan.sha256,
+            "model_plan_content_sha256": model_plan.content_sha256,
             "data_random_seed": 1111,
             "input_artifact_hashes": authority.hashes,
         },
@@ -265,7 +297,54 @@ def test_heldout_rejects_pairwise_only_stage(heldout_fixture: argparse.Namespace
 def test_heldout_rejects_another_training_plan(heldout_fixture: argparse.Namespace) -> None:
     fixture = heldout_fixture
     plan = fixture.inputs_json.parent / "model_plan.json"
-    plan.write_bytes(plan.read_bytes() + b" ")
+    payload = json.loads(plan.read_text(encoding="utf-8"))
+    payload["eps"]["grid"] = [0.5, 0.6]
+    _write(plan, payload)
     with pytest.raises(ValueError, match="different model plan"):
         release_pairwise.evaluate_heldout(fixture)
     assert not fixture.output_report.exists()
+
+
+def test_heldout_accepts_relocated_plan_with_same_content(heldout_fixture: argparse.Namespace, tmp_path: Path) -> None:
+    fixture = heldout_fixture
+    relocated = tmp_path / "relocated" / "pairwise"
+    shutil.copytree(fixture.inputs_json.parent, relocated)
+    plan = relocated / "model_plan.json"
+    # Reformatted bytes keep the same files, roles, digests, and policy.
+    plan.write_text(json.dumps(json.loads(plan.read_text(encoding="utf-8")), indent=2), encoding="utf-8")
+    assert sha256_file(plan) != sha256_file(fixture.inputs_json.parent / "model_plan.json")
+    fixture.inputs_json = relocated / "inputs.json"
+    fixture.arrow_root = relocated / "arrow" / "evaluation"
+
+    report = release_pairwise.evaluate_heldout(fixture)
+
+    assert report["model_plan_sha256"] == sha256_file(plan)
+    assert report["model_plan_content_sha256"] == load_model_plan(plan).content_sha256
+
+
+def _legacy_record(original: Path) -> dict[str, Any]:
+    return {"training_scope": "production_full", "model_plan_sha256": sha256_file(original), "data_random_seed": 1}
+
+
+def test_byte_only_training_record_requires_original_plan_proof(
+    heldout_fixture: argparse.Namespace, tmp_path: Path
+) -> None:
+    original = heldout_fixture.inputs_json.parent / "model_plan.json"
+    relocated = tmp_path / "relocated" / "pairwise"
+    shutil.copytree(original.parent, relocated)
+    plan_path = relocated / "model_plan.json"
+    plan_path.write_text(json.dumps(json.loads(plan_path.read_text(encoding="utf-8")), indent=2), encoding="utf-8")
+    plan = load_model_plan(plan_path)
+    record = _legacy_record(original)
+
+    with pytest.raises(ValueError, match="requires --original-model-plan"):
+        release_pairwise._require_trained_plan(record, plan, original_plan=None)
+    release_pairwise._require_trained_plan(record, plan, original_plan=original)
+
+    with pytest.raises(ValueError, match="bytes do not match"):
+        release_pairwise._require_trained_plan(record, plan, original_plan=plan_path)
+    changed = json.loads(plan_path.read_text(encoding="utf-8"))
+    changed["eps"]["grid"] = [0.5, 0.6]
+    _write(plan_path, changed)
+    with pytest.raises(ValueError, match="different model plan"):
+        release_pairwise._require_trained_plan(record, load_model_plan(plan_path), original_plan=original)

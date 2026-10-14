@@ -245,6 +245,7 @@ def test_augmented_dataset_contract_is_checked_before_featurization(
         dataset_names=("augmented",),
         datasets={"augmented": full_plan.datasets["augmented"]},
         model_plan_sha256=full_plan.model_plan_sha256,
+        model_plan_content_sha256=full_plan.model_plan_content_sha256,
         arrow_dirs={"augmented": full_plan.arrow_dirs["augmented"]},
         arrow_provenance_sha256={"augmented": full_plan.arrow_provenance_sha256["augmented"]},
         matrix_work_dir=full_plan.matrix_work_dir,

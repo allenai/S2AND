@@ -145,6 +145,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
                 ),
             },
             model_plan_sha256="0" * 64,
+            model_plan_content_sha256="1" * 64,
             arrow_dirs={"qian": arrow_dir},
             arrow_provenance_sha256={
                 "qian": verify_conversion_provenance(arrow_dir, expected_source_sha256=source_sha256(dataset_files))
@@ -274,6 +275,7 @@ def test_all_augmented_sources_are_checked_before_any_dataset_featurization(
             "augmented": ModelDataset(files={"train_pairs": pair_path}, sha256={"train_pairs": sha256_file(pair_path)}),
         },
         model_plan_sha256="0" * 64,
+        model_plan_content_sha256="1" * 64,
         arrow_dirs={},
         arrow_provenance_sha256={},
         matrix_work_dir=work_dir,

@@ -85,6 +85,7 @@ class PairwisePreflightPlan:
     dataset_names: tuple[str, ...]
     datasets: Mapping[str, ModelDataset]
     model_plan_sha256: str
+    model_plan_content_sha256: str
     arrow_dirs: Mapping[str, Path]
     arrow_provenance_sha256: Mapping[str, str]
     matrix_work_dir: Path
@@ -179,6 +180,7 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
         dataset_names=dataset_names,
         datasets=model_plan.datasets,
         model_plan_sha256=model_plan.sha256,
+        model_plan_content_sha256=model_plan.content_sha256,
         arrow_dirs=arrow_dirs,
         arrow_provenance_sha256=arrow_provenance_sha256,
         matrix_work_dir=matrix_work_dir,
@@ -212,6 +214,7 @@ def _training_config(
         "nan_policy": "preserve_nan",
         "nameless_features_to_use": list(DEFAULT_NAMELESS_FEATURE_GROUPS),
         "model_plan_sha256": plan.model_plan_sha256,
+        "model_plan_content_sha256": plan.model_plan_content_sha256,
         "data_random_seed": int(args.random_seed),
         "model_random_seed": 42,
         "source_dataset_names": list(plan.dataset_names),

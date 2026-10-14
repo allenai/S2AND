@@ -12,6 +12,7 @@ from typing import Any
 
 from s2and._sha256 import is_lowercase_sha256, sha256_file
 from s2and.consts import _PACKAGE_DATA_DIR
+from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.name_counts_index import NameCountsIndex
 from s2and.name_tuple_artifact import NameTupleArtifact, load_packaged_name_tuple_artifact
 from s2and.orcid_prefix_counts import LoadedOrcidPrefixCounts, load_canonical_orcid_prefix_counts
@@ -129,12 +130,57 @@ class ModelDataset:
 
 @dataclass(frozen=True, slots=True)
 class ModelPlan:
-    """One verified model-development plan and its byte identity."""
+    """One verified model-development plan and its byte and content identities.
+
+    ``sha256`` binds the exact plan bytes, including file locations.
+    ``content_sha256`` binds dataset names, file roles, file digests, the release
+    version, and the EPS policy, so a relocated copy of the same plan matches.
+    """
 
     release_version: str
     datasets: Mapping[str, ModelDataset]
     eps: EpsPolicy
     sha256: str
+    content_sha256: str
+
+
+def model_plan_content_sha256(payload: Any) -> str:
+    """Return the location-independent identity of one model-plan payload.
+
+    The file specs keep only their digests. This function does not read the
+    declared files, so it also identifies a plan whose original paths are gone.
+
+    Args:
+        payload: Parsed ``model_plan.json`` contents.
+
+    Returns:
+        The canonical JSON SHA-256 of the projected plan.
+
+    Raises:
+        ValueError: If the payload does not have the model-plan structure.
+    """
+
+    if not isinstance(payload, Mapping) or set(payload) != {"release_version", "datasets", "eps"}:
+        raise ValueError("invalid model plan")
+    raw_datasets = payload["datasets"]
+    if not isinstance(raw_datasets, Mapping) or not raw_datasets:
+        raise ValueError("invalid model datasets")
+    datasets: dict[str, dict[str, str]] = {}
+    for name, raw_files in raw_datasets.items():
+        if not isinstance(name, str) or not isinstance(raw_files, Mapping) or not raw_files:
+            raise ValueError("invalid model dataset")
+        datasets[name] = {}
+        for role, raw_spec in raw_files.items():
+            if not isinstance(raw_spec, Mapping) or set(raw_spec) != {"path", "sha256"}:
+                raise ValueError("invalid model file")
+            if not isinstance(raw_spec["path"], str) or not raw_spec["path"]:
+                raise ValueError("invalid model file")
+            if not is_lowercase_sha256(raw_spec["sha256"]):
+                raise ValueError("invalid model file")
+            datasets[name][str(role)] = raw_spec["sha256"]
+    return canonical_json_digest(
+        {"release_version": payload["release_version"], "datasets": datasets, "eps": payload["eps"]}
+    )
 
 
 def _unit_float(value: Any) -> float:
@@ -219,6 +265,7 @@ def load_model_plan(path: Path) -> ModelPlan:
         datasets=datasets,
         eps=eps,
         sha256=hashlib.sha256(contents).hexdigest(),
+        content_sha256=model_plan_content_sha256(payload),
     )
 
 

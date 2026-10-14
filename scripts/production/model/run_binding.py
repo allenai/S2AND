@@ -28,27 +28,35 @@ def _object(value: Any, *, label: str, keys: set[str] | frozenset[str]) -> Mappi
     return cast(Mapping[str, Any], value)
 
 
-def _project_file_specs(value: Any, *, label: str) -> Any:
-    """Replace absolute file locations with their content digests."""
+def _project_file_specs(value: Any, *, label: str, require_absolute: bool = True) -> Any:
+    """Replace file locations with their content digests."""
 
     if isinstance(value, Mapping):
         if set(value) == {"path", "sha256"}:
             spec = _object(value, label=label, keys={"path", "sha256"})
             path, digest = spec["path"], spec["sha256"]
-            if not isinstance(path, str) or not Path(path).is_absolute() or not is_lowercase_sha256(digest):
+            if not isinstance(path, str) or not path or not is_lowercase_sha256(digest):
+                raise ValueError(f"{label} must contain a path and lowercase SHA-256")
+            if require_absolute and not Path(path).is_absolute():
                 raise ValueError(f"{label} must contain an absolute path and lowercase SHA-256")
             return str(digest)
-        return {str(key): _project_file_specs(item, label=f"{label}.{key}") for key, item in value.items()}
+        return {
+            str(key): _project_file_specs(item, label=f"{label}.{key}", require_absolute=require_absolute)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_project_file_specs(item, label=f"{label}[]") for item in value]
+        return [_project_file_specs(item, label=f"{label}[]", require_absolute=require_absolute) for item in value]
     return value
 
 
 def model_plan_content_identity(payload: Any) -> dict[str, Any]:
-    """Return the path-independent content and policy identity of a model plan."""
+    """Return the path-independent content and policy identity of a model plan.
+
+    Relocatable plans store paths relative to the plan file, so this identity accepts both forms.
+    """
 
     plan = _object(payload, label="model plan", keys={"release_version", "datasets", "eps"})
-    return cast(dict[str, Any], _project_file_specs(plan, label="model plan"))
+    return cast(dict[str, Any], _project_file_specs(plan, label="model plan", require_absolute=False))
 
 
 def evaluation_plan_content_identity(payload: Any) -> dict[str, Any]:

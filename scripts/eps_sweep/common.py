@@ -59,7 +59,13 @@ def arrow_dataset_dir(arrow_root: Path, dataset: str, replay_bundle: str | None 
     return manifest_path.parent
 
 
-def read_sweep_curve(root: Path, dataset: str, score_mode: str) -> tuple[dict[str, Any], pd.DataFrame]:
+def read_sweep_curve(
+    root: Path,
+    dataset: str,
+    score_mode: str,
+    *,
+    weight: str = "weight_query_class_balanced",
+) -> tuple[dict[str, Any], pd.DataFrame]:
     """Bind each review curve to its completed plan and source model."""
     dataset_root = root / dataset
     plan_path = dataset_root / "plan.json"
@@ -72,7 +78,9 @@ def read_sweep_curve(root: Path, dataset: str, score_mode: str) -> tuple[dict[st
         raise ValueError(f"The EPS scores change after completion: {dataset}")
     curve = pd.read_csv(score_path, sep="\t")
     if score_mode == "safe-action-proxy":
-        curve = curve[curve["weight"].eq("weight_query_class_balanced")].copy()
+        curve = curve[
+            curve["weight"].eq(weight) & curve["scope_type"].eq("overall") & curve["scope_value"].eq("all")
+        ].copy()
     if curve["eps"].duplicated().any() or set(curve["eps"].round(10)) != {
         round(value, 10) for value in plan["eps_values"]
     }:

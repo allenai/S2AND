@@ -64,6 +64,8 @@ def _curve(root: Path, model_hash: str = "a" * 64, limited: bool = False, mode: 
             {
                 "eps": [0.55, 0.65],
                 "weight": "weight_query_class_balanced",
+                "scope_type": "overall",
+                "scope_value": "all",
                 "positive_recall": [0.8, 1],
                 "negative_separation": [1, 0.8],
             }

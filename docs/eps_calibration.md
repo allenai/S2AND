@@ -114,10 +114,15 @@ foreach ($Dataset in $Giants) {
 uv run --no-sync python scripts/eps_sweep/plot_b3_eps_sweeps.py `
   --root "$EpsRun/b3" --datasets $Giants --output "$EpsRun/b3.png" --reference-eps 0.55
 uv run --no-sync python scripts/eps_sweep/plot_q_class_eps_sweeps.py `
-  --root "$EpsRun/proxy" --datasets $Giants --output "$EpsRun/proxy.png" --reference-eps 0.55
+  --root "$EpsRun/proxy" --datasets $Giants --output "$EpsRun/proxy.png" `
+  --weight weight_query_label_balanced --reference-eps 0.55
 ```
 
 Set `--reference-eps` to the actual initial EPS for another release.
+The diagnostic plot uses query/label weights to match the original recall/separation plot.
+Each star marks the highest tested diagnostic accuracy for its source.
+Stars do not select release EPS or maximize B3.
+Use `--weight weight_query_class_balanced` for the previous equal-query view.
 Keep completed output directories immutable.
 Use a new output directory and the same verified distance-cache directory for a refined grid.
 Each cache binds the model, Arrow generation, signature order, and ORCID policy.

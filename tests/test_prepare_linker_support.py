@@ -239,6 +239,22 @@ def test_reject_unverified_review_before_output(tmp_path: Path) -> None:
     assert not args["output_root"].exists()
 
 
+def test_reject_review_checksums_for_same_named_files_in_a_subdirectory(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    handoff = args["review_handoff"]
+    nested = handoff / "older"
+    nested.mkdir()
+    lines = []
+    for name in ("final_linker_review.jsonl", "orcid_error_query_signatures.json"):
+        (nested / name).write_bytes((handoff / name).read_bytes())
+        lines.append(f"{sha256_file(nested / name)}  older/{name}\n")
+    (handoff / "orcid_error_query_signatures.json").write_text("[]", encoding="utf-8")
+    (handoff / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+    with pytest.raises(ValueError, match="lacks required decisions"):
+        prepare_linker_support(**args)
+    assert not args["output_root"].exists()
+
+
 def test_reject_all_unknown_train_and_preserve_source(tmp_path: Path) -> None:
     args = _fixture(tmp_path)
     path = args["source_root"] / "labels/train.parquet"

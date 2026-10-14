@@ -63,7 +63,8 @@ def _review(handoff: Path, units_path: Path) -> tuple[set[Query], set[Relation],
         if sha256_file(path) != expected:
             raise ValueError(f"Review digest mismatch: {path}")
         inputs.append(path)
-        verified.add(path.name)
+        # Match the exact files read below; a same-named file in a subdirectory does not verify them.
+        verified.add(path.relative_to(handoff.resolve()).as_posix())
     required = {"final_linker_review.jsonl", "orcid_error_query_signatures.json"}
     if not required <= verified:
         raise ValueError(f"The review checksum file lacks required decisions: {sorted(required - verified)}")

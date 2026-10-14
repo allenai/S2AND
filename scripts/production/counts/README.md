@@ -10,7 +10,6 @@ It preserves raw source data and requires matching, nonempty canonical surnames 
 It retains the EVENT threshold of 10 and the curated alias threshold of 2.
 The exclusion does not affect curated aliases or the separate runtime same-ORCID subblocking rule.
 The artifact and manifest formats remain unchanged.
-The [October 13 release record](../../../docs/release_evidence/orcid_prefix_exclusion_20261013.md) contains the applied counts and artifact identity.
 
 ```powershell
 uv run --no-sync python -m scripts.production.counts.generate_orcid_name_prefix_counts `
@@ -93,4 +92,3 @@ The October 12 release build uses the scratch predecessor of this producer.
 Its index contains 45,474,003 retained keys across four mappings.
 All 75,085 research M query keys match the complete index.
 The durable producer has byte parity with the existing production writer on focused Parquet tests.
-The release evidence file records the source and artifact hashes.

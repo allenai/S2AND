@@ -25,7 +25,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import read_arrow_collection_root  # noqa: E402
 from s2and.feature_port import featurize_pairs_with_rust  # noqa: E402
 from s2and.production_bundle_contract import infer_bundle_kind, require_bundle_state  # noqa: E402
@@ -368,15 +367,7 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
         seed=args.bootstrap_seed,
     )
     report = {
-        "models": {
-            name: {"path": str(path), "manifest_sha256": sha256_file(path / "manifest.json")}
-            for name, path in model_paths.items()
-        },
-        "source_inputs_sha256": sha256_file(inputs_path),
-        "arrow_manifest_sha256": sha256_file(arrow_root / "manifest.json"),
-        "input_artifact_hashes": artifacts.hashes,
-        "evaluation_sources": {name: release._spec_sha256(files) for name, files in specs.items()},
-        "unknown_signature_sources": {name: source.binding() for name, source in unknowns.items()},
+        "models": {name: str(path) for name, path in model_paths.items()},
         "feature_contract": feature_contract,
         "excluded_datasets": [PATENT_DATASET],
         "metric_contract": {

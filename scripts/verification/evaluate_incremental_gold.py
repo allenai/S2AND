@@ -171,7 +171,6 @@ def prepare_cases(
         "seed": seed,
         "bounds": {"max_blocks": max_blocks, "max_cases": max_cases},
         "labels": "Corrected gold identity facts; no manual safe-action judgments.",
-        "eligible_mask_sha256": sha256_file(eligible_mask),
         "source_sha256": sources,
         "counts": counts,
         "blocks": blocks,
@@ -277,8 +276,6 @@ def evaluate_cases(
             "profile_signature_count_mean": sum(profile_sizes) / len(profile_sizes),
         }
     summary = {
-        "cases_sha256": sha256_file(cases_path),
-        "model_manifest_sha256": sha256_file(model_dir / "manifest.json"),
         "label_type": payload["labels"],
         "preparation_counts": payload["counts"],
         "datasets": reports,

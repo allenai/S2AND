@@ -22,9 +22,8 @@ The snapshot preserves full corrected records for later corrections and embeddin
 Runtime Arrow projections alone do not retain all useful source text.
 The [data guide](data.md) explains source records, incremental tasks, formats, and compatibility.
 The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
-The snapshot plan uses relative paths. Its content identity matches the v1.3 fit plan.
-The v1.3 model records only plan bytes, so supply its original plan as `--original-model-plan`.
-The [candidate record](release_evidence/production_candidate_20261013.md) gives results from its complete patent-free model fit and evaluation.
+The snapshot plan uses relative paths.
+The v1.3 model records only its plan bytes, so evaluate it with that exact plan file.
 
 ## Build a Rust-backed training dataset
 

@@ -38,9 +38,9 @@ The [data guide](data.md) defines the shared local layout and update rules.
 - [Script catalog](../scripts/README.md)
 - [Release notes](release_notes.md)
 
-## Historical evidence
+## Historical notes
 
-Dated records in `release_evidence` and `rust/profiling` describe their named runs.
+Dated notes in `rust/profiling` describe their named runs.
 They are not current preparation commands or mandatory inputs to a new correction cycle.
 The corrected snapshot already contains accepted corrections.
 Use historical records only for questions about those prior decisions or measurements.

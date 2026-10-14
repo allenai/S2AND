@@ -155,5 +155,5 @@ The live authorities are `s2and.text`, its Rust implementation, and
 Tuple and ORCID runtime rules live in
 [production_inference.md](production_inference.md); Arrow and name-count
 formats live in [rust/arrow_dataset_spec.md](rust/arrow_dataset_spec.md).
-The retained manual
-tuple review is [release_evidence/name_tuple_legacy_adjudication_v1.md](release_evidence/name_tuple_legacy_adjudication_v1.md).
+`tests/test_name_tuple_artifact.py` keeps the reviewed tuple decisions in
+`tests/fixtures/name_tuples/` consistent with the artifact.

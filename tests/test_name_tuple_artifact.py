@@ -30,9 +30,7 @@ def test_checked_in_source_reproduces_canonical_name_tuples_byte_exactly(tmp_pat
 
 
 def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
-    evidence_path = (
-        Path(__file__).resolve().parents[1] / "docs" / "release_evidence" / "name_tuple_legacy_adjudication_v1.jsonl.gz"
-    )
+    evidence_path = Path(__file__).resolve().parent / "fixtures" / "name_tuples" / "legacy_adjudication_v1.jsonl.gz"
     records = [json.loads(line) for line in gzip.decompress(evidence_path.read_bytes()).decode("utf-8").splitlines()]
     accepted = {(record["left"], record["right"]) for record in records if record["label"] == "accept"}
     excluded = {(record["left"], record["right"]) for record in records if record["label"] != "accept"}
@@ -48,8 +46,8 @@ def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
 @pytest.mark.parametrize(
     ("evidence_file", "expected_count", "required_pair"),
     [
-        ("name_tuple_gold_additions_20261012.csv", 27, ("jeremiah", "jerry")),
-        ("name_tuple_model_additions_20261012.csv", 276, ("bernd", "bernhard")),
+        ("gold_additions_20261012.csv", 27, ("jeremiah", "jerry")),
+        ("model_additions_20261012.csv", 276, ("bernd", "bernhard")),
     ],
 )
 def test_gold_alias_additions_remove_real_first_name_vetoes(
@@ -61,7 +59,7 @@ def test_gold_alias_additions_remove_real_first_name_vetoes(
     from tests.helpers import build_arrow_training_dataset
     from tests.incremental_test_helpers import _dataset
 
-    evidence_path = Path(__file__).resolve().parents[1] / "docs/release_evidence" / evidence_file
+    evidence_path = Path(__file__).resolve().parent / "fixtures" / "name_tuples" / evidence_file
     with evidence_path.open(encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream))
     pairs = [(row["name_a"], row["name_b"]) for row in rows]

@@ -14,7 +14,6 @@ production model and public-data version is `1.3`, on a separate version axis.
   Incremental inputs contain the 13 inherited non-patent datasets.
   The complete patent-free candidate passes fit, evaluation, and installed Arrow inference checks.
   Final acceptance and S3/PyPI publication remain pending.
-  See [the candidate record](release_evidence/production_candidate_20261013.md) for results and limits.
   See [the release process](release.md).
 
 ### Breaking changes
@@ -321,9 +320,9 @@ production model and public-data version is `1.3`, on a separate version axis.
   compiles the `s2and-rust` sdist on each of them.
 - The canonical alias artifact now contains 5,027 pairs. A manual review of all
   2,266 legacy-only candidates restored 1,343 credible aliases, retained all
-  3,684 existing pairs, and excluded 906 rejects plus 17 unresolved pairs. The
-  complete adjudication ledger and rubric are retained under
-  `docs/release_evidence/`.
+  3,684 existing pairs, and excluded 906 rejects plus 17 unresolved pairs. Tests keep
+  the adjudication ledger in `tests/fixtures/name_tuples/` consistent with the
+  artifact.
 - Promoted query-disallow resolution is request-global and deterministic:
   require-forced decisions first, then descending initial score, then signature
   ID. Conflicts rebuild and score a complete single-query plan with the winning

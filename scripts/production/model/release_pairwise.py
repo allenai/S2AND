@@ -42,7 +42,6 @@ from s2and.production_training_contract import (  # noqa: E402
     ProductionArtifactAuthority,
     load_model_plan,
     load_packaged_artifact_authority,
-    model_plan_content_sha256,
 )
 from s2and.subblocking import GraphSubblockingConfig  # noqa: E402
 from scripts.production.model.augmented_leakage import (  # noqa: E402
@@ -961,7 +960,7 @@ def bind_candidate(args: argparse.Namespace) -> dict[str, str]:
         for field in ("name_counts_manifest_sha256", "name_tuples_data_sha256")
     ):
         raise ValueError("Candidate model was trained from a different artifact authority")
-    _require_trained_plan(training_config, model_plan, original_plan=_original_plan_arg(args))
+    _require_trained_plan(training_config, model_plan)
     clusterer = load_production_model(
         candidate_model,
         expected_artifact_hashes=artifact_authority.hashes,
@@ -1578,7 +1577,7 @@ def evaluate_heldout(args: argparse.Namespace) -> dict[str, Any]:
     version, specs = _heldout_input_specs(inputs_path)
     model_dir = Path(args.model).resolve()
     model_plan = load_model_plan(inputs_path.parent / "model_plan.json")
-    _training_config(model_dir, plan=model_plan, original_plan=_original_plan_arg(args))
+    _training_config(model_dir, plan=model_plan)
     _require_heldout_model_sources(inputs_path, model_plan)
     verified = {name: _verified_files(files, label=f"heldout.{name}") for name, files in specs.items()}
     _check_release_leakage(
@@ -1667,13 +1666,6 @@ def evaluate_heldout(args: argparse.Namespace) -> dict[str, Any]:
         print(json.dumps({"event": "heldout_dataset_complete", "dataset": name}), flush=True)
     aggregate, _ = pairwise_metrics(np.concatenate(all_labels), np.concatenate(all_main), np.concatenate(all_nameless))
     report = {
-        "candidate_model_manifest_sha256": _sha256_file(model_dir / "manifest.json"),
-        "inputs_manifest_sha256": _sha256_file(inputs_path),
-        "model_plan_sha256": model_plan.sha256,
-        "model_plan_content_sha256": model_plan.content_sha256,
-        "arrow_root_manifest_sha256": _sha256_file(arrow_manifest),
-        "input_artifact_hashes": artifacts.hashes,
-        "evaluation_sources": {name: _spec_sha256(files) for name, files in specs.items()},
         "clusterer_config": {
             "eps": float(clusterer.cluster_model.eps),
             "use_default_constraints_as_supervision": bool(clusterer.use_default_constraints_as_supervision),
@@ -1688,16 +1680,11 @@ def evaluate_heldout(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
-def _original_plan_arg(args: argparse.Namespace) -> Path | None:
-    original = getattr(args, "original_model_plan", None)
-    return None if original is None else Path(original).resolve()
-
-
 def _paths_overlap(left: Path, right: Path) -> bool:
     return left == right or left.is_relative_to(right) or right.is_relative_to(left)
 
 
-def _require_trained_plan(config: Mapping[str, Any], plan: ModelPlan, *, original_plan: Path | None) -> None:
+def _require_trained_plan(config: Mapping[str, Any], plan: ModelPlan) -> None:
     """Accept a bundle trained from this plan's content at any plan location.
 
     Bundles before content identities record only plan bytes. For those, a relocated
@@ -1709,24 +1696,15 @@ def _require_trained_plan(config: Mapping[str, Any], plan: ModelPlan, *, origina
         if recorded_content != plan.content_sha256:
             raise ValueError("Source bundle was trained from a different model plan")
         return
-    recorded_bytes = config.get("model_plan_sha256")
-    if recorded_bytes == plan.sha256:
-        return
-    if original_plan is None:
-        raise ValueError(
-            "Source bundle was trained from a different model plan; a relocated plan requires --original-model-plan"
-        )
-    if _sha256_file(original_plan) != recorded_bytes:
-        raise ValueError("Original model plan bytes do not match the training record")
-    if model_plan_content_sha256(_read_json(original_plan)) != plan.content_sha256:
+    if config.get("model_plan_sha256") != plan.sha256:
         raise ValueError("Source bundle was trained from a different model plan")
 
 
-def _training_config(bundle_dir: Path, *, plan: ModelPlan, original_plan: Path | None) -> dict[str, Any]:
+def _training_config(bundle_dir: Path, *, plan: ModelPlan) -> dict[str, Any]:
     payload = _read_json(bundle_dir / "reproducibility" / "pairwise_training_config.json")
     if not isinstance(payload, dict) or payload.get("training_scope") != "production_full":
         raise ValueError("EPS calibration requires a production_full training configuration")
-    _require_trained_plan(payload, plan, original_plan=original_plan)
+    _require_trained_plan(payload, plan)
     if isinstance(payload.get("data_random_seed"), bool) or not isinstance(payload.get("data_random_seed"), int):
         raise ValueError("EPS calibration data_random_seed must be an integer")
     return payload
@@ -1750,7 +1728,7 @@ def _calibration_preflight(
     if output_report.is_relative_to(source_bundle) or _paths_overlap(output_report, output_bundle):
         raise ValueError("Calibration report must be outside source and output bundles")
     plan = load_model_plan(model_plan_path)
-    config = _training_config(source_bundle, plan=plan, original_plan=_original_plan_arg(args))
+    config = _training_config(source_bundle, plan=plan)
     manifest_sha256 = _sha256_file(source_bundle / "manifest.json")
     return source_bundle, output_bundle, output_report, plan, config, manifest_sha256
 
@@ -1846,13 +1824,7 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
         new_eps=selected_eps,
         expected_artifact_hashes=artifacts.hashes,
     )
-    output_manifest_sha256 = _sha256_file(output_bundle / "manifest.json")
     report = {
-        "input_artifact_hashes": dict(artifacts.hashes),
-        "model_plan_sha256": plan.sha256,
-        "model_plan_content_sha256": plan.content_sha256,
-        "output_bundle_manifest_sha256": output_manifest_sha256,
-        "source_bundle_manifest_sha256": manifest_sha256,
         "source_eps": original_eps,
         "selected_eps": selected_eps,
         "validation_identities": identities,
@@ -2067,12 +2039,6 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
-ORIGINAL_PLAN_HELP = (
-    "Original model_plan.json of a bundle that records only the plan byte hash. "
-    "Its bytes must match that hash and its content must match the current plan."
-)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2088,7 +2054,6 @@ def build_parser() -> argparse.ArgumentParser:
     bind.add_argument("--run-root", type=Path, required=True)
     bind.add_argument("--candidate-model", type=Path, required=True)
     bind.add_argument("--public-data-root", type=Path, required=True)
-    bind.add_argument("--original-model-plan", type=Path, help=ORIGINAL_PLAN_HELP)
     bind.set_defaults(handler=bind_candidate)
 
     release = commands.add_parser("evaluate-release", help="Apply release gates to the five component reports.")
@@ -2106,7 +2071,6 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--name-counts-index-root", type=Path, required=True)
     calibrate.add_argument("--n-jobs", type=_positive_int, default=1)
     calibrate.add_argument("--total-ram-bytes", type=_positive_int)
-    calibrate.add_argument("--original-model-plan", type=Path, help=ORIGINAL_PLAN_HELP)
     calibrate.set_defaults(handler=calibrate_eps)
     arrow_root_help = (
         "Directory with one Arrow conversion per plan dataset (<root>/<dataset>/), each carrying conversion "
@@ -2137,7 +2101,6 @@ def build_parser() -> argparse.ArgumentParser:
     heldout.add_argument("--output-report", type=Path, required=True)
     heldout.add_argument("--n-jobs", type=_positive_int, default=1)
     heldout.add_argument("--total-ram-bytes", type=_positive_int)
-    heldout.add_argument("--original-model-plan", type=Path, help=ORIGINAL_PLAN_HELP)
     heldout.set_defaults(handler=evaluate_heldout)
     return parser
 

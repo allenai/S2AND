@@ -157,7 +157,6 @@ Only `clusterer.json` and `manifest.json` change.
 An EPS-only change requires no pairwise or incremental fit.
 Repeat affected cluster evaluation and real-model inference checks with the reviewed package before acceptance.
 
-Retain the reference files, curves, plots, and manual decision with release evidence.
 Publish optional calibration sidecars with the snapshot under its immutable S3 research prefix.
 Keep distance caches local.
 Keep their input roles and hashes distinct from untouched final tests.

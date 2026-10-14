@@ -25,7 +25,6 @@ Release `1.3` excludes patent data.
 Its pairwise data contains eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
 Its incremental data contains the 13 inherited non-patent datasets.
 The patent-free complete candidate passes fit, evaluation, and installed Arrow inference checks.
-The [candidate record](release_evidence/production_candidate_20261013.md) gives its model hashes, input populations, evaluation results, and remaining limits.
 The research S3 release remains unpublished.
 The release notes will identify the common Git ref, model path, research S3 prefix, and manifest hashes.
 Do not use an older public Arrow prefix with this runtime.

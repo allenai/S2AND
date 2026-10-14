@@ -991,10 +991,6 @@ def test_calibrate_eps_binds_plan_reuses_matrices_applies_floors_and_smallest_ti
     assert clusterer.cluster_model.eps == pytest.approx(0.5)
     assert clusterer.n_jobs == 5
     assert report["selected_eps"] == pytest.approx(0.2)
-    assert report["model_plan_sha256"] == _sha256(model_plan)
-    assert report["source_bundle_manifest_sha256"] == _sha256(bundle / "manifest.json")
-    assert report["output_bundle_manifest_sha256"] == _sha256(args.output_bundle / "manifest.json")
-    assert report["input_artifact_hashes"] == _artifact_authority().hashes
     assert finalizations[0]["new_eps"] == pytest.approx(0.2)
     assert "expected_old_eps" not in finalizations[0]
     assert args.output_bundle.is_dir() and args.output_report.is_file()

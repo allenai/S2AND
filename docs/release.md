@@ -9,7 +9,6 @@ Release `1.3` excludes patent data.
 Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
 Incremental inputs contain the 13 inherited non-patent datasets.
 The patent-free complete candidate passes fit, evaluation, and installed Arrow inference checks.
-The [candidate record](release_evidence/production_candidate_20261013.md) gives model hashes, input populations, evaluation results, and remaining limits.
 A production release still requires final acceptance and publication.
 No final release model or S3 location is declared here before acceptance and publication.
 

@@ -14,7 +14,6 @@ Pairwise inputs contain eight sources: seven non-patent benchmarks and the exist
 Incremental inputs contain the 13 inherited non-patent datasets.
 The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
 The snapshot passes relocation checks.
-The [candidate record](../../../docs/release_evidence/production_candidate_20261013.md) gives its current counts, model hashes, and evaluation results.
 
 ```powershell
 uv run --no-sync python scripts/production/data/package_corrected_datasets.py `

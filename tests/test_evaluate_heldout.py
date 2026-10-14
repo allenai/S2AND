@@ -240,10 +240,6 @@ def test_heldout_scores_complete_model_exact_pairs_and_full_unknown_context(
         report["clusterer_config"]["use_default_constraints_as_supervision"]
         == loaded.use_default_constraints_as_supervision
     )
-    assert report["candidate_model_manifest_sha256"] == sha256_file(fixture.model / "manifest.json")
-    assert report["evaluation_sources"]["qian"]["unknown_signatures"] == sha256_file(
-        fixture.files["unknown_signatures"]
-    )
     assert not any("baseline" in key for key in report)
     assert json.loads(fixture.output_report.read_text(encoding="utf-8")) == report
     assert {path: path.read_bytes() for path in source_bytes} == source_bytes
@@ -318,36 +314,21 @@ def test_heldout_accepts_relocated_plan_with_same_content(heldout_fixture: argpa
 
     report = release_pairwise.evaluate_heldout(fixture)
 
-    assert report["model_plan_sha256"] == sha256_file(plan)
-    assert report["model_plan_content_sha256"] == load_model_plan(plan).content_sha256
+    assert report["pairwise"]["aggregate"]["rows"] == 4
 
 
-def _legacy_record(original: Path) -> dict[str, Any]:
-    return {"training_scope": "production_full", "model_plan_sha256": sha256_file(original), "data_random_seed": 1}
-
-
-def test_byte_only_training_record_requires_original_plan_proof(
+def test_byte_only_training_record_requires_the_same_plan_bytes(
     heldout_fixture: argparse.Namespace, tmp_path: Path
 ) -> None:
     original = heldout_fixture.inputs_json.parent / "model_plan.json"
+    record = {"training_scope": "production_full", "model_plan_sha256": sha256_file(original)}
+    release_pairwise._require_trained_plan(record, load_model_plan(original))
     relocated = tmp_path / "relocated" / "pairwise"
     shutil.copytree(original.parent, relocated)
     plan_path = relocated / "model_plan.json"
     plan_path.write_text(json.dumps(json.loads(plan_path.read_text(encoding="utf-8")), indent=2), encoding="utf-8")
-    plan = load_model_plan(plan_path)
-    record = _legacy_record(original)
-
-    with pytest.raises(ValueError, match="requires --original-model-plan"):
-        release_pairwise._require_trained_plan(record, plan, original_plan=None)
-    release_pairwise._require_trained_plan(record, plan, original_plan=original)
-
-    with pytest.raises(ValueError, match="bytes do not match"):
-        release_pairwise._require_trained_plan(record, plan, original_plan=plan_path)
-    changed = json.loads(plan_path.read_text(encoding="utf-8"))
-    changed["eps"]["grid"] = [0.5, 0.6]
-    _write(plan_path, changed)
     with pytest.raises(ValueError, match="different model plan"):
-        release_pairwise._require_trained_plan(record, load_model_plan(plan_path), original_plan=original)
+        release_pairwise._require_trained_plan(record, load_model_plan(plan_path))
 
 
 def test_heldout_rejects_model_sources_that_differ_from_the_plan(heldout_fixture: argparse.Namespace) -> None:

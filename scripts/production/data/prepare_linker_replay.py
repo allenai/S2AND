@@ -158,11 +158,21 @@ def _prepare_dataset(
     _write_json(raw_output / "papers.json", papers)
     with (embedding_output / "specter2.pkl").open("xb") as stream:
         pickle.dump((matrix, np.asarray(output_keys, dtype=str)), stream, protocol=4)
+    # Check the written file, not the in-memory copy, against the fixed IDs and current raw names.
+    saved = _load_json(raw_output / "signatures.json")
+    ids_and_order_equal = list(saved) == list(old_signatures)
+    raw_name_parts_exact = all(
+        row["author_info"][field] == current_signatures[sid]["author_info"][field]
+        for sid, row in saved.items()
+        for field in ("first", "middle", "last")
+    )
+    if not ids_and_order_equal or not raw_name_parts_exact:
+        raise ValueError(f"The saved {dataset} replay signatures differ from the fixed IDs or current raw names")
     return {
         "dataset": dataset,
         "policy": "current_raw_benchmark_metadata",
         "signature_count": len(signatures),
-        "signature_ids_and_order_equal": list(signatures) == list(old_signatures),
+        "signature_ids_and_order_equal": ids_and_order_equal,
         "changed_signature_records": sum(signatures[sid] != row for sid, row in old_signatures.items()),
         "changed_signature_fields": dict(changed_fields),
         "scalar_email_projection_count": projected_email_count,
@@ -176,11 +186,7 @@ def _prepare_dataset(
         "added_vectors": len(output_keys) - len(old_keys),
         "old_missing_embedding_count": len(set(old_papers) - set(old_index)),
         "missing_embedding_count": len(set(papers) - set(output_keys)),
-        "raw_name_parts_exact": all(
-            row["author_info"][field] == current_signatures[sid]["author_info"][field]
-            for sid, row in signatures.items()
-            for field in ("first", "middle", "last")
-        ),
+        "raw_name_parts_exact": raw_name_parts_exact,
         "source_files": [{"path": str(path), "sha256": _sha256(path)} for path in source_files],
     }
 

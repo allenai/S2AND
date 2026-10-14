@@ -140,3 +140,20 @@ def test_source_bound_fails_before_output_creation(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="exceed max_source_bytes"):
         _run(roots, max_source_bytes=1)
     assert not roots["output"].exists()
+
+
+def test_saved_signatures_must_keep_fixed_ids_and_current_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.production.data import prepare_linker_replay as module
+
+    write_json = module._write_json
+
+    def reorder_signatures(path: Path, value: object) -> None:
+        if path.name == "signatures.json" and isinstance(value, dict):
+            value = dict(reversed(list(value.items())))
+        write_json(path, value)
+
+    monkeypatch.setattr(module, "_write_json", reorder_signatures)
+    with pytest.raises(ValueError, match="saved .* replay signatures differ"):
+        _run(_inputs(tmp_path))

@@ -36,9 +36,6 @@ Use [the data guide](../docs/data.md) for the common assets and corrected snapsh
 
 | Script | What it does |
 |---|---|
-| `make_inventors_s2and_subset.py` | Create inventors S2AND subset (defaults to a local ignored output path) |
-| `make_inventors_split_and_histograms.py` | Split inventors data and generate histograms (defaults to a local ignored output path) |
-| `make_inventors_hf_specter_embeddings.py` | Generate one inventors SPECTER embedding set per invocation (`--model specter` or `--model specter2`; defaults to a local ignored output path) |
 | `extract_big_block_dataset.py` | Stream a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, `specter.pickle`, `cluster_seeds.json`, `altered_cluster_signatures.txt`, and `meta.json`; supports both pretty-printed and minified JSON exports |
 | `convert_to_arrow.py` | Join canonical names into the benchmarks and the augmented training set; convert service JSON, benchmarks, and linker replay inputs into bounded Arrow runtime artifacts with current raw-planner batch indexes; validate name counts/datasets and write checksum-bound collection manifests |
 | `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on an extracted giant block and write preservation metrics, plots, and tables. Uses the same graph fallback as `Clusterer`. Needs the ORCID prefix-count files (see [subblocking](../docs/subblocking.md)). |
@@ -48,7 +45,7 @@ Use [the data guide](../docs/data.md) for the common assets and corrected snapsh
 
 | Script | What it does |
 |---|---|
-| `eval_prod_models.py` | Evaluate an explicitly supplied SPECTER2 bundle on full, inventors_s2and, or mini datasets. Requires an explicit `--arrow-data-root` or `--json-data-root` (JSON also needs `--name-counts-index-root` and `--name-tuples-path`). Non-training evaluation uses the test blocks recorded in the bundle, rejects `--seed`, and auto-uses Arrow when complete artifacts exist; SPECTER1 is an explicit `--train` research comparison only. |
+| `eval_prod_models.py` | Evaluate an explicitly supplied SPECTER2 bundle on the full (default) or mini datasets. Requires an explicit `--arrow-data-root` or `--json-data-root` (JSON also needs `--name-counts-index-root` and `--name-tuples-path`). Non-training evaluation uses the test blocks recorded in the bundle, rejects `--seed`, and auto-uses Arrow when complete artifacts exist; SPECTER1 is an explicit `--train` research comparison only. |
 | `eps_sweep/sweep_eps_on_linking_gold.py` | Giant-block release EPS curves with hidden-ORCID identity B3 or safe-action diagnostics; reuse native distances and linkage trees |
 | `eps_sweep/build_linking_eps_gold.py` | Expand active dev candidate labels into diagnostic pairs; exclude test queries and initial-query origins |
 | `eps_sweep/plot_b3_eps_sweeps.py` | Plot completed giant-block B3 curves for manual EPS review |
@@ -58,7 +55,6 @@ Use [the data guide](../docs/data.md) for the common assets and corrected snapsh
 | `verification/verify_production_model_distributions.py` | Verify wheel/sdist bytes, require canonical tuple/ORCID assets, and reject packaged default/model paths |
 | `verification/smoke_installed_incremental_arrow.py` | Installed-wheel synthetic canonical Arrow/linker smoke; the release runbook additionally requires one smoke with the real v1.3 bundle |
 | `verification/evaluate_incremental_gold.py` | Freeze bounded gold identity cases before scores; test positive and author-absent profiles through the complete model's public Arrow API |
-| `verification/compare_pairwise_models.py` | Compare patent and patent-free models on identical fixed non-patent pairs; report three heads and block confidence intervals |
 | `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
 | `verification/profile_promoted_incremental_arrow.py` | Produce the release performance report from a bounded promoted incremental Arrow workload |
 | `verification/compare_graph_subblocking_arrow_quality.py` | Produce the release subblocking-quality report by comparing Python and Rust graph subblocking on the frozen Arrow and component inputs |

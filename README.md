@@ -77,7 +77,7 @@ The [inference guide](docs/production_inference.md) describes raw inputs, embedd
 ## Training and evaluation
 
 The maintained production pairwise trainer reads `pairwise/model_plan.json` from the corrected research snapshot.
-It uses declared dataset names, including `inventors_s2and` when the plan includes patents.
+It uses the dataset names that the plan declares.
 The [production commands](scripts/production/README.md#pairwise-model) describe pairwise fit, validation-only EPS selection, and incremental finalization.
 A historical baseline is not a prerequisite for a pairwise fit.
 Final release acceptance remains a separate step.

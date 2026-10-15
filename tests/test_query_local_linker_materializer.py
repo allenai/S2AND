@@ -1,4 +1,4 @@
-"""Verify query-local catalogs against native public-request plans."""
+"""Verify linker materializer catalogs against native candidate plans."""
 
 from __future__ import annotations
 
@@ -45,9 +45,8 @@ class _ConstantPairwise:
         return np.full(len(features), 0.8)
 
 
-@pytest.mark.parametrize("query_local", [False, True], ids=["default_catalog", "query_local_catalog"])
-def test_materializer_matches_case_catalogs_without_cross_context_profiles(tmp_path: Path, query_local: bool) -> None:
-    """Duplicate profiles must not change a separate public request's candidate ranks."""
+def test_materializer_ranks_match_the_native_labeled_plan(tmp_path: Path) -> None:
+    """Duplicate and mixed profiles keep the ranks of the native labeled plan."""
     source = tmp_path / "source"
     paths = _context_paths(source / "datasets" / "toy")
     (source / "splits").mkdir()
@@ -115,26 +114,6 @@ def test_materializer_matches_case_catalogs_without_cross_context_profiles(tmp_p
             members,
             num_threads=1,
         )
-        expected_ranks = pd.Series(index=rows.index, dtype=np.float32)
-        for group, group_rows in rows.groupby("query_group_id", sort=False):
-            keys = group_rows["candidate_component_key"].tolist()
-            seeds = [(signature, key) for key in keys for signature in members[key]]
-            seed_path = write_ipc(
-                tmp_path / f"{group}_seeds.arrow",
-                pa.table(
-                    {
-                        "signature_id": [signature for signature, _key in seeds],
-                        "cluster_id": [key for _signature, key in seeds],
-                    }
-                ),
-            )
-            public_plan = runtime.RawBlockQueryCandidatePlanner.from_auto_queries(
-                arrow.native, seed_path, top_k=2, orcid_enabled=False, num_threads=1
-            ).plan(["q1"])
-            ranks = dict(zip(public_plan["row_component_keys"], public_plan["retrieval_ranks"], strict=True))
-            expected_ranks.loc[group_rows.index] = [ranks[key] for key in keys]
-
-        assert global_plan["retrieval_ranks"][0] != expected_ranks.iloc[0]
         output = tmp_path / "output"
         trainer._materialize_arrow_rust_feature_bundle(  # noqa: SLF001
             source_bundle=trainer.load_bundle(source),
@@ -160,20 +139,15 @@ def test_materializer_matches_case_catalogs_without_cross_context_profiles(tmp_p
             pairwise_model_nan_value=np.nan,
             pairwise_aggregate_nan_value=0.0,
             arrow_datasets={"toy": arrow},
-            query_local_candidate_datasets=frozenset({"toy"}) if query_local else frozenset(),
         )
     materialized = pd.read_parquet(output / "features_corrected" / "train.parquet")
     pd.testing.assert_frame_equal(
         materialized[list(rows.columns)],
-        rows.assign(
-            retrieval_rank=expected_ranks.to_numpy(dtype=np.int64)
-            if query_local
-            else np.asarray(global_plan["retrieval_ranks"], dtype=np.int64)
-        ),
+        rows.assign(retrieval_rank=np.asarray(global_plan["retrieval_ranks"], dtype=np.int64)),
     )
     np.testing.assert_array_equal(
         materialized["retrieval_rank"],
-        expected_ranks if query_local else global_plan["retrieval_ranks"],
+        global_plan["retrieval_ranks"],
     )
 
 

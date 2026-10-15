@@ -866,18 +866,12 @@ def _materialize_arrow_rust_dataset_rows(
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
     retrieval_top_k: int = DEFAULT_RETRIEVAL_TOP_K,
-    query_local_candidates: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any], np.ndarray]:
     started = time.perf_counter()
     dataset_name = context.dataset_name
     source_rows = rows.reset_index(drop=True).copy()
     source_row_count = len(source_rows)
     component_members = context.component_members
-    if query_local_candidates:
-        if source_rows["query_group_id"].nunique() != 1:
-            raise ValueError("Query-local candidate materialization requires one query group")
-        component_keys = dict.fromkeys(source_rows["candidate_component_key"].astype(str))
-        component_members = {key: context.component_members[key] for key in component_keys}
     query_ids = set(source_rows["query_signature_id"].astype(str))
     query_origins = {
         query: context.initial_query_sources[query] for query in query_ids if query in context.initial_query_sources
@@ -1213,7 +1207,6 @@ def _materialize_arrow_rust_feature_bundle(
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
     arrow_datasets: Mapping[str, ArrowDataset],
-    query_local_candidate_datasets: frozenset[str] = frozenset(),
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
     _copy_bundle_support_files(source_bundle, output_bundle_root)
     classic_spec = source_bundle.models.get("classic")
@@ -1379,11 +1372,8 @@ def _materialize_arrow_rust_feature_bundle(
             # The native plan allows one view per signature. Keep each complete
             # query together while sharing the dataset context across its views.
             for query_view, view_rows in dataset_rows.groupby(dataset_rows["query_view"].astype(str), sort=False):
-                local_candidates = dataset_name in query_local_candidate_datasets
                 affected_mask = view_rows["query_signature_id"].astype(str).isin(affected_queries)
-                if local_candidates:
-                    row_groups = list(view_rows.groupby(view_rows["query_group_id"].astype(str), sort=False))
-                elif bool(affected_mask.any()):
+                if bool(affected_mask.any()):
                     row_groups = list(
                         view_rows.loc[affected_mask].groupby(view_rows.loc[affected_mask, "query_group_id"], sort=False)
                     )
@@ -1393,7 +1383,7 @@ def _materialize_arrow_rust_feature_bundle(
                 else:
                     row_groups = [(None, view_rows)]
                 for group_index, (_group_id, group_rows) in enumerate(row_groups):
-                    suffix = f"__query{group_index}" if local_candidates or bool(affected_mask.any()) else ""
+                    suffix = f"__query{group_index}" if bool(affected_mask.any()) else ""
                     partial_path = partial_dir / (
                         f"{_safe_dataset_filename(dataset_name)}__"
                         f"{_safe_dataset_filename(str(query_view))}{suffix}.parquet"
@@ -1453,7 +1443,6 @@ def _materialize_arrow_rust_feature_bundle(
                     pairwise_model_nan_value=float(pairwise_model_nan_value),
                     pairwise_aggregate_nan_value=float(pairwise_aggregate_nan_value),
                     retrieval_top_k=retrieval_top_k,
-                    **({"query_local_candidates": True} if dataset_name in query_local_candidate_datasets else {}),
                 )
                 _write_arrow_rust_partial(
                     shard=shard,
@@ -1699,7 +1688,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     pairwise_aggregate_nan_value = 0.0
     feature_nan_policy = _feature_nan_policy_summary()
     source_bundle = load_bundle(args.source_bundle_root)
-    query_local_candidate_datasets = frozenset(getattr(args, "query_local_candidate_dataset", ()))
     training_table_keys, calibration_query_ids, evaluation_table_keys = _release_table_plan(source_bundle)
     _assert_output_paths_outside_inputs(
         output_dir=output_dir,
@@ -1716,9 +1704,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             name_counts_index_root=name_counts_index_root,
             arrow_stack=arrow_stack,
         )
-        # A misspelled dataset name must not silently fall back to block-local candidates.
-        if unknown_local := query_local_candidate_datasets - set(arrow_datasets):
-            raise ValueError(f"--query-local-candidate-dataset names absent datasets: {sorted(unknown_local)}")
         clusterer = load_clusterer(
             args.pairwise_model_path,
             n_jobs=int(args.n_jobs),
@@ -1756,7 +1741,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             pairwise_model_nan_value=pairwise_model_nan_value,
             pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
             arrow_datasets=arrow_datasets,
-            query_local_candidate_datasets=query_local_candidate_datasets,
         )
 
         started = time.perf_counter()
@@ -1808,7 +1792,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             pairwise_model_nan_value=pairwise_model_nan_value,
             pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
             arrow_datasets=arrow_datasets,
-            query_local_candidate_datasets=query_local_candidate_datasets,
         )
     evaluation = evaluate_classic(
         evaluation_feature_bundle,
@@ -1842,7 +1825,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "feature_nan_policy": feature_nan_policy,
         "artifact_summary": artifact_summary,
         "component_scope": "block-local",
-        "query_local_candidate_datasets": sorted(query_local_candidate_datasets),
     }
     _write_json(output_dir / "linker_evaluation_report.json", result)
     work.cleanup()
@@ -1869,12 +1851,6 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--name-counts-index-root", type=Path, required=True)
     parser.add_argument("--n-jobs", type=_positive_int, default=20)
     parser.add_argument("--total-ram-bytes", type=_positive_int, default=DEFAULT_TOTAL_RAM_BYTES)
-    parser.add_argument(
-        "--query-local-candidate-dataset",
-        action="append",
-        default=[],
-        help="Use each query group's source profiles as its candidate catalog. Repeat for each dataset.",
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:

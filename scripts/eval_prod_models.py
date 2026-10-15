@@ -105,8 +105,8 @@ Performance on zbmath     (B3): (0.945, 0.985, 0.964)    # mini ⊂ full
 Usage
 ================================================================================
 
-    # Evaluate one explicit SPECTER2 model on inventors_s2and
-    uv run python scripts/eval_prod_models.py --dataset inventors_s2and \
+    # Evaluate one explicit SPECTER2 model on the full benchmarks
+    uv run python scripts/eval_prod_models.py --dataset full \
         --specter2-model-path /path/to/production_model_bundle
 
     # Evaluate a bundle on its recorded mini holdout via ANDData/Python
@@ -166,9 +166,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate SPECTER2 production bundles or retrain embedding variants")
     parser.add_argument(
         "--dataset",
-        choices=["inventors_s2and", "mini", "full"],
-        default="inventors_s2and",
-        help="Which dataset(s) to evaluate on (default: inventors_s2and)",
+        choices=["mini", "full"],
+        default="full",
+        help="Which dataset(s) to evaluate on (default: full)",
     )
     parser.add_argument(
         "--seed",
@@ -355,10 +355,6 @@ def _assert_training_mode_metrics_identical(
                             f"metric={metric_name} baseline_mode={baseline_mode} mode={train_mode}: "
                             f"expected={expected_value} observed={observed_value}"
                         )
-
-
-def _supports_arrow_eval(dataset_label: str) -> bool:
-    return dataset_label in {"mini", "full"}
 
 
 def _should_use_arrow_eval(
@@ -1005,15 +1001,8 @@ def main() -> None:
 
     data_original = None if args.json_data_root is None else str(args.json_data_root.resolve())
     arrow_data_root = None if args.arrow_data_root is None else str(args.arrow_data_root.resolve())
-    if args.dataset == "mini":
-        # aminer has too much variance; medline is pairwise only
-        datasets = ["arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath"]
-    elif args.dataset == "full":
-        datasets = ["arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath"]
-    else:
-        if args.use_arrow:
-            raise ValueError("--use-arrow currently supports --dataset mini and --dataset full only")
-        datasets = ["inventors_s2and"]
+    # aminer has too much variance; medline is pairwise only
+    datasets = ["arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath"]
     datasets = _resolve_requested_datasets(datasets, args.datasets, args.dataset)
     if train_flag:
         _validate_train_mode_scope(train_modes, datasets)
@@ -1049,10 +1038,10 @@ def main() -> None:
         raise ValueError("Production evaluation requires --arrow-data-root or --json-data-root")
     missing_arrow_error = (
         first_missing_arrow_dataset_error(arrow_data_root, datasets, active_specter_suffixes)
-        if _supports_arrow_eval(args.dataset) and not train_flag and not args.no_arrow
+        if not train_flag and not args.no_arrow
         else FileNotFoundError("Arrow eval is unavailable for this configuration")
     )
-    arrow_available = _supports_arrow_eval(args.dataset) and not train_flag and missing_arrow_error is None
+    arrow_available = not train_flag and missing_arrow_error is None
     if args.use_arrow and missing_arrow_error is not None:
         raise missing_arrow_error
     use_arrow = _should_use_arrow_eval(

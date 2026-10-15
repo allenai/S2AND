@@ -836,7 +836,6 @@ def test_eval_main_rejects_invalid_mode_combinations(monkeypatch: pytest.MonkeyP
         ),
         (["--train", "--specter2-model-path", "unused-model"], "cannot be combined with --train"),
         (["--dataset", "mini", "--use-arrow", "--train"], "cannot be combined with --train"),
-        (["--dataset", "inventors_s2and", "--use-arrow"], "supports --dataset mini and --dataset full only"),
         (
             ["--dataset", "mini", "--specter2-model-path", "some-model", "--seed", "42"],
             "--seed applies only to --train",

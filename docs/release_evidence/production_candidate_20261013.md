@@ -3,8 +3,9 @@
 Release `1.3` excludes patent data from pairwise and incremental supervision.
 This candidate replaces the patent-inclusive package from commit `7e183c1`.
 The repository model is `artifacts/common/v1.3/production_model_v1.3`.
-Its 11 files total 25,958,235 bytes and match the evaluated package.
-Manifest SHA-256: `c7199d52e3ccdfb7fe24d745bd9f7bbbf86df453bc89b783015a623db99eed9f`.
+Its 11 files total 25,958,163 bytes.
+They match the evaluated package, except that the two JSON manifests omit the unread `generated_by_runtime` field.
+Manifest SHA-256: `b58e178c8b5089044dffcf7f5d95b8d7a5b59c2045a929bf12d1bc13ec46519b`.
 
 | Component | Features | Saved trees |
 | --- | ---: | ---: |

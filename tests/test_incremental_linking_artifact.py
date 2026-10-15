@@ -13,7 +13,6 @@ import numpy as np
 import pytest
 
 import s2and.incremental_linking.artifact as artifact_module
-from s2and import __version__
 from s2and.incremental_linking.artifact import (
     BOOSTER_FILENAME,
     INCREMENTAL_LINKER_KIND,
@@ -43,7 +42,6 @@ def _valid_metadata_payload() -> dict[str, Any]:
         "feature_names": list(promoted_linker_feature_columns()),
         "format_version": INCREMENTAL_LINKER_FORMAT_VERSION,
         "gate_config": tiny_logistic_gate_config(),
-        "generated_by_runtime": __version__,
         "kind": INCREMENTAL_LINKER_KIND,
         "pairwise_bundle_binding_digest": canonical_json_digest(synthetic_pairwise_bundle_binding()),
         "retrieval_top_k": 25,
@@ -108,14 +106,12 @@ def test_artifact_lifecycle_preserves_predictions_and_immutable_identity(tmp_pat
         "feature_names",
         "format_version",
         "gate_config",
-        "generated_by_runtime",
         "kind",
         "pairwise_bundle_binding_digest",
         "retrieval_top_k",
         "target_spec_digest",
     }
     assert metadata["kind"] == INCREMENTAL_LINKER_KIND
-    assert metadata["generated_by_runtime"] == __version__
     assert metadata["pairwise_bundle_binding_digest"] == canonical_json_digest(binding)
     assert metadata["target_spec_digest"] == canonical_json_digest(_TEST_TARGET_SPEC)
 
@@ -241,33 +237,20 @@ def test_metadata_rejects_invalid_fields() -> None:
         artifact_module._validated_metadata(payload)
 
 
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    (
-        ("kind", "not-a-linker", "kind must be"),
-        ("generated_by_runtime", " ", "generated_by_runtime must be a nonempty trimmed string"),
-    ),
-    ids=("wrong-kind", "invalid-producer-version"),
-)
-def test_load_rejects_wrong_identity_before_booster_io(
-    tmp_path: Path,
-    field: str,
-    value: str,
-    message: str,
-) -> None:
+def test_load_rejects_wrong_kind_before_booster_io(tmp_path: Path) -> None:
     artifact_dir = _write_fake_artifact(tmp_path / "artifact")
     metadata_path = artifact_dir / METADATA_FILENAME
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    payload[field] = value
+    payload["kind"] = "not-a-linker"
     metadata_path.write_text(json.dumps(payload), encoding="utf-8")
     (artifact_dir / BOOSTER_FILENAME).unlink()
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="kind must be"):
         load_incremental_linking_artifact(artifact_dir)
 
 
 @pytest.mark.parametrize("field", ("format_version", "feature_contract_version"))
-@pytest.mark.parametrize("value", (None, True, 1.0, 2))
+@pytest.mark.parametrize("value", (True, 1.0, 2))
 def test_load_rejects_unsupported_contract_before_booster_io(tmp_path: Path, field: str, value: object) -> None:
     artifact_dir = _write_fake_artifact(tmp_path / "artifact")
     metadata_path = artifact_dir / METADATA_FILENAME
@@ -303,25 +286,6 @@ def test_load_rejects_unversioned_metadata(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="metadata fields do not match the current contract"):
         load_incremental_linking_artifact(artifact_dir)
-
-
-def test_artifact_accepts_different_producer_runtime_with_equal_contract(tmp_path: Path) -> None:
-    booster, fixture = build_tiny_promoted_booster()
-    artifact_dir = tmp_path / "artifact"
-    metadata = save_incremental_linking_artifact(
-        booster,
-        artifact_dir,
-        gate_config=tiny_logistic_gate_config(),
-        target_spec=_TEST_TARGET_SPEC,
-        pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
-    )
-    metadata["generated_by_runtime"] = "0.0.0"
-    (artifact_dir / METADATA_FILENAME).write_text(json.dumps(metadata), encoding="utf-8")
-
-    loaded = load_incremental_linking_artifact(artifact_dir)
-    np.testing.assert_allclose(
-        loaded.predict_probabilities(fixture), np.asarray(booster.predict(fixture)), rtol=1e-10, atol=1e-10
-    )
 
 
 def test_load_always_verifies_booster_hash_before_loading_scorer(

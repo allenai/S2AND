@@ -145,14 +145,12 @@ def _run_metadata() -> dict[str, Any]:
             text=True,
         ).stdout.strip()
 
-    status = git("status", "--porcelain")
     return {
         "generated_at_utc": datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat(),
         "argv": sys.argv,
         "python_version": sys.version.split()[0],
         "platform": platform.platform(),
         "git_commit": git("rev-parse", "HEAD"),
-        "git_dirty": bool(status),
     }
 
 

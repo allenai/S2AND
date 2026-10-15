@@ -278,13 +278,9 @@ def test_uv_cache_and_digest_track_only_native_inputs(tmp_path: Path) -> None:
         assert rust_source_digest(source) != previous_digest, f"{relative}: edited input must change digest"
         assert _sync_uv_cache_project(project) == expected_builds, f"{relative}: edit must rebuild once"
 
-
-def test_recovery_command_rebuilds_an_unchanged_cached_package(tmp_path: Path) -> None:
-    """The suggested recovery must force a build even when cache keys match."""
-    _, project = _uv_cache_project(tmp_path)
-    assert _sync_uv_cache_project(project) == 1
-    assert _sync_uv_cache_project(project) == 1
-    assert _sync_uv_cache_project(project, recovery=True) == 2
+    # The suggested recovery must force a build even when the cache keys match.
+    assert _sync_uv_cache_project(project) == 5, "unchanged fixture must stay cached"
+    assert _sync_uv_cache_project(project, recovery=True) == 6, "recovery must rebuild a cached package"
 
 
 def _session_project(root: Path) -> tuple[Path, Path]:

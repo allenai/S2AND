@@ -8,6 +8,7 @@ import pytest
 
 from s2and.arrow_inputs import ArrowDataset
 from scripts.production.data.package_pairwise_inputs import package_pairwise_inputs
+from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import (
     convert_release_arrow,
     write_pairwise_artifacts,
@@ -15,8 +16,7 @@ from tests.pairwise_release_helpers import (
 )
 
 
-@pytest.fixture
-def prepared(tmp_path: Path) -> Path:
+def _write_prepared(tmp_path: Path) -> Path:
     root = tmp_path / "prepared"
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -46,6 +46,20 @@ def prepared(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return root
+
+
+@pytest.fixture(scope="module")
+def _prepared_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("prepared_template")
+    _write_prepared(root)
+    return root
+
+
+@pytest.fixture
+def prepared(_prepared_template: Path, tmp_path: Path) -> Path:
+    # Tests change the prepared inputs, so each test gets its own copy.
+    copy_template(_prepared_template, tmp_path)
+    return tmp_path / "prepared"
 
 
 def test_package_preserves_sources_and_opens_after_copy(prepared: Path, tmp_path: Path) -> None:

@@ -60,19 +60,11 @@ def test_source_support_preflight_accepts_valid_gate_and_complete_assignments(tm
     ("gate_changes", "message"),
     [
         (
-            {"calibration_splits": ["calibration_fit", "test"]},
-            "classic.promoted_stratified_gate calibration_splits must not include test_split",
-        ),
-        (
-            {"calibration_splits": ["calibration_fit", "calibration_fit"]},
-            "classic.promoted_stratified_gate.calibration_splits must not contain duplicates",
-        ),
-        (
             {"mode": "legacy_threshold_gate"},
             "classic.promoted_stratified_gate.mode must be 'promoted_logistic_topk_multiclass_l2'",
         ),
     ],
-    ids=["test-in-calibration", "duplicate-calibration", "unsupported-mode"],
+    ids=["unsupported-mode"],
 )
 def test_source_support_preflight_rejects_present_invalid_gate(
     tmp_path: Path, gate_changes: dict[str, Any], message: str

@@ -128,6 +128,23 @@ def _round_six(value: float) -> np.float32:
     return np.float32(np.round(value * 1_000_000.0) / 1_000_000.0)
 
 
+@cache
+def _paper_pair_evidence(query_paper: str, member_paper: str) -> tuple[float, float, float, float]:
+    """Jaccard, containment, overlap count, and author-count log difference of two papers."""
+
+    # Rows repeat few paper pairs, and each 2,000-name set intersection is the reference's main cost.
+    query_set = _paper_name_set(query_paper)
+    member_set = _paper_name_set(member_paper)
+    intersection = len(query_set & member_set)
+    author_counts = (len(_paper_names(query_paper)), len(_paper_names(member_paper)))
+    return (
+        intersection / len(query_set | member_set),
+        intersection / min(len(query_set), len(member_set)),
+        float(intersection),
+        abs(math.log1p(author_counts[0]) - math.log1p(author_counts[1])),
+    )
+
+
 def _reference_evidence(
     query: str,
     members: list[str],
@@ -136,19 +153,16 @@ def _reference_evidence(
     """Python reference of the paper author-list evidence of one candidate row."""
 
     query_paper, query_position, _ = signatures[query]
-    query_set = _paper_name_set(query_paper)
     query_local = _local_names(query_paper, query_position)
     jaccard = containment = overlap = local_jaccard = local_overlap = 0.0
     log_absdiff = math.inf
     for member in members:
         member_paper, member_position, _ = signatures[member]
-        member_set = _paper_name_set(member_paper)
-        intersection = len(query_set & member_set)
-        jaccard = max(jaccard, intersection / len(query_set | member_set))
-        containment = max(containment, intersection / min(len(query_set), len(member_set)))
-        overlap = max(overlap, float(intersection))
-        author_counts = (len(_paper_names(query_paper)), len(_paper_names(member_paper)))
-        log_absdiff = min(log_absdiff, abs(math.log1p(author_counts[0]) - math.log1p(author_counts[1])))
+        pair_jaccard, pair_containment, pair_overlap, pair_log_absdiff = _paper_pair_evidence(query_paper, member_paper)
+        jaccard = max(jaccard, pair_jaccard)
+        containment = max(containment, pair_containment)
+        overlap = max(overlap, pair_overlap)
+        log_absdiff = min(log_absdiff, pair_log_absdiff)
         if member == query:
             continue
         member_local = _local_names(member_paper, member_position)

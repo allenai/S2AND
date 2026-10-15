@@ -104,8 +104,7 @@ def test_pairwise_eval_scopes_plot_style(tmp_path, monkeypatch, fail_save: bool)
                 pairwise_eval(
                     np.ones((2, 1)), np.array([0, 1]), DummyClf(), str(tmp_path), "Style", ["x"], skip_shap=True
                 )
-                assert (tmp_path / "style_roc.png").is_file()
-                assert (tmp_path / "style_pr.png").is_file()
+                assert {p.name for p in tmp_path.glob("*.png")} == {"style_roc.png", "style_pr.png"}
             assert labelsizes == [18.0] * (1 if fail_save else 2)
             assert mpl.rcParams == before
         finally:
@@ -583,7 +582,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-@pytest.mark.parametrize("mode", ["single", "wrapped-nameless", "skip"])
+@pytest.mark.parametrize("mode", ["single", "wrapped-nameless"])
 def test_pairwise_eval_writes_only_requested_plots(tmp_path, monkeypatch, mode):
     """Exercise scorer unwrapping and SHAP routing with one plotting fixture."""
     import matplotlib.pyplot as plt
@@ -616,7 +615,6 @@ def test_pairwise_eval_writes_only_requested_plots(tmp_path, monkeypatch, mode):
             nameless_classifier=classifier if wrapped else None,
             nameless_X=np.ones((4, 2)) if wrapped else None,
             nameless_feature_names=["d", "e"] if wrapped else None,
-            skip_shap=mode == "skip",
         )
         expected = {"plots_roc.png", "plots_pr.png"}
         if mode == "single":
@@ -624,6 +622,6 @@ def test_pairwise_eval_writes_only_requested_plots(tmp_path, monkeypatch, mode):
         elif wrapped:
             expected.update({"plots_shap_0.png", "plots_shap_1.png"})
         assert {path.name for path in tmp_path.glob("*.png")} == expected
-        assert shapes == ([] if mode == "skip" else [(4, 3), (4, 2)] if wrapped else [(4, 3)])
+        assert shapes == ([(4, 3), (4, 2)] if wrapped else [(4, 3)])
     finally:
         plt.close("all")

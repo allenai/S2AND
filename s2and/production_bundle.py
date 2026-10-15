@@ -14,7 +14,6 @@ from typing import Any
 
 import numpy as np
 
-from s2and import __version__
 from s2and._sha256 import sha256_file as _sha256_file
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.contracts import canonical_json_digest
@@ -213,7 +212,6 @@ def write_production_manifest(
         "feature_contract_version": PAIRWISE_FEATURE_CONTRACT_VERSION,
         "feature_names": feature_names,
         "format_version": PRODUCTION_MODEL_FORMAT_VERSION,
-        "generated_by_runtime": __version__,
         "kind": PRODUCTION_MODEL_KIND,
         "release_version": release_version,
         "sha256": sha256,

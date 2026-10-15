@@ -300,7 +300,7 @@ def test_altered_presplit_lru_serializes_concurrent_get_and_eviction() -> None:
     reader.start()
     assert read_paused.wait(timeout=5)
     writer.start()
-    writer_finished_during_get = writer_done.wait(timeout=1)
+    writer_finished_during_get = writer_done.wait(timeout=0.2)
     allow_read_return.set()
     reader.join(timeout=5)
     writer.join(timeout=5)
@@ -820,10 +820,8 @@ def test_partial_supervision_plan_disallows_keep_only_explicit_query_to_active_s
     }
 
 
-@pytest.mark.parametrize(
-    "direct,reverse",
-    [(0.2, LARGE_DISTANCE), (LARGE_DISTANCE, 0.2), (None, LARGE_DISTANCE), (None, 0.2), (0.2, None)],
-)
+# Each public route rejects conflicting directions before planning, so each row sets one direction only.
+@pytest.mark.parametrize("direct,reverse", [(None, LARGE_DISTANCE), (None, 0.2), (0.2, None)])
 def test_native_planner_exclusions_match_scored_supervision_direction(
     tmp_path: Path, direct: float | None, reverse: float | None
 ) -> None:

@@ -47,8 +47,7 @@ NAMELESS_INFO = FeaturizationInfo(features_to_use=list(DEFAULT_NAMELESS_FEATURE_
 EPS_GRID = [round(float(eps), 3) for eps in np.linspace(0.05, 0.95, 19)]
 
 
-@pytest.fixture
-def release_inputs(tmp_path: Path) -> dict[str, Any]:
+def _build_release_inputs(tmp_path: Path) -> dict[str, Any]:
     data_dir = tmp_path / "data"
     files = write_pairwise_dataset(data_dir)
     tuple_path, name_counts_path, _orcid = write_pairwise_artifacts(tmp_path)
@@ -61,6 +60,17 @@ def release_inputs(tmp_path: Path) -> dict[str, Any]:
         "name_counts_path": name_counts_path,
         "name_tuples": load_name_tuple_artifact(tuple_path).pairs,
     }
+
+
+@pytest.fixture(scope="module")
+def release_inputs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """Build the inputs once. A test that changes an input file must use fresh_release_inputs."""
+    return _build_release_inputs(tmp_path_factory.mktemp("release"))
+
+
+@pytest.fixture
+def fresh_release_inputs(tmp_path: Path) -> dict[str, Any]:
+    return _build_release_inputs(tmp_path)
 
 
 def _json_dataset(inputs: dict[str, Any], *, selection_only: bool = False, **selection: Any) -> ANDData:
@@ -524,16 +534,16 @@ def _authority(inputs: dict[str, Any]) -> ProductionArtifactAuthority:
 
 @pytest.mark.parametrize("role", ["signatures", "papers", "specter_embeddings"])
 def test_release_rejects_stale_arrow_through_provenance_not_the_plan_file_check(
-    release_inputs: dict[str, Any],
+    fresh_release_inputs: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     role: str,
 ) -> None:
-    files = release_inputs["files"]
+    files = fresh_release_inputs["files"]
     _changed_feature_source(files, role)
     # The plan is updated to the changed JSON, so the existing plan-file digest check passes;
     # only the stale Arrow directory and its stale provenance record remain.
     updated_plan_digests = source_sha256(files)
-    dataset = _json_dataset(release_inputs)
+    dataset = _json_dataset(fresh_release_inputs)
     real_open = ArrowDataset.open
     monkeypatch.setattr(
         ArrowDataset,
@@ -543,12 +553,12 @@ def test_release_rejects_stale_arrow_through_provenance_not_the_plan_file_check(
 
     with pytest.raises(ArrowProvenanceError, match=f"qian was converted from a different {role} source"):
         with release_pairwise._release_rust_featurizer(
-            release_inputs["arrow_root"],
+            fresh_release_inputs["arrow_root"],
             "qian",
             source_sha256=updated_plan_digests,
             dataset=dataset,
             signature_ids=set(dataset.signatures),
-            artifacts=_authority(release_inputs),
+            artifacts=_authority(fresh_release_inputs),
             n_jobs=1,
         ):
             pass
@@ -556,23 +566,28 @@ def test_release_rejects_stale_arrow_through_provenance_not_the_plan_file_check(
     # Control: regenerating Arrow data and provenance from the changed JSON is accepted.
     monkeypatch.setattr(ArrowDataset, "open", real_open)
     convert_release_arrow(
-        release_inputs["data_dir"], "qian", release_inputs["arrow_root"], release_inputs["name_counts_path"]
+        fresh_release_inputs["data_dir"],
+        "qian",
+        fresh_release_inputs["arrow_root"],
+        fresh_release_inputs["name_counts_path"],
     )
     with release_pairwise._release_rust_featurizer(
-        release_inputs["arrow_root"],
+        fresh_release_inputs["arrow_root"],
         "qian",
         source_sha256=updated_plan_digests,
         dataset=dataset,
         signature_ids=set(dataset.signatures),
-        artifacts=_authority(release_inputs),
+        artifacts=_authority(fresh_release_inputs),
         n_jobs=1,
     ) as featurizer:
         assert {str(signature_id) for signature_id in featurizer.signature_ids()} == set(dataset.signatures)
 
 
-def test_provenance_rejects_tables_that_differ_from_the_recorded_conversion(release_inputs: dict[str, Any]) -> None:
-    dataset_dir = release_inputs["arrow_root"] / "qian"
-    expected = source_sha256(release_inputs["files"])
+def test_provenance_rejects_tables_that_differ_from_the_recorded_conversion(
+    fresh_release_inputs: dict[str, Any],
+) -> None:
+    dataset_dir = fresh_release_inputs["arrow_root"] / "qian"
+    expected = source_sha256(fresh_release_inputs["files"])
     verify_conversion_provenance(dataset_dir, expected_source_sha256=expected)
 
     record_path = dataset_dir / "conversion_provenance.json"

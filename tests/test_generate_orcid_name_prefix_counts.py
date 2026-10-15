@@ -205,7 +205,10 @@ def test_builder_deduplicates_rows() -> None:
     assert metrics["orcid_pair_keys_after_threshold"] > 0
 
 
-@pytest.mark.parametrize("orcid", [*sorted(generator.EXCLUDED_ORCID_GROUPS), "https://orcid.org/0000-0002-1825-0097"])
+# The CLI test checks the full reviewed set size. These rows check each ORCID prefix and the URL form.
+@pytest.mark.parametrize(
+    "orcid", ["0000-0000-0000-0001", "0009-0004-4499-3929", "https://orcid.org/0000-0002-1825-0097"]
+)
 def test_reviewed_group_supplies_no_evidence_even_with_matching_surnames(orcid: str) -> None:
     rows = [{"orcid": orcid, "first_name": first, "last_name": "Smith"} for first in ("Al", "Amy", "Ava", "Al")]
     counts, metrics = generator.build_prefix_counts_from_sorted_rows(rows, [], min_orcid_count=1, max_names_per_orcid=2)

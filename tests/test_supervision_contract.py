@@ -47,12 +47,8 @@ def test_public_boundaries_reject_conflicting_reverse_entries_before_work(method
     assert all(repr(value) in message for value in values)
     assert list(partial.items()) == original
 
-
-@pytest.mark.parametrize("method", PUBLIC_METHODS)
-def test_public_boundaries_reject_nonfinite_distances_before_work(method):
     value = float("nan")
     partial = {("paper-a", "paper-b"): value}
-    blocks = [] if "incremental" in method else {}
     with pytest.raises(ValueError, match="partial_supervision") as error:
         getattr(_clusterer(), method)(blocks, None, partial_supervision=partial)
     assert "paper-a" in str(error.value) and "paper-b" in str(error.value)
@@ -209,7 +205,9 @@ def test_bulk_prediction_preserves_predict_helper_overrides(override, threshold,
     assert {frozenset(members) for members in clusters.values()} == {frozenset({"0", "1"}), frozenset({"2", "3"})}
 
 
-@pytest.mark.parametrize("method", PUBLIC_METHODS)
+# Unbatched predict and predict_helper share _predict_with_normalized_supervision.
+# The predict_helper row of the conflict test covers the normalization of the helper.
+@pytest.mark.parametrize("method", [method for method in PUBLIC_METHODS if method != "predict_helper"])
 @pytest.mark.parametrize("value", [0.0, 0.2, 10000.0])
 def test_equal_reverse_supervision_matches_single_entry_on_real_public_routes(tmp_path, method, value):
     """Duplicates and input order cannot alter actual matrices or predictions."""

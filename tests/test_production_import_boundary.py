@@ -13,19 +13,20 @@ def _run_in_fresh_python(script: str) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("module", ["s2and.production_model", "s2and.eval"])
-def test_import_does_not_load_plotting_or_training(module: str) -> None:
-    """Check import boundaries in a fresh interpreter, outside pytest's imports."""
+def test_import_does_not_load_plotting_or_training() -> None:
+    """Check import boundaries in a fresh interpreter, outside pytest's imports.
+
+    test_production_model.py::test_complete_bundle_native_inference_does_not_load_hyperopt
+    checks the s2and.production_model boundary.
+    """
     script = textwrap.dedent(
-        f"""
+        """
         import importlib
         import sys
-        importlib.import_module({module!r})
+        importlib.import_module("s2and.eval")
         forbidden = ["seaborn", "matplotlib.pyplot", "hyperopt"]
-        if {module!r} == "s2and.production_model":
-            forbidden.append("s2and.eval")
         loaded = [name for name in forbidden if name in sys.modules]
-        assert not loaded, f"Unexpected import dependencies: {{loaded}}"
+        assert not loaded, f"Unexpected import dependencies: {loaded}"
         """
     )
     _run_in_fresh_python(script)

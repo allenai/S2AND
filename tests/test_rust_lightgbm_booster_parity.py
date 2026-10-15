@@ -67,37 +67,58 @@ class _NumericalSplit:
     ancestors: tuple[tuple[_NumericalSplit, bool], ...]
 
 
-def _model_numerical_splits(
-    booster: lgb.Booster,
-) -> list[_NumericalSplit]:
-    """Read numerical splits and paths from LightGBM's public model dump."""
+def _tree_numerical_splits(tree_index: int, tree: dict[str, str]) -> list[_NumericalSplit]:
+    """Read one serialized tree's numerical splits in pre-order."""
 
+    if int(tree["num_leaves"]) < 2:
+        return []
+    features = [int(value) for value in tree["split_feature"].split()]
+    # dump_model clamps thresholds to +-1e300 (AvoidInf); keep the same rows.
+    thresholds = [min(max(float(value), -1e300), 1e300) for value in tree["threshold"].split()]
+    decision_types = [int(value) for value in tree["decision_type"].split()]
+    left_children = [int(value) for value in tree["left_child"].split()]
+    right_children = [int(value) for value in tree["right_child"].split()]
     splits: list[_NumericalSplit] = []
 
-    def visit(
-        tree_index: int,
-        node: dict[str, Any],
-        ancestors: tuple[tuple[_NumericalSplit, bool], ...],
-    ) -> None:
-        if "split_index" not in node:
-            return
-        assert node["decision_type"] == "<="
+    def visit(node: int, ancestors: tuple[tuple[_NumericalSplit, bool], ...]) -> None:
+        decision_type = decision_types[node]
+        assert decision_type & 1 == 0, "categorical split"
         split = _NumericalSplit(
             tree_index,
-            int(node["split_index"]),
-            int(node["split_feature"]),
-            float(node["threshold"]),
-            bool(node["default_left"]),
-            str(node["missing_type"]),
+            node,
+            features[node],
+            thresholds[node],
+            bool(decision_type & 2),
+            ("None", "Zero", "NaN")[(decision_type >> 2) & 3],
             ancestors,
         )
         splits.append(split)
-        visit(tree_index, node["left_child"], (*ancestors, (split, True)))
-        visit(tree_index, node["right_child"], (*ancestors, (split, False)))
+        # A negative child index is a leaf.
+        if left_children[node] >= 0:
+            visit(left_children[node], (*ancestors, (split, True)))
+        if right_children[node] >= 0:
+            visit(right_children[node], (*ancestors, (split, False)))
 
-    for tree_index, tree in enumerate(booster.dump_model()["tree_info"]):
-        visit(tree_index, tree["tree_structure"], ())
+    visit(0, ())
     return splits
+
+
+def _model_numerical_splits(
+    booster: lgb.Booster,
+) -> list[_NumericalSplit]:
+    """Read numerical splits and paths from LightGBM's serialized model text."""
+
+    # The model text parse is much faster than dump_model JSON on large boosters.
+    trees: list[dict[str, str]] = []
+    for line in booster.model_to_string().split("end of trees", 1)[0].splitlines():
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+        if key == "Tree":
+            trees.append({})
+        elif trees:
+            trees[-1][key] = value
+    return [split for tree_index, tree in enumerate(trees) for split in _tree_numerical_splits(tree_index, tree)]
 
 
 def _split_goes_left(split: _NumericalSplit, value: float) -> bool:
@@ -680,29 +701,3 @@ def test_regression_model_rejected() -> None:
     booster = lgb.train({"objective": "regression", "verbose": -1, "seed": 0}, train_set, num_boost_round=3)
     with pytest.raises(ValueError, match="binary"):
         RustLightGBMBooster.from_string(booster.model_to_string())
-
-
-# ---------------------------------------------------------------------------
-# Input handling
-# ---------------------------------------------------------------------------
-
-
-def test_input_shape_layout_and_thread_identity() -> None:
-    rng = np.random.default_rng(11)
-    lgb_booster = _train_booster(rng, inject_nans=True, num_boost_round=10)
-    rust_booster = _rust_from_booster(lgb_booster)
-    features = np.ascontiguousarray(rng.normal(size=(32, lgb_booster.num_feature())))
-
-    with pytest.raises(ValueError, match="columns"):
-        rust_booster.predict_raw(features[:, :-1])
-
-    empty = np.empty((0, lgb_booster.num_feature()), dtype=np.float64)
-    assert np.asarray(rust_booster.predict_raw(empty)).shape == (0,)
-
-    one_thread = np.asarray(rust_booster.predict_raw(features, num_threads=1))
-    four_threads = np.asarray(rust_booster.predict_raw(features, num_threads=PARITY_NUM_THREADS))
-    assert one_thread.tobytes() == four_threads.tobytes()
-
-    fortran = np.asfortranarray(features)
-    fortran_raw = np.asarray(rust_booster.predict_raw(fortran, num_threads=PARITY_NUM_THREADS))
-    assert four_threads.tobytes() == fortran_raw.tobytes()

@@ -342,10 +342,10 @@ production_model_vX.Y/
 ```
 
 The root manifest contains `kind: "s2and_model"`, `format_version: 1`, and `feature_contract_version: 1`.
-It also contains `feature_names`, `release_version`, `generated_by_runtime`, `eps_calibration`, and `sha256`.
+It also contains `feature_names`, `release_version`, `eps_calibration`, and `sha256`.
 `feature_names` declares the exact main and nameless column order.
 The loader checks supported contract versions and feature names.
-`generated_by_runtime` records provenance; it does not require an exact installed package-version match.
+The bundle does not record the producer package version, so the loader does not compare it.
 The installed Python and Rust packages still require matched versions for their internal interfaces.
 
 The exact checksum inventory determines whether the bundle is pairwise-only or complete.

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import pickle
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -809,41 +808,6 @@ def test_benchmark_overwrite_removes_only_stale_pair_artifacts(tmp_path: Path) -
     assert "val_pairs" not in report["paths"]
     assert not (output_dir / "val_pairs.csv").exists()
     assert unrelated.read_text() == "keep"
-
-
-@pytest.mark.parametrize("failure", [FileNotFoundError("git missing"), subprocess.CalledProcessError(128, "git")])
-def test_converter_identity_records_unavailable_git(
-    monkeypatch: pytest.MonkeyPatch, failure: Exception, caplog: pytest.LogCaptureFixture
-) -> None:
-    def fail_git(*args: Any, **kwargs: Any) -> None:
-        raise failure
-
-    monkeypatch.setattr(convert_to_arrow.subprocess, "run", fail_git)
-    identity = convert_to_arrow._converter_identity(selected_embedding="specter2")
-    assert identity["git_head"] is None and identity["git_dirty"] is None
-    assert identity["selected_embedding"] == "specter2"
-    assert "Git metadata unavailable" in caplog.text
-
-
-def test_runtime_conversion_succeeds_without_git_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    sources = _write_one_signature_sources(tmp_path)
-    monkeypatch.setattr(convert_to_arrow, "_PROJECT_ROOT", sources.source_dir)
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(sources.source_dir.parent))
-    output_root = tmp_path / "out"
-    convert_to_arrow.convert_runtime_dataset_to_arrow(
-        sources=sources,
-        output_dir=output_root / "dummy",
-        root_manifest_dir=output_root,
-        name_counts_index_root=None,
-        n_jobs=1,
-        overwrite=False,
-        skip_name_counts_index=True,
-    )
-
-    provenance = json.loads((output_root / "dummy" / "conversion_provenance.json").read_text())
-    assert provenance["converter"]["git_head"] is None
-    assert provenance["converter"]["git_dirty"] is None
-    assert (output_root / "manifest.json").is_file()
 
 
 @pytest.mark.parametrize("role", ["signatures", "papers", "specter_embeddings", "clusters"])

@@ -79,12 +79,12 @@ def trained_scorers(
     return tuple(scorers)
 
 
+# Each backend pair and each copy budget appear, and each backend meets both budgets.
 @pytest.mark.parametrize(
-    "main_backend,nameless_backend",
-    [(0, 0), (0, 1), (1, 0), (1, 1)],
-    ids=["python-python", "python-native", "native-python", "native-native"],
+    "main_backend,nameless_backend,copy_budget",
+    [(0, 0, 1), (0, 1, 1_000_000), (1, 0, 1_000_000), (1, 1, 1)],
+    ids=["python-python-chunked", "python-native-one-batch", "native-python-one-batch", "native-native-chunked"],
 )
-@pytest.mark.parametrize("copy_budget", [1, 1_000_000], ids=["chunked", "one-batch"])
 def test_real_native_and_python_scorers_combine_distances_in_original_row_order(
     trained_scorers: tuple[tuple[LGBMClassifier, NativeLightGBMBinaryClassifier], ...],
     monkeypatch: pytest.MonkeyPatch,

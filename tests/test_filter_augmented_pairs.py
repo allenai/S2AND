@@ -2,13 +2,14 @@
 
 import csv
 import json
-import subprocess
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import scripts.convert_to_arrow as convert_to_arrow
 from s2and._sha256 import sha256_file
 from s2and.data import ANDData
 from scripts.production.model.augmented_leakage import training_members_from_sources
@@ -107,12 +108,19 @@ def _fixture(tmp_path: Path, *, name: str = "qian") -> dict[str, Any]:
     }
 
 
-def _run(release: Path, output: Path, *, seed: str = "1111") -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+def _run(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    release: Path,
+    output: Path,
+    *,
+    seed: str = "1111",
+) -> dict[str, Any]:
+    monkeypatch.setattr(
+        sys,
+        "argv",
         [
-            sys.executable,
-            "-m",
-            "scripts.convert_to_arrow",
+            "convert_to_arrow.py",
             "filter-augmented-pairs",
             "--release",
             str(release),
@@ -121,21 +129,19 @@ def _run(release: Path, output: Path, *, seed: str = "1111") -> subprocess.Compl
             "--output-root",
             str(output),
         ],
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        text=True,
-        check=False,
     )
+    convert_to_arrow.main()
+    return json.loads(capsys.readouterr().out)
 
 
 @pytest.mark.parametrize("name", ["qian", "inventors_s2and"])
-def test_filter_augmented_pairs_cli_matches_real_split_and_preserves_sources(tmp_path: Path, name: str) -> None:
+def test_filter_augmented_pairs_cli_matches_real_split_and_preserves_sources(
+    tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     fixture = _fixture(tmp_path, name=name)
     original = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     output = tmp_path / "filtered"
-    result = _run(fixture["release"], output)
-    assert result.returncode == 0, result.stderr
-    report = json.loads(result.stdout)
+    report = _run(monkeypatch, capsys, fixture["release"], output)
     assert report == json.loads((output / "filter_report.json").read_text())
     assert (report["train"]["input_rows"], report["train"]["retained_rows"], report["train"]["removed_rows"]) == (
         7,
@@ -159,14 +165,12 @@ def test_filter_augmented_pairs_cli_matches_real_split_and_preserves_sources(tmp
     for name, entry in report["outputs"].items():
         assert entry["sha256"] == sha256_file(output / name)
     assert report["random_seed"] == 1111
-    second = _run(fixture["release"], tmp_path / "filtered_again")
-    assert second.returncode == 0, second.stderr
-    second_report = json.loads(second.stdout)
+    second_report = _run(monkeypatch, capsys, fixture["release"], tmp_path / "filtered_again")
     assert {name: row["sha256"] for name, row in report["outputs"].items()} == {
         name: row["sha256"] for name, row in second_report["outputs"].items()
     }
-    retry = _run(fixture["release"], output)
-    assert retry.returncode != 0 and "already exists" in retry.stderr
+    with pytest.raises(FileExistsError, match="already exists"):
+        _run(monkeypatch, capsys, fixture["release"], output)
 
 
 @pytest.mark.parametrize(
@@ -179,7 +183,9 @@ def test_filter_augmented_pairs_cli_matches_real_split_and_preserves_sources(tmp
         ("negative-seed", "must be non-negative"),
     ],
 )
-def test_filter_augmented_pairs_cli_rejects_unsafe_outputs(tmp_path: Path, case: str, message: str) -> None:
+def test_filter_augmented_pairs_cli_rejects_unsafe_outputs(
+    tmp_path: Path, case: str, message: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     fixture = _fixture(tmp_path)
     if case in {"unknown-prefix", "missing-model"}:
         prefix = "unknown" if case == "unknown-prefix" else "kisti"
@@ -190,8 +196,8 @@ def test_filter_augmented_pairs_cli_rejects_unsafe_outputs(tmp_path: Path, case:
     elif case == "empty-test":
         fixture["test"].write_text(json.dumps(fixture["test_rows"][:3]), encoding="utf-8")
     output = tmp_path / "filtered"
-    result = _run(fixture["release"], output, seed="-1" if case == "negative-seed" else "1111")
-    assert result.returncode != 0 and message in result.stderr
+    with pytest.raises(ValueError, match=re.escape(message)):
+        _run(monkeypatch, capsys, fixture["release"], output, seed="-1" if case == "negative-seed" else "1111")
     assert not output.exists()
 
 
@@ -207,7 +213,9 @@ def test_training_members_uses_real_split_without_packaged_artifacts(
     assert training_members_from_sources("qian", fixture["model_files"], random_seed=1111) == fixture["train_ids"]
 
 
-def test_filter_augmented_pairs_uses_the_requested_seed_and_original_order(tmp_path: Path) -> None:
+def test_filter_augmented_pairs_uses_the_requested_seed_and_original_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     fixture = _fixture(tmp_path)
     reference = fixture["reference"]
     rows = [
@@ -222,8 +230,7 @@ def test_filter_augmented_pairs_uses_the_requested_seed_and_original_order(tmp_p
         allowed = {f"qian___{sid}" for members in train.values() for sid in members}
         expected = [row for row in rows if row[1] in allowed and row[3] in allowed]
         output = tmp_path / f"filtered_{seed}"
-        result = _run(fixture["release"], output, seed=str(seed))
-        assert result.returncode == 0, result.stderr
+        _run(monkeypatch, capsys, fixture["release"], output, seed=str(seed))
         with (output / "train_pairs.csv").open(newline="", encoding="utf-8") as source:
             actual = list(csv.reader(source))[1:]
         assert actual == expected

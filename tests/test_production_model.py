@@ -17,7 +17,6 @@ import s2and.incremental_linking.artifact as incremental_artifact_module
 import s2and.production_bundle as production_bundle_module
 import s2and.production_model as production_model_module
 import s2and.subblocking as subblocking_module
-from s2and import __version__
 from s2and.data import ANDData
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
@@ -361,6 +360,10 @@ def test_complete_bundle_native_inference_does_not_load_hyperopt(
         import numpy as np
         from s2and.production_model import load_production_model
 
+        forbidden = ["seaborn", "matplotlib.pyplot", "hyperopt", "s2and.eval"]
+        loaded = [name for name in forbidden if name in sys.modules]
+        assert not loaded, f"Unexpected import dependencies: {{loaded}}"
+
         clusterer = load_production_model(
             {str(output_bundle)!r}, expected_artifact_hashes={_TEST_EXPLICIT_ARTIFACT_HASHES!r}
         )
@@ -637,13 +640,11 @@ def test_manifest_has_exact_shape_and_identity(
         "feature_contract_version",
         "feature_names",
         "format_version",
-        "generated_by_runtime",
         "kind",
         "release_version",
         "sha256",
     }
     assert original_manifest["kind"] == PRODUCTION_MODEL_KIND
-    assert original_manifest["generated_by_runtime"] == __version__
     assert original_manifest["format_version"] == PRODUCTION_MODEL_FORMAT_VERSION
     assert original_manifest["feature_contract_version"] == PAIRWISE_FEATURE_CONTRACT_VERSION
     assert original_manifest["release_version"] == "9.9"
@@ -679,20 +680,18 @@ def test_manifest_has_exact_shape_and_identity(
             expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
         )
 
-    manifest = copy.deepcopy(original_manifest)
-    manifest["generated_by_runtime"] = " "
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (bundle_dir / "pairwise" / "main.lgb").unlink()
-    with pytest.raises(ValueError, match="generated_by_runtime must be a nonempty trimmed string"):
-        production_model_module._validate_manifest(
-            bundle_dir,
-            expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
-            expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
-        )
 
-
-@pytest.mark.parametrize("field", ("format_version", "feature_contract_version"))
-@pytest.mark.parametrize("value", (None, True, 1.0, 2))
+# Both fields share one check, so only format_version carries the type-strictness rows.
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("format_version", None),
+        ("format_version", True),
+        ("format_version", 1.0),
+        ("format_version", 2),
+        ("feature_contract_version", 2),
+    ),
+)
 def test_manifest_rejects_unsupported_contract_before_model_io(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
     field: str,
@@ -737,35 +736,6 @@ def test_pairwise_model_rejects_unversioned_manifest(
 
     with pytest.raises(ValueError, match="manifest field mismatch"):
         _load_pairwise_staging_model(bundle_dir)
-
-
-def test_complete_model_accepts_different_producer_runtime_with_equal_contract(finalization: dict[str, Any]) -> None:
-    summary = finalize_production_bundle(**finalization)
-    bundle_dir = summary.bundle_dir
-    original = load_production_model(bundle_dir)
-    assert original.incremental_linker_artifact is not None
-    rng = np.random.default_rng(21)
-    pairwise_features = rng.normal(size=(5, original.classifier.n_features_in_))
-    linker_features = rng.normal(size=(5, len(original.incremental_linker_artifact.feature_columns))).astype(np.float32)
-    expected_pairwise = original.classifier.predict_proba(pairwise_features)
-    expected_linker = original.incremental_linker_artifact.predict_probabilities(linker_features)
-
-    metadata_path = bundle_dir / "incremental_linker" / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["generated_by_runtime"] = "0.0.0"
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-    _refresh_manifest_checksum(bundle_dir, "incremental_linker/metadata.json")
-    manifest_path = bundle_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["generated_by_runtime"] = "0.0.0"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    loaded = load_production_model(bundle_dir)
-    assert loaded.incremental_linker_artifact is not None
-    np.testing.assert_array_equal(loaded.classifier.predict_proba(pairwise_features), expected_pairwise)
-    np.testing.assert_array_equal(
-        loaded.incremental_linker_artifact.predict_probabilities(linker_features), expected_linker
-    )
 
 
 def test_manifest_rejects_null_lifecycle_state(
@@ -1159,7 +1129,6 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
             "nameless": loaded.nameless_featurizer_info.get_feature_names(),
         },
         "format_version": PRODUCTION_MODEL_FORMAT_VERSION,
-        "generated_by_runtime": __version__,
         "kind": PRODUCTION_MODEL_KIND,
         "release_version": "9.9",
         "sha256": manifest["sha256"],

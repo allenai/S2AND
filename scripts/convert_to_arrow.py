@@ -13,7 +13,6 @@ import logging
 import os
 import pickle
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -662,24 +661,10 @@ def _write_specter_arrow(
 
 
 def _converter_identity(**options: Any) -> dict[str, Any]:
-    """Record the converter revision and the options that shaped its output."""
+    """Record the converter and the options that shaped its output."""
 
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], cwd=_PROJECT_ROOT, capture_output=True, text=True, check=True
-        ).stdout.strip()
-
-    try:
-        git_head: str | None = git("rev-parse", "HEAD")
-        git_dirty: bool | None = bool(git("status", "--porcelain", "--untracked-files=no"))
-    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        logger.warning("Converter Git metadata unavailable in %s: %s", _PROJECT_ROOT, exc)
-        git_head = None
-        git_dirty = None
     return {
         "script": "scripts/convert_to_arrow.py",
-        "git_head": git_head,
-        "git_dirty": git_dirty,
         "use_orcid_id": True,
         **options,
     }

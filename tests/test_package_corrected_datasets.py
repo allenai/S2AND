@@ -22,14 +22,16 @@ from scripts.production.data.package_corrected_datasets import (
 from scripts.production.data.package_pairwise_inputs import package_pairwise_inputs
 from scripts.production.model.linker_source_bundle import export_portable_source_bundle, validate_portable_source_bundle
 from scripts.production.model.unknown_signatures import load_unknown_signatures
+from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import write_pairwise_dataset
 from tests.test_linker_source_bundle import _link_directory, _write_arrow_root, _write_linker_inputs
-from tests.test_package_pairwise_inputs import prepared  # noqa: F401
+from tests.test_package_pairwise_inputs import _write_prepared
 
 
-@pytest.fixture
-def package_inputs(request: pytest.FixtureRequest, tmp_path: Path) -> dict[str, Path]:
-    prepared_root: Path = request.getfixturevalue("prepared")
+@pytest.fixture(scope="module")
+def _package_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    tmp_path = tmp_path_factory.mktemp("package_template")
+    prepared_root = _write_prepared(tmp_path)
     pairwise = tmp_path / "pairwise-inputs"
     package_pairwise_inputs(prepared_root, pairwise, datasets=("qian",))
     corrected = tmp_path / "corrected"
@@ -43,11 +45,19 @@ def package_inputs(request: pytest.FixtureRequest, tmp_path: Path) -> dict[str, 
     linker = tmp_path / "linker"
     _write_arrow_root(linker, dataset="qian", replay=True, name_counts_source=pairwise / "name_counts_index")
     _write_linker_inputs(linker, leak=False, dataset="qian")
+    return tmp_path
+
+
+@pytest.fixture
+def package_inputs(_package_template: Path, tmp_path: Path) -> dict[str, Path]:
+    # Tests change the inputs, so each test gets its own copy of the module template.
+    copy_template(_package_template, tmp_path)
+    pairwise = tmp_path / "pairwise-inputs"
     return {
-        "public_data_root": public,
-        "corrected_source_root": corrected,
+        "public_data_root": tmp_path / "public",
+        "corrected_source_root": tmp_path / "corrected",
         "pairwise_inputs_root": pairwise,
-        "linker_source_bundle": linker,
+        "linker_source_bundle": tmp_path / "linker",
         "name_counts_index": pairwise / "name_counts_index",
         "output_root": tmp_path / "complete",
     }
@@ -200,16 +210,13 @@ def test_complete_snapshot_rejects_benchmark_names_that_escape_output(package_in
     assert not package_inputs["output_root"].exists()
 
 
-def test_complete_snapshot_rejects_output_inside_a_support_junction_target(
-    package_inputs: dict[str, Path], tmp_path: Path
-) -> None:
+def test_complete_snapshot_rejects_a_linked_input_before_copy(package_inputs: dict[str, Path], tmp_path: Path) -> None:
     source = package_inputs["linker_source_bundle"]
     target = tmp_path / "external-labels"
     shutil.move(source / "labels", target)
     _link_directory(source / "labels", target)
-    output = target / "export"
-    package_inputs["output_root"] = output
-    with pytest.raises(ValueError, match="overlaps a copied directory target"):
+    output = package_inputs["output_root"]
+    with pytest.raises(ValueError, match="dataset snapshot input contains a filesystem link"):
         _package(package_inputs)
     assert not output.exists()
     assert (target / "train.parquet").is_file()

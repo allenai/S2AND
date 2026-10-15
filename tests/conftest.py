@@ -1,9 +1,17 @@
 """Common runtime isolation for the Python orchestration test suite."""
 
-import random
-from collections.abc import Iterator
+import os
 
-import numpy as np
+# Set these before a library starts its thread pool. Each xdist worker otherwise
+# starts one OpenMP thread for each core, and the workers compete for the cores.
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+# A known count stops the joblib physical-core probe, which costs about 2 s in each worker.
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 1))
+
+import random  # noqa: E402
+from collections.abc import Iterator  # noqa: E402
+
+import numpy as np  # noqa: E402
 import pytest
 
 from tests.rust_build_freshness import stale_rust_extension_message

@@ -126,26 +126,15 @@ def _copy_arrow_root_without_name_counts(source: Path, destination: Path) -> Non
     shutil.copytree(source, destination, ignore=ignore)
 
 
-def _validate_copy_output(source: Path, output: Path) -> None:
-    """Reject directory cycles and overlapping outputs before a copy."""
+def _reject_filesystem_links(root: Path, *, context: str) -> None:
+    """Reject symlinks and junctions, because a copy must not depend on paths outside the root."""
 
-    visited: set[Path] = set()
-    ancestors_by_directory: dict[Path, frozenset[Path]] = {}
-    for directory, names, _files in os.walk(source, followlinks=True):
-        directory_path = Path(directory)
-        resolved = directory_path.resolve()
-        ancestors = ancestors_by_directory.get(directory_path.parent, frozenset())
-        if resolved in ancestors:
-            raise ValueError(f"Input contains a cyclic directory link: {directory_path}")
-        ancestors_by_directory[directory_path] = ancestors | {resolved}
-        if output.is_relative_to(resolved):
-            raise ValueError(f"portable output overlaps a copied directory target: {resolved}")
-        if resolved in visited:
-            names.clear()
-            continue
-        visited.add(resolved)
-        if directory_path == source and "name_counts_index" in names:
-            names.remove("name_counts_index")
+    for directory, names, files in os.walk(root):
+        for name in (*names, *files):
+            path = Path(directory) / name
+            metadata = path.lstat()
+            if path.is_symlink() or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise ValueError(f"{context} contains a filesystem link: {path}")
 
 
 def _rebind_dataset_manifest(manifest_path: Path, *, name_counts_index: Path) -> None:
@@ -214,7 +203,7 @@ def _validate_support_root(source_root: Path) -> None:
         raise ValueError(f"linker support root contains reserved assembled paths: {conflicts}")
 
 
-def _validate_bundle_paths(root: Path, *, resolve_links: bool = True) -> None:
+def _validate_bundle_paths(root: Path) -> None:
     """Reject support paths that cannot survive a directory relocation."""
 
     bundle = _read_json(root / "bundle.json")
@@ -223,7 +212,7 @@ def _validate_bundle_paths(root: Path, *, resolve_links: bool = True) -> None:
         if not isinstance(value, str) or not value:
             raise ValueError(f"bundle.{field} must be a non-empty relative path")
         relative = Path(value)
-        resolved = (root / relative).resolve() if resolve_links else Path(os.path.abspath(root / relative))
+        resolved = (root / relative).resolve()
         if relative.is_absolute() or not resolved.is_relative_to(root.resolve()):
             raise ValueError(f"bundle.{field} escapes the source bundle: {value!r}")
         if not resolved.exists():
@@ -259,12 +248,7 @@ def validate_portable_source_bundle(root: Path) -> dict[str, Any]:
     """Verify all operational paths and payloads within one portable root."""
 
     root = root.resolve()
-    for directory, names, files in os.walk(root):
-        for name in (*names, *files):
-            path = Path(directory) / name
-            metadata = path.lstat()
-            if path.is_symlink() or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-                raise ValueError(f"portable source bundle contains a filesystem link: {path}")
+    _reject_filesystem_links(root, context="portable source bundle")
     _validate_bundle_paths(root)
     entries = _portable_dataset_manifests(root)
     shared_index = root / "name_counts_index"
@@ -313,7 +297,8 @@ def export_portable_source_bundle(*, source_bundle: Path, output_source_bundle: 
         raise FileExistsError("portable source bundle output directory must not exist")
     if output_source_bundle.is_relative_to(source_bundle) or source_bundle.is_relative_to(output_source_bundle):
         raise ValueError("portable source bundle input and output directories must not overlap")
-    _validate_bundle_paths(source_bundle, resolve_links=False)
+    _reject_filesystem_links(source_bundle, context="source bundle")
+    _validate_bundle_paths(source_bundle)
     entries = _portable_dataset_manifests(source_bundle)
     indexes = []
     for manifest_path in entries.values():
@@ -334,7 +319,6 @@ def export_portable_source_bundle(*, source_bundle: Path, output_source_bundle: 
         authoritative_manifest_sha256=sha256_file(index / "manifest.json"),
         dataset_manifests=entries,
     )
-    _validate_copy_output(source_bundle, output_source_bundle)
     _copy_arrow_root_without_name_counts(source_bundle, output_source_bundle)
     shutil.copytree(index, output_source_bundle / "name_counts_index")
     _rebind_portable_dataset_manifests(

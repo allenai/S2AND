@@ -20,6 +20,7 @@ from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION
 from s2and.production_model import load_production_model, pairwise_bundle_binding
 from s2and.production_training_contract import load_model_plan, load_packaged_artifact_authority
 from scripts.production.model import release_pairwise
+from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import convert_release_arrow, write_pairwise_artifacts, write_pairwise_dataset
 from tests.promoted_linking_helpers import (
     build_tiny_promoted_booster,
@@ -33,8 +34,7 @@ def _write(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
 
-@pytest.fixture
-def heldout_fixture(tmp_path: Path) -> argparse.Namespace:
+def _build_heldout(tmp_path: Path) -> argparse.Namespace:
     _tuple_path, counts_path, _orcid_path = write_pairwise_artifacts(tmp_path)
     authority = load_packaged_artifact_authority(name_counts_index_root=counts_path)
     pairwise_root = tmp_path / "snapshot" / "pairwise"
@@ -185,6 +185,28 @@ def heldout_fixture(tmp_path: Path) -> argparse.Namespace:
         keep=keep,
         authority=authority,
     )
+
+
+@pytest.fixture(scope="module")
+def _heldout_template(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, argparse.Namespace]:
+    root = tmp_path_factory.mktemp("heldout_template")
+    return root, _build_heldout(root)
+
+
+@pytest.fixture
+def heldout_fixture(_heldout_template: tuple[Path, argparse.Namespace], tmp_path: Path) -> argparse.Namespace:
+    root, template = _heldout_template
+    # The copy keeps the template depth because relocated plans find the count index by a relative path.
+    copy_template(root, tmp_path)
+
+    def rebase(value: Any) -> Any:
+        if isinstance(value, Path) and value.is_relative_to(root):
+            return tmp_path / value.relative_to(root)
+        if isinstance(value, dict):
+            return {key: rebase(item) for key, item in value.items()}
+        return value
+
+    return argparse.Namespace(**{key: rebase(value) for key, value in vars(template).items()})
 
 
 def test_heldout_scores_complete_model_exact_pairs_and_full_unknown_context(

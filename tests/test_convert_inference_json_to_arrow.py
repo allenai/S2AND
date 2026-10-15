@@ -338,15 +338,19 @@ def test_service_json_main_dispatches_bounded_cli_args(
     assert json.loads(capsys.readouterr().out)["dataset"] == "service_payload"
 
 
-def test_service_json_cli_converts_and_reports_success(tmp_path: Path) -> None:
+def test_service_json_cli_converts_and_reports_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     input_path = tmp_path / "request.json"
     input_path.write_text(json.dumps(_minimal_service_payload()), encoding="utf-8")
     output_root = tmp_path / "arrow"
-    result = subprocess.run(
+    monkeypatch.setattr(
+        sys,
+        "argv",
         [
-            sys.executable,
-            "-m",
-            "scripts.convert_to_arrow",
+            "convert_to_arrow.py",
             "service-json",
             "--input-json",
             str(input_path),
@@ -356,6 +360,24 @@ def test_service_json_cli_converts_and_reports_success(tmp_path: Path) -> None:
             "1",
             "--skip-name-counts-index",
         ],
+    )
+
+    try:
+        convert_module.main()
+    except SystemExit as exc:
+        pytest.fail(f"service-json CLI exited with {exc.code!r}")
+    report = json.loads(capsys.readouterr().out)
+    assert report["dataset"] == "request"
+    assert report["signature_count"] == report["paper_count"] == 1
+    assert (output_root / "manifest.json").is_file()
+    with ArrowDataset.open(output_root / "request"):
+        pass
+
+
+def test_module_entry_point_lists_subcommands() -> None:
+    # This is the only test of the `python -m` entry point; other CLI tests call main() in process.
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.convert_to_arrow", "--help"],
         cwd=Path(__file__).resolve().parents[1],
         capture_output=True,
         text=True,
@@ -363,12 +385,16 @@ def test_service_json_cli_converts_and_reports_success(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    report = json.loads(result.stdout)
-    assert report["dataset"] == "request"
-    assert report["signature_count"] == report["paper_count"] == 1
-    assert (output_root / "manifest.json").is_file()
-    with ArrowDataset.open(output_root / "request"):
-        pass
+    for subcommand in (
+        "service-json",
+        "join-canonical-names",
+        "join-canonical-augmented-names",
+        "filter-augmented-pairs",
+        "benchmark",
+        "linker-replay",
+        "validate",
+    ):
+        assert subcommand in result.stdout
 
 
 def test_service_conversion_checks_index_before_loading_input(tmp_path: Path) -> None:

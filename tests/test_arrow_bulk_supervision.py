@@ -45,8 +45,7 @@ def _clusterer(distance):
 
 @pytest.mark.parametrize("case", CASES)
 @pytest.mark.parametrize("route", ["python", "arrow"])
-@pytest.mark.parametrize("subblocked", [False, True])
-def test_bulk_zero_overrides_do_not_require_incremental_links(tmp_path, case, route, subblocked):
+def test_bulk_zero_overrides_do_not_require_incremental_links(tmp_path, case, route):
     names, supervision, threshold, _ = CASES[case]
     dataset = _dataset(names, {})
     blocks = {"one": list(dataset.signatures)}
@@ -57,7 +56,7 @@ def test_bulk_zero_overrides_do_not_require_incremental_links(tmp_path, case, ro
         dataset,
         blocks,
         route,
-        threshold=threshold if subblocked else None,
+        threshold=threshold,
         distance=0.9,
         partial_supervision=caller_supervision,
     )
@@ -96,14 +95,14 @@ def test_standalone_arrow_incremental_keeps_strict_zero_requirements(tmp_path, c
             )
 
 
-@pytest.mark.parametrize("key_type", [int, str])
+# Entry stringifies str and int keys alike, so int keys alone catch a missed stringify.
 @pytest.mark.parametrize("distance", [0.0, LARGE_DISTANCE])
-@pytest.mark.parametrize("threshold", [None, 10, 3])
-def test_arrow_bulk_normalizes_ids_and_supervision_on_every_route(tmp_path, key_type, distance, threshold):
+@pytest.mark.parametrize("threshold", [None, 3])
+def test_arrow_bulk_normalizes_ids_and_supervision_on_every_route(tmp_path, distance, threshold):
     names = [("Ada", "", "Smith")] * 4 + [("Bob", "", "Smith")] * 2
     dataset = _dataset(names, {})
     blocks = {"small": [0, 1], "big": [2, 3, 4, 5]}
-    supervision = {(key_type(2), key_type(3)): distance}
+    supervision = {(2, 3): distance}
 
     clusters = _predict(
         tmp_path,
@@ -118,7 +117,7 @@ def test_arrow_bulk_normalizes_ids_and_supervision_on_every_route(tmp_path, key_
     assert sorted(sid for members in clusters.values() for sid in members) == list(dataset.signatures)
     assert any({"2", "3"} <= set(members) for members in clusters.values()) == (distance == 0.0)
     assert blocks == {"small": [0, 1], "big": [2, 3, 4, 5]}
-    assert supervision == {(key_type(2), key_type(3)): distance}
+    assert supervision == {(2, 3): distance}
 
 
 def test_arrow_bulk_rejects_supervision_conflicts_after_id_normalization():

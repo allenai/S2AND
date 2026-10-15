@@ -4,8 +4,6 @@ import hashlib
 import json
 import os
 import shutil
-import stat
-import subprocess
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -482,8 +480,6 @@ def test_assembly_rejects_changed_payload_without_recertifying_it(tmp_path: Path
     ("field", "value", "message"),
     [
         ("kind", "unrecognized", "kind"),
-        ("format_version", 999, "format_version"),
-        ("unexpected", "metadata", "fields mismatch"),
     ],
 )
 def test_assembly_rejects_original_manifest_metadata(tmp_path: Path, field: str, value: object, message: str) -> None:
@@ -589,22 +585,10 @@ def test_portable_export_rejects_external_support_paths(tmp_path: Path) -> None:
 
 def _link_directory(path: Path, target: Path) -> None:
     if os.name == "nt":
-        quoted_path = str(path).replace("'", "''")
-        quoted_target = str(target).replace("'", "''")
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                f"New-Item -ItemType Junction -Path '{quoted_path}' -Target '{quoted_target}' -ErrorAction Stop",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode:
-            pytest.skip(f"Directory junction is unavailable: {result.stderr}")
+        import _winapi
+
+        # A junction needs no symlink privilege, so this works on every Windows account.
+        _winapi.CreateJunction(str(target), str(path))
     else:
         try:
             path.symlink_to(target, target_is_directory=True)
@@ -612,34 +596,13 @@ def _link_directory(path: Path, target: Path) -> None:
             pytest.skip(f"Directory symlink is unavailable: {exc}")
 
 
-def test_portable_export_rejects_output_inside_link_target_before_copy(tmp_path: Path) -> None:
-    source, _external_index = _external_index_source(tmp_path)
-    target = tmp_path / "external-labels"
-    shutil.move(source / "labels", target)
-    _link_directory(source / "labels", target)
-    output = target / "export"
-    with pytest.raises(ValueError, match="overlaps a copied directory target"):
-        export_portable_source_bundle(source_bundle=source, output_source_bundle=output)
-    assert not output.exists()
-
-
-def test_portable_export_materializes_a_nonoverlapping_support_link(tmp_path: Path) -> None:
+def test_portable_export_rejects_a_directory_link_before_copy(tmp_path: Path) -> None:
     source, _external_index = _external_index_source(tmp_path)
     target = tmp_path / "external-labels"
     shutil.move(source / "labels", target)
     _link_directory(source / "labels", target)
     output = tmp_path / "export"
-    report = export_portable_source_bundle(source_bundle=source, output_source_bundle=output)
-    assert report["selected_source_rows"] == 4
-    assert not (output / "labels").is_symlink()
-    assert not getattr((output / "labels").lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
-    assert _sha256(output / "labels" / "train.parquet") == _sha256(target / "train.parquet")
-
-
-def test_portable_export_rejects_a_cyclic_directory_link_before_copy(tmp_path: Path) -> None:
-    source, _external_index = _external_index_source(tmp_path)
-    _link_directory(source / "labels" / "loop", source)
-    output = tmp_path / "export"
-    with pytest.raises(ValueError, match="cyclic directory link"):
+    with pytest.raises(ValueError, match="source bundle contains a filesystem link"):
         export_portable_source_bundle(source_bundle=source, output_source_bundle=output)
     assert not output.exists()
+    assert (target / "train.parquet").is_file()

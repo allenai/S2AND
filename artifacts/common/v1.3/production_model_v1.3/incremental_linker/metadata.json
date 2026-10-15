@@ -1774,7 +1774,6 @@
       ]
     ]
   },
-  "generated_by_runtime": "1.0.0",
   "kind": "s2and_incremental_linker",
   "pairwise_bundle_binding_digest": "f34bf7de1e11a29ea2ccd3b10e647a5659b83fb5fe42c4aca40ece9d814f076e",
   "retrieval_top_k": 25,

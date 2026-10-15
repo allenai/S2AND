@@ -129,6 +129,27 @@ def test_manifest_writer_owns_runtime_fields_and_publishes_atomically(tmp_path: 
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
 
 
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [("missing", r"missing=\['files'\] extra=\[\]"), ("extra", r"missing=\[\] extra=\['source'\]")],
+    ids=["missing", "extra"],
+)
+def test_manifest_writer_rejects_field_mismatch_without_writing(tmp_path: Path, change: str, message: str) -> None:
+    # The reader also rejects these fields, so only a direct writer call proves the writer check.
+    signatures_path = tmp_path / "signatures.arrow"
+    signatures_path.write_bytes(b"signatures")
+    manifest = build_arrow_artifact_manifest({"signatures": signatures_path}, tmp_path)
+    if change == "missing":
+        del manifest["files"]
+    else:
+        manifest["source"] = "unexpected"
+
+    with pytest.raises(ValueError, match=f"Arrow artifact manifest fields mismatch: {message}"):
+        write_arrow_artifact_manifest(manifest, tmp_path)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["signatures.arrow"]
+
+
 @pytest.mark.parametrize("failure_stage", ["write", "replace"])
 def test_failed_manifest_publication_preserves_previous_generation_and_cleans_temporary_file(
     tmp_path: Path,

@@ -5,8 +5,9 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import shutil
 import weakref
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -20,15 +21,26 @@ from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import tiny_name_counts_tuple
 
 
-def _write_index(root: Path) -> Path:
-    path, _metrics = write_name_counts_index(root, tiny_name_counts_tuple())
-    return Path(path)
+@pytest.fixture(scope="module")
+def write_index(tmp_path_factory: pytest.TempPathFactory) -> Callable[[Path], Path]:
+    """Return a writer that copies one tiny index, so each case gets its own mutable index."""
+
+    # The index writer is slow relative to a copy, and these tests read or corrupt only the published files.
+    template_path, _metrics = write_name_counts_index(tmp_path_factory.mktemp("name_counts"), tiny_name_counts_tuple())
+    template = Path(template_path)
+
+    def write(root: Path) -> Path:
+        target = root / "name_counts_index"
+        shutil.copytree(template, target)
+        return target
+
+    return write
 
 
-def test_open_cache_retains_only_four_paths(tmp_path: Path) -> None:
+def test_open_cache_retains_only_four_paths(tmp_path: Path, write_index: Callable[[Path], Path]) -> None:
     references: list[weakref.ReferenceType[NameCountsIndex]] = []
     for index in range(5):
-        path = _write_index(tmp_path / str(index))
+        path = write_index(tmp_path / str(index))
         opened = NameCountsIndex.open(path)
         assert NameCountsIndex.open(path) is opened
         references.append(weakref.ref(opened))
@@ -64,8 +76,10 @@ def _remove_manifest_field(index_dir: Path, field: str) -> None:
     _write_manifest(index_dir, manifest)
 
 
-def test_valid_manifest_has_identical_python_and_rust_identity(tmp_path: Path) -> None:
-    index_dir = _write_index(tmp_path)
+def test_valid_manifest_has_identical_python_and_rust_identity(
+    tmp_path: Path, write_index: Callable[[Path], Path]
+) -> None:
+    index_dir = write_index(tmp_path)
 
     python_index = NameCountsIndex.open(index_dir)
     rust_index = load_s2and_rust_extension().NameCountsIndex.open(str(index_dir))
@@ -76,9 +90,11 @@ def test_valid_manifest_has_identical_python_and_rust_identity(tmp_path: Path) -
     assert Path(python_index.path) == index_dir.resolve()
 
 
-def test_native_manifest_validation_rejects_structural_identity_and_material_corruption(tmp_path: Path) -> None:
+def test_native_manifest_validation_rejects_structural_identity_and_material_corruption(
+    tmp_path: Path, write_index: Callable[[Path], Path]
+) -> None:
     for field in _REQUIRED_MANIFEST_FIELDS:
-        index_dir = _write_index(tmp_path / f"missing-{field}")
+        index_dir = write_index(tmp_path / f"missing-{field}")
         _remove_manifest_field(index_dir, field)
         _assert_native_validation_rejects(index_dir, field)
 
@@ -88,23 +104,23 @@ def test_native_manifest_validation_rejects_structural_identity_and_material_cor
         ("string-format", "format_version", "1", "expected u32"),
     )
     for case_id, field, value, expected in cases:
-        index_dir = _write_index(tmp_path / case_id)
+        index_dir = write_index(tmp_path / case_id)
         manifest = _read_manifest(index_dir)
         manifest[field] = value
         _write_manifest(index_dir, manifest)
 
         _assert_native_validation_rejects(index_dir, expected)
     parent = tmp_path / "parent"
-    _write_index(parent)
+    write_index(parent)
     _assert_native_validation_rejects(parent, "does not contain manifest.json")
 
-    index_dir = _write_index(tmp_path / "missing-first")
+    index_dir = write_index(tmp_path / "missing-first")
     manifest = _read_manifest(index_dir)
     manifest["files"].pop("first")
     _write_manifest(index_dir, manifest)
     _assert_native_validation_rejects(index_dir, "first")
 
-    index_dir = _write_index(tmp_path / "missing-sha256")
+    index_dir = write_index(tmp_path / "missing-sha256")
     manifest = _read_manifest(index_dir)
     manifest["files"]["first"].pop("sha256")
     _write_manifest(index_dir, manifest)
@@ -116,7 +132,7 @@ def test_native_manifest_validation_rejects_structural_identity_and_material_cor
         ("file-entry", "record_count"),
     )
     for mutation, expected_field in cases:
-        index_dir = _write_index(tmp_path / mutation)
+        index_dir = write_index(tmp_path / mutation)
         manifest = _read_manifest(index_dir)
         if mutation == "root":
             manifest["source_provenance"] = {}
@@ -132,7 +148,7 @@ def test_native_manifest_validation_rejects_structural_identity_and_material_cor
         ("sha256_mismatch", "SHA-256"),
     )
     for mutation, expected_field in mutations:
-        index_dir = _write_index(tmp_path / mutation / "index")
+        index_dir = write_index(tmp_path / mutation / "index")
         manifest = _read_manifest(index_dir)
         if mutation == "byte_count_mismatch":
             manifest["files"]["first"]["byte_count"] += 1
@@ -143,11 +159,11 @@ def test_native_manifest_validation_rejects_structural_identity_and_material_cor
         _write_manifest(index_dir, manifest)
         _assert_native_validation_rejects(index_dir, expected_field)
 
-    index_dir = _write_index(tmp_path / "renamed-file")
+    index_dir = write_index(tmp_path / "renamed-file")
     (index_dir / "first.bin").rename(index_dir / "renamed.bin")
     _assert_native_validation_rejects(index_dir, "first.bin")
 
-    index_dir = _write_index(tmp_path / "format-before-payload")
+    index_dir = write_index(tmp_path / "format-before-payload")
     manifest = _read_manifest(index_dir)
     manifest["format_version"] = 2
     _write_manifest(index_dir, manifest)
@@ -155,8 +171,10 @@ def test_native_manifest_validation_rejects_structural_identity_and_material_cor
     _assert_native_validation_rejects(index_dir, "format_version")
 
 
-def test_arrow_boundary_translates_representative_manifest_failure(tmp_path: Path) -> None:
-    index_dir = _write_index(tmp_path)
+def test_arrow_boundary_translates_representative_manifest_failure(
+    tmp_path: Path, write_index: Callable[[Path], Path]
+) -> None:
+    index_dir = write_index(tmp_path)
     _remove_manifest_field(index_dir, "format_version")
 
     with pytest.raises(MissingArrowArtifactError, match="format_version"):

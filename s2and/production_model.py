@@ -292,7 +292,6 @@ def _validate_manifest(
         "feature_contract_version",
         "feature_names",
         "format_version",
-        "generated_by_runtime",
         "kind",
         "release_version",
         "sha256",
@@ -314,13 +313,6 @@ def _validate_manifest(
     ):
         if type(manifest[field]) is not int or manifest[field] != expected:
             raise ValueError(f"Production model bundle {field} must equal supported version {expected}")
-    generated_by_runtime = manifest["generated_by_runtime"]
-    if (
-        not isinstance(generated_by_runtime, str)
-        or not generated_by_runtime
-        or generated_by_runtime.strip() != generated_by_runtime
-    ):
-        raise ValueError("Production model bundle generated_by_runtime must be a nonempty trimmed string")
 
     expected_hashes = manifest["sha256"]
     if not isinstance(expected_hashes, dict):

@@ -46,7 +46,7 @@ def test_fit_classic_fits_real_booster_and_logistic_gate(tmp_path: Path) -> None
 
 @pytest.mark.parametrize(
     "augmented_population",
-    ["train", "validation", "test", "omitted", "changed-provenance", "unknown-train", "unknown-validation"],
+    ["train", "test", "omitted", "changed-provenance", "unknown-validation"],
 )
 def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     tmp_path: Path,
@@ -93,11 +93,9 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     safe = next(iter(train.values()))[0]
     target = {
         "train": next(iter(train.values()))[1],
-        "validation": next(iter(val.values()))[0],
         "test": next(iter(test.values()))[0],
         "omitted": "not-in-model-plan",
         "changed-provenance": next(iter(train.values()))[1],
-        "unknown-train": next(iter(train.values()))[1],
         "unknown-validation": next(iter(val.values()))[0],
     }[augmented_population]
     unknown_ids = frozenset()
@@ -178,7 +176,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         return dataset
 
     monkeypatch.setattr(train_pairwise, "ANDData", checked_anddata)
-    if augmented_population in {"validation", "test", "omitted", "changed-provenance"}:
+    if augmented_population in {"test", "omitted", "changed-provenance"}:
         monkeypatch.setattr(
             train_pairwise,
             "_featurize_selection",

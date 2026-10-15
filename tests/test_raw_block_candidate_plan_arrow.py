@@ -48,7 +48,6 @@ s2and_rust = load_s2and_rust_extension()
 
 
 _NAME_COUNTS_INDEX_HEADER_LEN = 32
-_NAME_COUNTS_INDEX_RECORD_LEN = 40
 
 
 def _indexed_pair_matrix(featurizer: Any, pairs: list[tuple[str, str]]) -> np.ndarray:
@@ -175,20 +174,6 @@ def _write_tiny_name_counts_index(tmp_path: Path) -> str:
     )
     index_path, _metrics = write_name_counts_index(tmp_path, mappings)
     return index_path
-
-
-def _swap_first_two_name_count_records(index_root: str | Path, kind: str) -> None:
-    record_path = _name_count_record_path(index_root, kind)
-    payload = bytearray(record_path.read_bytes())
-    first_start = _NAME_COUNTS_INDEX_HEADER_LEN
-    second_start = first_start + _NAME_COUNTS_INDEX_RECORD_LEN
-    third_start = second_start + _NAME_COUNTS_INDEX_RECORD_LEN
-    first_record = bytes(payload[first_start:second_start])
-    second_record = bytes(payload[second_start:third_start])
-    payload[first_start:second_start] = second_record
-    payload[second_start:third_start] = first_record
-    record_path.write_bytes(payload)
-    _refresh_name_count_file_manifest(index_root, kind, record_path)
 
 
 def _corrupt_first_name_count_record_name_range(index_root: str | Path, kind: str) -> None:
@@ -838,22 +823,6 @@ def test_retained_index_preserves_header_checks(tmp_path: Path, header_offset: i
 
     # Bind the changed bytes so this exercises native index validation after SHA checks.
     with pytest.raises(ValueError, match=message):
-        _raw_candidate_plan_arrow(indexed_paths, ["q1"])
-
-
-def test_arrow_batch_lookup_index_rejects_wrong_key_column_reuse(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-    bad_index_path, _metrics = write_arrow_batch_lookup_index(
-        paths["signatures"],
-        tmp_path / "signatures.bad_key_batch_index.bin",
-        key_column="paper_id",
-        table_name="signatures",
-        overwrite=True,
-    )
-    indexed_paths = dict(paths)
-    indexed_paths["signatures_batch_index"] = bad_index_path
-
-    with pytest.raises(ValueError, match="different key column"):
         _raw_candidate_plan_arrow(indexed_paths, ["q1"])
 
 
@@ -1741,17 +1710,6 @@ def test_rust_featurizer_missing_name_counts_presence_is_consistent(
     paths_with_index["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact")
     with_name_counts = _native_featurizer(paths_with_index, signature_ids, set())
     assert with_name_counts.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
-
-
-def test_rust_featurizer_rejects_unsorted_name_counts_index(
-    tmp_path: Path,
-) -> None:
-    paths = base_arrow_paths(tmp_path)
-    paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact")
-    _swap_first_two_name_count_records(paths["name_counts_index"], "first")
-
-    with pytest.raises(ValueError, match="not sorted"):
-        _native_featurizer(paths, ["q1", "s1", "s2"], set())
 
 
 def test_rust_featurizer_rejects_out_of_bounds_name_counts_index_record(

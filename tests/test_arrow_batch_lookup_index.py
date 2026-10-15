@@ -245,7 +245,7 @@ def test_raw_planner_index_rejects_source_changed_while_lookup(
         )
 
 
-@pytest.mark.parametrize("operation", ["lookup", "validate", "reuse"])
+@pytest.mark.parametrize("operation", ["lookup", "validate"])
 def test_old_index_format_requires_rebuilding(tmp_path: Path, operation: str) -> None:
     path, index_path = _write_tiny_index(tmp_path)
     current = index_path.read_bytes()
@@ -254,10 +254,8 @@ def test_old_index_format_requires_rebuilding(tmp_path: Path, operation: str) ->
     with pytest.raises(ValueError, match="invalid magic bytes.*Rebuild"):
         if operation == "lookup":
             read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="signature_id", values=["s1"])
-        elif operation == "validate":
-            validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
         else:
-            write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", overwrite=False)
+            validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
 
 
 def test_structural_reuse_preserves_bytes_and_does_not_claim_content_validation(tmp_path: Path) -> None:
@@ -290,7 +288,7 @@ def test_structural_reuse_preserves_bytes_and_does_not_claim_content_validation(
     )
 
 
-@pytest.mark.parametrize("operation", ["lookup", "validate", "reuse"])
+@pytest.mark.parametrize("operation", ["lookup", "validate"])
 def test_source_size_mismatch_is_still_rejected(tmp_path: Path, operation: str) -> None:
     path, index_path = _write_tiny_index(tmp_path)
     data = bytearray(index_path.read_bytes())
@@ -299,10 +297,8 @@ def test_source_size_mismatch_is_still_rejected(tmp_path: Path, operation: str) 
     with pytest.raises(ValueError, match="stale.*indexed size"):
         if operation == "lookup":
             read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="signature_id", values=["s1"])
-        elif operation == "validate":
-            validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
         else:
-            write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", overwrite=False)
+            validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
 
 
 def test_source_changed_while_publishing_preserves_previous_index_and_cleans_temporary_files(

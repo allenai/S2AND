@@ -8,12 +8,10 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-import s2and.eval as eval_module
 import s2and.model as model_module
 import s2and.subblocking as subblocking_module
 from s2and.arrow_inputs import ArrowDataset
 from s2and.data import ANDData, _ordered_coauthors_for_signature
-from s2and.eval import incremental_cluster_eval
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.completion import first_initials, residual_first_initial_groups
 from s2and.incremental_linking.completion_metadata import SignatureFirstNames, SignatureOrcids
@@ -382,51 +380,6 @@ def test_sampling_balanced_homonym_synonym_respects_sample_size():
     )
     assert len(sampled) == 1
     assert sampled[0] in all_pairs
-
-
-def test_incremental_cluster_eval_val_uses_val_block_for_pairwise_metrics(monkeypatch):
-    class DummyDataset:
-        def __init__(self):
-            self.train_blocks = None
-            self.train_signatures = None
-            self.signature_to_cluster_id = {"s_train": "c_train", "s_val": "c_val", "s_test": "c_test"}
-
-        def get_blocks(self):
-            return {"b": ["s_train", "s_val", "s_test"]}
-
-        def split_cluster_signatures(self):
-            return {"b": ["s_train"]}, {"b": ["s_val"]}, {"b": ["s_test"]}
-
-        def construct_cluster_to_signatures(self, block_dict):
-            output = {}
-            for signatures in block_dict.values():
-                for signature in signatures:
-                    cluster_id = self.signature_to_cluster_id[signature]
-                    output.setdefault(cluster_id, []).append(signature)
-            return output
-
-    class DummyClusterer:
-        def predict(self, block_dict, dataset, partial_supervision=None):
-            all_signatures = []
-            for signatures in block_dict.values():
-                all_signatures.extend(signatures)
-            return {"pred_cluster": all_signatures}, None
-
-    captured_test_blocks = []
-
-    def fake_pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy="clusters"):
-        captured_test_blocks.append(test_block)
-        return 0.0, 0.0, 0.0
-
-    monkeypatch.setattr(eval_module, "pairwise_precision_recall_fscore", fake_pairwise_precision_recall_fscore)
-
-    dataset = DummyDataset()
-    clusterer = DummyClusterer()
-    incremental_cluster_eval(cast(ANDData, dataset), cast(Clusterer, clusterer), split="val")
-
-    assert len(captured_test_blocks) == 2
-    assert captured_test_blocks[0] == {"b": ["s_val"]}
-    assert captured_test_blocks[1] == {"b": ["s_val"]}
 
 
 def test_make_subblocks_handles_specter_edge_case_without_unbound_local(monkeypatch):

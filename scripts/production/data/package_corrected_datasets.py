@@ -29,8 +29,8 @@ from scripts.production.model.linker_source_bundle import (  # noqa: E402
     _dataset_manifests,
     _read_json,
     _rebind_dataset_manifests,
+    _reject_filesystem_links,
     _validate_bundle_paths,
-    _validate_copy_output,
     _validate_root_name_counts_binding,
     validate_portable_source_bundle,
 )
@@ -236,7 +236,7 @@ def package_corrected_datasets(
     for source in (public, corrected, pairwise, linker, index, *replay_sources.values()):
         if output.is_relative_to(source) or source.is_relative_to(output):
             raise ValueError("Dataset snapshot input and output directories must not overlap")
-        _validate_copy_output(source, output)
+        _reject_filesystem_links(source, context="dataset snapshot input")
     license_source = public / "LICENSE.txt"
     if not license_source.is_file():
         raise FileNotFoundError(license_source)
@@ -261,7 +261,7 @@ def package_corrected_datasets(
         public, authoritative_manifest_sha256=index_digest, dataset_manifests=public_manifests
     )
     _validate_root_name_counts_binding(linker, authoritative_manifest_sha256=index_digest)
-    _validate_bundle_paths(linker, resolve_links=False)
+    _validate_bundle_paths(linker)
 
     _copy_arrow_root_without_name_counts(linker, output)
     _copy_file(license_source, output / "LICENSE.txt")

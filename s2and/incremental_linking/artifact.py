@@ -13,7 +13,6 @@ from typing import Any
 
 import numpy as np
 
-from s2and import __version__
 from s2and._sha256 import is_lowercase_sha256
 from s2and._sha256 import sha256_file as _sha256_file
 from s2and.incremental_linking.contracts import (
@@ -36,7 +35,6 @@ _METADATA_FIELDS = frozenset(
         "feature_names",
         "format_version",
         "gate_config",
-        "generated_by_runtime",
         "kind",
         "pairwise_bundle_binding_digest",
         "retrieval_top_k",
@@ -72,13 +70,6 @@ def _validated_metadata(payload: Any) -> tuple[dict[str, Any], NumpyLogisticGate
             raise ValueError(f"Incremental linker artifact {field} must equal supported version {expected}")
     if payload["feature_names"] != list(promoted_linker_feature_columns()):
         raise ValueError("Incremental linker artifact feature_names must match the runtime ordered feature names")
-    generated_by_runtime = payload["generated_by_runtime"]
-    if (
-        not isinstance(generated_by_runtime, str)
-        or not generated_by_runtime
-        or generated_by_runtime.strip() != generated_by_runtime
-    ):
-        raise ValueError("Incremental linker artifact generated_by_runtime must be a nonempty trimmed string")
 
     retrieval_top_k = payload["retrieval_top_k"]
     if isinstance(retrieval_top_k, bool) or not isinstance(retrieval_top_k, int) or retrieval_top_k <= 0:
@@ -218,7 +209,6 @@ def save_incremental_linking_artifact(
             "feature_names": list(promoted_linker_feature_columns()),
             "format_version": INCREMENTAL_LINKER_FORMAT_VERSION,
             "gate_config": dict(gate_config),
-            "generated_by_runtime": __version__,
             "kind": INCREMENTAL_LINKER_KIND,
             "pairwise_bundle_binding_digest": canonical_json_digest(pairwise_binding),
             "retrieval_top_k": retrieval_top_k,

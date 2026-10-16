@@ -670,15 +670,15 @@ def test_manifest_has_exact_shape_and_identity(
             expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
         )
 
+    # Bundles written before a field retirement still load; nothing reads the field.
     manifest = copy.deepcopy(original_manifest)
-    manifest["retired_field"] = None
+    manifest["generated_by_runtime"] = {"retired": True}
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="manifest field mismatch"):
-        production_model_module._validate_manifest(
-            bundle_dir,
-            expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
-            expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
-        )
+    production_model_module._validate_manifest(
+        bundle_dir,
+        expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+        expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
+    )
 
 
 # Both fields share one check, so only format_version carries the type-strictness rows.
@@ -734,7 +734,7 @@ def test_pairwise_model_rejects_unversioned_manifest(
         del manifest[field]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="manifest field mismatch"):
+    with pytest.raises(ValueError, match=r"manifest is missing fields: \['feature_contract_version'"):
         _load_pairwise_staging_model(bundle_dir)
 
 

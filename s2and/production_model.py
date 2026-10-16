@@ -296,12 +296,9 @@ def _validate_manifest(
         "release_version",
         "sha256",
     }
-    if set(manifest) != expected_manifest_fields:
-        raise ValueError(
-            "Production model manifest field mismatch: "
-            f"missing={sorted(expected_manifest_fields - set(manifest))} "
-            f"extra={sorted(set(manifest) - expected_manifest_fields)}"
-        )
+    # format_version gates compatibility; unread extra fields are harmless.
+    if missing := sorted(expected_manifest_fields - set(manifest)):
+        raise ValueError(f"Production model manifest is missing fields: {missing}")
     if manifest["kind"] != PRODUCTION_MODEL_KIND:
         raise ValueError(f"Production model bundle kind must be {PRODUCTION_MODEL_KIND!r}")
     release_version = manifest["release_version"]

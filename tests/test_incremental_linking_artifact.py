@@ -223,13 +223,13 @@ def test_metadata_rejects_invalid_fields() -> None:
 
     missing = _valid_metadata_payload()
     del missing["booster_sha256"]
-    with pytest.raises(ValueError, match="fields do not match the current contract.*booster_sha256"):
+    with pytest.raises(ValueError, match=r"missing fields: \['booster_sha256'\]"):
         artifact_module._validated_metadata(missing)
 
-    unknown = _valid_metadata_payload()
-    unknown["future_implicit_default"] = True
-    with pytest.raises(ValueError, match="unknown=.*future_implicit_default"):
-        artifact_module._validated_metadata(unknown)
+    # Artifacts written before a field retirement still load; nothing reads the field.
+    retired = _valid_metadata_payload()
+    retired["generated_by_runtime"] = {"retired": True}
+    artifact_module._validated_metadata(retired)
 
     payload = _valid_metadata_payload()
     payload["gate_config"] = {}
@@ -284,7 +284,7 @@ def test_load_rejects_unversioned_metadata(tmp_path: Path) -> None:
         del payload[field]
     metadata_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="metadata fields do not match the current contract"):
+    with pytest.raises(ValueError, match="metadata is missing fields"):
         load_incremental_linking_artifact(artifact_dir)
 
 

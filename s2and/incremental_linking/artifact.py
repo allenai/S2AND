@@ -52,14 +52,9 @@ def _require_sha256(value: Any, *, field_name: str) -> str:
 def _validated_metadata(payload: Any) -> tuple[dict[str, Any], NumpyLogisticGate]:
     if not isinstance(payload, Mapping):
         raise ValueError("Incremental linker artifact metadata must be a JSON object")
-    observed_fields = set(payload)
-    if observed_fields != _METADATA_FIELDS:
-        missing = sorted(_METADATA_FIELDS - observed_fields)
-        unknown = sorted(observed_fields - _METADATA_FIELDS)
-        raise ValueError(
-            "Incremental linker artifact metadata fields do not match the current contract: "
-            f"missing={missing} unknown={unknown}"
-        )
+    # format_version gates compatibility; unread extra fields are harmless.
+    if missing := sorted(_METADATA_FIELDS - set(payload)):
+        raise ValueError(f"Incremental linker artifact metadata is missing fields: {missing}")
     if payload["kind"] != INCREMENTAL_LINKER_KIND:
         raise ValueError(f"Incremental linker artifact kind must be {INCREMENTAL_LINKER_KIND!r}")
     for field, expected in (

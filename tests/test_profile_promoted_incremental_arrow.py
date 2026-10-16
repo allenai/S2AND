@@ -289,7 +289,7 @@ def test_invalid_data_or_model_manifest_fails_from_content(tmp_path, monkeypatch
     model_root.mkdir()
     _stub_prerun(monkeypatch)
     _stub_inputs(monkeypatch, model_root, ["seed", "query"])
-    with pytest.raises(ValueError, match="Production model manifest field mismatch"):
+    with pytest.raises(ValueError, match="Production model manifest is missing fields"):
         profile.run(_args(model_root))
 
 

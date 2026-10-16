@@ -20,12 +20,39 @@ from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.feature_block_arrow import _write_sorted_name_count_records
 from s2and.name_counts_index import NameCountsIndex
 from s2and.runtime import load_s2and_rust_extension
-from s2and.text import canonicalize_name_parts
+from s2and.text import canonicalize_name_parts, last_name_allows_joined_initials
 
 from ._run_support import emit_jsonl, validate_input_file
 
 KINDS = ("first", "last", "first_last", "last_first_initial")
 _BATCH_ROWS = 100_000
+# The D9 initials rule needs the last name, but each map holds one name part.
+# The first map keeps both D9 outputs, and the join picks one by the last-name guard.
+_CANONICAL_MAP_FIELDS = {
+    "first": (("cfirst", pa.string()), ("cfirst_initials", pa.string())),
+    "last": (("clast", pa.string()), ("initials_ok", pa.bool_())),
+}
+
+
+def _canonical_map_columns(part: str, raw: list[str | None]) -> list[list[Any]]:
+    """Return the canonical map columns for one batch of distinct raw names.
+
+    Args:
+        part: ``first`` or ``last``.
+        raw: Distinct raw values of that name part.
+
+    Returns:
+        The columns of ``_CANONICAL_MAP_FIELDS[part]``, in order.
+    """
+    if part == "first":
+        return [
+            [canonicalize_name_parts(value, None, None, last_allows_initials=False).first for value in raw],
+            [canonicalize_name_parts(value, None, None, last_allows_initials=True).first for value in raw],
+        ]
+    return [
+        [canonicalize_name_parts(None, None, value).last for value in raw],
+        [last_name_allows_joined_initials(value) for value in raw],
+    ]
 
 
 def _aggregate(con: duckdb.DuckDBPyConnection, query: str) -> tuple[Any, ...]:
@@ -172,22 +199,14 @@ def build_name_counts_from_parquet(
                 if table in tables:
                     continue
                 map_path = output / f"{table}.parquet"
-                schema = pa.schema([(column, pa.string()), (f"c{part}", pa.string())])
+                schema = pa.schema([(column, pa.string()), *_CANONICAL_MAP_FIELDS[part]])
                 reader = con.execute(f"SELECT DISTINCT {column} FROM raw").to_arrow_reader(_BATCH_ROWS)
                 count = 0
                 with pq.ParquetWriter(map_path, schema, compression="zstd") as writer:
                     for batch in reader:
                         raw = batch.column(0).to_pylist()
-                        canonical = [
-                            getattr(
-                                canonicalize_name_parts(
-                                    value if part == "first" else None, None, value if part == "last" else None
-                                ),
-                                part,
-                            )
-                            for value in raw
-                        ]
-                        writer.write_table(pa.table({column: raw, f"c{part}": canonical}, schema=schema))
+                        columns = [raw, *_canonical_map_columns(part, raw)]
+                        writer.write_table(pa.Table.from_pydict(dict(zip(schema.names, columns, strict=True)), schema))
                         count += len(raw)
                         if count % 1_000_000 == 0:
                             emit("name_counts_canonical_progress", part=part, rows=count)
@@ -196,7 +215,9 @@ def build_name_counts_from_parquet(
                 emit("name_counts_canonical_ready", part=part, rows=count)
             if "canonical" not in tables:
                 con.execute(
-                    "CREATE TABLE canonical AS SELECT cfirst,clast,mention_count FROM raw r "
+                    "CREATE TABLE canonical AS SELECT "
+                    "CASE WHEN l.initials_ok THEN f.cfirst_initials ELSE f.cfirst END AS cfirst,"
+                    "clast,mention_count FROM raw r "
                     "JOIN map_first f ON r.first_name IS NOT DISTINCT FROM f.first_name "
                     "JOIN map_last l ON r.last_name IS NOT DISTINCT FROM l.last_name"
                 )

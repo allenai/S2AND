@@ -1477,7 +1477,7 @@ class ANDData:
                 computed = canonicalize_name_parts(
                     signature.author_info_first,
                     signature.author_info_middle,
-                    None,
+                    signature.author_info_last,
                 )
                 if first is None:
                     first = computed.first

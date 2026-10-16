@@ -31,7 +31,7 @@ def signature_first(signature: CompletionSignature) -> str:
     prepared_first = signature.author_info_first_normalized_without_apostrophe
     if prepared_first is not None:
         return prepared_first
-    return canonicalize_name_parts(signature.author_info_first, None, None).first
+    return canonicalize_name_parts(signature.author_info_first, None, signature.author_info_last).first
 
 
 class SignatureFirstNames(Mapping[str, str]):

@@ -395,11 +395,16 @@ def test_signature_name_parts_for_subblocking_recomputes_deferred_normalized_fie
     signature = SimpleNamespace(
         author_info_first="Arif\u2010ullah",
         author_info_middle=None,
+        author_info_last="Khan",
         author_info_first_normalized_without_apostrophe=None,
         author_info_middle_normalized_without_apostrophe=None,
     )
 
     assert subblocking.signature_name_parts_for_subblocking(signature) == ("arif ullah", "")
+    # D9 needs the raw last name to read joined capitals as initials.
+    for last, expected in (("Wells", ("h", "g")), ("WELLS", ("hg", ""))):
+        signature.author_info_first, signature.author_info_last = "HG", last
+        assert subblocking.signature_name_parts_for_subblocking(signature) == expected
 
 
 def test_signature_name_parts_for_subblocking_treats_all_dashes_uniformly() -> None:

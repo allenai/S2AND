@@ -466,11 +466,12 @@ def _load_arrow_incremental_signature_info(
                     raise ValueError(f"signatures Arrow contains duplicate signature_id: {signature_id!r}")
                 first = _optional_arrow_string(row.get("author_first"))
                 middle = _optional_arrow_string(row.get("author_middle"))
-                first_without_apostrophe = canonicalize_name_parts(first, middle, None).first
+                last = _optional_arrow_string(row.get("author_last"))
+                first_without_apostrophe = canonicalize_name_parts(first, middle, last).first
                 signatures[signature_id] = _ArrowIncrementalSignatureInfo(
                     paper_id=_optional_arrow_string(row.get("paper_id")),
                     author_info_first=first,
-                    author_info_last=_optional_arrow_string(row.get("author_last")),
+                    author_info_last=last,
                     author_info_first_normalized_without_apostrophe=first_without_apostrophe or None,
                     author_info_orcid=_optional_arrow_string(row.get("author_orcid")),
                 )

@@ -29,7 +29,7 @@
     "D6": {
       "status": "decided",
       "title": "Count keys use canonical fields after gating",
-      "description": "Count keys use the canonical fields after missing and informativeness gating (no compaction), and keys with a missing component are null (no lookup / NaN feature). This changes live feature values for missing-first examples: legacy still looks up last_first_initial when first is empty (for example lfi key 'smith'), while canonical_v2 suppresses that lookup. Empty-last/null-last are already pinned to null last-dependent legacy keys in the live code, so they are regression guards rather than headline feature changes. The change lands inside the single re-baseline/retrain cycle and is gated by its end-metric non-regression eval. The informative threshold is string-level: first and first_last are suppressed only when the canonical first key has length <= 1. Multi-initial compounds such as 'h g' and joined initials such as 'hg' are intentionally informative; a lone initial such as 'h' is not."
+      "description": "Count keys use the canonical fields after missing and informativeness gating (no compaction), and keys with a missing component are null (no lookup / NaN feature). This changes live feature values for missing-first examples: legacy still looks up last_first_initial when first is empty (for example lfi key 'smith'), while canonical_v2 suppresses that lookup. Empty-last/null-last are already pinned to null last-dependent legacy keys in the live code, so they are regression guards rather than headline feature changes. The change lands inside the single re-baseline/retrain cycle and is gated by its end-metric non-regression eval. The informative threshold is string-level: first and first_last are suppressed only when the canonical first key has length <= 1. Multi-initial compounds such as 'h g' are informative. A lone initial such as 'h' is not informative. Under D9, joined capitals such as 'HG' become the lone initial 'h' when the last name is not in capitals; otherwise 'hg' stays one informative token."
     },
     "D7": {
       "status": "decided",
@@ -40,6 +40,11 @@
       "status": "decided",
       "title": "last_first_initial stays initial-char",
       "description": "The last_first_initial count key remains '<canonical last> <first initial char>' (initial_char semantics, matching the current default and Arrow contract)."
+    },
+    "D9": {
+      "status": "decided",
+      "title": "Joined capital initials split",
+      "description": "Remove whitespace and periods from the raw first. If 2-3 ASCII capitals remain, the rule reads them as initials. The first capital becomes first, and each other capital becomes a middle token before the existing middle tokens. The rule applies only when the transliterated raw last has at least one lowercase letter and no more capitals than lowercase letters. Thus an accented lowercase letter such as '\u00e1' counts as lowercase, and an all-capitals last such as 'WELLS' stops the rule. The rule does not apply to ED, a frequent given name, or to MD, which D7 keeps for Muhammad. The rule does not apply to a title prefix such as DR (D7). It also does not apply to a two-capital abbreviation of one given name with a final period: CH, SH, ZH, KH, TS, YU, YA, YE, GY, NY, SZ, ZS, CS, PH, or TH, for example 'PH.' (Philippe). Approved 2026-10-16."
     }
   },
   "compare_compatibility": {
@@ -1428,11 +1433,37 @@
     {
       "id": "hg-joined-initials",
       "family": "initials",
-      "equivalence_group": null,
+      "equivalence_group": "g-hg-spilled",
       "input": {
         "first": "HG",
         "middle": "",
         "last": "Wells"
+      },
+      "canonical": {
+        "first": "h",
+        "middle": "g",
+        "last": "wells",
+        "count_keys": {
+          "first": null,
+          "last": "wells",
+          "first_last": null,
+          "last_first_initial": "wells h"
+        }
+      },
+      "decisions": [
+        "D6",
+        "D9"
+      ],
+      "notes": "Joined capitals before a mixed-case last are initials (D9), so they spill like 'H.G.'; the single-char gate keeps first/first_last count keys null."
+    },
+    {
+      "id": "hg-joined-capitals-all-caps-last",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "HG",
+        "middle": "",
+        "last": "WELLS"
       },
       "canonical": {
         "first": "hg",
@@ -1446,9 +1477,190 @@
         }
       },
       "decisions": [
-        "D6"
+        "D6",
+        "D9"
       ],
-      "notes": "Joined initials stay a single informative first token."
+      "notes": "An all-capitals last gives no case evidence, so joined capitals stay one informative first token."
+    },
+    {
+      "id": "ed-joined-capitals",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "ED",
+        "middle": "",
+        "last": "Wood"
+      },
+      "canonical": {
+        "first": "ed",
+        "middle": "",
+        "last": "wood",
+        "count_keys": {
+          "first": "ed",
+          "last": "wood",
+          "first_last": "ed wood",
+          "last_first_initial": "wood e"
+        }
+      },
+      "decisions": [
+        "D9"
+      ],
+      "notes": "ED is a frequent given name, so D9 does not split it."
+    },
+    {
+      "id": "md-joined-capitals",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "MD",
+        "middle": "",
+        "last": "Hossain"
+      },
+      "canonical": {
+        "first": "md",
+        "middle": "",
+        "last": "hossain",
+        "count_keys": {
+          "first": "md",
+          "last": "hossain",
+          "first_last": "md hossain",
+          "last_first_initial": "hossain m"
+        }
+      },
+      "decisions": [
+        "D7",
+        "D9"
+      ],
+      "notes": "MD abbreviates Muhammad (D7), so D9 does not split it."
+    },
+    {
+      "id": "ph-dotted-given-name-abbreviation",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "PH.",
+        "middle": "",
+        "last": "Dupont"
+      },
+      "canonical": {
+        "first": "ph",
+        "middle": "",
+        "last": "dupont",
+        "count_keys": {
+          "first": "ph",
+          "last": "dupont",
+          "first_last": "ph dupont",
+          "last_first_initial": "dupont p"
+        }
+      },
+      "decisions": [
+        "D9"
+      ],
+      "notes": "A dotted capital pair from the D9 list abbreviates one given name (Philippe), so it stays one token."
+    },
+    {
+      "id": "dr-joined-capitals-title",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "DR",
+        "middle": "",
+        "last": "Watson"
+      },
+      "canonical": {
+        "first": "",
+        "middle": "",
+        "last": "watson",
+        "count_keys": {
+          "first": null,
+          "last": "watson",
+          "first_last": null,
+          "last_first_initial": null
+        }
+      },
+      "decisions": [
+        "D6",
+        "D7",
+        "D9"
+      ],
+      "notes": "A title prefix keeps the D7 drop, not the D9 split; the empty first makes first-dependent keys null."
+    },
+    {
+      "id": "jhm-joined-initials",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "JHM",
+        "middle": "",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "j",
+        "middle": "h m",
+        "last": "smith",
+        "count_keys": {
+          "first": null,
+          "last": "smith",
+          "first_last": null,
+          "last_first_initial": "smith j"
+        }
+      },
+      "decisions": [
+        "D6",
+        "D9"
+      ],
+      "notes": "Three joined capitals become one first initial and two middle initials."
+    },
+    {
+      "id": "jh-mixed-case",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Jh",
+        "middle": "",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "jh",
+        "middle": "",
+        "last": "smith",
+        "count_keys": {
+          "first": "jh",
+          "last": "smith",
+          "first_last": "jh smith",
+          "last_first_initial": "smith j"
+        }
+      },
+      "decisions": [
+        "D9"
+      ],
+      "notes": "D9 requires capitals only; a mixed-case first stays one token."
+    },
+    {
+      "id": "jh-joined-initials-with-middle",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "JH",
+        "middle": "Kevin",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "j",
+        "middle": "h kevin",
+        "last": "smith",
+        "count_keys": {
+          "first": null,
+          "last": "smith",
+          "first_last": null,
+          "last_first_initial": "smith j"
+        }
+      },
+      "decisions": [
+        "D6",
+        "D9"
+      ],
+      "notes": "Middle initials from D9 come before the existing middle tokens."
     },
     {
       "id": "jp-spaced-initials",

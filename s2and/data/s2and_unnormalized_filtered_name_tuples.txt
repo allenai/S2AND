@@ -50,8 +50,6 @@ Meg,Megan
 Megan,Meg
 Bas,Bastiaan
 Bastiaan,Bas
-John,Jonathan
-Jonathan,John
 Kathryn,Kate
 Kate,Kathryn
 Maxim,Max
@@ -356,8 +354,6 @@ Rudolf,Rudi
 Rudi,Rudolf
 Manel,Manuel
 Manuel,Manel
-Jc,Jean
-Jean,Jc
 Katy,Katherine
 Katherine,Katy
 Nicola,Nikki
@@ -516,8 +512,6 @@ Alexander,Al
 Al,Alexander
 Nathaniel,Nate
 Nate,Nathaniel
-Angela,Angelina
-Angelina,Angela
 Cecile,Cecilia
 Cecilia,Cecile
 Nicola,Nicole
@@ -578,8 +572,6 @@ Fred,Frederik
 Frederik,Fred
 Malcolm,Mac
 Mac,Malcolm
-Johan,Jan
-Jan,Johan
 Fran,Francisco
 Francisco,Fran
 Kristine,Kris
@@ -972,8 +964,6 @@ Alice,Ali
 Ali,Alice
 Marina,Maja
 Maja,Marina
-Ali,Alex
-Alex,Ali
 Sid,Sidney
 Sidney,Sid
 Madeline,Madeleine
@@ -1030,8 +1020,6 @@ Elizabeth,Elise
 Elise,Elizabeth
 Terrence,Terrance
 Terrance,Terrence
-Jeremiah,Jeremy
-Jeremy,Jeremiah
 Jose,Jo
 Jo,Jose
 Arkadiusz,Arek
@@ -1044,8 +1032,6 @@ Molly,Mary
 Mary,Molly
 Jerome,Jerry
 Jerry,Jerome
-Jeanne,Jc
-Jc,Jeanne
 Randolph,Randy
 Randy,Randolph
 Joep,Jozef
@@ -1116,8 +1102,6 @@ Adrian,Adi
 Adi,Adrian
 Jean,John
 John,Jean
-Jean,Joan
-Joan,Jean
 Tamara,Tanja
 Tanja,Tamara
 Ju,Juju
@@ -1160,8 +1144,6 @@ Conchi,Concepcion
 Concepcion,Conchi
 Roberto,Rober
 Rober,Roberto
-Alexander,Alexandra
-Alexandra,Alexander
 Pip,Philippa
 Philippa,Pip
 Eleanor,Elenor
@@ -1188,8 +1170,6 @@ Liliya,Lili
 Lili,Liliya
 Ira,Irina
 Irina,Ira
-Aline,Adelaide
-Adelaide,Aline
 Catherine,Catie
 Catie,Catherine
 Dordije,Dorde
@@ -1602,12 +1582,8 @@ Fabian,F.J.
 F.J.,Fabian
 Guiseppe,Giuseppe
 Giuseppe,Guiseppe
-Rodrigo,RG
-RG,Rodrigo
 Giuseppe,Gian
 Gian,Giuseppe
-Joanna,JM
-JM,Joanna
 Viktoriia,Viktoria
 Viktoria,Viktoriia
 Bogdan,Bohdan
@@ -1628,8 +1604,6 @@ Michalis,Michail
 Michail,Michalis
 Mostafa,Mustafa
 Mustafa,Mostafa
-KJ,Kirsten
-Kirsten,KJ
 Mahdi,Mehdi
 Mehdi,Mahdi
 Evgeniya,Evgenia
@@ -1668,12 +1642,8 @@ Liliia,Liliya
 Liliya,Liliia
 RJC,Ricardo
 Ricardo,RJC
-MJ,Marthinus
-Marthinus,MJ
 Khaled,Khalid
 Khalid,Khaled
-CJ,Christopher
-Christopher,CJ
 Lyudmila,Liudmyla
 Liudmyla,Lyudmila
 Vitalii,Vitaly
@@ -1688,8 +1658,6 @@ Tetiana,Tatyana
 Tatyana,Tetiana
 Przemyslaw,Przemek
 Przemek,Przemyslaw
-DM,David
-David,DM
 Muhammad,Mohammed
 Mohammed,Muhammad
 Konstantinos,Kostantinos
@@ -1708,8 +1676,6 @@ Liudmyla,Lyudmyla
 Lyudmyla,Liudmyla
 Martyn,Martin
 Martin,Martyn
-Dan,DJ
-DJ,Dan
 Anthony,Antony
 Antony,Anthony
 Jose,J.L.
@@ -1730,8 +1696,6 @@ Constantinos,Costas
 Costas,Constantinos
 Ben,Bwj
 Bwj,Ben
-Jorge,Jose
-Jose,Jorge
 Malcolm,Malcolm
 Malcolm,Malcolm
 Alejandro,Alejandro
@@ -1774,8 +1738,6 @@ Kazuomi,Kazumi
 Kazumi,Kazuomi
 Daniel,D.W.
 D.W.,Daniel
-Ec,Eric
-Eric,Ec
 Andrew,A.M.
 A.M.,Andrew
 Herman,Hermen
@@ -1804,16 +1766,12 @@ Aleksei,Alexei
 Alexei,Aleksei
 Elham,Ellie
 Ellie,Elham
-Muhammad,Ma
-Ma,Muhammad
 Paulo,Paf
 Paf,Paulo
 Dmytro,Dmitry
 Dmitry,Dmytro
 Mahmoud,Mahmud
 Mahmud,Mahmoud
-Dmitry,Da
-Da,Dmitry
 Jim,J.G.
 J.G.,Jim
 Viktoriya,Viktoria
@@ -1824,8 +1782,6 @@ Andrey,Andriy
 Andriy,Andrey
 Monika,Monica
 Monica,Monika
-Deborah,Da
-Da,Deborah
 Peter,P.D.
 P.D.,Peter
 Jhonny,Jhony
@@ -1836,10 +1792,6 @@ Zoe,Zoi
 Zoi,Zoe
 Zeid,Zied
 Zied,Zeid
-Wim,Wh
-Wh,Wim
-David,DJ
-DJ,David
 Yuliia,Yuliya
 Yuliya,Yuliia
 Ksenia,Kseniia
@@ -1848,12 +1800,8 @@ B.P.,Benjamin
 Benjamin,B.P.
 Eduardus,Eddie
 Eddie,Eduardus
-Re,Rafael
-Rafael,Re
 Nicolaos,Nikolaos
 Nikolaos,Nicolaos
-Juan,Ja
-Ja,Juan
 Abol-Ghasem,Ali
 Ali,Abol-Ghasem
 Tin,Toly
@@ -1864,12 +1812,8 @@ Mohamed,Mahmoud
 Mahmoud,Mohamed
 Gerard,Gerry
 Gerry,Gerard
-Amir,Ah
-Ah,Amir
 Patrick,Pak
 Pak,Patrick
-John,Jc
-Jc,John
 Fredrick,Frederick
 Frederick,Fredrick
 Zafar,Zaffar
@@ -1882,8 +1826,6 @@ Shiv,S.K.
 S.K.,Shiv
 Emanuelle,Emmanuel
 Emmanuel,Emanuelle
-Tjun,Ty
-Ty,Tjun
 Pavel,Pavlo
 Pavlo,Pavel
 Alejandro,Alex
@@ -1912,12 +1854,8 @@ Selvasundarasekar,Sam
 Sam,Selvasundarasekar
 Shankargouda,Shankaragouda
 Shankaragouda,Shankargouda
-Robert,Rw
-Rw,Robert
 D.B.,David
 David,D.B.
-Em,Euan
-Euan,Em
 Raul,RDSG
 RDSG,Raul
 Denys,Denis
@@ -1932,8 +1870,6 @@ Christopher,Christopher
 Christopher,Christopher
 Nick,Nicolas
 Nicolas,Nick
-Glenn,Gf
-Gf,Glenn
 Stylianos,Stelios
 Stelios,Stylianos
 Mahomood-Ally,Mohamad
@@ -1952,8 +1888,6 @@ Panagiotis,Panayiotis
 Panayiotis,Panagiotis
 Liubov,Lubov
 Lubov,Liubov
-AJ,Andrew
-Andrew,AJ
 Atsushi,Atsushi
 Atsushi,Atsushi
 Randall,Randy
@@ -1964,8 +1898,6 @@ Vasiliy,Vasilii
 Vasilii,Vasiliy
 Spyros,Spyridon
 Spyridon,Spyros
-Dc,Deniz
-Deniz,Dc
 Mohd,Muhammed
 Muhammed,Mohd
 Olesya,Olesia
@@ -1976,16 +1908,12 @@ Giovanni,Gianni
 Gianni,Giovanni
 Sergiy,Sergei
 Sergei,Sergiy
-Elena,Ev
-Ev,Elena
 Athanasios,Athanasios
 Athanasios,Athanasios
 João,J.P.
 J.P.,João
 Uliana,Ulyana
 Ulyana,Uliana
-Aldo,Ae
-Ae,Aldo
 Ryan,R.J.
 R.J.,Ryan
 Mykhailo,Mykhaylo
@@ -2008,16 +1936,10 @@ Anatoli,Anatoly
 Anatoly,Anatoli
 Demetrios,Dimitrios
 Dimitrios,Demetrios
-Edward,EJ
-EJ,Edward
 Yun,Yoon
 Yoon,Yun
-Va,Vladimir
-Vladimir,Va
 Achilleas,Achilles
 Achilles,Achilleas
-Ah,Adrian
-Adrian,Ah
 Peter,Petro
 Petro,Peter
 Beverly,Beverley
@@ -2028,12 +1950,8 @@ Frederik,Frederick
 Frederick,Frederik
 Georgiy,Georgii
 Georgii,Georgiy
-Hye,HW
-HW,Hye
 Julien,J.S.
 J.S.,Julien
-Edward,Ew
-Ew,Edward
 JM,Jose
 Jose,JM
 Grigory,Grigoriy
@@ -2046,8 +1964,6 @@ Massimiliano,Massimilano
 Massimilano,Massimiliano
 P.J.,Patrick
 Patrick,P.J.
-Luis,La
-La,Luis
 Jamie,Jaime
 Jaime,Jamie
 Sung,Seong
@@ -2114,8 +2030,6 @@ Ole,Oliver
 Oliver,Ole
 Djordje,Dorde
 Dorde,Djordje
-Alfonso,AJ
-AJ,Alfonso
 P.G.,Peter
 Peter,P.G.
 J.D.,Justyna
@@ -2128,8 +2042,6 @@ Sotiris,Sotirios
 Sotirios,Sotiris
 Torsten,Torstein
 Torstein,Torsten
-BH,Bassel
-Bassel,BH
 Francisco,FJG
 FJG,Francisco
 Demosthenes,Dimosthenis
@@ -2204,8 +2116,6 @@ Leontii,Leontiy
 Leontiy,Leontii
 Emmanuel,Emanuel
 Emanuel,Emmanuel
-Antonino,Antonio
-Antonio,Antonino
 Ahmad,Ahmad
 Ahmad,Ahmad
 Mileusha,Milyausha
@@ -2250,8 +2160,6 @@ Francesco,Franceso
 Franceso,Francesco
 Kawsar,Kawser
 Kawser,Kawsar
-JT,Jay
-Jay,JT
 Andrej,Andrey
 Andrey,Andrej
 Seung,Senug
@@ -2290,8 +2198,6 @@ Georgie,Georgina
 Georgina,Georgie
 Mykola,Mukola
 Mukola,Mykola
-Ii,Il
-Il,Ii
 Fernando,Fernando
 Fernando,Fernando
 Naser,Nasser
@@ -2420,8 +2326,6 @@ Carles,Carlos
 Carlos,Carles
 Andrew,Andrei
 Andrei,Andrew
-Gi,Guy
-Guy,Gi
 Muhammad,Muhammad
 Muhammad,Muhammad
 Young,Yeong
@@ -2544,8 +2448,6 @@ Alta,Aletta
 Aletta,Alta
 Pranab,Panab
 Panab,Pranab
-Jung,Jong
-Jong,Jung
 Muenir,Munir
 Munir,Muenir
 Saurabh,Sourabh
@@ -2692,8 +2594,6 @@ Fedor,Fyodor
 Fyodor,Fedor
 Abanoub,Abanob
 Abanob,Abanoub
-Tai,Tae
-Tae,Tai
 Costantinos,Constantinos
 Constantinos,Costantinos
 Emmanouel,Emmanuel
@@ -2742,8 +2642,6 @@ Robert,Robert
 Robert,Robert
 Andreea,Andrea
 Andrea,Andreea
-Mh,Mohd
-Mohd,Mh
 Tareq,Tariq
 Tariq,Tareq
 Viktoriya,Victoriya
@@ -3154,8 +3052,6 @@ Saim,Salim
 Salim,Saim
 Panayotis,Panayiotis
 Panayiotis,Panayotis
-Jun,Juan
-Juan,Jun
 Francisco,Francisco
 Francisco,Francisco
 Souzana,Sousana
@@ -3426,8 +3322,6 @@ Ludmila,Ludmilla
 Ludmilla,Ludmila
 Vyacheslav,Vyacheslav
 Vyacheslav,Vyacheslav
-Seoung,Seong
-Seong,Seoung
 Krisztian,Kristian
 Kristian,Krisztian
 Arkadiy,Arkadii
@@ -3673,8 +3567,6 @@ Wacław,Waclaw
 Waclaw,Wacław
 Sanket,Sacket
 Sacket,Sanket
-Uwa,Uo
-Uo,Uwa
 Milena,Milana
 Milana,Milena
 Lejla,Leyla
@@ -3713,8 +3605,6 @@ Kazuteru,Kazuteru
 Kazuteru,Kazuteru
 Kostyantyn,Kostiantyn
 Kostiantyn,Kostyantyn
-Jessie,Jesse
-Jesse,Jessie
 Juan,John
 John,Juan
 Sanda,Sandra
@@ -4031,8 +3921,6 @@ Angeliki,Angelika
 Angelika,Angeliki
 Victor,Victor
 Victor,Victor
-Ian,In
-In,Ian
 Divane,Divani
 Divani,Divane
 Prabhaker,Prabhakar
@@ -4376,8 +4264,6 @@ Pramod,Promod
 Promod,Pramod
 Mireille,Mirele
 Mirele,Mireille
-Vera,Va
-Va,Vera
 Abas,Abbas
 Abbas,Abas
 Magdi,Magdy
@@ -4792,8 +4678,6 @@ Raffaella,Raffaela
 Raffaela,Raffaella
 Jeffrey,Jeffy
 Jeffy,Jeffrey
-Kay,Kc
-Kc,Kay
 Shunmugiah,Shunmugaiah
 Shunmugaiah,Shunmugiah
 Giovambattista,Giavambatista
@@ -5374,8 +5258,6 @@ Maryam,Maria
 Maria,Maryam
 Maria,Maritza
 Maritza,Maria
-Maria,Mira
-Mira,Maria
 Maria,Maja
 Maja,Maria
 Dwi,Dewi
@@ -5570,8 +5452,6 @@ Vassily,Vasily
 Vasily,Vassily
 Juares,Juarez
 Juarez,Juares
-Abdur,Abdul
-Abdul,Abdur
 Oliver,Olliver
 Olliver,Oliver
 Sohail,Shoail
@@ -5883,8 +5763,6 @@ Mustaqueem,Mustaqeem
 Mustaqeem,Mustaqeem
 Munish,Manish
 Manish,Munish
-Za,Zoe
-Zoe,Za
 Circe,Circy
 Circy,Circe
 Riccardo,Riccardo
@@ -5983,8 +5861,6 @@ Michael,Michael
 Michael,Michael
 Chaouki,Chawki
 Chawki,Chaouki
-Min,MJ
-MJ,Min
 Chul,Cheol
 Cheol,Chul
 Afsaneh,Afsaneh
@@ -6017,8 +5893,6 @@ Alexandar,Alexander
 Alexander,Alexandar
 KPC,Kim
 Kim,KPC
-Sung,Seung
-Seung,Sung
 Shuiji,Shuji
 Shuji,Shuiji
 Arseniy,Arsenii
@@ -7201,8 +7075,6 @@ Clemence,Clemence
 Clemence,Clemence
 Bramha,Brahma
 Brahma,Bramha
-III,Il
-Il,III
 Andrieli,Andriele
 Andriele,Andrieli
 Christof,Christof
@@ -7511,8 +7383,6 @@ Natalia,Nathalie
 Nathalie,Natalia
 Rafael,Refael
 Refael,Rafael
-Aline,Alice
-Alice,Aline
 Karilyn,Karylin
 Karylin,Karilyn
 Dominika,Dominika
@@ -7591,8 +7461,6 @@ Ghanshyam,Ghanshaym
 Ghanshaym,Ghanshyam
 Yassin,Yasin
 Yasin,Yassin
-Eun,EJ
-EJ,Eun
 Taisiia,Taisiya
 Taisiya,Taisiia
 Riwzan,Rizwan
@@ -7667,8 +7535,6 @@ Venkatramanan,Venkataramanan
 Venkataramanan,Venkatramanan
 Anna,Aina
 Aina,Anna
-Kia,Kai
-Kai,Kia
 Grigoriy,Grygorii
 Grygorii,Grigoriy
 Grigorii,Grygorii
@@ -8367,8 +8233,6 @@ Cristiane,Cristianae
 Cristianae,Cristiane
 Pooyan,Pouyan
 Pouyan,Pooyan
-Yong,Yoon
-Yoon,Yong
 Bernadete,Bernardete
 Bernardete,Bernadete
 Farzad,Farzd
@@ -8841,8 +8705,6 @@ Narayan,Narayan
 Narayan,Narayan
 Marija,Maja
 Maja,Marija
-Asim,Asif
-Asif,Asim
 Kalyanrao,Kalayanrao
 Kalayanrao,Kalyanrao
 Emanuela,Emanuala
@@ -9143,14 +9005,8 @@ Serene,Sze
 Sze,Serene
 Yung,You
 You,Yung
-You,Yong
-Yong,You
-TL,Tiing
-Tiing,TL
 K.L.,Kam
 Kam,K.L.
-Tien,TC
-TC,Tien
 Zhenghui,Zhen-Hui
 Zhen-Hui,Zhenghui
 Jung,Jeong
@@ -9179,12 +9035,8 @@ Pao,Po
 Po,Pao
 Yuan-Wei,Yuanawei
 Yuanawei,Yuan-Wei
-Jun,Jy
-Jy,Jun
 Khean,K.L.
 K.L.,Khean
-Ya,Yu
-Yu,Ya
 Seng,Sheng
 Sheng,Seng
 Qin-Pi,Qingpi
@@ -9219,8 +9071,6 @@ Tian'an,Tianna
 Tianna,Tian'an
 Cheng,Ceng
 Ceng,Cheng
-Yi,Yn
-Yn,Yi
 Shengyi,Shangyi
 Shangyi,Shengyi
 Jinshu,Jinchu
@@ -9283,8 +9133,6 @@ Jinggang,Jingang
 Jingang,Jinggang
 Ping-Wen,Pingwin
 Pingwin,Ping-Wen
-YY,Yu
-Yu,YY
 Shang,Shiang
 Shiang,Shang
 Guoyu,Gou-Yu
@@ -9299,16 +9147,12 @@ Liang-Tian,Lian-Tian
 Lian-Tian,Liang-Tian
 Qiusheng,Qiusheng
 Qiusheng,Qiusheng
-YY,Yiu
-Yiu,YY
 Guoqiang,Guoqiang
 Guoqiang,Guoqiang
 Yanghong,Yanhong
 Yanhong,Yanghong
 Man-Hong,Manghong
 Manghong,Man-Hong
-Chuan,Chun
-Chun,Chuan
 Chunlin,Chin-Lin
 Chin-Lin,Chunlin
 Zhen-dong,Zhengdong
@@ -9327,14 +9171,10 @@ Zhengwei,Zengwei
 Zengwei,Zhengwei
 Guan-Zhong,Guang-Zhong
 Guang-Zhong,Guan-Zhong
-Yu,Yi
-Yi,Yu
 Zengqiang,Zenqqiang
 Zenqqiang,Zengqiang
 J.H.,Jia
 Jia,J.H.
-Mu,My
-My,Mu
 Lie-Huang,Lie-Haung
 Lie-Haung,Lie-Huang
 Jiuzhong,Jui-zhong
@@ -9343,8 +9183,6 @@ Yun,Young
 Young,Yun
 Joo,Ju
 Ju,Joo
-Sung,Sang
-Sang,Sung
 Zhixiong,Zhixiong
 Zhixiong,Zhixiong
 Yeong,Yang
@@ -9431,14 +9269,10 @@ Yin-Chun,Yingchun
 Yingchun,Yin-Chun
 Zhentao,Zheng-Tao
 Zheng-Tao,Zhentao
-Yong,Ying
-Ying,Yong
 Chih,Chin
 Chin,Chih
 Wei-Jian,Weijian
 Weijian,Wei-Jian
-Yu,Ye
-Ye,Yu
 Qiong-Shi,Qionshi
 Qionshi,Qiong-Shi
 Yuanan,Yuanan
@@ -9447,14 +9281,10 @@ Qiu-ping,Qui-ping
 Qui-ping,Qiu-ping
 Ruo-yi,Roy
 Roy,Ruo-yi
-Zi,Zy
-Zy,Zi
 Yijiao,Yijiao
 Yijiao,Yijiao
 Minhui,Minghui
 Minghui,Minhui
-Zhen,Zn
-Zn,Zhen
 Jiangxiang,Jian-xiang
 Jian-xiang,Jiangxiang
 Bao-Qing,Baoqing
@@ -9475,8 +9305,6 @@ Yeong,Yeung
 Yeung,Yeong
 Lian-Zhong,Liang-Zhong
 Liang-Zhong,Lian-Zhong
-Lu,Liu
-Liu,Lu
 Jung-song,Junsong
 Junsong,Jung-song
 Xi-Yuan,Xiao-Yun
@@ -9485,8 +9313,6 @@ Jun-Long,Jun-Long
 Jun-Long,Jun-Long
 Zhonghi,Zhongshi
 Zhongshi,Zhonghi
-Yun,Ying
-Ying,Yun
 Jin-Xinag,Jinxiang
 Jinxiang,Jin-Xinag
 Ping-Fu,Pin-Fu
@@ -9557,12 +9383,8 @@ Jingbo,Jin-Bo
 Jin-Bo,Jingbo
 Zhen-Po,Zheng-Po
 Zheng-Po,Zhen-Po
-Shuo,Shou
-Shou,Shuo
 Chieh,Cheih
 Cheih,Chieh
-Pui,Py
-Py,Pui
 Chuan-cheng,Chuang-Cheng
 Chuang-Cheng,Chuan-cheng
 Zhao-Rong,Zhao-Rong
@@ -9585,8 +9407,6 @@ Shaoping,Shaping
 Shaping,Shaoping
 Linzhuo,Lin-Zhou
 Lin-Zhou,Linzhuo
-Yw,Yew
-Yew,Yw
 Jiang-liang,Jianliang
 Jianliang,Jiang-liang
 Rong-Bei,Rongpei
@@ -9619,8 +9439,6 @@ Min-Rui,Mingrui
 Mingrui,Min-Rui
 Cheng-Jin,Chengin
 Chengin,Cheng-Jin
-Ping,Peng
-Peng,Ping
 Hui-Qiang,Huqiang
 Huqiang,Hui-Qiang
 Changfu,Chuangfu
@@ -9647,8 +9465,6 @@ Jianye,Jiangye
 Jiangye,Jianye
 Mi,Mee
 Mee,Mi
-Le,Ly
-Ly,Le
 Gengxin,Gen-Xin
 Gen-Xin,Gengxin
 Qin-Shan,Qingshan
@@ -9705,10 +9521,6 @@ Ryohta,Ryota
 Ryota,Ryohta
 Kui-Xian,Kuixain
 Kuixain,Kui-Xian
-Lee,Ll
-Ll,Lee
-Wei,Wy
-Wy,Wei
 Liangliang,Lina-Liang
 Lina-Liang,Liangliang
 Zhen-Hua,Zhenhua
@@ -9735,8 +9547,6 @@ Guang-Sheng,Gung-sheng
 Gung-sheng,Guang-Sheng
 Rongshan,Rogshan
 Rogshan,Rongshan
-YY,Yih
-Yih,YY
 Jingkai,Jinkai
 Jinkai,Jingkai
 Liqiu,Liqui
@@ -9801,8 +9611,6 @@ Joon-shik,Jun-Shik
 Jun-Shik,Joon-shik
 Kee-hoon,Kee-Hoon
 Kee-Hoon,Kee-hoon
-Yao,Yl
-Yl,Yao
 Xianzhi,Xianzi
 Xianzi,Xianzhi
 Guang-yi,Guang-Xi
@@ -9837,18 +9645,10 @@ Zhenliang,Zhengliang
 Zhengliang,Zhenliang
 Shi-lin,Shui-Lin
 Shui-Lin,Shi-lin
-Yi,Yl
-Yl,Yi
-Zh,Zn
-Zn,Zh
 Sun,Soon
 Soon,Sun
-Zhi,Zhe
-Zhe,Zhi
 Lin-Yi,Ling-Yi
 Ling-Yi,Lin-Yi
-Yu,You
-You,Yu
 You-Li,Yuo-Li
 Yuo-Li,You-Li
 Runqin,Rui-Qin
@@ -9913,8 +9713,6 @@ Xiao-Heng,Xiaozheng
 Xiaozheng,Xiao-Heng
 Chee,Cheah
 Cheah,Chee
-Dong,Deng
-Deng,Dong
 Chuancun,Chuncun
 Chuncun,Chuancun
 An-Qi,Angi
@@ -10942,7 +10740,6 @@ semirames,semiramis
 senghyun,seunghyun
 senugwoo,seungwoo
 seon,sun
-seong,seung
 seongmin,sungmin
 seoung,seung
 seregei,sergei
@@ -11329,8 +11126,6 @@ chang jiang,cj
 chang sun,chong sun
 changjang,cj
 chao hisen,chao hsien
-chen sheng,cs
-chensheng,cs
 constantin,constantln
 constantine,costas
 cumrum,cumrun
@@ -11385,7 +11180,6 @@ hans josef,hj
 hao huai,hh
 hao huai,hou huai
 harrtmuth,hartmuth
-hf,hua fu
 hh,hou huai
 hj,hyeonjoon
 hj,hyun jong
@@ -11398,13 +11192,11 @@ iannis,ioannis
 jainwei,jian wei
 james,jem
 janos,john
-je,jie
 jean franccois,jean francois
 jean laurent,jl
 ji aan,jia an
 jia mo,jm
 jiamo,jm
-jian she,js
 jianahua,jianhua
 jifi,jiri
 joakim,jokaim
@@ -11426,7 +11218,6 @@ kou bin,kuo bin
 ladislaus,laszlo
 lbica,lubica
 lenny,leonid
-li zhu,lz
 lian rong,lr
 maiete,maite
 make,malte
@@ -11440,7 +11231,6 @@ michaa,michal
 michaeel,michael
 michael,miclael
 michael,misha
-ml,mu lin
 mohammad,mohammmad
 natan,nathan
 neetika,nitika
@@ -11498,10 +11288,6 @@ shiu yuen,siu yuen
 shoichi,syoichi
 shorokou,shoroku
 shoschichi,shoshichi
-shou xian,sx
-shouxian,sx
-shuang shi,ss
-shuangshi,ss
 shubhendra,subendra
 shubhendra,subhendra
 siamak,siamk
@@ -11558,10 +11344,8 @@ yishau,yishay
 yosef,yossi
 yoshihiio,yoshihiro
 yoshitaka,yositaka
-you ming,yu ming
 youn lang,youn long
 ys,yu sheng
-yu zhi,yz
 zen,zhen
 zhao,zhoa
 zhi peng,zi peng

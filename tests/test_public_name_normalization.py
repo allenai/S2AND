@@ -29,3 +29,34 @@ def test_public_native_helpers_preserve_missing_names_and_title_policy() -> None
     )
     for raw in (None, "", "Dr. Anne-Marie Claire", "O’Connor", "Ou—Yang", "王明"):
         assert native.canonicalize_name_text(raw) == canonicalize_name_text(raw)
+
+
+# D9 edge cases beyond the reviewed fixture: whitespace classes, the dotted
+# abbreviation list, titles, letter counts, and the transliterated case guard.
+D9_EDGE_CASES = [
+    (("JH\u00a0", None, "Lee"), ("j", "h", "lee")),
+    (("J\x1cH", None, "Lee"), ("j", "h", "lee")),
+    ((" J.H. ", "", "Lee"), ("j", "h", "lee")),
+    (("PH", None, "Dupont"), ("p", "h", "dupont")),
+    (("PH. ", None, "Dupont"), ("ph", "", "dupont")),
+    (("P.H.", None, "Dupont"), ("p", "h", "dupont")),
+    (("GY.", None, "Nagy"), ("gy", "", "nagy")),
+    (("E.D.", None, "Wood"), ("e", "d", "wood")),
+    (("MRS", None, "Smith"), ("", "", "smith")),
+    (("PHD", None, "Smith"), ("", "", "smith")),
+    (("JHMK", None, "Smith"), ("jhmk", "", "smith")),
+    (("H-G", None, "Wells"), ("h g", "", "wells")),
+    (("HG", None, "\u00d3lafsson"), ("h", "g", "olafsson")),
+    (("HG", None, "\u00d3LAFSSON"), ("hg", "", "olafsson")),
+    (("HG", None, "DeLa"), ("h", "g", "dela")),
+    (("HG", None, "McDONALD"), ("hg", "", "mcdonald")),
+    (("HG", None, "\u91d1"), ("h", "g", "jin")),
+    (("HG", None, None), ("hg", "", "")),
+]
+
+
+def test_public_native_helpers_match_d9_edge_cases() -> None:
+    native = load_s2and_rust_extension()
+    for raw, expected in D9_EDGE_CASES:
+        assert tuple(canonicalize_name_parts(*raw)) == expected, raw
+        assert native.canonicalize_name_parts(*raw) == expected, raw

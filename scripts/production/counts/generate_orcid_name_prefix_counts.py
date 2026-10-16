@@ -26,7 +26,13 @@ from s2and.orcid_prefix_counts import (
     load_canonical_orcid_prefix_counts,
     validate_orcid_prefix_counts,
 )
-from s2and.text import canonicalize_name_parts, canonicalize_name_text, normalize_orcid, same_prefix_tokens
+from s2and.text import (
+    canonicalize_name_parts,
+    canonicalize_name_text,
+    last_name_allows_joined_initials,
+    normalize_orcid,
+    same_prefix_tokens,
+)
 
 from ._run_support import (
     emit_jsonl,
@@ -186,8 +192,8 @@ def build_prefix_counts_from_sorted_rows(
     previous_orcid: str | None = None
     previous_source_orcid: str | None = None
     previous_normalized_orcid: str | None = None
-    canonical_first_cache: dict[tuple[str | None, str | None], str] = {}
-    canonical_last_cache: dict[str | None, str] = {}
+    canonical_first_cache: dict[tuple[str | None, str | None, bool], str] = {}
+    canonical_last_cache: dict[str | None, tuple[str, bool]] = {}
 
     def flush_group() -> None:
         if current_orcid is None:
@@ -253,23 +259,30 @@ def build_prefix_counts_from_sorted_rows(
             metrics["excluded_orcid_groups"] += int(new_orcid)
             continue
 
-        name_key = (raw_first, raw_middle)
+        last_entry = canonical_last_cache.get(raw_last)
+        if last_entry is None:
+            # The same space-insensitive comparison key as canonical_lasts_equivalent.
+            last_entry = (
+                canonicalize_name_text(raw_last).replace(" ", ""),
+                last_name_allows_joined_initials(raw_last),
+            )
+            if len(canonical_last_cache) >= 100_000:
+                canonical_last_cache.clear()
+            canonical_last_cache[raw_last] = last_entry
+        normalized_last, last_allows_initials = last_entry
+        # The canonical first depends on the last name only through the D9 guard.
+        name_key = (raw_first, raw_middle, last_allows_initials)
         normalized_first = canonical_first_cache.get(name_key)
         if normalized_first is None:
-            normalized_first = canonicalize_name_parts(raw_first, raw_middle, None).first
+            normalized_first = canonicalize_name_parts(
+                raw_first, raw_middle, raw_last, last_allows_initials=last_allows_initials
+            ).first
             if len(canonical_first_cache) >= 100_000:
                 canonical_first_cache.clear()
             canonical_first_cache[name_key] = normalized_first
         if not normalized_first:
             metrics["rejected_empty_canonical_first"] += 1
             continue
-        normalized_last = canonical_last_cache.get(raw_last)
-        if normalized_last is None:
-            # The same space-insensitive comparison key as canonical_lasts_equivalent.
-            normalized_last = canonicalize_name_text(raw_last).replace(" ", "")
-            if len(canonical_last_cache) >= 100_000:
-                canonical_last_cache.clear()
-            canonical_last_cache[raw_last] = normalized_last
         if not normalized_last:
             metrics["rejected_empty_canonical_last"] += 1
             continue
@@ -374,6 +387,53 @@ def _load_reviewed_csv_rows(path: Path) -> Iterator[Mapping[str, Any]]:
             yield row
 
 
+def load_reviewed_guardrails(path: Path | None) -> dict[str, int]:
+    """Load the reviewed run bounds and reject inconsistent bounds before the source is read.
+
+    Args:
+        path: The reviewed guardrail JSON file.
+
+    Returns:
+        The validated guardrail values.
+    """
+
+    guardrails = load_guardrails(path, fields=GUARDRAIL_FIELDS)
+    if guardrails["min_source_rows"] > guardrails["max_source_rows"]:
+        raise ValueError("guardrail min_source_rows must not exceed max_source_rows")
+    if guardrails["min_orcid_pair_keys"] > guardrails["max_pair_keys"]:
+        raise ValueError("guardrail min_orcid_pair_keys must not exceed max_pair_keys")
+    if guardrails["max_names_per_orcid"] < 2:
+        raise ValueError("guardrail max_names_per_orcid must be at least 2")
+    return guardrails
+
+
+def require_reviewed_population(metrics: Mapping[str, int], guardrails: Mapping[str, int]) -> None:
+    """Reject counts whose source population or ORCID evidence is below the reviewed bounds.
+
+    Args:
+        metrics: The metrics from ``build_prefix_counts_from_sorted_rows``.
+        guardrails: The bounds from ``load_reviewed_guardrails``.
+    """
+
+    if int(metrics.get("source_rows", 0)) == 0:
+        raise RuntimeError("ORCID prefix-count generation selected zero source rows")
+    if int(metrics.get("accepted_rows", 0)) == 0 or int(metrics.get("orcid_groups", 0)) == 0:
+        raise RuntimeError("ORCID prefix-count generation selected no usable ORCID/name groups")
+    if int(metrics.get("output_pair_keys", 0)) == 0:
+        raise RuntimeError("ORCID prefix-count generation produced zero output pair keys")
+    source_rows = int(metrics["source_rows"])
+    orcid_pair_keys = int(metrics["orcid_pair_keys_after_threshold"])
+    if source_rows < guardrails["min_source_rows"]:
+        raise RuntimeError(
+            f"source rows {source_rows} are below guardrail min_source_rows={guardrails['min_source_rows']}"
+        )
+    if orcid_pair_keys < guardrails["min_orcid_pair_keys"]:
+        raise RuntimeError(
+            "ORCID-derived pair keys "
+            f"{orcid_pair_keys} are below guardrail min_orcid_pair_keys={guardrails['min_orcid_pair_keys']}"
+        )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-csv", type=Path, required=True, help="Reviewed query-ordered warehouse export")
@@ -388,13 +448,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     source = validate_input_file(args.input_csv, option="--input-csv")
     output_dir = validate_output_container(args.output_dir, publication_path=args.output_dir)
-    guardrails = load_guardrails(args.guardrails_json, fields=GUARDRAIL_FIELDS)
-    if guardrails["min_source_rows"] > guardrails["max_source_rows"]:
-        raise ValueError("guardrail min_source_rows must not exceed max_source_rows")
-    if guardrails["min_orcid_pair_keys"] > guardrails["max_pair_keys"]:
-        raise ValueError("guardrail min_orcid_pair_keys must not exceed max_pair_keys")
-    if guardrails["max_names_per_orcid"] < 2:
-        raise ValueError("guardrail max_names_per_orcid must be at least 2")
+    guardrails = load_reviewed_guardrails(args.guardrails_json)
 
     name_tuples = load_packaged_name_tuple_artifact()
 
@@ -419,23 +473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_pair_keys=guardrails["max_pair_keys"],
         progress_callback=report_progress,
     )
-    if int(metrics.get("source_rows", 0)) == 0:
-        raise RuntimeError("ORCID prefix-count generation selected zero source rows")
-    if int(metrics.get("accepted_rows", 0)) == 0 or int(metrics.get("orcid_groups", 0)) == 0:
-        raise RuntimeError("ORCID prefix-count generation selected no usable ORCID/name groups")
-    if int(metrics.get("output_pair_keys", 0)) == 0:
-        raise RuntimeError("ORCID prefix-count generation produced zero output pair keys")
-    source_rows = int(metrics["source_rows"])
-    orcid_pair_keys = int(metrics["orcid_pair_keys_after_threshold"])
-    if source_rows < guardrails["min_source_rows"]:
-        raise RuntimeError(
-            f"source rows {source_rows} are below guardrail min_source_rows={guardrails['min_source_rows']}"
-        )
-    if orcid_pair_keys < guardrails["min_orcid_pair_keys"]:
-        raise RuntimeError(
-            "ORCID-derived pair keys "
-            f"{orcid_pair_keys} are below guardrail min_orcid_pair_keys={guardrails['min_orcid_pair_keys']}"
-        )
+    require_reviewed_population(metrics, guardrails)
 
     write_publication(
         counts,

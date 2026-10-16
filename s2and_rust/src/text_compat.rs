@@ -289,6 +289,77 @@ pub(crate) fn canonicalize_name_text_compat(
     canonical_name_tokens(&canonical_name_pretranslate(raw), unidecode_char_map).join(" ")
 }
 
+// D9 (mirrors Python `_JOINED_INITIALS_GIVEN_NAMES`): ED is a frequent given
+// name, and MD abbreviates Muhammad (D7).
+const JOINED_INITIALS_GIVEN_NAMES: [&str; 2] = ["ED", "MD"];
+// With a final period, these capital pairs abbreviate one given name, for
+// example "PH." (Philippe), "GY." (György), and "YU." (Yuri). Mirrors Python
+// `_DOTTED_GIVEN_NAME_ABBREVIATIONS`.
+const DOTTED_GIVEN_NAME_ABBREVIATIONS: [&str; 15] = [
+    "CH", "SH", "ZH", "KH", "TS", "YU", "YA", "YE", "GY", "NY", "SZ", "ZS", "CS", "PH", "TH",
+];
+
+/// D9 letter-case guard for one raw last name (mirrors Python
+/// `last_name_allows_joined_initials`). Letter case comes from the canonical
+/// transliteration before lowercasing: ASCII `a-z` is lowercase and `A-Z` is
+/// uppercase, so `á` counts as lowercase. The guard passes when there is at
+/// least one lowercase letter and no more uppercase than lowercase letters.
+pub(crate) fn last_name_allows_joined_initials(
+    last_raw: &str,
+    unidecode_char_map: Option<&HashMap<char, String>>,
+) -> bool {
+    let mut lowercase_count = 0usize;
+    let mut uppercase_count = 0usize;
+    let mut ascii_buffer = [0u8; 4];
+    for ch in canonical_name_pretranslate(last_raw).chars() {
+        let mapped: &str = if ch.is_ascii() {
+            ch.encode_utf8(&mut ascii_buffer)
+        } else {
+            unidecode_char_map
+                .and_then(|char_map| char_map.get(&ch).map(String::as_str))
+                .unwrap_or_else(|| text_unidecode_char(ch))
+        };
+        for byte in mapped.bytes() {
+            if byte.is_ascii_lowercase() {
+                lowercase_count += 1;
+            } else if byte.is_ascii_uppercase() {
+                uppercase_count += 1;
+            }
+        }
+    }
+    lowercase_count > 0 && lowercase_count >= uppercase_count
+}
+
+/// Lowercase D9 initials of a raw first name, or `None` (mirrors Python
+/// `_joined_initials`). This applies every D9 condition except the last-name
+/// guard.
+fn joined_initials(first_raw: &str, name_prefixes: &HashSet<String>) -> Option<String> {
+    let mut letters = String::with_capacity(3);
+    for ch in first_raw.chars() {
+        if ch == '.' || is_python_whitespace_compat(ch) {
+            continue;
+        }
+        if !ch.is_ascii_uppercase() || letters.len() == 3 {
+            return None;
+        }
+        letters.push(ch);
+    }
+    if letters.len() < 2 || JOINED_INITIALS_GIVEN_NAMES.contains(&letters.as_str()) {
+        return None;
+    }
+    if letters.len() == 2
+        && DOTTED_GIVEN_NAME_ABBREVIATIONS.contains(&letters.as_str())
+        && first_raw
+            .trim_matches(is_python_whitespace_compat)
+            .ends_with('.')
+    {
+        return None;
+    }
+    let initials = letters.to_ascii_lowercase();
+    // Titles keep the D7 drop: "DR" is not the initials "d r".
+    (!name_prefixes.contains(&initials)).then_some(initials)
+}
+
 /// Canonicalize raw first/middle/last per the canonical_v2 pipeline (mirrors
 /// Python `canonicalize_name_parts`). Returns (first, middle, last).
 ///
@@ -297,6 +368,9 @@ pub(crate) fn canonicalize_name_text_compat(
 ///   first as spaced tokens; otherwise the first token stays and later tokens
 ///   spill into middle ahead of existing middle tokens. Space tokens after a
 ///   dash-bound group still spill.
+/// - Joined initials (D9): a first of 2-3 ASCII capitals after whitespace and
+///   period removal becomes a first initial plus middle initials when the
+///   last name passes `last_name_allows_joined_initials`.
 pub(crate) fn canonicalize_name_parts_compat(
     first_raw: &str,
     middle_raw: &str,
@@ -304,9 +378,19 @@ pub(crate) fn canonicalize_name_parts_compat(
     name_prefixes: &HashSet<String>,
     unidecode_char_map: Option<&HashMap<char, String>>,
 ) -> (String, String, String) {
-    let first_clean = canonical_name_pretranslate(first_raw);
     let middle_text = canonicalize_name_text_compat(middle_raw, unidecode_char_map);
     let last = canonicalize_name_text_compat(last_raw, unidecode_char_map);
+    if let Some(initials) = joined_initials(first_raw, name_prefixes) {
+        if last_name_allows_joined_initials(last_raw, unidecode_char_map) {
+            let mut middle_tokens: Vec<String> = initials[1..].chars().map(String::from).collect();
+            if !middle_text.is_empty() {
+                middle_tokens.push(middle_text);
+            }
+            return (initials[..1].to_string(), middle_tokens.join(" "), last);
+        }
+    }
+
+    let first_clean = canonical_name_pretranslate(first_raw);
 
     // Whitespace chunks of the raw first field, each normalized to tokens and
     // tagged with whether a dash bound it together.

@@ -34,6 +34,9 @@ ROWS = [
     ("雪", "王", 2),
     ("Only", "Singleton", 1),
     ("Mary", "O'Neill", 4),
+    # D9 reads the last name, which the producer canonicalizes in a separate map.
+    ("HG", "Wells", 2),
+    ("HG", "WELLS", 3),
 ]
 
 
@@ -113,6 +116,8 @@ def test_module_cli_matches_the_production_writer_bytes_and_native_lookups(tmp_p
         columns[position] = keys
         np.testing.assert_array_equal(index.lookup_many(*columns)[position], [*mapping.values(), 1.0, np.nan])
     assert mappings[0]["ana"] == 3
+    assert mappings[0]["hg"] == 3
+    assert mappings[3]["wells h"] == 5
     assert "only singleton" not in mappings[2]
     record = json.loads((output / "run.json").read_text(encoding="utf-8"))
     assert record["status"] == "complete"

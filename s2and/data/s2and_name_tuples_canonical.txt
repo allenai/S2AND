@@ -61,7 +61,6 @@ abduallah,abdullah
 abdualrahman,abdulrahman
 abdukarem,abdul karem
 abdukarem,abdulkarem
-abdul,abdur
 abdul,abudul
 abdul ateef,abdul lateef
 abdul hadi,abdul haid
@@ -114,7 +113,6 @@ achile,achille
 achilleas,achillefs
 achilleas,achilles
 adel,adil
-adelaide,aline
 adenilcia,adenilica
 adeshina,adesina
 adi,adrian
@@ -122,12 +120,10 @@ adian,adrian
 adrea,andrea
 adressa,andressa
 adrian,adrien
-adrian,ah
 adrian,andrian
 adriana,adriane
 adriana,adrianna
 adrii,andrii
-ae,aldo
 aecia,alecia
 aexander,alexander
 afaseneh,afsaneh
@@ -143,7 +139,6 @@ agneszka,agnieszka
 agnieska,agnieszka
 agnieszka,anieszka
 agustin,augustin
-ah,amir
 ahamd,ahmad
 ahamd reza,ahmad reza
 ahamdreza,ahmadreza
@@ -166,8 +161,6 @@ aimilios,aimillios
 aina,anna
 airat,ayrat
 aireza,alireza
-aj,alfonso
-aj,andrew
 ajan,alan
 akeksey,aleksey
 akhiko,akihiko
@@ -237,13 +230,11 @@ alessandro,allesandro
 alessandro,allessandro
 alessio,alesso
 aletta,alta
-alex,ali
 alex,alyx
 alexadre,alexandre
 alexanda,alexander
 alexandar,alexander
 alexander,alexandr
-alexander,alexandra
 alexander,alexandre
 alexander,alexaner
 alexander,alexsander
@@ -272,7 +263,6 @@ alfonso,alfonzo
 alfonso,anfonso
 ali,allison
 ali,aly
-alice,aline
 aline,alyne
 aliona,alona
 alireaza,alireza
@@ -383,7 +373,6 @@ aneish,aniesh
 anelia,aneliya
 aneteneh,anteneh
 anette,annette
-angela,angelina
 angela,angie
 angela,anzhela
 angeles,angels
@@ -419,7 +408,6 @@ antonello,antonio
 antoni,antony
 antonia,antonina
 antonina,antonona
-antonino,antonio
 antonio,antono
 antonio,antoonio
 antonios,antonis
@@ -483,7 +471,6 @@ ashotosh,ashutosh
 ashu,ashwani
 ashwin,aswin
 asia,asiya
-asif,asim
 asmaa,asmae
 asta,astra
 astuo,atsuo
@@ -553,7 +540,6 @@ bartolome,bartomeu
 barween,brween
 basazinew,bsazinew
 bashiru,basiru
-bassel,bh
 batbaiar,batbayar
 batir,batyr
 baujke,baukje
@@ -762,7 +748,6 @@ cheih,chieh
 cheirth,cherith
 chen,chuin
 chen fu,chun fu
-chen sheng,cs
 chencai,chengcai
 cheng,chung
 cheng ming,chenming
@@ -776,7 +761,6 @@ chengpu,chenpu
 chengquan,chenquan
 chengyi,chenyi
 chengyu,chenyu
-chensheng,cs
 cheol,choel
 cheol,chul
 cheol hun,chul hun
@@ -834,9 +818,7 @@ christoph,cristoph
 christophe,chrsitophe
 christophe,cristophe
 christopher,chrstopher
-christopher,cj
 christopher,cristopher
-chuan,chun
 chuan xia,chunxia
 chuancheng,chuangcheng
 chuancun,chuncun
@@ -906,8 +888,6 @@ cumrum,cumrun
 cuneyd,cuneyt
 curtin,curtis
 cynthia,cyntia
-da,deborah
-da,dmitry
 daan,daniel
 daciberg,dacilberg
 dae,dea
@@ -923,7 +903,6 @@ daiyin,dayin
 dam,dan
 damian,damien
 damian,damion
-dan,dj
 dana,daniela
 danajeyan,dananjeyan
 daneil,daniel
@@ -968,8 +947,6 @@ david,davio
 david,davy
 david,deivid
 david,dewi
-david,dj
-david,dm
 davidson,davision
 davidson,davison
 davision,davison
@@ -977,7 +954,6 @@ davood,davoud
 dawn,dwan
 dayane,dayanne
 dayse,deyse
-dc,deniz
 deanna,diana
 debabrata,debrabata
 debadatta,debadutta
@@ -1009,7 +985,6 @@ demiana,demyana
 demosthenes,dimosthenes
 demosthenes,dimosthenis
 deneice,deniece
-deng,dong
 denis,dennis
 denis,denys
 denise,desnise
@@ -1134,7 +1109,6 @@ dushantha,dushnatha
 dushantha,dushyantha
 dyana,dyna
 ebru,erbu
-ec,eric
 eckard,eckart
 eckehard,eokehard
 edaward,edward
@@ -1164,8 +1138,6 @@ eduardo,edurado
 eduardo,edwardo
 edvard,edward
 edwabd,edward
-edward,ej
-edward,ew
 eesa,eisa
 effimia,efimia
 effrossyni,effrosyni
@@ -1187,7 +1159,6 @@ einolah,einollah
 eirc,eric
 eirene,eirini
 eisabetta,elisabetta
-ej,eun
 ekataterina,ekaterina
 ekaterina,ekaterine
 ekaterina,ekatherina
@@ -1206,7 +1177,6 @@ eleftherios,elftherios
 elena,eleni
 elena,eliana
 elena,ellen
-elena,ev
 elenice,elenince
 elenora,eleonora
 elfride,elfriede
@@ -1235,7 +1205,6 @@ elpidio,elpido
 elsa,elza
 elsayed,elsyed
 elwin,ewin
-em,euan
 emaad,emad
 emanoel,emmanoel
 emanuala,emanuela
@@ -1592,7 +1561,6 @@ getinet,getnet
 geun,guen
 gevorg,gevork
 gezahagne,gezahegne
-gf,glenn
 ghais,ghias
 ghanshaym,ghanshyam
 ghanshyam,ghansyam
@@ -1603,7 +1571,6 @@ gherado,gherardo
 gholam hosein,gholam hosien
 gholamhosein,gholamhosien
 gholamlreza,gholamreza
-gi,guy
 giampaolo,giampolo
 giampiero,giampietro
 giampiero,gian piero
@@ -1834,7 +1801,6 @@ heshmatolah,heshmatollah
 hey,hye
 heysook,hyesook
 heysung,hyesung
-hf,hua fu
 hh,hou huai
 hiasto,hisato
 hicham,hichem
@@ -1906,7 +1872,6 @@ hussain,hussein
 hussein,hussien
 hussen,hussien
 huynh,hyunh
-hw,hye
 hye son,hye sun
 hye yong,hye young
 hyemin,hymen
@@ -1933,7 +1898,6 @@ hyugin,hyungjin
 hyun hyub,hyun hyup
 hyunhyub,hyunhyup
 iain,ian
-ian,in
 iannis,ioannis
 ibaheem,ibraheem
 iciar,itziar
@@ -1947,11 +1911,9 @@ ignanio,ignazio
 igor,ihor
 ihtasham,ihtesham
 ihtesham,ihtisham
-ii,il
 iia,iya
 iiana,ilana
 iidiko,ildiko
-iii,il
 iikay,ilkay
 iiknur,ilknur
 iiona,ilona
@@ -2016,7 +1978,6 @@ ivailo,ivaylo
 ivaiyla,ivayla
 ivan,ivo
 izabela,izabella
-ja,juan
 jaap,jacob
 jabar,jabbar
 jacco,jacob
@@ -2062,7 +2023,6 @@ james,jem
 james,jim
 james,jimmy
 jamile,jamille
-jan,johan
 jan,johann
 jan,johannes
 jan,john
@@ -2093,15 +2053,9 @@ jaurrsup,jaursup
 javaria,javeria
 jawaher,jwaher
 jawariya,jawayria
-jay,jt
 jayashree,jayshree
 jayne,jie
-jc,jean
-jc,jeanne
-jc,john
-je,jie
 jeam,jean
-jean,joan
 jean,john
 jean,juan
 jean franccois,jean francois
@@ -2137,7 +2091,6 @@ jeongmin,jungmin
 jeorg,joerg
 jeramiah,jeremiah
 jeremey,jeremy
-jeremiah,jeremy
 jeremiah,jerry
 jeremy,jerremy
 jeremy,jerry
@@ -2149,7 +2102,6 @@ jerzy,jurek
 jesica,jessica
 jesisca,jessica
 jessa,jessica
-jesse,jessie
 jesse,jessy
 jeun seok,jun seok
 jeunseok,junseok
@@ -2171,7 +2123,6 @@ jiajun,jianju
 jiakun,jiankun
 jiamo,jm
 jian qi,jinaqi
-jian she,js
 jianaglong,jianglong
 jianahua,jianhua
 jiang,jiwang
@@ -2241,7 +2192,6 @@ jiuhui,juihui
 jiuzhong,jui zhong
 jiuzhong,juizhong
 jiyeong,jiyoung
-jm,joanna
 jm,jose
 jo hoon,joo hon
 joakim,jokaim
@@ -2281,7 +2231,6 @@ johannes,johnnes
 johannes,jos
 johbosco,johnbosco
 john,jon
-john,jonathan
 john,jonh
 john,juan
 johnathan,jonathan
@@ -2296,7 +2245,6 @@ jonathon,jonthon
 jonchul,jongchul
 joneyeon,jongyeon
 jong,joong
-jong,jung
 jong hoon,jong hun
 jongeun,jonguen
 jonghoon,jonghun
@@ -2315,7 +2263,6 @@ jordan,jordi
 jorde,jorge
 jordi,jorge
 joren,jorn
-jorge,jose
 jose,josn
 jose,josr
 jose manuel,jose mauel
@@ -2333,7 +2280,6 @@ joucai,juncai
 joung ho,jung ho
 joungho,jungho
 jrgen,jurgen
-juan,jun
 juanid,junaid
 juares,juarez
 juares,juarues
@@ -2357,7 +2303,6 @@ julian,jullian
 juliana,juliane
 julijus,julius
 julio,juulio
-jun,jy
 jun hyoung,jun hyung
 jun wei,juwei
 jung hwan,jung kwan
@@ -2386,7 +2331,6 @@ justyna,jutyna
 kabirullah,kabirullar
 kahled,khaled
 kai,kay
-kai,kia
 kalayanam,kalyanam
 kalayanmoy,kalyanmoy
 kalayanrao,kalyanrao
@@ -2464,7 +2408,6 @@ kausar,kauser
 kauzhiro,kazuhiro
 kavasseri,kavassery
 kawsar,kawser
-kay,kc
 kay,kei
 kayalvizhi,kayavizhi
 kayvan,keyvan
@@ -2524,7 +2467,6 @@ kirill,kyrill
 kirilo,kyrylo
 kirk,krik
 kirsten,kirstin
-kirsten,kj
 kirsten,kristen
 kittipan,kitttipan
 kiyomoto,kiyotomo
@@ -2624,7 +2566,6 @@ kyounghee,kyunghee
 kyoungjae,kyungjae
 kyoungwon,kyungwon
 kyung hwan,kyung wan
-la,luis
 ladislaus,laszlo
 laeticia,laetitia
 laila,lali
@@ -2657,12 +2598,10 @@ layane,layanne
 layla,lyla
 lazzat,lyazzat
 lbica,lubica
-le,ly
 leando,leandro
 lech,leszek
 ledidy,leidy
 lee,lin
-lee,ll
 leenapong,leenha pong
 leenapong,leenhapong
 leila,lella
@@ -2697,7 +2636,6 @@ lesia,lesya
 lesiia,lesya
 lesley,lesly
 letcia,leticia
-li zhu,lz
 lian rong,lr
 liangliang,lina liang
 liangliang,linagliang
@@ -2754,7 +2692,6 @@ lisa,lise
 lisbeth,lizbeth
 lisette,lissette
 lishengsa,lishengsha
-liu,lu
 liubomir,liubomur
 liubomir,liubomyr
 liubomir,ljubomyr
@@ -2851,7 +2788,6 @@ lynette,lynn
 lynette,lynnette
 lyubomir,lyubomyr
 lyudmila,lyudmyla
-ma,muhammad
 maameer,maamer
 maarten,marten
 mac,malcolm
@@ -3011,7 +2947,6 @@ maria,mary
 maria,marya
 maria,maryam
 maria,mercedes
-maria,mira
 maria,miriam
 maria grazia,meri grazia
 maria pompea,maria pompesa
@@ -3052,7 +2987,6 @@ marko,mirko
 marleen,marlene
 marta,martha
 marta,marti
-marthinus,mj
 martijn,martinus
 martijn,martjin
 martim,martin
@@ -3135,7 +3069,6 @@ merce,mercie
 mergaljas,mergalyas
 meritxell,mertixell
 meyong,myeong
-mh,mohd
 mi jeong,mi jung
 mi seun,mi suen
 miae,miai
@@ -3201,7 +3134,6 @@ milana,milena
 milena,millena
 mileusha,milyausha
 miltiades,miltiadis
-min,mj
 min jeong,min jung
 minahs,minhas
 mingang,minggang
@@ -3234,7 +3166,6 @@ mistuhiko,mitsuhiko
 mitsinobu,mitsunobu
 mitsuhiro,mitsuiro
 mitsuru,mituru
-ml,mu lin
 moahammad,mohammad
 moahmed,mohamed
 moahmmadreza,mohammadreza
@@ -3323,7 +3254,6 @@ mostafa,moustafa
 mostafa,mstafa
 mostafa,mustafa
 moushami,moushumi
-mu,my
 muahammad,muhammad
 muchamad,muchammad
 muchamad,muhammad
@@ -3727,7 +3657,6 @@ pencheng,peng cheng
 pencheng,pengcheng
 penelope,penny
 penelope,pinelopi
-peng,ping
 pengjuan,penguan
 pengtao,pentao
 percy,pery
@@ -3809,7 +3738,6 @@ priscila,prsicila
 priscilla,priscillia
 priscyla,priscylla
 przemek,przemyslaw
-pui,py
 pun xun,puxun
 punadji,punaji
 pundra,pundru
@@ -3860,7 +3788,6 @@ rafael,rafal
 rafael,rafeael
 rafael,rafel
 rafael,raphael
-rafael,re
 rafael,refael
 rafaela,rafaella
 rafaele,raffaele
@@ -3939,7 +3866,6 @@ renjith,renjth
 reseda,rezeda
 reyner,reynier
 reza,reze
-rg,rodrigo
 rhoghieh,roghieh
 ricard,richard
 ricardo,riccardo
@@ -3961,7 +3887,6 @@ roba,robe
 robbert,robert
 robbie,robert
 robert,robyn
-robert,rw
 roberta,robertta
 robinson,robison
 roderich,roderick
@@ -4082,7 +4007,6 @@ sandra,sandy
 sandurai,sendurai
 saneyuki,sanyeuki
 saneyuki,sanyuki
-sang,sung
 sang beom,sang bum
 sangamitra,sanghamitra
 sanimir,stanimir
@@ -4155,8 +4079,6 @@ senugwoo,seungwoo
 seock,seok
 seok,suk
 seon,sun
-seong,seoung
-seong,seung
 seong,sung
 seong jun,sheng jun
 seong min,sung min
@@ -4207,7 +4129,6 @@ seshadri,sheshadri
 seum,seung
 seung,sue
 seung,sueng
-seung,sung
 seung hoon,seung hun
 seung hyong,seung hyoung
 seung keol,seung kul
@@ -4310,9 +4231,6 @@ shogo,shougo
 shoichi,syoichi
 shorokou,shoroku
 shoschichi,shoshichi
-shou,shuo
-shou xian,sx
-shouxian,sx
 shraddha,shradhha
 shreyansh,shreyash
 shridar,shridhar
@@ -4322,9 +4240,7 @@ shrikanth,srikanth
 shu ya,syuya
 shu zhang,shu zhuang
 shuailong,shuzailong
-shuang shi,ss
 shuangen,shuanggen
-shuangshi,ss
 shuangzhu,shuanzhu
 shubhajit,subhajit
 shubhendra,subendra
@@ -4516,7 +4432,6 @@ tabassum,tabussam
 taddese,tadesse
 tadese,tadesse
 tadeush,tadeusz
-tae,tai
 tae hyoung,tae young
 taeho,teaho
 tafadzwanashe,tafazwanashe
@@ -4563,7 +4478,6 @@ tatyana,tetyana
 tavag,tavga
 tayebeh,tayyebeh
 taynara,thaynara
-tc,tien
 tea,teya
 teamer,teamur
 ted,theodore
@@ -4624,7 +4538,6 @@ thorsten,torsten
 tianan,tianna
 tiberio,tibero
 tihitina,tihitinna
-tiing,tl
 tikhon,tykhon
 tile,tilo
 tim,tin
@@ -4636,7 +4549,6 @@ timothee,timothy
 tin,toly
 tinging,tingting
 tishkin,tiskhin
-tjun,ty
 tmokatsu,tomokatsu
 toba,tooba
 tobias,toby
@@ -4682,13 +4594,10 @@ ulribe,ulrike
 ulrick,ulrik
 umaimainthan,umamainthan
 umamaheshwari,umamaheswari
-uo,uwa
 upendra,uprendra
 uros,urovs
 ursa,urska
 ursula,usula
-va,vera
-va,vladimir
 vadakkoot,vadakoot
 vadim,vadym
 vaenia,vania
@@ -4904,7 +4813,6 @@ wassilios,wassillios
 wed,wen
 wee,wei
 weguo,weiguo
-wei,wy
 wei li,wl
 wei xing,wx
 wei zhou,wz
@@ -4925,7 +4833,6 @@ wengliang,wenliang
 weon,won
 weretaw,woretaw
 weronika,weronka
-wh,wim
 wiesaw,wieslaw
 wiesiek,wieslaw
 wilfrido,willfrido
@@ -5020,7 +4927,6 @@ xuemei,xuemi
 xuemei,xumei
 xun yun,xuyun
 xunyun,xuyun
-ya,yu
 yaakov,yakov
 yadavendradev,yadvendradev
 yadolah,yadollah
@@ -5044,7 +4950,6 @@ yangyan,yanyan
 yanick,yannick
 yannis,yiannis
 yanshou,yanshuo
-yao,yl
 yap,yit
 yarabahally,yarabhally
 yarden,yrdn
@@ -5060,7 +4965,6 @@ yasuhiro,yoshihiro
 yasutoshi,yasuyoshi
 yazan,yazun
 yazhou,yazhuo
-ye,yu
 yeimkuan,yeimkunn
 yelizaveta,yelyzaveta
 yelli,yelly
@@ -5087,23 +4991,16 @@ yevgeniy,yevheniy
 yevgeniya,yevheniya
 yevhen,yuvgen
 yevhenia,yevheniia
-yew,yw
 ygal,yigal
-yi,yl
-yi,yn
-yi,yu
 yi sheng,ys
 yibelital,yibeltal
 yibin,yinbin
 yigit,yigvit
-yih,yy
 yijao,yijiao
 yimtubezenash,yimtubezinash
 yin ze,yin zhe
 yinchun,yingchun
 yinfeng,yingfeng
-ying,yong
-ying,yun
 ying lin,yinling
 ying yu,yinyu
 yingewi,yingwei
@@ -5118,7 +5015,6 @@ yinze,yinzhe
 yishau,yishay
 yitayeh,yitayeih
 yitayish,yitaysh
-yiu,yy
 yliya,yuliya
 yochiro,yoichiro
 yohichiro,yoichiro
@@ -5126,8 +5022,6 @@ yohsuke,yosuke
 yoichi,youichi
 yoke,yong
 yonatan,yonathan
-yong,yoon
-yong,you
 yong,youg
 yong,young
 yong,yung
@@ -5165,11 +5059,9 @@ yoshitaka,yositaka
 yoshitsugu,yoshitugu
 yosra,yousra
 yosuke,yousuke
-you,yu
 you,yung
 you,yuo
 you li,yuo li
-you ming,yu ming
 yougn,young
 youli,yuoli
 youn lang,youn long
@@ -5183,10 +5075,8 @@ yousef,youssef
 yrii,yurii
 yrij,yurij
 ys,yu sheng
-yu,yy
 yu beol,yu byeol
 yu cheng,yue sheng
-yu zhi,yz
 yuanaan,yuanan
 yuanawei,yuanwei
 yuanfang,yuangfang
@@ -5218,7 +5108,6 @@ yurij,yury
 yuriy,yury
 yuriy,yuryi
 yuzhuo,yvzhuo
-za,zoe
 zac,zak
 zach,zack
 zacharias,zaharias
@@ -5249,7 +5138,6 @@ zenjun,zhenjun
 zenoviy,zinoviy
 zenyong,zhenyong
 zequen,zequn
-zh,zn
 zha nao,zhao ao
 zhana,zhanna
 zhanfeng,zhangfeng
@@ -5257,10 +5145,8 @@ zhang gang,zheng gang
 zhangling,zhanling
 zhanna,zhanneta
 zhao,zhoa
-zhe,zhi
 zheina,zheyna
 zheliang,zhengliang
-zhen,zn
 zhen han,zhnehan
 zhen mig,zhen ming
 zhenbao,zheng bao
@@ -5303,7 +5189,6 @@ zhouhong,zhuohong
 zhouwei,zhuowei
 zhu hao,zu hao
 zhunyun,zhuyun
-zi,zy
 zi jin,zj
 ziemowit,ziemwowit
 zijin,zj

@@ -409,7 +409,7 @@ def has_name_dash(value: str | None) -> bool:
 # ------------------------ canonical_v2 name canonicalization ------------------------
 # These functions are the live canonical normalization surface used by ingestion,
 # feature extraction, subblocking, and query adaptation. The durable contract is in
-# docs/canonical_names.md; decisions D1-D8 are recorded in the fixture's decisions registry.
+# docs/canonical_names.md; decisions D1-D9 are recorded in the fixture's decisions registry.
 
 # D3 apostrophe-like marks: ASCII apostrophe, backtick, spacing acute, curly quotes,
 # modifier letters (okina/apostrophe), primes, saltillo, U+FE4D (classified with
@@ -429,6 +429,17 @@ _CANONICAL_NAME_TRANSLATION = str.maketrans(
 )
 
 _RE_CANONICAL_NON_LETTER = re.compile(r"[^a-z]+")
+
+# D9: ED is a frequent given name, and MD abbreviates Muhammad (D7).
+_JOINED_INITIALS_GIVEN_NAMES = frozenset({"ED", "MD"})
+# With a final period, these capital pairs abbreviate one given name, for example
+# "PH." (Philippe), "GY." (György), and "YU." (Yuri).
+_DOTTED_GIVEN_NAME_ABBREVIATIONS = frozenset(
+    {"CH", "SH", "ZH", "KH", "TS", "YU", "YA", "YE", "GY", "NY", "SZ", "ZS", "CS", "PH", "TH"}
+)
+_RE_JOINED_INITIALS = re.compile(r"[A-Z]{2,3}")
+_RE_ASCII_LOWERCASE = re.compile(r"[a-z]")
+_RE_ASCII_UPPERCASE = re.compile(r"[A-Z]")
 
 
 class CanonicalNameParts(NamedTuple):
@@ -469,10 +480,51 @@ def canonicalize_name_text(raw: str | None) -> str:
     return " ".join(_canonical_name_tokens(_canonical_name_pretranslate(raw)))
 
 
+def last_name_allows_joined_initials(last_raw: str | None) -> bool:
+    """Return the D9 letter-case guard for one raw last name.
+
+    Letter case comes from the canonical transliteration of the raw last name
+    before lowercasing. ASCII ``a-z`` counts as lowercase and ``A-Z`` counts as
+    uppercase, so ``á`` counts as lowercase. The pinned transliteration tables
+    make this definition identical in Python and Rust.
+
+    Args:
+        last_raw: Raw last name, or ``None``.
+
+    Returns:
+        True when the transliterated last name has at least one lowercase
+        letter and no more uppercase than lowercase letters.
+    """
+
+    transliterated = unidecode(_canonical_name_pretranslate(last_raw))
+    lowercase_count = len(_RE_ASCII_LOWERCASE.findall(transliterated))
+    return lowercase_count > 0 and lowercase_count >= len(_RE_ASCII_UPPERCASE.findall(transliterated))
+
+
+def _joined_initials(first_raw: str | None) -> str | None:
+    """Return the lowercase D9 initials of a raw first name, or ``None``.
+
+    This applies every D9 condition except the last-name guard.
+    """
+
+    if not first_raw:
+        return None
+    letters = "".join(first_raw.split()).replace(".", "")
+    if _RE_JOINED_INITIALS.fullmatch(letters) is None or letters in _JOINED_INITIALS_GIVEN_NAMES:
+        return None
+    if len(letters) == 2 and letters in _DOTTED_GIVEN_NAME_ABBREVIATIONS and first_raw.strip().endswith("."):
+        return None
+    initials = letters.lower()
+    # Titles keep the D7 drop: "DR" is not the initials "d r".
+    return None if initials in NAME_PREFIXES else initials
+
+
 def canonicalize_name_parts(
     first_raw: str | None,
     middle_raw: str | None,
     last_raw: str | None,
+    *,
+    last_allows_initials: bool | None = None,
 ) -> CanonicalNameParts:
     """Canonicalize raw first/middle/last per the canonical_v2 pipeline.
 
@@ -489,11 +541,41 @@ def canonicalize_name_parts(
       dash-bound group still spill.
     - Last keeps normalized spaces with particles preserved (D5); suffix
       stripping is outside canonical_v2.
+    - Joined initials (D9): when whitespace and periods are removed, a first
+      of 2-3 ASCII capitals such as ``HG`` or ``J.H.`` becomes a first initial
+      plus middle initials ahead of existing middle tokens. The last name must
+      pass ``last_name_allows_joined_initials``. ``ED``, ``MD``, title
+      prefixes, and dotted given-name abbreviations such as ``PH.`` do not
+      change.
+
+    Args:
+        first_raw: Raw first name, or ``None``.
+        middle_raw: Raw middle name, or ``None``.
+        last_raw: Raw last name, or ``None``.
+        last_allows_initials: The precomputed
+            ``last_name_allows_joined_initials(last_raw)`` result. Supply it
+            only when first and last names are canonicalized separately, such
+            as in a count generator with one map for each distinct name. The
+            default computes it from ``last_raw``.
+
+    Returns:
+        The canonical first, middle, and last fields.
     """
 
-    first_clean = _canonical_name_pretranslate(first_raw)
     middle_tokens = _canonical_name_tokens(_canonical_name_pretranslate(middle_raw))
     last_tokens = _canonical_name_tokens(_canonical_name_pretranslate(last_raw))
+    initials = _joined_initials(first_raw)
+    if initials is not None:
+        if last_allows_initials is None:
+            last_allows_initials = last_name_allows_joined_initials(last_raw)
+        if last_allows_initials:
+            return CanonicalNameParts(
+                first=initials[0],
+                middle=" ".join([*initials[1:], *middle_tokens]),
+                last=" ".join(last_tokens),
+            )
+
+    first_clean = _canonical_name_pretranslate(first_raw)
 
     # Whitespace chunks of the raw first field, each normalized to tokens and
     # tagged with whether a dash bound it together.

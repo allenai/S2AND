@@ -494,6 +494,7 @@ mod tests {
                     paper_id: "p1".to_string(),
                     first: "aa".to_string(),
                     middle: String::new(),
+                    last: String::new(),
                     affiliations: Vec::new(),
                     orcid: Some("0000-0000-0000-0001".to_string()),
                     position: None,
@@ -506,6 +507,7 @@ mod tests {
                     paper_id: "p2".to_string(),
                     first: "bb".to_string(),
                     middle: String::new(),
+                    last: String::new(),
                     affiliations: Vec::new(),
                     orcid: Some("0000-0000-0000-0001".to_string()),
                     position: None,
@@ -518,6 +520,7 @@ mod tests {
                     paper_id: "p3".to_string(),
                     first: "bb".to_string(),
                     middle: String::new(),
+                    last: String::new(),
                     affiliations: Vec::new(),
                     orcid: Some("0000-0000-0000-0002".to_string()),
                     position: None,
@@ -530,6 +533,7 @@ mod tests {
                     paper_id: "p4".to_string(),
                     first: "cc".to_string(),
                     middle: String::new(),
+                    last: String::new(),
                     affiliations: Vec::new(),
                     orcid: Some("0000-0000-0000-0002".to_string()),
                     position: None,
@@ -590,6 +594,7 @@ mod tests {
                 paper_id: "p1".to_string(),
                 first: "Alice".to_string(),
                 middle: String::new(),
+                last: String::new(),
                 affiliations: Vec::new(),
                 orcid: None,
                 position: None,
@@ -599,6 +604,7 @@ mod tests {
                 paper_id: "p2".to_string(),
                 first: "alice".to_string(),
                 middle: String::new(),
+                last: String::new(),
                 affiliations: Vec::new(),
                 orcid: None,
                 position: None,
@@ -608,6 +614,7 @@ mod tests {
                 paper_id: "p3".to_string(),
                 first: "Qi-Xin".to_string(),
                 middle: "A.".to_string(),
+                last: String::new(),
                 affiliations: Vec::new(),
                 orcid: None,
                 position: None,
@@ -617,6 +624,27 @@ mod tests {
                 paper_id: "p4".to_string(),
                 first: "Arif\u{2010}ullah".to_string(),
                 middle: String::new(),
+                last: String::new(),
+                affiliations: Vec::new(),
+                orcid: None,
+                position: None,
+            },
+            SubblockingSignatureRow {
+                signature_id: "s5".to_string(),
+                paper_id: "p5".to_string(),
+                first: "HG".to_string(),
+                middle: String::new(),
+                last: "Wells".to_string(),
+                affiliations: Vec::new(),
+                orcid: None,
+                position: None,
+            },
+            SubblockingSignatureRow {
+                signature_id: "s6".to_string(),
+                paper_id: "p6".to_string(),
+                first: "HG".to_string(),
+                middle: String::new(),
+                last: "WELLS".to_string(),
                 affiliations: Vec::new(),
                 orcid: None,
                 position: None,
@@ -637,6 +665,16 @@ mod tests {
         // Dash-bound given names stay together canonically (D1/D4).
         assert_eq!(rows[3].first, "arif ullah");
         assert_eq!(rows[3].middle, "");
+        // D9 reads the raw last name: joined capitals split only before a
+        // last name that is not in capitals.
+        assert_eq!(
+            (rows[4].first.as_str(), rows[4].middle.as_str()),
+            ("h", "g")
+        );
+        assert_eq!(
+            (rows[5].first.as_str(), rows[5].middle.as_str()),
+            ("hg", "")
+        );
     }
 
     #[test]

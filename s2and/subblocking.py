@@ -1322,7 +1322,9 @@ def signature_name_parts_for_subblocking(signature) -> tuple[str, str]:
     if first is not None and middle is not None:
         return first, middle
     # Rust preprocessing can defer normalized name fields; reconstruct with Python-equivalent logic.
-    parts = canonicalize_name_parts(signature.author_info_first, signature.author_info_middle, None)
+    parts = canonicalize_name_parts(
+        signature.author_info_first, signature.author_info_middle, signature.author_info_last
+    )
     return parts.first, parts.middle
 
 

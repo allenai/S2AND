@@ -28,6 +28,9 @@ Use `generate_name_counts_from_parquet` for large reviewed name-count exports.
 The producer sums plain mention counts across the complete source population.
 It applies the current canonical name rules and retains counts above one.
 It preserves the existing four-file binary index format.
+The producer canonicalizes each distinct first name and each distinct last name once.
+The first-name map keeps the canonical first with and without the D9 initials rule.
+The last-name map keeps the D9 guard, and the join selects the applicable first-name result.
 
 Each Parquet object must contain `first_name: string`, `last_name: string`, and `mention_count: int64`.
 Additional columns are permitted.

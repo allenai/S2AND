@@ -22,6 +22,8 @@ pub(crate) struct SubblockingSignatureRow {
     pub(crate) paper_id: String,
     pub(crate) first: String,
     pub(crate) middle: String,
+    // D9 needs the raw last name to decide whether joined capitals are initials.
+    pub(crate) last: String,
     pub(crate) affiliations: Vec<String>,
     pub(crate) orcid: Option<String>,
     pub(crate) position: Option<i64>,
@@ -36,7 +38,7 @@ pub(crate) fn normalize_subblocking_signature_rows(
         let (first, middle, _last) = canonicalize_name_parts_compat(
             &row.first,
             &row.middle,
-            "",
+            &row.last,
             name_prefixes,
             Some(unidecode_char_map),
         );
@@ -60,6 +62,7 @@ pub(crate) fn read_subblocking_signature_rows(
                     paper_id: signature.paper_id,
                     first: signature.author_first,
                     middle: signature.author_middle,
+                    last: signature.author_last,
                     affiliations: signature.affiliations,
                     orcid: signature.orcid,
                     position: signature.position,
@@ -2661,6 +2664,7 @@ pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
     for row in signature_rows.iter() {
         ensure_unidecode_for_text(&row.first, &mut unidecode_char_map)?;
         ensure_unidecode_for_text(&row.middle, &mut unidecode_char_map)?;
+        ensure_unidecode_for_text(&row.last, &mut unidecode_char_map)?;
     }
     normalize_subblocking_signature_rows(&mut signature_rows, &name_prefixes, &unidecode_char_map);
 

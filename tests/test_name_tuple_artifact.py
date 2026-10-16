@@ -25,7 +25,7 @@ def test_checked_in_source_reproduces_canonical_name_tuples_byte_exactly(tmp_pat
 
     assert regenerated_path.read_bytes() == expected_path.read_bytes()
     artifact = load_name_tuple_artifact(expected_path)
-    assert len(artifact.pairs) == 5330
+    assert len(artifact.pairs) == 5215
     assert artifact.data_sha256 == hashlib.sha256(expected_path.read_bytes()).hexdigest()
 
 
@@ -39,7 +39,8 @@ def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
     assert len(records) == 2266
     assert len(accepted) == 1343
     assert len(excluded) == 923
-    assert accepted <= artifact.pairs
+    # The 2026-10-16 alias review removed this accepted pair: the syllables name different people.
+    assert accepted - artifact.pairs == {("seong", "seung")}
     assert artifact.pairs.isdisjoint(excluded)
 
 
@@ -47,7 +48,7 @@ def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
     ("evidence_file", "expected_count", "required_pair"),
     [
         ("gold_additions_20261012.csv", 27, ("jeremiah", "jerry")),
-        ("model_additions_20261012.csv", 276, ("bernd", "bernhard")),
+        ("model_additions_20261012.csv", 263, ("bernd", "bernhard")),
     ],
 )
 def test_gold_alias_additions_remove_real_first_name_vetoes(

@@ -123,13 +123,47 @@ authorities. Given raw `first`, `middle`, and `last` values, they:
 3. treat supported Unicode dash variants as one separator;
 4. replace remaining nonletters with spaces and collapse whitespace;
 5. drop at most one leading title from first name, except `md`;
-6. retain a dash-bound first-name group, otherwise keep the first token and
+6. split 2-3 joined capitals in first name into initials when the last name
+   is not in capitals (decision D9);
+7. retain a dash-bound first-name group, otherwise keep the first token and
    spill remaining first-name tokens into middle; and
-7. normalize last name independently, preserving spaces and surname particles.
+8. normalize last name independently, preserving spaces and surname particles.
 
 Examples: `Anne-Marie Claire` becomes first `anne marie`, middle `claire`;
 apostrophe variants of `O'Connor` become `oconnor`; and `Ou-Yang` and
 `Ou Yang` both become last `ou yang`.
+
+Decision D9 reads joined capitals as initials.
+The rule removes whitespace and periods from the raw first name.
+If 2-3 ASCII capitals remain, the first capital becomes first.
+Each other capital becomes a middle token before the existing middle tokens.
+For example, `HG` with last `Wells` becomes first `h`, middle `g`.
+`JHM` becomes first `j`, middle `h m`.
+
+The rule needs case evidence from the raw last name.
+`last_name_allows_joined_initials` transliterates the raw last name with the
+canonical table and then counts ASCII letters.
+The rule applies only when the result has at least one lowercase letter and no
+more capitals than lowercase letters.
+Thus `á` counts as lowercase, and `HG` with last `WELLS` stays first `hg`.
+The pinned transliteration tables make this definition identical in Python
+and Rust.
+
+The rule does not apply to these first names:
+
+- `ED`, a frequent given name, and `MD`, which abbreviates Muhammad (D7);
+- a title prefix such as `DR`, which D7 drops;
+- a two-capital abbreviation of one given name with a final period: `CH`,
+  `SH`, `ZH`, `KH`, `TS`, `YU`, `YA`, `YE`, `GY`, `NY`, `SZ`, `ZS`, `CS`, `PH`,
+  or `TH`, for example `PH.` (Philippe), `GY.` (György), and `YU.` (Yuri).
+
+Mixed-case forms such as `Jh` do not change.
+Every caller must supply the raw last name.
+A count generator can canonicalize first and last names in separate maps.
+Such a generator computes `last_name_allows_joined_initials` once for each
+distinct last name.
+It then supplies that result to `canonicalize_name_parts` as
+`last_allows_initials`.
 
 `s2and.text.canonical_name_count_keys` emits no sentinel keys. It emits
 `first` only when first has more than one character, `last` when present,

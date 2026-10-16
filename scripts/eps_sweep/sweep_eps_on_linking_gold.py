@@ -798,9 +798,8 @@ def _linkage_from_cached_distance(
     """Build the FastCluster linkage tree once for a cached distance vector."""
 
     import numpy as np
-    from fastcluster import linkage
 
-    from s2and.model_pairwise import FastCluster
+    from s2and.model_pairwise import FastCluster, constrained_linkage
 
     if len(signature_ids) <= 1:
         return None
@@ -826,7 +825,7 @@ def _linkage_from_cached_distance(
         len(signature_ids),
     )
     started = time.perf_counter()
-    linkage_matrix = linkage(dist_array, linkage_method, preserve_input=True)
+    linkage_matrix = constrained_linkage(dist_array, linkage_method, preserve_input=True)
     logging.info(
         "Finished linkage build for block %s using %s in %.3fs",
         block_key,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -10,8 +10,51 @@ from scipy.cluster.hierarchy import fcluster
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.metrics import roc_auc_score
 
+from s2and.consts import HARD_LINKAGE_DISTANCE, LARGE_DISTANCE
+
 if TYPE_CHECKING:
     from hyperopt import Trials
+
+# Giant blocks can hold hard negatives in most pairs; scan in bounded chunks so
+# the temporary mask stays small, not one byte or index per pair.
+_HARD_NEGATIVE_SCAN_CHUNK = 1 << 22
+
+
+def _hard_negative_chunks(distances: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """Yield each condensed chunk with its exact hard-negative sentinel mask."""
+    for start in range(0, len(distances), _HARD_NEGATIVE_SCAN_CHUNK):
+        chunk = distances[start : start + _HARD_NEGATIVE_SCAN_CHUNK]
+        yield chunk, chunk == LARGE_DISTANCE
+
+
+def constrained_linkage(distances: np.ndarray, method: str, *, preserve_input: bool) -> np.ndarray:
+    """Build a linkage tree in which hard negatives never share a cluster below EPS.
+
+    Every pair at exactly ``LARGE_DISTANCE`` is a hard negative. Linkage gets
+    ``HARD_LINKAGE_DISTANCE`` for these pairs, because average linkage can
+    dilute a finite sentinel below EPS inside a large merge. Other distances,
+    including soft distances above ``LARGE_DISTANCE``, pass through unchanged.
+
+    Args:
+        distances: Condensed distance matrix.
+        method: fastcluster linkage method.
+        preserve_input: Keep the caller's array unchanged. When False, the
+            caller gives up the array, and a writable float64 array is
+            modified in place.
+
+    Returns:
+        The fastcluster linkage matrix.
+    """
+    condensed = np.asarray(distances, dtype=np.float64)
+    if not any(mask.any() for _, mask in _hard_negative_chunks(condensed)):
+        return linkage(condensed, method, preserve_input=preserve_input)
+    shared = isinstance(distances, np.ndarray) and np.may_share_memory(condensed, distances)
+    if shared and (preserve_input or not condensed.flags.writeable):
+        condensed = condensed.copy()
+    for chunk, mask in _hard_negative_chunks(condensed):
+        chunk[mask] = HARD_LINKAGE_DISTANCE
+    # condensed is now owned by this call, or released by the caller.
+    return linkage(condensed, method, preserve_input=False)
 
 
 def lightgbm_booster(model: Any) -> Booster:
@@ -321,7 +364,10 @@ class FastCluster(TransformerMixin, BaseEstimator):
             )
         elif len(X.shape) > 2:
             raise ValueError("The input to fit can only be one-dimensional or two-dimensional.")
-        Z = linkage(X, self.linkage, preserve_input=self.preserve_input)
+        if self.input_as_observation_matrix:
+            Z = linkage(X, self.linkage, preserve_input=self.preserve_input)
+        else:
+            Z = constrained_linkage(X, self.linkage, preserve_input=self.preserve_input)
         self.labels_ = fcluster(Z, t=self.eps, criterion="distance")
         return self
 

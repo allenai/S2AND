@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER
+from s2and import model_pairwise
+from s2and.consts import HARD_LINKAGE_DISTANCE, LARGE_DISTANCE, LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.feature_port import _get_rust_featurizer
 from s2and.featurizer import FeaturizationInfo
@@ -169,6 +170,53 @@ def test_predict_from_arrow_filters_real_rust_featurizer(
     assert telemetry["signature_count"] == 4
     assert telemetry["featurizer_signature_count"] == 4
     assert telemetry["pair_count"] == 6
+
+
+def test_python_and_rust_paths_give_linkage_identical_hard_negatives(
+    parity_datasets: tuple[ANDData, ANDData],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every matrix builder and clustering path gives linkage the same input."""
+    python_dataset, rust_dataset = parity_datasets
+    block = {"mixed": ["3", "4", "5", "6"]}
+    partial_supervision = {("6", "3"): LARGE_DISTANCE}
+    linkage_inputs: list[NDArray[np.float64]] = []
+    real_linkage = model_pairwise.linkage
+
+    def record_linkage(distances: NDArray[np.float64], method: str, *, preserve_input: bool) -> Any:
+        linkage_inputs.append(np.array(distances, copy=True))
+        return real_linkage(distances, method, preserve_input=preserve_input)
+
+    monkeypatch.setattr(model_pairwise, "linkage", record_linkage)
+    clusterer = _clusterer(fastcluster=True, batch_size=6, use_default_constraints_as_supervision=True)
+    clusterer.classifier = ConstantDistanceClassifier(0.2)
+    rust_featurizer = _get_rust_featurizer(rust_dataset)
+    stored = [
+        clusterer.make_distance_matrices(block, dataset, partial_supervision=partial_supervision, disable_tqdm=True)
+        for dataset in (python_dataset, rust_dataset)
+    ]
+    stored.append(
+        clusterer.make_distance_matrices_from_rust_featurizer(
+            block, rust_featurizer, partial_supervision=partial_supervision, pair_chunk_size=6
+        )
+    )
+    for dists in stored:
+        clusterer.predict(block, python_dataset, dists=dists)
+    clusterer.predict(block, python_dataset, partial_supervision=partial_supervision)
+    clusterer.predict_from_rust_featurizer(
+        block,
+        rust_featurizer,
+        partial_supervision=partial_supervision,
+        cluster_seeds_require=python_dataset.cluster_seeds_require,
+        cluster_seeds_disallow=python_dataset.cluster_seeds_disallow,
+    )
+
+    # Pairs in condensed order: (3,4) (3,5) (3,6) (4,5) (4,6) (5,6).
+    expected = np.where(stored[0]["mixed"] == LARGE_DISTANCE, HARD_LINKAGE_DISTANCE, stored[0]["mixed"])
+    assert set(np.flatnonzero(expected == HARD_LINKAGE_DISTANCE)) >= {1, 2, 3, 5}
+    assert len(linkage_inputs) == 5
+    for linkage_input in linkage_inputs:
+        np.testing.assert_array_equal(linkage_input, expected)
 
 
 @pytest.mark.parametrize("pair_chunk_size", [1, 3], ids=["one-pair", "whole-block"])

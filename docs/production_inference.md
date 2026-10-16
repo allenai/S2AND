@@ -259,10 +259,10 @@ paper to remove.
 Exclusions involving new papers prevent attachments to the original
 profile, including attachments through temporary split components.
 Subblocked bulk prediction creates temporary seed groups from its own bulk
-output. Average linkage can place an explicit negative pair together because
-bulk disallows use a finite distance. Follow-on attachment preserves those
-computed memberships and omits only their internal hard negatives from its
-local attachment request. Exclusions involving fresh signatures or different
+output. Average linkage does not place a pair at exactly `LARGE_DISTANCE`
+together; other linkage methods give no such guarantee. Follow-on attachment
+preserves the computed memberships and omits only their internal hard negatives
+from its local attachment request. Exclusions involving fresh signatures or different
 groups remain active, and the original input supervision is unchanged. This
 exception does not apply to caller-supplied incremental seed groups.
 

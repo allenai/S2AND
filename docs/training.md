@@ -151,6 +151,11 @@ clusterer.fit(dataset)
 ```
 
 S2AND uses agglomerative clustering with average linkage on top of the pairwise model.
+Linkage treats each pair at exactly `LARGE_DISTANCE` as a hard negative: the pair
+never joins one cluster below EPS in any block that fits in memory. These pairs include
+explicit disallows, caller hard disallows, pairs in different seed groups, and
+name-rule conflicts. Other distances keep their averaged meaning. Seed
+restoration after linkage enforces only explicit disallows.
 
 Omitting `search_space` leaves `clusterer.search_space` as `None` during
 construction and inference. `fit()` creates the same uniform EPS space shown

@@ -18,9 +18,10 @@ def filter_generated_seed_negatives(
 ) -> tuple[set[tuple[str, str]], dict[tuple[str, str], int | float]]:
     """Copy attachment constraints without negatives internal to bulk clusters.
 
-    Bulk linkage may average a finite hard-negative sentinel into a cluster.
-    Its generated membership is fixed during the subsequent incremental pass;
-    it is not a new caller claim to validate. Omit only negatives already inside
+    Average linkage keeps hard negatives apart; other linkage methods give no
+    such guarantee, so a generated cluster can hold one. Its generated
+    membership is fixed during the subsequent incremental pass; it is not a
+    new caller claim to validate. Omit only negatives already inside
     that membership, retaining every cross-group and query exclusion. Callers
     keep their complete constraints for later passes and seed restoration.
 

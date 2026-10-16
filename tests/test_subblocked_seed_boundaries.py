@@ -253,8 +253,9 @@ def test_generated_bulk_seed_negatives_do_not_reject_initial_attachment(tmp_path
     assert partial_supervision == original_supervision
 
 
-def test_generated_bulk_seed_negatives_preserve_average_linkage_arrow_partition(tmp_path):
-    """Keep the original average-linkage dilution and excluded-query mechanism."""
+@pytest.mark.parametrize("route", ["python", "arrow"])
+def test_average_linkage_keeps_bulk_negative_apart_in_large_merge(tmp_path, route):
+    """A negative stays hard when a large average-linkage merge would dilute it."""
     dataset = _dataset([("Ada", "", "Smith")] * 400 + [("A", "", "Smith")], {})
     for index in range(200, 400):
         paper_id = str(100 + index)
@@ -269,16 +270,19 @@ def test_generated_bulk_seed_negatives_preserve_average_linkage_arrow_partition(
         tmp_path,
         dataset,
         blocks,
-        "arrow",
+        route,
         threshold=400,
         classifier=_YearDistanceClassifier(),
         partial_supervision=partial_supervision,
     )
 
     _assert_partition(clusters, blocks)
-    # The 200-by-200 linkage mean is about .35, below eps=.5. Preserve that
-    # computed bulk group, while a negative involving the new query stays active.
-    expected = {frozenset(str(index) for index in range(400)), frozenset({"400"})}
+    # A finite sentinel averages to about .35 over 200 x 200 pairs, below
+    # eps=.5. The query keeps its own negative and joins the other group.
+    expected = {
+        frozenset(str(index) for index in range(200)),
+        frozenset(str(index) for index in range(200, 401)),
+    }
     assert {frozenset(members) for members in clusters.values()} == expected
     assert dataset.cluster_seeds_require == {}
     assert dataset.cluster_seeds_disallow == original_disallows

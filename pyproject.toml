@@ -40,6 +40,8 @@ dependencies = [
   "shap>=0.51,<1",
   # PyArrow 21+ no longer publishes manylinux2014 wheels; our release target is glibc 2.17.
   "pyarrow>=20,<21",
+  # Memory budgets read total RAM and process RSS from psutil.
+  "psutil>=7,<8",
   "s2and-rust==1.0.0",
 ]
 

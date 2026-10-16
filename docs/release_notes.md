@@ -1,9 +1,474 @@
 # Release Notes
 
-## 0.51.2
+## Unreleased 1.0.0 simplification
 
-- Ships the package as `0.51.2` and pins optional Rust installs to `s2and-rust==0.51.2`.
-- Adds `fingerprint_source` to `write_arrow_batch_lookup_index` and `write_raw_arrow_batch_lookup_indexes` (default `True`, so existing callers are unchanged). Passing `False` skips the full-file FNV hash of each Arrow table and stores `ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED` in the header, for callers that just wrote the files themselves and index them per request; it cannot be combined with `overwrite=False`. Request-time readers (`read_arrow_batch_lookup_index_batch_indices_for_request`, Rust `open_for_request`) already compare size only and accept such indexes. Strict validation rejects them with an explicit message, and the Rust raw planner's missing-signature diagnostic no longer strict-validates an unfingerprinted index, so a missing query or seed signature still surfaces as `KeyError`. `source_fingerprint_kind` in the returned metrics reports `size_only` for them.
+The coordinated `s2and` and `s2and-rust` package version is `1.0.0`. The
+production model and public-data version is `1.3`, on a separate version axis.
+
+### Status
+
+- The compatible complete model and research snapshot remain unpublished.
+  The corrected source snapshot supports the next update cycle without historical correction archives.
+  Release `1.3` excludes patent data.
+  Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
+  Incremental inputs contain the 13 inherited non-patent datasets.
+  The complete patent-free candidate passes fit, evaluation, and installed Arrow inference checks.
+  Final acceptance and S3/PyPI publication remain pending.
+  See [the release process](release.md).
+
+### Breaking changes
+
+- Removes full-file Arrow source fingerprints and the `fingerprint_source`
+  writer option. Batch indexes now use `S2ABI003` with a 32-byte header; rebuild
+  older indexes and regenerate their dataset manifest. Validators and
+  `overwrite=False` reuse check structure and size, not source content identity.
+  `ArrowDataset.open` retains manifest SHA-256 checks; `open_trusted(paths)`
+  accepts caller-owned tables/indexes without a dataset manifest or checksum scan.
+
+- Code is licensed under MIT; distributed data assets use CC-BY-4.0. See
+  [LICENSE](../LICENSE) and [LICENSE-DATA](../LICENSE-DATA). Rust distributions
+  include the code license and notices for the bundled CLD2 dependency.
+- Release preparation resolves augmented source identities when checking
+  held-out overlap in both directions: augmented training cannot contain held-out
+  benchmark signatures, and augmented evaluation cannot contain benchmark
+  model-development signatures. Before any featurization, pairwise training
+  rejects augmented members outside the actual source training blocks, including
+  validation, test, and omitted signatures. `convert_to_arrow.py
+  filter-augmented-pairs` writes reproducible filtered training/evaluation files
+  and counts from a draft release and the training seed, preserving originals.
+- Arrow bulk prediction keeps zero-valued caller supervision as distance
+  overrides during initial-only attachment, rather than treating them as
+  mandatory incremental links. Standalone incremental requests retain their
+  strict requirements. Arrow bulk accepts integer signature IDs by normalizing
+  members and supervision keys to strings consistently, including returned IDs.
+- `convert_to_arrow.py service-json` now prints its summary successfully after
+  writing artifacts. Converters validate shared counts and fixed-pair labels
+  before preprocessing, publish canonical pair column names, and reject self-pairs
+  or conflicting labels. Consistent repeated pairs retain their multiplicity.
+  Overwrite removes stale optional pair files, and conversion detects source
+  changes before publishing the root manifest.
+
+- The production trainer accepts the dataset names declared by the model plan instead of a fixed seven-source set.
+  The `1.3` fit excludes `inventors_s2and` and retains the accepted non-patent augmented dataset.
+  Internal `orcid` is not a declared input to that fit.
+- `package_corrected_datasets.py` produces a portable corrected snapshot with complete incremental support and one common count index.
+  Common large assets use Git LFS; the S3 research payload excludes a second common asset copy.
+  Corrected source records preserve full paper text where available.
+  Existing giant replay sources do not supply full abstract text.
+- Models declare format and feature-contract versions plus ordered feature names.
+  The generating runtime is provenance rather than an exact model-loader package-version lock.
+  Installed Python and Rust packages still require matched versions.
+- `ANDData(preprocess=False)` no longer builds per-signature coauthor sets:
+  `author_info_coauthors` and `author_info_coauthor_blocks` stay `None`. Python
+  featurization, which already requires `preprocess=True`, is the only reader
+  that needs them. Graph subblocking recomputes the same coauthor blocks from
+  the paper authors, and evaluation falls back to the paper author count.
+  Each set holds one entry per paper author, so papers with thousands of
+  authors made them quadratic.
+- Release featurization: `train_pairwise.py` and `release_pairwise.py`
+  `calibrate-eps`, `evaluate-pairs`, and `evaluate-clusters` now compute pair
+  features and distances with the Rust featurizer from a required
+  `--arrow-root`. JSON `ANDData` still selects the splits, pairs, blocks,
+  seeds, and truth. On six benchmark datasets, featurization was about 100x
+  faster than the Python featurizer, with bit-identical validation distances,
+  B3, and trained AUC. `convert_to_arrow.py` now writes
+  `conversion_provenance.json` with SHA-256 bindings for signatures, papers,
+  selected embeddings, and optional clusters. Public pair CSVs remain outside
+  manifest/provenance content binding; release-plan pair inputs are hashed
+  separately. Converter revision metadata is informational.
+  Release commands reject any conversion that does not match the plan's
+  signatures, papers, and SPECTER digests. `train_pairwise.py --chunk-size` is
+  removed. The pairwise training config drops `chunk_size` and records
+  `featurization_backend` plus, per dataset, `arrow_dir` and
+  `arrow_conversion_provenance_sha256`. Each command builds the featurizer
+  only for the signatures it scores, and cluster evaluation still processes
+  one block at a time.
+- The `S2AND_BACKEND` environment variable is removed. Public APIs already chose
+  their backend by method, so only direct callers of
+  `s2and.runtime.build_runtime_context(...)` without `backend` are affected;
+  they now always get Python. `scripts/bench_preprocess_phases.py` drops its
+  `--backend` option.
+- `scripts/convert_to_arrow.py --name-counts-index-root` takes the name-count
+  index directory itself, like the model, calibration, evaluation, and linker
+  commands; it previously took the directory containing `name_counts_index/`.
+  Passing the parent now fails with a missing-artifact error.
+- Python and Rust now ship one `canonical_v2` name/feature behavior
+  under an exactly matched package runtime. Titles retain letters and digits,
+  CLD2 runs in explicit plain-text mode, malformed email is missing evidence,
+  query-author text uses canonical fields only, and incremental six-decimal
+  values use ties-to-even rounding. Deterministic parity is pinned at `1e-6`
+  (exact for discrete/count/boolean features).
+- Runtime legacy-normalization shims, Sinonym rewriting, fastText,
+  and reference features are removed. `s2and-rust` is a required runtime
+  dependency. Production Rust featurization and ingest enter through validated
+  Arrow IPC artifacts; classic JSON/`ANDData` remains a Python training,
+  fixture, and reference surface for the canonical S2 partition.
+- Script-side `ANDData` conversion now constructs typed PyArrow
+  tables directly. The intermediate `FeatureBlock`, `FeatureBlockSignature`,
+  `FeatureBlockPaper`, and `FeatureBlockPaperAuthor` object graph is removed.
+  Producers use `write_raw_planner_arrow_from_anddata()` or
+  `raw_planner_arrow_tables_from_anddata()`; table mappings are written with
+  `write_raw_planner_arrow_tables()`.
+- `ANDData` blocking is S2-only. `author_info.block` is the sole
+  grouping authority; the `block_type` constructor argument,
+  `Signature.author_info_given_block`, `get_original_blocks()`, and
+  `get_s2_blocks()` are removed, as is the `block_type` argument to
+  `facet_eval()`. Its block-size, homonymity, and synonymity facets now use the
+  same S2 block. A legacy `author_info.given_block` JSON field is tolerated as
+  an ignored extra field, not used as a fallback. Workflows that require
+  original benchmark partitions must preserve those groupings externally or
+  use S2AND 0.51.x and earlier.
+- FastCluster condensed distance matrices, including those retained
+  for EPS calibration, are `float64` in Python and Rust; Python previously
+  stored two bytes per pair. Recompute any cached `float16` matrices supplied
+  as `val_dists_precomputed` or prediction `dists`. Pairwise training,
+  `Clusterer.fit()`, and clustering evaluation now resolve the same signature
+  splits, so EPS calibration uses the explicit validation split instead of the
+  former random calibration population; recompute precomputed validation
+  matrices built for the old population. Default split ordering and random
+  seeds are unchanged.
+- Current production conversion and evaluation are SPECTER2-only.
+  Runtime dataset conversion writes exactly one selected embedding table under
+  canonical manifest key `specter`, defaulting to physical `specter2.arrow`,
+  and fails if that source is absent. `eval_prod_models.py` no longer accepts a
+  SPECTER1 production bundle or `--specter1-model-path`; SPECTER1 remains an
+  explicit `--train` research comparison, while its historical production
+  surface remains in S2AND v1.21 and earlier.
+- Production-bundle evaluation reuses the trainer's recorded split.
+  `eval_prod_models.py` evaluates exactly the test blocks recorded in the
+  bundle's training summary (see the Evaluation entry below), reads
+  `data_random_seed` from `reproducibility/pairwise_training_config.json`,
+  fails closed for bundles without them, and rejects an explicit `--seed`
+  outside `--train`.
+- Promoted stratified split assignments must carry `base_group_id`,
+  and no base identity may appear in more than one split. Masked views
+  (`full`, `initial_only`) of one base query previously straddled calibration
+  and test (394 base identities affecting 316 test queries, or 2.67% of test
+  queries, in the 20260525 assignments); the classic loader now fails closed,
+  and regenerated datasets must assign splits per `base_group_id` — the same
+  identity notion the classic train/holdout filter already enforces.
+- ORCID prefix counts use one validated JSON file plus a minimal
+  tuple-dependency manifest. Producer provenance, schema, and metrics sidecars
+  are removed.
+- Name-count indexes use public format `1` and the flat
+  `name_counts_index/{manifest.json,first.bin,last.bin,first_last.bin,last_first_initial.bin}`
+  layout. The manifest contains a stable kind, format `1`, and byte count plus
+  SHA-256 for four fixed binary roles; filenames are derived as `<role>.bin`.
+  Older layouts are rejected, so rebuild Arrow and model artifacts bound to
+  the manifest SHA-256.
+- Arrow dataset manifests use `kind: "s2and_arrow_dataset"`, public
+  format `1`, portable `paths`, and a flat semantic-role content inventory.
+  Serialized generation IDs, file/directory kind labels, and nested generation
+  objects are removed. `ArrowDataset.open()` proves artifact safety, while the
+  release validator owns publication topology and requires root and nested
+  replay datasets to bind the publication-root `name_counts_index`.
+- `ArrowDataset.name_counts_manifest`,
+  `ValidatedNameCountsManifest`, and `NameCountsBinding` are removed. Callers
+  use `ArrowDataset.name_counts_index` and `NameCountsIndex.path`,
+  plus `.manifest_sha256`; feature contracts bind that digest directly.
+- Release orchestration uses one owner-authored `release.json` and
+  two generated plans. `release.json.release_version` is the one human-owned
+  model/data release choice; `model_plan.json` carries it with training,
+  validation, and EPS inputs, and final public-data assembly reads that plan.
+  `evaluation_plan.json` owns held-out inputs, gates,
+  the reviewed baseline identity, performance inputs, and exact parity and
+  subblocking content/workload identities. A post-finalization
+  `run_binding.json` binds both path-independent plans, the complete candidate,
+  and the public-data root; all five component reports and the aggregate
+  decision carry that binding. Unreleased manifest/spec formats and their
+  compatibility-free CLI flags are removed.
+  Fixed-role plans and reports no longer carry decorative schema labels.
+  Pairwise training still requires the external name-count index, local matrix
+  workspace, validation-pair size, and explicit full-run acknowledgement.
+- Linker training is one direct entrypoint. It performs one fresh fit
+  against the final pairwise bundle, writes a complete bundle with the
+  embedded replay target, reloads those exact bytes, and evaluates them.
+- `NameTupleArtifact.identity` and
+  `s2and_rust.read_name_tuple_artifact_identity` are removed. The Python loader
+  validates the canonical text file directly and retains only frozen alias
+  pairs plus `data_sha256`; the former `.meta.json` sidecar is removed.
+  Python-driven Rust flows receive the explicit pairs rather than reopening
+  the artifact in Rust.
+
+### Fixed
+
+- Benchmark Arrow conversion publishes fixed-pair labels. MEDLINE has pair
+  labels but no clusters, and the converter previously copied only clusters
+  JSON, so the public Arrow MEDLINE dataset shipped without labels. Its
+  `train_pairs.csv`, `test_pairs.csv`, and optional `val_pairs.csv` are now
+  validated, copied, and declared in the dataset manifest.
+- `convert_to_arrow.py benchmark` and `linker-replay` no longer exit 1 with
+  `KeyError: 'dataset'` after writing every dataset.
+- Arrow subblocking restores seed membership with the shared
+  cannot-link policy, including conflicting requires/disallows. Candidate
+  planning uses the same effective caller supervision as scoring. Windows
+  retained Arrow readers reopen the validated handle to isolate Python/native
+  cursors while retaining file identity, without copying data.
+- Caller supervision: prediction and distance-matrix APIs now treat pairs as
+  undirected. Equal reverse entries are deduplicated; conflicting distances or
+  NaN/infinity raise `ValueError` before prediction work starts. Requests no
+  longer choose between contradictory directions based on signature order.
+- Constraint parity: Arrow now bypasses dataset disallows when
+  `use_default_constraints_as_supervision=False`, matching Python. Explicit
+  caller supervision remains active. Arrow incremental retrieval also honors
+  caller overrides of dataset disallows before excluding candidates, fixing
+  incorrect abstentions and `partial_supervision_require_outside_retrieval_window`
+  errors for otherwise eligible candidates. Python altered-profile preparation
+  no longer promotes disabled dataset disallows into caller supervision, which
+  could change query attachments by splitting a claimed profile. Precomputed
+  restrictions, direct Rust-featurizer seed overrides, and transitive constraint
+  semantics are unchanged.
+- Incremental seed validation: Python and Arrow now reject an active explicit
+  disallow between members of the same original seed group before splitting
+  or scoring, with a matching `incremental_seed_disallow_conflict` `ValueError`.
+  Previously, restoring the original group could silently violate that disallow.
+  Caller overrides and the default-constraint switch are resolved first;
+  valid original membership and exclusions involving new papers are preserved.
+  Follow-on attachment in subblocked bulk prediction preserves already computed
+  bulk groups, omitting hard negatives internal to those generated groups only
+  from the attachment request. Finite bulk distances can average away a
+  disallow; this does not turn a request without input seeds into a seed-conflict
+  error. Exclusions involving new signatures or different groups remain active.
+- Evaluation: linker features no longer depend on target labels; actual input
+  seed holdouts still preserve name conflicts and explicit disallows. Metrics
+  produced with label-assisted features must be regenerated. Pairwise training
+  now records test block IDs and an order-independent block membership digest
+  in its existing training summary. Standalone bundle evaluation verifies these
+  identities for both JSON and Arrow; older bundles without them require the
+  official frozen release evaluator or retraining, rather than guessing from a seed.
+- JSON seed `require` pairs now form connected components, so
+  overlapping declarations cannot overwrite earlier must-links. Explicit
+  `disallow` pairs retain their existing precedence. Classic Python incremental
+  prediction now honors the ignore-seeds flag through postprocessing when
+  splitting altered profiles. Arrow-backed facet evaluation computes deferred
+  canonical names before comparing them, preserving homonymity and synonymity
+  metrics across JSON and Arrow ingestion.
+- Subblocked prediction keeps original input blocks independent.
+  Initial-only groups attach only to predictions from their own block, and a
+  claimed profile spanning blocks no longer merges their clusters. Both routes
+  keep each active required component in one subblock; on the Python route a
+  component larger than `batching_threshold` within one block now raises
+  `ValueError`, as Arrow already did. Blocks containing only initials use bulk
+  prediction. Explicit disallows and caller supervision stay effective across
+  sequential initial-only passes. Subblocked outputs can change accordingly.
+- Mixed initial/full-name required profiles prefer a full-name
+  subblock on both routes, retaining its native members first. This prevents
+  packing from separating a claimed full-name member from compatible neighbours
+  when they fit together. Arrow bulk prediction normalizes integer signature IDs
+  and supervision keys to strings on both subblocked and unbatched routes.
+- Completion canonicalizes first names when prepared names are
+  absent, so raw `"J."` is recognized as an initial. An explicitly prepared
+  empty name remains empty. This can change subblocked and incremental outputs.
+- Altered-profile split components receive IDs that cannot collide
+  with existing profile IDs. Previously, splitting profile `p` reused an
+  existing profile named `p_0`, merging that profile into the split.
+- Evaluation and artifacts: automatic `eval_prod_models` routing can use JSON
+  when the Arrow source or requested dataset is unavailable, the requested
+  SPECTER generation is undeclared, or the name-count index is undeclared.
+  Generation selection uses the manifest's declared filename even when its
+  resolved on-disk name differs. Automatic JSON fallback reports its cause.
+  Broken collection bindings, missing required base artifacts, invalid manifests
+  and corrupt declared data raise; empty Arrow files identify their table and
+  path. `--no-arrow` skips Arrow inspection. Linker source assembly rejects Arrow
+  inputs whose content differs from their manifests instead of silently
+  regenerating checksums for altered inputs.
+
+### Changed
+
+- `scripts/convert_to_arrow.py join-canonical-augmented-names` gives the
+  internal augmented training set its source datasets' canonical names,
+  re-shortening the first names the augmentation had cut to an initial, and
+  drops signatures and pairs from `--drop-sources` (v1.3: `orcid`). It writes
+  release-ready inputs: training pairs with `signature_id_1`/`signature_id_2`
+  columns and held-out pairs in the pairwise-evaluation JSON format.
+- Development: the test suite runs under pytest-xdist (`-n auto`), and
+  `run_ci_locally.py --pytest-workers` selects the worker count.
+- `scripts/tutorial_for_predicting_with_the_prod_model.py` scores the bundle's
+  recorded held-out blocks with the trainer's recorded seed, applies
+  `--specter-suffix` to the JSON route as well as Arrow (no silent SPECTER1
+  fallback), and drops `--load-name-counts`, which no production bundle accepts.
+- `load_production_model(path, n_jobs=N)` sets the prediction worker count at
+  load time. Without it, a loaded bundle keeps its stored `n_jobs=1`.
+- Bulk prediction: altered-profile markers no longer trigger temporary seed
+  splitting on subblocked Arrow requests. Both Python and Arrow now use ordinary
+  required groups for bulk prediction, with explicit disallows retaining their
+  existing precedence. The public Arrow argument remains accepted but is ignored
+  in bulk mode. This can restore claimed membership previously split by Arrow;
+  an active required component exceeding `batching_threshold` within one block
+  now raises instead of being split to fit. Incremental linking still splits
+  altered profiles temporarily for scoring and restores their original identity.
+- Development: the repository-root `s2and_rust/__init__.py` workspace shim is
+  removed, so code run from the checkout imports the installed `s2and_rust`
+  package instead of an in-tree `maturin develop` build. `uv sync` and `uv run`
+  use timestamp cache keys for native build inputs, and a fresh
+  `uv sync --extra dev` checkout can run the tests without `maturin develop`.
+  Tests stop before collection when the importable extension's embedded source
+  snapshot differs from the checkout; force a refresh with
+  `uv sync --extra dev --reinstall-package s2and-rust`. The content digest
+  covers native manifests, the root lockfile, build script and Rust sources,
+  excluding editor files, build outputs and the unused vendored lockfile. uv's
+  cache keys cover those inputs plus `s2and_rust/pyproject.toml`, its
+  `README.md`, and the Python wrapper files, which the test guard does not
+  check. uv can miss backdated additions, older-file deletions and edits that
+  preserve timestamps; see [build recovery](install.md#build-the-rust-extension-from-source)
+  if Cargo also needs its cached artifacts cleared.
+- Python support: `s2and` now supports Python 3.11, 3.12, and 3.13
+  (previously 3.11 only), matching the range `s2and-rust` already declared.
+  `s2and` remains a single pure-Python wheel; `s2and-rust` continues to ship
+  per-version platform wheels. CI runs typecheck-and-test on all three
+  interpreters, and the release workflow smokes the installed artifacts and
+  compiles the `s2and-rust` sdist on each of them.
+- The canonical alias artifact now contains 5,027 pairs. A manual review of all
+  2,266 legacy-only candidates restored 1,343 credible aliases, retained all
+  3,684 existing pairs, and excluded 906 rejects plus 17 unresolved pairs. Tests keep
+  the adjudication ledger in `tests/fixtures/name_tuples/` consistent with the
+  artifact.
+- Promoted query-disallow resolution is request-global and deterministic:
+  require-forced decisions first, then descending initial score, then signature
+  ID. Conflicts rebuild and score a complete single-query plan with the winning
+  component excluded, preserving outcomes across input permutations and batch
+  sizes. Physical batch telemetry may vary with the RAM plan.
+- The native name-count index, Arrow inputs, pairwise boosters, and linker
+  metadata retain the runtime checks needed to prevent incompatible feature
+  computation. The historical name-count pickle is not a runtime or published
+  representation. Models selecting name-count features compare the exact
+  `name_counts_manifest_sha256` at Python, Arrow, and prebuilt-Rust-featurizer
+  boundaries before feature work.
+- Arrow production inputs require a canonical content-addressed manifest.
+  `ArrowDataset.open(root)` validates immutable files and indexes once and
+  retains their native readers for its lifetime; prediction receives
+  request-local seeds explicitly and reuses the open handle.
+- Stored language evidence is now an all-or-nothing triple with finite
+  reliability in `[0,1]`; unreliable rows must carry zero. Python and Rust
+  reject partial/malformed values and agree across pair order. Raw candidate
+  planning likewise has only two valid constructors: declared queries and
+  explicit automatic queries; the empty-sidecar/boolean-bypass state is gone.
+- Name-count indexes are assembled completely in a temporary sibling and
+  published with one rename into an absent `name_counts_index` target.
+  Production count generators consume reviewed CSV exports, keep warehouse
+  clients and credentials outside the repository, and bound local fixtures.
+  ORCID counts use one direct JSON file plus one minimal
+  tuple-dependency manifest, with no producer-provenance protocol, pointer
+  manifest, retry loop, or legacy fallback. The large name-count index remains
+  external data rather than Python package data.
+- Generated `within_block_random` pair sampling now uses exact seeded rank
+  sampling. It preserves the legacy candidate order, selected pairs, and labels
+  while memory scales with requested samples plus blocks instead of all
+  candidate pairs. Fixed-pair CSV datasets remain fully loaded during the
+  release-only training run.
+- Fixed train/validation/test CSV inputs now reject any unordered pair that
+  appears in more than one split. Preflight performs this schema, duplication,
+  and overlap validation before expensive featurization.
+- Pairwise and complete-model bundles validate in sibling staging directories
+  and publish with one rename into a new path; finalization never mutates the
+  pairwise source. The release evaluation report rejects missing or nonfinite
+  required metrics. Wheel/sdist validation rejects undeclared production assets
+  and any packaged production-model/default path.
+  Production training records the canonical name-tuple and ORCID prefix-count
+  data SHA-256 values plus the exact name-count manifest SHA-256 in the feature
+  contract; bundle export and load require exact matches, and the linker
+  binding covers all three through its ordered feature-contract digest. Model
+  roots use one fixed-role manifest with format and feature-contract versions, ordered features, runtime provenance, EPS lifecycle, and checksums.
+  Historical
+  commit `e54c6ba` documents the published v1.21
+  loader's explicit clustering-threshold override to `0.65` for versions
+  `1.2`/`1.21`; the stored threshold is stale. The current canonical loader has
+  no legacy override.
+  An optional historical model comparison requires its compatible runtime.
+  New canonical models use their own `clusterer.json` value.
+- The release workflow has no evidence inputs. It tests the exact commit,
+  builds and installs Python and Rust artifacts outside the source tree, runs
+  platform wheel smokes, and enforces the `main` ref in the workflow itself
+  before routing publication through the PyPI environment. It publishes Rust,
+  waits for that exact dependency, and then publishes Python. The Rust
+  build-system floor and release action are aligned at Maturin 1.14.1. The real
+  external v1.3 model/data smoke remains a pre-publication operator gate.
+
+### Performance
+
+- Release pairwise training, EPS calibration, and pair and cluster evaluation
+  load the JSON `ANDData` that selects pairs, splits, blocks, seeds, and truth
+  with `preprocess=False` and without SPECTER or name counts, since the Rust
+  featurizer computes every feature from Arrow. On aminer, arnetminer,
+  inspire, kisti, orcid, pubmed, qian, zbmath, and augmented, the selection is
+  identical to the preprocessed load. Without the coauthor sets it no longer
+  builds, INSPIRE's load drops from 29 minutes to about one, and the memory it
+  holds from 90 GB to 3 GB.
+- The Rust featurizer stores each paper's coauthor names, name blocks, and
+  character n-gram counts once, instead of copying them into every signature on
+  the paper. Pair features subtract each signature's own author, and they are
+  bit-identical to before. On INSPIRE, whose papers have up to 3,167 authors, a
+  featurizer for 174,652 signatures now builds in 7 s instead of 250 s and
+  frees in 11 s instead of 18 minutes. Duplicate author positions remain rejected
+  by the Arrow reader and converter.
+- The raw Arrow candidate planner and `raw_arrow_labeled_candidate_plan`
+  normalize authors into shared per-paper tables, instead of once per signature
+  and again for every component summary that holds it. Query coauthor blocks
+  are read off a per-paper block table, and paper author-list evidence
+  intersects interned name ids instead of string sets. Planner payloads and
+  incremental-linking clusters are bit-identical to before. On the production
+  `s_lee` linker block (422k signatures, papers of up to 8,099 authors), the
+  labeled-row plan over its 152,900 evaluation rows takes 31 s instead of 54 s
+  and peaks at 6.7 GB instead of 8.1 GB.
+- Retrieval scores coauthor and affiliation overlap through an inverted index
+  of the component counters, built with the retriever, and computes query
+  term weights once per query instead of once per component. Scores, top-k
+  order and incremental-linking clusters are bit-identical to before. On
+  `s_lee` (21,669 components), a query with about 2,900 coauthor terms takes
+  43 ms instead of 317 ms, an ordinary query 6 ms instead of 9 ms, and
+  planning 2,000 evaluation queries takes 17.2 s instead of 24.1 s in the
+  recorded implementation benchmark. The index
+  holds 3.2M postings (48 MB) and builds in 0.06 s. Python-built
+  `RustHybridCentroidRetriever` summaries with colliding FNV-64 keys in coauthor,
+  non-mega-coauthor, or affiliation overlap counters are rejected.
+- `RustLightGBMBooster` builds an exact fast scorer at load time. Models whose
+  trees all have at most 32 leaves use QuickScorer; models with up to 256
+  leaves per tree use lockstep traversal over integer bin keys. Both support up
+  to 256 features and 255 distinct thresholds per feature, which covers
+  LightGBM's default `max_bin=255`. Raw scores and probabilities are
+  bit-identical to the previous traversal. That traversal still scores every
+  other model, including single-tree constants/stumps, Zero-missing splits, NaN thresholds, and parser-accepted
+  shared-child graphs. On the v1.21 pairwise models and 50,000 real rows,
+  8-thread float32 scoring was 6.2x (main) and 3.3x (nameless) faster. A 5-block
+  AMiner bulk request (8.76M pairs) ran 2.79x faster end to end (46.3 s to
+  16.6 s), with identical clusters and chunk digests. The public API is
+  unchanged.
+- Python pair featurization runs serially on Windows. Its thread pool was
+  slower than serial there, and the output is bit-identical.
+- The default bulk prediction path avoids repeating caller-supervision
+  validation for ordinary subblocks. Public entry points, custom helper
+  overrides, and incremental attachment passes retain their validation.
+- Promoted RAM limits are refreshed before planning each query window, after
+  planning, and before each scoring batch. A shrunk window plans only its safe
+  prefix and defers the remaining queries; a shrunk scoring batch is scored from
+  slices of the window's existing plan.
+  The native LightGBM path consumes contiguous float32 features and uses
+  budgeted row chunks, avoiding the previous full float64 widening transient.
+  Loaded incremental linker artifacts are retained on the clusterer instead of
+  being reloaded and rehashed per request.
+- Arrow training iterates record batches and avoids duplicate full-table
+  materialization. Paper-author inputs reject duplicate positions, empty names,
+  and dangling references consistently in Python and Rust. Python subblocking
+  rejects duplicate IDs with explicit runtime invariants.
+- The `1.0.0` runtime removes legacy pickle/count-dictionary loading and redundant
+  artifact plumbing. Bounded native name-count lookups, optimized float32
+  scoring, and deterministic component publication reduce resource use and
+  preserve artifact identities. Release-grade v1.3 memory and throughput gates
+  remain pending.
+
+### Removed and simplified
+
+- Release policy now has one runbook, two prepared plans, one
+  final run binding, and one reusable `ArrowDataset` handle. Completed Rust migration comparisons,
+  stress tools, memory calibrators, duplicated artifact protocols, their
+  dispatchers, and tool-only tests are retired. The bounded release
+  verification commands that remain are
+  `scripts/verification/profile_promoted_incremental_arrow.py` (performance
+  report), `compare_full_predict_arrow_parity.py` (parity report), and
+  `compare_graph_subblocking_arrow_quality.py` (subblocking report). Obsolete cache and retired-format
+  tests are removed, repeated cases are curated, and the accidentally
+  unbounded booster-parity matrix is deterministically budgeted without
+  excluding parity from the default suite.
 
 ## 0.51.1
 
@@ -12,8 +477,8 @@
 - Adds canonical Arrow runtime contracts and tooling: `s2and.arrow_inputs`, `s2and/arrow_schema_contract.json`, `scripts/convert_to_arrow.py`, `scripts/arrow_conversion_helpers.py`, local Arrow release validation, and bounded parity/quality verification scripts. The documented public data release is now `s2and-release-arrow`; the legacy JSON/pickle release remains for paper-era inputs.
 - Tightens production validation. Missing or malformed Arrow artifacts now raise structured `MissingArrowArtifactError` failures, Rust production routes fail fast instead of silently falling back to `ANDData`, unsupported name-alias path keys are rejected, and direct Arrow prediction refuses models that require reference features.
 - Reworks promoted incremental linking around Arrow/Rust. The promoted path reads base Arrow artifacts, query signatures, cluster seeds, cluster seed disallows, and altered-profile sidecars; Rust performs raw candidate planning and promoted row-signal construction; `batching_threshold` controls promoted Rust query batch size.
-- Switches promoted linker replay/training to `--feature-mode arrow-rust` by default against the canonical `s2and_and_big_blocks_linker_dataset_20260525` Arrow+labels bundle. `precomputed-promoted` remains an explicit reuse mode.
-- Uses the manifest-backed binary `name_counts_index/` sidecar as the Rust hot-path name-count artifact. Embedded Arrow name-count columns are no longer the runtime direction, and `name_counts.arrow` is generation, inspection, and parity-debugging only.
+- Switches promoted linker replay/training to one fresh Arrow/Rust flow against the canonical `s2and_and_big_blocks_linker_dataset_20260525` Arrow+labels bundle. Cached/precomputed feature modes are no longer supported.
+- Uses the manifest-backed binary `name_counts_index/` sidecar as the sole supported name-count artifact. Embedded Arrow name-count columns and the standalone `name_counts.arrow` artifact are no longer supported.
 - Updates model, eval, tutorial, and profiling flows for Arrow-first operation. `eval_prod_models.py` can auto-use Arrow when complete artifacts exist, the production tutorial defaults to Arrow input, the documented model path is the native `production_model_v1.21/` bundle, and `rust_suite.py promoted-incremental-arrow-profile` replaces the legacy big-block incremental profiler.
 - Adds graph subblocking as the default fallback for oversized name groups and introduces strict Arrow-native Rust graph subblocking with batch-indexed reads, expanded telemetry, ORCID repair behavior, and scoped dash-name compatibility.
 - Narrows the Rust production surface to one route per job. Legacy/debug bridge APIs are removed or demoted, including raw FeatureBlock scoring, string-pair constraint matrix APIs, retriever debug APIs, aggregate-only linker helpers, and `s2and/rust_capabilities.py`.
@@ -24,6 +489,9 @@
 - `s2and-rust>=0.50.0` is required for Rust-backed incremental linking.
 - Native extension load failures now surface as import errors instead of silently falling back to Python. Missing extension modules still use the Python fallback path.
 - Incremental linking uses the NumPy logistic link-or-abstain gate artifact format; legacy score/margin gate thresholds are not supported.
-- Production linker finalization trains the final booster on train plus weighted calibration splits, then calibrates the final logistic gate on the held-out test split.
+- Production linker finalization trains the final booster on train plus weighted
+  calibration splits and fits the logistic gate on the configured calibration
+  splits. The held-out test split is materialized and evaluated only after the
+  complete bundle is serialized and reloaded.
 - Incremental name compatibility now accepts joined and first-token aliases in addition to exact first-name tuples.
 - Artifact cache entries are keyed by validator type. Raw-ETag cache filenames are no longer probed.

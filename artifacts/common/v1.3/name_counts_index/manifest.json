@@ -1,0 +1,22 @@
+{
+  "files": {
+    "first": {
+      "byte_count": 92951256,
+      "sha256": "1d7dcf80a755d78ea9e1eb0660aa58573061ec3de7eb059ad078a211f192ca12"
+    },
+    "first_last": {
+      "byte_count": 1384916538,
+      "sha256": "0068a3a49a66cc24565c58886d43bcc735ed1b4d778255820476d26202eefdaa"
+    },
+    "last": {
+      "byte_count": 286383247,
+      "sha256": "0116305de2c5ca131b72a5e320b0b65bd78094944665d983c488ce26b2bfa69d"
+    },
+    "last_first_initial": {
+      "byte_count": 628774718,
+      "sha256": "411ab057507d4365f8ec1bb4bd699a79016e26fa4c56c3041f25b966fc8cb77d"
+    }
+  },
+  "format_version": 1,
+  "kind": "s2and_name_counts"
+}

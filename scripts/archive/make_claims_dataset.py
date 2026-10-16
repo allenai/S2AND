@@ -1,5 +1,12 @@
 # ruff: noqa: E402
 
+"""Build historical block-local Semantic Scholar corrections datasets.
+
+Warning:
+    This provenance recipe requires private warehouse helpers and data that are
+    not part of this repository. It is not a supported public entrypoint.
+"""
+
 import json
 import os
 from typing import Any
@@ -26,8 +33,6 @@ ch.setLevel(logging.DEBUG)
 logger.addHandler(ch)
 
 from tqdm import tqdm
-
-os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
 DATA_DIR = CONFIG["internal_data_dir"]
 
@@ -103,7 +108,6 @@ def main(num_blocks: int):
         reference_ids = set(list(all_references["to_paper_id"].values))
         logger.info(f"Retrieved {len(reference_ids)} reference ids")
 
-        # metadata
         paper_ids_to_query = list(set(root_paper_ids).union(reference_ids))
         make_s2ids_table(paper_ids_to_query, table_name="temp_AND_all_ids")
         logger.info("temp table made")
@@ -114,7 +118,6 @@ def main(num_blocks: int):
         all_authors = get_author_ids_for_papers("temp_AND_all_ids")
         logger.info("authors gotten")
 
-        # specter
         specter_X, specter_keys = specterize(list(root_paper_ids))
         logger.info(f"Retrieved {specter_X.shape} specterized papers")
 

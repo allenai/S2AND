@@ -2,13 +2,15 @@
 
 This script evaluates candidate `maximum_size` thresholds using repeated ORCID groups as
 an external preservation signal. It disables ORCID subblocking explicitly so the metric
-reflects only name-based and SPECTER-based partitioning, not the ORCID co-location override
-in `make_subblocks(...)`.
+reflects only name-based and fallback partitioning, not the ORCID co-location override
+in `make_subblocks(...)`. Oversized name groups use the same graph fallback (default
+`GraphSubblockingConfig`) as `Clusterer.predict(..., batching_threshold=...)`.
 
-It also reports how often SPECTER fallback was actually invoked while building subblocks,
+It also reports how often the fallback was actually invoked while building subblocks,
 plus the size of the downstream retrieval target:
 
-`single-letter-first-name signatures UNION signatures that end up in a SPECTER-made subblock`.
+`single-letter-first-name signatures UNION signatures that end up in a fallback-made subblock`.
+The `*specter*` metric names are historical: fallback subblocks keep the `|specter=` key.
 """
 
 from __future__ import annotations
@@ -30,11 +32,12 @@ import pandas as pd
 
 from s2and.data import ANDData, Signature
 from s2and.subblocking import (
+    GraphSubblockingConfig,
+    make_dataset_graph_subblocking_cluster_fn,
     make_subblocks_with_telemetry,
     normalize_orcid_for_subblocking,
     signature_name_parts_for_subblocking,
 )
-from s2and.text import set_fasttext_loading_enabled
 
 
 def parse_args() -> argparse.Namespace:
@@ -272,8 +275,6 @@ def load_dataset(dataset_root: Path, n_jobs: int, random_seed: int) -> ANDData:
     papers_path = _required_file(dataset_root, "papers.json")
     specter_path = _required_file(dataset_root, "specter.pickle")
 
-    set_fasttext_loading_enabled(False)
-    os.environ.setdefault("S2AND_BACKEND", "python")
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
 
     return ANDData(
@@ -292,13 +293,11 @@ def load_dataset(dataset_root: Path, n_jobs: int, random_seed: int) -> ANDData:
         val_pairs_size=1000,
         test_pairs_size=1000,
         n_jobs=int(n_jobs),
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=True,
         random_seed=int(random_seed),
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
-        compute_reference_features=False,
     )
 
 
@@ -317,6 +316,7 @@ def main() -> None:
     all_signature_ids = sorted(str(signature_id) for signature_id in dataset.signatures.keys())
     repeated_orcid_groups = _build_repeated_orcid_groups(dataset.signatures)
     single_letter_ids = _single_letter_first_name_ids(dataset.signatures)
+    graph_cluster_fn = make_dataset_graph_subblocking_cluster_fn(config=GraphSubblockingConfig())
     rows: list[dict[str, Any]] = []
     for threshold in thresholds:
         threshold_start = time.perf_counter()
@@ -325,6 +325,7 @@ def main() -> None:
             dataset,
             maximum_size=int(threshold),
             use_orcid_subblocking=False,
+            specter_cluster_fn=graph_cluster_fn,
         )
         signature_to_subblock = _signature_to_subblock(subblocks)
         preservation_metrics = _orcid_preservation_metrics(repeated_orcid_groups, signature_to_subblock)

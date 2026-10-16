@@ -1,3 +1,11 @@
+"""Build the historical legacy JSON/pickle S2AND mini datasets.
+
+Warning:
+    This provenance recipe executes and writes at import time. It expects the
+    legacy JSON/pickle release layout and must not be pointed at an Arrow
+    release root.
+"""
+
 import collections
 import json
 import os
@@ -93,7 +101,6 @@ for dataset, s, c, p, X, k in zip(DATASETS, signatures_all, clusters_all, papers
 
     s_filtered = {k: v for k, v in s.items() if v["author_info"]["block"] in blocks_to_keep}
 
-    # filter the clusters too
     c_filtered = {k: v for k, v in c.items() if np.all([i in s_filtered for i in v["signature_ids"]])}
 
     # go back through the clusters and find the signatures we'll actually need
@@ -120,7 +127,6 @@ for dataset, s, c, p, X, k in zip(DATASETS, signatures_all, clusters_all, papers
     k_filtered = k[keys_filtered_flag]
     X_filtered = X[keys_filtered_flag, :]
 
-    # save all of the data
     data_output_dir = os.path.join(DATA_DIR, "s2and_mini", dataset)
     if not os.path.exists(data_output_dir):
         os.mkdir(data_output_dir)

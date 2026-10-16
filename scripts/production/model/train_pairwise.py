@@ -1,346 +1,670 @@
 """Train the pairwise half of a native production model bundle.
 
-This replaces the historical pickle dump flow. The output directory is a
-pairwise-only ``production_model_vX.Y`` bundle stage. Run
-``train_linker_and_finalize.py`` next to add the promoted incremental linker and
-write the final loadable production manifest.
+The output directory is a pairwise-only ``production_model_vX.Y`` bundle with
+pending placeholder EPS. Validation-only calibration writes the calibrated
+pairwise sibling consumed by ``train_linker_and_finalize.py``.
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from hyperopt import hp
+import pandas as pd
+from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-DEFAULT_FEATURE_CACHE_ROOT = REPO_ROOT / "data" / ".feature_cache"
-os.environ.setdefault("S2AND_CACHE", str(DEFAULT_FEATURE_CACHE_ROOT))
-os.environ.setdefault("S2AND_BACKEND", "rust")
 
-from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH  # noqa: E402
-from s2and.data import ANDData  # noqa: E402
-from s2and.featurizer import FeaturizationInfo, featurize  # noqa: E402
+from s2and.arrow_inputs import ArrowDataset  # noqa: E402
+from s2and.arrow_provenance import ArrowProvenanceError, verify_conversion_provenance  # noqa: E402
+from s2and.data import ANDData, _map_fixed_pair_labels  # noqa: E402
+from s2and.feature_port import build_verified_rust_featurizer, featurize_pairs_with_rust  # noqa: E402
+from s2and.featurizer import (  # noqa: E402
+    DEFAULT_FEATURE_GROUPS,
+    DEFAULT_NAMELESS_FEATURE_GROUPS,
+    FeaturizationInfo,
+    TupleOfArrays,
+    resolve_selection_pairs,
+)
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
 from s2and.production_bundle import write_pairwise_production_bundle  # noqa: E402
+from s2and.production_bundle_contract import PENDING_EPS_CALIBRATION, PENDING_PAIRWISE_EPS  # noqa: E402
+from s2and.production_training_contract import (  # noqa: E402
+    ModelDataset,
+    ProductionArtifactAuthority,
+    block_membership_sha256,
+    load_model_plan,
+    load_packaged_artifact_authority,
+)
+from scripts.production.model.augmented_leakage import (  # noqa: E402
+    require_declared_sources,
+    require_training_members,
+    require_validation_members,
+    source_members,
+    split_members_from_sources,
+)
+from scripts.production.model.unknown_signatures import (  # noqa: E402
+    augmented_unknown_ids,
+    exclude_unknown_pairs,
+    load_unknown_signatures,
+)
 
 logger = logging.getLogger("s2and")
 
-DEFAULT_SPECTER_SUFFIX = "_specter2.pkl"
-DEFAULT_SIGNATURES_SUFFIX = "_signatures.json"
-DEFAULT_SOURCE_DATASET_NAMES = ("aminer", "arnetminer", "inspire", "kisti", "orcid", "pubmed", "qian", "zbmath")
-PAIRWISE_ONLY_DATASETS = frozenset({"medline", "augmented"})
-DEFAULT_BLOCK_TYPE = "s2"
+# Historical plan examples use these names; each model plan declares its actual datasets.
+DEFAULT_SOURCE_DATASET_NAMES = ("aminer", "arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath")
 DEFAULT_TRAIN_PAIRS_SIZE = 100_000
-DEFAULT_VAL_TEST_SIZE = 10_000
+DEFAULT_VALIDATION_PAIRS_SIZE = 10_000
 DEFAULT_N_ITER = 50
 DEFAULT_N_JOBS = 25
-DEFAULT_CHUNK_SIZE = 100
-
-FEATURES_TO_USE = (
-    "name_similarity",
-    "affiliation_similarity",
-    "email_similarity",
-    "coauthor_similarity",
-    "venue_similarity",
-    "year_diff",
-    "title_similarity",
-    "misc_features",
-    "name_counts",
-    "embedding_similarity",
-    "journal_similarity",
-    "advanced_name_similarity",
-)
-NAMELESS_FEATURES_TO_USE = tuple(
-    feature_name
-    for feature_name in FEATURES_TO_USE
-    if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
-)
+DEFAULT_RANDOM_SEED = 1111
+# Plan roles that determine Rust pair features; each Arrow conversion must match them.
+ARROW_SOURCE_ROLES = ("signatures", "papers", "specter_embeddings")
 
 
-def _search_space() -> dict[str, Any]:
-    return {
-        "eps": hp.uniform("eps", 0, 1),
-        "linkage": hp.choice("linkage", ["average"]),
+@dataclass(frozen=True, slots=True)
+class PairwisePreflightPlan:
+    """Validated, read-only launch plan created before artifact or dataset loading."""
+
+    output_dir: Path
+    release_version: str
+    dataset_names: tuple[str, ...]
+    datasets: Mapping[str, ModelDataset]
+    model_plan_sha256: str
+    model_plan_content_sha256: str
+    arrow_dirs: Mapping[str, Path]
+    arrow_provenance_sha256: Mapping[str, str]
+    matrix_work_dir: Path
+    matrix_work_free_bytes: int
+    total_ram_bytes: int | None
+
+
+def _canonical_training_artifact_hashes(authority: ProductionArtifactAuthority) -> dict[str, str]:
+    """Validate canonical count artifacts and return their immutable bindings."""
+
+    orcid_counts = authority.orcid_prefix_counts
+    if orcid_counts.name_tuples_sha256 != authority.name_tuples.data_sha256:
+        raise RuntimeError("ORCID prefix counts were generated from a different canonical name-tuple artifact")
+    return authority.hashes
+
+
+def _positive_int_arg(args: argparse.Namespace, name: str) -> int:
+    value = int(getattr(args, name))
+    if value <= 0:
+        option = name.replace("_", "-")
+        raise SystemExit(f"--{option} must be positive, got {value}")
+    return value
+
+
+def _preflight_matrix_work_dir(path: Path) -> int:
+    """Verify the scratch directory and return its measured free capacity."""
+
+    if not path.is_dir():
+        raise SystemExit(f"--matrix-work-dir must name an existing directory: {path}")
+    if next(path.iterdir(), None) is not None:
+        raise SystemExit(f"--matrix-work-dir must be empty: {path}")
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", prefix=".s2and_preflight_", dir=path) as probe:
+            probe.write(b"s2and matrix-work preflight\n")
+            probe.flush()
+            os.fsync(probe.fileno())
+    except OSError as exc:
+        raise SystemExit(f"--matrix-work-dir is not writable: {path}: {exc}") from exc
+    return int(shutil.disk_usage(path).free)
+
+
+def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
+    """Resolve every launch input without loading artifacts or ANDData."""
+
+    for numeric_arg in (
+        "n_iter",
+        "n_jobs",
+        "train_pairs_size",
+        "validation_pairs_size",
+    ):
+        _positive_int_arg(args, numeric_arg)
+    if int(args.random_seed) < 0:
+        raise SystemExit(f"--random-seed must be non-negative, got {args.random_seed}")
+
+    if not bool(args.run_full):
+        raise SystemExit("production training requires --run-full")
+    output_dir = Path(args.output_dir).resolve()
+    if output_dir.exists():
+        raise SystemExit(f"--output-dir must name a new directory: {output_dir}")
+    if output_dir.parent.exists() and not output_dir.parent.is_dir():
+        raise SystemExit(f"--output-dir parent must be a directory: {output_dir.parent}")
+    matrix_work_dir = Path(args.matrix_work_dir).resolve()
+    matrix_work_free_bytes = _preflight_matrix_work_dir(matrix_work_dir)
+
+    requested_total_ram = args.total_ram_bytes
+    if requested_total_ram is not None and int(requested_total_ram) <= 0:
+        raise SystemExit(f"--total-ram-bytes must be positive, got {requested_total_ram}")
+
+    if args.model_plan is None:
+        raise SystemExit("production training requires --model-plan")
+    model_plan = load_model_plan(Path(args.model_plan).resolve())
+    dataset_names = tuple(model_plan.datasets)
+    if "augmented" in model_plan.datasets and model_plan.datasets["augmented"].split_mode != "fixed_pairs":
+        raise SystemExit("model plan augmented dataset requires fixed train and validation pairs")
+    if not any(dataset.split_mode == "random_blocks" for dataset in model_plan.datasets.values()):
+        raise SystemExit("model plan requires a random-block dataset for EPS calibration")
+
+    arrow_root = Path(args.arrow_root).resolve()
+    arrow_dirs = {name: arrow_root / name for name in dataset_names}
+    arrow_provenance_sha256 = {
+        name: verify_conversion_provenance(
+            arrow_dirs[name],
+            expected_source_sha256={role: model_plan.datasets[name].sha256[role] for role in ARROW_SOURCE_ROLES},
+        )
+        for name in dataset_names
     }
 
-
-def _dataset_names(*, include_augmented: bool, selected_datasets: list[str] | None = None) -> list[str]:
-    names = list(selected_datasets or DEFAULT_SOURCE_DATASET_NAMES)
-    if include_augmented:
-        if selected_datasets is not None:
-            return names
-        names.append("augmented")
-    return names
-
-
-def _resolve_dataset_file(data_dir: Path, dataset_name: str, *candidates: str) -> Path:
-    dataset_dir = data_dir / dataset_name
-    for candidate in candidates:
-        path = dataset_dir / candidate
-        if path.exists():
-            return path
-    joined = ", ".join(str(dataset_dir / candidate) for candidate in candidates)
-    raise FileNotFoundError(f"Could not find any dataset file for {dataset_name}: {joined}")
-
-
-def _optional_dataset_file(data_dir: Path, dataset_name: str, *candidates: str) -> Path | None:
-    dataset_dir = data_dir / dataset_name
-    for candidate in candidates:
-        path = dataset_dir / candidate
-        if path.exists():
-            return path
-    return None
-
-
-def _dataset_pair_paths(data_dir: Path, dataset_name: str) -> tuple[str | None, str | None, str | None, str | None]:
-    if dataset_name not in PAIRWISE_ONLY_DATASETS:
-        clusters_path = _resolve_dataset_file(
-            data_dir,
-            dataset_name,
-            f"{dataset_name}_clusters.json",
-            "clusters.json",
-        )
-        return (
-            str(clusters_path),
-            None,
-            None,
-            None,
-        )
-    train_pairs_path = _resolve_dataset_file(data_dir, dataset_name, "train_pairs.csv")
-    val_pairs_path = _optional_dataset_file(data_dir, dataset_name, "val_pairs.csv")
-    test_pairs_path = _resolve_dataset_file(data_dir, dataset_name, "test_pairs.csv")
-    return (
-        None,
-        str(train_pairs_path),
-        str(val_pairs_path) if val_pairs_path is not None else None,
-        str(test_pairs_path),
+    return PairwisePreflightPlan(
+        output_dir=output_dir,
+        release_version=model_plan.release_version,
+        dataset_names=dataset_names,
+        datasets=model_plan.datasets,
+        model_plan_sha256=model_plan.sha256,
+        model_plan_content_sha256=model_plan.content_sha256,
+        arrow_dirs=arrow_dirs,
+        arrow_provenance_sha256=arrow_provenance_sha256,
+        matrix_work_dir=matrix_work_dir,
+        matrix_work_free_bytes=matrix_work_free_bytes,
+        total_ram_bytes=None if requested_total_ram is None else int(requested_total_ram),
     )
 
 
-def _training_config(args: argparse.Namespace, dataset_names: list[str]) -> dict[str, Any]:
+def _training_config(
+    args: argparse.Namespace,
+    plan: PairwisePreflightPlan,
+    *,
+    artifact_hashes: Mapping[str, str],
+) -> dict[str, Any]:
     return {
-        "block_type": DEFAULT_BLOCK_TYPE,
-        "chunk_size": int(args.chunk_size),
-        "data_dir": str(Path(args.data_dir)),
-        "features_to_use": list(FEATURES_TO_USE),
-        "featurizer_version": int(FEATURIZER_VERSION),
-        "include_augmented": bool(args.include_augmented),
+        "dataset_inputs": {
+            name: {
+                "arrow_dir": str(plan.arrow_dirs[name]),
+                "arrow_conversion_provenance_sha256": plan.arrow_provenance_sha256[name],
+                "files": {role: str(path) for role, path in plan.datasets[name].files.items()},
+                "split_mode": plan.datasets[name].split_mode,
+            }
+            for name in plan.dataset_names
+        },
+        "featurization_backend": "rust_from_provenance_bound_arrow",
+        "features_to_use": list(DEFAULT_FEATURE_GROUPS),
+        "training_scope": "production_full",
+        "input_artifact_hashes": {str(key): str(value) for key, value in artifact_hashes.items()},
         "n_iter": int(args.n_iter),
         "n_jobs": int(args.n_jobs),
-        "nameless_features_to_use": list(NAMELESS_FEATURES_TO_USE),
-        "production_version": str(args.production_version),
-        "source_dataset_names": dataset_names,
-        "specter_suffix": str(args.specter_suffix),
-        "signatures_suffix": str(args.signatures_suffix),
+        "nan_policy": "preserve_nan",
+        "nameless_features_to_use": list(DEFAULT_NAMELESS_FEATURE_GROUPS),
+        "model_plan_sha256": plan.model_plan_sha256,
+        "model_plan_content_sha256": plan.model_plan_content_sha256,
+        "data_random_seed": int(args.random_seed),
+        "model_random_seed": 42,
+        "source_dataset_names": list(plan.dataset_names),
         "train_pairs_size": int(args.train_pairs_size),
-        "use_cache": bool(args.use_cache),
-        "val_test_size": int(args.val_test_size),
+        "uses_monotone_constraints": True,
+        "validation_pairs_size": int(args.validation_pairs_size),
+    }
+
+
+def _require_disk_for_write(path: Path, payload_bytes: int) -> None:
+    """Fail immediately when the next concrete matrix write cannot fit."""
+
+    required_bytes = int(payload_bytes) + 4096
+    free_bytes = int(shutil.disk_usage(path.parent).free)
+    if free_bytes < required_bytes:
+        raise OSError(
+            f"Insufficient disk for matrix write {path}: required_bytes={required_bytes} free_bytes={free_bytes}"
+        )
+
+
+def _stage_array(path: Path, values: np.ndarray) -> Path:
+    array = np.asarray(values)
+    if array.dtype.hasobject:
+        raise TypeError(f"Cannot stage object array at {path}")
+    _require_disk_for_write(path, int(array.nbytes))
+    np.save(path, array, allow_pickle=False)
+    return path
+
+
+def _stage_dataset_features(
+    root: Path,
+    dataset_name: str,
+    *,
+    train: TupleOfArrays,
+    val: TupleOfArrays,
+) -> dict[str, Path]:
+    dataset_root = root / dataset_name
+    dataset_root.mkdir()
+    arrays: dict[str, Path] = {}
+    for split_name, split in (("train", train), ("val", val)):
+        features, labels, nameless_features = split
+        if nameless_features is None:
+            raise RuntimeError(f"Expected nameless {split_name} features for dataset {dataset_name!r}")
+        for role, values in (
+            (f"X_{split_name}", features),
+            (f"y_{split_name}", labels),
+            (f"nameless_X_{split_name}", nameless_features),
+        ):
+            arrays[role] = _stage_array(dataset_root / f"{role}.npy", values)
+    return arrays
+
+
+def _featurize_selection(
+    dataset: ANDData,
+    arrow_dataset: ArrowDataset,
+    featurizer_info: FeaturizationInfo,
+    *,
+    name_counts_manifest_sha256: str,
+    n_jobs: int,
+    nameless_featurizer_info: FeaturizationInfo,
+    total_ram_bytes: int | None,
+    unknown_signature_ids: frozenset[str] = frozenset(),
+) -> tuple[TupleOfArrays, TupleOfArrays]:
+    """Featurize release train/validation pairs and never resolve a test split.
+
+    The JSON dataset selects the pairs. A Rust featurizer built only for the
+    selected pairs' signatures computes their features.
+    """
+
+    train_pairs, val_pairs = resolve_selection_pairs(dataset)
+    selected_counts = (len(train_pairs), len(val_pairs))
+    train_pairs = exclude_unknown_pairs(train_pairs, unknown_signature_ids)
+    val_pairs = exclude_unknown_pairs(val_pairs, unknown_signature_ids)
+    logger.info(
+        "unknown pair exclusions dataset=%s train=%d validation=%d",
+        dataset.name,
+        selected_counts[0] - len(train_pairs),
+        selected_counts[1] - len(val_pairs),
+    )
+    rust_featurizer = build_verified_rust_featurizer(
+        dataset,
+        arrow_dataset,
+        signature_ids={str(pair[index]) for pair in (*train_pairs, *val_pairs) for index in (0, 1)},
+        name_counts_manifest_sha256=name_counts_manifest_sha256,
+        num_threads=n_jobs,
+    )
+    train, val = (
+        featurize_pairs_with_rust(
+            rust_featurizer,
+            pairs,
+            featurizer_info,
+            nameless_featurizer_info=nameless_featurizer_info,
+            n_jobs=n_jobs,
+            nan_value=np.nan,
+            total_ram_bytes=total_ram_bytes,
+        )
+        for pairs in (train_pairs, val_pairs)
+    )
+    return train, val
+
+
+def _load_staged_array(path: Path) -> np.ndarray:
+    return np.load(path, allow_pickle=False, mmap_mode="r")
+
+
+def _finite_validation_roc_auc(value: Any) -> float:
+    metric = float(value)
+    if not np.isfinite(metric):
+        raise RuntimeError("selected validation ROC AUC must be finite")
+    return metric
+
+
+def _concatenate_staged_arrays(
+    output_path: Path,
+    arrays: list[Path],
+) -> Path:
+    if not arrays:
+        raise ValueError(f"Cannot assemble empty union array at {output_path}")
+    sources = [_load_staged_array(path) for path in arrays]
+    trailing_shape = sources[0].shape[1:]
+    if any(source.shape[1:] != trailing_shape for source in sources[1:]):
+        raise ValueError("Cannot concatenate arrays with different shapes")
+    shape = (sum(source.shape[0] for source in sources), *trailing_shape)
+    if shape[0] <= 0:
+        raise ValueError(f"Union array must contain at least one row: {output_path}")
+
+    dtype = np.result_type(*(source.dtype for source in sources))
+    _require_disk_for_write(output_path, int(np.prod(shape, dtype=np.int64) * dtype.itemsize))
+    union = np.lib.format.open_memmap(output_path, mode="w+", dtype=dtype, shape=shape)
+    offset = 0
+    for source in sources:
+        next_offset = offset + source.shape[0]
+        union[offset:next_offset] = source
+        offset = next_offset
+    union.flush()
+    return output_path
+
+
+def _fit_pairwise_model(
+    args: argparse.Namespace,
+    arrays: Mapping[str, Path],
+    *,
+    feature_prefix: str,
+    monotone_constraints: Any,
+) -> tuple[PairwiseModeler, float]:
+    model = PairwiseModeler(
+        n_iter=int(args.n_iter),
+        n_jobs=int(args.n_jobs),
+        monotone_constraints=monotone_constraints,
+    )
+    X_train = _load_staged_array(arrays[f"{feature_prefix}X_train"])
+    y_train = _load_staged_array(arrays["y_train"])
+    X_val = _load_staged_array(arrays[f"{feature_prefix}X_val"])
+    y_val = _load_staged_array(arrays["y_val"])
+    model.fit(X_train, y_train, X_val, y_val)
+    validation_roc_auc = _finite_validation_roc_auc(roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))
+    gc.collect()
+    return model, validation_roc_auc
+
+
+def _publish_result(
+    args: argparse.Namespace,
+    plan: PairwisePreflightPlan,
+    clusterer: Clusterer,
+    training_config: Mapping[str, Any],
+    training_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    bundle = write_pairwise_production_bundle(
+        clusterer,
+        plan.output_dir,
+        release_version=plan.release_version,
+        eps_calibration=PENDING_EPS_CALIBRATION,
+        pairwise_training_config=training_config,
+        pairwise_training_summary=training_summary,
+    )
+    return {
+        "bundle_dir": str(bundle.bundle_dir),
+        "release_version": bundle.release_version,
+        "eps_calibration": bundle.eps_calibration,
+        "manifest_path": str(bundle.manifest_path),
+        "training_summary": training_summary,
     }
 
 
 def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     """Train pairwise models and write the pairwise production bundle stage."""
 
-    if not args.run_full:
-        raise SystemExit("pairwise production training is unbounded; pass --run-full explicitly")
-
-    os.environ["OMP_NUM_THREADS"] = str(max(1, int(args.n_jobs)))
-
-    data_dir = Path(args.data_dir)
-    output_dir = Path(args.output_dir or data_dir / f"production_model_v{args.production_version}")
-    featurizer_info = FeaturizationInfo(features_to_use=list(FEATURES_TO_USE), featurizer_version=FEATURIZER_VERSION)
-    nameless_featurizer_info = FeaturizationInfo(
-        features_to_use=list(NAMELESS_FEATURES_TO_USE),
-        featurizer_version=FEATURIZER_VERSION,
+    plan = _preflight_pairwise(args)
+    unknown_inputs = {name: load_unknown_signatures(plan.datasets[name].files) for name in plan.dataset_names}
+    unknown_ids = {name: source.ids for name, source in unknown_inputs.items()}
+    augmented_members: dict[str, set[str]] = {}
+    augmented_validation_members: dict[str, set[str]] = {}
+    if "augmented" in plan.datasets:
+        unknown_ids["augmented"] = augmented_unknown_ids(unknown_ids)
+        for role, population, members in (
+            ("train_pairs", "training", augmented_members),
+            ("val_pairs", "validation", augmented_validation_members),
+        ):
+            if role not in plan.datasets["augmented"].files:
+                continue
+            pair_frame = _map_fixed_pair_labels(
+                pd.read_csv(plan.datasets["augmented"].files[role]), f"augmented {population}"
+            )
+            members.update(
+                source_members(
+                    (str(left), str(right))
+                    for left, right in pair_frame.iloc[:, :2].itertuples(index=False, name=None)
+                    if str(left) not in unknown_ids["augmented"] and str(right) not in unknown_ids["augmented"]
+                )
+            )
+            require_declared_sources(members, plan.dataset_names, context=f"Augmented {population}")
+            del pair_frame
+    # Copies outside each source fit population must not enter the fit, and validation
+    # copies outside the source validation population must not select the model.
+    for dataset_name in plan.dataset_names:
+        dataset_input = plan.datasets[dataset_name]
+        if dataset_name in augmented_members or dataset_name in augmented_validation_members:
+            training, validation = split_members_from_sources(
+                dataset_name, dataset_input.files, random_seed=int(args.random_seed)
+            )
+            require_training_members(augmented_members, dataset_name, training)
+            require_validation_members(augmented_validation_members, dataset_name, validation)
+    artifact_authority = load_packaged_artifact_authority(
+        name_counts_index_root=Path(args.name_counts_index_root),
     )
-    if args.negative_one_for_nan:
-        monotone_constraints = None
-        nameless_monotone_constraints = None
-        nan_value = -1.0
-    else:
-        monotone_constraints = featurizer_info.lightgbm_monotone_constraints
-        nameless_monotone_constraints = nameless_featurizer_info.lightgbm_monotone_constraints
-        nan_value = np.nan
+    canonical_name_tuples = artifact_authority.name_tuples
+    artifact_hashes = _canonical_training_artifact_hashes(artifact_authority)
+    training_config = _training_config(
+        args,
+        plan,
+        artifact_hashes=artifact_hashes,
+    )
+    training_config["unknown_signature_inputs"] = {name: source.binding() for name, source in unknown_inputs.items()}
+    training_config["unknown_signature_policy"] = "exclude_pair_endpoints; retain_eps_inputs; score_known_members_only"
+    os.environ["OMP_NUM_THREADS"] = str(int(args.n_jobs))
+    logger.info(
+        "pairwise resources n_jobs=%d matrix_work_dir=%s free_bytes=%d total_ram_bytes=%s",
+        int(args.n_jobs),
+        plan.matrix_work_dir,
+        plan.matrix_work_free_bytes,
+        plan.total_ram_bytes,
+    )
 
+    featurizer_info = FeaturizationInfo(features_to_use=list(DEFAULT_FEATURE_GROUPS))
+    nameless_featurizer_info = FeaturizationInfo(features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS))
+    monotone_constraints = featurizer_info.lightgbm_monotone_constraints
+    nameless_monotone_constraints = nameless_featurizer_info.lightgbm_monotone_constraints
+
+    cluster_test_splits: dict[str, dict[str, Any]] = {}
     started = time.perf_counter()
-    dataset_names = _dataset_names(
-        include_augmented=bool(args.include_augmented),
-        selected_datasets=[str(dataset) for dataset in args.datasets] if args.datasets else None,
-    )
-    datasets: dict[str, dict[str, Any]] = {}
-    for dataset_name in tqdm(dataset_names, desc="Processing datasets and fitting base models"):
-        logger.info("processing dataset %s", dataset_name)
-        clusters_path, train_pairs_path, val_pairs_path, test_pairs_path = _dataset_pair_paths(data_dir, dataset_name)
-        anddata = ANDData(
-            signatures=str(
-                _resolve_dataset_file(
-                    data_dir,
-                    dataset_name,
-                    f"{dataset_name}{args.signatures_suffix}",
-                    args.signatures_suffix.lstrip("_"),
-                    "signatures.json",
-                )
-            ),
-            papers=str(
-                _resolve_dataset_file(
-                    data_dir,
-                    dataset_name,
-                    f"{dataset_name}_papers.json",
-                    "papers.json",
-                )
-            ),
-            name=dataset_name,
-            mode="train",
-            specter_embeddings=str(
-                _resolve_dataset_file(
-                    data_dir,
-                    dataset_name,
-                    f"{dataset_name}{args.specter_suffix}",
-                    args.specter_suffix.lstrip("_"),
-                    "specter.pickle",
-                )
-            ),
-            clusters=clusters_path,
-            block_type=DEFAULT_BLOCK_TYPE,
-            train_pairs=train_pairs_path,
-            val_pairs=val_pairs_path,
-            test_pairs=test_pairs_path,
-            train_pairs_size=int(args.train_pairs_size),
-            val_pairs_size=int(args.val_test_size),
-            test_pairs_size=int(args.val_test_size),
-            preprocess=True,
-        )
+    with tempfile.TemporaryDirectory(
+        prefix=f".pairwise_v{plan.release_version}_",
+        dir=plan.matrix_work_dir,
+    ) as matrix_work_dir_raw:
+        matrix_work_dir = Path(matrix_work_dir_raw)
+        staged_datasets: dict[str, dict[str, Path]] = {}
+        for dataset_name in tqdm(plan.dataset_names, desc="Loading and featurizing datasets"):
+            logger.info("processing dataset %s", dataset_name)
+            dataset_input = plan.datasets[dataset_name]
+            files = dataset_input.files
+            anddata_kwargs: dict[str, Any] = {
+                "signatures": str(files["signatures"]),
+                "papers": str(files["papers"]),
+                "name": dataset_name,
+                "mode": "train",
+                "clusters": str(files["clusters"]) if "clusters" in files else None,
+                "train_pairs": str(files["train_pairs"]) if "train_pairs" in files else None,
+                "val_pairs": str(files["val_pairs"]) if "val_pairs" in files else None,
+                "test_pairs": None,
+                "train_pairs_size": int(args.train_pairs_size),
+                "val_pairs_size": int(args.validation_pairs_size),
+                "random_seed": int(args.random_seed),
+                "name_counts_index": None,
+                "n_jobs": int(args.n_jobs),
+                "preprocess": False,
+                "name_tuples": canonical_name_tuples.pairs,
+            }
 
-        train, val, test = featurize(
-            anddata,
-            featurizer_info,
-            n_jobs=int(args.n_jobs),
-            use_cache=bool(args.use_cache),
-            chunk_size=int(args.chunk_size),
-            nameless_featurizer_info=nameless_featurizer_info,
-            nan_value=nan_value,
-        )
-        if train is None or val is None or test is None:
-            raise RuntimeError(f"Expected train/val/test features for {dataset_name}")
-        X_train, y_train, nameless_X_train = train
-        X_val, y_val, nameless_X_val = val
-        X_test, y_test, nameless_X_test = test
-        datasets[dataset_name] = {
-            "anddata": anddata,
-            "X_train": X_train,
-            "y_train": y_train,
-            "X_val": X_val,
-            "y_val": y_val,
-            "X_test": X_test,
-            "y_test": y_test,
-            "nameless_X_train": nameless_X_train,
-            "nameless_X_val": nameless_X_val,
-            "nameless_X_test": nameless_X_test,
+            # Selection only: the Rust featurizer computes every feature from Arrow.
+            anddata = ANDData(**anddata_kwargs)
+            if anddata.name_tuples != canonical_name_tuples.pairs:
+                raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
+
+            if dataset_input.split_mode == "random_blocks":
+                # Resolve the same split as pair selection, before allocating feature
+                # matrices. Persist identities so Arrow row sorting cannot change it.
+                train_blocks, val_blocks, test_blocks = anddata.split_cluster_signatures()
+                require_training_members(
+                    augmented_members,
+                    dataset_name,
+                    {signature_id for members in train_blocks.values() for signature_id in members},
+                )
+                require_validation_members(
+                    augmented_validation_members,
+                    dataset_name,
+                    {signature_id for members in val_blocks.values() for signature_id in members},
+                )
+                cluster_test_splits[dataset_name] = {
+                    "block_membership_sha256": block_membership_sha256(anddata.get_blocks()),
+                    "test_block_ids": list(test_blocks),
+                }
+                del train_blocks, val_blocks, test_blocks
+
+            current_provenance = verify_conversion_provenance(
+                plan.arrow_dirs[dataset_name],
+                expected_source_sha256={role: dataset_input.sha256[role] for role in ARROW_SOURCE_ROLES},
+            )
+            if current_provenance != plan.arrow_provenance_sha256[dataset_name]:
+                raise ArrowProvenanceError(f"Arrow conversion provenance changed after preflight for {dataset_name!r}")
+            with ArrowDataset.open(
+                plan.arrow_dirs[dataset_name],
+                require_specter=True,
+                require_name_counts_index=True,
+            ) as arrow_dataset:
+                train, val = _featurize_selection(
+                    anddata,
+                    arrow_dataset,
+                    featurizer_info,
+                    name_counts_manifest_sha256=artifact_hashes["name_counts_manifest_sha256"],
+                    n_jobs=int(args.n_jobs),
+                    nameless_featurizer_info=nameless_featurizer_info,
+                    total_ram_bytes=plan.total_ram_bytes,
+                    unknown_signature_ids=unknown_ids[dataset_name],
+                )
+            staged = _stage_dataset_features(
+                matrix_work_dir,
+                dataset_name,
+                train=train,
+                val=val,
+            )
+            del train, val
+            staged_datasets[dataset_name] = staged
+            del staged
+            del anddata
+            gc.collect()
+
+        validation_dataset_names = tuple(name for name in plan.dataset_names if name != "augmented")
+        union_members = {
+            "X_train": plan.dataset_names,
+            "y_train": plan.dataset_names,
+            "nameless_X_train": plan.dataset_names,
+            "X_val": validation_dataset_names,
+            "y_val": validation_dataset_names,
+            "nameless_X_val": validation_dataset_names,
+        }
+        union_arrays = {
+            role: _concatenate_staged_arrays(
+                matrix_work_dir / f"union_{role}.npy",
+                [staged_datasets[name][role] for name in names],
+            )
+            for role, names in union_members.items()
         }
 
-    anddatas = [
-        datasets[dataset_name]["anddata"]
-        for dataset_name in dataset_names
-        if dataset_name not in PAIRWISE_ONLY_DATASETS
-    ]
-    X_train = np.vstack([datasets[dataset_name]["X_train"] for dataset_name in dataset_names])
-    y_train = np.hstack([datasets[dataset_name]["y_train"] for dataset_name in dataset_names])
-    validation_dataset_names = [dataset_name for dataset_name in dataset_names if dataset_name != "augmented"]
-    X_val = np.vstack([datasets[dataset_name]["X_val"] for dataset_name in validation_dataset_names])
-    y_val = np.hstack([datasets[dataset_name]["y_val"] for dataset_name in validation_dataset_names])
-    nameless_X_train = np.vstack([datasets[dataset_name]["nameless_X_train"] for dataset_name in dataset_names])
-    nameless_X_val = np.vstack([datasets[dataset_name]["nameless_X_val"] for dataset_name in validation_dataset_names])
+        logger.info("fitting pairwise model")
+        union_classifier, main_validation_roc_auc = _fit_pairwise_model(
+            args,
+            union_arrays,
+            feature_prefix="",
+            monotone_constraints=monotone_constraints,
+        )
 
-    logger.info("fitting pairwise model")
-    union_classifier = PairwiseModeler(
-        n_iter=int(args.n_iter),
-        n_jobs=int(args.n_jobs),
-        monotone_constraints=monotone_constraints,
-    )
-    union_classifier.fit(X_train, y_train, X_val, y_val)
+        logger.info("fitting nameless pairwise model")
+        nameless_union_classifier, nameless_validation_roc_auc = _fit_pairwise_model(
+            args,
+            union_arrays,
+            feature_prefix="nameless_",
+            monotone_constraints=nameless_monotone_constraints,
+        )
 
-    logger.info("fitting nameless pairwise model")
-    nameless_union_classifier = PairwiseModeler(
-        n_iter=int(args.n_iter),
-        n_jobs=int(args.n_jobs),
-        monotone_constraints=nameless_monotone_constraints,
-    )
-    nameless_union_classifier.fit(nameless_X_train, y_train, nameless_X_val, y_val)
+        logger.info("building uncalibrated pairwise bundle")
+        union_clusterer = Clusterer(
+            featurizer_info,
+            union_classifier.classifier,
+            cluster_model=FastCluster(linkage="average", eps=PENDING_PAIRWISE_EPS),
+            n_jobs=int(args.n_jobs),
+            nameless_classifier=nameless_union_classifier.classifier,
+            nameless_featurizer_info=nameless_featurizer_info,
+        )
+        union_clusterer.feature_contract.update(artifact_hashes)
 
-    logger.info("fitting clustering threshold")
-    union_clusterer = Clusterer(
-        featurizer_info,
-        union_classifier.classifier,
-        cluster_model=FastCluster(),
-        search_space=_search_space(),
-        n_iter=int(args.cluster_n_iter),
-        n_jobs=int(args.n_jobs),
-        use_cache=bool(args.use_cache),
-        nameless_classifier=nameless_union_classifier.classifier,
-        nameless_featurizer_info=nameless_featurizer_info,
-    )
-    union_clusterer.fit(anddatas)
-    best_params = union_clusterer.best_params
-    if best_params is None:
-        raise RuntimeError("Clusterer fitting did not produce best clustering parameters.")
-
-    training_summary = {
-        "best_clustering_params": dict(best_params),
-        "elapsed_seconds": round(float(time.perf_counter() - started), 3),
-        "main_train_rows": int(X_train.shape[0]),
-        "main_val_rows": int(X_val.shape[0]),
-        "nameless_train_rows": int(nameless_X_train.shape[0]),
-        "nameless_val_rows": int(nameless_X_val.shape[0]),
-        "output_dir": str(output_dir),
-    }
-    bundle_summary = write_pairwise_production_bundle(
+        training_summary: dict[str, Any] = {
+            "cluster_test_splits": cluster_test_splits,
+            "main_pairwise_best_params": dict(union_classifier.best_params or {}),
+            "main_train_rows": int(_load_staged_array(union_arrays["X_train"]).shape[0]),
+            "main_val_rows": int(_load_staged_array(union_arrays["X_val"]).shape[0]),
+            "main_validation_roc_auc": main_validation_roc_auc,
+            "nameless_pairwise_best_params": dict(nameless_union_classifier.best_params or {}),
+            "nameless_train_rows": int(_load_staged_array(union_arrays["nameless_X_train"]).shape[0]),
+            "nameless_val_rows": int(_load_staged_array(union_arrays["nameless_X_val"]).shape[0]),
+            "nameless_validation_roc_auc": nameless_validation_roc_auc,
+        }
+        logger.info("pairwise training completed in %.3f seconds", time.perf_counter() - started)
+    result = _publish_result(
+        args,
+        plan,
         union_clusterer,
-        output_dir,
-        bundle_version=str(args.production_version),
-        source_model_version=str(args.production_version),
-        pairwise_training_config=_training_config(args, dataset_names),
-        pairwise_training_summary=training_summary,
+        training_config,
+        training_summary,
     )
-    result = {
-        "bundle_dir": str(bundle_summary.bundle_dir),
-        "bundle_status": bundle_summary.bundle_status,
-        "bundle_version": bundle_summary.bundle_version,
-        "manifest_path": str(bundle_summary.manifest_path),
-        "training_summary": training_summary,
-    }
     print(json.dumps(result, indent=2, sort_keys=True))
     return result
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--production-version", required=True, help="Version suffix for production_model_vX.Y.")
-    parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--data-dir", type=Path, default=Path(PROJECT_ROOT_PATH) / "data")
-    parser.add_argument("--specter-suffix", default=DEFAULT_SPECTER_SUFFIX)
-    parser.add_argument("--signatures-suffix", default=DEFAULT_SIGNATURES_SUFFIX)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--name-counts-index-root",
+        type=Path,
+        required=True,
+        help="Explicit manifest-backed name-count index directory.",
+    )
     parser.add_argument("--n-iter", type=int, default=DEFAULT_N_ITER)
-    parser.add_argument("--cluster-n-iter", type=int, default=25)
     parser.add_argument("--n-jobs", type=int, default=DEFAULT_N_JOBS)
-    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
+    parser.add_argument(
+        "--arrow-root",
+        type=Path,
+        required=True,
+        help=(
+            "Directory with one Arrow conversion per training dataset (<root>/<dataset>/), each carrying "
+            "conversion provenance that matches the model plan's signatures, papers and SPECTER files."
+        ),
+    )
     parser.add_argument("--train-pairs-size", type=int, default=DEFAULT_TRAIN_PAIRS_SIZE)
-    parser.add_argument("--val-test-size", type=int, default=DEFAULT_VAL_TEST_SIZE)
-    parser.add_argument("--datasets", nargs="*", default=None, help="Optional dataset names for smoke tests.")
-    parser.add_argument("--include-augmented", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--use-cache", action="store_true")
-    parser.add_argument("--negative-one-for-nan", action="store_true")
-    parser.add_argument("--run-full", action="store_true", help="Explicitly allow full production pairwise training.")
+    parser.add_argument(
+        "--validation-pairs-size",
+        type=int,
+        default=DEFAULT_VALIDATION_PAIRS_SIZE,
+    )
+    parser.add_argument("--random-seed", type=int, default=DEFAULT_RANDOM_SEED)
+    parser.add_argument("--matrix-work-dir", type=Path, required=True)
+    parser.add_argument(
+        "--model-plan",
+        type=Path,
+        required=True,
+        help="Training/validation inputs and EPS policy for this release run.",
+    )
+    parser.add_argument(
+        "--total-ram-bytes",
+        type=int,
+        default=None,
+        help="Optional explicit RAM budget; autodetected RAM is safety-capped when omitted.",
+    )
+    parser.add_argument(
+        "--run-full",
+        action="store_true",
+        required=True,
+        help="Acknowledge the full production training cost.",
+    )
     return parser
 
 

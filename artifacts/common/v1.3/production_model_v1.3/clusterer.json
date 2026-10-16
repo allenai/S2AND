@@ -1,0 +1,49 @@
+{
+  "batch_size": 1000000,
+  "cluster_model": {
+    "eps": 0.55,
+    "linkage": "average"
+  },
+  "dont_merge_cluster_seeds": true,
+  "feature_contract": {
+    "name_counts_manifest_sha256": "85cffc00421f6b8a7ebab6b6bac7da162b4bccde88b83e348c9554e26c7153e7",
+    "name_tuples_data_sha256": "0bcb523ebf8e6f7020883d96cc2822f402f212069214fa23e56b6e7bc0b01f0c",
+    "orcid_prefix_counts_data_sha256": "10c3b6aef4eb4cb61497db4afe942c93263b19115d00c3121626eebe27022a66"
+  },
+  "featurizer_info": {
+    "features_to_use": [
+      "name_similarity",
+      "affiliation_similarity",
+      "email_similarity",
+      "coauthor_similarity",
+      "venue_similarity",
+      "year_diff",
+      "title_similarity",
+      "misc_features",
+      "name_counts",
+      "embedding_similarity",
+      "journal_similarity",
+      "advanced_name_similarity"
+    ]
+  },
+  "incremental_mean_min_hybrid_weight": 0.5,
+  "incremental_precluster_broadcast_mode": "always",
+  "incremental_seed_score_mode": "mean",
+  "n_jobs": 1,
+  "nameless_featurizer_info": {
+    "features_to_use": [
+      "affiliation_similarity",
+      "email_similarity",
+      "coauthor_similarity",
+      "venue_similarity",
+      "year_diff",
+      "title_similarity",
+      "misc_features",
+      "embedding_similarity",
+      "journal_similarity"
+    ]
+  },
+  "random_state": 42,
+  "suppress_orcid": false,
+  "use_default_constraints_as_supervision": true
+}

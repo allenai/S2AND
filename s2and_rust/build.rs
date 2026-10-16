@@ -1,8 +1,115 @@
-#[cfg(windows)]
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Native build inputs covered by the embedded source digest.
+///
+/// `tests/rust_build_freshness.py` mirrors these lists and the hashing below.
+const SOURCE_DIGEST_FILES: [&str; 4] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "vendor/cld2/Cargo.toml",
+];
+const SOURCE_DIGEST_DIRS: [&str; 2] = ["src", "vendor/cld2/src"];
+
 fn main() {
+    emit_source_digest();
+    #[cfg(windows)]
+    stage_python_runtime_dlls();
+}
+
+/// Embed a digest of every native build input so tests can reject stale builds.
+///
+/// Emitting any `rerun-if-changed` limits Cargo's change detection to the
+/// listed paths, so the manifests and both Rust source trees are listed on
+/// every platform. Directory watches include new modules; the digest includes
+/// only `.rs` files, not editor files or a vendored crate's build outputs.
+/// Cargo's timestamp checks are a heuristic, not content-based invalidation.
+fn emit_source_digest() {
+    // A shared target directory can reuse a compiled build script across
+    // source copies. Read Cargo's current package root when the script runs.
+    let root = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets the package manifest directory"),
+    );
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    for name in SOURCE_DIGEST_FILES {
+        println!("cargo:rerun-if-changed={name}");
+        files.push((name.to_string(), root.join(name)));
+    }
+    for name in SOURCE_DIGEST_DIRS {
+        println!("cargo:rerun-if-changed={name}");
+        collect_files(&root, &root.join(name), &mut files);
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut hasher = Sha256::new();
+    for (relative, path) in &files {
+        let content = fs::read(path)
+            .unwrap_or_else(|err| panic!("cannot read build input {}: {err}", path.display()));
+        hasher.update(relative.as_bytes());
+        hasher.update([0u8]);
+        hasher.update((content.len() as u64).to_le_bytes());
+        hasher.update(&content);
+    }
+    println!(
+        "cargo:rustc-env=S2AND_RUST_SOURCE_DIGEST=v1:{:x}",
+        hasher.finalize()
+    );
+}
+
+fn collect_files(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) {
+    let metadata = fs::symlink_metadata(dir).unwrap_or_else(|err| {
+        panic!(
+            "cannot inspect build input directory {}: {err}",
+            dir.display()
+        )
+    });
+    assert!(
+        !is_linked_directory(&metadata),
+        "linked native source directories are unsupported: {}",
+        dir.display()
+    );
+    let entries = fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("cannot list build inputs in {}: {err}", dir.display()));
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|err| panic!("cannot list build inputs in {}: {err}", dir.display()))
+            .path();
+        if path.is_dir() {
+            collect_files(root, &path, files);
+        } else if path.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
+            let relative = path
+                .strip_prefix(root)
+                .expect("build input is under the manifest directory")
+                .components()
+                .map(|component| {
+                    component.as_os_str().to_str().unwrap_or_else(|| {
+                        panic!("native source paths must be valid UTF-8: {path:?}")
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            files.push((relative, path));
+        }
+    }
+}
+
+fn is_linked_directory(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Include junctions, which Python 3.11 also identifies via this flag.
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+#[cfg(windows)]
+fn stage_python_runtime_dlls() {
     use std::env;
-    use std::fs;
-    use std::path::{Path, PathBuf};
 
     println!("cargo:rerun-if-env-changed=PYO3_PYTHON");
     println!("cargo:rerun-if-env-changed=PYTHON_SYS_EXECUTABLE");
@@ -72,9 +179,6 @@ fn main() {
         }
     }
 }
-
-#[cfg(not(windows))]
-fn main() {}
 
 #[cfg(windows)]
 fn rerun_if_changed(path: &std::path::Path) {

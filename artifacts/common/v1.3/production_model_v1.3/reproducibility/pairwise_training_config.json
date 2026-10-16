@@ -1,0 +1,187 @@
+{
+  "data_random_seed": 1111,
+  "dataset_inputs": {
+    "aminer": {
+      "arrow_conversion_provenance_sha256": "23f2e57f7e52126f2ec75249d61ccd27a532c1c80b778237d082f6b244092ca2",
+      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\aminer",
+      "files": {
+        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\aminer\\aminer_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\aminer\\aminer_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\aminer\\aminer_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\aminer\\aminer_specter2.pkl"
+      },
+      "split_mode": "random_blocks"
+    },
+    "arnetminer": {
+      "arrow_conversion_provenance_sha256": "9dfb9663e2e49e10a839f9c5115b2dc88e74ef95475e68d4c2b5209ca6169b36",
+      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\arnetminer",
+      "files": {
+        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\arnetminer\\arnetminer_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\arnetminer\\arnetminer_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\arnetminer\\arnetminer_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\arnetminer\\arnetminer_specter2.pkl"
+      },
+      "split_mode": "random_blocks"
+    },
+    "augmented": {
+      "arrow_conversion_provenance_sha256": "042cbb66cca405685a625f3e8d0ffabd6d83cf6c0b5f146a829203cd04ac9d2f",
+      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\augmented",
+      "files": {
+        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\augmented\\augmented_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\augmented\\augmented_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\augmented\\augmented_specter2.pkl",
+        "train_pairs": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\augmented\\train_pairs.csv",
+        "val_pairs": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\augmented\\val_pairs.csv"
+      },
+      "split_mode": "fixed_pairs"
+    },
+    "inspire": {
+      "arrow_conversion_provenance_sha256": "ddb3340b71eeca5f893b87035e5ab0a4d2a3075027c008942134e695008c222c",
+      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\inspire",
+      "files": {
+        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\inspire\\inspire_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\inspire\\inspire_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\inspire\\inspire_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\inspire\\inspire_specter2.pkl"
+      },
+      "split_mode": "random_blocks"
+    },
+    "kisti": {
+      "arrow_conversion_provenance_sha256": "400b208549f82eba8ef44edbbdc8601c8cbb3221d1899574426c4ce73ecd9508",
+      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\kisti",
+      "files": {
+        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\kisti\\kisti_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\kisti\\kisti_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\kisti\\kisti_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\kisti\\kisti_specter2.pkl"
+      },
+      "split_mode": "random_blocks"
+    },
+    "pubmed": {
+      "arrow_conversion_provenance_sha256": "ebe36226bba009933b9fba8d660566d207d27bccafbfb7a8d85da0fadb13e5ce",
+      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\pubmed",
+      "files": {
+        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\pubmed\\pubmed_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\pubmed\\pubmed_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\pubmed\\pubmed_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\pubmed\\pubmed_specter2.pkl"
+      },
+      "split_mode": "random_blocks"
+    },
+    "qian": {
+      "arrow_conversion_provenance_sha256": "02ab72b1b77281ce5ebc70c02afdb2d8858e594f9b51ce7ea4ac334c9f6a180c",
+      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\qian",
+      "files": {
+        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\qian\\qian_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\qian\\qian_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\qian\\qian_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\qian\\qian_specter2.pkl"
+      },
+      "split_mode": "random_blocks"
+    },
+    "zbmath": {
+      "arrow_conversion_provenance_sha256": "77b3d8ae69dead8fe3f23bbf854bda839ab1a8c71390f1dc6e0f6d1f6a0717b9",
+      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\zbmath",
+      "files": {
+        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\zbmath\\zbmath_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\zbmath\\zbmath_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\zbmath\\zbmath_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\zbmath\\zbmath_specter2.pkl"
+      },
+      "split_mode": "random_blocks"
+    }
+  },
+  "features_to_use": [
+    "name_similarity",
+    "affiliation_similarity",
+    "email_similarity",
+    "coauthor_similarity",
+    "venue_similarity",
+    "year_diff",
+    "title_similarity",
+    "misc_features",
+    "name_counts",
+    "embedding_similarity",
+    "journal_similarity",
+    "advanced_name_similarity"
+  ],
+  "featurization_backend": "rust_from_provenance_bound_arrow",
+  "input_artifact_hashes": {
+    "name_counts_manifest_sha256": "85cffc00421f6b8a7ebab6b6bac7da162b4bccde88b83e348c9554e26c7153e7",
+    "name_tuples_data_sha256": "0bcb523ebf8e6f7020883d96cc2822f402f212069214fa23e56b6e7bc0b01f0c",
+    "orcid_prefix_counts_data_sha256": "d09f52ec0b0272f9931635f7a27676b2cf90c5645e9166233a5f1630cee9c133"
+  },
+  "model_plan_sha256": "529c9dcc3eb657f21bc7396e11efb21e6831d5662ea1ba7e428485a54485e070",
+  "model_random_seed": 42,
+  "n_iter": 50,
+  "n_jobs": 20,
+  "nameless_features_to_use": [
+    "affiliation_similarity",
+    "email_similarity",
+    "coauthor_similarity",
+    "venue_similarity",
+    "year_diff",
+    "title_similarity",
+    "misc_features",
+    "embedding_similarity",
+    "journal_similarity"
+  ],
+  "nan_policy": "preserve_nan",
+  "source_dataset_names": [
+    "aminer",
+    "arnetminer",
+    "inspire",
+    "kisti",
+    "pubmed",
+    "qian",
+    "zbmath",
+    "augmented"
+  ],
+  "train_pairs_size": 100000,
+  "training_scope": "production_full",
+  "unknown_signature_inputs": {
+    "aminer": {
+      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\aminer\\restored_unknown_signature_ids_20261009.json",
+      "sha256": "401c33c063e63bfe8ef0fdca7c6d97d4481cc1039db111695995f2659a19264e",
+      "signature_count": 13656
+    },
+    "arnetminer": {
+      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\arnetminer\\restored_unknown_signature_ids_20261009.json",
+      "sha256": "3d63f049bd373eb078c47e9abad7fe88ce273458beac6d67bc220e06ec80f6fb",
+      "signature_count": 78
+    },
+    "augmented": {
+      "path": null,
+      "sha256": null,
+      "signature_count": 0
+    },
+    "inspire": {
+      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\inspire\\restored_unknown_signature_ids_20261009.json",
+      "sha256": "0a4c080b857923c09aebafade40cc6006f89c0025dd9820db13f450f74c7b8b3",
+      "signature_count": 4366
+    },
+    "kisti": {
+      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\kisti\\restored_unknown_signature_ids_20261009.json",
+      "sha256": "c06f2d937e910e8dd22dcddbd3d023702565e4141c56078df770e6812ed710f8",
+      "signature_count": 32
+    },
+    "pubmed": {
+      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\pubmed\\restored_unknown_signature_ids_20261009.json",
+      "sha256": "922b609606ddc48f540ae8236eb05e6304e59c69353305915dedb395c0b524f8",
+      "signature_count": 17
+    },
+    "qian": {
+      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\qian\\restored_unknown_signature_ids_20261009.json",
+      "sha256": "0809212dbf4503f15a26ccdb6c60989688e848dc0cff730e8f53f75d226904ae",
+      "signature_count": 23
+    },
+    "zbmath": {
+      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\zbmath\\restored_unknown_signature_ids_20261009.json",
+      "sha256": "c5366609c6bf2a5ea382b36328f3adc1bb774e03d6f75b2caaaee4152900005f",
+      "signature_count": 3
+    }
+  },
+  "unknown_signature_policy": "exclude_pair_endpoints; retain_eps_inputs; score_known_members_only",
+  "uses_monotone_constraints": true,
+  "validation_pairs_size": 10000
+}

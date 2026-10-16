@@ -5,29 +5,45 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
+from s2and.incremental_linking.features import LinkerFeatureMatrix
+from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking.logistic_gate import (
     build_logistic_gate_matrix,
+    build_runtime_logistic_gate_matrix,
     default_logistic_gate_feature_names,
-    ranked_query_rows,
+    load_logistic_gate_config,
+    logistic_gate_config,
 )
 
 
-def test_ranked_query_rows_groups_in_first_seen_order_without_repeated_scans() -> None:
-    query_rows = ranked_query_rows(
-        np.asarray(["q2", "q1", "q2", "q1", "q3", "q2"], dtype=object),
-        np.asarray([0.4, 0.9, 0.8, 0.7, 0.1, 0.8], dtype=np.float64),
-        retrieval_ranks=np.asarray([2, 1, 1, 2, 1, 3], dtype=np.int64),
-        component_keys=cast(Any, np.asarray(["b", "a", "a", "b", "z", "c"], dtype=object)),
-    )
+def test_load_logistic_gate_config_rejects_unknown_model_type() -> None:
+    with pytest.raises(ValueError, match="Unsupported logistic gate model_type"):
+        load_logistic_gate_config({"model_type": "unknown"})
 
-    assert [group.tolist() for group in query_rows.groups] == [[0, 2, 5], [1, 3], [4]]
-    assert [group.tolist() for group in query_rows.ranked_groups] == [[2, 5, 0], [1, 3], [4]]
-    np.testing.assert_array_equal(query_rows.best_rows, np.asarray([2, 1, 4], dtype=np.int64))
-    np.testing.assert_allclose(query_rows.runner_up_scores[:2], np.asarray([0.8, 0.7], dtype=np.float64))
-    assert np.isnan(query_rows.runner_up_scores[2])
-    np.testing.assert_allclose(query_rows.score_margins[:2], np.asarray([0.0, 0.2], dtype=np.float64))
-    assert np.isnan(query_rows.score_margins[2])
-    np.testing.assert_array_equal(query_rows.has_runner_up, np.asarray([True, True, False]))
+
+def test_logistic_gate_config_rejects_feature_outside_runtime_safe_universe() -> None:
+    with pytest.raises(ValueError, match="unsupported runtime features.*top_raw_unwired_source"):
+        logistic_gate_config(
+            feature_names=("top_raw_unwired_source",),
+            weights=np.zeros((1, 3), dtype=np.float64),
+            bias=np.zeros(3, dtype=np.float64),
+            missing_values=np.zeros(1, dtype=np.float64),
+            calibration_mode="test",
+        )
+
+
+def test_load_logistic_gate_config_rejects_feature_outside_runtime_safe_universe() -> None:
+    config = logistic_gate_config(
+        feature_names=("chosen_probability",),
+        weights=np.zeros((1, 3), dtype=np.float64),
+        bias=np.zeros(3, dtype=np.float64),
+        missing_values=np.zeros(1, dtype=np.float64),
+        calibration_mode="test",
+    )
+    config["feature_names"] = ["top_raw_unwired_source"]
+
+    with pytest.raises(ValueError, match="unsupported runtime features.*top_raw_unwired_source"):
+        load_logistic_gate_config(config)
 
 
 def test_build_logistic_gate_matrix_covers_feature_families() -> None:
@@ -87,7 +103,14 @@ def test_build_logistic_gate_matrix_covers_feature_families() -> None:
         component_keys=cast(Any, np.asarray(["b", "a", "a", "b", "z", "c"], dtype=object)),
     )
 
+    assert [group.tolist() for group in query_rows.groups] == [[0, 2, 5], [1, 3], [4]]
     assert [group.tolist() for group in query_rows.ranked_groups] == [[2, 5, 0], [1, 3], [4]]
+    np.testing.assert_array_equal(query_rows.best_rows, np.asarray([2, 1, 4], dtype=np.int64))
+    np.testing.assert_allclose(query_rows.runner_up_scores[:2], np.asarray([0.8, 0.7], dtype=np.float64))
+    assert np.isnan(query_rows.runner_up_scores[2])
+    np.testing.assert_allclose(query_rows.score_margins[:2], np.asarray([0.0, 0.2], dtype=np.float64))
+    assert np.isnan(query_rows.score_margins[2])
+    np.testing.assert_array_equal(query_rows.has_runner_up, np.asarray([True, True, False]))
     expected = np.asarray(
         [
             [
@@ -197,6 +220,49 @@ def test_build_logistic_gate_matrix_rejects_duplicate_feature_names() -> None:
             ("chosen_probability", "chosen_probability"),
             query_indices=np.asarray(["q1", "q2"], dtype=object),
             probabilities=np.asarray([0.9, 0.8], dtype=np.float64),
+            feature_values={},
+        )
+
+
+def test_build_runtime_logistic_gate_matrix_rejects_absent_selected_numeric_source() -> None:
+    gate = load_logistic_gate_config(
+        logistic_gate_config(
+            feature_names=("top_raw_min_distance",),
+            weights=np.zeros((1, 3), dtype=np.float64),
+            bias=np.zeros(3, dtype=np.float64),
+            missing_values=np.zeros(1, dtype=np.float64),
+            calibration_mode="test",
+        )
+    )
+    candidate_batch = LinkerCandidateBatch(
+        row_count=1,
+        left_signature_indices=np.zeros(0, dtype=np.uint32),
+        right_signature_indices=np.zeros(0, dtype=np.uint32),
+        pair_row_indices=np.zeros(0, dtype=np.uint32),
+        row_query_signature_indices=np.asarray([0], dtype=np.uint32),
+        row_component_keys=("candidate",),
+    )
+    feature_matrix = LinkerFeatureMatrix(
+        matrix=np.empty((1, 0), dtype=np.float32),
+        feature_columns=(),
+        candidate_batch=candidate_batch,
+    )
+
+    with pytest.raises(ValueError, match="top_raw_min_distance.*requires.*min_distance"):
+        build_runtime_logistic_gate_matrix(
+            gate,
+            feature_matrix,
+            probabilities=np.asarray([0.9], dtype=np.float64),
+            row_signals=None,
+        )
+
+
+def test_build_logistic_gate_matrix_rejects_absent_gate_bucket_source() -> None:
+    with pytest.raises(ValueError, match="gate_bucket_.*require.*first_name_bucket"):
+        build_logistic_gate_matrix(
+            ("gate_bucket_single_candidate|multi_letter_first",),
+            query_indices=np.asarray(["q1"], dtype=object),
+            probabilities=np.asarray([0.9], dtype=np.float64),
             feature_values={},
         )
 

@@ -1,0 +1,1622 @@
+{
+  "status": "local_candidate_preparation_and_bounded_validation_complete",
+  "production_code_changed": false,
+  "production_assets_replaced": false,
+  "s3_publication_performed": false,
+  "name_frequency_rebuild_performed": false,
+  "source_sha256": "bfcdc22eddceead61602e2dcb063f1fb5e8b9d29027ddcd2195ec16d29250915",
+  "cache_metrics": {
+    "source_mentions": 41899086,
+    "orcid_groups": 9425662,
+    "canonical_distinct_rows": 10484891,
+    "empty_canonical_mentions": 443,
+    "empty_canonical_group_rows": 344,
+    "max_nonempty_canonical_firsts_per_orcid": 1242,
+    "unique_raw_firsts": 603544
+  },
+  "cache_sha256": "36096dd49919c818fc25e48513ebcdbff9caf0ef67000dafff1b68e2ceb58677",
+  "count_statistics_sha256": "92a6e9f6521d93a2792947324dd21f9a8b365a15699520e22ed6be782f975494",
+  "elapsed_seconds": {
+    "cache": 56.67131996154785,
+    "counts": 54.94772696495056
+  },
+  "execution": {
+    "cache": {
+      "git_revision": "ff9f61c6a160e7a9bf6a66bca6151219d3ebcccb",
+      "command": [
+        "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\build_cache.py",
+        "--output",
+        "scratch/dataset_upgrade_20260925/orcid_calibration/full_cache",
+        "--max-seconds",
+        "900",
+        "--memory",
+        "8GB",
+        "--threads",
+        "2"
+      ],
+      "cwd": "D:\\Google Drive\\code\\ai2\\S2AND",
+      "max_seconds": 900,
+      "pid": 4512,
+      "exit_code": 0
+    },
+    "counts": {
+      "git_revision": "ff9f61c6a160e7a9bf6a66bca6151219d3ebcccb",
+      "command": [
+        "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\build_counts.py",
+        "--cache",
+        "scratch/dataset_upgrade_20260925/orcid_calibration/full_cache/canonical_groups.parquet",
+        "--output",
+        "scratch/dataset_upgrade_20260925/orcid_calibration/full_counts",
+        "--max-seconds",
+        "900",
+        "--max-groups",
+        "2000000"
+      ],
+      "cwd": "D:\\Google Drive\\code\\ai2\\S2AND",
+      "max_seconds": 900,
+      "pid": 28776,
+      "exit_code": 0
+    }
+  },
+  "code_sha256": {
+    "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\build_counts.py": "63ba363bfa5754091efe283e19e7ecde18fe6492e1f616686b5113dd8d650b01",
+    "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\count_core.py": "1f281a36a6dc2e01d16b5a62abb41d4ec9faa7d8ea552652b754d0562b11a148",
+    "s2and\\text.py": "81a67ee7015984ebc7b142cf71e132e08fbca8c922a66302062c0a74e488da39",
+    "scripts\\production\\counts\\generate_orcid_name_prefix_counts.py": "5454b93d2cf4c06e0ca82b13b17d58b57b0890bd99474fac1741f5a954925933"
+  },
+  "counts_summary": {
+    "statistics_totals": {
+      "pair_keys": 437780,
+      "events": 1416921,
+      "clean_pair_keys": 258900,
+      "clean_events": 805884,
+      "maximum_event_count": 3790,
+      "clean_maximum_event_count": 3789
+    },
+    "candidates": [
+      {
+        "name": "all_sources_min5",
+        "path": "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\full_counts\\candidates\\all_sources_min5.json",
+        "threshold": 5,
+        "group_policy": "all_sources",
+        "sha256": "325bd09f681d249d11898993a3eb922ab45e362224977af5dcdec3b6c2cc1f0b",
+        "orcid_pair_keys_before_threshold": 437780,
+        "orcid_pair_keys_after_threshold": 40226,
+        "alias_pair_keys_before_threshold": 18275,
+        "selected_name_tuple_pairs": 5027,
+        "output_pair_keys": 40896,
+        "output_outer_keys": 4733
+      },
+      {
+        "name": "all_sources_min10",
+        "path": "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\full_counts\\candidates\\all_sources_min10.json",
+        "threshold": 10,
+        "group_policy": "all_sources",
+        "sha256": "e2dc3a0186135ea7b9ee846d25cca6074e414ba6f3029e88ec11289b8ac048d7",
+        "orcid_pair_keys_before_threshold": 437780,
+        "orcid_pair_keys_after_threshold": 17596,
+        "alias_pair_keys_before_threshold": 18275,
+        "selected_name_tuple_pairs": 5027,
+        "output_pair_keys": 18631,
+        "output_outer_keys": 2997
+      },
+      {
+        "name": "all_sources_min20",
+        "path": "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\full_counts\\candidates\\all_sources_min20.json",
+        "threshold": 20,
+        "group_policy": "all_sources",
+        "sha256": "eb22f50190d0cdbbf1eb4690bc6aeea8dd3788599a172fe6404d6eb38444fea3",
+        "orcid_pair_keys_before_threshold": 437780,
+        "orcid_pair_keys_after_threshold": 7315,
+        "alias_pair_keys_before_threshold": 18275,
+        "selected_name_tuple_pairs": 5027,
+        "output_pair_keys": 8811,
+        "output_outer_keys": 1861
+      },
+      {
+        "name": "all_sources_min50",
+        "path": "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\full_counts\\candidates\\all_sources_min50.json",
+        "threshold": 50,
+        "group_policy": "all_sources",
+        "sha256": "c555402f0b604e4e8f272cf21aac5729298a1e72764c704306cae44c08c4ae83",
+        "orcid_pair_keys_before_threshold": 437780,
+        "orcid_pair_keys_after_threshold": 2374,
+        "alias_pair_keys_before_threshold": 18275,
+        "selected_name_tuple_pairs": 5027,
+        "output_pair_keys": 4378,
+        "output_outer_keys": 1203
+      },
+      {
+        "name": "exclude_reviewed_14_min5",
+        "path": "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\full_counts\\candidates\\exclude_reviewed_14_min5.json",
+        "threshold": 5,
+        "group_policy": "exclude_reviewed_14",
+        "sha256": "2e95837181b23add4d92310f0ae8d9b59b9e7e38e5169c1434962778027177fb",
+        "orcid_pair_keys_before_threshold": 258900,
+        "orcid_pair_keys_after_threshold": 18121,
+        "alias_pair_keys_before_threshold": 18275,
+        "selected_name_tuple_pairs": 5027,
+        "output_pair_keys": 18815,
+        "output_outer_keys": 3417
+      },
+      {
+        "name": "exclude_reviewed_14_min10",
+        "path": "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\full_counts\\candidates\\exclude_reviewed_14_min10.json",
+        "threshold": 10,
+        "group_policy": "exclude_reviewed_14",
+        "sha256": "827389ef07822a29a43ecafa02552da4106f4700cfff292b63382f236ef35589",
+        "orcid_pair_keys_before_threshold": 258900,
+        "orcid_pair_keys_after_threshold": 7766,
+        "alias_pair_keys_before_threshold": 18275,
+        "selected_name_tuple_pairs": 5027,
+        "output_pair_keys": 8858,
+        "output_outer_keys": 1950
+      },
+      {
+        "name": "exclude_reviewed_14_min20",
+        "path": "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\full_counts\\candidates\\exclude_reviewed_14_min20.json",
+        "threshold": 20,
+        "group_policy": "exclude_reviewed_14",
+        "sha256": "295ccf24000e23df7f58cb1348a22842a796627f4a99b6d82339ee1b35dbeb54",
+        "orcid_pair_keys_before_threshold": 258900,
+        "orcid_pair_keys_after_threshold": 3448,
+        "alias_pair_keys_before_threshold": 18275,
+        "selected_name_tuple_pairs": 5027,
+        "output_pair_keys": 5038,
+        "output_outer_keys": 1349
+      },
+      {
+        "name": "exclude_reviewed_14_min50",
+        "path": "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\full_counts\\candidates\\exclude_reviewed_14_min50.json",
+        "threshold": 50,
+        "group_policy": "exclude_reviewed_14",
+        "sha256": "be066d6623ea6f3dd57949a6bb496cbe19cbdaa5d2bd8fd34d7e7bcd3a156e76",
+        "orcid_pair_keys_before_threshold": 258900,
+        "orcid_pair_keys_after_threshold": 1345,
+        "alias_pair_keys_before_threshold": 18275,
+        "selected_name_tuple_pairs": 5027,
+        "output_pair_keys": 3406,
+        "output_outer_keys": 1076
+      }
+    ],
+    "dominance": [
+      {
+        "orcid_pair_keys": 40226,
+        "single_orcid_support_keys": 11050,
+        "at_least_half_from_one_orcid": 23565,
+        "max_events": 3790,
+        "max_single_group_events": 1344,
+        "policy": "all_sources",
+        "threshold": 5
+      },
+      {
+        "orcid_pair_keys": 17596,
+        "single_orcid_support_keys": 3322,
+        "at_least_half_from_one_orcid": 9979,
+        "max_events": 3790,
+        "max_single_group_events": 1344,
+        "policy": "all_sources",
+        "threshold": 10
+      },
+      {
+        "orcid_pair_keys": 7315,
+        "single_orcid_support_keys": 646,
+        "at_least_half_from_one_orcid": 3753,
+        "max_events": 3790,
+        "max_single_group_events": 1344,
+        "policy": "all_sources",
+        "threshold": 20
+      },
+      {
+        "orcid_pair_keys": 2374,
+        "single_orcid_support_keys": 47,
+        "at_least_half_from_one_orcid": 947,
+        "max_events": 3790,
+        "max_single_group_events": 1344,
+        "policy": "all_sources",
+        "threshold": 50
+      },
+      {
+        "orcid_pair_keys": 18121,
+        "single_orcid_support_keys": 21,
+        "at_least_half_from_one_orcid": 469,
+        "max_events": 3789,
+        "max_single_group_events": 12,
+        "policy": "exclude_reviewed_14",
+        "threshold": 5
+      },
+      {
+        "orcid_pair_keys": 7766,
+        "single_orcid_support_keys": 0,
+        "at_least_half_from_one_orcid": 9,
+        "max_events": 3789,
+        "max_single_group_events": 12,
+        "policy": "exclude_reviewed_14",
+        "threshold": 10
+      },
+      {
+        "orcid_pair_keys": 3448,
+        "single_orcid_support_keys": 0,
+        "at_least_half_from_one_orcid": 0,
+        "max_events": 3789,
+        "max_single_group_events": 12,
+        "policy": "exclude_reviewed_14",
+        "threshold": 20
+      },
+      {
+        "orcid_pair_keys": 1345,
+        "single_orcid_support_keys": 0,
+        "at_least_half_from_one_orcid": 0,
+        "max_events": 3789,
+        "max_single_group_events": 12,
+        "policy": "exclude_reviewed_14",
+        "threshold": 50
+      }
+    ],
+    "top_pairs": [
+      [
+        "alek",
+        "alex",
+        3790,
+        3028,
+        8,
+        3789,
+        3027,
+        8
+      ],
+      [
+        "aleks",
+        "alex",
+        3778,
+        3023,
+        8,
+        3777,
+        3022,
+        8
+      ],
+      [
+        "alek",
+        "alexa",
+        2522,
+        2054,
+        4,
+        2521,
+        2053,
+        4
+      ],
+      [
+        "aleks",
+        "alexa",
+        2516,
+        2050,
+        4,
+        2515,
+        2049,
+        4
+      ],
+      [
+        "serg",
+        "serh",
+        2039,
+        1403,
+        9,
+        2039,
+        1403,
+        9
+      ],
+      [
+        "serg",
+        "serhi",
+        2027,
+        1398,
+        9,
+        2027,
+        1398,
+        9
+      ],
+      [
+        "al",
+        "an",
+        1949,
+        452,
+        1344,
+        524,
+        446,
+        6
+      ],
+      [
+        "sergi",
+        "serh",
+        1661,
+        1279,
+        6,
+        1661,
+        1279,
+        6
+      ],
+      [
+        "sergi",
+        "serhi",
+        1656,
+        1277,
+        6,
+        1656,
+        1277,
+        6
+      ],
+      [
+        "ma",
+        "mi",
+        1647,
+        585,
+        880,
+        653,
+        575,
+        12
+      ]
+    ],
+    "reviewed_events": 611037,
+    "total_elapsed_count_and_cache_seconds": 111.61904692649841,
+    "disk_bytes": 2024407540,
+    "name_cardinality": {
+      "exclude_reviewed_14_max_names": 100,
+      "exclude_reviewed_14_groups_over100": 0,
+      "all_groups_over100": [
+        [
+          "0000-0002-1825-0097",
+          1242
+        ],
+        [
+          "0000-0001-2345-6789",
+          200
+        ],
+        [
+          "0000-0002-5024-6186",
+          158
+        ],
+        [
+          "0000-0001-7511-2910",
+          150
+        ],
+        [
+          "0000-0002-3752-9683",
+          147
+        ],
+        [
+          "0000-0002-4011-3590",
+          128
+        ],
+        [
+          "0000-0002-5982-8983",
+          126
+        ],
+        [
+          "0000-0000-0000-0001",
+          115
+        ]
+      ]
+    }
+  },
+  "independent_output_verification": {
+    "status": "passed",
+    "release_asset": false,
+    "scope": "Full persisted statistics and all 8 candidates; all 14 reviewed groups independently recounted from existing complete raw-group fixtures with actual production producer. No second full raw-source count pass.",
+    "run_sha256": "8b45ae246cef0becafa412c6e14c751b1c5b04a4fcab6fdf8ab459074da394e3",
+    "cache_sha256_verified": "36096dd49919c818fc25e48513ebcdbff9caf0ef67000dafff1b68e2ceb58677",
+    "statistics_sha256_verified": "92a6e9f6521d93a2792947324dd21f9a8b365a15699520e22ed6be782f975494",
+    "statistics_rows": 437780,
+    "eligible_orcid_groups": 907809,
+    "reviewed_groups": [
+      {
+        "orcid": "0000-0000-0000-0001",
+        "raw_mentions": 132,
+        "canonical_names": 115,
+        "pairs": 2950,
+        "events": 4520
+      },
+      {
+        "orcid": "0000-0001-2345-6789",
+        "raw_mentions": 277,
+        "canonical_names": 200,
+        "pairs": 7789,
+        "events": 11658
+      },
+      {
+        "orcid": "0000-0001-7511-2910",
+        "raw_mentions": 184,
+        "canonical_names": 150,
+        "pairs": 3680,
+        "events": 6116
+      },
+      {
+        "orcid": "0000-0002-1028-8971",
+        "raw_mentions": 5,
+        "canonical_names": 3,
+        "pairs": 0,
+        "events": 0
+      },
+      {
+        "orcid": "0000-0002-1825-0097",
+        "raw_mentions": 2467,
+        "canonical_names": 1242,
+        "pairs": 180314,
+        "events": 556721
+      },
+      {
+        "orcid": "0000-0002-3752-9683",
+        "raw_mentions": 619,
+        "canonical_names": 147,
+        "pairs": 2810,
+        "events": 7083
+      },
+      {
+        "orcid": "0000-0002-4011-3590",
+        "raw_mentions": 336,
+        "canonical_names": 128,
+        "pairs": 5721,
+        "events": 7887
+      },
+      {
+        "orcid": "0000-0002-5024-6186",
+        "raw_mentions": 175,
+        "canonical_names": 158,
+        "pairs": 4864,
+        "events": 7806
+      },
+      {
+        "orcid": "0000-0002-5571-8349",
+        "raw_mentions": 71,
+        "canonical_names": 64,
+        "pairs": 1839,
+        "events": 3004
+      },
+      {
+        "orcid": "0000-0002-5982-8983",
+        "raw_mentions": 169,
+        "canonical_names": 126,
+        "pairs": 2815,
+        "events": 3600
+      },
+      {
+        "orcid": "0000-0003-1855-6181",
+        "raw_mentions": 99,
+        "canonical_names": 46,
+        "pairs": 675,
+        "events": 954
+      },
+      {
+        "orcid": "0000-0003-3393-8460",
+        "raw_mentions": 27,
+        "canonical_names": 2,
+        "pairs": 0,
+        "events": 0
+      },
+      {
+        "orcid": "0000-0003-3895-7409",
+        "raw_mentions": 13,
+        "canonical_names": 2,
+        "pairs": 0,
+        "events": 0
+      },
+      {
+        "orcid": "0009-0004-4499-3929",
+        "raw_mentions": 43,
+        "canonical_names": 41,
+        "pairs": 1037,
+        "events": 1688
+      }
+    ],
+    "reviewed_mentions": 4617,
+    "reviewed_events": 611037,
+    "reviewed_pair_keys": 206337,
+    "reviewed_pair_support_total": 214494,
+    "flagged_subtraction_verified_every_statistics_row": true,
+    "all_max_equals_max_of_clean_and_flagged_verified_every_statistics_row": true,
+    "checkpoint_files_hashed_and_reduced": 46,
+    "checkpoint_consolidation_exact_all_six_statistics": true,
+    "clean_max_scope": "Independently reduced every persisted checkpoint and verified max(all)=max(clean, independently recounted flagged) on every pair; did not recount all clean ORCID groups from source.",
+    "name_tuple_sha256": "b21638351149389c57eca547b0f79c80084e56ad273f31e778cb1db1866945a8",
+    "alias_full_pairs": 5027,
+    "alias_prefix_pairs": 18275,
+    "alias_prefix_pairs_passing_2": 2865,
+    "candidate_semantics": "ORCID count >= threshold wins unchanged; alias count >= 2 supplies only missing keys; alias counts are not added or maximized.",
+    "candidates": [
+      {
+        "name": "all_sources_min5",
+        "sha256": "325bd09f681d249d11898993a3eb922ab45e362224977af5dcdec3b6c2cc1f0b",
+        "orcid_keys": 40226,
+        "alias_fallback_keys": 670,
+        "total_keys": 40896,
+        "exact_match": true
+      },
+      {
+        "name": "all_sources_min10",
+        "sha256": "e2dc3a0186135ea7b9ee846d25cca6074e414ba6f3029e88ec11289b8ac048d7",
+        "orcid_keys": 17596,
+        "alias_fallback_keys": 1035,
+        "total_keys": 18631,
+        "exact_match": true
+      },
+      {
+        "name": "all_sources_min20",
+        "sha256": "eb22f50190d0cdbbf1eb4690bc6aeea8dd3788599a172fe6404d6eb38444fea3",
+        "orcid_keys": 7315,
+        "alias_fallback_keys": 1496,
+        "total_keys": 8811,
+        "exact_match": true
+      },
+      {
+        "name": "all_sources_min50",
+        "sha256": "c555402f0b604e4e8f272cf21aac5729298a1e72764c704306cae44c08c4ae83",
+        "orcid_keys": 2374,
+        "alias_fallback_keys": 2004,
+        "total_keys": 4378,
+        "exact_match": true
+      },
+      {
+        "name": "exclude_reviewed_14_min5",
+        "sha256": "2e95837181b23add4d92310f0ae8d9b59b9e7e38e5169c1434962778027177fb",
+        "orcid_keys": 18121,
+        "alias_fallback_keys": 694,
+        "total_keys": 18815,
+        "exact_match": true
+      },
+      {
+        "name": "exclude_reviewed_14_min10",
+        "sha256": "827389ef07822a29a43ecafa02552da4106f4700cfff292b63382f236ef35589",
+        "orcid_keys": 7766,
+        "alias_fallback_keys": 1092,
+        "total_keys": 8858,
+        "exact_match": true
+      },
+      {
+        "name": "exclude_reviewed_14_min20",
+        "sha256": "295ccf24000e23df7f58cb1348a22842a796627f4a99b6d82339ee1b35dbeb54",
+        "orcid_keys": 3448,
+        "alias_fallback_keys": 1590,
+        "total_keys": 5038,
+        "exact_match": true
+      },
+      {
+        "name": "exclude_reviewed_14_min50",
+        "sha256": "be066d6623ea6f3dd57949a6bb496cbe19cbdaa5d2bd8fd34d7e7bcd3a156e76",
+        "orcid_keys": 1345,
+        "alias_fallback_keys": 2061,
+        "total_keys": 3406,
+        "exact_match": true
+      }
+    ],
+    "elapsed_seconds": 18.110526000033133
+  },
+  "validation_comparison": {
+    "status": "verified",
+    "frozen_population_sha256": "0c9c515e364c64642dc172d31c5e476a40bb777302f7e50fa4f26bbea6b2b23f",
+    "block_count": 50,
+    "signature_count": 16446,
+    "comparison_tables": 9,
+    "maximum_sizes": [
+      100,
+      250,
+      500,
+      4000
+    ],
+    "capacity_bound_definition": "For each gold cluster of n signatures within a block: q*C(C-1)/2+r(r-1)/2, where (q,r)=divmod(n,C). Sum across clusters and blocks. This is an upper bound, not a feasible joint packing guarantee.",
+    "partition_comparison": "SHA256 of sorted groups of sorted actual member IDs, independent of native subblock names",
+    "summary": [
+      {
+        "label": "historical_reference",
+        "maximum_size": 100,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 454745,
+        "retention": 0.30686452870218667,
+        "capacity_only_pair_upper_bound": 537608,
+        "capacity_only_retention_upper_bound": 0.362780955362951,
+        "unavoidable_lost_gold_pairs_under_capacity": 944300,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 82863,
+        "fraction_of_capacity_upper_bound_retained": 0.8458672489992708,
+        "comparison_pairs": 707966,
+        "comparison_pair_fraction": 0.18538334035973428,
+        "subblock_count": 254,
+        "subblocking_seconds": 31.031021699891426,
+        "bypassed_blocks": 0,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "historical_reference",
+        "maximum_size": 250,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 996385,
+        "retention": 0.6723663007420164,
+        "capacity_only_pair_upper_bound": 1111408,
+        "capacity_only_retention_upper_bound": 0.7499844794683611,
+        "unavoidable_lost_gold_pairs_under_capacity": 370500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 115023,
+        "fraction_of_capacity_upper_bound_retained": 0.896506953342067,
+        "comparison_pairs": 1755029,
+        "comparison_pair_fraction": 0.4595604004262974,
+        "subblock_count": 101,
+        "subblocking_seconds": 6.505495299759787,
+        "bypassed_blocks": 26,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "historical_reference",
+        "maximum_size": 500,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1339376,
+        "retention": 0.9038185906277583,
+        "capacity_only_pair_upper_bound": 1364408,
+        "capacity_only_retention_upper_bound": 0.9207103274967137,
+        "unavoidable_lost_gold_pairs_under_capacity": 117500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 25032,
+        "fraction_of_capacity_upper_bound_retained": 0.9816535816266102,
+        "comparison_pairs": 2693831,
+        "comparison_pair_fraction": 0.7053889440235878,
+        "subblock_count": 63,
+        "subblocking_seconds": 1.5501896000932902,
+        "bypassed_blocks": 45,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "historical_reference",
+        "maximum_size": 4000,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1481908,
+        "retention": 1.0,
+        "capacity_only_pair_upper_bound": 1481908,
+        "capacity_only_retention_upper_bound": 1.0,
+        "unavoidable_lost_gold_pairs_under_capacity": 0,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 0,
+        "fraction_of_capacity_upper_bound_retained": 1.0,
+        "comparison_pairs": 3818930,
+        "comparison_pair_fraction": 1.0,
+        "subblock_count": 50,
+        "subblocking_seconds": 0.023274899867828935,
+        "bypassed_blocks": 50,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "all_sources_min5",
+        "maximum_size": 100,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 454813,
+        "retention": 0.30691041549138004,
+        "capacity_only_pair_upper_bound": 537608,
+        "capacity_only_retention_upper_bound": 0.362780955362951,
+        "unavoidable_lost_gold_pairs_under_capacity": 944300,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 82795,
+        "fraction_of_capacity_upper_bound_retained": 0.8459937352122736,
+        "comparison_pairs": 711888,
+        "comparison_pair_fraction": 0.1864103295949389,
+        "subblock_count": 247,
+        "subblocking_seconds": 31.43524340010481,
+        "bypassed_blocks": 0,
+        "retained_gold_pair_delta_vs_reference": 68,
+        "comparison_pair_delta_vs_reference": 3922,
+        "changed_partition_blocks_vs_reference": 6
+      },
+      {
+        "label": "all_sources_min5",
+        "maximum_size": 250,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 996388,
+        "retention": 0.6723683251591867,
+        "capacity_only_pair_upper_bound": 1111408,
+        "capacity_only_retention_upper_bound": 0.7499844794683611,
+        "unavoidable_lost_gold_pairs_under_capacity": 370500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 115020,
+        "fraction_of_capacity_upper_bound_retained": 0.8965096526208197,
+        "comparison_pairs": 1755437,
+        "comparison_pair_fraction": 0.4596672366343452,
+        "subblock_count": 99,
+        "subblocking_seconds": 6.539024600002449,
+        "bypassed_blocks": 26,
+        "retained_gold_pair_delta_vs_reference": 3,
+        "comparison_pair_delta_vs_reference": 408,
+        "changed_partition_blocks_vs_reference": 2
+      },
+      {
+        "label": "all_sources_min5",
+        "maximum_size": 500,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1339376,
+        "retention": 0.9038185906277583,
+        "capacity_only_pair_upper_bound": 1364408,
+        "capacity_only_retention_upper_bound": 0.9207103274967137,
+        "unavoidable_lost_gold_pairs_under_capacity": 117500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 25032,
+        "fraction_of_capacity_upper_bound_retained": 0.9816535816266102,
+        "comparison_pairs": 2694291,
+        "comparison_pair_fraction": 0.7055093966110927,
+        "subblock_count": 62,
+        "subblocking_seconds": 1.45430329994997,
+        "bypassed_blocks": 45,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 460,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "all_sources_min5",
+        "maximum_size": 4000,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1481908,
+        "retention": 1.0,
+        "capacity_only_pair_upper_bound": 1481908,
+        "capacity_only_retention_upper_bound": 1.0,
+        "unavoidable_lost_gold_pairs_under_capacity": 0,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 0,
+        "fraction_of_capacity_upper_bound_retained": 1.0,
+        "comparison_pairs": 3818930,
+        "comparison_pair_fraction": 1.0,
+        "subblock_count": 50,
+        "subblocking_seconds": 0.025004499999340624,
+        "bypassed_blocks": 50,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "all_sources_min10",
+        "maximum_size": 100,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 454745,
+        "retention": 0.30686452870218667,
+        "capacity_only_pair_upper_bound": 537608,
+        "capacity_only_retention_upper_bound": 0.362780955362951,
+        "unavoidable_lost_gold_pairs_under_capacity": 944300,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 82863,
+        "fraction_of_capacity_upper_bound_retained": 0.8458672489992708,
+        "comparison_pairs": 710449,
+        "comparison_pair_fraction": 0.1860335224788095,
+        "subblock_count": 250,
+        "subblocking_seconds": 32.208603999984916,
+        "bypassed_blocks": 0,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 2483,
+        "changed_partition_blocks_vs_reference": 3
+      },
+      {
+        "label": "all_sources_min10",
+        "maximum_size": 250,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 996385,
+        "retention": 0.6723663007420164,
+        "capacity_only_pair_upper_bound": 1111408,
+        "capacity_only_retention_upper_bound": 0.7499844794683611,
+        "unavoidable_lost_gold_pairs_under_capacity": 370500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 115023,
+        "fraction_of_capacity_upper_bound_retained": 0.896506953342067,
+        "comparison_pairs": 1755231,
+        "comparison_pair_fraction": 0.4596132948234191,
+        "subblock_count": 100,
+        "subblocking_seconds": 6.287674399965908,
+        "bypassed_blocks": 26,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 202,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "all_sources_min10",
+        "maximum_size": 500,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1339376,
+        "retention": 0.9038185906277583,
+        "capacity_only_pair_upper_bound": 1364408,
+        "capacity_only_retention_upper_bound": 0.9207103274967137,
+        "unavoidable_lost_gold_pairs_under_capacity": 117500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 25032,
+        "fraction_of_capacity_upper_bound_retained": 0.9816535816266102,
+        "comparison_pairs": 2694291,
+        "comparison_pair_fraction": 0.7055093966110927,
+        "subblock_count": 62,
+        "subblocking_seconds": 1.4014003000338562,
+        "bypassed_blocks": 45,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 460,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "all_sources_min10",
+        "maximum_size": 4000,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1481908,
+        "retention": 1.0,
+        "capacity_only_pair_upper_bound": 1481908,
+        "capacity_only_retention_upper_bound": 1.0,
+        "unavoidable_lost_gold_pairs_under_capacity": 0,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 0,
+        "fraction_of_capacity_upper_bound_retained": 1.0,
+        "comparison_pairs": 3818930,
+        "comparison_pair_fraction": 1.0,
+        "subblock_count": 50,
+        "subblocking_seconds": 0.021409700042568147,
+        "bypassed_blocks": 50,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "all_sources_min20",
+        "maximum_size": 100,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 454745,
+        "retention": 0.30686452870218667,
+        "capacity_only_pair_upper_bound": 537608,
+        "capacity_only_retention_upper_bound": 0.362780955362951,
+        "unavoidable_lost_gold_pairs_under_capacity": 944300,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 82863,
+        "fraction_of_capacity_upper_bound_retained": 0.8458672489992708,
+        "comparison_pairs": 710384,
+        "comparison_pair_fraction": 0.18601650200448816,
+        "subblock_count": 251,
+        "subblocking_seconds": 30.58408210001653,
+        "bypassed_blocks": 0,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 2418,
+        "changed_partition_blocks_vs_reference": 3
+      },
+      {
+        "label": "all_sources_min20",
+        "maximum_size": 250,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 996362,
+        "retention": 0.6723507802103774,
+        "capacity_only_pair_upper_bound": 1111408,
+        "capacity_only_retention_upper_bound": 0.7499844794683611,
+        "unavoidable_lost_gold_pairs_under_capacity": 370500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 115046,
+        "fraction_of_capacity_upper_bound_retained": 0.8964862588716295,
+        "comparison_pairs": 1755035,
+        "comparison_pair_fraction": 0.459561971547004,
+        "subblock_count": 101,
+        "subblocking_seconds": 6.5765554002719,
+        "bypassed_blocks": 26,
+        "retained_gold_pair_delta_vs_reference": -23,
+        "comparison_pair_delta_vs_reference": 6,
+        "changed_partition_blocks_vs_reference": 2
+      },
+      {
+        "label": "all_sources_min20",
+        "maximum_size": 500,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1339376,
+        "retention": 0.9038185906277583,
+        "capacity_only_pair_upper_bound": 1364408,
+        "capacity_only_retention_upper_bound": 0.9207103274967137,
+        "unavoidable_lost_gold_pairs_under_capacity": 117500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 25032,
+        "fraction_of_capacity_upper_bound_retained": 0.9816535816266102,
+        "comparison_pairs": 2694291,
+        "comparison_pair_fraction": 0.7055093966110927,
+        "subblock_count": 62,
+        "subblocking_seconds": 1.3774635000736453,
+        "bypassed_blocks": 45,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 460,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "all_sources_min20",
+        "maximum_size": 4000,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1481908,
+        "retention": 1.0,
+        "capacity_only_pair_upper_bound": 1481908,
+        "capacity_only_retention_upper_bound": 1.0,
+        "unavoidable_lost_gold_pairs_under_capacity": 0,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 0,
+        "fraction_of_capacity_upper_bound_retained": 1.0,
+        "comparison_pairs": 3818930,
+        "comparison_pair_fraction": 1.0,
+        "subblock_count": 50,
+        "subblocking_seconds": 0.025576600455679,
+        "bypassed_blocks": 50,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "all_sources_min50",
+        "maximum_size": 100,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 454745,
+        "retention": 0.30686452870218667,
+        "capacity_only_pair_upper_bound": 537608,
+        "capacity_only_retention_upper_bound": 0.362780955362951,
+        "unavoidable_lost_gold_pairs_under_capacity": 944300,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 82863,
+        "fraction_of_capacity_upper_bound_retained": 0.8458672489992708,
+        "comparison_pairs": 707966,
+        "comparison_pair_fraction": 0.18538334035973428,
+        "subblock_count": 254,
+        "subblocking_seconds": 30.814550499839243,
+        "bypassed_blocks": 0,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "all_sources_min50",
+        "maximum_size": 250,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 996362,
+        "retention": 0.6723507802103774,
+        "capacity_only_pair_upper_bound": 1111408,
+        "capacity_only_retention_upper_bound": 0.7499844794683611,
+        "unavoidable_lost_gold_pairs_under_capacity": 370500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 115046,
+        "fraction_of_capacity_upper_bound_retained": 0.8964862588716295,
+        "comparison_pairs": 1754632,
+        "comparison_pair_fraction": 0.4594564446062117,
+        "subblock_count": 103,
+        "subblocking_seconds": 6.3192677000770345,
+        "bypassed_blocks": 26,
+        "retained_gold_pair_delta_vs_reference": -23,
+        "comparison_pair_delta_vs_reference": -397,
+        "changed_partition_blocks_vs_reference": 2
+      },
+      {
+        "label": "all_sources_min50",
+        "maximum_size": 500,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1339376,
+        "retention": 0.9038185906277583,
+        "capacity_only_pair_upper_bound": 1364408,
+        "capacity_only_retention_upper_bound": 0.9207103274967137,
+        "unavoidable_lost_gold_pairs_under_capacity": 117500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 25032,
+        "fraction_of_capacity_upper_bound_retained": 0.9816535816266102,
+        "comparison_pairs": 2693372,
+        "comparison_pair_fraction": 0.705268753289534,
+        "subblock_count": 64,
+        "subblocking_seconds": 1.4198755995603278,
+        "bypassed_blocks": 45,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": -459,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "all_sources_min50",
+        "maximum_size": 4000,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1481908,
+        "retention": 1.0,
+        "capacity_only_pair_upper_bound": 1481908,
+        "capacity_only_retention_upper_bound": 1.0,
+        "unavoidable_lost_gold_pairs_under_capacity": 0,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 0,
+        "fraction_of_capacity_upper_bound_retained": 1.0,
+        "comparison_pairs": 3818930,
+        "comparison_pair_fraction": 1.0,
+        "subblock_count": 50,
+        "subblocking_seconds": 0.021711799781769514,
+        "bypassed_blocks": 50,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "exclude_reviewed_14_min5",
+        "maximum_size": 100,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 455248,
+        "retention": 0.30720395598107303,
+        "capacity_only_pair_upper_bound": 537608,
+        "capacity_only_retention_upper_bound": 0.362780955362951,
+        "unavoidable_lost_gold_pairs_under_capacity": 944300,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 82360,
+        "fraction_of_capacity_upper_bound_retained": 0.8468028749572178,
+        "comparison_pairs": 712908,
+        "comparison_pair_fraction": 0.18667742011505842,
+        "subblock_count": 247,
+        "subblocking_seconds": 30.957806500198785,
+        "bypassed_blocks": 0,
+        "retained_gold_pair_delta_vs_reference": 503,
+        "comparison_pair_delta_vs_reference": 4942,
+        "changed_partition_blocks_vs_reference": 7
+      },
+      {
+        "label": "exclude_reviewed_14_min5",
+        "maximum_size": 250,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 996388,
+        "retention": 0.6723683251591867,
+        "capacity_only_pair_upper_bound": 1111408,
+        "capacity_only_retention_upper_bound": 0.7499844794683611,
+        "unavoidable_lost_gold_pairs_under_capacity": 370500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 115020,
+        "fraction_of_capacity_upper_bound_retained": 0.8965096526208197,
+        "comparison_pairs": 1755437,
+        "comparison_pair_fraction": 0.4596672366343452,
+        "subblock_count": 99,
+        "subblocking_seconds": 6.339410700195003,
+        "bypassed_blocks": 26,
+        "retained_gold_pair_delta_vs_reference": 3,
+        "comparison_pair_delta_vs_reference": 408,
+        "changed_partition_blocks_vs_reference": 2
+      },
+      {
+        "label": "exclude_reviewed_14_min5",
+        "maximum_size": 500,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1339376,
+        "retention": 0.9038185906277583,
+        "capacity_only_pair_upper_bound": 1364408,
+        "capacity_only_retention_upper_bound": 0.9207103274967137,
+        "unavoidable_lost_gold_pairs_under_capacity": 117500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 25032,
+        "fraction_of_capacity_upper_bound_retained": 0.9816535816266102,
+        "comparison_pairs": 2694291,
+        "comparison_pair_fraction": 0.7055093966110927,
+        "subblock_count": 62,
+        "subblocking_seconds": 1.3501742999069393,
+        "bypassed_blocks": 45,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 460,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "exclude_reviewed_14_min5",
+        "maximum_size": 4000,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1481908,
+        "retention": 1.0,
+        "capacity_only_pair_upper_bound": 1481908,
+        "capacity_only_retention_upper_bound": 1.0,
+        "unavoidable_lost_gold_pairs_under_capacity": 0,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 0,
+        "fraction_of_capacity_upper_bound_retained": 1.0,
+        "comparison_pairs": 3818930,
+        "comparison_pair_fraction": 1.0,
+        "subblock_count": 50,
+        "subblocking_seconds": 0.022010099899489433,
+        "bypassed_blocks": 50,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "exclude_reviewed_14_min10",
+        "maximum_size": 100,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 455180,
+        "retention": 0.30715806919187966,
+        "capacity_only_pair_upper_bound": 537608,
+        "capacity_only_retention_upper_bound": 0.362780955362951,
+        "unavoidable_lost_gold_pairs_under_capacity": 944300,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 82428,
+        "fraction_of_capacity_upper_bound_retained": 0.8466763887442151,
+        "comparison_pairs": 710106,
+        "comparison_pair_fraction": 0.18594370674508304,
+        "subblock_count": 251,
+        "subblocking_seconds": 28.543153799779247,
+        "bypassed_blocks": 0,
+        "retained_gold_pair_delta_vs_reference": 435,
+        "comparison_pair_delta_vs_reference": 2140,
+        "changed_partition_blocks_vs_reference": 3
+      },
+      {
+        "label": "exclude_reviewed_14_min10",
+        "maximum_size": 250,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 996385,
+        "retention": 0.6723663007420164,
+        "capacity_only_pair_upper_bound": 1111408,
+        "capacity_only_retention_upper_bound": 0.7499844794683611,
+        "unavoidable_lost_gold_pairs_under_capacity": 370500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 115023,
+        "fraction_of_capacity_upper_bound_retained": 0.896506953342067,
+        "comparison_pairs": 1755231,
+        "comparison_pair_fraction": 0.4596132948234191,
+        "subblock_count": 100,
+        "subblocking_seconds": 6.438748000189662,
+        "bypassed_blocks": 26,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 202,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "exclude_reviewed_14_min10",
+        "maximum_size": 500,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1339376,
+        "retention": 0.9038185906277583,
+        "capacity_only_pair_upper_bound": 1364408,
+        "capacity_only_retention_upper_bound": 0.9207103274967137,
+        "unavoidable_lost_gold_pairs_under_capacity": 117500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 25032,
+        "fraction_of_capacity_upper_bound_retained": 0.9816535816266102,
+        "comparison_pairs": 2694291,
+        "comparison_pair_fraction": 0.7055093966110927,
+        "subblock_count": 62,
+        "subblocking_seconds": 1.2931490001501516,
+        "bypassed_blocks": 45,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 460,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "exclude_reviewed_14_min10",
+        "maximum_size": 4000,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1481908,
+        "retention": 1.0,
+        "capacity_only_pair_upper_bound": 1481908,
+        "capacity_only_retention_upper_bound": 1.0,
+        "unavoidable_lost_gold_pairs_under_capacity": 0,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 0,
+        "fraction_of_capacity_upper_bound_retained": 1.0,
+        "comparison_pairs": 3818930,
+        "comparison_pair_fraction": 1.0,
+        "subblock_count": 50,
+        "subblocking_seconds": 0.02292980020865798,
+        "bypassed_blocks": 50,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "exclude_reviewed_14_min20",
+        "maximum_size": 100,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 455180,
+        "retention": 0.30715806919187966,
+        "capacity_only_pair_upper_bound": 537608,
+        "capacity_only_retention_upper_bound": 0.362780955362951,
+        "unavoidable_lost_gold_pairs_under_capacity": 944300,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 82428,
+        "fraction_of_capacity_upper_bound_retained": 0.8466763887442151,
+        "comparison_pairs": 709966,
+        "comparison_pair_fraction": 0.1859070472619294,
+        "subblock_count": 253,
+        "subblocking_seconds": 30.418703800125513,
+        "bypassed_blocks": 0,
+        "retained_gold_pair_delta_vs_reference": 435,
+        "comparison_pair_delta_vs_reference": 2000,
+        "changed_partition_blocks_vs_reference": 2
+      },
+      {
+        "label": "exclude_reviewed_14_min20",
+        "maximum_size": 250,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 996362,
+        "retention": 0.6723507802103774,
+        "capacity_only_pair_upper_bound": 1111408,
+        "capacity_only_retention_upper_bound": 0.7499844794683611,
+        "unavoidable_lost_gold_pairs_under_capacity": 370500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 115046,
+        "fraction_of_capacity_upper_bound_retained": 0.8964862588716295,
+        "comparison_pairs": 1755035,
+        "comparison_pair_fraction": 0.459561971547004,
+        "subblock_count": 101,
+        "subblocking_seconds": 8.21526180015644,
+        "bypassed_blocks": 26,
+        "retained_gold_pair_delta_vs_reference": -23,
+        "comparison_pair_delta_vs_reference": 6,
+        "changed_partition_blocks_vs_reference": 2
+      },
+      {
+        "label": "exclude_reviewed_14_min20",
+        "maximum_size": 500,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1339376,
+        "retention": 0.9038185906277583,
+        "capacity_only_pair_upper_bound": 1364408,
+        "capacity_only_retention_upper_bound": 0.9207103274967137,
+        "unavoidable_lost_gold_pairs_under_capacity": 117500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 25032,
+        "fraction_of_capacity_upper_bound_retained": 0.9816535816266102,
+        "comparison_pairs": 2694291,
+        "comparison_pair_fraction": 0.7055093966110927,
+        "subblock_count": 62,
+        "subblocking_seconds": 1.2568487000535242,
+        "bypassed_blocks": 45,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 460,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "exclude_reviewed_14_min20",
+        "maximum_size": 4000,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1481908,
+        "retention": 1.0,
+        "capacity_only_pair_upper_bound": 1481908,
+        "capacity_only_retention_upper_bound": 1.0,
+        "unavoidable_lost_gold_pairs_under_capacity": 0,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 0,
+        "fraction_of_capacity_upper_bound_retained": 1.0,
+        "comparison_pairs": 3818930,
+        "comparison_pair_fraction": 1.0,
+        "subblock_count": 50,
+        "subblocking_seconds": 0.026560600206721574,
+        "bypassed_blocks": 50,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      },
+      {
+        "label": "exclude_reviewed_14_min50",
+        "maximum_size": 100,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 455180,
+        "retention": 0.30715806919187966,
+        "capacity_only_pair_upper_bound": 537608,
+        "capacity_only_retention_upper_bound": 0.362780955362951,
+        "unavoidable_lost_gold_pairs_under_capacity": 944300,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 82428,
+        "fraction_of_capacity_upper_bound_retained": 0.8466763887442151,
+        "comparison_pairs": 708986,
+        "comparison_pair_fraction": 0.18565043087985378,
+        "subblock_count": 254,
+        "subblocking_seconds": 30.868304799834732,
+        "bypassed_blocks": 0,
+        "retained_gold_pair_delta_vs_reference": 435,
+        "comparison_pair_delta_vs_reference": 1020,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "exclude_reviewed_14_min50",
+        "maximum_size": 250,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 996362,
+        "retention": 0.6723507802103774,
+        "capacity_only_pair_upper_bound": 1111408,
+        "capacity_only_retention_upper_bound": 0.7499844794683611,
+        "unavoidable_lost_gold_pairs_under_capacity": 370500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 115046,
+        "fraction_of_capacity_upper_bound_retained": 0.8964862588716295,
+        "comparison_pairs": 1754632,
+        "comparison_pair_fraction": 0.4594564446062117,
+        "subblock_count": 103,
+        "subblocking_seconds": 9.176236400089692,
+        "bypassed_blocks": 26,
+        "retained_gold_pair_delta_vs_reference": -23,
+        "comparison_pair_delta_vs_reference": -397,
+        "changed_partition_blocks_vs_reference": 2
+      },
+      {
+        "label": "exclude_reviewed_14_min50",
+        "maximum_size": 500,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1339376,
+        "retention": 0.9038185906277583,
+        "capacity_only_pair_upper_bound": 1364408,
+        "capacity_only_retention_upper_bound": 0.9207103274967137,
+        "unavoidable_lost_gold_pairs_under_capacity": 117500,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 25032,
+        "fraction_of_capacity_upper_bound_retained": 0.9816535816266102,
+        "comparison_pairs": 2641514,
+        "comparison_pair_fraction": 0.6916895570225168,
+        "subblock_count": 65,
+        "subblocking_seconds": 1.3844884000718594,
+        "bypassed_blocks": 45,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": -52317,
+        "changed_partition_blocks_vs_reference": 1
+      },
+      {
+        "label": "exclude_reviewed_14_min50",
+        "maximum_size": 4000,
+        "gold_pairs": 1481908,
+        "retained_gold_pairs": 1481908,
+        "retention": 1.0,
+        "capacity_only_pair_upper_bound": 1481908,
+        "capacity_only_retention_upper_bound": 1.0,
+        "unavoidable_lost_gold_pairs_under_capacity": 0,
+        "additional_lost_gold_pairs_beyond_capacity_bound": 0,
+        "fraction_of_capacity_upper_bound_retained": 1.0,
+        "comparison_pairs": 3818930,
+        "comparison_pair_fraction": 1.0,
+        "subblock_count": 50,
+        "subblocking_seconds": 0.03083869972033426,
+        "bypassed_blocks": 50,
+        "retained_gold_pair_delta_vs_reference": 0,
+        "comparison_pair_delta_vs_reference": 0,
+        "changed_partition_blocks_vs_reference": 0
+      }
+    ],
+    "all_sources_vs_exclude_reviewed_14": [
+      {
+        "minimum_count": 5,
+        "maximum_size": 100,
+        "changed_partition_blocks": 1
+      },
+      {
+        "minimum_count": 5,
+        "maximum_size": 250,
+        "changed_partition_blocks": 0
+      },
+      {
+        "minimum_count": 5,
+        "maximum_size": 500,
+        "changed_partition_blocks": 0
+      },
+      {
+        "minimum_count": 5,
+        "maximum_size": 4000,
+        "changed_partition_blocks": 0
+      },
+      {
+        "minimum_count": 10,
+        "maximum_size": 100,
+        "changed_partition_blocks": 2
+      },
+      {
+        "minimum_count": 10,
+        "maximum_size": 250,
+        "changed_partition_blocks": 0
+      },
+      {
+        "minimum_count": 10,
+        "maximum_size": 500,
+        "changed_partition_blocks": 0
+      },
+      {
+        "minimum_count": 10,
+        "maximum_size": 4000,
+        "changed_partition_blocks": 0
+      },
+      {
+        "minimum_count": 20,
+        "maximum_size": 100,
+        "changed_partition_blocks": 3
+      },
+      {
+        "minimum_count": 20,
+        "maximum_size": 250,
+        "changed_partition_blocks": 0
+      },
+      {
+        "minimum_count": 20,
+        "maximum_size": 500,
+        "changed_partition_blocks": 0
+      },
+      {
+        "minimum_count": 20,
+        "maximum_size": 4000,
+        "changed_partition_blocks": 0
+      },
+      {
+        "minimum_count": 50,
+        "maximum_size": 100,
+        "changed_partition_blocks": 1
+      },
+      {
+        "minimum_count": 50,
+        "maximum_size": 250,
+        "changed_partition_blocks": 0
+      },
+      {
+        "minimum_count": 50,
+        "maximum_size": 500,
+        "changed_partition_blocks": 1
+      },
+      {
+        "minimum_count": 50,
+        "maximum_size": 4000,
+        "changed_partition_blocks": 0
+      }
+    ],
+    "finalist_rerun_parity": {
+      "status": "passed",
+      "started_utc": "2026-09-25T21:09:38.342935+00:00",
+      "prior_validation_seconds": 534.3418431999744,
+      "remaining_budget_seconds": 65.65815680002561,
+      "label": "exclude_reviewed_14_min10",
+      "maximum_sizes": [
+        100,
+        250,
+        500
+      ],
+      "command": [
+        "D:\\Google Drive\\code\\ai2\\S2AND\\.venv\\Scripts\\python.exe",
+        "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\validation\\evaluate_counts.py",
+        "--counts-json",
+        "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\full_counts\\candidates\\exclude_reviewed_14_min10.json",
+        "--label",
+        "exclude_reviewed_14_min10_determinism_rerun",
+        "--maximum-sizes",
+        "100",
+        "250",
+        "500",
+        "--output",
+        "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\validation\\finalist_rerun.json"
+      ],
+      "pid": 66432,
+      "exit_code": 0,
+      "completed_utc": "2026-09-25T21:10:23.090938+00:00",
+      "checked_block_size_rows": 150,
+      "checked_fields": [
+        "partition_sha256",
+        "retained_gold_same_author_pairs",
+        "gold_same_author_pairs",
+        "comparison_pairs",
+        "subblock_sizes"
+      ],
+      "differences": [],
+      "counts_sha256": "827389ef07822a29a43ecafa02552da4106f4700cfff292b63382f236ef35589",
+      "frozen_population_sha256": "0c9c515e364c64642dc172d31c5e476a40bb777302f7e50fa4f26bbea6b2b23f",
+      "elapsed_seconds": 44.75,
+      "total_validation_seconds": 579.0918431999744
+    },
+    "resource_summary": {
+      "historical_reference": {
+        "counts_sha256": "ab8f80a8211fe8f561ad84770f30cb6edf57c984a31f692f763c2aa8099b10d6",
+        "seconds": 50.791829699941445,
+        "peak_working_set_bytes": 1054040064
+      },
+      "all_sources_min5": {
+        "counts_sha256": "325bd09f681d249d11898993a3eb922ab45e362224977af5dcdec3b6c2cc1f0b",
+        "seconds": 50.46038339997176,
+        "peak_working_set_bytes": 1060999168
+      },
+      "all_sources_min10": {
+        "counts_sha256": "e2dc3a0186135ea7b9ee846d25cca6074e414ba6f3029e88ec11289b8ac048d7",
+        "seconds": 50.792983299994376,
+        "peak_working_set_bytes": 1056817152
+      },
+      "all_sources_min20": {
+        "counts_sha256": "eb22f50190d0cdbbf1eb4690bc6aeea8dd3788599a172fe6404d6eb38444fea3",
+        "seconds": 49.57419840001967,
+        "peak_working_set_bytes": 1055006720
+      },
+      "all_sources_min50": {
+        "counts_sha256": "c555402f0b604e4e8f272cf21aac5729298a1e72764c704306cae44c08c4ae83",
+        "seconds": 49.47807090001879,
+        "peak_working_set_bytes": 1053839360
+      },
+      "exclude_reviewed_14_min5": {
+        "counts_sha256": "2e95837181b23add4d92310f0ae8d9b59b9e7e38e5169c1434962778027177fb",
+        "seconds": 49.269900399958715,
+        "peak_working_set_bytes": 1057529856
+      },
+      "exclude_reviewed_14_min10": {
+        "counts_sha256": "827389ef07822a29a43ecafa02552da4106f4700cfff292b63382f236ef35589",
+        "seconds": 46.94034479995025,
+        "peak_working_set_bytes": 1055105024
+      },
+      "exclude_reviewed_14_min20": {
+        "counts_sha256": "295ccf24000e23df7f58cb1348a22842a796627f4a99b6d82339ee1b35dbeb54",
+        "seconds": 51.93405410001287,
+        "peak_working_set_bytes": 1054556160
+      },
+      "exclude_reviewed_14_min50": {
+        "counts_sha256": "be066d6623ea6f3dd57949a6bb496cbe19cbdaa5d2bd8fd34d7e7bcd3a156e76",
+        "seconds": 54.320121700002346,
+        "peak_working_set_bytes": 1053605888
+      }
+    }
+  },
+  "reference_lookup_verification": {
+    "status": "verified_mapping",
+    "release_asset": false,
+    "reference_policy": "Historical directional raw artifact under current Rust lexicographic-direction-first, then reverse-fallback lookup. This is not a recovered canonical release artifact or an original historical-consumer replay.",
+    "source_path": "D:\\Google Drive\\code\\ai2\\S2AND\\s2and\\data-backup\\first_k_letter_counts_from_orcid.json",
+    "source_bytes": 122591,
+    "source_sha256": "08d1557e496fb3a34905b28b9b23573034353f9ac0e38a201afca5ad511243fe",
+    "raw_outer_keys": 2187,
+    "raw_directional_entries": 9182,
+    "unordered_pairs": 5419,
+    "mirrored_pairs": 3763,
+    "conflicting_mirrored_pairs": 2049,
+    "reverse_only_pairs": 739,
+    "conflict_examples": [
+      {
+        "left": "aa",
+        "right": "al",
+        "selected_lexicographic_direction": 32,
+        "unused_reverse_direction": 22
+      },
+      {
+        "left": "aa",
+        "right": "ale",
+        "selected_lexicographic_direction": 15,
+        "unused_reverse_direction": 14
+      },
+      {
+        "left": "aa",
+        "right": "an",
+        "selected_lexicographic_direction": 28,
+        "unused_reverse_direction": 29
+      },
+      {
+        "left": "ab",
+        "right": "ad",
+        "selected_lexicographic_direction": 23,
+        "unused_reverse_direction": 12
+      },
+      {
+        "left": "ab",
+        "right": "ah",
+        "selected_lexicographic_direction": 17,
+        "unused_reverse_direction": 15
+      },
+      {
+        "left": "ab",
+        "right": "ahm",
+        "selected_lexicographic_direction": 15,
+        "unused_reverse_direction": 12
+      },
+      {
+        "left": "ab",
+        "right": "al",
+        "selected_lexicographic_direction": 43,
+        "unused_reverse_direction": 37
+      },
+      {
+        "left": "ab",
+        "right": "am",
+        "selected_lexicographic_direction": 12,
+        "unused_reverse_direction": 15
+      },
+      {
+        "left": "ab",
+        "right": "an",
+        "selected_lexicographic_direction": 40,
+        "unused_reverse_direction": 29
+      },
+      {
+        "left": "abd",
+        "right": "ad",
+        "selected_lexicographic_direction": 18,
+        "unused_reverse_direction": 3
+      }
+    ],
+    "canonical_path": "D:\\Google Drive\\code\\ai2\\S2AND\\scratch\\dataset_upgrade_20260925\\orcid_calibration\\validation\\historical_counts.current_rust_lookup.json",
+    "canonical_bytes": 61272,
+    "canonical_sha256": "ab8f80a8211fe8f561ad84770f30cb6edf57c984a31f692f763c2aa8099b10d6",
+    "canonical_outer_keys": 1391,
+    "canonical_pair_keys": 5419,
+    "all_unordered_pairs_checked_in_both_directions": true,
+    "lookup_comparisons": 10838,
+    "unknown_pair_returns_none": true,
+    "proof_scope": "Every stored unordered key checked in both query directions; queries outside this union return None under both maps because no stored key is introduced or dropped.",
+    "rust_lookup_source_path": "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\src\\subblocking.rs",
+    "rust_lookup_source_sha256": "b62df69ef4ae134fb89ef97151001b75a06510614d868a093e359e9ce4717743",
+    "rust_lookup_function": "unordered_prefix_pair_score",
+    "git_revision": "ff9f61c6a160e7a9bf6a66bca6151219d3ebcccb",
+    "partition_parity": "Pending independent validation harness; lookup equivalence alone is established here."
+  },
+  "reference_partition_verification": {
+    "status": "passed",
+    "raw_counts_sha256": "08d1557e496fb3a34905b28b9b23573034353f9ac0e38a201afca5ad511243fe",
+    "canonical_counts_sha256": "ab8f80a8211fe8f561ad84770f30cb6edf57c984a31f692f763c2aa8099b10d6",
+    "checked_fields": [
+      "dataset",
+      "block",
+      "maximum_size",
+      "partition_sha256",
+      "gold_same_author_pairs",
+      "retained_gold_same_author_pairs",
+      "comparison_pairs",
+      "subblock_sizes"
+    ],
+    "rows": 4,
+    "raw_seconds": 2.4837399999960326,
+    "canonical_seconds": 2.749525099992752
+  },
+  "record_sha256": {
+    "full_cache/run.json": "a7d9a8f83a9cc898d040413fdac1e1e3d5d8700441b72652a9033cbdc7f7843e",
+    "full_counts/run.json": "8b45ae246cef0becafa412c6e14c751b1c5b04a4fcab6fdf8ab459074da394e3",
+    "full_output_verification.json": "b94cfe84b4f25a9feed7c7b7e76866ded30e6f33276ac908fba2d66d5f6aa1aa",
+    "validation/comparison_summary.json": "116e161459101f199bbb0d40cca2e4d74765b2bb4705ca24b0d58d543b616815",
+    "validation/frozen_validation.json": "0c9c515e364c64642dc172d31c5e476a40bb777302f7e50fa4f26bbea6b2b23f"
+  },
+  "limitations": [
+    "Validation uses reconstructed current-policy membership, not a recovered historical release split.",
+    "The reference uses historical counts with the current Rust consumer; the canonical packaged prior is absent.",
+    "All selected blocks are below 4000 signatures; 100/250/500 are stress settings.",
+    "No model was trained or scored; this measures subblocking gold-pair retention and comparison cost.",
+    "No production publication or automatic quarantine was performed.",
+    "Scratch scripts and prerequisite inputs are local/gitignored; see the companion reproduction notes."
+  ]
+}

@@ -47,8 +47,7 @@ def first_name_bucket_array(
     views = np.asarray(query_views, dtype=object)
     if tokens.ndim != 1 or views.ndim != 1 or len(tokens) != len(views):
         raise ValueError(
-            "query_first_tokens and query_views must be 1D arrays with equal length: "
-            f"{tokens.shape} != {views.shape}"
+            f"query_first_tokens and query_views must be 1D arrays with equal length: {tokens.shape} != {views.shape}"
         )
     return np.asarray(
         [first_name_bucket_from_token_view(token, view) for token, view in zip(tokens, views, strict=True)],

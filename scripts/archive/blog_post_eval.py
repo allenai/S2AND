@@ -2,6 +2,12 @@
 
 """
 This script generates results that are needed for the blog post.
+
+Warning:
+    This is a historical private-data workflow, not a canonical-v2 results
+    reproducer or supported current entrypoint. Exact legacy reproduction
+    belongs on the ``s2and_paper`` branch.
+
 Here are all the commands that one needs to run:
 
 python scripts/blog_post_eval.py --random_seed 42 --experiment_name baseline
@@ -21,23 +27,20 @@ from typing import Any
 from s2and.consts import CONFIG
 
 os.environ["OMP_NUM_THREADS"] = "8"
-os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
 import argparse
 import json
 import logging
-import pickle
 
 import numpy as np
 import pandas as pd
 from hyperopt import hp
 from tqdm import tqdm
 
-from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_PATH
+from s2and.consts import NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.eval import claims_eval
 from s2and.featurizer import FeaturizationInfo, featurize
-from s2and.file_cache import cached_path
 from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
 logger = logging.getLogger("s2and")
@@ -58,7 +61,6 @@ FEATURES_TO_USE = [
     "venue_similarity",
     "year_diff",
     "title_similarity",
-    "reference_features",
     "misc_features",
     "name_counts",
     "embedding_similarity",
@@ -66,7 +68,6 @@ FEATURES_TO_USE = [
     "advanced_name_similarity",
 ]
 
-BLOCK_TYPE = "s2"
 N_TRAIN_PAIRS_SIZE = 100000
 N_VAL_TEST_SIZE = 10000
 N_ITER = 50
@@ -93,19 +94,22 @@ def main(
     USE_MONOTONE_CONSTRAINTS = not dont_use_monotone_constraints
     N_JOBS = n_jobs
 
-    for feature_group in feature_groups_to_skip:
-        FEATURES_TO_USE.remove(feature_group)
+    feature_groups_to_skip_set = set(feature_groups_to_skip)
+    unknown_feature_groups_to_skip = sorted(feature_groups_to_skip_set - set(FEATURES_TO_USE) - {"reference_features"})
+    if unknown_feature_groups_to_skip:
+        raise ValueError(f"Unknown feature group(s) to skip: {unknown_feature_groups_to_skip}")
+    features_to_use = [
+        feature_group for feature_group in FEATURES_TO_USE if feature_group not in feature_groups_to_skip_set
+    ]
 
     NAMELESS_FEATURES_TO_USE = [
         feature_name
-        for feature_name in FEATURES_TO_USE
+        for feature_name in features_to_use
         if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
     ]
 
-    FEATURIZER_INFO = FeaturizationInfo(features_to_use=FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION)
-    NAMELESS_FEATURIZER_INFO = FeaturizationInfo(
-        features_to_use=NAMELESS_FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION
-    )
+    FEATURIZER_INFO = FeaturizationInfo(features_to_use=features_to_use)
+    NAMELESS_FEATURIZER_INFO = FeaturizationInfo(features_to_use=NAMELESS_FEATURES_TO_USE)
 
     MONOTONE_CONSTRAINTS = FEATURIZER_INFO.lightgbm_monotone_constraints
     NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
@@ -143,7 +147,6 @@ def main(
             mode="train",
             specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
             clusters=clusters_path,
-            block_type=BLOCK_TYPE,
             train_pairs=train_pairs_path,
             val_pairs=val_pairs_path,
             test_pairs=test_pairs_path,
@@ -159,7 +162,6 @@ def main(
             anddata,
             FEATURIZER_INFO,
             n_jobs=N_JOBS,
-            use_cache=True,
             chunk_size=100,
             nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
             nan_value=np.nan,
@@ -231,7 +233,6 @@ def main(
         nameless_classifier=nameless_union_classifier.classifier if nameless_union_classifier is not None else None,
         nameless_featurizer_info=NAMELESS_FEATURIZER_INFO if nameless_union_classifier is not None else None,
         use_default_constraints_as_supervision=USE_RULES,
-        use_cache=True,
         random_state=random_seed if random_seed is not None else 42,
     )
     clusterer.fit(anddatas)
@@ -252,11 +253,13 @@ def main(
 
     block_keys = sorted(
         filter(
-            lambda x: not x.endswith(".json")
-            and not x.endswith(".pickle")
-            and not x.endswith(".py")
-            and not x.endswith(".vscode")
-            and not x.endswith(".csv"),
+            lambda x: (
+                not x.endswith(".json")
+                and not x.endswith(".pickle")
+                and not x.endswith(".py")
+                and not x.endswith(".vscode")
+                and not x.endswith(".csv")
+            ),
             os.listdir(BLOCK_DATASETS_DIR),
         ),
         key=lambda x: os.path.getsize(os.path.join(os.path.join(BLOCK_DATASETS_DIR, x), "claims_signatures.json")),
@@ -268,22 +271,6 @@ def main(
     # let's only keep the first ~130 for speed purposes
     block_keys = block_keys[:130]
 
-    logger.info("starting transfer experiment main, loading name counts")
-    with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-        (
-            first_dict,
-            last_dict,
-            first_last_dict,
-            last_first_initial_dict,
-        ) = pickle.load(f)
-    name_counts = {
-        "first_dict": first_dict,
-        "last_dict": last_dict,
-        "first_last_dict": first_last_dict,
-        "last_first_initial_dict": last_first_initial_dict,
-    }
-    logger.info("loaded name counts")
-
     results_dict = {}
     for block_key in tqdm(block_keys):
         results = {}
@@ -294,10 +281,9 @@ def main(
             papers=os.path.join(block_dir, "claims_papers.json"),
             mode="inference",
             specter_embeddings=os.path.join(block_dir, "claims_specter.pickle"),
-            block_type="s2",
             name=block_key.replace(" ", "_"),
             n_jobs=n_jobs,
-            load_name_counts=name_counts,
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
         )
         logger.info("Dataset loaded")
 

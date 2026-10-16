@@ -1,17 +1,40 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+requires = ["maturin>=1.14.1,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "s2and-rust"
-version = "0.51.2"
+version = "1.0.0"
 description = "Rust extension for s2and"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "vendor/cld2/LICENSE-APACHE.txt", "vendor/cld2/UNLICENSE.txt"]
 authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 
 [tool.maturin]
 bindings = "pyo3"
 python-source = "."
 module-name = "s2and_rust._s2and_rust"
+include = [{ path = "vendor/cld2/**/*", format = "sdist" }]
+
+[tool.uv]
+# Custom keys replace uv's defaults. Keep package metadata and every local
+# native/Python build input, including every file covered by the source digest.
+# These are timestamp-based hints: older additions/deletions and preserved
+# mtimes can require an explicit rebuild (see docs/install.md in the repo).
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "build.rs" },
+    { file = "src/**/*.rs" },
+    { file = "vendor/cld2/Cargo.toml" },
+    { file = "vendor/cld2/src/**/*.rs" },
+    { file = "s2and_rust/**/*.py" },
+    { file = "README.md" },
+    { file = "LICENSE" },
+    { file = "THIRD_PARTY_NOTICES.md" },
+    { file = "vendor/cld2/LICENSE-APACHE.txt" },
+    { file = "vendor/cld2/UNLICENSE.txt" },
+]

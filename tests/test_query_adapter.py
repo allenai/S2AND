@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from functools import partial
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -13,16 +14,20 @@ from s2and.incremental_linking.query_adapter import (
     query_view_for_features,
     raw_paper_evidence_features,
 )
-from s2and.incremental_linking_training.query_support import counter_query_overlap, title_overlap
 from tests.helpers import build_dummy_dataset, build_query_features
 
+_summary = partial(
+    build_cluster_summary, cluster_id="cluster", component_key="component", max_exemplars=4, block_key="block"
+)
 
-def _dataset_arg(dataset: object) -> Any:
-    return cast(Any, dataset)
+
+def _paper(title="", *, venue=None, journal_name=None, year=2020, authors=()):
+    """Construct only the raw paper fields used by query adaptation."""
+    return SimpleNamespace(title=title, venue=venue, journal_name=journal_name, year=year, authors=authors)
 
 
-def _signature(paper_id: str) -> SimpleNamespace:
-    return SimpleNamespace(
+def _signature(paper_id: str, **overrides: Any) -> SimpleNamespace:
+    signature = SimpleNamespace(
         paper_id=paper_id,
         author_info_first="Alice",
         author_info_middle="",
@@ -36,49 +41,68 @@ def _signature(paper_id: str) -> SimpleNamespace:
         author_info_orcid=None,
         author_info_name_counts=None,
     )
+    signature.__dict__.update(overrides)
+    return signature
 
 
 def test_title_and_venue_terms_keep_single_character_tokens() -> None:
     dataset = SimpleNamespace(
         signatures={"q": _signature("pq"), "c": _signature("pc")},
         papers={
-            "pq": SimpleNamespace(title="A M Study", venue="Series A", journal_name=None, year=2020),
-            "pc": SimpleNamespace(title="A Different Study", venue="A", journal_name=None, year=2021),
+            "pq": _paper(title="A M Study Part 1 Co3O4", venue="Series A"),
+            "pc": _paper(title="A Different Study", venue="A", year=2021),
         },
         specter_embeddings=None,
     )
     feature_cache = {}
 
-    query = extract_query_features(_dataset_arg(dataset), "q", feature_cache=feature_cache)
-    summary = build_cluster_summary(
-        _dataset_arg(dataset),
-        cluster_id="cluster",
-        component_key="component",
-        signature_ids=("c",),
-        max_exemplars=4,
-        feature_cache=feature_cache,
-        orcid_enabled=False,
-        block_key="block",
-    )
+    query = extract_query_features(dataset, "q", feature_cache=feature_cache)
+    summary = _summary(dataset, signature_ids=("c",), feature_cache=feature_cache)
 
-    assert query.title_terms == frozenset({"a", "m", "study"})
+    assert query.title_terms == frozenset({"a", "m", "study", "part", "1", "co3o4"})
     assert query.venue_terms == frozenset({"series", "a"})
     assert summary.title_counts["a"] == 1
     assert summary.venue_counts["a"] == 1
-    assert title_overlap(query, summary) == pytest.approx(2.0 / 3.0)
-    assert counter_query_overlap(query.venue_terms, summary.venue_counts, summary.size) == pytest.approx(0.5)
 
 
-def test_signature_query_author_prefers_raw_full_name() -> None:
+def test_classic_query_and_summary_match_arrow_year_missingness() -> None:
+    for case_id, year, expected in (
+        ("none", None, None),
+        ("zero", 0, None),
+        ("present", 2020, 2020),
+    ):
+        dataset = SimpleNamespace(
+            signatures={"q": _signature("pq"), "seed": _signature("ps")},
+            papers={"pq": _paper(title="", year=year, authors=[]), "ps": _paper(title="", year=year, authors=[])},
+            specter_embeddings=None,
+        )
+
+        query = extract_query_features(dataset, "q")
+        summary = _summary(dataset, signature_ids=("seed",), max_exemplars=0, feature_cache={})
+
+        assert query.year == expected, case_id
+        assert summary.year_values == ([] if expected is None else [expected]), case_id
+        assert summary.year_min == expected, case_id
+        assert summary.year_max == expected, case_id
+        assert summary.year_mean == expected, case_id
+
+
+def test_signature_query_author_ignores_raw_full_name_and_uses_canonical_fields() -> None:
     signature = SimpleNamespace(
         author_info_full_name="Ada B. Lovelace, PhD",
-        author_info_first="Ada",
-        author_info_middle="B.",
+        author_info_first="Dr.",
+        author_info_middle="B-2",
         author_info_last="Lovelace",
         author_info_suffix="PhD",
     )
 
-    assert query_adapter_module._signature_query_author(signature) == "Ada B. Lovelace, PhD"
+    assert query_adapter_module._signature_query_author(signature) == "b lovelace phd"
+
+    signature.author_info_first_normalized_without_apostrophe = ""
+    signature.author_info_middle_normalized_without_apostrophe = ""
+    signature.author_info_last_normalized = "lovelace"
+    signature.author_info_suffix_normalized = "phd"
+    assert query_adapter_module._signature_query_author(signature) == "lovelace phd"
 
 
 def test_signature_coauthor_blocks_uses_precomputed_blocks_without_position() -> None:
@@ -89,7 +113,7 @@ def test_signature_coauthor_blocks_uses_precomputed_blocks_without_position() ->
 
     assert query_adapter_module._signature_coauthor_blocks(  # noqa: SLF001
         signature,
-        _dataset_arg(dataset),
+        dataset,
     ) == frozenset({"ada"})
 
 
@@ -102,7 +126,7 @@ def test_signature_coauthor_blocks_uses_explicit_coauthors_without_position() ->
 
     assert query_adapter_module._signature_coauthor_blocks(  # noqa: SLF001
         signature,
-        _dataset_arg(dataset),
+        dataset,
     ) == frozenset({"a lovelace"})
 
 
@@ -123,8 +147,36 @@ def test_signature_coauthor_blocks_tolerates_null_paper_author_position() -> Non
 
     assert query_adapter_module._signature_coauthor_blocks(  # noqa: SLF001
         signature,
-        _dataset_arg(dataset),
+        dataset,
     ) == frozenset({"g hopper"})
+
+
+def test_query_features_count_blank_author_rows_without_modern_name_evidence() -> None:
+    signature = _signature("paper")
+    signature.author_info_coauthor_blocks = None
+    signature.author_info_coauthors = None
+    dataset = SimpleNamespace(
+        signatures={"q": signature},
+        papers={
+            "paper": _paper(
+                title="Paper",
+                authors=[
+                    SimpleNamespace(position=0, author_name="Alice Smith"),
+                    SimpleNamespace(position=1, author_name=""),
+                    SimpleNamespace(position=2, author_name="   "),
+                    SimpleNamespace(position=3, author_name="Bob Jones"),
+                ],
+            )
+        },
+        specter_embeddings=None,
+    )
+
+    features = extract_query_features(dataset, "q")
+
+    assert features.paper_author_count == 4
+    assert features.paper_author_names == frozenset({"alice smith", "bob jones"})
+    assert features.local10_author_names == frozenset({"bob jones"})
+    assert features.coauthor_blocks == frozenset({"b jones"})
 
 
 def test_mask_query_features_keeps_orcid_only_when_enabled() -> None:
@@ -150,72 +202,11 @@ def test_mask_query_features_keeps_orcid_only_when_enabled() -> None:
     assert initial_with_orcid.middle_initials == frozenset()
 
 
-def test_query_and_summary_orcids_are_canonicalized_and_empty_values_ignored() -> None:
-    dataset = SimpleNamespace(
-        signatures={
-            "q_blank": SimpleNamespace(**{**_signature("p_q_blank").__dict__, "author_info_orcid": "   "}),
-            "q_trim": SimpleNamespace(
-                **{**_signature("p_q_trim").__dict__, "author_info_orcid": "ORCID: 000000021825009x"}
-            ),
-            "seed_blank": SimpleNamespace(**{**_signature("p_seed_blank").__dict__, "author_info_orcid": "   "}),
-            "seed_trim": SimpleNamespace(
-                **{
-                    **_signature("p_seed_trim").__dict__,
-                    "author_info_orcid": " https://orcid.org/0000-0002-1825-0097 ",
-                }
-            ),
-        },
-        papers={
-            "p_q_blank": SimpleNamespace(title="Blank Query", venue=None, journal_name=None, year=2020, authors=[]),
-            "p_q_trim": SimpleNamespace(title="Trim Query", venue=None, journal_name=None, year=2020, authors=[]),
-            "p_seed_blank": SimpleNamespace(title="Blank Seed", venue=None, journal_name=None, year=2021, authors=[]),
-            "p_seed_trim": SimpleNamespace(title="Trim Seed", venue=None, journal_name=None, year=2021, authors=[]),
-        },
-        specter_embeddings=None,
-    )
-    feature_cache = {}
-
-    assert (
-        extract_query_features(_dataset_arg(dataset), "q_blank", feature_cache=feature_cache, orcid_enabled=True).orcid
-        is None
-    )
-    assert (
-        extract_query_features(_dataset_arg(dataset), "q_trim", feature_cache=feature_cache, orcid_enabled=True).orcid
-        == "0000-0002-1825-009X"
-    )
-
-    summary = build_cluster_summary(
-        _dataset_arg(dataset),
-        cluster_id="cluster",
-        component_key="component",
-        signature_ids=("seed_blank", "seed_trim"),
-        max_exemplars=4,
-        feature_cache=feature_cache,
-        orcid_enabled=True,
-        block_key="block",
-    )
-    assert summary.orcid_values == frozenset({"0000-0002-1825-0097"})
-
-
-def test_query_view_for_features_uses_full_only_for_full_first_name() -> None:
-    assert query_view_for_features(build_query_features(first="alice", has_full_first=True)) == "full"
-    assert query_view_for_features(build_query_features(first="a", has_full_first=False)) == "initial_only"
-
-
-def test_build_incremental_linker_inputs_resolves_auto_and_per_query_views(monkeypatch) -> None:
+def test_build_incremental_linker_inputs_resolves_auto_and_per_query_views() -> None:
     dataset = build_dummy_dataset("dummy_query_view_resolution")
 
-    def fake_build_retriever(summaries, *, include_exemplars=True):
-        del include_exemplars
-        return SimpleNamespace(
-            retriever=object(),
-            summary_by_component={str(summary.component_key): summary for summary in summaries},
-        )
-
-    monkeypatch.setattr(query_adapter_module, "build_rust_hybrid_centroid_retriever", fake_build_retriever)
-
     auto_inputs = query_adapter_module.build_incremental_linker_inputs(
-        dataset=_dataset_arg(dataset),
+        dataset=dataset,
         query_signature_ids=["5", "8"],
         cluster_seeds_require={"3": "seed", "4": "seed"},
         query_view=None,
@@ -226,7 +217,7 @@ def test_build_incremental_linker_inputs_resolves_auto_and_per_query_views(monke
     assert auto_inputs.query_by_signature_id["5"].has_full_first is True
 
     explicit_inputs = query_adapter_module.build_incremental_linker_inputs(
-        dataset=_dataset_arg(dataset),
+        dataset=dataset,
         query_signature_ids=["5", "8"],
         cluster_seeds_require={"3": "seed", "4": "seed"},
         query_view=("full", "initial_only"),
@@ -235,82 +226,47 @@ def test_build_incremental_linker_inputs_resolves_auto_and_per_query_views(monke
     assert explicit_inputs.query_by_signature_id["5"].first == "alexander"
     assert explicit_inputs.query_by_signature_id["8"].first == "a"
     assert explicit_inputs.query_by_signature_id["8"].has_full_first is False
+    assert query_view_for_features(auto_inputs.query_by_signature_id["5"]) == "full"
+    assert query_view_for_features(explicit_inputs.query_by_signature_id["8"]) == "initial_only"
 
 
-def test_build_incremental_linker_inputs_threads_orcid_enabled_to_queries_and_summaries(monkeypatch) -> None:
+def test_build_incremental_linker_inputs_canonicalizes_and_gates_orcids():
     dataset = SimpleNamespace(
         signatures={
-            "q": SimpleNamespace(**{**_signature("p_q").__dict__, "author_info_orcid": "ORCID: 000000021825009X"}),
-            "seed_a": SimpleNamespace(
-                **{**_signature("p_seed_a").__dict__, "author_info_orcid": "https://orcid.org/0000-0002-1825-0097"}
-            ),
-            "seed_b": _signature("p_seed_b"),
+            "q": _signature("pq", author_info_orcid="ORCID: 000000021825009x"),
+            "blank": _signature("pb", author_info_orcid="   "),
+            "seed_a": _signature("ps", author_info_orcid=" https://orcid.org/0000-0002-1825-0097 "),
+            "seed_b": _signature("pb", author_info_orcid="   "),
         },
-        papers={
-            "p_q": SimpleNamespace(title="Query Paper", venue=None, journal_name=None, year=2020, authors=[]),
-            "p_seed_a": SimpleNamespace(title="Seed Paper A", venue=None, journal_name=None, year=2020, authors=[]),
-            "p_seed_b": SimpleNamespace(title="Seed Paper B", venue=None, journal_name=None, year=2021, authors=[]),
-        },
+        papers={key: _paper() for key in ("pq", "pb", "ps")},
         specter_embeddings=None,
     )
-
-    def fake_build_retriever(summaries, *, include_exemplars=True):
-        del include_exemplars
-        return SimpleNamespace(
-            retriever=object(),
-            summary_by_component={str(summary.component_key): summary for summary in summaries},
+    for enabled in (False, True):
+        inputs = query_adapter_module.build_incremental_linker_inputs(
+            dataset=dataset,
+            query_signature_ids=["q", "blank"],
+            cluster_seeds_require={"seed_a": "seed", "seed_b": "seed"},
+            query_view="full",
+            orcid_enabled=enabled,
         )
-
-    monkeypatch.setattr(query_adapter_module, "build_rust_hybrid_centroid_retriever", fake_build_retriever)
-
-    disabled_inputs = query_adapter_module.build_incremental_linker_inputs(
-        dataset=_dataset_arg(dataset),
-        query_signature_ids=["q"],
-        cluster_seeds_require={"seed_a": "seed", "seed_b": "seed"},
-        query_view="full",
-        orcid_enabled=False,
-    )
-    assert disabled_inputs.query_by_signature_id["q"].orcid is None
-    assert disabled_inputs.summary_by_component["seed"].orcid_values == frozenset()
-
-    enabled_inputs = query_adapter_module.build_incremental_linker_inputs(
-        dataset=_dataset_arg(dataset),
-        query_signature_ids=["q"],
-        cluster_seeds_require={"seed_a": "seed", "seed_b": "seed"},
-        query_view="full",
-        orcid_enabled=True,
-    )
-    assert enabled_inputs.query_by_signature_id["q"].orcid == "0000-0002-1825-009X"
-    assert enabled_inputs.summary_by_component["seed"].orcid_values == frozenset({"0000-0002-1825-0097"})
+        assert inputs.query_by_signature_id["q"].orcid == ("0000-0002-1825-009X" if enabled else None)
+        assert inputs.query_by_signature_id["blank"].orcid is None
+        assert inputs.summary_by_component["seed"].orcid_values == (
+            frozenset({"0000-0002-1825-0097"}) if enabled else frozenset()
+        )
 
 
 def test_cluster_summary_tracks_non_mega_coauthors_separately() -> None:
-    small_signature = SimpleNamespace(
-        **{
-            **_signature("p_small").__dict__,
-            "author_info_coauthor_blocks": ["shared coauthor", "small only"],
-        }
-    )
-    mega_signature = SimpleNamespace(
-        **{
-            **_signature("p_mega").__dict__,
-            "author_info_coauthor_blocks": ["shared coauthor", "mega only"],
-        }
-    )
+    small_signature = _signature("p_small", author_info_coauthor_blocks=["shared coauthor", "small only"])
+    mega_signature = _signature("p_mega", author_info_coauthor_blocks=["shared coauthor", "mega only"])
     dataset = SimpleNamespace(
         signatures={"small": small_signature, "mega": mega_signature},
         papers={
-            "p_small": SimpleNamespace(
-                title="Small Paper",
-                venue=None,
-                journal_name=None,
-                year=2020,
-                authors=[SimpleNamespace(author_name="Alice"), SimpleNamespace(author_name="Bob")],
+            "p_small": _paper(
+                title="Small Paper", authors=[SimpleNamespace(author_name="Alice"), SimpleNamespace(author_name="Bob")]
             ),
-            "p_mega": SimpleNamespace(
+            "p_mega": _paper(
                 title="Mega Paper",
-                venue=None,
-                journal_name=None,
                 year=2021,
                 authors=[SimpleNamespace(author_name=f"Author {index}") for index in range(50)],
             ),
@@ -318,16 +274,7 @@ def test_cluster_summary_tracks_non_mega_coauthors_separately() -> None:
         specter_embeddings=None,
     )
 
-    summary = build_cluster_summary(
-        _dataset_arg(dataset),
-        cluster_id="cluster",
-        component_key="component",
-        signature_ids=("small", "mega"),
-        max_exemplars=4,
-        feature_cache={},
-        orcid_enabled=False,
-        block_key="block",
-    )
+    summary = _summary(dataset, signature_ids=("small", "mega"), feature_cache={})
 
     assert summary.max_paper_author_count == 50
     assert summary.coauthor_counts["shared coauthor"] == 2
@@ -341,36 +288,28 @@ def test_raw_paper_evidence_features_use_author_lists_and_local_windows() -> Non
     dataset = SimpleNamespace(
         signatures={
             "q": _signature("pq"),
-            "c_match": SimpleNamespace(**{**_signature("pc_match").__dict__, "author_info_position": 1}),
-            "c_other": SimpleNamespace(**{**_signature("pc_other").__dict__, "author_info_position": 0}),
+            "c_match": _signature("pc_match", author_info_position=1),
+            "c_other": _signature("pc_other", author_info_position=0),
         },
         papers={
-            "pq": SimpleNamespace(
+            "pq": _paper(
                 title="Shared Collaboration Result",
-                venue=None,
-                journal_name=None,
-                year=2020,
                 authors=[
                     SimpleNamespace(author_name="Alice Smith", position=0),
                     SimpleNamespace(author_name="Bob Jones", position=1),
                     SimpleNamespace(author_name="Carol Lee", position=2),
                 ],
             ),
-            "pc_match": SimpleNamespace(
+            "pc_match": _paper(
                 title="Shared Collaboration Result",
-                venue=None,
-                journal_name=None,
-                year=2020,
                 authors=[
                     SimpleNamespace(author_name="Alice Smith", position=0),
                     SimpleNamespace(author_name="Bob Jones", position=1),
                     SimpleNamespace(author_name="Carol Lee", position=2),
                 ],
             ),
-            "pc_other": SimpleNamespace(
+            "pc_other": _paper(
                 title="Different Topic",
-                venue=None,
-                journal_name=None,
                 year=2021,
                 authors=[
                     SimpleNamespace(author_name="Alice Smith", position=0),
@@ -382,17 +321,8 @@ def test_raw_paper_evidence_features_use_author_lists_and_local_windows() -> Non
     )
     feature_cache = {}
 
-    query = extract_query_features(_dataset_arg(dataset), "q", feature_cache=feature_cache)
-    summary = build_cluster_summary(
-        _dataset_arg(dataset),
-        cluster_id="cluster",
-        component_key="component",
-        signature_ids=("c_other", "c_match"),
-        max_exemplars=4,
-        feature_cache=feature_cache,
-        orcid_enabled=False,
-        block_key="block",
-    )
+    query = extract_query_features(dataset, "q", feature_cache=feature_cache)
+    summary = _summary(dataset, signature_ids=("c_other", "c_match"), feature_cache=feature_cache)
 
     features = raw_paper_evidence_features(query, summary)
 
@@ -411,33 +341,21 @@ def test_local10_evidence_ignores_query_signature_member() -> None:
     dataset = SimpleNamespace(
         signatures={"q": _signature("pq")},
         papers={
-            "pq": SimpleNamespace(
+            "pq": _paper(
                 title="Shared Collaboration Result",
-                venue=None,
-                journal_name=None,
-                year=2020,
                 authors=[
                     SimpleNamespace(author_name="Alice Smith", position=0),
                     SimpleNamespace(author_name="Bob Jones", position=1),
                     SimpleNamespace(author_name="Carol Lee", position=2),
                 ],
-            ),
+            )
         },
         specter_embeddings=None,
     )
     feature_cache = {}
 
-    query = extract_query_features(_dataset_arg(dataset), "q", feature_cache=feature_cache)
-    summary = build_cluster_summary(
-        _dataset_arg(dataset),
-        cluster_id="cluster",
-        component_key="component",
-        signature_ids=("q",),
-        max_exemplars=4,
-        feature_cache=feature_cache,
-        orcid_enabled=False,
-        block_key="block",
-    )
+    query = extract_query_features(dataset, "q", feature_cache=feature_cache)
+    summary = _summary(dataset, signature_ids=("q",), feature_cache=feature_cache)
 
     features = raw_paper_evidence_features(query, summary)
 

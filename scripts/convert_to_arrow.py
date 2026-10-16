@@ -1,26 +1,25 @@
 """Convert S2AND runtime inputs into direct-Rust Arrow artifacts.
 
 The runtime bundle writer emits bounded Arrow IPC file-format tables plus the
-current S2AND raw-planner batch-index sidecars (S2ABI002).
+current S2AND raw-planner batch-index sidecars (S2ABI003).
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
+import csv
 import json
 import logging
 import os
 import pickle
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from io import StringIO
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -29,14 +28,26 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from s2and.arrow_inputs import require_name_counts_index_artifact  # noqa: E402
+from s2and._atomic_io import exclusive_file_lock  # noqa: E402
+from s2and._sha256 import sha256_file as _file_sha256  # noqa: E402
+from s2and.arrow_inputs import (  # noqa: E402
+    ARROW_COLLECTION_KIND,
+    PUBLIC_DATA_KIND,
+    ArrowDataset,
+    build_arrow_artifact_manifest,
+    read_arrow_collection_root,
+    require_name_counts_index_artifact,
+    write_arrow_artifact_manifest,
+)
+from s2and.arrow_provenance import write_conversion_provenance  # noqa: E402
+from s2and.arrow_schema import validate_arrow_schema  # noqa: E402
+from s2and.consts import PUBLIC_DATA_FORMAT_VERSION  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 
 BENCHMARK_DATASETS = ("aminer", "arnetminer", "inspire", "kisti", "medline", "pubmed", "qian", "zbmath")
-ROOT_MANIFEST_SCHEMA = "inference_arrow_bundle_v1"
-ARROW_SCHEMA_CONTRACT_PATH = _PROJECT_ROOT / "s2and" / "arrow_schema_contract.json"
+_ROOT_MANIFEST_LOCK_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,9 @@ class RuntimeDatasetSources:
     clusters_path: Path | None = None
     specter_path: Path | None = None
     specter2_path: Path | None = None
+    train_pairs_path: Path | None = None
+    val_pairs_path: Path | None = None
+    test_pairs_path: Path | None = None
 
 
 def _load_json(path: Path) -> Any:
@@ -94,523 +108,94 @@ def _resolve_manifest_path(path_value: Any, base_dir: Path | None) -> Path:
 def _manifest_relative_path(path_value: Any, manifest_dir: Path) -> str:
     path = Path(str(path_value))
     try:
-        return os.path.relpath(str(path.resolve()), str(manifest_dir.resolve()))
+        return Path(os.path.relpath(str(path.resolve()), str(manifest_dir.resolve()))).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
-def _portable_manifest_paths(paths: Mapping[str, Any], manifest_dir: Path) -> dict[str, str]:
-    return {str(key): _manifest_relative_path(value, manifest_dir) for key, value in paths.items()}
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as infile:
-        for chunk in iter(lambda: infile.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _git_output(args: Sequence[str]) -> str | None:
+def _root_child_manifest_path(root: Path, raw_path: Any, *, label: str) -> Path:
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ValueError(f"{label} path must be a nonempty string")
+    relative_path = Path(raw_path.replace("\\", "/"))
+    if relative_path.is_absolute():
+        raise ValueError(f"{label} path must be relative to its root")
+    resolved = (root / relative_path).resolve()
     try:
-        completed = subprocess.run(
-            ["git", *args],
-            cwd=_PROJECT_ROOT,
-            check=True,
-            capture_output=True,
-            encoding="utf-8",
-            timeout=5,
-        )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return None
-    return completed.stdout.strip()
+        resolved.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"{label} path escapes its root") from exc
+    if not resolved.is_file():
+        raise FileNotFoundError(f"{label} manifest does not exist: {resolved}")
+    return resolved
 
 
-def _git_commit_metadata() -> dict[str, Any]:
-    status = _git_output(["status", "--porcelain"])
-    return {
-        "git_commit": _git_output(["rev-parse", "HEAD"]),
-        "git_dirty": None if status is None else bool(status),
-    }
-
-
-class _RootManifestLock:
-    """Small same-directory lock for root manifest read-modify-write."""
-
-    def __init__(self, path: Path, *, attempts: int = 50, sleep_seconds: float = 0.1) -> None:
-        self.path = path
-        self.attempts = attempts
-        self.sleep_seconds = sleep_seconds
-        self._fd: int | None = None
-        self._payload: str | None = None
-
-    def _try_create_lock_file(self) -> bool:
-        payload = f"{os.getpid()}\n"
-        fd: int | None = None
-        try:
-            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, payload.encode("ascii"))
-        except FileExistsError:
-            return False
-        except Exception:
-            self.path.unlink(missing_ok=True)
-            raise
-        finally:
-            if fd is not None:
-                os.close(fd)
-        self._payload = payload
-        return True
-
-    def __enter__(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        for attempt in range(1, self.attempts + 1):
-            if self._try_create_lock_file():
-                self._fd = None
-                return
-            if _remove_dead_pid_lock(self.path) and self._try_create_lock_file():
-                self._fd = None
-                return
-            if attempt == self.attempts:
-                lock_pid = _lock_pid(self.path)
-                pid_context = f" held by pid {lock_pid}" if lock_pid is not None else ""
-                raise TimeoutError(
-                    f"timed out waiting for root manifest lock {self.path}{pid_context} "
-                    f"after {self.attempts} attempts; remove the lock file if no converter is running"
-                )
-            time.sleep(self.sleep_seconds)
-
-    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
-        if self._payload is None:
-            return
-        try:
-            current_payload = self.path.read_text(encoding="ascii")
-        except FileNotFoundError:
-            return
-        except OSError:
-            return
-        if current_payload == self._payload:
-            self.path.unlink(missing_ok=True)
-        self._payload = None
-
-
-def _lock_pid(path: Path) -> int | None:
-    try:
-        raw_pid = path.read_text(encoding="ascii").splitlines()[0].strip()
-    except OSError:
-        return None
-    except IndexError:
-        return None
-    if not raw_pid:
-        return None
-    try:
-        pid = int(raw_pid)
-    except ValueError:
-        return None
-    return pid if pid > 0 else None
-
-
-def _pid_is_running(pid: int) -> bool:
-    if pid == os.getpid():
-        return True
-    if os.name == "nt":
-        import ctypes
-
-        process_query_limited_information = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, int(pid))
-        if not handle:
-            return False
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return True
-    return True
-
-
-def _remove_dead_pid_lock(path: Path) -> bool:
-    try:
-        raw_pid = path.read_text(encoding="ascii").splitlines()[0].strip()
-    except OSError:
-        return False
-    except IndexError:
-        raw_pid = ""
-    if raw_pid:
-        try:
-            pid = int(raw_pid)
-        except ValueError:
-            pid = None
-    else:
-        pid = None
-    if pid is not None and pid > 0 and _pid_is_running(pid):
-        return False
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def _root_manifest_entries(root_manifest_path: Path, dataset_name: str) -> list[dict[str, Any]]:
-    if not root_manifest_path.exists():
-        return []
-    try:
-        root_manifest = _load_json(root_manifest_path)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"existing root manifest is invalid JSON: {root_manifest_path}") from exc
-    if not isinstance(root_manifest, Mapping):
-        raise TypeError(f"existing root manifest must contain an object: {root_manifest_path}")
-
-    entries = _root_manifest_entries_from_manifest(root_manifest, root_manifest_path)
-    return [entry for entry in entries if entry["dataset"] != dataset_name]
+def _read_generic_root_manifest(
+    root_manifest_path: Path,
+    *,
+    ignore_dataset: str | None = None,
+) -> dict[str, Path]:
+    datasets, _replays, release_version = read_arrow_collection_root(
+        root_manifest_path,
+        ignore_dataset=ignore_dataset,
+    )
+    if release_version is not None:
+        raise ValueError(f"Generic Arrow conversion cannot modify a published root: {root_manifest_path}")
+    return datasets
 
 
 def _validate_existing_root_manifest(root_manifest_path: Path) -> None:
-    if not root_manifest_path.exists():
-        return
-    try:
-        root_manifest = _load_json(root_manifest_path)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"existing root manifest is invalid JSON: {root_manifest_path}") from exc
-    if not isinstance(root_manifest, Mapping):
-        raise TypeError(f"existing root manifest must contain an object: {root_manifest_path}")
-    _root_manifest_entries_from_manifest(root_manifest, root_manifest_path)
+    if root_manifest_path.exists():
+        _read_generic_root_manifest(root_manifest_path)
 
 
-def _root_manifest_entries_from_manifest(
-    root_manifest: Mapping[str, Any],
-    root_manifest_path: Path,
-) -> list[dict[str, Any]]:
-    if root_manifest.get("schema") == ROOT_MANIFEST_SCHEMA:
-        raw_entries = root_manifest.get("dataset_manifests")
-        if not isinstance(raw_entries, Sequence) or isinstance(raw_entries, str | bytes):
-            raise ValueError(f"existing root manifest dataset_manifests must be a list: {root_manifest_path}")
-        entries = _validated_root_manifest_entries(raw_entries, root_manifest_path)
-    else:
-        raise ValueError(
-            "existing root manifest has unsupported schema "
-            f"{root_manifest.get('schema')!r}; expected {ROOT_MANIFEST_SCHEMA!r}: {root_manifest_path}"
-        )
-    return entries
-
-
-def _root_manifest_replay_bundle_entries_from_manifest(
-    root_manifest: Mapping[str, Any],
-    root_manifest_path: Path,
-) -> list[dict[str, Any]]:
-    raw_entries = root_manifest.get("replay_bundles", [])
-    if raw_entries is None:
-        return []
-    if not isinstance(raw_entries, Sequence) or isinstance(raw_entries, str | bytes):
-        raise ValueError(f"existing root manifest replay_bundles must be a list: {root_manifest_path}")
-    entries: list[dict[str, Any]] = []
-    for index, raw_entry in enumerate(raw_entries):
-        if not isinstance(raw_entry, Mapping):
-            raise ValueError(f"existing root manifest replay_bundles[{index}] must be an object: {root_manifest_path}")
-        manifest_path = raw_entry.get("manifest_path")
-        if manifest_path is None:
-            raise ValueError(
-                f"existing root manifest replay_bundles[{index}] is missing manifest_path: {root_manifest_path}"
-            )
-        manifest_path_text = str(manifest_path)
-        if not manifest_path_text:
-            raise ValueError(
-                f"existing root manifest replay_bundles[{index}] has empty manifest_path: {root_manifest_path}"
-            )
-        entry = dict(raw_entry)
-        manifest_path_parts = PurePosixPath(manifest_path_text.replace("\\", "/")).parts
-        entry["manifest_path"] = manifest_path_text
-        entry["bundle"] = str(raw_entry.get("bundle") or manifest_path_parts[0])
-        entries.append(entry)
-    return entries
-
-
-def _validated_root_manifest_entries(raw_entries: Any, root_manifest_path: Path) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-    for index, raw_entry in enumerate(raw_entries):
-        if not isinstance(raw_entry, Mapping):
-            raise ValueError(
-                f"existing root manifest dataset_manifests[{index}] must be an object: {root_manifest_path}"
-            )
-        if raw_entry.get("dataset") is None:
-            raise ValueError(
-                f"existing root manifest dataset_manifests[{index}] is missing dataset: {root_manifest_path}"
-            )
-        if raw_entry.get("manifest_path") is None:
-            raise ValueError(
-                f"existing root manifest dataset_manifests[{index}] is missing manifest_path: {root_manifest_path}"
-            )
-        entry = dict(raw_entry)
-        entry["dataset"] = str(raw_entry["dataset"])
-        entry["dataset_dir"] = str(raw_entry.get("dataset_dir", ""))
-        entry["manifest_path"] = str(raw_entry["manifest_path"])
-        entries.append(entry)
-    return entries
-
-
-def _entry_manifest_path(output_root: Path, entry: Mapping[str, Any]) -> Path:
-    return _resolve_manifest_path(entry["manifest_path"], output_root)
-
-
-def _int_manifest_value(manifest: Mapping[str, Any], key: str) -> int:
-    value = manifest.get(key, 0)
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _optional_int_value(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _first_int_value(*values: Any) -> int:
-    for value in values:
-        parsed = _optional_int_value(value)
-        if parsed is not None:
-            return parsed
-    return 0
-
-
-def _specter_report_row_count(manifest: Mapping[str, Any]) -> int | None:
-    reports = manifest.get("specter")
-    if not isinstance(reports, Mapping):
-        return None
-    preferred_keys = ("specter2", "specter")
-    for key in preferred_keys:
-        report = reports.get(key)
-        if isinstance(report, Mapping):
-            row_count = _optional_int_value(report.get("row_count"))
-            if row_count is not None:
-                return row_count
-    for report in reports.values():
-        if isinstance(report, Mapping):
-            row_count = _optional_int_value(report.get("row_count"))
-            if row_count is not None:
-                return row_count
-    return None
-
-
-def _validation_requirements_from_manifest(manifest: Mapping[str, Any]) -> dict[str, bool]:
-    paths = manifest.get("paths", {})
-    path_map = paths if isinstance(paths, Mapping) else {}
-    return {
-        "require_embeddings": bool(path_map.get("specter") or path_map.get("specter2")),
-        "require_name_counts_index": bool(path_map.get("name_counts_index")),
-    }
-
-
-def _dataset_manifest_audit(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    paths = manifest.get("paths", {})
-    path_keys = set(paths) if isinstance(paths, Mapping) else set()
-    validation = manifest.get("validation", {})
-    validation_map = validation if isinstance(validation, Mapping) else {}
-    physical_layout = manifest.get("physical_layout", {})
-    physical_tables = physical_layout.get("tables", {}) if isinstance(physical_layout, Mapping) else {}
-    batch_index_count = sum(1 for key in path_keys if str(key).endswith("_batch_index"))
-    if isinstance(physical_tables, Mapping):
-        batch_index_count = max(
-            batch_index_count,
-            sum(
-                1
-                for layout in physical_tables.values()
-                if isinstance(layout, Mapping) and layout.get("batch_index_present")
-            ),
-        )
-    sidecar_keys = sorted(
-        key
-        for key in path_keys
-        if str(key).endswith("_batch_index")
-        or str(key) in {"cluster_seeds", "cluster_seed_disallows", "altered_cluster_signatures", "name_counts_index"}
-    )
-    return {
-        "conversion_kind": manifest.get("conversion_kind"),
-        "source_id": manifest.get("source_path") or manifest.get("source_dir"),
-        "signature_count": _int_manifest_value(manifest, "signature_count"),
-        "paper_count": _int_manifest_value(manifest, "paper_count"),
-        "embedding_row_count": _first_int_value(
-            validation_map.get("specter_count"),
-            manifest.get("paper_embedding_count"),
-            _specter_report_row_count(manifest),
-        ),
-        "cluster_seed_count": _first_int_value(
-            validation_map.get("cluster_seed_count"),
-            manifest.get("cluster_seeds_require_count"),
-        ),
-        "cluster_seed_disallow_count": _first_int_value(
-            validation_map.get("cluster_seed_disallow_count"),
-            manifest.get("cluster_seeds_disallow_count"),
-        ),
-        "altered_cluster_signature_count": _first_int_value(
-            validation_map.get("altered_cluster_signature_count"),
-            manifest.get("altered_cluster_signature_count"),
-        ),
-        "missing_embedding_count": _first_int_value(validation_map.get("missing_specter_paper_count")),
-        "batch_index_count": int(batch_index_count),
-        "sidecar_keys": sidecar_keys,
-        "validation_present": bool(validation_map),
-    }
-
-
-def _enrich_root_manifest_entry(output_root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
-    enriched = dict(entry)
-    manifest_path = _entry_manifest_path(output_root, entry)
-    if not manifest_path.exists():
-        enriched["manifest_exists"] = False
-        return enriched
-    enriched["manifest_exists"] = True
-    manifest_stat = manifest_path.stat()
-    enriched["manifest_size_bytes"] = int(manifest_stat.st_size)
-    enriched["manifest_sha256"] = _file_sha256(manifest_path)
-    manifest = _load_json(manifest_path)
-    if not isinstance(manifest, Mapping):
-        raise TypeError(f"dataset manifest must contain an object: {manifest_path}")
-    enriched["audit"] = _dataset_manifest_audit(manifest)
-    enriched["validation_requirements"] = _validation_requirements_from_manifest(manifest)
-    return enriched
-
-
-def _enrich_replay_bundle_entry(output_root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
-    enriched = dict(entry)
-    manifest_path = _entry_manifest_path(output_root, entry)
-    if not manifest_path.exists():
-        enriched["manifest_exists"] = False
-        return enriched
-    enriched["manifest_exists"] = True
-    manifest_stat = manifest_path.stat()
-    enriched["manifest_size_bytes"] = int(manifest_stat.st_size)
-    enriched["manifest_sha256"] = _file_sha256(manifest_path)
-    manifest = _load_json(manifest_path)
-    if not isinstance(manifest, Mapping):
-        raise TypeError(f"replay bundle manifest must contain an object: {manifest_path}")
-    nested_entries = _root_manifest_entries_from_manifest(manifest, manifest_path)
-    bundle_root = manifest_path.parent
-    enriched_nested_entries = [_enrich_root_manifest_entry(bundle_root, nested) for nested in nested_entries]
-    enriched["datasets"] = [entry["dataset"] for entry in enriched_nested_entries]
-    enriched["dataset_manifests"] = enriched_nested_entries
-    enriched["audit"] = {
-        "schema": manifest.get("schema"),
-        **_root_manifest_audit(enriched_nested_entries),
-    }
-    return enriched
-
-
-def _root_manifest_audit(dataset_manifests: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    datasets_with_missing_manifests = [
-        str(entry["dataset"]) for entry in dataset_manifests if not bool(entry.get("manifest_exists", False))
-    ]
-    audits: list[Mapping[str, Any]] = []
-    for entry in dataset_manifests:
-        audit = entry.get("audit")
-        if isinstance(audit, Mapping):
-            audits.append(audit)
-    return {
-        "dataset_count": len(dataset_manifests),
-        "datasets_with_missing_manifests": datasets_with_missing_manifests,
-        "total_signature_count": sum(int(audit.get("signature_count", 0) or 0) for audit in audits),
-        "total_paper_count": sum(int(audit.get("paper_count", 0) or 0) for audit in audits),
-        "total_embedding_row_count": sum(int(audit.get("embedding_row_count", 0) or 0) for audit in audits),
-        "total_missing_embedding_count": sum(int(audit.get("missing_embedding_count", 0) or 0) for audit in audits),
-        "total_batch_index_count": sum(int(audit.get("batch_index_count", 0) or 0) for audit in audits),
-    }
-
-
-def _root_manifest_validation_commands(
+def _manifest_bindings(
     output_root: Path,
-    dataset_manifests: Sequence[Mapping[str, Any]],
+    paths: Mapping[str, str],
     *,
-    dataset_dir_prefix: str = "",
-) -> list[str]:
-    commands = []
-    for entry in dataset_manifests:
-        if not bool(entry.get("manifest_exists", False)):
-            continue
-        dataset_dir = str(entry.get("dataset_dir") or "").replace("\\", "/")
-        if not dataset_dir:
-            continue
-        if dataset_dir_prefix:
-            dataset_dir = f"{dataset_dir_prefix.rstrip('/')}/{dataset_dir}"
-        dataset_dir = _manifest_relative_path(output_root / dataset_dir, _PROJECT_ROOT).replace("\\", "/")
-        command_parts = ["uv run python scripts/convert_to_arrow.py validate", f"--dataset-dir {dataset_dir}"]
-        requirements = entry.get("validation_requirements")
-        if isinstance(requirements, Mapping):
-            if requirements.get("require_embeddings"):
-                command_parts.append("--require-embeddings")
-            if requirements.get("require_name_counts_index"):
-                command_parts.append("--require-name-counts-index")
-        commands.append(" ".join(command_parts))
-    return commands
-
-
-def _replay_bundle_validation_commands(output_root: Path, replay_bundles: Sequence[Mapping[str, Any]]) -> list[str]:
-    commands: list[str] = []
-    for bundle in replay_bundles:
-        if not bool(bundle.get("manifest_exists", False)):
-            continue
-        manifest_path = str(bundle.get("manifest_path") or "").replace("\\", "/")
-        if not manifest_path:
-            continue
-        bundle_prefix = str(PurePosixPath(manifest_path).parent)
-        nested_entries = bundle.get("dataset_manifests", [])
-        if isinstance(nested_entries, Sequence) and not isinstance(nested_entries, str | bytes):
-            commands.extend(
-                _root_manifest_validation_commands(output_root, nested_entries, dataset_dir_prefix=bundle_prefix)
-            )
-    return commands
+    label: str,
+) -> dict[str, dict[str, str]]:
+    bindings: dict[str, dict[str, str]] = {}
+    for name, path_text in sorted(paths.items()):
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{label} keys must be nonempty strings")
+        manifest_path = _root_child_manifest_path(output_root, path_text, label=f"{label}.{name}")
+        bindings[name] = {
+            "path": str(path_text).replace("\\", "/"),
+            "sha256": _file_sha256(manifest_path),
+        }
+    return bindings
 
 
 def _write_root_manifest(
     output_root: Path,
     *,
-    dataset_manifests: Sequence[Mapping[str, Any]],
-    replay_bundles: Sequence[Mapping[str, Any]] = (),
-    output_root_label: str | None = None,
+    dataset_manifests: Mapping[str, str],
+    replay_bundles: Mapping[str, str] | None = None,
+    release_version: str | None = None,
 ) -> dict[str, Any]:
-    enriched_dataset_manifests = [_enrich_root_manifest_entry(output_root, entry) for entry in dataset_manifests]
-    enriched_replay_bundles = [_enrich_replay_bundle_entry(output_root, entry) for entry in replay_bundles]
-    validation_commands = _root_manifest_validation_commands(output_root, enriched_dataset_manifests)
-    validation_commands.extend(_replay_bundle_validation_commands(output_root, enriched_replay_bundles))
+    if release_version is not None and (not release_version or release_version.strip() != release_version):
+        raise ValueError("release_version must be a nonempty trimmed string")
+    if not dataset_manifests:
+        raise ValueError("dataset_manifests must be nonempty")
+    if replay_bundles and release_version is None:
+        raise ValueError("Only a published public-data root may declare replay_bundles")
     payload: dict[str, Any] = {
-        "schema": ROOT_MANIFEST_SCHEMA,
-        "output_root": str(output_root_label or output_root),
-        "generated_at_utc": datetime.now(UTC).isoformat(),
-        "generator": {
-            "script": "scripts/convert_to_arrow.py",
-            **_git_commit_metadata(),
-        },
-        "datasets": [entry["dataset"] for entry in enriched_dataset_manifests],
-        "dataset_manifests": enriched_dataset_manifests,
-        "audit": _root_manifest_audit(enriched_dataset_manifests),
-        "validation_command_cwd": str(_PROJECT_ROOT),
-        "validation_commands": validation_commands,
+        "kind": PUBLIC_DATA_KIND if release_version is not None else ARROW_COLLECTION_KIND,
+        "format_version": PUBLIC_DATA_FORMAT_VERSION,
+        "dataset_manifests": _manifest_bindings(
+            output_root,
+            dataset_manifests,
+            label="dataset_manifests",
+        ),
     }
-    if enriched_replay_bundles:
-        payload["replay_bundles"] = enriched_replay_bundles
-        payload["replay_audit"] = {
-            "bundle_count": len(enriched_replay_bundles),
-            "bundles_with_missing_manifests": [
-                str(entry.get("bundle")) for entry in enriched_replay_bundles if not entry.get("manifest_exists")
-            ],
-            "total_dataset_count": sum(
-                int(entry.get("audit", {}).get("dataset_count", 0))
-                for entry in enriched_replay_bundles
-                if isinstance(entry.get("audit"), Mapping)
-            ),
-        }
+    if release_version is not None:
+        payload["release_version"] = release_version
+    if replay_bundles:
+        payload["replay_bundles"] = _manifest_bindings(
+            output_root,
+            replay_bundles,
+            label="replay_bundles",
+        )
     _replace_json(output_root / "manifest.json", payload)
     return payload
 
@@ -618,28 +203,23 @@ def _write_root_manifest(
 def _upsert_root_manifest(output_root: Path, *, dataset_name: str, dataset_dir: Path) -> None:
     root_manifest_path = output_root / "manifest.json"
     lock_path = root_manifest_path.with_suffix(root_manifest_path.suffix + ".lock")
-    with _RootManifestLock(lock_path):
-        existing_root_manifest: Mapping[str, Any] = {}
+    with exclusive_file_lock(lock_path, timeout_seconds=_ROOT_MANIFEST_LOCK_TIMEOUT_SECONDS):
+        dataset_manifests: dict[str, str] = {}
         if root_manifest_path.exists():
-            loaded_root_manifest = _load_json(root_manifest_path)
-            if not isinstance(loaded_root_manifest, Mapping):
-                raise TypeError(f"existing root manifest must contain an object: {root_manifest_path}")
-            existing_root_manifest = loaded_root_manifest
-        dataset_manifests = _root_manifest_entries(root_manifest_path, dataset_name)
-        dataset_manifests.append(
-            {
-                "dataset": dataset_name,
-                "dataset_dir": _manifest_relative_path(dataset_dir, output_root),
-                "manifest_path": _manifest_relative_path(dataset_dir / "manifest.json", output_root),
+            existing_datasets = _read_generic_root_manifest(
+                root_manifest_path,
+                ignore_dataset=dataset_name,
+            )
+            dataset_manifests = {
+                name: _manifest_relative_path(path, output_root) for name, path in existing_datasets.items()
             }
+        dataset_manifests[dataset_name] = _manifest_relative_path(
+            dataset_dir / "manifest.json",
+            output_root,
         )
-        dataset_manifests.sort(key=lambda entry: entry["dataset"])
-        replay_bundles = _root_manifest_replay_bundle_entries_from_manifest(existing_root_manifest, root_manifest_path)
         _write_root_manifest(
             output_root,
             dataset_manifests=dataset_manifests,
-            replay_bundles=replay_bundles,
-            output_root_label=str(existing_root_manifest.get("output_root") or output_root),
         )
 
 
@@ -662,6 +242,255 @@ def _mapping_by_id(rows: Any, *, id_key: str, label: str) -> dict[str, Mapping[s
     return mapped
 
 
+def join_canonical_benchmark_names(
+    signatures: Mapping[str, Any],
+    canonical_rows: Sequence[Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Replace benchmark name fields with canonical rows joined by signature ID."""
+
+    fields = ("first", "middle", "last")
+    for signature_id, signature in signatures.items():
+        if signature["signature_id"] != signature_id:
+            raise ValueError(f"benchmark signature key does not match signature_id: {signature_id!r}")
+
+    canonical_by_id = _mapping_by_id(canonical_rows, id_key="signature_id", label="canonical name rows")
+
+    missing = sorted(signatures.keys() - canonical_by_id.keys())
+    extra = sorted(canonical_by_id.keys() - signatures.keys())
+    if missing or extra:
+        raise ValueError(
+            "canonical name signature IDs must exactly match benchmark signatures: "
+            f"missing={missing[:10]}, extra={extra[:10]}"
+        )
+
+    field_divergence_counts = {field: 0 for field in fields}
+    changed_signature_count = 0
+    joined: dict[str, dict[str, Any]] = {}
+    for signature_id in sorted(signatures):
+        signature = signatures[signature_id]
+        author_info = dict(signature["author_info"])
+        canonical = canonical_by_id[signature_id]
+        changed = False
+        for field in fields:
+            if author_info.get(field) != canonical[field]:
+                field_divergence_counts[field] += 1
+                changed = True
+            author_info[field] = canonical[field]
+        changed_signature_count += int(changed)
+        joined[signature_id] = {**signature, "author_info": author_info}
+
+    return joined, {
+        "rows": len(joined),
+        "changed_signatures": changed_signature_count,
+        "field_changes": field_divergence_counts,
+    }
+
+
+AUGMENTED_SOURCE_SEPARATOR = "___"
+AUGMENTED_SIGNATURES_FILE = "augmented_signatures.json"
+AUGMENTED_TRAINING_PAIR_FILES = ("train_pairs.csv", "val_pairs.csv")
+AUGMENTED_TEST_PAIR_FILE = "test_pairs.csv"
+AUGMENTED_TEST_PAIRS_OUTPUT = "test_pairs.json"
+
+
+def _augmented_source(signature_id: str) -> tuple[str, str]:
+    source, separator, source_signature_id = signature_id.partition(AUGMENTED_SOURCE_SEPARATOR)
+    if not separator or not source or not source_signature_id:
+        raise ValueError(f"augmented signature ID must look like <dataset>___<signature_id>: {signature_id!r}")
+    return source, source_signature_id
+
+
+def join_canonical_augmented_names(
+    augmented_signatures: Mapping[str, Any],
+    source_signatures: Mapping[str, Mapping[str, Any]],
+    canonical_rows: Mapping[str, Any],
+    *,
+    drop_sources: frozenset[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Give augmented signatures their source datasets' canonical names.
+
+    The augmented training set copies signatures from the benchmark datasets under IDs of
+    the form ``<dataset>___<signature_id>``. Its generator changed only one name field: it
+    shortened about half of the first names to their first character, and copied middle
+    and last names unchanged. This join drops signatures from ``drop_sources``, checks
+    that every remaining signature still matches its original benchmark signature, then
+    replaces ``first``/``middle``/``last`` with the source dataset's canonical row,
+    shortening the canonical first name wherever the augmented one was shortened.
+
+    An original first name of one character cannot show whether it was shortened, so it
+    is treated as unshortened and receives the full canonical first name; the report
+    counts these rows.
+
+    Args:
+        augmented_signatures: Augmented signatures keyed by prefixed signature ID.
+        source_signatures: Original (pre-join) benchmark signatures, keyed by dataset and
+            then by the dataset's own signature ID.
+        canonical_rows: Canonical name rows (``signature_id``, ``first``, ``middle``,
+            ``last``) keyed by dataset, in the same format as the benchmark join.
+        drop_sources: Source datasets whose augmented signatures are removed.
+
+    Returns:
+        The joined signatures and a report with kept/dropped counts, changed fields, and
+        counts of re-shortened and one-character first names.
+
+    Raises:
+        ValueError: If an ID is malformed, a drop source matches no signature, a source
+            dataset or canonical row is missing, an augmented signature no longer matches
+            its original benchmark signature, or a canonical first name that must be
+            shortened does not start with a letter or digit.
+    """
+
+    fields = ("first", "middle", "last")
+    kept_by_source: dict[str, list[tuple[str, str]]] = {}
+    dropped_by_source: dict[str, int] = {}
+    for signature_id, signature in augmented_signatures.items():
+        if signature.get("signature_id") != signature_id:
+            raise ValueError(f"augmented signature key does not match signature_id: {signature_id!r}")
+        source, source_signature_id = _augmented_source(signature_id)
+        if source in drop_sources:
+            dropped_by_source[source] = dropped_by_source.get(source, 0) + 1
+        else:
+            kept_by_source.setdefault(source, []).append((signature_id, source_signature_id))
+
+    unmatched_drop_sources = sorted(drop_sources - dropped_by_source.keys())
+    if unmatched_drop_sources:
+        raise ValueError(f"drop sources match no augmented signatures: {unmatched_drop_sources}")
+    missing_sources = sorted(
+        source for source in kept_by_source if source not in source_signatures or source not in canonical_rows
+    )
+    if missing_sources:
+        raise ValueError(f"augmented join needs source signatures and canonical names for: {missing_sources}")
+
+    field_changes = {field: 0 for field in fields}
+    changed_signatures = 0
+    shortened_first_names = 0
+    single_character_first_names = 0
+    single_character_first_names_lengthened = 0
+    mismatches: list[str] = []
+    missing_rows: list[str] = []
+    unshortenable: list[str] = []
+    joined: dict[str, dict[str, Any]] = {}
+    for source in sorted(kept_by_source):
+        canonical_by_id = _mapping_by_id(
+            canonical_rows[source], id_key="signature_id", label=f"{source} canonical rows"
+        )
+        originals = source_signatures[source]
+        for signature_id, source_signature_id in sorted(kept_by_source[source]):
+            original = originals.get(source_signature_id)
+            canonical = canonical_by_id.get(source_signature_id)
+            if original is None or canonical is None:
+                missing_rows.append(signature_id)
+                continue
+            author_info = dict(augmented_signatures[signature_id]["author_info"])
+            original_info = original["author_info"]
+            original_first = original_info.get("first")
+            augmented_first = author_info.get("first")
+            shortened = bool(original_first) and len(original_first) > 1 and augmented_first == original_first[0]
+            if (
+                (augmented_first != original_first and not shortened)
+                or author_info.get("middle") != original_info.get("middle")
+                or author_info.get("last") != original_info.get("last")
+            ):
+                mismatches.append(signature_id)
+                continue
+            canonical_first = canonical["first"]
+            if shortened and canonical_first and not canonical_first[0].isalnum():
+                unshortenable.append(signature_id)
+                continue
+            if original_first and len(original_first) == 1:
+                single_character_first_names += 1
+                single_character_first_names_lengthened += int(bool(canonical_first) and len(canonical_first) > 1)
+            new_names = {
+                "first": canonical_first[0] if shortened and canonical_first else canonical_first,
+                "middle": canonical["middle"],
+                "last": canonical["last"],
+            }
+            changed = False
+            for field in fields:
+                if author_info.get(field) != new_names[field]:
+                    field_changes[field] += 1
+                    changed = True
+                author_info[field] = new_names[field]
+            changed_signatures += int(changed)
+            shortened_first_names += int(shortened)
+            joined[signature_id] = {**augmented_signatures[signature_id], "author_info": author_info}
+
+    if missing_rows:
+        raise ValueError(
+            f"{len(missing_rows)} augmented signatures have no original signature or canonical row, "
+            f"for example {missing_rows[:5]}"
+        )
+    if mismatches:
+        raise ValueError(
+            f"{len(mismatches)} augmented signatures no longer match their original benchmark signatures "
+            f"(first/middle/last), for example {mismatches[:5]}"
+        )
+    if unshortenable:
+        raise ValueError(
+            f"{len(unshortenable)} shortened augmented first names have canonical first names that do not start "
+            f"with a letter or digit, for example {unshortenable[:5]}"
+        )
+    return joined, {
+        "kept_signatures": {source: len(rows) for source, rows in sorted(kept_by_source.items())},
+        "dropped_signatures": dict(sorted(dropped_by_source.items())),
+        "changed_signatures": changed_signatures,
+        "field_changes": field_changes,
+        "shortened_first_names": shortened_first_names,
+        "single_character_first_names": single_character_first_names,
+        "single_character_first_names_lengthened": single_character_first_names_lengthened,
+    }
+
+
+def filter_augmented_pairs(
+    pair_path: Path,
+    *,
+    kept_signature_ids: set[str],
+    drop_sources: frozenset[str],
+) -> tuple[list[tuple[str, str, str, int]], int]:
+    """Drop pair rows that touch a dropped source dataset.
+
+    Args:
+        pair_path: Augmented fixed-pair CSV (``pair1``/``pairs1``/``signature_id_1`` style).
+        kept_signature_ids: Signature IDs that remain after the join.
+        drop_sources: Source datasets whose pairs are removed.
+
+    Returns:
+        Kept rows as ``(signature_id_1, signature_id_2, original_label, integer_label)``
+        in file order, and the number of dropped rows.
+
+    Raises:
+        ValueError: If the file violates the fixed-pair contract, every row is dropped, or
+            a kept row references a signature that is not in the joined signatures.
+    """
+
+    import pandas as pd
+
+    from s2and.data import _map_fixed_pair_labels
+
+    # Same reader and contract as ANDData fixed pairs; keep_default_na preserves raw labels.
+    raw = pd.read_csv(pair_path, sep=",", dtype=str, keep_default_na=False)
+    mapped = _map_fixed_pair_labels(raw, pair_path.name)
+    left_column, right_column, label_column = list(mapped.columns)
+    kept: list[tuple[str, str, str, int]] = []
+    unknown: set[str] = set()
+    for left, right, original_label, label in zip(
+        mapped[left_column].tolist(),
+        mapped[right_column].tolist(),
+        raw[label_column].tolist(),
+        mapped[label_column].tolist(),
+        strict=True,
+    ):
+        if _augmented_source(left)[0] in drop_sources or _augmented_source(right)[0] in drop_sources:
+            continue
+        unknown.update(signature_id for signature_id in (left, right) if signature_id not in kept_signature_ids)
+        kept.append((left, right, original_label, int(label)))
+    if unknown:
+        raise ValueError(f"{pair_path} references signatures missing from the joined set: {sorted(unknown)[:5]}")
+    if not kept:
+        raise ValueError(f"every pair in {pair_path} was dropped")
+    return kept, len(raw) - len(kept)
+
+
 def _altered_values(payload: Mapping[str, Any]) -> list[str]:
     values = payload.get("altered_cluster_signatures") or []
     if isinstance(values, str | bytes) or not isinstance(values, Sequence):
@@ -682,9 +511,12 @@ def _require_groups_from_service_payload(value: Any) -> list[list[str]]:
             for signature_id, component_key in value.items():
                 groups_by_component.setdefault(str(component_key), []).append(str(signature_id))
             return list(groups_by_component.values())
-        if all(isinstance(item, Sequence) and not isinstance(item, str | bytes) for item in values):
-            return [[str(signature_id) for signature_id in members] for members in values]
-        raise TypeError("cluster_seeds.require must be either signature->cluster or cluster->signature-list")
+        groups: list[list[str]] = []
+        for members in values:
+            if not isinstance(members, Sequence) or isinstance(members, str | bytes):
+                raise TypeError("cluster_seeds.require must be either signature->cluster or cluster->signature-list")
+            groups.append([str(signature_id) for signature_id in members])
+        return groups
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
         groups: list[list[str]] = []
         for item in value:
@@ -828,65 +660,24 @@ def _write_specter_arrow(
     }
 
 
-def _add_extra_specter_index_and_layout(
-    *,
-    paths: dict[str, str],
-    raw_planner_index_metrics: dict[str, Any],
-    physical_layout: dict[str, Any],
-    table_key: str,
-    output_dir: Path,
-    overwrite: bool,
-) -> None:
-    from s2and.incremental_linking.feature_block import (
-        RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
-        arrow_ipc_physical_layout,
-        write_arrow_batch_lookup_index,
-    )
+def _converter_identity(**options: Any) -> dict[str, Any]:
+    """Record the converter and the options that shaped its output."""
 
-    arrow_path = paths.get(table_key)
-    if arrow_path is None:
-        return
-    index_key = f"{table_key}_batch_index"
-    index_path, index_metrics = write_arrow_batch_lookup_index(
-        arrow_path,
-        output_dir / f"{Path(arrow_path).stem}.specter_batch_index.bin",
-        key_column="paper_id",
-        table_name="specter",
-        max_record_batch_rows=RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS["specter"],
-        overwrite=overwrite,
-    )
-    paths[index_key] = index_path
-    raw_planner_index_metrics[index_key] = index_metrics
-    physical_layout["tables"][table_key] = {
-        "key": "paper_id",
-        "max_record_batch_rows": RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS["specter"],
-        "batch_index_path_key": index_key,
-        "batch_index_present": True,
-        **arrow_ipc_physical_layout(arrow_path),
+    return {
+        "script": "scripts/convert_to_arrow.py",
+        "use_orcid_id": True,
+        **options,
     }
 
 
-def _source_file(source_dir: Path, dataset: str, preferred_name: str, fallback_name: str | None = None) -> Path:
-    candidates = [source_dir / preferred_name]
-    if fallback_name is not None:
-        candidates.append(source_dir / fallback_name)
-    for path in candidates:
-        if path.exists():
-            return path
-    formatted = ", ".join(str(path) for path in candidates)
-    raise FileNotFoundError(f"Missing source file. Tried: {formatted}")
+def _source_file(path: Path) -> Path:
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing source file: {path}")
+    return path
 
 
-def _optional_source_file(
-    source_dir: Path, dataset: str, preferred_name: str, fallback_name: str | None = None
-) -> Path | None:
-    candidates = [source_dir / preferred_name]
-    if fallback_name is not None:
-        candidates.append(source_dir / fallback_name)
-    for path in candidates:
-        if path.exists():
-            return path
-    return None
+def _optional_source_file(path: Path) -> Path | None:
+    return path if path.is_file() else None
 
 
 def benchmark_dataset_sources(source_root: Path, dataset: str) -> RuntimeDatasetSources:
@@ -894,12 +685,114 @@ def benchmark_dataset_sources(source_root: Path, dataset: str) -> RuntimeDataset
     return RuntimeDatasetSources(
         dataset=dataset,
         source_dir=source_dir,
-        signatures_path=_source_file(source_dir, dataset, f"{dataset}_signatures.json", "signatures.json"),
-        papers_path=_source_file(source_dir, dataset, f"{dataset}_papers.json", "papers.json"),
-        clusters_path=_optional_source_file(source_dir, dataset, f"{dataset}_clusters.json", "clusters.json"),
-        specter_path=_optional_source_file(source_dir, dataset, f"{dataset}_specter.pickle", "specter.pickle"),
-        specter2_path=_optional_source_file(source_dir, dataset, f"{dataset}_specter2.pkl", "specter2.pkl"),
+        signatures_path=_source_file(source_dir / f"{dataset}_signatures.json"),
+        papers_path=_source_file(source_dir / f"{dataset}_papers.json"),
+        clusters_path=_optional_source_file(source_dir / f"{dataset}_clusters.json"),
+        specter_path=_optional_source_file(source_dir / f"{dataset}_specter.pickle"),
+        specter2_path=_optional_source_file(source_dir / f"{dataset}_specter2.pkl"),
+        train_pairs_path=_optional_source_file(source_dir / "train_pairs.csv"),
+        val_pairs_path=_optional_source_file(source_dir / "val_pairs.csv"),
+        test_pairs_path=_optional_source_file(source_dir / "test_pairs.csv"),
     )
+
+
+def _validated_fixed_pair_labels(
+    sources: RuntimeDatasetSources, signature_ids: set[str]
+) -> dict[str, list[tuple[str, str, str]]]:
+    """Validate a dataset's fixed-pair label CSVs before they are published.
+
+    Pair-only benchmarks such as MEDLINE carry their labels as ``train_pairs.csv``,
+    ``test_pairs.csv`` and an optional ``val_pairs.csv`` instead of clusters. Each file
+    must satisfy the ``ANDData`` fixed-pair contract, reference only signatures in the
+    dataset, and share no unordered pair with another split.
+
+    Args:
+        sources: Source files for the dataset being converted.
+        signature_ids: Signature IDs present in the converted dataset.
+
+    Returns:
+        Rows with canonical column order keyed by manifest path key (``train_pairs``,
+        ``val_pairs``, ``test_pairs``); empty when the dataset has no pair labels.
+        Raw label spellings and repeated consistent pairs are preserved.
+
+    Raises:
+        ValueError: If only some required splits are present, or a file violates the
+            fixed-pair contract.
+    """
+
+    import pandas as pd
+
+    from s2and.data import _map_fixed_pair_labels
+
+    candidates = {
+        "train_pairs": sources.train_pairs_path,
+        "val_pairs": sources.val_pairs_path,
+        "test_pairs": sources.test_pairs_path,
+    }
+    present = {key: path for key, path in candidates.items() if path is not None}
+    if not present:
+        return {}
+    if "train_pairs" not in present or "test_pairs" not in present:
+        raise ValueError(
+            f"Dataset {sources.dataset!r} fixed-pair labels require train_pairs.csv and test_pairs.csv; "
+            f"found {sorted(present)}"
+        )
+    identities: dict[str, set[tuple[str, str]]] = {}
+    rows_by_split: dict[str, list[tuple[str, str, str]]] = {}
+    for key, path in present.items():
+        csv_text = path.read_text(encoding="utf-8")
+        raw = pd.read_csv(StringIO(csv_text), sep=",", dtype=str, keep_default_na=False)
+        mapped_input = raw.copy()
+        # Preserve ANDData's label inference (e.g. a numeric 1.0 column), while
+        # retaining exact string IDs and the published label spelling.
+        if "label" in raw:
+            mapped_input["label"] = pd.read_csv(StringIO(csv_text), sep=",", usecols=lambda column: column == "label")[
+                "label"
+            ]
+        frame = _map_fixed_pair_labels(mapped_input, key)
+        labels: dict[tuple[str, str], int] = {}
+        rows: list[tuple[str, str, str]] = []
+        for (left, right, label), original_label in zip(
+            frame.itertuples(index=False, name=None), raw["label"], strict=True
+        ):
+            if left == right:
+                raise ValueError(f"{path} contains self-pair: {left!r}")
+            pair = (left, right) if left < right else (right, left)
+            if pair in labels and labels[pair] != int(label):
+                raise ValueError(f"{path} contains conflicting labels for unordered pair: {pair!r}")
+            labels[pair] = int(label)
+            rows.append((left, right, original_label))
+        unknown = sorted({signature_id for pair in labels for signature_id in pair} - signature_ids)
+        if unknown:
+            raise ValueError(f"{path} references signatures absent from dataset {sources.dataset!r}: {unknown[:5]}")
+        identities[key] = set(labels)
+        rows_by_split[key] = rows
+    keys = sorted(identities)
+    for index, left in enumerate(keys):
+        for right in keys[index + 1 :]:
+            overlap = identities[left] & identities[right]
+            if overlap:
+                raise ValueError(
+                    f"Dataset {sources.dataset!r} fixed-pair splits {left!r} and {right!r} share "
+                    f"{len(overlap)} unordered pairs, for example {sorted(overlap)[:3]}"
+                )
+    return rows_by_split
+
+
+def _conversion_name_counts_index(
+    root: Path, index_root: Path | None, *, skip: bool, context: str
+) -> tuple[str | None, float]:
+    """Check the shared index before preprocessing or writing dataset artifacts."""
+
+    if skip:
+        return None, 0.0
+    start = time.perf_counter()
+    path = require_name_counts_index_artifact(
+        root / "name_counts_index" if index_root is None else index_root,
+        context=context,
+        producer_hint="run python -m scripts.production.counts.generate_name_counts first",
+    )
+    return path, time.perf_counter() - start
 
 
 def linker_replay_dataset_sources(raw_root: Path, embeddings_root: Path, dataset: str) -> RuntimeDatasetSources:
@@ -908,9 +801,9 @@ def linker_replay_dataset_sources(raw_root: Path, embeddings_root: Path, dataset
     return RuntimeDatasetSources(
         dataset=dataset,
         source_dir=raw_dir,
-        signatures_path=_source_file(raw_dir, dataset, "signatures.json"),
-        papers_path=_source_file(raw_dir, dataset, "papers.json"),
-        specter2_path=_source_file(embeddings_dir, dataset, "specter2.pkl"),
+        signatures_path=_source_file(raw_dir / "signatures.json"),
+        papers_path=_source_file(raw_dir / "papers.json"),
+        specter2_path=_source_file(embeddings_dir / "specter2.pkl"),
     )
 
 
@@ -947,7 +840,6 @@ def convert_service_json_to_arrow(
     n_jobs: int,
     overwrite: bool,
     skip_name_counts_index: bool,
-    overwrite_name_counts_index: bool = False,
     copy_source_json: bool = False,
     validate: bool = True,
 ) -> dict[str, Any]:
@@ -955,13 +847,10 @@ def convert_service_json_to_arrow(
 
     from s2and.data import ANDData
     from s2and.incremental_linking.feature_block import (
-        FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
-        raw_planner_arrow_physical_layout,
         write_arrow_ipc_table,
-        write_name_counts_index,
         write_raw_arrow_batch_lookup_indexes,
     )
-    from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
+    from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
     output_dir = output_root / dataset_name
     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
@@ -969,8 +858,10 @@ def convert_service_json_to_arrow(
             f"output directory already contains files for dataset {dataset_name!r}: {output_dir}. "
             "Use --overwrite to regenerate it."
         )
-    output_dir.mkdir(parents=True, exist_ok=True)
     _validate_existing_root_manifest(output_root / "manifest.json")
+    name_counts_index_path, write_name_counts_index_seconds = _conversion_name_counts_index(
+        output_root, name_counts_index_root, skip=skip_name_counts_index, context="service JSON conversion"
+    )
 
     start = time.perf_counter()
     payload = _load_json(input_json)
@@ -995,7 +886,6 @@ def convert_service_json_to_arrow(
         specter_embeddings=specter_embeddings,
         cluster_seeds=_cluster_seeds_payload(payload),
         altered_cluster_signatures=altered,
-        block_type="s2",
         train_pairs=None,
         val_pairs=None,
         test_pairs=None,
@@ -1003,18 +893,16 @@ def convert_service_json_to_arrow(
         val_pairs_size=1000,
         test_pairs_size=1000,
         n_jobs=n_jobs,
-        load_name_counts=not skip_name_counts_index,
+        name_counts_index=None,
         preprocess=True,
         random_seed=42,
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
-        compute_reference_features=False,
     )
     anddata_seconds = time.perf_counter() - start
 
     start = time.perf_counter()
-    paths = write_feature_block_arrow_from_anddata(
+    paths = write_raw_planner_arrow_from_anddata(
         dataset,
         output_dir,
         signature_ids=list(dataset.signatures),
@@ -1047,44 +935,31 @@ def convert_service_json_to_arrow(
         paths.update({key: str(path) for key, path in source_paths.items()})
 
     start = time.perf_counter()
-    paths, raw_planner_index_metrics = write_raw_arrow_batch_lookup_indexes(
+    paths, _raw_planner_index_metrics = write_raw_arrow_batch_lookup_indexes(
         paths,
         output_dir,
         overwrite=overwrite,
     )
     write_raw_planner_indexes_seconds = time.perf_counter() - start
-    physical_layout = raw_planner_arrow_physical_layout(paths)
 
-    name_counts_index_metrics: dict[str, Any] = {"skipped": True}
-    write_name_counts_index_seconds = 0.0
-    if not skip_name_counts_index:
-        start = time.perf_counter()
-        index_root = output_root if name_counts_index_root is None else name_counts_index_root
-        name_counts_index_path, name_counts_index_metrics = write_name_counts_index(
-            index_root,
-            overwrite=overwrite_name_counts_index,
-        )
-        write_name_counts_index_seconds = time.perf_counter() - start
+    if name_counts_index_path is not None:
         paths["name_counts_index"] = name_counts_index_path
 
-    manifest_paths = _portable_manifest_paths(paths, output_dir)
-    manifest = {
-        "schema": FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
-        "dataset": dataset_name,
-        "source_path": str(input_json),
-        "conversion_kind": "service-json",
+    manifest = build_arrow_artifact_manifest(paths, output_dir)
+    validation_metrics: dict[str, Any] = {}
+    if validate:
+        validation_metrics = validate_arrow_dataset_manifest(
+            manifest,
+            require_embeddings=specter_embeddings is not None,
+            require_name_counts_index=not skip_name_counts_index,
+            base_dir=output_dir,
+        )
+    write_arrow_artifact_manifest(manifest, output_dir)
+    _upsert_root_manifest(output_root, dataset_name=dataset_name, dataset_dir=output_dir)
+    return {
+        **manifest,
         "signature_count": len(dataset.signatures),
         "paper_count": len(dataset.papers),
-        "paper_embedding_count": len(specter_embeddings or {}),
-        "cluster_seeds_require_count": len(dataset.cluster_seeds_require),
-        "cluster_seeds_disallow_count": len(dataset.cluster_seeds_disallow),
-        "altered_cluster_signature_count": len(altered),
-        "altered_cluster_signatures": altered,
-        "paths": manifest_paths,
-        "physical_layout": physical_layout,
-        "raw_planner_batch_indexes": raw_planner_index_metrics,
-        "name_counts_index": name_counts_index_metrics,
-        "name_tuples": "default packaged filtered aliases",
         "timings_seconds": {
             "load_json_seconds": load_seconds,
             "anddata_seconds": anddata_seconds,
@@ -1092,17 +967,8 @@ def convert_service_json_to_arrow(
             "write_raw_planner_indexes_seconds": write_raw_planner_indexes_seconds,
             "write_name_counts_index_seconds": write_name_counts_index_seconds,
         },
+        "validation": validation_metrics,
     }
-    if validate:
-        manifest["validation"] = validate_arrow_dataset_manifest(
-            manifest,
-            require_embeddings=specter_embeddings is not None,
-            require_name_counts_index=not skip_name_counts_index,
-            base_dir=output_dir,
-        )
-    _replace_json(output_dir / "manifest.json", manifest)
-    _upsert_root_manifest(output_root, dataset_name=dataset_name, dataset_dir=output_dir)
-    return manifest
 
 
 def convert_runtime_dataset_to_arrow(
@@ -1114,40 +980,59 @@ def convert_runtime_dataset_to_arrow(
     n_jobs: int,
     overwrite: bool,
     skip_name_counts_index: bool,
-    overwrite_name_counts_index: bool = False,
     include_empty_cluster_seeds: bool = False,
-    selected_embedding: str | None = None,
+    selected_embedding: str = "specter2",
     validate: bool = True,
 ) -> dict[str, Any]:
-    """Write one benchmark or linker-replay dataset as Arrow artifacts."""
+    """Write one benchmark or linker-replay dataset with one selected embedding table."""
 
     from s2and.data import ANDData
     from s2and.incremental_linking.feature_block import (
-        FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
-        raw_planner_arrow_physical_layout,
-        write_name_counts_index,
         write_raw_arrow_batch_lookup_indexes,
     )
-    from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
+    from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
     dataset_name = sources.dataset
+    if selected_embedding not in {"specter", "specter2"}:
+        raise ValueError(f"unsupported selected embedding: {selected_embedding!r}")
+    embedding_source = sources.specter_path if selected_embedding == "specter" else sources.specter2_path
+    if embedding_source is None or not embedding_source.is_file():
+        raise FileNotFoundError(
+            f"Dataset {dataset_name!r} has no {selected_embedding} source; "
+            "canonical benchmark and production conversion requires SPECTER2"
+        )
     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
         raise FileExistsError(
             f"output directory already contains files for dataset {dataset_name!r}: {output_dir}. "
             "Use --overwrite to regenerate it."
         )
-    output_dir.mkdir(parents=True, exist_ok=True)
     _validate_existing_root_manifest(root_manifest_dir / "manifest.json")
+    name_counts_index_path, write_name_counts_index_seconds = _conversion_name_counts_index(
+        root_manifest_dir, name_counts_index_root, skip=skip_name_counts_index, context="runtime dataset conversion"
+    )
+    converter = _converter_identity(
+        selected_embedding=selected_embedding,
+        include_empty_cluster_seeds=include_empty_cluster_seeds,
+        name_counts_index="skipped" if skip_name_counts_index else "bound",
+    )
+    provenance_sources = {
+        "signatures": sources.signatures_path,
+        "papers": sources.papers_path,
+        "specter_embeddings": embedding_source,
+        **({} if sources.clusters_path is None else {"clusters": sources.clusters_path}),
+    }
+    source_hashes = {role: _file_sha256(path) for role, path in provenance_sources.items()}
+    signatures = _load_json(sources.signatures_path)
+    pair_rows = _validated_fixed_pair_labels(sources, set(signatures))
 
     start = time.perf_counter()
     dataset = ANDData(
-        signatures=str(sources.signatures_path),
+        signatures=signatures,
         papers=str(sources.papers_path),
         name=dataset_name,
         mode="train" if sources.clusters_path is not None else "inference",
         specter_embeddings=None,
         clusters=str(sources.clusters_path) if sources.clusters_path is not None else None,
-        block_type="s2",
         train_pairs=None,
         val_pairs=None,
         test_pairs=None,
@@ -1155,18 +1040,16 @@ def convert_runtime_dataset_to_arrow(
         val_pairs_size=10000,
         test_pairs_size=10000,
         n_jobs=n_jobs,
-        load_name_counts=not skip_name_counts_index,
+        name_counts_index=None,
         preprocess=True,
         random_seed=42,
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
-        compute_reference_features=False,
     )
     anddata_seconds = time.perf_counter() - start
 
     start = time.perf_counter()
-    paths = write_feature_block_arrow_from_anddata(
+    paths = write_raw_planner_arrow_from_anddata(
         dataset,
         output_dir,
         signature_ids=list(dataset.signatures),
@@ -1183,89 +1066,72 @@ def convert_runtime_dataset_to_arrow(
             shutil.copy2(sources.clusters_path, output_clusters_path)
         paths["clusters"] = str(output_clusters_path)
 
+    for pair_key, rows in pair_rows.items():
+        output_pair_path = output_dir / f"{pair_key}.csv"
+        with output_pair_path.open("w", encoding="utf-8", newline="") as output:
+            writer = csv.writer(output, lineterminator="\n")
+            writer.writerow(["signature_id_1", "signature_id_2", "label"])
+            writer.writerows(rows)
+        paths[pair_key] = str(output_pair_path)
+    if overwrite:
+        for pair_key in {"train_pairs", "val_pairs", "test_pairs"} - pair_rows.keys():
+            (output_dir / f"{pair_key}.csv").unlink(missing_ok=True)
+
     needed_paper_ids = {str(signature.paper_id) for signature in dataset.signatures.values()}
-    specter_reports: dict[str, Any] = {}
-    if sources.specter_path is not None:
-        specter_reports["specter"] = _write_specter_arrow(
-            source_path=sources.specter_path,
-            output_path=output_dir / "specter.arrow",
-            needed_paper_ids=needed_paper_ids,
-            overwrite=overwrite,
-        )
-        paths["specter"] = str(output_dir / "specter.arrow")
-    if sources.specter2_path is not None:
-        specter_reports["specter2"] = _write_specter_arrow(
-            source_path=sources.specter2_path,
-            output_path=output_dir / "specter2.arrow",
-            needed_paper_ids=needed_paper_ids,
-            overwrite=overwrite,
-        )
-        paths["specter2"] = str(output_dir / "specter2.arrow")
-        if selected_embedding == "specter2" or paths.get("specter") is None:
-            paths["specter"] = str(output_dir / "specter2.arrow")
+    embedding_path = output_dir / f"{selected_embedding}.arrow"
+    _write_specter_arrow(
+        source_path=embedding_source,
+        output_path=embedding_path,
+        needed_paper_ids=needed_paper_ids,
+        overwrite=overwrite,
+    )
+    paths["specter"] = str(embedding_path)
 
     start = time.perf_counter()
-    paths, raw_planner_index_metrics = write_raw_arrow_batch_lookup_indexes(
+    paths, _raw_planner_index_metrics = write_raw_arrow_batch_lookup_indexes(
         paths,
         output_dir,
         overwrite=overwrite,
     )
     write_raw_planner_indexes_seconds = time.perf_counter() - start
-    physical_layout = raw_planner_arrow_physical_layout(paths)
-    if sources.specter2_path is not None:
-        _add_extra_specter_index_and_layout(
-            paths=paths,
-            raw_planner_index_metrics=raw_planner_index_metrics,
-            physical_layout=physical_layout,
-            table_key="specter2",
-            output_dir=output_dir,
-            overwrite=overwrite,
-        )
-
-    name_counts_index_metrics: dict[str, Any] = {"skipped": True}
-    write_name_counts_index_seconds = 0.0
-    if not skip_name_counts_index:
-        start = time.perf_counter()
-        index_root = root_manifest_dir if name_counts_index_root is None else name_counts_index_root
-        name_counts_index_path, name_counts_index_metrics = write_name_counts_index(
-            index_root,
-            overwrite=overwrite_name_counts_index,
-        )
-        write_name_counts_index_seconds = time.perf_counter() - start
+    if name_counts_index_path is not None:
         paths["name_counts_index"] = name_counts_index_path
 
-    manifest_paths = _portable_manifest_paths(paths, output_dir)
-    manifest = {
-        "schema": FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
-        "dataset": dataset_name,
-        "source_dir": str(sources.source_dir),
-        "conversion_kind": "table-runtime",
+    manifest = build_arrow_artifact_manifest(paths, output_dir)
+    validation_metrics: dict[str, Any] = {}
+    if validate:
+        validation_metrics = validate_arrow_dataset_manifest(
+            manifest,
+            require_embeddings=True,
+            require_name_counts_index=not skip_name_counts_index,
+            base_dir=output_dir,
+        )
+    changed_sources = [role for role, path in provenance_sources.items() if _file_sha256(path) != source_hashes[role]]
+    if changed_sources:
+        raise ValueError(f"Source files changed during conversion: {changed_sources}; rerun from stable inputs")
+    write_arrow_artifact_manifest(manifest, output_dir)
+    provenance_path = write_conversion_provenance(
+        output_dir,
+        sources=provenance_sources,
+        converter=converter,
+    )
+    recorded_sources = _load_json(provenance_path)["sources"]
+    if any(recorded_sources[role]["sha256"] != digest for role, digest in source_hashes.items()):
+        provenance_path.unlink()
+        raise ValueError("Source files changed while writing conversion provenance; rerun from stable inputs")
+    _upsert_root_manifest(root_manifest_dir, dataset_name=dataset_name, dataset_dir=output_dir)
+    return {
+        **manifest,
         "signature_count": len(dataset.signatures),
         "paper_count": len(dataset.papers),
-        "cluster_count": len(dataset.clusters or {}),
-        "paths": manifest_paths,
-        "specter": specter_reports,
-        "physical_layout": physical_layout,
-        "raw_planner_batch_indexes": raw_planner_index_metrics,
-        "name_counts_index": name_counts_index_metrics,
-        "name_tuples": "default packaged filtered aliases",
         "timings_seconds": {
             "anddata_seconds": anddata_seconds,
             "write_common_seconds": write_common_seconds,
             "write_raw_planner_indexes_seconds": write_raw_planner_indexes_seconds,
             "write_name_counts_index_seconds": write_name_counts_index_seconds,
         },
+        "validation": validation_metrics,
     }
-    if validate:
-        manifest["validation"] = validate_arrow_dataset_manifest(
-            manifest,
-            require_embeddings=sources.specter_path is not None or sources.specter2_path is not None,
-            require_name_counts_index=not skip_name_counts_index,
-            base_dir=output_dir,
-        )
-    _replace_json(output_dir / "manifest.json", manifest)
-    _upsert_root_manifest(root_manifest_dir, dataset_name=dataset_name, dataset_dir=output_dir)
-    return manifest
 
 
 def _read_arrow_table(path: str | Path) -> Any:
@@ -1275,100 +1141,26 @@ def _read_arrow_table(path: str | Path) -> Any:
         return pa.ipc.open_file(source).read_all()
 
 
-def _ensure_arrow_column_type(table: Any, column: str, predicate: Callable[[Any], bool], expected: str) -> None:
-    field_index = table.schema.get_field_index(column)
-    if field_index < 0:
-        raise KeyError(f"Arrow table is missing required column {column!r}")
-    field_type = table.schema.field(field_index).type
-    if not predicate(field_type):
-        raise ValueError(f"Arrow column {column!r} expected {expected}, got {field_type}")
-
-
-def _ensure_string_column(table: Any, column: str) -> None:
-    import pyarrow as pa
-
-    _ensure_arrow_column_type(table, column, pa.types.is_string, "string")
-
-
-def _ensure_integer_column(table: Any, column: str) -> None:
-    import pyarrow as pa
-
-    _ensure_arrow_column_type(table, column, pa.types.is_integer, "integer")
-
-
-def _ensure_specter_embedding_column(table: Any) -> None:
-    import pyarrow as pa
-
-    field_index = table.schema.get_field_index("embedding")
-    if field_index < 0:
-        raise KeyError("Arrow table is missing required column 'embedding'")
-    field_type = table.schema.field(field_index).type
-    if not (pa.types.is_fixed_size_list(field_type) and pa.types.is_float32(field_type.value_type)):
-        raise ValueError(f"Arrow column 'embedding' expected fixed_size_list<float32>, got {field_type}")
-
-
-def _arrow_contract_required_columns(table_name: str) -> list[Mapping[str, Any]]:
-    contract = _load_json(ARROW_SCHEMA_CONTRACT_PATH)
-    if not isinstance(contract, Mapping):
-        raise TypeError(f"Arrow schema contract must contain an object: {ARROW_SCHEMA_CONTRACT_PATH}")
-    tables = contract.get("tables")
-    if not isinstance(tables, Mapping):
-        raise ValueError(f"Arrow schema contract is missing tables: {ARROW_SCHEMA_CONTRACT_PATH}")
-    columns = tables.get(table_name)
-    if not isinstance(columns, Sequence) or isinstance(columns, str | bytes):
-        raise ValueError(f"Arrow schema contract is missing table {table_name!r}: {ARROW_SCHEMA_CONTRACT_PATH}")
-    return [column for column in columns if isinstance(column, Mapping) and bool(column.get("required"))]
-
-
-def _ensure_arrow_contract_column_type(table: Any, table_name: str, column: str, datatype: str) -> None:
-    import pyarrow as pa
-
-    def is_string_list(value: Any) -> bool:
-        return pa.types.is_list(value) and pa.types.is_string(value.value_type)
-
-    def is_float32_fixed_size_list(value: Any) -> bool:
-        return pa.types.is_fixed_size_list(value) and pa.types.is_float32(value.value_type)
-
-    match datatype:
-        case "string":
-            predicate = pa.types.is_string
-        case "int64":
-            predicate = pa.types.is_int64
-        case "bool":
-            predicate = pa.types.is_boolean
-        case "list<string>":
-            predicate = is_string_list
-        case "fixed_size_list<float32>":
-            predicate = is_float32_fixed_size_list
-        case _:
-            raise ValueError(f"Arrow schema contract has unsupported datatype {datatype!r} for {table_name}.{column}")
-    _ensure_arrow_column_type(table, column, predicate, datatype)
-
-
-def _ensure_arrow_contract_required_columns(table: Any, table_name: str) -> None:
-    for column_spec in _arrow_contract_required_columns(table_name):
-        column = str(column_spec["name"])
-        datatype = str(column_spec["datatype"])
-        try:
-            _ensure_arrow_contract_column_type(table, table_name, column, datatype)
-        except KeyError as exc:
-            raise KeyError(f"{table_name} Arrow table is missing required column {column!r}") from exc
-
-
 def _table_values(table: Any, column: str) -> list[Any]:
     if column not in table.column_names:
         raise ValueError(f"Arrow table is missing required column {column!r}")
     return table[column].to_pylist()
 
 
-def _required_string_values(table: Any, column: str, *, label: str) -> list[str]:
+def _required_string_values(
+    table: Any,
+    column: str,
+    *,
+    label: str,
+    allow_empty: bool = False,
+) -> list[str]:
     values = _table_values(table, column)
     out: list[str] = []
     for row_index, value in enumerate(values):
         if value is None:
             raise ValueError(f"{label} contains null value at row {row_index}")
         text = str(value)
-        if not text:
+        if not allow_empty and not text:
             raise ValueError(f"{label} contains empty value at row {row_index}")
         out.append(text)
     return out
@@ -1412,8 +1204,6 @@ def validate_arrow_dataset_manifest(
     paths = {str(key): str(_resolve_manifest_path(value, base_dir)) for key, value in manifest["paths"].items()}
     required_paths = ["signatures", "papers", "paper_authors"]
     if require_embeddings:
-        if "specter" not in paths and "specter2" in paths:
-            paths["specter"] = paths["specter2"]
         required_paths.append("specter")
     if require_name_counts_index:
         required_paths.append("name_counts_index")
@@ -1424,14 +1214,22 @@ def validate_arrow_dataset_manifest(
     signatures = _read_arrow_table(paths["signatures"])
     papers = _read_arrow_table(paths["papers"])
     paper_authors = _read_arrow_table(paths["paper_authors"])
-    _ensure_arrow_contract_required_columns(signatures, "signatures")
-    _ensure_arrow_contract_required_columns(papers, "papers")
-    _ensure_arrow_contract_required_columns(paper_authors, "paper_authors")
+    validate_arrow_schema(signatures.schema, table_name="signatures")
+    validate_arrow_schema(papers.schema, table_name="papers")
+    validate_arrow_schema(paper_authors.schema, table_name="paper_authors")
     signature_ids = _required_string_values(signatures, "signature_id", label="signatures.signature_id")
     signature_paper_ids = _required_string_values(signatures, "paper_id", label="signatures.paper_id")
+    signature_author_positions = _table_values(signatures, "author_position")
+    if any(position is None for position in signature_author_positions):
+        raise ValueError("signatures.author_position contains null value")
     paper_ids = _required_string_values(papers, "paper_id", label="papers.paper_id")
     paper_author_paper_ids = _required_string_values(paper_authors, "paper_id", label="paper_authors.paper_id")
-    _required_string_values(paper_authors, "author_name", label="paper_authors.author_name")
+    _required_string_values(
+        paper_authors,
+        "author_name",
+        label="paper_authors.author_name",
+        allow_empty=True,
+    )
     paper_author_positions = _table_values(paper_authors, "position")
     _ensure_unique(signature_ids, label="signatures.signature_id")
     _ensure_unique(paper_ids, label="papers.paper_id")
@@ -1453,14 +1251,9 @@ def validate_arrow_dataset_manifest(
         "paper_author_count": int(paper_authors.num_rows),
         "required_paths_present": True,
     }
-    if int(manifest.get("signature_count", signatures.num_rows)) != signatures.num_rows:
-        raise ValueError("manifest signature_count does not match signatures.arrow")
-    if int(manifest.get("paper_count", papers.num_rows)) != papers.num_rows:
-        raise ValueError("manifest paper_count does not match papers.arrow")
-
     if require_embeddings:
         specter = _read_arrow_table(paths["specter"])
-        _ensure_arrow_contract_required_columns(specter, "specter")
+        validate_arrow_schema(specter.schema, table_name="specter")
         specter_paper_ids = _required_string_values(specter, "paper_id", label="specter.paper_id")
         _ensure_unique(specter_paper_ids, label="specter.paper_id")
         missing_embeddings = sorted(set(signature_paper_ids) - set(specter_paper_ids))
@@ -1476,8 +1269,7 @@ def validate_arrow_dataset_manifest(
     cluster_seed_path = paths.get("cluster_seeds")
     if cluster_seed_path is not None and Path(cluster_seed_path).exists():
         cluster_seeds = _read_arrow_table(cluster_seed_path)
-        _ensure_string_column(cluster_seeds, "signature_id")
-        _ensure_string_column(cluster_seeds, "cluster_id")
+        validate_arrow_schema(cluster_seeds.schema, table_name="cluster_seeds")
         seed_signature_ids = [str(value) for value in _table_values(cluster_seeds, "signature_id")]
         seed_cluster_ids = [str(value) for value in _table_values(cluster_seeds, "cluster_id")]
         _ensure_unique(seed_signature_ids, label="cluster_seeds.signature_id")
@@ -1492,8 +1284,7 @@ def validate_arrow_dataset_manifest(
     disallow_path = paths.get("cluster_seed_disallows")
     if disallow_path is not None and Path(disallow_path).exists():
         disallows = _read_arrow_table(disallow_path)
-        _ensure_string_column(disallows, "signature_id_1")
-        _ensure_string_column(disallows, "signature_id_2")
+        validate_arrow_schema(disallows.schema, table_name="cluster_seed_disallows")
         left_ids = [str(value) for value in _table_values(disallows, "signature_id_1")]
         right_ids = [str(value) for value in _table_values(disallows, "signature_id_2")]
         _ensure_subset(left_ids, signature_id_set, label="cluster_seed_disallows.signature_id_1")
@@ -1502,7 +1293,7 @@ def validate_arrow_dataset_manifest(
         for left, right in zip(left_ids, right_ids, strict=True):
             if left == right:
                 raise ValueError(f"cluster_seed_disallows contains self-pair: {left!r}")
-            pair = tuple(sorted((left, right)))
+            pair = (left, right) if left < right else (right, left)
             if pair in normalized_pairs:
                 raise ValueError(f"cluster_seed_disallows contains duplicate undirected pair: {pair!r}")
             normalized_pairs.add(pair)
@@ -1511,7 +1302,7 @@ def validate_arrow_dataset_manifest(
     altered_path = paths.get("altered_cluster_signatures")
     if altered_path is not None and Path(altered_path).exists():
         altered = _read_arrow_table(altered_path)
-        _ensure_string_column(altered, "signature_id")
+        validate_arrow_schema(altered.schema, table_name="altered_cluster_signatures")
         altered_signature_ids = [str(value) for value in _table_values(altered, "signature_id")]
         _ensure_unique(altered_signature_ids, label="altered_cluster_signatures.signature_id")
         _ensure_subset(altered_signature_ids, signature_id_set, label="altered_cluster_signatures.signature_id")
@@ -1527,55 +1318,29 @@ def validate_arrow_dataset_manifest(
         require_name_counts_index_artifact(
             paths["name_counts_index"],
             context="convert_to_arrow dataset validation",
-            producer_hint="rerun scripts/convert_to_arrow.py name-counts-index or rebuild the release bundle",
+            producer_hint="run python -m scripts.production.counts.generate_name_counts or rebuild the release bundle",
         )
         metrics["name_counts_index_present"] = True
 
-    physical_layout = manifest.get("physical_layout")
-    if isinstance(physical_layout, Mapping):
-        from s2and.incremental_linking.feature_block import (
-            RAW_PLANNER_ARROW_KEY_COLUMNS,
-            validate_arrow_batch_lookup_index,
-        )
+    from s2and.incremental_linking.feature_block import (
+        RAW_PLANNER_ARROW_KEY_COLUMNS,
+        raw_planner_arrow_physical_layout,
+        validate_arrow_batch_lookup_index,
+    )
 
-        tables = physical_layout.get("tables", {})
-        if isinstance(tables, Mapping):
-            for table_name, raw_layout in tables.items():
-                if not isinstance(raw_layout, Mapping):
-                    raise ValueError(f"physical_layout.tables.{table_name} must be an object")
-                table_key = str(table_name)
-                max_rows = int(raw_layout.get("max_record_batch_rows", 0))
-                actual_max_rows = int(raw_layout.get("actual_max_batch_rows", 0))
-                if max_rows > 0 and actual_max_rows > max_rows:
-                    raise ValueError(
-                        f"physical_layout.tables.{table_name} exceeds max batch rows: "
-                        f"{actual_max_rows} > {max_rows}"
-                    )
-                if bool(raw_layout.get("batch_index_present", False)):
-                    if table_key not in paths:
-                        raise FileNotFoundError(
-                            f"physical_layout.tables.{table_name} has batch_index_present but manifest.paths "
-                            f"is missing {table_key!r}"
-                        )
-                    index_key = str(raw_layout.get("batch_index_path_key") or f"{table_key}_batch_index")
-                    if index_key not in paths:
-                        raise FileNotFoundError(
-                            f"physical_layout.tables.{table_name} has batch_index_present but manifest.paths "
-                            f"is missing {index_key!r}"
-                        )
-                    if not Path(paths[index_key]).exists():
-                        raise FileNotFoundError(
-                            f"physical_layout.tables.{table_name} batch index is missing: {paths[index_key]}"
-                        )
-                    key_column = str(raw_layout.get("key") or RAW_PLANNER_ARROW_KEY_COLUMNS.get(table_key, ""))
-                    if not key_column:
-                        raise ValueError(f"physical_layout.tables.{table_name} is missing key for batch index")
-                    validate_arrow_batch_lookup_index(
-                        paths[table_key],
-                        paths[index_key],
-                        key_column=key_column,
-                        expected_row_count=int(raw_layout["row_count"]) if "row_count" in raw_layout else None,
-                    )
+    physical_layout = raw_planner_arrow_physical_layout(paths)
+    for table_name, raw_layout in physical_layout["tables"].items():
+        table_key = str(table_name)
+        index_key = str(raw_layout["batch_index_path_key"])
+        if not bool(raw_layout["batch_index_present"]):
+            raise FileNotFoundError(f"manifest is missing required raw-planner batch index: {index_key}")
+        key_column = RAW_PLANNER_ARROW_KEY_COLUMNS[table_key]
+        validate_arrow_batch_lookup_index(
+            paths[table_key],
+            paths[index_key],
+            key_column=key_column,
+            expected_row_count=int(raw_layout["row_count"]),
+        )
     return metrics
 
 
@@ -1586,6 +1351,12 @@ def validate_arrow_dataset_dir(
     require_name_counts_index: bool,
     require_complete_embeddings: bool = False,
 ) -> dict[str, Any]:
+    with ArrowDataset.open(
+        dataset_dir,
+        require_specter=require_embeddings,
+        require_name_counts_index=require_name_counts_index,
+    ):
+        pass
     manifest = _load_json(dataset_dir / "manifest.json")
     if not isinstance(manifest, Mapping):
         raise TypeError(f"dataset manifest must contain an object: {dataset_dir / 'manifest.json'}")
@@ -1624,11 +1395,295 @@ def _run_service_json(args: argparse.Namespace) -> None:
         n_jobs=int(args.n_jobs),
         overwrite=bool(args.overwrite),
         skip_name_counts_index=bool(args.skip_name_counts_index),
-        overwrite_name_counts_index=bool(args.overwrite_name_counts_index),
         copy_source_json=bool(args.copy_source_json),
         validate=not bool(args.skip_validation),
     )
-    _print_report(report)
+    _print_report({**report, "dataset": dataset_name})
+
+
+def _run_join_canonical_names(args: argparse.Namespace) -> None:
+    signatures = _load_json(args.signatures)
+    canonical_rows = _load_json(args.canonical_names)
+    if not isinstance(signatures, Mapping):
+        raise TypeError("benchmark signatures must be a JSON object keyed by signature_id")
+    if not isinstance(canonical_rows, list):
+        raise TypeError("canonical names must be a JSON list")
+    if args.output.exists():
+        raise FileExistsError(f"output already exists: {args.output}")
+    joined, report = join_canonical_benchmark_names(signatures, canonical_rows)
+    _write_json(args.output, joined)
+    print(json.dumps({**report, "output": str(args.output)}, indent=2, sort_keys=True))
+
+
+def _benchmark_signatures_path(source_root: Path, dataset: str) -> Path:
+    for name in (f"{dataset}_signatures.json", "signatures.json"):
+        path = source_root / dataset / name
+        if path.is_file():
+            return path
+    raise FileNotFoundError(f"No {dataset}_signatures.json or signatures.json under {source_root / dataset}")
+
+
+def _run_join_canonical_augmented_names(args: argparse.Namespace) -> None:
+    augmented_dir: Path = args.augmented_dir
+    output_dir: Path = args.output_dir
+    if output_dir.exists():
+        raise FileExistsError(f"output directory already exists: {output_dir}")
+    drop_sources = frozenset(args.drop_sources or ())
+    augmented_signatures = _load_json(augmented_dir / AUGMENTED_SIGNATURES_FILE)
+    if not isinstance(augmented_signatures, Mapping):
+        raise TypeError("augmented signatures must be a JSON object keyed by signature_id")
+    pair_files = [*AUGMENTED_TRAINING_PAIR_FILES, AUGMENTED_TEST_PAIR_FILE]
+    missing_pairs = [name for name in pair_files if not (augmented_dir / name).is_file()]
+    if missing_pairs:
+        raise FileNotFoundError(f"augmented directory is missing pair files: {missing_pairs}")
+
+    sources = sorted({_augmented_source(str(signature_id))[0] for signature_id in augmented_signatures} - drop_sources)
+    source_signatures: dict[str, Mapping[str, Any]] = {}
+    canonical_rows: dict[str, Any] = {}
+    for source in sources:
+        signatures = _load_json(_benchmark_signatures_path(args.source_root, source))
+        if not isinstance(signatures, Mapping):
+            raise TypeError(f"{source} benchmark signatures must be a JSON object keyed by signature_id")
+        rows = _load_json(args.canonical_names_root / f"{source}.json")
+        if not isinstance(rows, list):
+            raise TypeError(f"{source} canonical names must be a JSON list")
+        source_signatures[source] = signatures
+        canonical_rows[source] = rows
+
+    joined, report = join_canonical_augmented_names(
+        augmented_signatures,
+        source_signatures,
+        canonical_rows,
+        drop_sources=drop_sources,
+    )
+    filtered = {}
+    report["pairs"] = {}
+    for name in pair_files:
+        rows, dropped = filter_augmented_pairs(
+            augmented_dir / name,
+            kept_signature_ids=set(joined),
+            drop_sources=drop_sources,
+        )
+        filtered[name] = rows
+        report["pairs"][name] = {"kept": len(rows), "dropped": dropped}
+    report = {**report, "drop_sources": sorted(drop_sources), "output_dir": str(output_dir)}
+
+    # Publish all outputs together: build them in a sibling directory, then rename it.
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent))
+    try:
+        _write_json(staging_dir / AUGMENTED_SIGNATURES_FILE, joined)
+        for name in AUGMENTED_TRAINING_PAIR_FILES:
+            with (staging_dir / name).open("w", encoding="utf-8", newline="") as target:
+                writer = csv.writer(target, lineterminator="\n")
+                writer.writerow(["signature_id_1", "signature_id_2", "label"])
+                writer.writerows((left, right, original_label) for left, right, original_label, _ in filtered[name])
+        _write_json(
+            staging_dir / AUGMENTED_TEST_PAIRS_OUTPUT,
+            [
+                {"signature_id_1": left, "signature_id_2": right, "label": label}
+                for left, right, _, label in filtered[AUGMENTED_TEST_PAIR_FILE]
+            ],
+        )
+        _write_json(staging_dir / "join_report.json", report)
+        staging_dir.rename(output_dir)
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def _read_augmented_pair_csv(path: Path) -> tuple[list[str], list[list[str]], tuple[int, int]]:
+    """Validate fixed-pair labels while retaining all CSV cell values and rows."""
+    import pandas as pd
+
+    from s2and.data import _map_fixed_pair_labels
+
+    with path.open(encoding="utf-8", newline="") as source:
+        csv_text = source.read()
+    records = list(csv.reader(StringIO(csv_text)))
+    if not records or len(set(records[0])) != len(records[0]):
+        raise ValueError(f"{path} must have a unique fixed-pair CSV header")
+    header, rows = records[0], records[1:]
+    if any(len(row) != len(header) for row in rows):
+        raise ValueError(f"{path} contains a row whose width differs from its header")
+    mapped = _map_fixed_pair_labels(pd.read_csv(StringIO(csv_text)), path.name)
+    return header, rows, (header.index(str(mapped.columns[0])), header.index(str(mapped.columns[1])))
+
+
+def _run_filter_augmented_pairs(args: argparse.Namespace) -> None:
+    """Write reviewed-input candidates without changing the draft release or sources."""
+    from scripts.production.model.augmented_leakage import (
+        require_declared_sources,
+        training_members_from_sources,
+    )
+    from scripts.production.model.release_pairwise import (
+        _block_signature_ids,
+        _csv_pair_identities,
+        _heldout_pair_identities,
+        _signature_ids,
+    )
+
+    output_root: Path = args.output_root
+    if output_root.exists():
+        raise FileExistsError(f"output directory already exists: {output_root}")
+    if args.random_seed < 0:
+        raise ValueError("--random-seed must be non-negative")
+    release_path = args.release.resolve()
+    source_paths: dict[str, Path] = {"release": release_path}
+    source_hashes: dict[str, str] = {"release": _file_sha256(release_path)}
+    draft = _load_json(release_path)
+
+    def source(role: str, raw_path: Any) -> Path:
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ValueError(f"{role} must name a source path in the draft release")
+        path = _source_file(_resolve_manifest_path(raw_path, release_path.parent).resolve())
+        source_paths[role] = path
+        source_hashes[role] = _file_sha256(path)
+        return path
+
+    models = draft["model"]["datasets"]
+    augmented = models["augmented"]
+    train_path = source("model.augmented.train_pairs", augmented["train_pairs"])
+    val_path = source("model.augmented.val_pairs", augmented["val_pairs"])
+    val_bytes = val_path.read_bytes()
+    test_path = source("evaluation.augmented.pairs", draft["evaluation"]["pairwise"]["augmented"]["pairs"])
+    train_header, train_rows, train_indices = _read_augmented_pair_csv(train_path)
+    _, val_rows, val_indices = _read_augmented_pair_csv(val_path)
+    test_records = _load_json(test_path)
+    _heldout_pair_identities(test_path, context="augmented evaluation pairs")
+
+    def identity(signature_id: str) -> tuple[str, str]:
+        name, original_id = _augmented_source(signature_id)
+        require_declared_sources({name: {original_id}}, tuple(models), context="augmented source")
+        return name, original_id
+
+    train_identities = [tuple(identity(row[index]) for index in train_indices) for row in train_rows]
+    for row in val_rows:
+        for index in val_indices:
+            identity(row[index])
+    test_identities = [(identity(row["signature_id_1"]), identity(row["signature_id_2"])) for row in test_records]
+    required_sources = {name for row in train_identities for name, _ in row} - {"medline"}
+    missing_sources = required_sources - models.keys()
+    if missing_sources:
+        raise ValueError(f"Draft model is missing augmented training source datasets: {sorted(missing_sources)}")
+
+    training: dict[str, set[str]] = {}
+    development: dict[str, set[str]] = {}
+    for name, files in models.items():
+        if name == "augmented":
+            continue
+        if "clusters" in files:
+            model_files = {
+                role: source(f"model.{name}.{role}", files[role]) for role in ("signatures", "papers", "clusters")
+            }
+            training[name] = training_members_from_sources(name, model_files, random_seed=args.random_seed)
+            development[name] = _signature_ids(model_files["signatures"], context=f"model {name!r}")
+        else:
+            split_members = {
+                split: {
+                    sid
+                    for pair in _csv_pair_identities(
+                        source(f"model.{name}.{split}", files[split]), context=f"{name!r} {split}"
+                    )
+                    for sid in pair
+                }
+                for split in ("train_pairs", "val_pairs")
+            }
+            training[name] = split_members["train_pairs"]
+            development[name] = split_members["train_pairs"] | split_members["val_pairs"]
+
+    external_heldout: dict[str, set[str]] = {}
+    for name, files in draft["evaluation"]["pairwise"].items():
+        if name != "augmented":
+            pairs = _heldout_pair_identities(
+                source(f"evaluation.pairwise.{name}.pairs", files["pairs"]), context=f"{name!r} evaluation"
+            )
+            external_heldout.setdefault(name, set()).update(sid for pair in pairs for sid in pair)
+    for name, files in draft["evaluation"].get("cluster", {}).items():
+        external_heldout.setdefault(name, set()).update(
+            _block_signature_ids(
+                source(f"evaluation.cluster.{name}.blocks", files["blocks"]), context=f"{name!r} evaluation"
+            )
+        )
+
+    def select(
+        identities: Sequence[tuple[tuple[str, str], ...]], raw_labels: list[str], *, split: str
+    ) -> tuple[list[int], dict[str, Any]]:
+        kept: list[int] = []
+        reasons: dict[str, int] = {}
+        retained_labels: dict[str, int] = {}
+        removed_labels: dict[str, int] = {}
+        for index, row in enumerate(identities):
+            row_reasons: set[str] = set()
+            for name, original_id in row:
+                if split == "train":
+                    if name in training and original_id not in training[name]:
+                        row_reasons.add(f"{name}:outside_training_split")
+                    if original_id in external_heldout.get(name, set()):
+                        row_reasons.add(f"{name}:external_heldout")
+                elif original_id in development.get(name, set()):
+                    row_reasons.add(f"{name}:model_development_population")
+            if row_reasons:
+                removed_labels[raw_labels[index]] = removed_labels.get(raw_labels[index], 0) + 1
+                for reason in row_reasons:
+                    reasons[reason] = reasons.get(reason, 0) + 1
+            else:
+                kept.append(index)
+                retained_labels[raw_labels[index]] = retained_labels.get(raw_labels[index], 0) + 1
+        return kept, {
+            "input_rows": len(identities),
+            "retained_rows": len(kept),
+            "removed_rows": len(identities) - len(kept),
+            "removed_rows_by_reason": dict(sorted(reasons.items())),
+            "retained_rows_by_raw_label": dict(sorted(retained_labels.items())),
+            "removed_rows_by_raw_label": dict(sorted(removed_labels.items())),
+        }
+
+    train_kept, train_report = select(
+        train_identities, [row[train_header.index("label")] for row in train_rows], split="train"
+    )
+    test_kept, test_report = select(test_identities, [str(row["label"]) for row in test_records], split="test")
+    report = {
+        "random_seed": args.random_seed,
+        "sources": {
+            role: {"path": str(path), "sha256": source_hashes[role]} for role, path in sorted(source_paths.items())
+        },
+        "train": train_report,
+        "validation": {"input_rows": len(val_rows), "retained_rows": len(val_rows), "removed_rows": 0},
+        "test": test_report,
+        "reason_counts_note": "A removed row can have multiple reasons; removed_rows counts each row once.",
+    }
+    if not train_kept or not test_kept:
+        raise ValueError(
+            "Filtering leaves no training or no held-out pairs. Review the model/evaluation population design; "
+            f"do not bypass the leakage guards. Counts: {json.dumps(report, sort_keys=True)}"
+        )
+    changed = [role for role, path in source_paths.items() if _file_sha256(path) != source_hashes[role]]
+    if changed:
+        raise ValueError(f"Sources changed while filtering augmented pairs: {changed}")
+
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{output_root.name}.staging-", dir=output_root.parent) as staging_raw:
+        staging = Path(staging_raw)
+        with (staging / "train_pairs.csv").open("w", encoding="utf-8", newline="") as output:
+            writer = csv.writer(output, lineterminator="\n")
+            writer.writerow(train_header)
+            writer.writerows(train_rows[index] for index in train_kept)
+        (staging / "val_pairs.csv").write_bytes(val_bytes)
+        kept_test_records = [test_records[index] for index in test_kept]
+        with (staging / "test_pairs.csv").open("w", encoding="utf-8", newline="") as output:
+            writer = csv.writer(output, lineterminator="\n")
+            writer.writerow(["signature_id_1", "signature_id_2", "label"])
+            writer.writerows((row["signature_id_1"], row["signature_id_2"], row["label"]) for row in kept_test_records)
+        (staging / "test_pairs.json").write_text(json.dumps(kept_test_records, indent=2) + "\n", encoding="utf-8")
+        report["outputs"] = {
+            name: {"path": str(output_root.resolve() / name), "sha256": _file_sha256(staging / name)}
+            for name in ("train_pairs.csv", "val_pairs.csv", "test_pairs.csv", "test_pairs.json")
+        }
+        _write_json(staging / "filter_report.json", report)
+        staging.rename(output_root)
+    print(json.dumps(report, indent=2, sort_keys=True))
 
 
 def _selected_runtime_dataset_names(
@@ -1656,11 +1711,8 @@ def _run_benchmark(args: argparse.Namespace) -> None:
     )
     if not dataset_names:
         raise ValueError(f"No benchmark datasets found under {args.source_root}")
-    name_counts_index_overwritten = False
-    reports = []
     for dataset_name in dataset_names:
         start = time.perf_counter()
-        overwrite_name_counts_index = bool(args.overwrite_name_counts_index) and not name_counts_index_overwritten
         report = convert_runtime_dataset_to_arrow(
             sources=benchmark_dataset_sources(args.source_root, dataset_name),
             output_dir=output_root / dataset_name,
@@ -1669,16 +1721,12 @@ def _run_benchmark(args: argparse.Namespace) -> None:
             n_jobs=int(args.n_jobs),
             overwrite=bool(args.overwrite),
             skip_name_counts_index=bool(args.skip_name_counts_index),
-            overwrite_name_counts_index=overwrite_name_counts_index,
-            selected_embedding=None,
+            selected_embedding="specter2",
             validate=not bool(args.skip_validation),
         )
-        if overwrite_name_counts_index:
-            name_counts_index_overwritten = True
         report["total_seconds"] = time.perf_counter() - start
-        reports.append(report)
         print(json.dumps({"dataset": dataset_name, "total_seconds": report["total_seconds"]}, sort_keys=True))
-    print(json.dumps({"datasets": [report["dataset"] for report in reports]}, indent=2, sort_keys=True))
+    print(json.dumps({"datasets": list(dataset_names)}, indent=2, sort_keys=True))
 
 
 def _run_linker_replay(args: argparse.Namespace) -> None:
@@ -1693,11 +1741,8 @@ def _run_linker_replay(args: argparse.Namespace) -> None:
     )
     if not dataset_names:
         raise ValueError(f"No linker replay datasets found under {args.raw_root}")
-    name_counts_index_overwritten = False
-    reports = []
     for dataset_name in dataset_names:
         start = time.perf_counter()
-        overwrite_name_counts_index = bool(args.overwrite_name_counts_index) and not name_counts_index_overwritten
         report = convert_runtime_dataset_to_arrow(
             sources=linker_replay_dataset_sources(args.raw_root, args.embeddings_root, dataset_name),
             output_dir=datasets_root / dataset_name,
@@ -1706,23 +1751,12 @@ def _run_linker_replay(args: argparse.Namespace) -> None:
             n_jobs=int(args.n_jobs),
             overwrite=bool(args.overwrite),
             skip_name_counts_index=bool(args.skip_name_counts_index),
-            overwrite_name_counts_index=overwrite_name_counts_index,
             selected_embedding="specter2",
             validate=not bool(args.skip_validation),
         )
-        if overwrite_name_counts_index:
-            name_counts_index_overwritten = True
         report["total_seconds"] = time.perf_counter() - start
-        reports.append(report)
         print(json.dumps({"dataset": dataset_name, "total_seconds": report["total_seconds"]}, sort_keys=True))
-    print(json.dumps({"datasets": [report["dataset"] for report in reports]}, indent=2, sort_keys=True))
-
-
-def _run_name_counts_index(args: argparse.Namespace) -> None:
-    from s2and.incremental_linking.feature_block import write_name_counts_index
-
-    index_path, metrics = write_name_counts_index(args.output_root, overwrite=bool(args.overwrite))
-    print(json.dumps({"name_counts_index": index_path, "metrics": metrics}, indent=2, sort_keys=True))
+    print(json.dumps({"datasets": list(dataset_names)}, indent=2, sort_keys=True))
 
 
 def _run_validate(args: argparse.Namespace) -> None:
@@ -1735,42 +1769,15 @@ def _run_validate(args: argparse.Namespace) -> None:
     print(json.dumps(metrics, indent=2, sort_keys=True))
 
 
-def _run_refresh_root_manifest(args: argparse.Namespace) -> None:
-    root_manifest_path = args.output_root / "manifest.json"
-    root_manifest = _load_json(root_manifest_path)
-    if not isinstance(root_manifest, Mapping):
-        raise TypeError(f"root manifest must contain an object: {root_manifest_path}")
-    dataset_manifests = _root_manifest_entries_from_manifest(root_manifest, root_manifest_path)
-    replay_bundles = _root_manifest_replay_bundle_entries_from_manifest(root_manifest, root_manifest_path)
-    refreshed = _write_root_manifest(
-        args.output_root,
-        dataset_manifests=dataset_manifests,
-        replay_bundles=replay_bundles,
-        output_root_label=args.output_root_label or str(root_manifest.get("output_root") or args.output_root),
-    )
-    print(
-        json.dumps(
-            {
-                "dataset_count": len(refreshed["dataset_manifests"]),
-                "replay_bundle_count": len(refreshed.get("replay_bundles", [])),
-                "manifest_path": str(root_manifest_path),
-                "validation_command_count": len(refreshed.get("validation_commands", [])),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-
-
 def _add_common_runtime_args(parser: argparse.ArgumentParser, *, default_n_jobs: int) -> None:
-    parser.add_argument("--name-counts-index-root", type=Path, default=None)
+    parser.add_argument(
+        "--name-counts-index-root",
+        type=Path,
+        default=None,
+        help="Manifest-backed name-count index directory (default: name_counts_index/ under the output root).",
+    )
     parser.add_argument("--n-jobs", type=int, default=default_n_jobs)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument(
-        "--overwrite-name-counts-index",
-        action="store_true",
-        help="Rebuild the shared name-counts index once before reusing it for all converted datasets.",
-    )
     parser.add_argument("--skip-name-counts-index", action="store_true")
     parser.add_argument("--skip-validation", action="store_true")
 
@@ -1796,15 +1803,68 @@ def _build_parser() -> argparse.ArgumentParser:
 
     service = subparsers.add_parser("service-json", help="Convert one service-shaped inference JSON payload.")
     service.add_argument("--input-json", type=Path, required=True)
-    service.add_argument("--output-root", type=Path, default=Path("scratch/inference_arrow"))
+    service.add_argument("--output-root", type=Path, required=True)
     service.add_argument("--dataset-name", default=None)
     service.add_argument("--copy-source-json", action="store_true")
     _add_common_runtime_args(service, default_n_jobs=4)
     service.set_defaults(func=_run_service_json)
 
+    canonical_names = subparsers.add_parser(
+        "join-canonical-names",
+        help="Replace benchmark author name fields from canonical rows joined by signature ID.",
+    )
+    canonical_names.add_argument("--signatures", type=Path, required=True)
+    canonical_names.add_argument("--canonical-names", type=Path, required=True)
+    canonical_names.add_argument("--output", type=Path, required=True)
+    canonical_names.set_defaults(func=_run_join_canonical_names)
+
+    augmented_names = subparsers.add_parser(
+        "join-canonical-augmented-names",
+        help=(
+            "Give the augmented training set its source datasets' canonical names, dropping signatures and pairs "
+            "from --drop-sources."
+        ),
+    )
+    augmented_names.add_argument(
+        "--augmented-dir",
+        type=Path,
+        required=True,
+        help="Directory with augmented_signatures.json, train_pairs.csv, val_pairs.csv, and test_pairs.csv.",
+    )
+    augmented_names.add_argument(
+        "--source-root",
+        type=Path,
+        required=True,
+        help="Original (pre-join) benchmark root with <dataset>/<dataset>_signatures.json or signatures.json.",
+    )
+    augmented_names.add_argument(
+        "--canonical-names-root",
+        type=Path,
+        required=True,
+        help="Directory with one <dataset>.json canonical-name export per source dataset.",
+    )
+    augmented_names.add_argument(
+        "--drop-sources",
+        nargs="*",
+        default=[],
+        help="Source datasets whose augmented signatures and pairs are removed (v1.3: orcid).",
+    )
+    augmented_names.add_argument("--output-dir", type=Path, required=True, help="Fresh output directory.")
+    augmented_names.set_defaults(func=_run_join_canonical_augmented_names)
+
+    filtered_pairs = subparsers.add_parser(
+        "filter-augmented-pairs", help="Filter augmented pairs against a draft release's frozen source populations."
+    )
+    filtered_pairs.add_argument("--release", type=Path, required=True)
+    filtered_pairs.add_argument("--random-seed", type=int, required=True)
+    filtered_pairs.add_argument(
+        "--output-root", type=Path, required=True, help="Fresh output directory; never overwritten."
+    )
+    filtered_pairs.set_defaults(func=_run_filter_augmented_pairs)
+
     benchmark = subparsers.add_parser("benchmark", help="Convert benchmark dataset JSON/pickle files.")
-    benchmark.add_argument("--source-root", type=Path, default=Path("s2and/data/s2and_mini"))
-    benchmark.add_argument("--output-root", type=Path, default=Path("s2and/data/s2and_mini_arrow"))
+    benchmark.add_argument("--source-root", type=Path, required=True)
+    benchmark.add_argument("--output-root", type=Path, required=True)
     _add_runtime_dataset_selection_args(benchmark)
     _add_common_runtime_args(benchmark, default_n_jobs=20)
     benchmark.set_defaults(func=_run_benchmark)
@@ -1817,13 +1877,6 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_common_runtime_args(linker_replay, default_n_jobs=20)
     linker_replay.set_defaults(func=_run_linker_replay)
 
-    name_counts = subparsers.add_parser(
-        "name-counts-index", help="Generate the shared manifest-backed name-count index."
-    )
-    name_counts.add_argument("--output-root", type=Path, required=True)
-    name_counts.add_argument("--overwrite", action="store_true")
-    name_counts.set_defaults(func=_run_name_counts_index)
-
     validate = subparsers.add_parser("validate", help="Validate one generated Arrow dataset manifest.")
     validate.add_argument("--dataset-dir", type=Path, required=True)
     validate.add_argument("--require-embeddings", action="store_true")
@@ -1835,17 +1888,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     validate.set_defaults(func=_run_validate)
 
-    refresh_root = subparsers.add_parser(
-        "refresh-root-manifest",
-        help="Refresh root manifest checksums, audits, replay bundle metadata, and validation commands.",
-    )
-    refresh_root.add_argument("--output-root", type=Path, required=True)
-    refresh_root.add_argument(
-        "--output-root-label",
-        default=None,
-        help="Optional logical root to write into output_root, e.g. the public S3 prefix.",
-    )
-    refresh_root.set_defaults(func=_run_refresh_root_manifest)
     return parser
 
 

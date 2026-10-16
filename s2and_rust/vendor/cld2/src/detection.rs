@@ -13,19 +13,9 @@ use libc::{c_char, c_double, c_int};
 use language::LanguageIdExt;
 use types::*;
 
-// A lock which controls our access to DetectLanguageVersion, which uses
-// an internal buffer to format the string.
-//
-// TODO: Should we move this to the cld2-sys package, in case other
-// packages want to synchronize with us?
-//
-// HACK: Yes, this is Mutex inside lazy_static, which is just plain wrong.
-// I just want to get this working on stable Rust with as little fuss as
-// possible.
-lazy_static! {
-    static ref CLD2_VERSION_LOCK: Mutex<u8> = Mutex::new(0);
-    static ref CLD2_DETECT_LOCK: Mutex<u8> = Mutex::new(0);
-}
+// CLD2 uses an internal buffer for its version text.
+static CLD2_VERSION_LOCK: Mutex<u8> = Mutex::new(0);
+static CLD2_DETECT_LOCK: Mutex<u8> = Mutex::new(0);
 
 /// Get the version of cld2 and its embedded data files as a string.
 ///

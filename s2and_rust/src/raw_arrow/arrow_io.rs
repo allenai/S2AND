@@ -6,7 +6,6 @@ use arrow::datatypes::DataType;
 use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
-use std::borrow::Cow;
 use std::fs::File;
 
 pub(crate) fn io_error_to_py(context: &str, path: &str, err: impl std::fmt::Display) -> PyErr {
@@ -77,31 +76,19 @@ impl<'a> ArrowStringColumn<'a> {
         }
     }
 
-    pub(crate) fn optional_value(&self, row: usize) -> Option<Cow<'a, str>> {
+    pub(crate) fn optional_value(&self, row: usize) -> Option<&'a str> {
         match self {
-            Self::Utf8(values) => (!values.is_null(row)).then(|| Cow::Borrowed(values.value(row))),
-            Self::LargeUtf8(values) => {
-                (!values.is_null(row)).then(|| Cow::Borrowed(values.value(row)))
-            }
+            Self::Utf8(values) => (!values.is_null(row)).then(|| (*values).value(row)),
+            Self::LargeUtf8(values) => (!values.is_null(row)).then(|| (*values).value(row)),
         }
     }
 
     pub(crate) fn optional_owned(&self, row: usize) -> Option<String> {
-        self.optional_value(row).map(Cow::into_owned)
+        self.optional_value(row).map(str::to_owned)
     }
 
-    pub(crate) fn required_value(&self, row: usize, context: &str) -> PyResult<Cow<'a, str>> {
+    pub(crate) fn required_value(&self, row: usize, context: &str) -> PyResult<&'a str> {
         self.optional_value(row).ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!("{context} is null at row {row}"))
-        })
-    }
-
-    pub(crate) fn required_borrowed_value(&self, row: usize, context: &str) -> PyResult<&'a str> {
-        let value = match self {
-            Self::Utf8(values) => (!values.is_null(row)).then(|| (*values).value(row)),
-            Self::LargeUtf8(values) => (!values.is_null(row)).then(|| (*values).value(row)),
-        };
-        value.ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!("{context} is null at row {row}"))
         })
     }

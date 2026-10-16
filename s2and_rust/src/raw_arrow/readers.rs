@@ -189,8 +189,7 @@ pub(crate) fn read_raw_arrow_signatures_from_batches(
             None => None,
         };
         for row in 0..batch.num_rows() {
-            let signature_id_value =
-                signature_id_values.required_borrowed_value(row, "signature_id")?;
+            let signature_id_value = signature_id_values.required_value(row, "signature_id")?;
             if signature_id_value.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "signatures Arrow cannot contain empty signature_id values",
@@ -216,9 +215,7 @@ pub(crate) fn read_raw_arrow_signatures_from_batches(
                     )))
                 }
                 Entry::Vacant(entry) => {
-                    let paper_id = paper_id_values
-                        .required_value(row, "paper_id")?
-                        .into_owned();
+                    let paper_id = paper_id_values.required_value(row, "paper_id")?.to_owned();
                     let position = position_values
                         .optional_value(row, "author_position")?
                         .ok_or_else(|| {
@@ -313,7 +310,7 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
         let language_reliability_col = arrow_optional_column_index(&batch, "language_reliability")
             .map(|index| batch.column(index).as_ref());
         for row in 0..batch.num_rows() {
-            let paper_id_value = paper_id_values.required_borrowed_value(row, "paper_id")?;
+            let paper_id_value = paper_id_values.required_value(row, "paper_id")?;
             if paper_id_value.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "papers Arrow cannot contain empty paper_id values",
@@ -400,14 +397,14 @@ pub(crate) fn read_raw_arrow_paper_authors_from_batches(
         let author_name_values =
             ArrowStringColumn::from_string_array(author_name_col.as_ref(), "author_name")?;
         for row in 0..batch.num_rows() {
-            let paper_id_value = paper_id_values.required_borrowed_value(row, "paper_id")?;
+            let paper_id_value = paper_id_values.required_value(row, "paper_id")?;
             if paper_id_value.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "paper_authors Arrow cannot contain empty paper_id values",
                 ));
             }
             let position = position_values.required_value(row, "position")?;
-            let author_name = author_name_values.required_borrowed_value(row, "author_name")?;
+            let author_name = author_name_values.required_value(row, "author_name")?;
             if let Some(seen_positions) = seen_filtered_positions.as_mut() {
                 if !seen_positions.insert((paper_id_value, position)) {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -453,10 +450,10 @@ pub(crate) fn read_raw_arrow_cluster_seeds(
         for row in 0..batch.num_rows() {
             let signature_id = signature_id_values
                 .required_value(row, "signature_id")?
-                .into_owned();
+                .to_owned();
             let component_key = cluster_id_values
                 .required_value(row, "cluster_id")?
-                .into_owned();
+                .to_owned();
             if signature_id.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "cluster_seeds Arrow cannot contain empty signature_id values",
@@ -525,10 +522,10 @@ pub(crate) fn read_raw_arrow_cluster_seed_disallows(
         for row in 0..batch.num_rows() {
             let left = left_values
                 .required_value(row, "signature_id_1")?
-                .into_owned();
+                .to_owned();
             let right = right_values
                 .required_value(row, "signature_id_2")?
-                .into_owned();
+                .to_owned();
             insert_canonical_cluster_seed_disallow(
                 &mut out,
                 left,
@@ -575,13 +572,13 @@ pub(crate) fn read_raw_arrow_query_signatures(
         for row in 0..batch.num_rows() {
             let signature_id = signature_id_values
                 .required_value(row, "signature_id")?
-                .into_owned();
+                .to_owned();
             let query_view = query_view_values
                 .required_value(row, "query_view")?
-                .into_owned();
+                .to_owned();
             let query_author = query_author_values
                 .required_value(row, "query_author")?
-                .into_owned();
+                .to_owned();
             if signature_id.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "query_signatures Arrow cannot contain empty signature_id values",
@@ -621,7 +618,7 @@ pub(crate) fn read_raw_arrow_specter_from_batches(
             ArrowStringColumn::from_string_array(paper_id_col.as_ref(), "paper_id")?;
         let embedding_col = batch.column(arrow_column_index(&batch, "embedding", path)?);
         for row in 0..batch.num_rows() {
-            let paper_id_value = paper_id_values.required_borrowed_value(row, "paper_id")?;
+            let paper_id_value = paper_id_values.required_value(row, "paper_id")?;
             if paper_id_value.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "specter Arrow cannot contain empty paper_id values",

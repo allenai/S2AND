@@ -100,12 +100,7 @@ struct CounterData {
 
 #[inline(always)]
 fn fnv64(bytes: &[u8]) -> u64 {
-    let mut h = FNV_OFFSET;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(FNV_PRIME);
-    }
-    h
+    fnv64_update(FNV_OFFSET, bytes)
 }
 
 #[inline(always)]

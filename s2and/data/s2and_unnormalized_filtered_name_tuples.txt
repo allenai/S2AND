@@ -392,8 +392,6 @@ Deb,Debra
 Debra,Deb
 Cindy,Cynthia
 Cynthia,Cindy
-John,Johannes
-Johannes,John
 Mick,Michael
 Michael,Mick
 Arthur,Art
@@ -620,8 +618,6 @@ Terri,Theresa
 Theresa,Terri
 Uli,Ulrich
 Ulrich,Uli
-John,Johan
-Johan,John
 Roderick,Rod
 Rod,Roderick
 Neil,Niel
@@ -706,8 +702,6 @@ Henri,Hendrik
 Hendrik,Henri
 Johnathan,John
 John,Johnathan
-Joanne,Joanna
-Joanna,Joanne
 Avi,Avraham
 Avraham,Avi
 Beatriz,Bea
@@ -1056,8 +1050,6 @@ Aleks,Aleksandra
 Aleksandra,Aleks
 Lucia,Luci
 Luci,Lucia
-Anthony,Antonio
-Antonio,Anthony
 Em,Emily
 Emily,Em
 Emilia,Emilka
@@ -1108,8 +1100,6 @@ Ju,Juju
 Juju,Ju
 Rachel,Rachelle
 Rachelle,Rachel
-John,Jan
-Jan,John
 Vitaly,Vitalik
 Vitalik,Vitaly
 Ronaldo,Ronald
@@ -1234,8 +1224,6 @@ Harriet,Hattie
 Hattie,Harriet
 Nino,Ninoslav
 Ninoslav,Nino
-Johanna,Joanna
-Joanna,Johanna
 Margarita,Margo
 Margo,Margarita
 Stanislav,Stane
@@ -1468,8 +1456,6 @@ Mohammad,Mohamed
 Mohamed,Mohammad
 Petr,Peter
 Peter,Petr
-Artur,Arthur
-Arthur,Artur
 Alkiviadis,Alkis
 Alkis,Alkiviadis
 Anastasia,Anastasiya
@@ -1878,8 +1864,6 @@ Nadiia,Nadia
 Nadia,Nadiia
 Vasily,Vasilii
 Vasilii,Vasily
-Michael,MJ
-MJ,Michael
 Evgenij,Evgeny
 Evgeny,Evgenij
 Mikhail,Mykhailo
@@ -1952,8 +1936,6 @@ Georgiy,Georgii
 Georgii,Georgiy
 Julien,J.S.
 J.S.,Julien
-JM,Jose
-Jose,JM
 Grigory,Grigoriy
 Grigoriy,Grigory
 Peter,P.J.
@@ -2462,8 +2444,6 @@ Valeriia,Valeriya
 Valeriya,Valeriia
 Lorraine,Lorraine
 Lorraine,Lorraine
-Andrea,Andreia
-Andreia,Andrea
 Vassilios,Vassilis
 Vassilis,Vassilios
 Isabella,Isabela
@@ -3597,8 +3577,6 @@ Evgeniya,Eugeniya
 Eugeniya,Evgeniya
 Alistair,Alastair
 Alastair,Alistair
-Andrea,Andrew
-Andrew,Andrea
 Masumeh,Masoumeh
 Masoumeh,Masumeh
 Kazuteru,Kazuteru
@@ -4165,8 +4143,6 @@ Mohammad,Mohammad
 Mohammad,Mohammad
 Qing-Hui,Qinhui
 Qinhui,Qing-Hui
-Alexandre,Alejandro
-Alejandro,Alexandre
 Deivid,David
 David,Deivid
 Anne,Ane
@@ -6703,8 +6679,6 @@ Kseniya,Ksenya
 Ksenya,Kseniya
 Akshai,Akshay
 Akshay,Akshai
-Adriane,Adriana
-Adriana,Adriane
 Hyung,Hyeong
 Hyeong,Hyung
 Dae-Hyeon,Dae-Hyeon
@@ -7495,8 +7469,6 @@ Jaquelline,Jaqueline
 Jaqueline,Jaquelline
 Kovalevskij,Kovalevsky
 Kovalevsky,Kovalevskij
-Alexandra,Alejandra
-Alejandra,Alexandra
 Gladys,Gladys
 Gladys,Gladys
 Monir-al-Sadat,Monir-Sadat
@@ -8735,8 +8707,6 @@ Wasim,Waseem
 Waseem,Wasim
 Nutulla,Nutpulla
 Nutpulla,Nutulla
-Alexandro,Alexandre
-Alexandre,Alexandro
 Hassem,Hasem
 Hasem,Hassem
 Pham,Phan
@@ -11112,19 +11082,11 @@ bartllomiej,bartlomiej
 bartolome,bartomeu
 bernardo,berndt
 bernd,bernhard
-bing nian,bn
 bing song,bs
 bingsong,bs
 brice oliver,brice olivier
 cai dain,cai dian
-cai dain,cd
-cai dian,cd
-caidian,cd
-cg,chun gui
-cg,chungui
-chang jiang,cj
 chang sun,chong sun
-changjang,cj
 chao hisen,chao hsien
 constantin,constantln
 constantine,costas
@@ -11176,14 +11138,8 @@ gregory,grzegorz
 grezgorz,grzegorz
 guo hua,guo jua
 hans heinrich,heinrich
-hans josef,hj
-hao huai,hh
 hao huai,hou huai
 harrtmuth,hartmuth
-hh,hou huai
-hj,hyeonjoon
-hj,hyun jong
-hl,hong lin
 hom yi,horng yih
 hrachya,hratchia
 hrachya,hratchya
@@ -11193,10 +11149,7 @@ jainwei,jian wei
 james,jem
 janos,john
 jean franccois,jean francois
-jean laurent,jl
 ji aan,jia an
-jia mo,jm
-jiamo,jm
 jianahua,jianhua
 jifi,jiri
 joakim,jokaim
@@ -11205,9 +11158,6 @@ joaquim,joaquira
 josha,joshua
 julio,juulio
 junichi,juntchi
-kang lin,kl
-kang ling,kl
-kanglin,kl
 karin,katrin
 karl heinz,kh
 kasimierz,kazimierz
@@ -11218,13 +11168,11 @@ kou bin,kuo bin
 ladislaus,laszlo
 lbica,lubica
 lenny,leonid
-lian rong,lr
 maiete,maite
 make,malte
 makus,markus
 marcella,marcelle
 marcus,mark
-marie helene,mh
 masiur,mosiur
 mi seun,mi suen
 michaa,michal
@@ -11252,14 +11200,11 @@ phil,phlip
 philip,phlip
 philipp,phillippe
 philippe,phillip
-pierluigi,pl
 pun xun,puxun
-qh,qing hua
 rajiah,rajish
 rakesh,rankesh
 randal,randy
 randolph,randoplh
-rd,rolf dieter
 ricard,richard
 roderich,roderick
 rohollah,rohoollah
@@ -11269,7 +11214,6 @@ sang beom,sang bum
 sarka,sharka
 sarmishtha,sarmistha
 saurabh,sourav
-sc,shu chen
 schin ichi,shin ichi
 schin ichi,shin iehi
 segev,seveg
@@ -11277,7 +11221,6 @@ semen,simon
 semyon,simon
 sergeii,sergey
 sergej,serguei
-she sheng,ss
 sheng qin,shenqqin
 shengqin,shenqqin
 shi huo,shi kuo
@@ -11314,10 +11257,7 @@ vicent,vincente
 vicente,vincent
 vojtech,vojtyech
 vyacheslav,vyatcheslav
-wei li,wl
-wei xing,wx
 wei zhou,wz
-wen feng,wf
 wenfei,wenfie
 wiesaw,wieslaw
 wiesiek,wieslaw
@@ -11325,11 +11265,6 @@ willem,willy
 woiciech,wojciech
 woiciech,wojtek
 wojciech,wojeciech
-xc,xin chou
-xc,xinchou
-xh,xin hua
-xh,xinhua
-xh,xiu hua
 xiaoyong,xy
 xie guo,xiguo
 xing he,xinhe
@@ -11351,5 +11286,3 @@ zhao,zhoa
 zhi peng,zi peng
 zhipeng,zi peng
 zhu hao,zu hao
-zi jin,zj
-zijin,zj

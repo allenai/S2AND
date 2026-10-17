@@ -123,8 +123,8 @@ authorities. Given raw `first`, `middle`, and `last` values, they:
 3. treat supported Unicode dash variants as one separator;
 4. replace remaining nonletters with spaces and collapse whitespace;
 5. drop at most one leading title from first name, except `md`;
-6. split 2-3 joined capitals in first name into initials when the last name
-   is not in capitals (decision D9);
+6. split 2-3 joined capitals, or a short mixed-case first name with no vowel,
+   into initials when the last name is not in capitals (decision D9);
 7. retain a dash-bound first-name group, otherwise keep the first token and
    spill remaining first-name tokens into middle; and
 8. normalize last name independently, preserving spaces and surname particles.
@@ -157,7 +157,33 @@ The rule does not apply to these first names:
   `SH`, `ZH`, `KH`, `TS`, `YU`, `YA`, `YE`, `GY`, `NY`, `SZ`, `ZS`, `CS`, `PH`,
   or `TH`, for example `PH.` (Philippe), `GY.` (György), and `YU.` (Yuri).
 
-Mixed-case forms such as `Jh` do not change.
+A second branch of D9 reads short mixed-case first names as initials.
+It removes whitespace from the raw first name, but it keeps periods.
+If one ASCII capital and 1-2 lowercase ASCII letters remain, the branch reads
+them as initials.
+The letters must not include a vowel: `a`, `e`, `i`, `o`, `u`, or `y`.
+For example, `Jh` with last `Smith` becomes first `j`, middle `h`.
+`Jm` with middle `Kevin` becomes first `j`, middle `m kevin`.
+The last-name rule is the same as for joined capitals.
+
+The mixed-case branch does not apply to these first names:
+
+- a first name with a period, such as `Jh.` or `Kh.`;
+- a title prefix such as `Dr`, which D7 drops;
+- `Ty` and other strings with a vowel or `y`;
+- abbreviations of one given name: `ch`, `chr`, `cs`, `dzh`, `fr`, `gh`,
+  `kh`, `khr`, `lj`, `ll`, `md`, `mhd`, `ph`, `sh`, `sk`, `st`, `sw`, `sz`,
+  `th`, `vl`, `wm`, `zh`, and `zs`, for example `Md` (Muhammad) and `Kh`
+  (Khristo);
+- titles before the given name: `ds`, `hjh`, `lt`, `mst`, `rr`, and `smt`;
+- the suffixes `jr` and `sr`;
+- the real names `lv`, `ng`, and `tsz`; and
+- the company word `ltd`.
+
+A review of mention counts and gold clusters on 2026-10-16 selected this list.
+Python `_MIXED_CASE_NON_INITIALS` and Rust `MIXED_CASE_NON_INITIALS` hold it.
+A Rust test keeps the two lists equal.
+
 Every caller must supply the raw last name.
 A count generator can canonicalize first and last names in separate maps.
 Such a generator computes `last_name_allows_joined_initials` once for each

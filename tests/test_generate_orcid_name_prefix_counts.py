@@ -205,6 +205,19 @@ def test_builder_deduplicates_rows() -> None:
     assert metrics["orcid_pair_keys_after_threshold"] > 0
 
 
+def test_builder_reads_mixed_case_initials_through_the_last_name_guard() -> None:
+    # D9 splits "Jh" before "Smith", and the initial "j" is a prefix of "james", so that ORCID adds no pair.
+    # Before "SMITH", "Jh" stays one token and pairs with "james".
+    rows = [
+        {"orcid": orcid, "first_name": first, "last_name": last}
+        for orcid, last in ((ORCID_1, "Smith"), ("0000-0000-0000-0002", "SMITH"))
+        for first in ("Jh", "James")
+    ]
+    counts, _ = generator.build_prefix_counts_from_sorted_rows(rows, [], min_orcid_count=1)
+
+    assert counts == {"ja": {"jh": 1}, "jam": {"jh": 1}, "jame": {"jh": 1}, "james": {"jh": 1}}
+
+
 # The CLI test checks the full reviewed set size. These rows check each ORCID prefix and the URL form.
 @pytest.mark.parametrize(
     "orcid", ["0000-0000-0000-0001", "0009-0004-4499-3929", "https://orcid.org/0000-0002-1825-0097"]

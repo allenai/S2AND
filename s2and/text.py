@@ -438,6 +438,28 @@ _DOTTED_GIVEN_NAME_ABBREVIATIONS = frozenset(
     {"CH", "SH", "ZH", "KH", "TS", "YU", "YA", "YE", "GY", "NY", "SZ", "ZS", "CS", "PH", "TH"}
 )
 _RE_JOINED_INITIALS = re.compile(r"[A-Z]{2,3}")
+# The D9 mixed-case branch: one capital and 1-2 lowercase letters, with no
+# vowel and no y, such as "Jh". The pattern keeps periods, so "Ch." fails it.
+_RE_MIXED_CASE_INITIALS = re.compile(r"[A-Z][a-z]{1,2}")
+_MIXED_CASE_INITIALS_VOWELS = frozenset("aeiouy")
+# These mixed-case strings are not initials. The 2026-10-16 review of mention
+# counts and gold clusters found that each one is a given-name abbreviation, a
+# title, a suffix, a real name, or a company word.
+_MIXED_CASE_NON_INITIALS = frozenset(
+    {
+        # Abbreviations of one given name, for example "Md" (Muhammad) and "Ch" (Christian).
+        *("ch", "chr", "cs", "dzh", "fr", "gh", "kh", "khr", "lj", "ll", "md", "mhd"),
+        *("ph", "sh", "sk", "st", "sw", "sz", "th", "vl", "wm", "zh", "zs"),
+        # Titles before the given name, for example "Mst" (Mosammat) and "Lt" (Lieutenant).
+        *("ds", "hjh", "lt", "mst", "rr", "smt"),
+        # Suffixes: "Jr" (Junior) and "Sr" (Senior).
+        *("jr", "sr"),
+        # Real names: "Ng" and "Lv" are surnames, and "Tsz" is a given name.
+        *("lv", "ng", "tsz"),
+        # A company word ("Ltd").
+        "ltd",
+    }
+)
 _RE_ASCII_LOWERCASE = re.compile(r"[a-z]")
 _RE_ASCII_UPPERCASE = re.compile(r"[A-Z]")
 
@@ -509,13 +531,22 @@ def _joined_initials(first_raw: str | None) -> str | None:
 
     if not first_raw:
         return None
-    letters = "".join(first_raw.split()).replace(".", "")
-    if _RE_JOINED_INITIALS.fullmatch(letters) is None or letters in _JOINED_INITIALS_GIVEN_NAMES:
+    joined = "".join(first_raw.split())
+    letters = joined.replace(".", "")
+    if _RE_JOINED_INITIALS.fullmatch(letters) is not None:
+        if letters in _JOINED_INITIALS_GIVEN_NAMES:
+            return None
+        if len(letters) == 2 and letters in _DOTTED_GIVEN_NAME_ABBREVIATIONS and first_raw.strip().endswith("."):
+            return None
+        initials = letters.lower()
+    elif _RE_MIXED_CASE_INITIALS.fullmatch(joined) is not None:
+        initials = joined.lower()
+        # A vowel or y can make a short name, such as "Ty" or "Bo".
+        if not _MIXED_CASE_INITIALS_VOWELS.isdisjoint(initials) or initials in _MIXED_CASE_NON_INITIALS:
+            return None
+    else:
         return None
-    if len(letters) == 2 and letters in _DOTTED_GIVEN_NAME_ABBREVIATIONS and first_raw.strip().endswith("."):
-        return None
-    initials = letters.lower()
-    # Titles keep the D7 drop: "DR" is not the initials "d r".
+    # Titles keep the D7 drop: "DR" and "Dr" are not the initials "d r".
     return None if initials in NAME_PREFIXES else initials
 
 
@@ -546,7 +577,9 @@ def canonicalize_name_parts(
       plus middle initials ahead of existing middle tokens. The last name must
       pass ``last_name_allows_joined_initials``. ``ED``, ``MD``, title
       prefixes, and dotted given-name abbreviations such as ``PH.`` do not
-      change.
+      change. A first of one capital and 1-2 lowercase letters with no vowel,
+      no y, and no period, such as ``Jh``, changes the same way. Listed
+      non-initials such as ``Md``, ``Ch``, and ``Jr`` do not change.
 
     Args:
         first_raw: Raw first name, or ``None``.

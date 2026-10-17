@@ -43,8 +43,8 @@
     },
     "D9": {
       "status": "decided",
-      "title": "Joined capital initials split",
-      "description": "Remove whitespace and periods from the raw first. If 2-3 ASCII capitals remain, the rule reads them as initials. The first capital becomes first, and each other capital becomes a middle token before the existing middle tokens. The rule applies only when the transliterated raw last has at least one lowercase letter and no more capitals than lowercase letters. Thus an accented lowercase letter such as '\u00e1' counts as lowercase, and an all-capitals last such as 'WELLS' stops the rule. The rule does not apply to ED, a frequent given name, or to MD, which D7 keeps for Muhammad. The rule does not apply to a title prefix such as DR (D7). It also does not apply to a two-capital abbreviation of one given name with a final period: CH, SH, ZH, KH, TS, YU, YA, YE, GY, NY, SZ, ZS, CS, PH, or TH, for example 'PH.' (Philippe). Approved 2026-10-16."
+      "title": "Joined initials split",
+      "description": "Remove whitespace and periods from the raw first. If 2-3 ASCII capitals remain, the rule reads them as initials. The first capital becomes first, and each other capital becomes a middle token before the existing middle tokens. The rule applies only when the transliterated raw last has at least one lowercase letter and no more capitals than lowercase letters. Thus an accented lowercase letter such as '\u00e1' counts as lowercase, and an all-capitals last such as 'WELLS' stops the rule. The rule does not apply to ED, a frequent given name, or to MD, which D7 keeps for Muhammad. The rule does not apply to a title prefix such as DR (D7). It also does not apply to a two-capital abbreviation of one given name with a final period: CH, SH, ZH, KH, TS, YU, YA, YE, GY, NY, SZ, ZS, CS, PH, or TH, for example 'PH.' (Philippe). Approved 2026-10-16. A second branch applies the same split to a raw first that, with whitespace removed, is one ASCII capital and one or two lowercase ASCII letters with no vowel (a, e, i, o, u, or y) and no period, for example 'Jh'. The last-name rule is the same. This branch does not apply to a title prefix such as 'Dr' (D7). It also does not apply to 35 listed strings: the given-name abbreviations ch, chr, cs, dzh, fr, gh, kh, khr, lj, ll, md, mhd, ph, sh, sk, st, sw, sz, th, vl, wm, zh, and zs; the titles ds, hjh, lt, mst, rr, and smt; the suffixes jr and sr; the real names lv, ng, and tsz; and the company word ltd. Mixed-case branch approved 2026-10-16."
     }
   },
   "compare_compatibility": {
@@ -1621,6 +1621,108 @@
         "last": "Smith"
       },
       "canonical": {
+        "first": "j",
+        "middle": "h",
+        "last": "smith",
+        "count_keys": {
+          "first": null,
+          "last": "smith",
+          "first_last": null,
+          "last_first_initial": "smith j"
+        }
+      },
+      "decisions": [
+        "D6",
+        "D9"
+      ],
+      "notes": "One capital and one lowercase letter with no vowel are initials (D9), so 'Jh' spills like 'JH'; the single-char gate keeps first/first_last count keys null."
+    },
+    {
+      "id": "xh-mixed-case-initials",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Xh",
+        "middle": "",
+        "last": "Wang"
+      },
+      "canonical": {
+        "first": "x",
+        "middle": "h",
+        "last": "wang",
+        "count_keys": {
+          "first": null,
+          "last": "wang",
+          "first_last": null,
+          "last_first_initial": "wang x"
+        }
+      },
+      "decisions": [
+        "D6",
+        "D9"
+      ],
+      "notes": "A mixed-case consonant pair that is not on the D9 list splits into initials."
+    },
+    {
+      "id": "kh-mixed-case-abbreviation",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Kh",
+        "middle": "",
+        "last": "Markov"
+      },
+      "canonical": {
+        "first": "kh",
+        "middle": "",
+        "last": "markov",
+        "count_keys": {
+          "first": "kh",
+          "last": "markov",
+          "first_last": "kh markov",
+          "last_first_initial": "markov k"
+        }
+      },
+      "decisions": [
+        "D9"
+      ],
+      "notes": "Kh abbreviates one given name (Khristo, Khalid), so the D9 list keeps it as one token."
+    },
+    {
+      "id": "kh-dotted-mixed-case",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Kh.",
+        "middle": "",
+        "last": "Markov"
+      },
+      "canonical": {
+        "first": "kh",
+        "middle": "",
+        "last": "markov",
+        "count_keys": {
+          "first": "kh",
+          "last": "markov",
+          "first_last": "kh markov",
+          "last_first_initial": "markov k"
+        }
+      },
+      "decisions": [
+        "D9"
+      ],
+      "notes": "A period marks an abbreviation, so the D9 mixed-case branch does not apply."
+    },
+    {
+      "id": "jh-dotted-mixed-case",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Jh.",
+        "middle": "",
+        "last": "Smith"
+      },
+      "canonical": {
         "first": "jh",
         "middle": "",
         "last": "smith",
@@ -1634,7 +1736,133 @@
       "decisions": [
         "D9"
       ],
-      "notes": "D9 requires capitals only; a mixed-case first stays one token."
+      "notes": "The D9 mixed-case branch keeps periods in its match, so 'Jh.' stays one token although 'Jh' splits."
+    },
+    {
+      "id": "jr-mixed-case-suffix",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Jr",
+        "middle": "James W.",
+        "last": "York"
+      },
+      "canonical": {
+        "first": "jr",
+        "middle": "james w",
+        "last": "york",
+        "count_keys": {
+          "first": "jr",
+          "last": "york",
+          "first_last": "jr york",
+          "last_first_initial": "york j"
+        }
+      },
+      "decisions": [
+        "D9"
+      ],
+      "notes": "Jr is a suffix in the first field, so the D9 list keeps it as one token."
+    },
+    {
+      "id": "ng-mixed-case-surname",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Ng",
+        "middle": "Seik",
+        "last": "Weng"
+      },
+      "canonical": {
+        "first": "ng",
+        "middle": "seik",
+        "last": "weng",
+        "count_keys": {
+          "first": "ng",
+          "last": "weng",
+          "first_last": "ng weng",
+          "last_first_initial": "weng n"
+        }
+      },
+      "decisions": [
+        "D9"
+      ],
+      "notes": "Ng is a Cantonese surname in the first field, so the D9 list keeps it as one token."
+    },
+    {
+      "id": "ty-mixed-case-vowel",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Ty",
+        "middle": "",
+        "last": "Burrell"
+      },
+      "canonical": {
+        "first": "ty",
+        "middle": "",
+        "last": "burrell",
+        "count_keys": {
+          "first": "ty",
+          "last": "burrell",
+          "first_last": "ty burrell",
+          "last_first_initial": "burrell t"
+        }
+      },
+      "decisions": [
+        "D9"
+      ],
+      "notes": "The D9 mixed-case branch counts y as a vowel, so the short given name Ty stays one token."
+    },
+    {
+      "id": "jh-mixed-case-all-caps-last",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Jh",
+        "middle": "",
+        "last": "SMITH"
+      },
+      "canonical": {
+        "first": "jh",
+        "middle": "",
+        "last": "smith",
+        "count_keys": {
+          "first": "jh",
+          "last": "smith",
+          "first_last": "jh smith",
+          "last_first_initial": "smith j"
+        }
+      },
+      "decisions": [
+        "D9"
+      ],
+      "notes": "An all-capitals last gives no case evidence, so the D9 mixed-case branch keeps the first as one token."
+    },
+    {
+      "id": "jm-mixed-case-initials-with-middle",
+      "family": "initials",
+      "equivalence_group": null,
+      "input": {
+        "first": "Jm",
+        "middle": "Kevin",
+        "last": "Smith"
+      },
+      "canonical": {
+        "first": "j",
+        "middle": "m kevin",
+        "last": "smith",
+        "count_keys": {
+          "first": null,
+          "last": "smith",
+          "first_last": null,
+          "last_first_initial": "smith j"
+        }
+      },
+      "decisions": [
+        "D6",
+        "D9"
+      ],
+      "notes": "Middle initials from the D9 mixed-case branch come before the existing middle tokens."
     },
     {
       "id": "jh-joined-initials-with-middle",
@@ -2256,9 +2484,10 @@
         }
       },
       "decisions": [
-        "D7"
+        "D7",
+        "D9"
       ],
-      "notes": "A bare Md first name is retained rather than canonicalized to empty."
+      "notes": "A bare Md first name is retained rather than canonicalized to empty; D9 lists md (Muhammad) as a non-initial, so it does not split."
     },
     {
       "id": "dr-md-given-abbrev",

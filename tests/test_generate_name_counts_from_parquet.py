@@ -37,6 +37,9 @@ ROWS = [
     # D9 reads the last name, which the producer canonicalizes in a separate map.
     ("HG", "Wells", 2),
     ("HG", "WELLS", 3),
+    # The D9 mixed-case branch uses the same last-name guard.
+    ("Jh", "Wells", 4),
+    ("Jh", "WELLS", 2),
 ]
 
 
@@ -118,6 +121,8 @@ def test_module_cli_matches_the_production_writer_bytes_and_native_lookups(tmp_p
     assert mappings[0]["ana"] == 3
     assert mappings[0]["hg"] == 3
     assert mappings[3]["wells h"] == 5
+    assert mappings[0]["jh"] == 2
+    assert mappings[3]["wells j"] == 6
     assert "only singleton" not in mappings[2]
     record = json.loads((output / "run.json").read_text(encoding="utf-8"))
     assert record["status"] == "complete"

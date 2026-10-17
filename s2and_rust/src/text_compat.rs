@@ -298,6 +298,27 @@ const JOINED_INITIALS_GIVEN_NAMES: [&str; 2] = ["ED", "MD"];
 const DOTTED_GIVEN_NAME_ABBREVIATIONS: [&str; 15] = [
     "CH", "SH", "ZH", "KH", "TS", "YU", "YA", "YE", "GY", "NY", "SZ", "ZS", "CS", "PH", "TH",
 ];
+// The D9 mixed-case branch rejects a vowel or y, because these letters can
+// make a short name, such as "Ty" or "Bo".
+const MIXED_CASE_INITIALS_VOWELS: &[u8] = b"aeiouy";
+// These mixed-case strings are not initials (mirrors Python
+// `_MIXED_CASE_NON_INITIALS`). The 2026-10-16 review of mention counts and
+// gold clusters found that each one is a given-name abbreviation, a title, a
+// suffix, a real name, or a company word.
+#[rustfmt::skip]
+const MIXED_CASE_NON_INITIALS: [&str; 35] = [
+    // Abbreviations of one given name, for example "Md" (Muhammad).
+    "ch", "chr", "cs", "dzh", "fr", "gh", "kh", "khr", "lj", "ll", "md", "mhd", "ph", "sh", "sk",
+    "st", "sw", "sz", "th", "vl", "wm", "zh", "zs",
+    // Titles before the given name, for example "Mst" (Mosammat).
+    "ds", "hjh", "lt", "mst", "rr", "smt",
+    // Suffixes: "Jr" (Junior) and "Sr" (Senior).
+    "jr", "sr",
+    // Real names: "Ng" and "Lv" are surnames, and "Tsz" is a given name.
+    "lv", "ng", "tsz",
+    // A company word ("Ltd").
+    "ltd",
+];
 
 /// D9 letter-case guard for one raw last name (mirrors Python
 /// `last_name_allows_joined_initials`). Letter case comes from the canonical
@@ -335,28 +356,56 @@ pub(crate) fn last_name_allows_joined_initials(
 /// guard.
 fn joined_initials(first_raw: &str, name_prefixes: &HashSet<String>) -> Option<String> {
     let mut letters = String::with_capacity(3);
+    let mut has_period = false;
     for ch in first_raw.chars() {
-        if ch == '.' || is_python_whitespace_compat(ch) {
+        if is_python_whitespace_compat(ch) {
             continue;
         }
-        if !ch.is_ascii_uppercase() || letters.len() == 3 {
+        if ch == '.' {
+            has_period = true;
+            continue;
+        }
+        // Both branches need 2-3 ASCII letters, so stop early on a long first.
+        if !ch.is_ascii_alphabetic() || letters.len() == 3 {
             return None;
         }
         letters.push(ch);
     }
-    if letters.len() < 2 || JOINED_INITIALS_GIVEN_NAMES.contains(&letters.as_str()) {
+    if letters.len() < 2 {
         return None;
     }
-    if letters.len() == 2
-        && DOTTED_GIVEN_NAME_ABBREVIATIONS.contains(&letters.as_str())
-        && first_raw
-            .trim_matches(is_python_whitespace_compat)
-            .ends_with('.')
+    let bytes = letters.as_bytes();
+    let initials = if bytes.iter().all(u8::is_ascii_uppercase) {
+        if JOINED_INITIALS_GIVEN_NAMES.contains(&letters.as_str()) {
+            return None;
+        }
+        if letters.len() == 2
+            && DOTTED_GIVEN_NAME_ABBREVIATIONS.contains(&letters.as_str())
+            && first_raw
+                .trim_matches(is_python_whitespace_compat)
+                .ends_with('.')
+        {
+            return None;
+        }
+        letters.to_ascii_lowercase()
+    } else if !has_period
+        && bytes[0].is_ascii_uppercase()
+        && bytes[1..].iter().all(u8::is_ascii_lowercase)
     {
+        // The mixed-case branch keeps periods in its match, so "Ch." fails it.
+        let initials = letters.to_ascii_lowercase();
+        if initials
+            .bytes()
+            .any(|byte| MIXED_CASE_INITIALS_VOWELS.contains(&byte))
+            || MIXED_CASE_NON_INITIALS.contains(&initials.as_str())
+        {
+            return None;
+        }
+        initials
+    } else {
         return None;
-    }
-    let initials = letters.to_ascii_lowercase();
-    // Titles keep the D7 drop: "DR" is not the initials "d r".
+    };
+    // Titles keep the D7 drop: "DR" and "Dr" are not the initials "d r".
     (!name_prefixes.contains(&initials)).then_some(initials)
 }
 
@@ -370,7 +419,9 @@ fn joined_initials(first_raw: &str, name_prefixes: &HashSet<String>) -> Option<S
 ///   dash-bound group still spill.
 /// - Joined initials (D9): a first of 2-3 ASCII capitals after whitespace and
 ///   period removal becomes a first initial plus middle initials when the
-///   last name passes `last_name_allows_joined_initials`.
+///   last name passes `last_name_allows_joined_initials`. A first of one
+///   capital and 1-2 lowercase letters with no vowel, no y, and no period,
+///   such as "Jh", changes the same way unless it is a listed non-initial.
 pub(crate) fn canonicalize_name_parts_compat(
     first_raw: &str,
     middle_raw: &str,
@@ -488,7 +539,7 @@ pub(crate) fn compute_block_compat(name: &str) -> String {
 mod tests {
     use super::{
         canonical_name_count_keys_compat, canonicalize_name_parts_compat,
-        normalize_text_compat_native, text_unidecode_char,
+        normalize_text_compat_native, text_unidecode_char, MIXED_CASE_NON_INITIALS,
     };
     use std::collections::HashSet;
     use std::path::Path;
@@ -614,6 +665,26 @@ mod tests {
             assert_eq!(middle, "louise", "raw input {raw:?}");
             assert_eq!(last, "");
         }
+    }
+
+    #[test]
+    fn mixed_case_non_initials_match_python_source() {
+        let python_source = include_str!("../../s2and/text.py");
+        let literal = python_source
+            .split_once("_MIXED_CASE_NON_INITIALS = frozenset(")
+            .expect("Python non-initials set")
+            .1
+            .split_once("\n)\n")
+            .expect("Python non-initials set end")
+            .0;
+        let python: HashSet<&str> = literal
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .flat_map(|line| line.split('"').skip(1).step_by(2))
+            .collect();
+        let rust: HashSet<&str> = MIXED_CASE_NON_INITIALS.into_iter().collect();
+        assert_eq!(rust.len(), MIXED_CASE_NON_INITIALS.len());
+        assert_eq!(rust, python);
     }
 
     #[test]

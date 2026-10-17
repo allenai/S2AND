@@ -52,6 +52,18 @@ D9_EDGE_CASES = [
     (("HG", None, "McDONALD"), ("hg", "", "mcdonald")),
     (("HG", None, "\u91d1"), ("h", "g", "jin")),
     (("HG", None, None), ("hg", "", "")),
+    # The mixed-case branch: whitespace classes, periods, vowels, the list, titles, and letter counts.
+    (("J\u00a0h", None, "Lee"), ("j", "h", "lee")),
+    (("J\x1ch", None, "Lee"), ("j", "h", "lee")),
+    (("Jhm", None, "Lee"), ("j", "h m", "lee")),
+    (("Jh.", None, "Lee"), ("jh", "", "lee")),
+    (("Jhmk", None, "Lee"), ("jhmk", "", "lee")),
+    (("By", None, "Lee"), ("by", "", "lee")),
+    (("Wm", None, "Lee"), ("wm", "", "lee")),
+    (("Ms", None, "Lee"), ("", "", "lee")),
+    (("Hj", None, "\u00d3lafsson"), ("h", "j", "olafsson")),
+    (("Hj", None, "McDONALD"), ("hj", "", "mcdonald")),
+    (("Hj", None, None), ("hj", "", "")),
 ]
 
 

@@ -520,83 +520,14 @@ impl RustFeaturizer {
             return Some(high_value);
         }
 
-        let middle1_str = s1.middle.as_deref().unwrap_or("");
-        let middle1_tokens: Vec<&str> = middle1_str.split_whitespace().collect();
-        if !middle1_tokens.is_empty() {
-            let middle2_str = s2.middle.as_deref().unwrap_or("");
-            let middle2_tokens: Vec<&str> = middle2_str.split_whitespace().collect();
-            if !middle2_tokens.is_empty() {
-                let middle1_set: HashSet<&str> = middle1_tokens.iter().copied().collect();
-                let middle2_set: HashSet<&str> = middle2_tokens.iter().copied().collect();
-                let mut overlapping_affixes: HashSet<&str> = HashSet::new();
-                for token in middle1_set.intersection(&middle2_set) {
-                    if is_dropped_affix(token) {
-                        overlapping_affixes.insert(*token);
-                    }
-                }
-
-                let middle_1_all: Vec<&str> = middle1_tokens
-                    .iter()
-                    .copied()
-                    .filter(|w| !w.is_empty() && !overlapping_affixes.contains(w))
-                    .collect();
-                let middle_2_all: Vec<&str> = middle2_tokens
-                    .iter()
-                    .copied()
-                    .filter(|w| !w.is_empty() && !overlapping_affixes.contains(w))
-                    .collect();
-
-                let middle_1_words: HashSet<&str> = middle_1_all
-                    .iter()
-                    .copied()
-                    .filter(|w| py_len(w) > 1)
-                    .collect();
-                let middle_2_words: HashSet<&str> = middle_2_all
-                    .iter()
-                    .copied()
-                    .filter(|w| py_len(w) > 1)
-                    .collect();
-
-                let mut middle_1_firsts: HashSet<char> = HashSet::new();
-                for word in middle_1_all.iter() {
-                    if let Some(ch) = word.chars().next() {
-                        middle_1_firsts.insert(ch);
-                    }
-                }
-                let mut middle_2_firsts: HashSet<char> = HashSet::new();
-                for word in middle_2_all.iter() {
-                    if let Some(ch) = word.chars().next() {
-                        middle_2_firsts.insert(ch);
-                    }
-                }
-
-                let conflicting_initials = !middle_1_firsts.is_empty()
-                    && !middle_2_firsts.is_empty()
-                    && middle_1_firsts.is_disjoint(&middle_2_firsts);
-
-                let mut middle_1_chars: HashSet<char> = HashSet::new();
-                for word in middle_1_words.iter() {
-                    for ch in word.chars() {
-                        middle_1_chars.insert(ch);
-                    }
-                }
-                let mut middle_2_chars: HashSet<char> = HashSet::new();
-                for word in middle_2_words.iter() {
-                    for ch in word.chars() {
-                        middle_2_chars.insert(ch);
-                    }
-                }
-
-                let conflicting_full_names = !middle_1_words.is_empty()
-                    && !middle_2_words.is_empty()
-                    && middle_1_words.is_disjoint(&middle_2_words)
-                    && middle_1_chars != middle_2_chars
-                    && !same_prefix_tokens(middle1_str, middle2_str);
-
-                if conflicting_initials || conflicting_full_names {
-                    return Some(high_value);
-                }
-            }
+        let (middle1_tokens, middle2_tokens) = constraint_middle_tokens(
+            first1,
+            s1.middle.as_deref().unwrap_or(""),
+            first2,
+            s2.middle.as_deref().unwrap_or(""),
+        );
+        if middle_names_conflict(&middle1_tokens, &middle2_tokens) {
+            return Some(high_value);
         }
         None
     }

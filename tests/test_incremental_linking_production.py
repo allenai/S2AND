@@ -293,3 +293,123 @@ def test_global_query_disallow_resolution_rejects_conflicting_requires() -> None
         assert "cluster_seed_disallow_conflicts_with_require_constraint" in str(error)
     else:
         raise AssertionError("conflicting require decisions must fail")
+
+
+def test_reject_conflicting_new_links_keeps_forced_then_score_order() -> None:
+    from s2and.incremental_linking.seed_assignment import LinkPriority, reject_conflicting_new_links
+
+    names = {"forced": "t", "high": "d", "mid": "t", "low": "d", "other": "d"}
+    linked = {"high": "c", "mid": "c", "low": "c", "forced": "c", "other": "split"}
+    priorities = {
+        "forced": LinkPriority(forced=True, score=0.10),
+        "high": LinkPriority(forced=False, score=0.95),
+        "mid": LinkPriority(forced=False, score=0.90),
+        "low": LinkPriority(forced=False, score=0.90),
+        "other": LinkPriority(forced=False, score=0.50),
+    }
+
+    accepted, rejected = reject_conflicting_new_links(
+        linked,
+        priorities=priorities,
+        recluster_map={"split": "c"},
+        conflict=lambda left, right: names[left] != names[right],
+    )
+
+    # The forced "t" link comes first and blocks each "d" link, including
+    # "other", which restores into cluster c. "low" sorts before "mid" on the
+    # score tie.
+    assert accepted == {"forced": "c", "mid": "c"}
+    assert rejected == ["high", "low", "other"]
+    with pytest.raises(ValueError, match="no link priority"):
+        reject_conflicting_new_links(linked, priorities={}, recluster_map={}, conflict=lambda _a, _b: False)
+
+
+@pytest.mark.parametrize("batch_size", [1, 3], ids=["cross-batch", "same-batch"])
+@pytest.mark.parametrize("name_check", [False, True], ids=["check-off", "check-on"])
+def test_attach_name_check_rejects_conflicting_links_in_one_pass(tmp_path, monkeypatch, batch_size, name_check) -> None:
+    from s2and.arrow_inputs import ArrowDataset
+    from s2and.featurizer import FeaturizationInfo
+    from s2and.model import _ArrowIncrementalSignatureInfo
+    from tests.helpers import write_minimal_arrow_prediction_bundle
+
+    write_minimal_arrow_prediction_bundle(tmp_path)
+    seeds = {"0": "c", "1": "c"}
+    names = {"q1": ("J.", "D."), "q2": ("J.", "T."), "seed1": ("J.", "D.")}
+    scores = {"q1": 0.95, "q2": 0.90, "seed1": 0.80}
+    dataset = production_module._DirectArrowIncrementalDataset(  # noqa: SLF001
+        name_tuples=set(),
+        cluster_seeds_require=seeds,
+        cluster_seeds_disallow=set(),
+        altered_cluster_signatures=[],
+        max_seed_cluster_id=1,
+        signatures={
+            query: _ArrowIncrementalSignatureInfo(
+                paper_id="p0",
+                author_info_first=first,
+                author_info_last="Smith",
+                author_info_first_normalized_without_apostrophe="j",
+                author_info_orcid=None,
+                author_info_middle=middle,
+            )
+            for query, (first, middle) in names.items()
+        },
+        name_check_exempt_signature_ids=frozenset() if name_check else None,
+    )
+
+    class OneComponentClusterer:
+        n_jobs = 1
+        suppress_orcid = True
+        featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+
+        def _build_incremental_seed_setup(self, *args, **kwargs):
+            return incremental_seed_setup(seeds, {}, {"c": ["0", "1"]}, None)
+
+    def link_every_query(*args, **kwargs):
+        plan = kwargs["raw_plan_bundle"]
+        assert kwargs["name_check_exempt_signature_ids"] == dataset.name_check_exempt_signature_ids
+        signature_ids = kwargs["rust_featurizer"].signature_ids()
+        decisions = [
+            LinkOrAbstainDecision(signature_ids.index(query), "link", 0, "c", scores[query], None, None)
+            for query in plan.query_signature_ids
+        ]
+        return SimpleNamespace(
+            compact_result=SimpleNamespace(decisions=decisions),
+            decision_row_signals={},
+            linked_signature_clusters={signature_ids[d.query_signature_index]: "c" for d in decisions},
+            telemetry={"query_count": len(decisions)},
+        )
+
+    monkeypatch.setattr(
+        production_module.feature_port,
+        "build_rust_featurizer_from_arrow_dataset",
+        lambda dataset, **kwargs: SimpleNamespace(signature_ids=lambda: list(kwargs["signature_ids"])),
+    )
+    monkeypatch.setattr(
+        production_module.runtime_module,
+        "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
+        link_every_query,
+    )
+    with ArrowDataset.open(tmp_path) as arrow_dataset:
+        result = production_module.predict_incremental_promoted_linker_from_arrow(
+            OneComponentClusterer(),
+            [*seeds, *names],
+            dataset,
+            cluster_residuals=_unexpected_residual_clustering,
+            arrow_dataset=arrow_dataset,
+            artifact=SimpleNamespace(artifact_dir=tmp_path, retrieval_top_k=2, feature_columns=("test",)),
+            prevent_new_incompatibilities=False,
+            partial_supervision={},
+            runtime_context=SimpleNamespace(run_id="attach-name-check"),
+            total_ram_bytes=32 * 1024**3,
+            batching_threshold=batch_size,
+        )
+
+    telemetry = result["incremental_linker_telemetry"]
+    if name_check:
+        # q2 (J. T.) conflicts with the higher-scored q1 (J. D.) and becomes a residual.
+        assert set(result["clusters"]["c"]) == {"0", "1", "q1", "seed1"}
+        assert ["q2"] in result["clusters"].values()
+        assert telemetry["name_check_rejected_link_count"] == 1
+    else:
+        assert set(result["clusters"]["c"]) == {"0", "1", "q1", "q2", "seed1"}
+        assert "name_check_rejected_link_count" not in telemetry

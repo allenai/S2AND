@@ -81,6 +81,10 @@ class LinkOrAbstainDecision:
     score: float | None
     runner_up_score: float | None
     score_margin: float | None
+    # True when require or ORCID evidence chose the row.
+    forced: bool = False
+    # True when the attach name check turned a link into this abstain.
+    name_conflict: bool = False
 
 
 @dataclass(frozen=True)
@@ -243,7 +247,15 @@ def _constraint_row_signals(
     pair_labels: np.ndarray,
     *,
     distance_override_mask: np.ndarray | None = None,
+    name_check_pair_mask: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
+    """Count hard-constraint labels per candidate row.
+
+    ``name_check_pair_mask`` selects the pairs whose member the attach name
+    check covers. When it is given, the result also holds
+    ``constraint_name_check_disallow_count``, the hard negatives among those
+    pairs.
+    """
     row_count = int(candidate_batch.row_count)
     labels = np.asarray(pair_labels, dtype=np.float64)
     pair_count = int(candidate_batch.pair_count)
@@ -274,13 +286,24 @@ def _constraint_row_signals(
 
     disallow_fraction = np.zeros(row_count, dtype=np.float32)
     np.divide(disallow_counts, pair_counts, out=disallow_fraction, where=pair_counts > 0)
-    return {
+    signals = {
         "constraint_pair_count": pair_counts,
         "constraint_hit_count": hit_counts,
         "constraint_require_count": require_counts,
         "constraint_disallow_count": disallow_counts,
         "constraint_disallow_fraction": disallow_fraction,
     }
+    if name_check_pair_mask is not None:
+        checked = np.asarray(name_check_pair_mask, dtype=bool)
+        if checked.shape != (pair_count,):
+            raise ValueError(f"name_check_pair_mask must have shape ({pair_count},), got {checked.shape}")
+        checked_disallow = np.zeros(pair_count, dtype=bool)
+        checked_disallow[finite] = labels[finite] + float(LARGE_INTEGER) >= float(LARGE_DISTANCE)
+        checked_disallow &= checked
+        signals["constraint_name_check_disallow_count"] = np.bincount(
+            row_indices[checked_disallow], minlength=row_count
+        ).astype(np.float32, copy=False)
+    return signals
 
 
 def _subset_row_signals(
@@ -406,6 +429,7 @@ def _decide_query_rows(
     constraint_vetoes: np.ndarray | None,
     component_keys: tuple[object, ...] | None,
     candidate_batch: LinkerCandidateBatch,
+    name_conflict_rows: np.ndarray | None = None,
 ) -> LinkOrAbstainDecision:
     """Decide link-or-abstain for one query over an explicit allowed row set.
 
@@ -414,6 +438,10 @@ def _decide_query_rows(
     provided when ``allowed_rows`` is the query's complete retrieved group;
     subset callers (such as disallow exclusions) pass ``None`` and the gate is
     re-run over the subset.
+
+    ``name_conflict_rows`` marks rows whose component has a checked member
+    that violates the hard name constraint with the query. A link to such a
+    row becomes an abstain unless require or ORCID evidence chose the row.
     """
 
     if len(allowed_rows) == 0:
@@ -463,6 +491,7 @@ def _decide_query_rows(
         )
         margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
         action: LinkAction = "link"
+        forced = True
     elif len(forced_orcid_rows):
         best_row = _best_row_for_group(
             forced_orcid_rows,
@@ -479,7 +508,9 @@ def _decide_query_rows(
         )
         margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
         action = "link"
+        forced = True
     elif len(eligible_rows) < len(allowed_rows):
+        forced = False
         if len(eligible_rows) == 0:
             if fast_path is not None:
                 best_row, runner_up_score, fast_margin, _fast_link = fast_path
@@ -524,6 +555,15 @@ def _decide_query_rows(
             )
             margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
         action = "link" if gate_link else "abstain"
+        forced = False
+    # The disallow veto above looks only at the share of conflicting members.
+    # This check keeps a query out of any component with one conflicting
+    # checked member, so an attachment cannot add a name-rule violation.
+    name_conflict = (
+        action == "link" and not forced and name_conflict_rows is not None and bool(name_conflict_rows[best_row])
+    )
+    if name_conflict:
+        action = "abstain"
     component_key = None
     if action == "link" and component_keys is not None:
         component_key = str(component_keys[best_row])
@@ -535,6 +575,8 @@ def _decide_query_rows(
         score=float(probabilities[best_row]),
         runner_up_score=None if np.isnan(runner_up_score) else float(runner_up_score),
         score_margin=margin,
+        forced=forced and action == "link",
+        name_conflict=name_conflict,
     )
 
 
@@ -552,7 +594,9 @@ def _predict_incremental_link_or_abstain_compact(
     ``hard_excluded_rows`` removes candidate rows from consideration entirely,
     as if the raw planner had excluded them at retrieval time; it carries
     cluster-seed-disallow exclusions against components that a mutually
-    disallowed query linked to in an earlier batch.
+    disallowed query linked to in an earlier batch. When ``row_signals``
+    holds ``constraint_name_check_disallow_count``, a link to a row with a
+    checked name conflict becomes an abstain (see ``_decide_query_rows``).
     """
 
     candidate_batch = feature_matrix.candidate_batch
@@ -581,6 +625,10 @@ def _predict_incremental_link_or_abstain_compact(
     orcid_matches = _orcid_match_signal(row_signals, candidate_batch.row_count)
     constraint_requires = _constraint_require_signal(row_signals, candidate_batch.row_count)
     constraint_vetoes = _constraint_disallow_veto_signal(row_signals, candidate_batch.row_count)
+    name_check_disallow_counts = _optional_float_row_signal(
+        row_signals, "constraint_name_check_disallow_count", candidate_batch.row_count
+    )
+    name_conflict_rows = None if name_check_disallow_counts is None else name_check_disallow_counts > 0
     excluded_rows_mask: np.ndarray | None = None
     if hard_excluded_rows is not None:
         excluded_rows_mask = np.asarray(hard_excluded_rows, dtype=bool)
@@ -595,6 +643,8 @@ def _predict_incremental_link_or_abstain_compact(
         ),
         "cluster_seed_disallow_excluded_query_count": 0,
     }
+    if name_conflict_rows is not None:
+        decision_telemetry["name_check_abstain_count"] = 0
     decide_kwargs: dict[str, Any] = {
         "gate": gate,
         "feature_matrix": feature_matrix,
@@ -605,6 +655,7 @@ def _predict_incremental_link_or_abstain_compact(
         "constraint_vetoes": constraint_vetoes,
         "component_keys": component_keys,
         "candidate_batch": candidate_batch,
+        "name_conflict_rows": name_conflict_rows,
     }
     decisions: list[LinkOrAbstainDecision] = []
     for query_pos, group in enumerate(gate_query_rows.groups):
@@ -628,14 +679,15 @@ def _predict_incremental_link_or_abstain_compact(
             )
             allowed_rows = group[~excluded_rows_mask[group]]
             fast_path = None
-        decisions.append(
-            _decide_query_rows(
-                allowed_rows,
-                query_signature_index=query_signature_index,
-                fast_path=fast_path,
-                **decide_kwargs,
-            )
+        decision = _decide_query_rows(
+            allowed_rows,
+            query_signature_index=query_signature_index,
+            fast_path=fast_path,
+            **decide_kwargs,
         )
+        if decision.name_conflict:
+            decision_telemetry["name_check_abstain_count"] += 1
+        decisions.append(decision)
     return LinkOrAbstainCompactResult(
         probabilities=np.asarray(probabilities, dtype=np.float64),
         decisions=tuple(decisions),
@@ -1482,11 +1534,15 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     retrieval_top_k: int | None = None,
     cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
     partial_supervision_is_distance_override: bool = False,
+    name_check_exempt_signature_ids: frozenset[str] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Run production scoring/gating from an already retrieved candidate batch.
 
     Omit ``queries`` when retrieval supplies the authoritative ``query_author``
     row signal. Callers without that signal may still supply query objects.
+    A non-None ``name_check_exempt_signature_ids`` turns on the attach name
+    check: a link becomes an abstain when the query violates the hard name
+    constraint with a component member outside this set.
     """
 
     if queries is not None and len(queries) != len(query_signature_ids):
@@ -1586,8 +1642,19 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         raise ValueError(
             f"constraint label count must match pair_count: {pair_labels.shape} != ({candidate_batch.pair_count},)"
         )
+    name_check_pair_mask = None
+    if name_check_exempt_signature_ids is not None:
+        exempt_members = np.fromiter(
+            (signature_id in name_check_exempt_signature_ids for signature_id in signature_ids_by_index),
+            dtype=bool,
+            count=len(signature_ids_by_index),
+        )
+        name_check_pair_mask = ~exempt_members[np.asarray(candidate_batch.right_signature_indices, dtype=np.int64)]
     constraint_row_signals = _constraint_row_signals(
-        candidate_batch, pair_labels, distance_override_mask=distance_override_mask
+        candidate_batch,
+        pair_labels,
+        distance_override_mask=distance_override_mask,
+        name_check_pair_mask=name_check_pair_mask,
     )
 
     pairwise_model_result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
@@ -1745,6 +1812,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     partial_supervision_seed_signature_to_component: Mapping[str, Any] | None = None,
     cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
     partial_supervision_is_distance_override: bool = False,
+    name_check_exempt_signature_ids: frozenset[str] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Shared raw Arrow scoring implementation."""
 
@@ -1797,6 +1865,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         retrieval_top_k=top_k_resolved,
         cluster_seed_disallow_excluded_components=cluster_seed_disallow_excluded_components,
         partial_supervision_is_distance_override=partial_supervision_is_distance_override,
+        name_check_exempt_signature_ids=name_check_exempt_signature_ids,
     )
     raw_plan_telemetry_fields = _raw_candidate_plan_telemetry_fields(raw_plan_bundle.telemetry)
     telemetry = {

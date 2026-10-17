@@ -281,6 +281,16 @@ indirect merges cannot reconnect a forbidden pair.
 
 ## Incremental decision semantics
 
+Subblocked initial-only attachment adds two hard name checks. Standalone
+incremental prediction does not use them. A query does not link to a cluster
+when it violates the hard name constraint with a member of that cluster; the
+decision becomes an abstain. Require and ORCID evidence keep their links.
+Members of caller-required seed groups are not checked, so a curated profile
+with conflicting names does not block each query. Then the links of the pass go
+in order of forced evidence, score and signature ID. A link that conflicts with
+a link accepted earlier into the same cluster is rejected. Abstained and
+rejected queries go to residual clustering.
+
 Promoted query decisions are request-global and deterministic across input
 order, query batches, and `batching_threshold`. A global conflict is resolved
 by rebuilding and rescoring the lower-priority query from its complete

@@ -214,3 +214,38 @@ def test_bulk_context_survives_public_wrappers_and_is_isolated(tmp_path, fail_bu
                 name_tuples=frozenset(),
             )
         assert len(calls) == 2
+
+
+def test_attach_name_check_covers_only_initial_only_attachment(tmp_path, monkeypatch):
+    """Subblocked attachment exempts caller-required seeds; the public API stays unchanged."""
+    import s2and.model as model_module
+
+    dataset = _dataset([("Ada", "", "Smith"), ("A", "", "Smith"), ("A", "", "Smith")], {})
+    prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+    observed = []
+    original = model_module.predict_incremental_promoted_linker_from_arrow
+
+    def capture(clusterer, block_signatures, request_dataset, **kwargs):
+        observed.append(request_dataset.name_check_exempt_signature_ids)
+        return original(clusterer, block_signatures, request_dataset, **kwargs)
+
+    monkeypatch.setattr(model_module, "predict_incremental_promoted_linker_from_arrow", capture)
+    clusterer = _clusterer(0.9)
+    attach_tiny_incremental_linker(clusterer, tmp_path / "linker")
+    with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+        clusterer.predict_from_arrow(
+            {"one": ["0", "1", "2"]},
+            arrow_dataset,
+            batching_threshold=2,
+            cluster_seeds_require={"0": "profile"},
+            name_tuples=frozenset(),
+        )
+        assert observed == [frozenset({"0"})]
+        clusterer.predict_incremental_from_arrow(
+            ["1", "2"],
+            arrow_dataset,
+            cluster_seeds_require={"0": "seed"},
+            name_tuples=frozenset(),
+        )
+    assert observed[-1] is None
+    assert model_module._ARROW_ATTACH_NAME_CHECK_EXEMPT.get() is None

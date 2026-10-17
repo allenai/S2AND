@@ -31,10 +31,10 @@ from s2and.incremental_linking.policy import (
     request_cluster_seed_disallow_parts,
 )
 from s2and.incremental_linking.retrieval import RawArrowPlanBundle
-from s2and.incremental_linking.seed_assignment import apply_seed_links
+from s2and.incremental_linking.seed_assignment import LinkPriority, apply_seed_links, reject_conflicting_new_links
 from s2and.prediction_state import PredictionState
 from s2and.runtime import RuntimeContext
-from s2and.text import normalize_orcid
+from s2and.text import CanonicalNameParts, canonical_names_conflict, canonicalize_name_parts, normalize_orcid
 
 logger = logging.getLogger("s2and")
 
@@ -54,6 +54,7 @@ _PROMOTED_INCREMENTAL_SUM_TELEMETRY_FIELDS = frozenset(
         "constraint_unresolved_pairs",
         "decision_count",
         "link_count",
+        "name_check_abstain_count",
         "native_scorer_chunk_count",
         "no_candidate_query_count",
         "pair_count",
@@ -159,6 +160,10 @@ class _DirectArrowIncrementalDataset:
     max_seed_cluster_id: int
     signatures: Mapping[str, Any]
     partial_supervision_is_distance_override: bool = False
+    # Set only by subblocked initial-only attachment. None keeps the public
+    # incremental behavior; a set turns on the attach name checks and lists the
+    # caller-required seed members that the checks skip.
+    name_check_exempt_signature_ids: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +190,7 @@ class _QueryDisallowRescoreContext:
     base_pairs_per_query: int
     featurizer_cache: _QueryDisallowFeaturizerCache
     partial_supervision_is_distance_override: bool = False
+    name_check_exempt_signature_ids: frozenset[str] | None = None
 
 
 @dataclass
@@ -371,6 +377,66 @@ def _scored_query_decisions_from_result(
     return scored
 
 
+def _record_link_priorities(
+    decisions: Iterable[runtime_module.LinkOrAbstainDecision],
+    signature_ids_by_index: Sequence[str],
+    priorities: dict[str, LinkPriority],
+) -> None:
+    """Keep the forced flag and score of each link for the in-pass name check."""
+
+    for decision in decisions:
+        if decision.action == "link" and decision.score is not None:
+            signature_id = str(signature_ids_by_index[int(decision.query_signature_index)])
+            priorities[signature_id] = LinkPriority(forced=decision.forced, score=float(decision.score))
+
+
+def _new_link_name_conflict(
+    dataset: _DirectArrowIncrementalDataset,
+    partial_supervision: Mapping[tuple[str, str], int | float],
+) -> tuple[Callable[[str, str], bool], Callable[[str], tuple[str, Any]]]:
+    """Return the hard name constraint between two linked queries and its key.
+
+    ORCID does not count, as in the linker's constraint labels. A caller
+    distance for the pair takes precedence over the name rule, as in scoring.
+    The key is the canonical name, or the signature ID when caller distances
+    involve the signature, so equal keys give equal verdicts.
+    """
+
+    name_tuples = name_tuples_for_incremental_rules(dataset.name_tuples)
+    names: dict[str, CanonicalNameParts] = {}
+    verdicts: dict[tuple[CanonicalNameParts, CanonicalNameParts], bool] = {}
+
+    def name(signature_id: str) -> CanonicalNameParts:
+        parts = names.get(signature_id)
+        if parts is None:
+            signature = dataset.signatures[signature_id]
+            parts = canonicalize_name_parts(
+                signature.author_info_first, signature.author_info_middle, signature.author_info_last
+            )
+            names[signature_id] = parts
+        return parts
+
+    def conflict(left: str, right: str) -> bool:
+        distance = runtime_module._partial_supervision_distance(partial_supervision, left, right)  # noqa: SLF001
+        if distance is not None:
+            return distance == LARGE_DISTANCE
+        key = (name(left), name(right))
+        verdict = verdicts.get(key)
+        if verdict is None:
+            verdict = canonical_names_conflict(key[0], key[1], name_tuples)
+            verdicts[key] = verdict
+        return verdict
+
+    supervised_ids = {str(signature_id) for pair in partial_supervision for signature_id in pair}
+
+    def conflict_key(signature_id: str) -> tuple[str, Any]:
+        if signature_id in supervised_ids:
+            return ("signature", signature_id)
+        return ("name", name(signature_id))
+
+    return conflict, conflict_key
+
+
 def _cluster_seed_representatives(cluster_seeds_require: Mapping[str, int | str]) -> dict[str, str]:
     """Return one deterministic seed from each definitive post-split component."""
 
@@ -521,6 +587,7 @@ def _rescore_query_disallow_endpoint(
         partial_supervision_seed_signature_to_component=context.cluster_seeds_require,
         cluster_seed_disallow_excluded_components={signature_id: excluded_components},
         partial_supervision_is_distance_override=context.partial_supervision_is_distance_override,
+        name_check_exempt_signature_ids=context.name_check_exempt_signature_ids,
     )
     decision = _scored_query_decisions_from_result(
         result,
@@ -982,6 +1049,8 @@ def predict_incremental_promoted_linker_from_arrow(
         pairs_total_floor=initial_pair_total_floor,
     )
     linked_signature_clusters: dict[str, int | str] = {}
+    name_check_exempt_signature_ids = dataset.name_check_exempt_signature_ids
+    link_priorities: dict[str, LinkPriority] = {}
     batch_telemetries: list[Mapping[str, int | float | str]] = []
     batch_sizes: list[int] = []
     query_batch_size = max(1, int(initial_limits.query_batch_size or 1))
@@ -1145,7 +1214,12 @@ def predict_incremental_promoted_linker_from_arrow(
                     partial_supervision_seed_signature_to_component=cluster_seeds_require,
                     cluster_seed_disallow_excluded_components=None,
                     partial_supervision_is_distance_override=dataset.partial_supervision_is_distance_override,
+                    name_check_exempt_signature_ids=name_check_exempt_signature_ids,
                 )
+                if name_check_exempt_signature_ids is not None:
+                    _record_link_priorities(
+                        result.compact_result.decisions, raw_batch_featurizer.signature_ids(), link_priorities
+                    )
                 if query_disallow_partners:
                     scored_batch = _scored_query_decisions_from_result(
                         result,
@@ -1203,6 +1277,7 @@ def predict_incremental_promoted_linker_from_arrow(
                 base_pairs_per_query=base_pairs_per_query,
                 featurizer_cache=rescore_featurizer_cache,
                 partial_supervision_is_distance_override=dataset.partial_supervision_is_distance_override,
+                name_check_exempt_signature_ids=name_check_exempt_signature_ids,
             )
             rescore_outcomes: list[_QueryDisallowRescoreOutcome] = []
 
@@ -1216,6 +1291,11 @@ def predict_incremental_promoted_linker_from_arrow(
                     excluded_components,
                 )
                 rescore_outcomes.append(outcome)
+                rescored = outcome.decision.decision
+                if name_check_exempt_signature_ids is not None and rescored.action == "link":
+                    link_priorities[signature_id] = LinkPriority(
+                        forced=rescored.forced, score=float(rescored.score or 0.0)
+                    )
                 return outcome.decision
 
             globally_linked, global_disallow_counts = _resolve_query_disallows_globally(
@@ -1278,6 +1358,21 @@ def predict_incremental_promoted_linker_from_arrow(
         del rescore_featurizer_cache
         del raw_request_planner
         finish_start = time.perf_counter()
+        if name_check_exempt_signature_ids is not None and bool(
+            getattr(clusterer, "use_default_constraints_as_supervision", True)
+        ):
+            # Links from one pass do not see each other during scoring. Keep the
+            # higher-priority link when two new links to one cluster conflict.
+            conflict, conflict_key = _new_link_name_conflict(dataset, partial_supervision)
+            linked_signature_clusters, name_check_rejected = reject_conflicting_new_links(
+                linked_signature_clusters,
+                priorities=link_priorities,
+                recluster_map=recluster_map,
+                conflict=conflict,
+                conflict_key=conflict_key,
+            )
+            merged_telemetry["name_check_rejected_link_count"] = len(name_check_rejected)
+            logger.info("Attach name check rejected %d new links that conflict in one pass", len(name_check_rejected))
         logger.info("Assigning unassigned signatures for incremental clustering")
         check_names = prevent_new_incompatibilities and bool(recluster_map)
         assignment = apply_seed_links(

@@ -1,10 +1,72 @@
 """Apply incremental seed-link decisions without model or dataset dependencies."""
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence, Set
+from collections.abc import Callable, Hashable, Mapping, Sequence, Set
 from dataclasses import dataclass
 
 from s2and.text import first_names_name_compatible
+
+
+@dataclass(frozen=True)
+class LinkPriority:
+    """Order of one accepted link when new links compete for a cluster."""
+
+    forced: bool
+    score: float
+
+
+def reject_conflicting_new_links(
+    linked_signature_to_cluster: Mapping[str, int | str],
+    *,
+    priorities: Mapping[str, LinkPriority],
+    recluster_map: Mapping[int | str, int | str],
+    conflict: Callable[[str, str], bool],
+    conflict_key: Callable[[str], Hashable] | None = None,
+) -> tuple[dict[str, int | str], list[str]]:
+    """Reject new links that conflict with a link accepted into the same cluster.
+
+    Links that require or ORCID evidence forced come first and are always kept.
+    The other links follow by score descending, then by signature ID. A link is
+    rejected when ``conflict`` is true for it and a link already accepted into
+    the same restored cluster.
+
+    Args:
+        linked_signature_to_cluster: Linker decisions, before restoring profiles.
+        priorities: Forced flag and score of each linked signature.
+        recluster_map: Split-cluster IDs mapped to their original profile IDs.
+        conflict: Whether two linked signatures cannot share a cluster.
+        conflict_key: Optional key with equal ``conflict`` results for equal
+            keys and no conflict inside one key. Each cluster then keeps one
+            accepted signature per key, so the check scales with distinct keys.
+
+    Returns:
+        The accepted links and the rejected signature IDs in priority order.
+    """
+    missing = sorted(set(linked_signature_to_cluster) - set(priorities))
+    if missing:
+        raise ValueError(f"Linked signatures have no link priority: {missing[:10]!r}")
+
+    def priority(signature_id: str) -> tuple[bool, float, str]:
+        item = priorities[signature_id]
+        return not item.forced, -item.score, signature_id
+
+    key_of = conflict_key if conflict_key is not None else (lambda signature_id: signature_id)
+    accepted: dict[str, int | str] = {}
+    # One accepted representative per key and cluster.
+    accepted_by_cluster: defaultdict[str, dict[Hashable, str]] = defaultdict(dict)
+    rejected: list[str] = []
+    for signature_id in sorted(linked_signature_to_cluster, key=priority):
+        cluster_id = linked_signature_to_cluster[signature_id]
+        representatives = accepted_by_cluster[str(recluster_map.get(cluster_id, cluster_id))]
+        key = key_of(signature_id)
+        if not priorities[signature_id].forced and any(
+            conflict(signature_id, member) for member_key, member in representatives.items() if member_key != key
+        ):
+            rejected.append(signature_id)
+            continue
+        representatives.setdefault(key, signature_id)
+        accepted[signature_id] = cluster_id
+    return accepted, rejected
 
 
 @dataclass

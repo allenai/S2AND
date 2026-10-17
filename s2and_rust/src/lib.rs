@@ -38,7 +38,8 @@ use arrow_batch_lookup::IndexedArrowReadStats;
 use arrow_dataset::{ArrowDataset, ArrowDatasetResources};
 use coauthors::{CoauthorTables, NameGrams, PaperCoauthors, SignatureCoauthors};
 use constraints::{
-    first_names_name_compatible, lasts_equivalent_for_constraint, same_prefix_tokens,
+    constraint_middle_tokens, first_names_name_compatible, lasts_equivalent_for_constraint,
+    middle_names_conflict, same_prefix_tokens,
 };
 use feature_schema::FULL_FEATURE_COUNT;
 use features::*;

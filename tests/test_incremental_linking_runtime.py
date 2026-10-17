@@ -1361,3 +1361,123 @@ def test_from_retrieval_records_artifact_retrieval_top_k_when_not_passed(
     assert result.telemetry["retrieval_top_k"] == 37
     assert result.telemetry["partial_supervision_pair_count"] == 0
     assert result.telemetry["candidate_row_count"] == 1
+
+
+_DISALLOW_LABEL = float(LARGE_DISTANCE - LARGE_INTEGER)
+
+
+def test_constraint_row_signals_count_only_checked_name_conflicts() -> None:
+    candidate_batch = LinkerCandidateBatch(
+        row_count=2,
+        left_signature_indices=np.asarray([0, 0, 0, 0], dtype=np.uint32),
+        right_signature_indices=np.asarray([1, 2, 3, 4], dtype=np.uint32),
+        pair_row_indices=np.asarray([0, 0, 1, 1], dtype=np.uint32),
+    )
+    labels = np.asarray([_DISALLOW_LABEL, np.nan, _DISALLOW_LABEL, _DISALLOW_LABEL], dtype=np.float64)
+
+    signals = runtime_module._constraint_row_signals(
+        candidate_batch, labels, name_check_pair_mask=np.asarray([False, True, True, False])
+    )
+
+    np.testing.assert_array_equal(signals["constraint_disallow_count"], [1.0, 2.0])
+    np.testing.assert_array_equal(signals["constraint_name_check_disallow_count"], [0.0, 1.0])
+    assert "constraint_name_check_disallow_count" not in runtime_module._constraint_row_signals(candidate_batch, labels)
+
+
+def test_compact_name_check_turns_a_conflicting_link_into_an_abstain() -> None:
+    """One conflicting member in five passes the share veto but not the name check."""
+    shared = {
+        "constraint_pair_count": [5, 5],
+        "constraint_disallow_count": [1, 0],
+        "constraint_disallow_fraction": [0.2, 0.0],
+    }
+    baseline = _compact_decisions([0.95, 0.80], row_signals=shared)
+    assert (baseline.decisions[0].action, baseline.decisions[0].component_key) == ("link", "c0")
+    assert "name_check_abstain_count" not in baseline.decision_telemetry
+
+    checked = _compact_decisions([0.95, 0.80], row_signals={**shared, "constraint_name_check_disallow_count": [1, 0]})
+
+    decision = checked.decisions[0]
+    assert (decision.action, decision.component_key, decision.row_index) == ("abstain", None, None)
+    assert decision.name_conflict
+    assert decision.score == pytest.approx(0.95)
+    assert checked.decision_telemetry["name_check_abstain_count"] == 1
+
+
+@pytest.mark.parametrize("force", ["constraint_require_count", "orcid_match"])
+def test_compact_name_check_keeps_require_and_orcid_links(force):
+    result = _compact_decisions(
+        [0.95, 0.10],
+        gate=0.99,
+        row_signals={
+            force: [0, 1],
+            "constraint_pair_count": [1, 5],
+            "constraint_disallow_count": [0, 1],
+            "constraint_disallow_fraction": [0.0, 0.2],
+            "constraint_name_check_disallow_count": [0, 1],
+        },
+    )
+    decision = result.decisions[0]
+    assert (decision.action, decision.component_key) == ("link", "c1")
+    assert decision.forced
+    assert not decision.name_conflict
+    assert result.decision_telemetry["name_check_abstain_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("exempt", "conflicting_member", "expected_action"),
+    [
+        (None, "s1", "link"),
+        (frozenset({"s1"}), "s1", "link"),
+        (frozenset(), "s1", "abstain"),
+        (frozenset({"s1"}), "s2", "abstain"),
+    ],
+    ids=["check-off", "required-seed-member-skipped", "member-checked", "non-seed-member-checked"],
+)
+def test_from_retrieval_name_check_skips_required_seed_members(
+    monkeypatch: pytest.MonkeyPatch,
+    exempt: frozenset[str] | None,
+    conflicting_member: str,
+    expected_action: str,
+) -> None:
+    members = ["s1", "s2", "s3"]
+    retrieval_batch = _production_retrieval_batch(
+        row_query_signature_indices=np.asarray([0], dtype=np.uint32),
+        row_component_keys=("c1",),
+        left_signature_indices=np.asarray([0, 0, 0], dtype=np.uint32),
+        right_signature_indices=np.asarray([1, 2, 3], dtype=np.uint32),
+        pair_row_indices=np.asarray([0, 0, 0], dtype=np.uint32),
+    )
+    labels = np.full(3, np.nan, dtype=np.float64)
+    labels[members.index(conflicting_member)] = _DISALLOW_LABEL
+    monkeypatch.setattr(
+        runtime_module,
+        "_resolve_candidate_batch_pair_labels_rust",
+        lambda **_kwargs: (labels.copy(), SimpleNamespace(total_pairs=3)),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "compute_candidate_batch_pairwise_model_and_aggregate_stats",
+        lambda _dataset, candidate_batch, **_kwargs: _fake_pairwise_result(candidate_batch),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "build_promoted_non_pairwise_row_features_with_telemetry",
+        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.9], dtype=np.float32)),
+    )
+    seeds = dict.fromkeys(members, "c1")
+
+    result = runtime_module._predict_incremental_link_or_abstain_production_from_retrieval_private(  # noqa: SLF001
+        FakeProductionClusterer(seeds),
+        StaticArtifact(np.asarray([0.9], dtype=np.float64), gate_config=_promoted_gate_config(0.0)),
+        featurizer=FakeRuntimeFeaturizer(["q1", *members]),
+        retrieval_batch=retrieval_batch,
+        queries=[object()],
+        query_signature_ids=["q1"],
+        cluster_seeds_require=seeds,
+        name_check_exempt_signature_ids=exempt,
+    )
+
+    # One disallow in three pairs stays below the share veto in every case.
+    assert result.compact_result.decisions[0].action == expected_action
+    assert ("constraint_name_check_disallow_count" in result.decision_row_signals) == (exempt is not None)

@@ -37,23 +37,20 @@ from s2and.runtime import (
 from s2and.sampling import random_sampling, sampling
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
-    DROPPED_AFFIXES,
     VENUE_STOP_WORDS,
     CanonicalNameParts,
-    canonical_lasts_equivalent,
     canonical_name_count_keys,
     canonical_name_tuple_pair,
+    canonical_names_conflict,
     canonicalize_name_parts,
     canonicalize_name_text,
     compute_block,
     detect_language,
-    first_names_name_compatible,
     get_text_ngrams,
     get_text_ngrams_words,
     normalize_orcid_compact,
     normalize_text,
     normalize_title,
-    same_prefix_tokens,
 )
 from s2and.thread_config import resolve_n_jobs
 
@@ -1492,7 +1489,6 @@ class ANDData:
 
         first_1, middle_1_text = _materialize_constraint_name_parts(signature_1)
         first_2, middle_2_text = _materialize_constraint_name_parts(signature_2)
-        middle_1 = middle_1_text.split()
 
         orcid_1 = normalize_orcid_compact(signature_1.author_info_orcid)
         orcid_2 = normalize_orcid_compact(signature_2.author_info_orcid)
@@ -1519,50 +1515,14 @@ class ANDData:
         # but if they are not equal, we can't say much
         elif not suppress_orcid and orcid_1 is not None and orcid_2 is not None and orcid_1 == orcid_2:
             return low_value
-        # just-in-case last name constraint: if canonical last names differ at
-        # compare time, then disallow. Dash/space variants canonicalize to the
-        # same spaced form (D5); joined-vs-spaced spellings are additionally
-        # equivalent here by compare-time policy (see canonical_lasts_equivalent).
-        elif not canonical_lasts_equivalent(
-            _materialize_constraint_last_normalized(signature_1),
-            _materialize_constraint_last_normalized(signature_2),
+        # The name rule compares canonical last names, first initials, first
+        # names and effective middle names (see canonical_names_conflict).
+        elif canonical_names_conflict(
+            CanonicalNameParts(first_1, middle_1_text, _materialize_constraint_last_normalized(signature_1)),
+            CanonicalNameParts(first_2, middle_2_text, _materialize_constraint_last_normalized(signature_2)),
+            self.name_tuples,
         ):
             return high_value
-        # just-in-case first initial constraint: if first initials are different, then disallow
-        elif len(first_1) > 0 and len(first_2) > 0 and first_1[0] != first_2[0]:
-            return high_value
-        # and then name based constraints
-        else:
-            # either a known alias or a prefix of the other
-            # if neither, then we'll say it's impossible to be the same person
-            if not first_names_name_compatible(first_1, first_2, self.name_tuples):
-                return high_value
-            # dont cluster together if there is no intersection between the sets of middle initials
-            # and both sets are not empty
-            elif len(middle_1) > 0:
-                middle_2 = middle_2_text.split()
-                if len(middle_2) > 0:
-                    overlapping_affixes = set(middle_2).intersection(middle_1).intersection(DROPPED_AFFIXES)
-                    middle_1_all = [word for word in middle_1 if len(word) > 0 and word not in overlapping_affixes]
-                    middle_2_all = [word for word in middle_2 if len(word) > 0 and word not in overlapping_affixes]
-                    middle_1_words = {word for word in middle_1_all if len(word) > 1}
-                    middle_2_words = {word for word in middle_2_all if len(word) > 1}
-                    middle_1_firsts = {word[0] for word in middle_1_all}
-                    middle_2_firsts = {word[0] for word in middle_2_all}
-                    conflicting_initials = (
-                        len(middle_1_firsts) > 0
-                        and len(middle_2_firsts) > 0
-                        and len(middle_1_firsts.intersection(middle_2_firsts)) == 0
-                    )
-                    conflicting_full_names = (
-                        len(middle_1_words) > 0
-                        and len(middle_2_words) > 0
-                        and len(middle_1_words.intersection(middle_2_words)) == 0
-                        and set("".join(middle_1_words)) != set("".join(middle_2_words))
-                        and not same_prefix_tokens(middle_1_text, middle_2_text)
-                    )
-                    if conflicting_initials or conflicting_full_names:
-                        return high_value
         return None
 
     def get_signatures_to_block(self) -> dict[str, str]:

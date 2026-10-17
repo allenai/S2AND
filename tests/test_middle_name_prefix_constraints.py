@@ -34,7 +34,21 @@ CASES: list[tuple[Name, Name, float | None]] = [
     (("C.", "Meg", "Smith"), ("D.", "Megan", "Smith"), LARGE_DISTANCE),
     (("C.", "Meg", "Smith"), ("C.", "Megan", "Jones"), LARGE_DISTANCE),
     (("Carl", "Meg", "Smith"), ("Chris", "Megan", "Smith"), LARGE_DISTANCE),
+    # A prefix-matched dash-bound first name adds its later tokens to the middle.
+    (("J.-D.", "T.", "Smith"), ("J.", "D.", "Smith"), None),
+    (("J.-D.", "", "Smith"), ("J.", "T.", "Smith"), LARGE_DISTANCE),
+    (("Chi-Hung", "", "Tam"), ("C.", "M.", "Tam"), LARGE_DISTANCE),
+    (("Jean-Daniel", "", "Smith"), ("Jean", "Daniel", "Smith"), None),
+    (("Jean-Daniel", "", "Smith"), ("Jean", "Paul", "Smith"), LARGE_DISTANCE),
+    (("Jean-Daniel", "T.", "Smith"), ("Jean-D.", "", "Smith"), None),
+    # Tokens that the other first name covers do not join the middle.
+    (("Jean-Pierre", "A.", "Smith"), ("Jean-Pierre", "B.", "Smith"), LARGE_DISTANCE),
+    (("Xiao-Qing", "", "Liu"), ("Xiaoqing", "Frank", "Liu"), None),
+    # An alias covers the full first name, so its later tokens stay out.
+    (("Abol-Ghasem", "", "Smith"), ("Ali", "R.", "Smith"), None),
+    (("Abol-Ghasem", "M.", "Smith"), ("Ali", "R.", "Smith"), LARGE_DISTANCE),
 ]
+ALIASES = {("abol ghasem", "ali")}
 
 
 @pytest.fixture(scope="module")
@@ -42,6 +56,7 @@ def prefix_dataset(tmp_path_factory: pytest.TempPathFactory) -> tuple[ANDData, A
     """Use real ingestion and Arrow conversion for both implementations."""
     names = [name for left, right, _ in CASES for name in (left, right)]
     dataset = _dataset(names, {})
+    dataset.name_tuples = set(ALIASES)
     arrow_dataset = build_arrow_training_dataset(dataset, tmp_path_factory.mktemp("middle-prefix"))
     native = _get_rust_featurizer(arrow_dataset)
     indices = {signature_id: index for index, signature_id in enumerate(native.signature_ids())}

@@ -911,6 +911,133 @@ def first_names_name_compatible(first_a: str, first_b: str, name_tuples: Set[tup
     return pair in name_tuples or (pair[1], pair[0]) in name_tuples
 
 
+def _uncovered_first_tail(tokens: list[str], other: list[str]) -> list[str]:
+    """Return the later first-name tokens that the other first name does not cover.
+
+    The other first name covers the tokens at its aligned positions. When its
+    last token extends past the aligned token, the remainder also covers the
+    next tokens, so ``xiaoqing`` covers ``xiao qing``. The first token is the
+    first name itself and is never part of the tail.
+    """
+
+    start = max(len(other), 1)
+    if start >= len(tokens):
+        return []
+    if other:
+        aligned, last = tokens[len(other) - 1], other[-1]
+        rest = last[len(aligned) :] if last.startswith(aligned) else ""
+        while rest and start < len(tokens):
+            token = tokens[start]
+            if rest.startswith(token):
+                rest = rest[len(token) :]
+            elif token.startswith(rest):
+                rest = ""
+            else:
+                break
+            start += 1
+    return tokens[start:]
+
+
+def constraint_middle_tokens(first_a: str, middle_a: str, first_b: str, middle_b: str) -> tuple[list[str], list[str]]:
+    """Return the middle-name tokens that the hard name constraint compares.
+
+    A canonical first name keeps a dash-bound group, for example ``jean daniel``
+    from ``Jean-Daniel``. When the first names match by prefix, or one is
+    missing, the first-name check compares only the aligned tokens. The tokens
+    that the other first name does not cover then come before the middle-name
+    tokens, so ``jean daniel`` compares with ``jean`` + ``daniel`` as first
+    ``jean`` with middle ``daniel``. Aligned tokens, such as the two
+    ``pierre`` tokens of two ``jean pierre`` records, are not added. When the
+    first names match only through an alias tuple, the alias covers the full
+    first names and the middle-name tokens do not change. Call this function
+    only for compatible first names.
+
+    Args:
+        first_a: Canonical first name of one record.
+        middle_a: Canonical middle name of that record.
+        first_b: Canonical first name of the other record.
+        middle_b: Canonical middle name of the other record.
+
+    Returns:
+        The effective middle-name tokens of each record.
+    """
+
+    first_tokens_a, first_tokens_b = first_a.split(), first_b.split()
+    middle_tokens_a, middle_tokens_b = middle_a.split(), middle_b.split()
+    if first_tokens_a and first_tokens_b and not same_prefix_tokens(first_a, first_b):
+        return middle_tokens_a, middle_tokens_b
+    return (
+        _uncovered_first_tail(first_tokens_a, first_tokens_b) + middle_tokens_a,
+        _uncovered_first_tail(first_tokens_b, first_tokens_a) + middle_tokens_b,
+    )
+
+
+def middle_names_conflict(middle_a: list[str], middle_b: list[str]) -> bool:
+    """Return whether two middle-name token lists violate the hard name rule.
+
+    Shared affixes do not count. The initials of the remaining tokens must
+    intersect. Full words must intersect, use the same letters, or match by
+    aligned prefixes.
+
+    Args:
+        middle_a: Effective middle-name tokens of one record.
+        middle_b: Effective middle-name tokens of the other record.
+
+    Returns:
+        True when the middle names conflict.
+    """
+
+    if not middle_a or not middle_b:
+        return False
+    overlapping_affixes = set(middle_b).intersection(middle_a).intersection(DROPPED_AFFIXES)
+    kept_a = [word for word in middle_a if word and word not in overlapping_affixes]
+    kept_b = [word for word in middle_b if word and word not in overlapping_affixes]
+    words_a = {word for word in kept_a if len(word) > 1}
+    words_b = {word for word in kept_b if len(word) > 1}
+    initials_a = {word[0] for word in kept_a}
+    initials_b = {word[0] for word in kept_b}
+    conflicting_initials = bool(initials_a) and bool(initials_b) and not initials_a & initials_b
+    conflicting_full_names = (
+        bool(words_a)
+        and bool(words_b)
+        and not words_a & words_b
+        and set("".join(words_a)) != set("".join(words_b))
+        and not same_prefix_tokens(" ".join(middle_a), " ".join(middle_b))
+    )
+    return conflicting_initials or conflicting_full_names
+
+
+def canonical_names_conflict(
+    name_a: CanonicalNameParts,
+    name_b: CanonicalNameParts,
+    name_tuples: Set[tuple[str, str]],
+) -> bool:
+    """Return whether two canonical names violate the hard name constraint.
+
+    This is the name part of ``ANDData._get_constraint`` and of its Rust
+    equivalent: last names, first initials, first-name compatibility and
+    effective middle names. Seed, explicit disallow and ORCID rules are not
+    part of it.
+
+    Args:
+        name_a: Canonical name parts of one record.
+        name_b: Canonical name parts of the other record.
+        name_tuples: Canonical first-name alias pairs.
+
+    Returns:
+        True when the two names cannot belong to the same person.
+    """
+
+    if not canonical_lasts_equivalent(name_a.last, name_b.last):
+        return True
+    if name_a.first and name_b.first and name_a.first[0] != name_b.first[0]:
+        return True
+    if not first_names_name_compatible(name_a.first, name_b.first, name_tuples):
+        return True
+    middle_a, middle_b = constraint_middle_tokens(name_a.first, name_a.middle, name_b.first, name_b.middle)
+    return middle_names_conflict(middle_a, middle_b)
+
+
 def equal(
     name_1: str | None,
     name_2: str | None,

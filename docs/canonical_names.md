@@ -210,6 +210,15 @@ The rule compares aligned tokens up to the shorter list, as for first names.
 Middle initial conflicts still cause a veto. Seed, ORCID, surname, and first-name
 rules retain their precedence. Middle names do not use the alias tuple file.
 
+A dash-bound first name can have more tokens than the other first name. When
+the first names match by prefix, the middle comparison starts with the
+first-name tokens that the other first name does not cover. Thus `jean daniel`
+agrees with first `jean` and middle `daniel`, and conflicts with first `jean`
+and middle `paul`. A joined token covers the tokens that it contains, so
+`xiaoqing` covers `xiao qing`. Aligned tokens do not move: two `jean pierre`
+records compare only their middle names. An alias match covers the full first
+names, so no first-name token moves.
+
 The live authorities are `s2and.text`, its Rust implementation, and
 [the frozen examples](../tests/fixtures/canonical_name_examples.json).
 Tuple and ORCID runtime rules live in

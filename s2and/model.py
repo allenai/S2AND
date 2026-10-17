@@ -123,6 +123,11 @@ _PREDICT_FEATURE_COPY_MAX_BYTES = 128 * (1 << 20)
 # Carry bulk semantics through public attachment overrides that delegate to
 # super(), without mutating a shared Clusterer or changing public arguments.
 _ARROW_BULK_DISTANCE_OVERRIDES: ContextVar[bool] = ContextVar("s2and_arrow_bulk_distance_overrides", default=False)
+# Subblocked initial-only attachment sets the caller-required seed members that
+# its name checks skip. None keeps the public incremental behavior unchanged.
+_ARROW_ATTACH_NAME_CHECK_EXEMPT: ContextVar[frozenset[str] | None] = ContextVar(
+    "s2and_arrow_attach_name_check_exempt", default=None
+)
 
 
 @dataclass(frozen=True)
@@ -134,6 +139,7 @@ class _ArrowIncrementalSignatureInfo:
     author_info_last: str | None
     author_info_first_normalized_without_apostrophe: str | None
     author_info_orcid: str | None
+    author_info_middle: str | None = None
 
 
 def _build_incremental_result(
@@ -474,6 +480,7 @@ def _load_arrow_incremental_signature_info(
                     author_info_last=last,
                     author_info_first_normalized_without_apostrophe=first_without_apostrophe or None,
                     author_info_orcid=_optional_arrow_string(row.get("author_orcid")),
+                    author_info_middle=middle,
                 )
     missing_signature_ids = [signature_id for signature_id in requested_signature_ids if signature_id not in signatures]
     if missing_signature_ids:
@@ -3255,6 +3262,7 @@ class Clusterer:
                 synthetic_seed_map, current_disallows, current_supervision
             )
             bulk_context_token = _ARROW_BULK_DISTANCE_OVERRIDES.set(True)
+            name_check_token = _ARROW_ATTACH_NAME_CHECK_EXEMPT.set(frozenset(scoped_seeds[origin]))
             try:
                 incremental_result = self.predict_incremental_from_arrow(
                     group_signature_ids,
@@ -3270,6 +3278,7 @@ class Clusterer:
                     altered_cluster_signatures=[],
                 )
             finally:
+                _ARROW_ATTACH_NAME_CHECK_EXEMPT.reset(name_check_token)
                 _ARROW_BULK_DISTANCE_OVERRIDES.reset(bulk_context_token)
             clusters_payload = incremental_result.get("clusters")
             if not isinstance(clusters_payload, dict):
@@ -5349,6 +5358,7 @@ class Clusterer:
         """
 
         partial_supervision_is_distance_override = _ARROW_BULK_DISTANCE_OVERRIDES.get()
+        name_check_exempt_signature_ids = _ARROW_ATTACH_NAME_CHECK_EXEMPT.get()
         partial_supervision = normalize_partial_supervision(partial_supervision, stringify_ids=True)
         if runtime_context is None:
             runtime_context = build_runtime_context(
@@ -5428,6 +5438,7 @@ class Clusterer:
                 max_seed_cluster_id=_seed_cluster_count_from_seed_map(seed_signature_to_cluster),
                 signatures=signatures,
                 partial_supervision_is_distance_override=partial_supervision_is_distance_override,
+                name_check_exempt_signature_ids=name_check_exempt_signature_ids,
             )
             logger.info("Running direct Arrow promoted incremental prediction")
             return predict_incremental_promoted_linker_from_arrow(

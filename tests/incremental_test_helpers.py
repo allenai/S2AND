@@ -61,7 +61,17 @@ def _dataset(names: list[tuple[str, str, str]], seeds: dict[str, str]) -> ANDDat
 
 
 def _predict(
-    tmp_path, dataset, blocks, route, *, threshold=3, distance=0.1, classifier=None, linkage="average", **kwargs
+    tmp_path,
+    dataset,
+    blocks,
+    route,
+    *,
+    threshold=3,
+    distance=0.1,
+    classifier=None,
+    linkage="average",
+    gate_link=True,
+    **kwargs,
 ):
     clusterer = Clusterer(
         FeaturizationInfo(["year_diff"]),
@@ -73,7 +83,7 @@ def _predict(
     if route == "python":
         return clusterer.predict(blocks, dataset, batching_threshold=threshold, **kwargs)[0]
     prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
-    attach_tiny_incremental_linker(clusterer, tmp_path / "linker")
+    attach_tiny_incremental_linker(clusterer, tmp_path / "linker", link=gate_link)
     with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
         return clusterer.predict_from_arrow(
             blocks,
@@ -93,13 +103,18 @@ def prepare_seed_arrow_bundle(dataset, arrow_dir):
     write_test_arrow_artifact_manifest(arrow_dir, paths)
 
 
-def attach_tiny_incremental_linker(clusterer, artifact_dir):
-    """Attach the same deterministic promoted linker used by seed route tests."""
+def attach_tiny_incremental_linker(clusterer, artifact_dir, *, link=True):
+    """Attach the same deterministic promoted linker used by seed route tests.
+
+    The gate links every scored query when ``link`` is true and abstains otherwise. Require and
+    ORCID evidence link in both cases. Use ``link=False`` for constant distances above EPS, which
+    classic attachment does not link.
+    """
     booster, _ = build_tiny_promoted_booster()
     save_incremental_linking_artifact(
         booster,
         artifact_dir,
-        gate_config=tiny_logistic_gate_config(),
+        gate_config=tiny_logistic_gate_config(link),
         target_spec={},
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )

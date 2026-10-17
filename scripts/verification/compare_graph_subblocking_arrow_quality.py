@@ -732,7 +732,7 @@ def _run_rust_subblocking(
     signature_ids: Sequence[str],
     config: GraphSubblockingConfig,
 ) -> tuple[dict[str, list[str]], dict[str, Any]]:
-    return _make_subblocks_with_telemetry_arrow_rust(
+    subblocks, telemetry, _no_middle_dead_ends = _make_subblocks_with_telemetry_arrow_rust(
         arrow_dataset,
         signature_ids,
         maximum_size=int(args.maximum_size),
@@ -740,6 +740,7 @@ def _run_rust_subblocking(
         graph_subblocking_random_seed=int(args.seed),
         use_orcid_subblocking=bool(args.orcid_subblocking),
     )
+    return subblocks, telemetry
 
 
 def _baseline_deltas(summary: dict[str, Any], baseline_path: Path | None) -> dict[str, Any]:

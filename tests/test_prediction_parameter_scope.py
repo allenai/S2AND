@@ -153,7 +153,7 @@ def test_arrow_subblocked_override_reaches_nested_residual_prediction(
     monkeypatch.setattr(
         Clusterer,
         "_build_arrow_subblocked_block_dict",
-        lambda *args, **kwargs: {"full": ["0", "1"], "initial": ["2", "3"]},
+        lambda *args, **kwargs: ({"full": ["0", "1"], "initial": ["2", "3"]}, {}),
     )
     monkeypatch.setattr(
         Clusterer,

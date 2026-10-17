@@ -74,12 +74,9 @@ def test_bulk_uses_effective_constraints_before_real_subblocking(tmp_path, enabl
         "soft_override": {("1", "0"): 0.3},
     }[case]
     disallowed = case == "caller_disallow" or (case == "dataset_disallow" and enabled)
-    expected = {
-        (False, False): [["0", "1", "2"]],
-        (False, True): [["0", "1"], ["2"]],
-        (True, False): [["0", "2"], ["1"]],
-        (True, True): [["0"], ["1"], ["2"]],
-    }[(disallowed, threshold is not None)]
+    # The cap cuts the no-middle "ada" records into the pieces 0-1 and 2. The reunite-only pass
+    # then attaches record 2, so the subblocked result equals the full-block result.
+    expected = [["0", "2"], ["1"]] if disallowed else [["0", "1", "2"]]
     for route in ["python", "arrow"]:
         clusters = _predict(
             tmp_path / route,

@@ -1378,6 +1378,36 @@ def subblocking_name_parts(names: Sequence[tuple[str, str]], maximum_size: int) 
     return key_names
 
 
+def no_middle_dead_end_buckets(
+    signature_ids: Sequence[Any], names: Sequence[tuple[str, str]], maximum_size: int
+) -> dict[str, list[Any]]:
+    """Return the no-middle bucket of each first-name dead end, keyed by the key first name.
+
+    A dead end is a key first name of two or more characters with more than ``maximum_size``
+    records in the request. Prefix subdivision cannot split it, so the subblocker splits it by
+    middle name. Its records without a key middle name share one bucket. Over the cap, the
+    graph fallback cuts that bucket into pieces, and one person's records can land in different
+    pieces. Prediction reunites the records of each bucket after bulk clustering. The Rust Arrow
+    planner returns the same buckets from its own dead ends.
+
+    Args:
+        signature_ids: Every record of one subblocking request, in request order.
+        names: Canonical (first, middle) of each record, in the order of ``signature_ids``.
+        maximum_size: Maximum subblock size.
+
+    Returns:
+        The signature IDs of each nonempty bucket, in request order.
+    """
+
+    key_names = subblocking_name_parts(names, maximum_size)
+    first_counts = Counter(first for first, _middle in key_names if len(first) > 1)
+    buckets: defaultdict[str, list[Any]] = defaultdict(list)
+    for signature_id, (first, middle) in zip(signature_ids, key_names, strict=True):
+        if not middle and first_counts[first] > maximum_size:
+            buckets[first].append(signature_id)
+    return dict(buckets)
+
+
 def _signature_coauthor_blocks_for_specter(signature, anddata, compute_block_fn=compute_block) -> list[str]:
     coauthor_blocks = signature.author_info_coauthor_blocks
     if coauthor_blocks is not None:
@@ -1660,15 +1690,20 @@ def _make_subblocks_with_telemetry_arrow_rust(
     graph_subblocking_config: GraphSubblockingConfig | None = None,
     graph_subblocking_random_seed: int = 0,
     use_orcid_subblocking: bool = True,
-):
-    """Run native Rust graph subblocking with signature rows loaded from Arrow."""
+) -> tuple[dict[str, list[str]], dict[str, Any], dict[str, list[str]]]:
+    """Run native Rust graph subblocking with signature rows loaded from Arrow.
+
+    Returns:
+        The subblocks, the planner telemetry, and the no-middle bucket of each first-name dead
+        end (see ``no_middle_dead_end_buckets``).
+    """
 
     from s2and.runtime import load_s2and_rust_extension
 
     first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
     rust_prefix_counts = {prefix: dict(nested_counts) for prefix, nested_counts in first_k_letter_counts_sorted.items()}
     rust_make_subblocks = load_s2and_rust_extension().make_subblocks_with_telemetry_arrow_native_graph
-    subblocks, telemetry = rust_make_subblocks(
+    subblocks, telemetry, no_middle_dead_ends = rust_make_subblocks(
         arrow_dataset.native,
         [str(signature_id) for signature_id in _require_unique_subblocking_signature_ids(signature_ids)],
         int(maximum_size),
@@ -1677,7 +1712,11 @@ def _make_subblocks_with_telemetry_arrow_rust(
         int(graph_subblocking_random_seed),
         bool(use_orcid_subblocking),
     )
-    return {str(key): list(values) for key, values in dict(subblocks).items()}, dict(telemetry)
+    return (
+        {str(key): list(values) for key, values in dict(subblocks).items()},
+        dict(telemetry),
+        {str(first): [str(signature_id) for signature_id in bucket] for first, bucket in no_middle_dead_ends},
+    )
 
 
 def make_subblocks_with_telemetry(

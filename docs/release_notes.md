@@ -195,6 +195,13 @@ production model and public-data version is `1.3`, on a separate version axis.
   else they key as their first token. Canonical names, features and constraints
   do not change. Subblocked outputs of blocks with compound first names change.
   See [compound first names](subblocking.md#compound-first-names).
+- Subblocked prediction on both routes reattaches no-middle records of a
+  first-name dead end that the size cap cut across subblocks. The step runs
+  between bulk prediction and initial-only attachment and sees only clusters
+  of such records of one dead end. Outputs change only for dead ends whose
+  clusters occupy two or more subblocks. The Rust subblocker binding returns
+  these records by dead end as a third value. See
+  [reunite-only step](subblocking.md#reunite-only-step).
 
 ### Fixed
 

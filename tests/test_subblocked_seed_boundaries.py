@@ -195,7 +195,14 @@ def test_oversized_required_component_only_rejected_when_active(tmp_path, route,
             _predict(tmp_path, dataset, {"one": list(dataset.signatures)}, route, threshold=2, **flags)
     else:
         clusters = _predict(
-            tmp_path, dataset, {"one": list(dataset.signatures)}, route, threshold=2, distance=0.9, **flags
+            tmp_path,
+            dataset,
+            {"one": list(dataset.signatures)},
+            route,
+            threshold=2,
+            distance=0.9,
+            gate_link=False,
+            **flags,
         )
         assert all(len(members) == 1 for members in clusters.values())
 

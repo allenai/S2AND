@@ -46,7 +46,8 @@ All steps use the key names from step 1. Signatures whose key first name has at 
 single-letter group, which is handled later in bulk prediction. Multi-letter subblocks are predicted first,
 their resulting clusters become temporary cluster seeds, and single-letter subblocks run through a synthetic
 incremental pass so initial-only signatures can attach back to established clusters. Prediction classifies each
-subblock by the key first name of its first member.
+subblock by the key first name of its first member. Between these two passes, the
+[reunite-only step](#reunite-only-step) reattaches no-middle records that step 4 cut across subblocks.
 
 Average linkage does not put a pair at exactly `LARGE_DISTANCE` in one cluster.
 Other linkage methods give no such guarantee. The synthetic attachment pass
@@ -62,6 +63,55 @@ This keeps compatible full-name neighbours available during bulk clustering.
 Packing still respects the subblock capacity; separate full-name groups can
 remain separate when they do not fit. The threshold does not cap the size of a
 final cluster after initial-only attachment.
+
+## Reunite-only step
+
+A key first name with more than `maximum_size` records in a block is a first-name dead end. Prefix
+subdivision cannot split it, so step 3 splits it by middle name. Its records without a key middle name share one
+bucket. When that bucket is over the cap, the fallback in step 4 cuts it into pieces of at most the cap. Bulk
+prediction runs on each subblock alone, so records of one person in different pieces never meet. For example, on
+the `w wang` block at a cap of 15,000, the fallback cut 63,948 "wei" records into five pieces.
+
+A record is marked when all of these conditions are true:
+
+- Its original block has more than `maximum_size` records.
+- Its key first name has two or more characters and more than `maximum_size` records in that block.
+- Its key middle name is empty.
+- It is not a member of an active caller-required seed group.
+
+The planners report the records that meet the first three conditions, as one bucket for each dead end. The native
+Arrow planner returns the buckets from its dead ends. On the Python route, `no_middle_dead_end_buckets(...)` applies
+the same rule to the canonical names, and a parity test compares the two. The piece of a record is the subblock that
+bulk prediction ran on. This is the final subblock after the packing of required seed groups.
+
+After bulk prediction, the step does these operations for each bucket of each original block:
+
+1. Find the bulk clusters that hold only marked records of the bucket. When they occupy fewer than two pieces, the
+   bucket does not change.
+2. Keep the clusters of the piece with the most of these records as seeds. On a tie, use the first of these pieces
+   in key order. The attachment pass needs at least one seed. A merged piece that holds only the small leftover of
+   the cut can sort first, so the largest piece keeps the most bulk clusters.
+3. Detach the clusters of the other pieces. Send the records of each piece, in key order, to the sequential
+   attachment of the route as one group.
+4. Then run the initial-only groups with all clusters visible.
+
+A group in step 3 sees only the seeds and the clusters that earlier groups of its bucket made. It never sees a
+cluster of another bucket or a cluster that holds an unmarked record. A measurement showed that most attachments
+of marked records to clusters with unmarked records were wrong. A bulk cluster with marked records of two buckets
+stays as it is. Members of required seed groups are never marked, so their groups do not split or merge
+differently. Explicit disallows and caller supervision apply as in initial-only attachment.
+
+On the Arrow route, each group also gets the attach name checks of initial-only attachment (see
+[incremental decision semantics](production_inference.md#incremental-decision-semantics)). No required member is
+visible, so the set of exempt members is empty. Each route uses its own attachment. The promoted Arrow linker
+decides each query alone. By default, classic attachment first clusters the queries of a group and then decides for
+each of these clusters as a unit. Thus disallows can give different clusters on the two routes.
+
+When no bucket has marked-only clusters in two or more pieces, the step changes nothing and the clusters are
+identical to the clusters without the step. The Python route with `use_s2_clusters=True` skips the step. The
+request telemetry `subblocked_reunite` counts the marked records, the reunited buckets, the detached and seed
+clusters, the query groups and their records.
+See [production_inference.md](production_inference.md#reunite-only-memory-and-time) for memory and time.
 
 ## Dash normalization
 

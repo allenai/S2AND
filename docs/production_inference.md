@@ -179,6 +179,10 @@ membership or attachment policy. The Arrow `altered_cluster_signatures` argument
 is accepted but ignored by bulk prediction; the Python route likewise
 ignores `ANDData.altered_cluster_signatures` in bulk mode. Required components
 larger than the threshold within one original block raise even when marked altered.
+Between bulk prediction and initial-only attachment, the
+[reunite-only step](subblocking.md#reunite-only-step) reattaches no-middle
+records that the size cap cut across subblocks (see
+[memory and time](#reunite-only-memory-and-time)).
 
 Promoted incremental inference requires an explicit seed mapping:
 
@@ -200,6 +204,20 @@ clusters = result["clusters"]
 Optional disallow pairs are passed through `cluster_seeds_disallow`. Seed
 component IDs are preserved, so parity checks should compare partitions when
 another ingestion path assigns different cluster IDs.
+
+### Reunite-only memory and time
+
+Each pass of the [reunite-only step](subblocking.md#reunite-only-step) attaches
+the marked records of one subblock, at most `batching_threshold` records, to the
+marked-only clusters of its dead-end bucket. The memory checks of this attachment use
+`total_ram_bytes`. A prototype of the step ran on the `w wang` block, with
+270,088 records, a cap of 15,000 and 4 threads. A budget of 8 GiB raised
+`MemoryError` at 8.5 GiB RSS. A budget of 32 GiB gave a peak RSS of 9.2 GiB,
+about the same as without the step.
+
+The step added about 11.5 minutes on that block. Set `total_ram_bytes` well
+above the expected peak RSS of the process. A bucket without marked-only
+clusters in two or more subblocks skips the step.
 
 ### Arrow validation in release and evaluation tools
 
@@ -289,7 +307,8 @@ Members of caller-required seed groups are not checked, so a curated profile
 with conflicting names does not block each query. Then the links of the pass go
 in order of forced evidence, score and signature ID. A link that conflicts with
 a link accepted earlier into the same cluster is rejected. Abstained and
-rejected queries go to residual clustering.
+rejected queries go to residual clustering. The passes of the
+[reunite-only step](subblocking.md#reunite-only-step) use the same checks.
 
 Promoted query decisions are request-global and deterministic across input
 order, query batches, and `batching_threshold`. A global conflict is resolved

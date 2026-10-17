@@ -94,6 +94,7 @@ from s2and.subblocking import (
     _resolve_graph_subblocking_config,
     make_dataset_graph_subblocking_cluster_fn,
     make_subblocks,
+    no_middle_dead_end_buckets,
     signature_name_parts_for_subblocking,
     subblocking_name_parts,
 )
@@ -3147,13 +3148,20 @@ class Clusterer:
         batching_threshold: int,
         cluster_seeds_require: Mapping[str, int | str],
         prediction_state: PredictionState | None = None,
-    ) -> dict[str, list[str]]:
-        """Partition oversized blocks without splitting required seed components."""
+    ) -> tuple[dict[str, list[str]], dict[str, str]]:
+        """Partition oversized blocks without splitting required seed components.
+
+        Returns:
+            The subblocks, and the key first name of the dead end of each record that the
+            native planner reports in a no-middle dead-end bucket (see
+            ``no_middle_dead_end_buckets``).
+        """
 
         if prediction_state is None:
             prediction_state = PredictionState()
 
         subblocked: dict[str, list[str]] = {}
+        no_middle_dead_ends: dict[str, str] = {}
         telemetry_by_block: dict[str, dict[str, Any]] = {}
         normalized_blocks = {
             block_key: [str(signature_id) for signature_id in block_dict[block_key]] for block_key in sorted(block_dict)
@@ -3193,7 +3201,7 @@ class Clusterer:
                 subblocked[block_key] = block_signatures
                 continue
 
-            native_subblocks, telemetry = _make_subblocks_with_telemetry_arrow_rust(
+            native_subblocks, telemetry, no_middle_buckets = _make_subblocks_with_telemetry_arrow_rust(
                 arrow_dataset,
                 block_signatures,
                 maximum_size=batching_threshold,
@@ -3201,6 +3209,8 @@ class Clusterer:
                 graph_subblocking_random_seed=int(getattr(self, "random_state", 0) or 0),
                 use_orcid_subblocking=True,
             )
+            for first, bucket in no_middle_buckets.items():
+                no_middle_dead_ends.update(dict.fromkeys(bucket, first))
             normalized_native_subblocks: dict[str, list[str]] = {}
             output_locations: defaultdict[str, list[str]] = defaultdict(list)
             for subblock_key in sorted(native_subblocks):
@@ -3288,7 +3298,7 @@ class Clusterer:
             "oversized_block_count": int(len(telemetry_by_block)),
             "blocks": telemetry_by_block,
         }
-        return subblocked
+        return subblocked, no_middle_dead_ends
 
     def _predict_subblocked_single_letter_groups_from_arrow(
         self,
@@ -3410,6 +3420,7 @@ class Clusterer:
         prediction_name_tuples = name_tuples
         effective_cluster_seeds_require: dict[str, int | str] = {}
         active_cluster_seeds_require: dict[str, int | str] = {}
+        no_middle_dead_ends: dict[str, str] = {}
         if needs_subblocking:
             assert batching_threshold is not None
             block_dict = {key: [str(signature_id) for signature_id in members] for key, members in block_dict.items()}
@@ -3439,7 +3450,7 @@ class Clusterer:
                 if signature_id in atomic_seed_signature_ids
             }
             subblocking_start = time.perf_counter()
-            block_dict_subblocked = self._build_arrow_subblocked_block_dict(
+            block_dict_subblocked, no_middle_dead_ends = self._build_arrow_subblocked_block_dict(
                 block_dict,
                 arrow_lease,
                 batching_threshold=batching_threshold,
@@ -3526,9 +3537,8 @@ class Clusterer:
             # for each initial-only group. Release the bulk native state first so
             # the two large representations never overlap in memory.
             del rust_featurizer, proxy_dataset
-            pred_clusters = self._predict_subblocked_single_letter_groups_from_arrow(
-                block_dict_single_letter,
-                pred_clusters=pred_clusters,
+            attach_from_arrow = partial(
+                self._predict_subblocked_single_letter_groups_from_arrow,
                 arrow_dataset=arrow_dataset,
                 batching_threshold=batching_threshold,
                 partial_supervision=effective_partial_supervision,
@@ -3536,8 +3546,23 @@ class Clusterer:
                 total_ram_bytes=total_ram_bytes,
                 name_tuples=prediction_name_tuples,
                 cluster_seeds_disallow=cluster_seed_disallows,
-                cluster_seeds_require=active_cluster_seeds_require,
                 original_blocks=block_dict,
+            )
+            pred_clusters = self._reunite_no_middle_dead_ends(
+                pred_clusters,
+                no_middle_dead_ends=no_middle_dead_ends,
+                required_seed_ids=active_cluster_seeds_require.keys(),
+                bulk_groups=block_dict_multiple_letter,
+                original_blocks=block_dict,
+                # No required seed member is marked, so none is visible or queried here. The
+                # empty map still turns on the attach name checks.
+                attach=lambda queries, seeds: attach_from_arrow(queries, pred_clusters=seeds, cluster_seeds_require={}),
+                prediction_state=prediction_state,
+            )
+            pred_clusters = attach_from_arrow(
+                block_dict_single_letter,
+                pred_clusters=pred_clusters,
+                cluster_seeds_require=active_cluster_seeds_require,
             )
             result = dict(pred_clusters), None
         else:
@@ -4111,6 +4136,122 @@ class Clusterer:
         logger.info(f"Finished, here's how long each took: {predict_times}")
         return pred_clusters
 
+    def _reunite_no_middle_dead_ends(
+        self,
+        pred_clusters: dict[str, list[str]],
+        *,
+        no_middle_dead_ends: Mapping[str, str],
+        required_seed_ids: Collection[str],
+        bulk_groups: Mapping[str, Sequence[str]],
+        original_blocks: Mapping[str, Sequence[str]],
+        attach: Callable[[dict[str, list[str]], dict[str, list[str]]], dict[str, list[str]]],
+        prediction_state: PredictionState,
+    ) -> dict[str, list[str]]:
+        """Reattach no-middle dead-end records that the size cap split across subblocks.
+
+        A record is marked when the planner reports it in the no-middle bucket of a first-name
+        dead end and it is not a member of a caller-required seed group. Bulk clustering runs per
+        subblock (piece), so marked records of one person in different pieces never meet. The
+        step works on each bucket of each original block alone. It detaches the bulk clusters
+        that hold only marked records of the bucket when they occupy two or more pieces. The
+        clusters of the piece with the most of these records (the first in key order on ties)
+        stay as seeds, because an attachment pass needs at least one seed. The records of each
+        other piece then attach in key order, as one ``attach`` group per piece. A pass sees only
+        the marked-only clusters of its bucket: the seeds and the clusters of earlier passes.
+        Clusters that hold an unmarked record stay hidden, because attachments to them were
+        mostly wrong. The caller runs the initial-only groups after this step, with every
+        cluster visible.
+
+        Args:
+            pred_clusters: Bulk clusters of the multiple-letter groups.
+            no_middle_dead_ends: The key first name of the dead end of each record in a
+                no-middle dead-end bucket.
+            required_seed_ids: Members of active caller-required seed groups. They are never
+                marked, so their groups do not split or merge differently.
+            bulk_groups: Multiple-letter groups that bulk clustering ran on, keyed by piece.
+            original_blocks: Caller blocks, which scope each pass.
+            attach: Runs the route's sequential attachment on ``(query groups, seed clusters)``
+                and returns the resulting clusters.
+            prediction_state: Receives the step telemetry.
+
+        Returns:
+            ``pred_clusters`` itself when no bucket has marked-only clusters in two or more
+            pieces. Else the kept clusters followed by the reunited clusters of each bucket.
+        """
+
+        required = set(required_seed_ids)
+        marked = {
+            signature_id: first for signature_id, first in no_middle_dead_ends.items() if signature_id not in required
+        }
+        piece_by_signature = {
+            signature_id: piece
+            for piece, members in bulk_groups.items()
+            for signature_id in members
+            if signature_id in marked
+        }
+        origin_by_signature = {
+            signature_id: origin
+            for origin, members in original_blocks.items()
+            for signature_id in members
+            if signature_id in marked
+        }
+        # bucket (original block, dead-end first name) -> piece -> marked-only cluster IDs
+        cluster_ids_by_bucket: defaultdict[tuple[str, str], defaultdict[str, list[str]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        for cluster_id, members in pred_clusters.items():
+            if not members or any(signature_id not in marked for signature_id in members):
+                continue
+            first = marked[members[0]]
+            # Bulk can join records of two dead ends in one merged piece. Such a cluster has
+            # no single bucket, so it stays as it is.
+            if all(marked[signature_id] == first for signature_id in members):
+                bucket = (origin_by_signature[members[0]], first)
+                cluster_ids_by_bucket[bucket][piece_by_signature[members[0]]].append(cluster_id)
+        passes: list[tuple[dict[str, list[str]], dict[str, list[str]]]] = []
+        detached: set[str] = set()
+        for bucket in sorted(cluster_ids_by_bucket):
+            by_piece = cluster_ids_by_bucket[bucket]
+            if len(by_piece) < 2:
+                continue
+            pieces = sorted(by_piece)
+            # The largest piece keeps the most bulk clusters. A merged piece that holds only the
+            # leftover of the cut can sort first and would leave few seeds.
+            seed_piece = max(pieces, key=lambda piece: sum(len(pred_clusters[c]) for c in by_piece[piece]))
+            seeds = {cluster_id: pred_clusters[cluster_id] for cluster_id in by_piece[seed_piece]}
+            queries = {
+                piece: [signature_id for cluster_id in by_piece[piece] for signature_id in pred_clusters[cluster_id]]
+                for piece in pieces
+                if piece != seed_piece
+            }
+            passes.append((queries, seeds))
+            detached.update(cluster_id for cluster_ids in by_piece.values() for cluster_id in cluster_ids)
+        telemetry: dict[str, Any] = {
+            "marked_signature_count": len(marked),
+            "bucket_count": len(passes),
+            "detached_cluster_count": len(detached),
+            "seed_cluster_count": sum(len(seeds) for _queries, seeds in passes),
+            "query_group_count": sum(len(queries) for queries, _seeds in passes),
+            "query_signature_count": sum(len(members) for queries, _seeds in passes for members in queries.values()),
+            "seconds": 0.0,
+        }
+        prediction_state.telemetry["subblocked_reunite"] = telemetry
+        if not passes:
+            return pred_clusters
+        logger.info(
+            "Reuniting %d no-middle dead-end signatures of %d buckets in %d pieces against %d seed clusters",
+            telemetry["query_signature_count"],
+            telemetry["bucket_count"],
+            telemetry["query_group_count"],
+            telemetry["seed_cluster_count"],
+        )
+        start = time.perf_counter()
+        # One call per bucket keeps the clusters of other buckets out of view.
+        reunited = {f"bucket={index}": attach(queries, seeds) for index, (queries, seeds) in enumerate(passes)}
+        telemetry["seconds"] = time.perf_counter() - start
+        kept = {cluster_id: members for cluster_id, members in pred_clusters.items() if cluster_id not in detached}
+        return _combine_subblocked_predictions({"kept": kept, **reunited})
+
     def _predict_subblocked_single_letter_incremental_groups(
         self,
         block_dict_single_letter: dict[str, list[str]],
@@ -4252,9 +4393,8 @@ class Clusterer:
             explicit_cluster_seeds_require=None,
             prediction_state=prediction_state,
         )
-        pred_clusters = self._predict_subblocked_single_letter_incremental_groups(
-            block_dict_single_letter_first_names,
-            pred_clusters=pred_clusters,
+        attach_python = partial(
+            self._predict_subblocked_single_letter_incremental_groups,
             dataset=dataset,
             partial_supervision=partial_supervision,
             runtime_context=runtime_context,
@@ -4262,6 +4402,32 @@ class Clusterer:
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             original_blocks=block_dict,
         )
+        # Legacy S2 clusters are given as they are, so the step does not take them apart.
+        no_middle_dead_ends = {
+            signature_id: first
+            for block_signatures in block_dict.values()
+            if len(block_signatures) > batching_threshold and not use_s2_clusters
+            for first, bucket in no_middle_dead_end_buckets(
+                block_signatures,
+                [signature_name_parts_for_subblocking(dataset.signatures[s]) for s in block_signatures],
+                batching_threshold,
+            ).items()
+            for signature_id in bucket
+        }
+        pred_clusters = self._reunite_no_middle_dead_ends(
+            pred_clusters,
+            no_middle_dead_ends=no_middle_dead_ends,
+            required_seed_ids=(
+                dataset.cluster_seeds_require.keys()
+                if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds
+                else ()
+            ),
+            bulk_groups=block_dict_multiple_letter_first_names,
+            original_blocks=block_dict,
+            attach=lambda queries, seeds: attach_python(queries, pred_clusters=seeds),
+            prediction_state=prediction_state,
+        )
+        pred_clusters = attach_python(block_dict_single_letter_first_names, pred_clusters=pred_clusters)
         return dict(pred_clusters), None
 
     def predict(

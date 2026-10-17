@@ -29,14 +29,11 @@ def test_bulk_altered_markers_preserve_ordinary_seed_policy(tmp_path, route, thr
     if case == "ignored_seeds":
         kwargs["incremental_dont_use_cluster_seeds"] = True
 
+    distance = 0.1 if case == "query_disallow" else 0.9
+    # The reunite-only pass attaches unclaimed "ada" records across subblocks. The tiny Arrow gate
+    # links at any distance, so it must abstain where classic attachment rejects the distance.
     clusters = _predict(
-        tmp_path,
-        dataset,
-        blocks,
-        route,
-        threshold=threshold,
-        distance=0.1 if case == "query_disallow" else 0.9,
-        **kwargs,
+        tmp_path, dataset, blocks, route, threshold=threshold, distance=distance, gate_link=distance < 0.5, **kwargs
     )
 
     expected = {frozenset({str(index)}) for index in range(count)}

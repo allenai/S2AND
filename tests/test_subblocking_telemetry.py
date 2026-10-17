@@ -524,7 +524,7 @@ def test_python_and_arrow_subblock_compound_first_names_identically(tmp_path, ro
         list(signatures), dataset, maximum_size, first_k_letter_counts_sorted={}, use_orcid_subblocking=False
     )
     with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow_dataset:
-        native_subblocks, _ = subblocking._make_subblocks_with_telemetry_arrow_rust(
+        native_subblocks, _, _ = subblocking._make_subblocks_with_telemetry_arrow_rust(
             arrow_dataset,
             list(signatures),
             maximum_size,
@@ -541,6 +541,78 @@ def test_python_and_arrow_subblock_compound_first_names_identically(tmp_path, ro
         # Ten "huimin" records exceed the cap of nine, so the compound keys as "hui" and not as "huimin".
         compound_key = next(key for key, values in python_plan.items() if "s10" in values)
         assert compound_key.split(", ")[0] == "hui"
+
+
+def _rows(*groups: tuple[str, str, int]) -> list[tuple[str, str, str]]:
+    names = [(first, middle) for first, middle, count in groups for _ in range(count)]
+    return [(f"s{index}", first, middle) for index, (first, middle) in enumerate(names)]
+
+
+@pytest.mark.parametrize(
+    ("rows", "maximum_size", "expected"),
+    [
+        pytest.param(
+            _rows(("Wei", "", 3), ("Wei", "Min", 1), ("Wen", "", 3), ("W.", "", 2), ("W.", "A", 2), ("Wei-Lan", "", 1)),
+            3,
+            {"wei": ["s0", "s1", "s2"]},
+            # "wen" is at the cap, "w" is an initial over the cap, and "Wei-Lan" keys as "wei" with middle "lan".
+            id="dead-end-at-and-over-cap",
+        ),
+        pytest.param(
+            _rows(("Weimin", "", 5), ("Weimin", "A", 1), ("Weimin", "B", 1), ("Weimin", "C", 1), ("Weimin", "D", 1))
+            + [("s9", "Wei-Min", "")],
+            9,
+            {"weimin": ["s0", "s1", "s2", "s3", "s4", "s9"]},
+            id="joined-compound-in-dead-end",
+        ),
+        pytest.param(
+            _rows(("Wei", "", 3), ("Wei", "Min", 1), ("Hao", "", 2), ("Hao", "Xu", 2)),
+            3,
+            {"wei": ["s0", "s1", "s2"], "hao": ["s4", "s5"]},
+            id="two-dead-ends",
+        ),
+        pytest.param(
+            _rows(("J.-D.", "", 1), ("J", "", 2), ("JD", "", 1), ("Jian", "", 1)),
+            2,
+            {},
+            id="initials-and-joined-capitals-are-not-dead-ends",
+        ),
+    ],
+)
+def test_python_and_arrow_report_the_same_no_middle_dead_ends(tmp_path, rows, maximum_size, expected) -> None:
+    """Both planners report the no-middle bucket of each first-name dead end, from the same raw names."""
+    load_s2and_rust_extension()
+    signatures_path = tmp_path / "signatures.arrow"
+    _write_signatures_arrow(signatures_path, [(*row, None) for row in rows])
+    names = {sid: subblocking.canonicalize_name_parts(first, middle, "wang") for sid, first, middle in rows}
+    signature_ids = list(names)
+    python_dead_ends = subblocking.no_middle_dead_end_buckets(
+        signature_ids, [(parts.first, parts.middle) for parts in names.values()], maximum_size
+    )
+    dataset = SimpleNamespace(
+        signatures={sid: _signature(sid, first=parts.first, middle=parts.middle) for sid, parts in names.items()},
+        random_seed=0,
+    )
+    python_subblocks, _ = subblocking.make_subblocks_with_telemetry(
+        signature_ids, dataset, maximum_size, first_k_letter_counts_sorted={}, use_orcid_subblocking=False
+    )
+    with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow_dataset:
+        native_subblocks, _, native_dead_ends = subblocking._make_subblocks_with_telemetry_arrow_rust(
+            arrow_dataset,
+            signature_ids,
+            maximum_size,
+            first_k_letter_counts_sorted={},
+            graph_subblocking_config=subblocking.GraphSubblockingConfig(),
+            use_orcid_subblocking=False,
+        )
+
+    assert python_dead_ends == expected
+    assert {first: sorted(bucket) for first, bucket in native_dead_ends.items()} == expected
+    # Each reported record sits in the no-middle bucket of its dead end in both plans.
+    for plan in (python_subblocks, native_subblocks):
+        bucket_of = {sid: key for key, members in plan.items() for sid in members}
+        for first, bucket in expected.items():
+            assert all(f"{first}|middle=" in bucket_of[sid].split(", ") for sid in bucket)
 
 
 def test_coauthor_blocks_from_rowwise_arrow_normalizes_author_names(tmp_path) -> None:
@@ -680,7 +752,7 @@ def test_python_and_arrow_orcid_repair_preserve_whole_subblocks(
             list(dataset.signatures),
             **kwargs,
             graph_subblocking_config=subblocking.GraphSubblockingConfig(),
-        )
+        )[:2]
     for subblocks, telemetry in (python_result, native_result):
         assert sorted(sorted(members) for members in subblocks.values()) == expected
         assert telemetry["orcid_subblocking_enabled"] is enabled
@@ -815,7 +887,7 @@ def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:
             first_k_letter_counts_sorted={},
         )
         arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, case_root)
-        rust_subblocks, _rust_telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
+        rust_subblocks, _rust_telemetry, _ = subblocking._make_subblocks_with_telemetry_arrow_rust(
             arrow_dataset,
             signature_ids,
             maximum_size=1,
@@ -905,7 +977,7 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_tel
     }
 
     arrow_dataset = _open_subblocking_arrow_dataset(paths, tmp_path)
-    subblocks, telemetry = subblocking._make_subblocks_with_telemetry_arrow_rust(
+    subblocks, telemetry, no_middle_dead_ends = subblocking._make_subblocks_with_telemetry_arrow_rust(
         arrow_dataset,
         ["s1", "s2", "s3", "s4"],
         maximum_size=2,
@@ -919,6 +991,8 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_tel
     )
     assert {frozenset(values) for values in subblocks.values()} == {frozenset({"s1", "s2"}), frozenset({"s3", "s4"})}
     assert telemetry["specter_invocation_count"] == 1
+    # Four "hui" records without a middle name exceed the cap of two.
+    assert no_middle_dead_ends == {"hui": ["s1", "s2", "s3", "s4"]}
     assert telemetry["graph_fallback_native"] is True
     assert telemetry["graph_fallback_invocation_count"] == 1
     assert telemetry["graph_fallback_load_metrics"]["paper_authors_rows_loaded"] == 12

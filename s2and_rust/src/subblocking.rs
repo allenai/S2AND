@@ -1888,6 +1888,36 @@ pub(crate) fn subdivide_helper_rust(
     (output, output_cant_subdivide)
 }
 
+/// Return the no-middle bucket of each first-name dead end, keyed by the key first name, in
+/// dead-end order. Dead ends without a no-middle record are left out.
+///
+/// A dead end is a key first name with more than `maximum_size` records, so prefix subdivision
+/// cannot split it. Its records without a key middle name share one middle-name bucket. Over
+/// the cap, the graph fallback cuts that bucket into pieces, and one person's records can land
+/// in different pieces. Prediction reunites the records of each bucket across pieces after bulk
+/// clustering, so the planner reports them.
+pub(crate) fn no_middle_dead_end_buckets(
+    dead_ends: &OrderedSubblocks,
+    row_by_signature_id: &HashMap<String, SubblockingSignatureRow>,
+) -> Vec<(String, Vec<String>)> {
+    dead_ends
+        .iter()
+        .map(|(first, signature_ids)| {
+            let bucket: Vec<String> = signature_ids
+                .iter()
+                .filter(|signature_id| {
+                    row_by_signature_id
+                        .get(*signature_id)
+                        .is_some_and(|row| row.middle.is_empty())
+                })
+                .cloned()
+                .collect();
+            (first.clone(), bucket)
+        })
+        .filter(|(_first, bucket)| !bucket.is_empty())
+        .collect()
+}
+
 pub(crate) fn specter_labeled_subblock_stats(subblocks: &OrderedSubblocks) -> (usize, usize) {
     let mut subblock_count = 0usize;
     let mut signature_count = 0usize;
@@ -2040,7 +2070,7 @@ pub(crate) fn sorted_subblock_merge_candidates(
 #[cfg(test)]
 mod subdivision_tests {
     use super::{
-        apply_subblocking_key_names, prune_native_graph_edge_scores,
+        apply_subblocking_key_names, no_middle_dead_end_buckets, prune_native_graph_edge_scores,
         sorted_subblock_merge_candidates, subdivide_helper_rust, OrderedSubblocks,
         SubblockingSignatureRow,
     };
@@ -2243,6 +2273,59 @@ mod subdivision_tests {
         assert_eq!(
             key_names(&[("qi an", "")], &[("qian", "", 21)], 20),
             pairs(&[("qi", "an")])
+        );
+    }
+
+    #[test]
+    fn no_middle_dead_ends_cover_only_key_names_over_the_cap() {
+        let row = |signature_id: &str, first: &str, middle: &str| SubblockingSignatureRow {
+            signature_id: signature_id.to_string(),
+            paper_id: String::new(),
+            first: first.to_string(),
+            middle: middle.to_string(),
+            last: String::new(),
+            affiliations: Vec::new(),
+            orcid: None,
+            position: None,
+        };
+        // "wei" has 5 key records over a cap of 3. "wen" fits, and "w" is in the single-letter group.
+        // "hao" is a second dead end. "han" is a dead end without a no-middle record.
+        let mut rows = vec![
+            row("s0", "wei", ""),
+            row("s1", "wei", "min"),
+            row("s2", "wei", ""),
+            row("s3", "wen", ""),
+            row("s4", "w", ""),
+            row("s5", "wei", ""),
+            // The compound keys as "wei" with middle "lan", so it is not a no-middle record.
+            row("s6", "wei lan", ""),
+            row("s7", "hao", ""),
+            row("s8", "hao", ""),
+            row("s9", "hao", "x"),
+            row("s10", "hao", "y"),
+            row("s11", "han", "a"),
+            row("s12", "han", "b"),
+            row("s13", "han", "c"),
+            row("s14", "han", "d"),
+        ];
+        apply_subblocking_key_names(&mut rows, 3);
+        let row_by_signature_id: HashMap<String, SubblockingSignatureRow> = rows
+            .iter()
+            .map(|row| (row.signature_id.clone(), row.clone()))
+            .collect();
+        let (names, signature_ids): (Vec<String>, Vec<String>) = rows
+            .iter()
+            .filter(|row| row.first.chars().count() > 1)
+            .map(|row| (row.first.clone(), row.signature_id.clone()))
+            .unzip();
+        let (_output, dead_ends) = subdivide_helper_rust(names, signature_ids, 3, 2);
+
+        assert_eq!(
+            no_middle_dead_end_buckets(&dead_ends, &row_by_signature_id),
+            vec![
+                ("wei".to_string(), strings(&["s0", "s2", "s5"])),
+                ("hao".to_string(), strings(&["s7", "s8"])),
+            ]
         );
     }
 
@@ -2571,6 +2654,14 @@ pub(crate) fn extract_string_vec_entries(
     Ok(out)
 }
 
+/// The subblocks, the planner telemetry, and the records in the no-middle bucket of a first-name
+/// dead end (see `no_middle_dead_end_buckets`).
+pub(crate) type SubblockPlan = (
+    HashMap<String, Vec<String>>,
+    Py<PyDict>,
+    Vec<(String, Vec<String>)>,
+);
+
 pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     py: Python<'_>,
     dataset: &ArrowDatasetResources,
@@ -2580,7 +2671,7 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     graph_config: NativeGraphSubblockingConfig,
     random_seed: u64,
     use_orcid_subblocking: bool,
-) -> PyResult<(HashMap<String, Vec<String>>, Py<PyDict>)> {
+) -> PyResult<SubblockPlan> {
     if maximum_size == 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "maximum_size must be positive",
@@ -2639,6 +2730,8 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
         .iter()
         .map(|(_key, values)| values.len())
         .sum();
+    let no_middle_dead_ends =
+        no_middle_dead_end_buckets(&output_cant_subdivide, &row_by_signature_id);
 
     let mut output_for_specter = OrderedSubblocks::default();
     for (key, sig_ids_loop) in output_cant_subdivide.entries {
@@ -2777,7 +2870,7 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     telemetry.final_specter_labeled_signature_count = final_specter_signature_count;
     let telemetry_dict = telemetry.to_dict(py)?;
     insert_native_graph_telemetry(py, telemetry_dict.bind(py), &graph_telemetry)?;
-    Ok((output.to_hashmap(), telemetry_dict))
+    Ok((output.to_hashmap(), telemetry_dict, no_middle_dead_ends))
 }
 
 #[pyfunction]
@@ -2799,7 +2892,7 @@ pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
     graph_config: Option<&Bound<'_, PyAny>>,
     random_seed: u64,
     use_orcid_subblocking: bool,
-) -> PyResult<(HashMap<String, Vec<String>>, Py<PyDict>)> {
+) -> PyResult<SubblockPlan> {
     let dataset = dataset.shared();
     let mut seen_signature_ids = HashSet::<String>::new();
     for signature_id in &signature_ids {

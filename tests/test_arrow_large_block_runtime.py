@@ -146,7 +146,7 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
             "multi_b": ["1", "3", "4"],
         }
         assert max(map(len, subblocks.values())) <= kwargs["maximum_size"]
-        return subblocks, {"final_subblock_count": 3, "input_signature_count": 9}
+        return subblocks, {"final_subblock_count": 3, "input_signature_count": 9}, {}
 
     def fake_load_name_parts(_dataset: Any, signature_ids: list[str]):
         events.append("names")
@@ -272,13 +272,13 @@ def test_arrow_subblocking_avoids_generated_key_collisions(
 ) -> None:
     def fake_native_subblocking(_dataset: Any, signature_ids: list[str], **_kwargs: Any):
         assert signature_ids == ["s1", "s2"]
-        return {"x": ["s1"], "y": ["s2"]}, {}
+        return {"x": ["s1"], "y": ["s2"]}, {}, {}
 
     monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
     write_minimal_arrow_prediction_bundle(tmp_path)
     arrow_dataset = ArrowDataset.open(tmp_path)
 
-    result = _clusterer()._build_arrow_subblocked_block_dict(
+    result, no_middle_dead_ends = _clusterer()._build_arrow_subblocked_block_dict(
         {
             "a": ["s1", "s2"],
             "a|subblock=x": ["other"],
@@ -288,6 +288,7 @@ def test_arrow_subblocking_avoids_generated_key_collisions(
         cluster_seeds_require={},
     )
 
+    assert no_middle_dead_ends == {}
     assert result == {
         "a|subblock=x|collision=0001": ["s1"],
         "a|subblock=y": ["s2"],
@@ -327,12 +328,16 @@ def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
         _dataset: Any,
         signature_ids: list[str],
         **_kwargs: Any,
-    ) -> tuple[dict[str, list[str]], dict[str, int]]:
+    ) -> tuple[dict[str, list[str]], dict[str, int], dict[str, list[str]]]:
         assert signature_ids == ["0", "1", "2", "3", "4"]
-        return {
-            "initial": ["2", "3", "4"],
-            "multiple": ["0", "1"],
-        }, {"final_subblock_count": 2}
+        return (
+            {
+                "initial": ["2", "3", "4"],
+                "multiple": ["0", "1"],
+            },
+            {"final_subblock_count": 2},
+            {},
+        )
 
     def fake_load_name_parts(_dataset: Any, signature_ids: list[str]) -> list[tuple[str, str]]:
         assert signature_ids == ["0", "1", "2", "3", "4"]
@@ -402,7 +407,7 @@ def test_large_arrow_block_rejects_native_subblock_over_threshold(
     monkeypatch.setattr(
         model_module,
         "_make_subblocks_with_telemetry_arrow_rust",
-        lambda *_args, **_kwargs: ({"too_large": ["0", "1", "2", "3"]}, {}),
+        lambda *_args, **_kwargs: ({"too_large": ["0", "1", "2", "3"]}, {}, {}),
     )
 
     with pytest.raises(RuntimeError, match="Rust Arrow subblocking exceeded batching_threshold"):
@@ -472,7 +477,7 @@ def test_large_arrow_block_rejects_invalid_native_partition(
         monkeypatch.setattr(
             model_module,
             "_make_subblocks_with_telemetry_arrow_rust",
-            lambda *_args, _subblocks=native_subblocks, **_kwargs: (_subblocks, {}),
+            lambda *_args, _subblocks=native_subblocks, **_kwargs: (_subblocks, {}, {}),
         )
         with pytest.raises(
             RuntimeError,

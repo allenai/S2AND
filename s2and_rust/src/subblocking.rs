@@ -47,6 +47,68 @@ pub(crate) fn normalize_subblocking_signature_rows(
     }
 }
 
+// A compound keys as its joined form only when the block shows that spelling much more often than
+// the split spelling, so that distinct names such as "qi an" and "qian" stay apart on weak evidence.
+pub(crate) const COMPOUND_JOIN_RATIO: usize = 8;
+
+/// Replace canonical first/middle names with the names that key subblocks.
+///
+/// Mirrors `s2and.subblocking.subblocking_name_parts`: a canonical first with two or more tokens
+/// keys as one token. All-initial compounds and compounds without strong joined-form evidence
+/// split ("j d" -> "j" + "d", "hui min" -> "hui" + "min"). A compound joins ("huimin") when the
+/// joined canonical first has at most `maximum_size` records and more than `COMPOUND_JOIN_RATIO`
+/// times the split-form records, with one added to each count. The counts use canonical names of
+/// all rows, so call this once on the whole request.
+pub(crate) fn apply_subblocking_key_names(
+    rows: &mut [SubblockingSignatureRow],
+    maximum_size: usize,
+) {
+    let rewrites: Vec<(usize, String, String)> = {
+        let mut first_counts: HashMap<&str, usize> = HashMap::new();
+        let mut split_counts: HashMap<(&str, &str), usize> = HashMap::new();
+        for row in rows.iter() {
+            *first_counts.entry(row.first.as_str()).or_insert(0) += 1;
+            if !row.first.contains(' ') {
+                if let Some(middle_head) = row.middle.split_whitespace().next() {
+                    *split_counts
+                        .entry((row.first.as_str(), middle_head))
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+        rows.iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let tokens: Vec<&str> = row.first.split_whitespace().collect();
+                if tokens.len() < 2 {
+                    return None;
+                }
+                let joined = tokens.concat();
+                let n_join = first_counts.get(joined.as_str()).copied().unwrap_or(0);
+                let n_split = split_counts
+                    .get(&(tokens[0], tokens[1]))
+                    .copied()
+                    .unwrap_or(0);
+                if tokens.iter().any(|token| py_len(token) > 1)
+                    && n_join <= maximum_size
+                    && n_join + 1 > COMPOUND_JOIN_RATIO * (n_split + 1)
+                {
+                    return Some((index, joined, row.middle.clone()));
+                }
+                let mut middle_tokens = tokens[1..].to_vec();
+                if !row.middle.is_empty() {
+                    middle_tokens.push(row.middle.as_str());
+                }
+                Some((index, tokens[0].to_string(), middle_tokens.join(" ")))
+            })
+            .collect()
+    };
+    for (index, first, middle) in rewrites {
+        rows[index].first = first;
+        rows[index].middle = middle;
+    }
+}
+
 pub(crate) fn read_subblocking_signature_rows(
     dataset: &ArrowDatasetResources,
     keep_signature_ids: &HashSet<String>,
@@ -1978,8 +2040,9 @@ pub(crate) fn sorted_subblock_merge_candidates(
 #[cfg(test)]
 mod subdivision_tests {
     use super::{
-        prune_native_graph_edge_scores, sorted_subblock_merge_candidates, subdivide_helper_rust,
-        OrderedSubblocks,
+        apply_subblocking_key_names, prune_native_graph_edge_scores,
+        sorted_subblock_merge_candidates, subdivide_helper_rust, OrderedSubblocks,
+        SubblockingSignatureRow,
     };
     use std::collections::HashMap;
 
@@ -2090,6 +2153,116 @@ mod subdivision_tests {
         assert_eq!(
             candidates,
             vec![(("chen|middle=w".to_string(), "cheng".to_string()), 100004.0)]
+        );
+    }
+
+    /// Key names of the first `targets` rows after the rule runs on `targets` plus `context` rows.
+    fn key_names(
+        targets: &[(&str, &str)],
+        context: &[(&str, &str, usize)],
+        maximum_size: usize,
+    ) -> Vec<(String, String)> {
+        let row = |first: &str, middle: &str| SubblockingSignatureRow {
+            signature_id: String::new(),
+            paper_id: String::new(),
+            first: first.to_string(),
+            middle: middle.to_string(),
+            last: String::new(),
+            affiliations: Vec::new(),
+            orcid: None,
+            position: None,
+        };
+        let mut rows: Vec<SubblockingSignatureRow> = targets
+            .iter()
+            .map(|(first, middle)| row(first, middle))
+            .collect();
+        for (first, middle, count) in context {
+            rows.extend((0..*count).map(|_| row(first, middle)));
+        }
+        apply_subblocking_key_names(&mut rows, maximum_size);
+        rows.into_iter()
+            .take(targets.len())
+            .map(|row| (row.first, row.middle))
+            .collect()
+    }
+
+    fn pairs(values: &[(&str, &str)]) -> Vec<(String, String)> {
+        values
+            .iter()
+            .map(|(first, middle)| (first.to_string(), middle.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn all_initial_compounds_key_as_initials_even_with_joined_evidence() {
+        let observed = key_names(
+            &[("j d", ""), ("j d", "t"), ("j d t", "")],
+            &[("jd", "", 50)],
+            100,
+        );
+
+        assert_eq!(observed, pairs(&[("j", "d"), ("j", "d t"), ("j", "d t")]));
+    }
+
+    #[test]
+    fn compound_joins_only_above_the_ratio() {
+        // (n_join + 1) / (n_split + 1) must be above 8: 8/1 splits and 9/1 joins.
+        assert_eq!(
+            key_names(&[("hui min", "x")], &[("huimin", "", 7)], 100),
+            pairs(&[("hui", "min x")])
+        );
+        assert_eq!(
+            key_names(&[("hui min", "x")], &[("huimin", "", 8)], 100),
+            pairs(&[("huimin", "x")])
+        );
+        // Split-form records ("hui" with a middle that starts with "min") raise the bar.
+        assert_eq!(
+            key_names(
+                &[("hui min", "")],
+                &[("huimin", "", 15), ("hui", "min jie", 1)],
+                100
+            ),
+            pairs(&[("hui", "min")])
+        );
+        assert_eq!(
+            key_names(
+                &[("hui min", "")],
+                &[("huimin", "", 16), ("hui", "minh", 1), ("hui min", "", 3)],
+                100
+            ),
+            pairs(&[("huimin", "")])
+        );
+    }
+
+    #[test]
+    fn compound_does_not_join_a_first_name_above_the_cap() {
+        assert_eq!(
+            key_names(&[("qi an", "")], &[("qian", "", 20)], 20),
+            pairs(&[("qian", "")])
+        );
+        assert_eq!(
+            key_names(&[("qi an", "")], &[("qian", "", 21)], 20),
+            pairs(&[("qi", "an")])
+        );
+    }
+
+    #[test]
+    fn three_token_compounds_join_all_tokens_or_split_after_the_first() {
+        assert_eq!(
+            key_names(
+                &[("xiao yu ting", "m"), ("xiao yu ting", "")],
+                &[("xiaoyuting", "", 9)],
+                100
+            ),
+            pairs(&[("xiaoyuting", "m"), ("xiaoyuting", "")])
+        );
+        assert_eq!(
+            key_names(
+                &[("xiao yu ting", "m")],
+                &[("xiaoyuting", "", 9), ("xiao", "yu", 1)],
+                100
+            ),
+            pairs(&[("xiao", "yu ting m")])
         );
     }
 }
@@ -2401,7 +2574,7 @@ pub(crate) fn extract_string_vec_entries(
 pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     py: Python<'_>,
     dataset: &ArrowDatasetResources,
-    rows: Vec<SubblockingSignatureRow>,
+    mut rows: Vec<SubblockingSignatureRow>,
     maximum_size: usize,
     first_k_letter_counts_sorted: HashMap<String, HashMap<String, f64>>,
     graph_config: NativeGraphSubblockingConfig,
@@ -2413,6 +2586,8 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
             "maximum_size must be positive",
         ));
     }
+    // From here on, row names are subblock key names. The graph and ORCID steps read no names.
+    apply_subblocking_key_names(&mut rows, maximum_size);
 
     let signature_ids: Vec<String> = rows.iter().map(|row| row.signature_id.clone()).collect();
     let row_by_signature_id: HashMap<String, SubblockingSignatureRow> = rows

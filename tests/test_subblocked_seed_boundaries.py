@@ -287,3 +287,50 @@ def test_average_linkage_keeps_bulk_negative_apart_in_large_merge(tmp_path, rout
     assert dataset.cluster_seeds_require == {}
     assert dataset.cluster_seeds_disallow == original_disallows
     assert partial_supervision == original_supervision
+
+
+@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("claimed", [False, True])
+def test_dash_initial_compound_subblock_is_classified_by_its_key_first(tmp_path, monkeypatch, route, claimed):
+    """A "J.-D." record keys as "j", so its subblock attaches like initials and never homes a profile."""
+    from s2and.model import Clusterer
+
+    dataset = _dataset([("J.-D.", "", "Smith")] + [("Jean", "", "Smith")] * 3, {"0": "c", "1": "c"} if claimed else {})
+    blocks = {"one": list(dataset.signatures)}
+    observed = {}
+    partition = Clusterer._partition_subblocked_first_name_groups
+
+    def record_partition(self, block_dict_subblocked, *args, **kwargs):
+        result = partition(self, block_dict_subblocked, *args, **kwargs)
+        observed.update(subblocks=dict(block_dict_subblocked), bulk=result[0], attach=result[1])
+        return result
+
+    monkeypatch.setattr(Clusterer, "_partition_subblocked_first_name_groups", record_partition)
+    clusters = _predict(tmp_path, dataset, blocks, route, threshold=3)
+
+    _assert_partition(clusters, blocks)
+    if claimed:
+        # The full-name subblock is the profile's home, so the "j" subblock empties.
+        assert observed["subblocks"] == {
+            "one|subblock=je|repair_part=0000": ["1", "0", "2"],
+            "one|subblock=je|repair_part=0001": ["3"],
+        }
+        assert observed["attach"] == {}
+    else:
+        assert observed["subblocks"] == {"one|subblock=j": ["0"], "one|subblock=je": ["1", "2", "3"]}
+        assert observed["bulk"] == {"one|subblock=je": ["1", "2", "3"]}
+        assert observed["attach"] == {"one|subblock=j": ["0"]}
+
+
+@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize(("neighbour", "attaches"), [("Jean-Daniel", True), ("Jean-Marc", False)])
+def test_dash_initial_compound_attaches_under_cluster_name_checks(tmp_path, route, neighbour, attaches):
+    """The key rule routes "J.-D." to initial-only attachment; the attach name checks then decide the link."""
+    dataset = _dataset([("J.-D.", "", "Smith")] + [(neighbour, "", "Smith")] * 3, {})
+    blocks = {"one": list(dataset.signatures)}
+
+    clusters = _predict(tmp_path, dataset, blocks, route, threshold=3)
+
+    _assert_partition(clusters, blocks)
+    assert any({"1", "2", "3"} <= set(members) for members in clusters.values())
+    assert any({"0", "1", "2", "3"} <= set(members) for members in clusters.values()) is attaches

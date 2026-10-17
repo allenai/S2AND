@@ -1328,6 +1328,56 @@ def signature_name_parts_for_subblocking(signature) -> tuple[str, str]:
     return parts.first, parts.middle
 
 
+# A compound keys as its joined form only when the block shows that spelling much more often than the
+# split spelling, so that distinct names such as "qi an" and "qian" stay apart on weak evidence.
+COMPOUND_JOIN_RATIO = 8
+
+
+def subblocking_name_parts(names: Sequence[tuple[str, str]], maximum_size: int) -> list[tuple[str, str]]:
+    """Return the first and middle names that key each record of one subblocking request.
+
+    Only subblock keys use these names. Canonical names, features, counts and constraints do not
+    change. A canonical first with two or more tokens is a dash-bound compound, for example
+    ``"hui min"`` from ``Hui-Min`` or ``"j d"`` from ``J.-D.``. Each compound keys as one token:
+
+    - When every token has one character, the first token is the key first. The other tokens go
+      before the canonical middle: ``("j d", "t")`` keys as ``("j", "d t")``.
+    - Else the compound keys as its joined form with the canonical middle when the request has at
+      most ``maximum_size`` records with that canonical first (``n_join``) and
+      ``(n_join + 1) / (n_split + 1) > COMPOUND_JOIN_RATIO``. ``n_split`` counts records whose
+      canonical first is the first token and whose middle starts with the second token.
+    - Else the compound splits as initials do: ``("hui min", "")`` keys as ``("hui", "min")``.
+
+    Args:
+        names: Canonical (first, middle) of every record in the request, in request order.
+        maximum_size: Maximum subblock size. A joined form with more records is already a prefix
+            dead end, and a few joined records would only change its middle-name and fallback groups.
+
+    Returns:
+        Key (first, middle) for each record, in the order of ``names``.
+    """
+
+    first_counts = Counter(first for first, _middle in names)
+    split_counts = Counter((first, middle.split()[0]) for first, middle in names if " " not in first and middle)
+    key_names = []
+    for first, middle in names:
+        tokens = first.split()
+        if len(tokens) < 2:
+            key_names.append((first, middle))
+            continue
+        joined = "".join(tokens)
+        n_join = first_counts[joined]
+        if (
+            any(len(token) > 1 for token in tokens)
+            and n_join <= maximum_size
+            and n_join + 1 > COMPOUND_JOIN_RATIO * (split_counts[(tokens[0], tokens[1])] + 1)
+        ):
+            key_names.append((joined, middle))
+        else:
+            key_names.append((tokens[0], " ".join([*tokens[1:], middle] if middle else tokens[1:])))
+    return key_names
+
+
 def _signature_coauthor_blocks_for_specter(signature, anddata, compute_block_fn=compute_block) -> list[str]:
     coauthor_blocks = signature.author_info_coauthor_blocks
     if coauthor_blocks is not None:
@@ -1644,7 +1694,8 @@ def make_subblocks_with_telemetry(
     This function takes a list of signature IDs and splits them into subblocks of maximum_size.
     It first splits by first name initial letter. Then it recursively splits any subblocks larger than
     maximum_size using middle names and the SPECTER clustering algorithm. Finally, it merges any subblocks
-    smaller than maximum_size that share name attributes.
+    smaller than maximum_size that share name attributes. All of these steps use the key names from
+    `subblocking_name_parts(...)`, which give each compound first name one key token.
 
     There is an optional ORCID repair pass: when `use_orcid_subblocking` is true, whole subblocks
     that contain the same normalized ORCID are merged only when the combined subblocks fit within
@@ -1666,9 +1717,12 @@ def make_subblocks_with_telemetry(
     logger.info("Beginning subblocking...")
     first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
     signature_ids = np.asarray(_require_unique_subblocking_signature_ids(signature_ids), dtype=object)
-    first_middle_names = [signature_name_parts_for_subblocking(anddata.signatures[i]) for i in signature_ids]
+    first_middle_names = subblocking_name_parts(
+        [signature_name_parts_for_subblocking(anddata.signatures[i]) for i in signature_ids], maximum_size
+    )
     first_names = np.array([name_parts[0] for name_parts in first_middle_names])
     middle_names = np.array([name_parts[1] for name_parts in first_middle_names])
+    middle_name_by_signature_id = dict(zip(signature_ids, middle_names, strict=True))
 
     # set aside those that are only 1 letter long for a different treatment
     single_letter_first_names_flag = np.array([len(first_name) <= 1 for first_name in first_names])
@@ -1716,9 +1770,7 @@ def make_subblocks_with_telemetry(
         )
     output_for_specter = {}
     for key, sig_ids_loop in output_cant_subdivide.items():
-        middle_names_loop = np.array(
-            [signature_name_parts_for_subblocking(anddata.signatures[i])[1] for i in sig_ids_loop]
-        )
+        middle_names_loop = np.array([middle_name_by_signature_id[i] for i in sig_ids_loop])
         output_loop, output_cant_subdivide_loop = subdivide_helper(
             middle_names_loop, sig_ids_loop, maximum_size, starting_k=1
         )

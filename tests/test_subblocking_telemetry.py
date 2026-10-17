@@ -425,6 +425,124 @@ def test_signature_name_parts_for_subblocking_treats_all_dashes_uniformly() -> N
     assert subblocking.signature_name_parts_for_subblocking(ascii_dash) == ("sang min", "")
 
 
+def _key_names(targets, context, maximum_size: int) -> list[tuple[str, str]]:
+    """Key names of the target rows after the rule runs on targets plus repeated context rows."""
+    names = list(targets) + [(first, middle) for first, middle, count in context for _ in range(count)]
+    return subblocking.subblocking_name_parts(names, maximum_size)[: len(targets)]
+
+
+def test_subblocking_name_parts_key_all_initial_compounds_as_initials() -> None:
+    # The Rust twin is all_initial_compounds_key_as_initials_even_with_joined_evidence.
+    assert _key_names([("j d", ""), ("j d", "t"), ("j d t", "")], [("jd", "", 50)], 100) == [
+        ("j", "d"),
+        ("j", "d t"),
+        ("j", "d t"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("context", "expected"),
+    [
+        ([("huimin", "", 7)], ("hui", "min x")),
+        ([("huimin", "", 8)], ("huimin", "x")),
+        # Split-form records ("hui" with a middle that starts with "min") raise the bar.
+        ([("huimin", "", 15), ("hui", "min jie", 1)], ("hui", "min x")),
+        # Neither a longer middle token nor another compound counts as split form.
+        ([("huimin", "", 16), ("hui", "minh", 1), ("hui min", "", 3)], ("huimin", "x")),
+    ],
+)
+def test_subblocking_name_parts_join_only_above_the_ratio(context, expected) -> None:
+    # (n_join + 1) / (n_split + 1) must be above 8. The Rust twin is compound_joins_only_above_the_ratio.
+    assert _key_names([("hui min", "x")], context, 100) == [expected]
+
+
+@pytest.mark.parametrize(("joined_count", "expected"), [(20, ("qian", "")), (21, ("qi", "an"))])
+def test_subblocking_name_parts_do_not_join_a_first_name_above_the_cap(joined_count, expected) -> None:
+    assert _key_names([("qi an", "")], [("qian", "", joined_count)], 20) == [expected]
+
+
+def test_subblocking_name_parts_join_all_tokens_or_split_after_the_first() -> None:
+    targets = [("xiao yu ting", "m"), ("xiao yu ting", "")]
+    assert _key_names(targets, [("xiaoyuting", "", 9)], 100) == [("xiaoyuting", "m"), ("xiaoyuting", "")]
+    assert _key_names(targets[:1], [("xiaoyuting", "", 9), ("xiao", "yu", 1)], 100) == [("xiao", "yu ting m")]
+
+
+@pytest.mark.parametrize(
+    ("rows", "maximum_size", "expected"),
+    [
+        pytest.param(
+            [("s0", "J.-D.", "T."), ("s1", "J.", ""), ("s2", "Jian", ""), ("s3", "Jian", ""), ("s4", "Jing", "")],
+            2,
+            {"j": ["s0", "s1"], "jia": ["s2", "s3"], "jin": ["s4"]},
+            id="all-initial-compound-joins-initials",
+        ),
+        pytest.param(
+            [(f"s{i}", "Huimin", "") for i in range(8)] + [("s8", "Hui-Min", ""), ("s9", "Hui", "Ling")],
+            9,
+            {"huim": [f"s{i}" for i in range(9)], "hui": ["s9"]},
+            id="joined-majority",
+        ),
+        pytest.param(
+            [(f"s{i}", "Huimin", "") for i in range(8)] + [("s8", "Hui-Min", ""), ("s9", "Hui", "Min")],
+            9,
+            {"huim": [f"s{i}" for i in range(8)], "hui": ["s8", "s9"]},
+            id="split-form-evidence",
+        ),
+        pytest.param(
+            [(f"s{i}", "Xiaoyuting", "") for i in range(8)] + [("s8", "Xiao-Yu-Ting", ""), ("s9", "Xiao", "")],
+            9,
+            {"xiaoy": [f"s{i}" for i in range(9)], "xiao": ["s9"]},
+            id="three-token-join",
+        ),
+        pytest.param(
+            [(f"s{i}", "Xiaoyuting", "") for i in range(8)]
+            + [("s8", "Xiao-Yu-Ting", ""), ("s9", "Xiao", ""), ("s10", "Xiao", "Yu")],
+            9,
+            {"xiaoy": [f"s{i}" for i in range(8)], "xiao": ["s10", "s8", "s9"]},
+            id="three-token-split",
+        ),
+        pytest.param(
+            [(f"s{i}", "Huimin", chr(ord("A") + i)) for i in range(10)] + [("s10", "Hui-Min", "")],
+            9,
+            None,
+            id="joined-form-above-cap",
+        ),
+    ],
+)
+def test_python_and_arrow_subblock_compound_first_names_identically(tmp_path, rows, maximum_size, expected) -> None:
+    """Both planners key compounds the same way from the same raw names."""
+    load_s2and_rust_extension()
+    signatures_path = tmp_path / "signatures.arrow"
+    _write_signatures_arrow(signatures_path, [(*row, None) for row in rows])
+    signatures = {}
+    for sid, first, middle in rows:
+        # _write_signatures_arrow stores the last name "wang", and canonicalization reads it.
+        parts = subblocking.canonicalize_name_parts(first, middle, "wang")
+        signatures[sid] = _signature(sid, first=parts.first, middle=parts.middle)
+    dataset = SimpleNamespace(signatures=signatures, random_seed=0)
+    python_subblocks, _ = subblocking.make_subblocks_with_telemetry(
+        list(signatures), dataset, maximum_size, first_k_letter_counts_sorted={}, use_orcid_subblocking=False
+    )
+    with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow_dataset:
+        native_subblocks, _ = subblocking._make_subblocks_with_telemetry_arrow_rust(
+            arrow_dataset,
+            list(signatures),
+            maximum_size,
+            first_k_letter_counts_sorted={},
+            graph_subblocking_config=subblocking.GraphSubblockingConfig(),
+            use_orcid_subblocking=False,
+        )
+
+    python_plan = {key: sorted(values) for key, values in python_subblocks.items()}
+    assert python_plan == {key: sorted(values) for key, values in native_subblocks.items()}
+    if expected is not None:
+        assert python_plan == expected
+    else:
+        # Ten "huimin" records exceed the cap of nine, so the compound keys as "hui" and not as "huimin".
+        compound_key = next(key for key, values in python_plan.items() if "s10" in values)
+        assert compound_key.split(", ")[0] == "hui"
+
+
 def test_coauthor_blocks_from_rowwise_arrow_normalizes_author_names(tmp_path) -> None:
     paper_authors = pa.table(
         {

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -98,9 +97,9 @@ def test_public_arrow_subblocking_preserves_effective_seed_disallows(
 def patch_arrow_orchestration(monkeypatch: pytest.MonkeyPatch):
     """Install per-test orchestration fakes; each test owns its captures/oracles."""
 
-    def install(native_subblocking, representatives, featurizer, bulk_predict, incremental_predict):
+    def install(native_subblocking, name_parts, featurizer, bulk_predict, incremental_predict):
         monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", native_subblocking)
-        monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", representatives)
+        monkeypatch.setattr(model_module, "_load_arrow_canonical_name_parts", name_parts)
         monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", featurizer)
         monkeypatch.setattr(Clusterer, "_predict_subblocked_multiple_letter_groups", bulk_predict)
         monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", incremental_predict)
@@ -132,7 +131,7 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     build_calls: list[dict[str, Any]] = []
     native_calls: list[dict[str, Any]] = []
     incremental_calls: list[dict[str, Any]] = []
-    representative_calls: list[list[str]] = []
+    name_calls: list[list[str]] = []
 
     class FakeRustFeaturizer:
         def cluster_seeds_require(self) -> list[tuple[str, str]]:
@@ -149,16 +148,10 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         assert max(map(len, subblocks.values())) <= kwargs["maximum_size"]
         return subblocks, {"final_subblock_count": 3, "input_signature_count": 9}
 
-    def fake_load_representatives(_dataset: Any, signature_ids: list[str]):
-        events.append("representatives")
-        representative_calls.append(signature_ids)
-        return {
-            signature_id: SimpleNamespace(
-                author_info_first="j" if signature_id == "6" else "john",
-                author_info_first_normalized_without_apostrophe=("j" if signature_id == "6" else "john"),
-            )
-            for signature_id in signature_ids
-        }
+    def fake_load_name_parts(_dataset: Any, signature_ids: list[str]):
+        events.append("names")
+        name_calls.append(list(signature_ids))
+        return [("j" if signature_id in {"6", "7", "8"} else "john", "") for signature_id in signature_ids]
 
     def fake_build_featurizer(dataset: ArrowDataset, **kwargs: Any) -> FakeRustFeaturizer:
         events.append("featurizer")
@@ -212,7 +205,7 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
 
     patch_arrow_orchestration(
         fake_native_subblocking,
-        fake_load_representatives,
+        fake_load_name_parts,
         fake_build_featurizer,
         fake_predict_multiple,
         fake_predict_incremental,
@@ -235,15 +228,19 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     assert dists is None
     assert events == [
         "native_subblocking",
-        "representatives",
-        "representatives",
+        "names",
+        "names",
+        "names",
         "featurizer",
         "bulk_predict",
         "incremental_attach",
     ]
     assert native_calls[0]["signature_ids"] == [str(index) for index in range(9)]
     assert native_calls[0]["maximum_size"] == 3
-    assert representative_calls == [["6", "0", "1"], ["6", "0", "5", "3", "9"]]
+    # Compound keys depend on the whole oversized block: seed packing and the partition read all of
+    # its names. The small block is not subblocked, so only its first member is read.
+    large = [str(index) for index in range(9)]
+    assert name_calls == [large, ["9"], large]
     assert len(build_calls) == 1
     assert build_calls[0]["signature_ids"] == ["0", "1", "2", "5", "3", "4", "9"]
     assert build_calls[0]["cluster_seeds_path"] is not None
@@ -303,19 +300,10 @@ def test_all_initial_arrow_subblocks_stay_on_bulk_path() -> None:
         "block|subblock=a": ["i0", "i1"],
         "block|subblock=b": ["i2"],
     }
-    dataset = SimpleNamespace(
-        signatures={
-            signature_id: SimpleNamespace(
-                author_info_first="J",
-                author_info_first_normalized_without_apostrophe="j",
-            )
-            for signature_id in ("i0", "i1", "i2")
-        }
-    )
 
     bulk_blocks, incremental_blocks, alert_flag = _clusterer()._partition_subblocked_first_name_groups(
         block_dict,
-        dataset,
+        {"i0": "j", "i2": "j"},
         original_blocks={"block": [sid for members in block_dict.values() for sid in members]},
     )
 
@@ -346,18 +334,9 @@ def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
             "multiple": ["0", "1"],
         }, {"final_subblock_count": 2}
 
-    def fake_load_representatives(
-        _dataset: Any,
-        signature_ids: list[str],
-    ) -> dict[str, SimpleNamespace]:
-        assert signature_ids == ["2", "0"]
-        return {
-            signature_id: SimpleNamespace(
-                author_info_first="j" if signature_id == "2" else "john",
-                author_info_first_normalized_without_apostrophe=("j" if signature_id == "2" else "john"),
-            )
-            for signature_id in signature_ids
-        }
+    def fake_load_name_parts(_dataset: Any, signature_ids: list[str]) -> list[tuple[str, str]]:
+        assert signature_ids == ["0", "1", "2", "3", "4"]
+        return [("j" if signature_id in {"2", "3", "4"} else "john", "") for signature_id in signature_ids]
 
     def fake_build_featurizer(dataset: ArrowDataset, **kwargs: Any) -> object:
         assert dataset is arrow_dataset
@@ -394,7 +373,7 @@ def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(
 
     patch_arrow_orchestration(
         fake_native_subblocking,
-        fake_load_representatives,
+        fake_load_name_parts,
         fake_build_featurizer,
         fake_predict_multiple,
         fake_predict_incremental,

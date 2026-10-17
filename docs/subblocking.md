@@ -35,15 +35,18 @@ clusterer.subblocking_graph_config = GraphSubblockingConfig()
 
 Subblocking proceeds in this order:
 
-1. Split signatures by first-name prefix.
-2. For first-name groups that remain too large, split by middle-name prefix.
-3. For groups that are still too large, call the fallback cluster function (graph for `Clusterer`; see above).
-4. Merge compatible small subblocks back up to the maximum size.
-5. Run the optional same-ORCID repair pass.
+1. Give each compound first name one key token (see [compound first names](#compound-first-names)).
+2. Split signatures by first-name prefix.
+3. For first-name groups that remain too large, split by middle-name prefix.
+4. For groups that are still too large, call the fallback cluster function (graph for `Clusterer`; see above).
+5. Merge compatible small subblocks back up to the maximum size.
+6. Run the optional same-ORCID repair pass.
 
-The single-letter first-name path is handled later in bulk prediction. Multi-letter subblocks are predicted first,
+All steps use the key names from step 1. Signatures whose key first name has at most one character form the
+single-letter group, which is handled later in bulk prediction. Multi-letter subblocks are predicted first,
 their resulting clusters become temporary cluster seeds, and single-letter subblocks run through a synthetic
-incremental pass so initial-only signatures can attach back to established clusters.
+incremental pass so initial-only signatures can attach back to established clusters. Prediction classifies each
+subblock by the key first name of its first member.
 
 Average linkage does not put a pair at exactly `LARGE_DISTANCE` in one cluster.
 Other linkage methods give no such guarantee. The synthetic attachment pass
@@ -62,13 +65,40 @@ final cluster after initial-only attachment.
 
 ## Dash normalization
 
-Current normalization handles every dash-like given-name separator uniformly. Dash-bound compounds stay together in the first
-name for subblocking regardless of the dash code point: both `Sang-Min` and `Sang<U+2010>Min` normalize to
-`first="sang min", middle=""`.
+Current normalization handles every dash-like given-name separator uniformly. Dash-bound compounds stay together in the
+canonical first name regardless of the dash code point: both `Sang-Min` and `Sang<U+2010>Min` normalize to
+`first="sang min", middle=""`. Subblock keys then apply the [compound first-name rule](#compound-first-names).
 
 The Python implementation uses precomputed canonical first/middle fields when available and reconstructs them with the
 same canonicalizer when Rust preprocessing deferred those fields. The Rust Arrow path applies the same
 normalization while reading raw name columns.
+
+## Compound first names
+
+A canonical first name with two or more tokens is a compound, for example `hui min` from `Hui-Min` or `j d` from
+`J.-D.`. A compound keys as one token, so it does not make a prefix bucket of its own. The rule changes only the
+first and middle names that form subblock keys. Canonical names, features, name counts and constraints do not
+change. `s2and.subblocking.subblocking_name_parts(...)` and the Rust Arrow planner apply the same rule to the
+whole request before the partition flow starts.
+
+1. If every token has one character, the key first is the first token. The other tokens go before the canonical
+   middle: `j d` with middle `t` keys as first `j`, middle `d t`, in the single-letter group.
+2. Else the planner counts two forms in the request. `n_join` counts records with the joined canonical first
+   (`huimin`). `n_split` counts records with canonical first `hui` and a middle whose first token is `min`.
+3. The compound keys as the joined form with its canonical middle when `n_join <= maximum_size` and
+   `(n_join + 1) / (n_split + 1) > 8`.
+4. Else the key first is the first token (`hui`), and the key middle is the other tokens before the canonical
+   middle (`min`).
+
+A compound with three or more tokens joins all of its tokens (`xiaoyuting`) or keeps only its first token
+(`xiao` with middle `yu ting`). The split-form count uses the first two tokens. The ratio keeps distinct names
+apart on weak evidence, for example `qi an` and `qian`. A joined first name with more than `maximum_size` records
+is already a dead end of prefix subdivision, and a few joined records would only change its middle-name and
+fallback groups.
+
+The counts depend on the whole original block. Thus the Arrow route reads the names of every member of an
+oversized block to classify its subblocks. A block at or below the threshold is not subblocked, so its
+classification uses canonical first names.
 
 ## ORCID policy
 

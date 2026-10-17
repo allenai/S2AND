@@ -43,9 +43,6 @@ from s2and.incremental_linking.completion_metadata import (
 from s2and.incremental_linking.completion_metadata import (
     name_tuples_for_incremental_rules as _name_tuples_for_incremental_rules,
 )
-from s2and.incremental_linking.completion_metadata import (
-    signature_first as _signature_first_for_rules,
-)
 from s2and.incremental_linking.feature_block import (
     normalize_cluster_seed_disallow_pairs,
     temporary_cluster_seed_sidecars,
@@ -97,6 +94,8 @@ from s2and.subblocking import (
     _resolve_graph_subblocking_config,
     make_dataset_graph_subblocking_cluster_fn,
     make_subblocks,
+    signature_name_parts_for_subblocking,
+    subblocking_name_parts,
 )
 from s2and.supervision import (
     effective_dataset_disallows,
@@ -486,6 +485,82 @@ def _load_arrow_incremental_signature_info(
     if missing_signature_ids:
         raise ValueError(f"Arrow signatures are missing incremental signature ids: {missing_signature_ids[:10]}")
     return signatures
+
+
+def _load_arrow_canonical_name_parts(arrow_dataset: Any, signature_ids: Sequence[str]) -> list[tuple[str, str]]:
+    """Return canonical (first, middle) for each signature, in the order of ``signature_ids``."""
+
+    if not signature_ids:
+        return []
+    import pyarrow as pa
+
+    # The last name takes part because canonicalization reads it (D9 joined capitals).
+    columns = ["signature_id", "author_first", "author_middle", "author_last"]
+    requested = set(signature_ids)
+    # Whole oversized blocks come here. A Python set filter avoids one Arrow hash build per batch,
+    # and many records share raw name strings, so each distinct triple is canonicalized once.
+    canonical: dict[tuple[str | None, str | None, str | None], tuple[str, str]] = {}
+    names: dict[str, tuple[str, str]] = {}
+    with arrow_dataset.open_file("signatures") as source_file, pa.PythonFile(source_file, mode="r") as source:
+        reader = pa.ipc.open_file(source)
+        missing_columns = sorted(set(columns).difference(reader.schema.names))
+        if missing_columns:
+            raise ValueError(f"signatures Arrow is missing required columns for subblock names: {missing_columns}")
+        column_indexes = [reader.schema.get_field_index(column) for column in columns]
+        for batch_index in _signature_batch_indices_for_request(arrow_dataset, signature_ids):
+            batch = reader.get_batch(batch_index)
+            for signature_id, first, middle, last in zip(
+                *(batch.column(index).to_pylist() for index in column_indexes), strict=True
+            ):
+                if signature_id not in requested:
+                    continue
+                if signature_id in names:
+                    raise ValueError(f"signatures Arrow contains duplicate signature_id: {signature_id!r}")
+                parts = canonical.get((first, middle, last))
+                if parts is None:
+                    canonical_parts = canonicalize_name_parts(first, middle, last)
+                    parts = canonical[(first, middle, last)] = (canonical_parts.first, canonical_parts.middle)
+                names[signature_id] = parts
+    missing_signature_ids = [signature_id for signature_id in signature_ids if signature_id not in names]
+    if missing_signature_ids:
+        raise ValueError(f"Arrow signatures are missing subblocking signature ids: {missing_signature_ids[:10]}")
+    return [names[signature_id] for signature_id in signature_ids]
+
+
+def _subblocking_firsts(
+    signature_ids: Sequence[Any],
+    name_parts: Sequence[tuple[str, str]],
+    maximum_size: int,
+) -> dict[Any, str]:
+    """Map each signature of one subblocked block to the first name of its subblock key."""
+
+    key_names = subblocking_name_parts(name_parts, maximum_size)
+    return {signature_id: first for signature_id, (first, _middle) in zip(signature_ids, key_names, strict=True)}
+
+
+def _group_subblocking_firsts(
+    groups: Mapping[str, Sequence[Any]],
+    original_blocks: Mapping[str, Sequence[Any]],
+    maximum_size: int,
+    load_name_parts: Callable[[Sequence[Any]], Sequence[tuple[str, str]]],
+) -> dict[Any, str]:
+    """Return the subblock-key first name of the first member of each nonempty group.
+
+    The compound key rule counts names over the whole original block, so a subblocked block loads
+    the names of all its members. A block at or below ``maximum_size`` is not subblocked and keeps
+    its canonical first names.
+    """
+
+    representatives = {members[0] for members in groups.values() if members}
+    firsts: dict[Any, str] = {}
+    for block_signatures in original_blocks.values():
+        if len(block_signatures) > maximum_size:
+            block_firsts = _subblocking_firsts(block_signatures, load_name_parts(block_signatures), maximum_size)
+            firsts.update((sid, block_firsts[sid]) for sid in block_signatures if sid in representatives)
+        else:
+            local = [sid for sid in block_signatures if sid in representatives]
+            firsts.update((sid, first) for sid, (first, _middle) in zip(local, load_name_parts(local), strict=True))
+    return firsts
 
 
 def _load_arrow_incremental_orcid_signature_info(
@@ -3165,14 +3240,15 @@ class Clusterer:
             )
             full_name_subblocks: set[str] = set()
             if repacked_seed_component_count:
-                representatives = _load_arrow_incremental_signature_info(
-                    arrow_dataset,
-                    [members[0] for members in normalized_native_subblocks.values() if members],
+                firsts = _subblocking_firsts(
+                    block_signatures,
+                    _load_arrow_canonical_name_parts(arrow_dataset, block_signatures),
+                    batching_threshold,
                 )
                 full_name_subblocks = {
                     key
                     for key, members in normalized_native_subblocks.items()
-                    if members and len(_signature_first_for_rules(representatives[members[0]])) > 1
+                    if members and len(firsts[members[0]]) > 1
                 }
             repaired_subblock_count = 0
             repaired = pack_seed_components(
@@ -3370,17 +3446,11 @@ class Clusterer:
                 cluster_seeds_require=atomic_cluster_seeds_require,
                 prediction_state=prediction_state,
             )
-            representative_signature_ids = [
-                str(signatures[0]) for signatures in block_dict_subblocked.values() if signatures
-            ]
-            subblock_signature_rule_metadata = _load_arrow_incremental_signature_info(
-                arrow_lease,
-                representative_signature_ids,
-            )
-            partition_dataset = _RustFeaturizerPredictDataset(
-                cluster_seeds_require={},
-                cluster_seeds_disallow=set(),
-                signatures=subblock_signature_rule_metadata,
+            subblocking_firsts = _group_subblocking_firsts(
+                block_dict_subblocked,
+                block_dict,
+                batching_threshold,
+                lambda signature_ids: _load_arrow_canonical_name_parts(arrow_lease, signature_ids),
             )
             (
                 block_dict_multiple_letter,
@@ -3388,7 +3458,7 @@ class Clusterer:
                 subblocking_alert_flag,
             ) = self._partition_subblocked_first_name_groups(
                 block_dict_subblocked,
-                cast(ANDData, partition_dataset),
+                subblocking_firsts,
                 original_blocks=block_dict,
             )
             featurizer_signature_ids = list(
@@ -3398,7 +3468,6 @@ class Clusterer:
                     for signature_id in block_dict_multiple_letter[block_key]
                 )
             )
-            del partition_dataset, subblock_signature_rule_metadata
             arrow_subblocking_seconds = time.perf_counter() - subblocking_start
             # The sequential initial-only passes re-enter the public incremental
             # API. Freeze canonical aliases once so each pass can reuse them.
@@ -3892,10 +3961,13 @@ class Clusterer:
                     raise RuntimeError(f"Subblocking exceeded batching_threshold (block={block_key})")
                 full_name_subblocks = set()
                 if components_by_block[block_key]:
+                    firsts = _subblocking_firsts(
+                        block_signatures,
+                        [signature_name_parts_for_subblocking(dataset.signatures[s]) for s in block_signatures],
+                        batching_threshold,
+                    )
                     full_name_subblocks = {
-                        key
-                        for key, members in subblocks.items()
-                        if members and len(_signature_first_for_rules(dataset.signatures[members[0]])) > 1
+                        key for key, members in subblocks.items() if members and len(firsts[members[0]]) > 1
                     }
                 repaired = pack_seed_components(
                     {key: subblocks[key] for key in sorted(subblocks)},
@@ -3925,10 +3997,17 @@ class Clusterer:
     def _partition_subblocked_first_name_groups(
         self,
         block_dict_subblocked: dict[str, list[str]],
-        dataset: ANDData,
+        subblocking_firsts: Mapping[str, str],
         *,
         original_blocks: Mapping[str, Sequence[str]],
     ) -> tuple[dict[str, list[str]], dict[str, list[str]], bool]:
+        """Split groups into bulk and initial-only attachment by the key first of their first member.
+
+        ``subblocking_firsts`` maps the first member of each nonempty group to the first name of
+        its subblock key (see ``_group_subblocking_firsts``). A compound such as ``"j d"`` keys as
+        ``"j"``, so its group attaches like other initials.
+        """
+
         nonempty_subblocks = {
             block_key: block_signatures
             for block_key, block_signatures in block_dict_subblocked.items()
@@ -3937,7 +4016,7 @@ class Clusterer:
         single_letter = {
             block_key: block_signatures
             for block_key, block_signatures in nonempty_subblocks.items()
-            if len(_signature_first_for_rules(dataset.signatures[block_signatures[0]])) <= 1
+            if len(subblocking_firsts[block_signatures[0]]) <= 1
         }
         multiple_letter = {
             block_key: block_signatures
@@ -4145,11 +4224,19 @@ class Clusterer:
                 else {}
             ),
         )
+        subblocking_firsts = _group_subblocking_firsts(
+            block_dict_subblocked,
+            block_dict,
+            batching_threshold,
+            lambda signature_ids: [signature_name_parts_for_subblocking(dataset.signatures[s]) for s in signature_ids],
+        )
         (
             block_dict_multiple_letter_first_names,
             block_dict_single_letter_first_names,
             alert_flag,
-        ) = self._partition_subblocked_first_name_groups(block_dict_subblocked, dataset, original_blocks=block_dict)
+        ) = self._partition_subblocked_first_name_groups(
+            block_dict_subblocked, subblocking_firsts, original_blocks=block_dict
+        )
         pred_clusters = self._predict_subblocked_multiple_letter_groups(
             block_dict_multiple_letter_first_names,
             alert_flag=alert_flag,

@@ -189,6 +189,12 @@ production model and public-data version is `1.3`, on a separate version axis.
   pairs plus `data_sha256`; the former `.meta.json` sidecar is removed.
   Python-driven Rust flows receive the explicit pairs rather than reopening
   the artifact in Rust.
+- Subblock keys give each compound first name one token. An all-initial
+  compound such as `J.-D.` keys as `j` and attaches with other initials. Other
+  compounds join (`huimin`) only with strong joined-form evidence in the block,
+  else they key as their first token. Canonical names, features and constraints
+  do not change. Subblocked outputs of blocks with compound first names change.
+  See [compound first names](subblocking.md#compound-first-names).
 
 ### Fixed
 

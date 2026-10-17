@@ -1704,7 +1704,9 @@ def test_predict_subblocked_processes_subblocks_in_sorted_key_order(clusterer_da
         return {f"cluster_{len(observed_order)}": list(block_dict[key])}, None
 
     monkeypatch.setattr(model_module, "make_subblocks", _fake_make_subblocks)
-    monkeypatch.setattr(model_module, "_signature_first_for_rules", lambda _: "john")
+    monkeypatch.setattr(
+        model_module, "subblocking_name_parts", lambda names, _maximum_size: [("john", "")] * len(names)
+    )
     monkeypatch.setattr(Clusterer, "predict_helper", _fake_predict_helper)
 
     clusterer.predict({"block": block_signatures}, dataset, batching_threshold=3)

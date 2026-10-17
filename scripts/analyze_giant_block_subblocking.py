@@ -37,6 +37,7 @@ from s2and.subblocking import (
     make_subblocks_with_telemetry,
     normalize_orcid_for_subblocking,
     signature_name_parts_for_subblocking,
+    subblocking_name_parts,
 )
 
 
@@ -90,12 +91,19 @@ def _build_repeated_orcid_groups(signatures: dict[str, Signature]) -> dict[str, 
     }
 
 
-def _single_letter_first_name_ids(signatures: dict[str, Signature]) -> set[str]:
-    """Return signature IDs whose normalized first name is empty or one character."""
+def _single_letter_first_name_ids(
+    signatures: dict[str, Signature], signature_ids: list[str], maximum_size: int
+) -> set[str]:
+    """Return signature IDs whose subblock-key first name is empty or one character.
+
+    The key of a compound first name depends on the threshold, so call this once per threshold.
+    """
+    key_names = subblocking_name_parts(
+        [signature_name_parts_for_subblocking(signatures[signature_id]) for signature_id in signature_ids],
+        maximum_size,
+    )
     return {
-        str(signature_id)
-        for signature_id, signature in signatures.items()
-        if len(signature_name_parts_for_subblocking(signature)[0]) <= 1
+        signature_id for signature_id, (first, _middle) in zip(signature_ids, key_names, strict=True) if len(first) <= 1
     }
 
 
@@ -315,7 +323,6 @@ def main() -> None:
     dataset = load_dataset(args.dataset_root, n_jobs=int(args.n_jobs), random_seed=int(args.random_seed))
     all_signature_ids = sorted(str(signature_id) for signature_id in dataset.signatures.keys())
     repeated_orcid_groups = _build_repeated_orcid_groups(dataset.signatures)
-    single_letter_ids = _single_letter_first_name_ids(dataset.signatures)
     graph_cluster_fn = make_dataset_graph_subblocking_cluster_fn(config=GraphSubblockingConfig())
     rows: list[dict[str, Any]] = []
     for threshold in thresholds:
@@ -328,6 +335,7 @@ def main() -> None:
             specter_cluster_fn=graph_cluster_fn,
         )
         signature_to_subblock = _signature_to_subblock(subblocks)
+        single_letter_ids = _single_letter_first_name_ids(dataset.signatures, all_signature_ids, int(threshold))
         preservation_metrics = _orcid_preservation_metrics(repeated_orcid_groups, signature_to_subblock)
         subblock_metrics = _subblock_size_metrics(subblocks)
         final_specter_signature_ids = _specter_signature_ids(subblocks)
@@ -370,7 +378,6 @@ def main() -> None:
         "signature_count": int(len(all_signature_ids)),
         "paper_count": int(len(dataset.papers)),
         "embedding_count": int(embedding_count),
-        "single_letter_first_name_signature_count": int(len(single_letter_ids)),
         "orcid_signature_count": int(
             sum(1 for signature in dataset.signatures.values() if signature.author_info_orcid)
         ),

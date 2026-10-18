@@ -8,8 +8,9 @@ The [data guide](../../docs/data.md) defines common Git LFS assets and the S3 re
 Release `1.3` excludes patent data.
 Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
 Incremental inputs contain the 13 inherited non-patent datasets.
-The patent-free complete candidate passes fit, evaluation, and installed Arrow inference checks.
-The [candidate record](../../docs/release_evidence/production_candidate_20261013.md) gives model hashes, input populations, evaluation results, and remaining limits.
+The production count authority is fresh author-table counts, A.
+The [mainline record](../../docs/release_evidence/author_counts_mainline_20261017.md) defines the selected policy and rebuild status.
+The [earlier candidate record](../../docs/release_evidence/production_candidate_20261013.md) preserves the previous model's evidence.
 The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
 The snapshot passes relocation checks.
 
@@ -60,7 +61,7 @@ uv run --no-sync python scripts/production/model/train_pairwise.py `
   --output-dir $PairwiseModel `
   --matrix-work-dir "$RunRoot/matrix-work" `
   --total-ram-bytes 137438953472 `
-  --n-jobs 20 `
+  --n-jobs 12 `
   --run-full
 ```
 
@@ -100,7 +101,7 @@ uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-e
   --name-counts-index-root "$Snapshot/name_counts_index" `
   --arrow-root "$Snapshot/pairwise/arrow/release" `
   --total-ram-bytes 137438953472 `
-  --n-jobs 20
+  --n-jobs 12
 ```
 
 The EPS grid and minimum floors come from the model plan.
@@ -116,6 +117,8 @@ A booster or feature-contract change requires new incremental features and a fre
 ## Complete model and linker evaluation
 
 Freeze incremental task labels, assignments, target, and evaluation policy before the fit:
+Use the index path that the snapshot's Arrow manifests resolve.
+An identical index at another path does not satisfy the linker preflight check.
 
 ```powershell
 uv run --no-sync python scripts/production/model/train_linker_and_finalize.py `
@@ -124,7 +127,7 @@ uv run --no-sync python scripts/production/model/train_linker_and_finalize.py `
   --pairwise-model-path $CalibratedModel `
   --name-counts-index-root "$Snapshot/name_counts_index" `
   --output-dir "$RunRoot/complete" `
-  --n-jobs 20 `
+  --n-jobs 12 `
   --total-ram-bytes 137438953472
 ```
 
@@ -165,7 +168,7 @@ Small tuple and ORCID files remain in normal Git and the wheel.
 The binary name-count index uses Git LFS and remains outside the wheel.
 Release `1.3` uses `artifacts/common/v1.3/name_counts_index`.
 The complete model target is `artifacts/common/v1.3/production_model_v1.3`.
-This path contains the verified patent-free candidate. Final release acceptance remains pending.
+This path contains the A release candidate. Final release acceptance remains pending.
 See [the count producers](counts/README.md) for source columns, workload bounds, and native index construction.
 
 The reviewed tuple source reproduces the canonical artifact byte-for-byte:
@@ -177,13 +180,17 @@ uv run --no-sync python scripts/production/generate_canonical_name_tuples.py `
 ```
 
 Regenerate it only when the source or canonical rules change.
-Generate global counts from the full source corpus rather than a research query subset:
+Generate global A counts from every row in the Athena author table.
+Use the [Athena author-count command](counts/README.md#athena-author-row-export).
+It preserves raw name groups before the current repository normalizer creates the count keys.
+
+For an existing verified author-row export, use the shared Parquet producer:
 
 ```powershell
 uv run --no-sync --with 'duckdb>=1.5,<2' python -m scripts.production.counts.generate_name_counts_from_parquet `
   --input-manifest <approved-name-count-export.json> `
-  --expected-source-rows <approved-row-count> `
-  --expected-source-mentions <approved-mention-count> `
+  --expected-source-rows <raw-name-group-count> `
+  --expected-source-mentions <author-table-row-count> `
   --threads 4 --memory-limit 12GB `
   --output-dir <fresh-count-output>
 
@@ -192,6 +199,10 @@ uv run --no-sync python -m scripts.production.counts.generate_orcid_name_prefix_
   --guardrails-json <approved-orcid-bounds.json> `
   --output-dir <fresh-orcid-output>
 ```
+
+The shared producer retains `mention_count` and `--expected-source-mentions` as weight field names.
+For A, both values represent author-table rows.
+The archived M study does not define the current production count authority.
 
 The ORCID input contains `raw_orcid,orcid,first_name,middle,last_name` in the required source order.
 The producer enforces the shared nonempty surname rule and the 14-group exclusion.
@@ -257,7 +268,7 @@ uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-he
   --arrow-root "$Snapshot/pairwise/arrow/evaluation" `
   --name-counts-index-root "$Snapshot/name_counts_index" `
   --output-report "$RunRoot/reports/heldout_metrics.json" `
-  --n-jobs 20 `
+  --n-jobs 12 `
   --total-ram-bytes 137438953472
 ```
 

@@ -175,6 +175,20 @@ def test_initial_only_source_preserves_empty_informative_name_mappings(tmp_path:
         ).read_bytes()
 
 
+def test_resume_rejects_changed_normalizer_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    normalizer = tmp_path / "text.py"
+    normalizer.write_bytes(Path(producer.text_normalizer.__file__).read_bytes())
+    monkeypatch.setattr(producer.text_normalizer, "__file__", str(normalizer))
+    manifest = _source(tmp_path / "source")
+    output = tmp_path / "actual"
+    _build(manifest, output)
+    before = (output / "name_counts_index/manifest.json").read_bytes()
+    normalizer.write_bytes(normalizer.read_bytes() + b"\n# Source identity changes.\n")
+    with pytest.raises(ValueError, match="producer identity differ"):
+        _build(manifest, output, resume=True)
+    assert (output / "name_counts_index/manifest.json").read_bytes() == before
+
+
 def test_source_checksum_and_population_fail_before_publication(tmp_path: Path) -> None:
     manifest = _source(tmp_path / "source")
     with pytest.raises(ValueError, match="expected rows"):

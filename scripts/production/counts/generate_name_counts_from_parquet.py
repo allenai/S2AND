@@ -1,4 +1,4 @@
-"""Build a bounded global plain-mention index from reviewed Parquet objects."""
+"""Build a canonical count index from reviewed weighted raw-name Parquet objects."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+import s2and.text as text_normalizer
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.feature_block_arrow import _write_sorted_name_count_records
 from s2and.name_counts_index import NameCountsIndex
@@ -132,6 +133,7 @@ def build_name_counts_from_parquet(
     identity = {
         "source_manifest_sha256": _sha256(manifest),
         "producer_sha256": _sha256(Path(__file__)),
+        "normalizer_sha256": _sha256(Path(text_normalizer.__file__)),
         "expected_source_rows": expected_source_rows,
         "expected_source_mentions": expected_source_mentions,
     }

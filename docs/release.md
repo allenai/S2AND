@@ -8,7 +8,9 @@ Public Arrow and name-count data use format `1`.
 Release `1.3` excludes patent data.
 Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
 Incremental inputs contain the 13 inherited non-patent datasets.
-The patent-free complete candidate passes fit, evaluation, and installed Arrow inference checks.
+Fresh author-table counts, A, define the production count authority.
+The selected rebuild uses current normalization and the current packaged tuple and ORCID assets.
+See the [A mainline record](release_evidence/author_counts_mainline_20261017.md) for its status.
 A production release still requires final acceptance and publication.
 No final release model or S3 location is declared here before acceptance and publication.
 
@@ -31,6 +33,7 @@ Keep source snapshots and fit outputs in separate directories.
 ## Fixed decisions
 
 - Keep one common binary name-count index and complete production model in versioned Git LFS assets.
+- Build the common index from author-table rows. Archive mention counts, M, as a research alternative.
 - Keep small name tuples and ORCID prefix counts in normal Git and the Python wheel.
 - Publish corrected research data to S3 without a second model or count index.
 - Use supported formats and schemas for dataset compatibility.
@@ -75,6 +78,8 @@ It excludes `inventors_s2and` from corrected records, Arrow data, pairwise plans
 
 Reuse unchanged common assets.
 Regenerate a common asset only when its source data or semantics change.
+Regenerate A after a canonical name-rule change, even when the raw Athena export stays unchanged.
+Recompute pairwise and linker features after a count-authority change.
 The ORCID producer preserves the surname rule and excludes the 14 reviewed groups.
 Run the focused producer checks before a bounded rebuild.
 See [the count commands](../scripts/production/README.md#count-artifacts).

@@ -1,96 +1,169 @@
 {
+  "actual_boosters": {
+    "main": {
+      "actual_trees": 137,
+      "feature_names": [
+        "first_names_equal",
+        "middle_initials_overlap",
+        "middle_names_equal",
+        "middle_one_missing",
+        "single_char_first",
+        "single_char_middle",
+        "affiliation_overlap",
+        "email_prefix_equal",
+        "email_suffix_equal",
+        "coauthor_overlap",
+        "coauthor_similarity",
+        "coauthor_match",
+        "venue_overlap",
+        "year_diff",
+        "title_overlap_words",
+        "title_overlap_chars",
+        "position_diff",
+        "abstract_count",
+        "english_count",
+        "same_language",
+        "language_reliability_min",
+        "first_name_count_min",
+        "last_first_name_count_min",
+        "last_name_count_min",
+        "last_first_initial_count_min",
+        "first_name_count_max",
+        "last_first_name_count_max",
+        "specter_cosine_sim",
+        "journal_overlap",
+        "levenshtein",
+        "prefix",
+        "lcs",
+        "jaro"
+      ],
+      "maximum_tree_leaves": 99,
+      "minimum_tree_leaves": 2,
+      "model_sha256": "63dfa9a4c890c5557de74f74677d71791c53c7b71a30be160d136b3625843edb",
+      "num_features": 33,
+      "total_tree_leaves": 7762
+    },
+    "nameless": {
+      "actual_trees": 238,
+      "feature_names": [
+        "affiliation_overlap",
+        "email_prefix_equal",
+        "email_suffix_equal",
+        "coauthor_overlap",
+        "coauthor_similarity",
+        "coauthor_match",
+        "venue_overlap",
+        "year_diff",
+        "title_overlap_words",
+        "title_overlap_chars",
+        "position_diff",
+        "abstract_count",
+        "english_count",
+        "same_language",
+        "language_reliability_min",
+        "specter_cosine_sim",
+        "journal_overlap"
+      ],
+      "maximum_tree_leaves": 56,
+      "minimum_tree_leaves": 2,
+      "model_sha256": "09a0fe45c629b0f5de981e9a33daff320438c307c9bdf7894cc5bbe0f33d2b47",
+      "num_features": 17,
+      "total_tree_leaves": 12810
+    }
+  },
   "data_random_seed": 1111,
   "dataset_inputs": {
     "aminer": {
       "arrow_conversion_provenance_sha256": "23f2e57f7e52126f2ec75249d61ccd27a532c1c80b778237d082f6b244092ca2",
-      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\aminer",
+      "arrow_dir": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\arrow\\release\\aminer",
       "files": {
-        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\aminer\\aminer_clusters.json",
-        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\aminer\\aminer_papers.json",
-        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\aminer\\aminer_signatures.json",
-        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\aminer\\aminer_specter2.pkl"
+        "clusters": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\aminer\\aminer_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\aminer\\aminer_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\aminer\\aminer_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\aminer\\aminer_specter2.pkl"
       },
       "split_mode": "random_blocks"
     },
     "arnetminer": {
       "arrow_conversion_provenance_sha256": "9dfb9663e2e49e10a839f9c5115b2dc88e74ef95475e68d4c2b5209ca6169b36",
-      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\arnetminer",
+      "arrow_dir": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\arrow\\release\\arnetminer",
       "files": {
-        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\arnetminer\\arnetminer_clusters.json",
-        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\arnetminer\\arnetminer_papers.json",
-        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\arnetminer\\arnetminer_signatures.json",
-        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\arnetminer\\arnetminer_specter2.pkl"
+        "clusters": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\arnetminer\\arnetminer_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\arnetminer\\arnetminer_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\arnetminer\\arnetminer_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\arnetminer\\arnetminer_specter2.pkl"
       },
       "split_mode": "random_blocks"
     },
     "augmented": {
       "arrow_conversion_provenance_sha256": "042cbb66cca405685a625f3e8d0ffabd6d83cf6c0b5f146a829203cd04ac9d2f",
-      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\augmented",
+      "arrow_dir": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\arrow\\release\\augmented",
       "files": {
-        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\augmented\\augmented_papers.json",
-        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\augmented\\augmented_signatures.json",
-        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\augmented\\augmented_specter2.pkl",
-        "train_pairs": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\augmented\\train_pairs.csv",
-        "val_pairs": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\augmented\\val_pairs.csv"
+        "papers": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\augmented\\augmented_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\augmented\\augmented_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\augmented\\augmented_specter2.pkl",
+        "train_pairs": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\augmented\\train_pairs.csv",
+        "val_pairs": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\augmented\\val_pairs.csv"
       },
       "split_mode": "fixed_pairs"
     },
     "inspire": {
       "arrow_conversion_provenance_sha256": "ddb3340b71eeca5f893b87035e5ab0a4d2a3075027c008942134e695008c222c",
-      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\inspire",
+      "arrow_dir": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\arrow\\release\\inspire",
       "files": {
-        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\inspire\\inspire_clusters.json",
-        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\inspire\\inspire_papers.json",
-        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\inspire\\inspire_signatures.json",
-        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\inspire\\inspire_specter2.pkl"
+        "clusters": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\inspire\\inspire_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\inspire\\inspire_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\inspire\\inspire_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\inspire\\inspire_specter2.pkl"
       },
       "split_mode": "random_blocks"
     },
     "kisti": {
       "arrow_conversion_provenance_sha256": "400b208549f82eba8ef44edbbdc8601c8cbb3221d1899574426c4ce73ecd9508",
-      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\kisti",
+      "arrow_dir": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\arrow\\release\\kisti",
       "files": {
-        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\kisti\\kisti_clusters.json",
-        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\kisti\\kisti_papers.json",
-        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\kisti\\kisti_signatures.json",
-        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\kisti\\kisti_specter2.pkl"
+        "clusters": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\kisti\\kisti_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\kisti\\kisti_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\kisti\\kisti_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\kisti\\kisti_specter2.pkl"
       },
       "split_mode": "random_blocks"
     },
     "pubmed": {
       "arrow_conversion_provenance_sha256": "ebe36226bba009933b9fba8d660566d207d27bccafbfb7a8d85da0fadb13e5ce",
-      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\pubmed",
+      "arrow_dir": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\arrow\\release\\pubmed",
       "files": {
-        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\pubmed\\pubmed_clusters.json",
-        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\pubmed\\pubmed_papers.json",
-        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\pubmed\\pubmed_signatures.json",
-        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\pubmed\\pubmed_specter2.pkl"
+        "clusters": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\pubmed\\pubmed_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\pubmed\\pubmed_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\pubmed\\pubmed_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\pubmed\\pubmed_specter2.pkl"
       },
       "split_mode": "random_blocks"
     },
     "qian": {
       "arrow_conversion_provenance_sha256": "02ab72b1b77281ce5ebc70c02afdb2d8858e594f9b51ce7ea4ac334c9f6a180c",
-      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\qian",
+      "arrow_dir": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\arrow\\release\\qian",
       "files": {
-        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\qian\\qian_clusters.json",
-        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\qian\\qian_papers.json",
-        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\qian\\qian_signatures.json",
-        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\qian\\qian_specter2.pkl"
+        "clusters": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\qian\\qian_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\qian\\qian_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\qian\\qian_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\qian\\qian_specter2.pkl"
       },
       "split_mode": "random_blocks"
     },
     "zbmath": {
       "arrow_conversion_provenance_sha256": "77b3d8ae69dead8fe3f23bbf854bda839ab1a8c71390f1dc6e0f6d1f6a0717b9",
-      "arrow_dir": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\arrow\\release\\zbmath",
+      "arrow_dir": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\arrow\\release\\zbmath",
       "files": {
-        "clusters": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\zbmath\\zbmath_clusters.json",
-        "papers": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\zbmath\\zbmath_papers.json",
-        "signatures": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\zbmath\\zbmath_signatures.json",
-        "specter_embeddings": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\common\\zbmath\\zbmath_specter2.pkl"
+        "clusters": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\zbmath\\zbmath_clusters.json",
+        "papers": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\zbmath\\zbmath_papers.json",
+        "signatures": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\zbmath\\zbmath_signatures.json",
+        "specter_embeddings": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\corrected_sources\\zbmath\\zbmath_specter2.pkl"
       },
       "split_mode": "random_blocks"
     }
   },
+  "feature_pack_sha256": "b2a7a5fead0499df1f919bd92e613888fbcd56f6e08e74a575f95a97b7fc4495",
   "features_to_use": [
     "name_similarity",
     "affiliation_similarity",
@@ -106,15 +179,3865 @@
     "advanced_name_similarity"
   ],
   "featurization_backend": "rust_from_provenance_bound_arrow",
-  "input_artifact_hashes": {
-    "name_counts_manifest_sha256": "85cffc00421f6b8a7ebab6b6bac7da162b4bccde88b83e348c9554e26c7153e7",
-    "name_tuples_data_sha256": "0bcb523ebf8e6f7020883d96cc2822f402f212069214fa23e56b6e7bc0b01f0c",
-    "orcid_prefix_counts_data_sha256": "d09f52ec0b0272f9931635f7a27676b2cf90c5645e9166233a5f1630cee9c133"
+  "head_release_selections": {
+    "main": {
+      "candidates": [
+        {
+          "actual_trees": 1610,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "H13_incumbent",
+          "maximum_tree_leaves": 99,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\H13_incumbent-d15bb9470b110143.lgb",
+            "sha256": "d15bb9470b110143dcef4c53af67b849222398269e57ca13b2da9535af667a48"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\H13_incumbent\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\H13_incumbent\\stdout.log",
+            "sha256": "89229d5d630ff909129826a37ef942344a82fcf26b1588d111e3679ecf5a9bb5"
+          },
+          "validation_roc_auc": 0.9935176435560131
+        },
+        {
+          "actual_trees": 2152,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_001",
+          "maximum_tree_leaves": 192,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_001-cf0aab4a066cb1ea.lgb",
+            "sha256": "cf0aab4a066cb1eaec26d19c97c384dc48c4d86131c3f48fa0bc4bcfd349d409"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_001\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_001\\stdout.log",
+            "sha256": "8b9430384307bc7d3cdab8f0a7c5b009ae6445765e7a7d8df030490a39de5c5a"
+          },
+          "validation_roc_auc": 0.9922829667878417
+        },
+        {
+          "actual_trees": 1846,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_002",
+          "maximum_tree_leaves": 10,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_002-cfa15754bbf83e7b.lgb",
+            "sha256": "cfa15754bbf83e7b7aa69e53740844d6b488682ee7d609a053f6f484083b5835"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_002\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_002\\stdout.log",
+            "sha256": "8d2432989d4f7426a974a6bc3448f45715b56b6ad3a08201954ee89e08ef8d39"
+          },
+          "validation_roc_auc": 0.9929052559731717
+        },
+        {
+          "actual_trees": 1859,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_003",
+          "maximum_tree_leaves": 16,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_003-e5c1bc31f36ed535.lgb",
+            "sha256": "e5c1bc31f36ed535c776fa8ef4817045cf3ce924c2817020fcc50534a157af48"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_003\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_003\\stdout.log",
+            "sha256": "9dfeca1eb207073cfdd79076ff719cca16b499a68816f1c009d61c70d6a269e2"
+          },
+          "validation_roc_auc": 0.993046136609683
+        },
+        {
+          "actual_trees": 226,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_004",
+          "maximum_tree_leaves": 250,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_004-56fb70d90a85c92f.lgb",
+            "sha256": "56fb70d90a85c92f45768d6a619a893078c18cba59afe732977407329de7b15c"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_004\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_004\\stdout.log",
+            "sha256": "1761cce672ed1bac7321b4e58ecde9431f92a8993be2e348a010bfac4c93abfc"
+          },
+          "validation_roc_auc": 0.8548373297809158
+        },
+        {
+          "actual_trees": 385,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_005",
+          "maximum_tree_leaves": 42,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_005-7a519c0b5715a0f0.lgb",
+            "sha256": "7a519c0b5715a0f03d7415e9f5a4b820b43462064ffa7545bff86f2c821080fe"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_005\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_005\\stdout.log",
+            "sha256": "6f22f4841bb08a5bd89a0c499e5622f6e691f1d39712b6340e69117d0752ff99"
+          },
+          "validation_roc_auc": 0.9934119847472516
+        },
+        {
+          "actual_trees": 402,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_006",
+          "maximum_tree_leaves": 104,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_006-ee3db551fef65751.lgb",
+            "sha256": "ee3db551fef65751070d3ec64bfc08d4f11c86568a9addc590c0005986670e95"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_006\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_006\\stdout.log",
+            "sha256": "e89a38092d59adf6f4e3a8096cf389a1cab46ad53f0cae9f49f010f51acaaeb6"
+          },
+          "validation_roc_auc": 0.9934389819375448
+        },
+        {
+          "actual_trees": 1759,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_007",
+          "maximum_tree_leaves": 414,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_007-ee6047b6f599cf66.lgb",
+            "sha256": "ee6047b6f599cf66f7a365a312c542ed3a16123b94121a833eba1ebc82054db5"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:414>256"
+          ],
+          "validation_roc_auc": 0.991978211348518
+        },
+        {
+          "actual_trees": 1210,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_008",
+          "maximum_tree_leaves": 40,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_008-dcda0570ee3271ad.lgb",
+            "sha256": "dcda0570ee3271ad0933bef8d67908361036fa44f290002cffff7fe1d658efe7"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_008\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_008\\stdout.log",
+            "sha256": "2ac67c1e750e89bdc00249558deb48f1fad941eac9ca538838b6bcd8a1e46aab"
+          },
+          "validation_roc_auc": 0.9911167513523254
+        },
+        {
+          "actual_trees": 2490,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_009",
+          "maximum_tree_leaves": 130,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_009-16a95fef0b776999.lgb",
+            "sha256": "16a95fef0b7769990c011ef1c2dd7d8a401f39dfd575eeb723ab3282c924add9"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_009\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_009\\stdout.log",
+            "sha256": "37ccee0135536ddb0edc7122fa9fd498b89c413cc992b8cab566d7b6c8b726ce"
+          },
+          "validation_roc_auc": 0.993120104394683
+        },
+        {
+          "actual_trees": 182,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_010",
+          "maximum_tree_leaves": 250,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_010-8411ac522ff4b144.lgb",
+            "sha256": "8411ac522ff4b14422b5956cbe4170fd394706f417aec82b1f8c14407a623f77"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_010\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_010\\stdout.log",
+            "sha256": "aca09502445355acdb8e936d8fa7b2e042ee6efdcb1143f6e539b56d2b0060d4"
+          },
+          "validation_roc_auc": 0.9935048207527452
+        },
+        {
+          "actual_trees": 893,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_011",
+          "maximum_tree_leaves": 789,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_011-28308b9da3fd7a70.lgb",
+            "sha256": "28308b9da3fd7a707f7c55d6d8d6ccde110701fd7654972fc7759dec6a78a827"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:789>256"
+          ],
+          "validation_roc_auc": 0.9937315898092717
+        },
+        {
+          "actual_trees": 1384,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_012",
+          "maximum_tree_leaves": 34,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_012-113143dbbae27ff3.lgb",
+            "sha256": "113143dbbae27ff3a6c5ad619eb3824b7dcceb0b1b438e2044a6bee4cbb56380"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_012\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_012\\stdout.log",
+            "sha256": "9688e876d2dc580ab37fff7332bfeecb6c0bacacedb7f8904ed44be6ed63de5c"
+          },
+          "validation_roc_auc": 0.9925749934229319
+        },
+        {
+          "actual_trees": 1702,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_013",
+          "maximum_tree_leaves": 22,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_013-11718bb35291e544.lgb",
+            "sha256": "11718bb35291e5443aeaa9b329cd43e63eb77cde9a8d4e4b89d36a1445375834"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_013\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_013\\stdout.log",
+            "sha256": "472329199c3ee278847beab4890e0e38361ede05d2e4331e2c14d770c7a01db0"
+          },
+          "validation_roc_auc": 0.9933385208860721
+        },
+        {
+          "actual_trees": 2138,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_014",
+          "maximum_tree_leaves": 608,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_014-410aa6d8e8bdfde7.lgb",
+            "sha256": "410aa6d8e8bdfde71893e8d2ac38c20ea2f4ef2b272cd3919eed17ff2704fd66"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:608>256"
+          ],
+          "validation_roc_auc": 0.992348026356604
+        },
+        {
+          "actual_trees": 1165,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_015",
+          "maximum_tree_leaves": 939,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_015-b3ce318f1e7d2efa.lgb",
+            "sha256": "b3ce318f1e7d2efac18d69514a46c7abd71602f58125637e8586086c2e200f83"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:939>256"
+          ],
+          "validation_roc_auc": 0.9937439009018164
+        },
+        {
+          "actual_trees": 72,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_016",
+          "maximum_tree_leaves": 39,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_016-9b1dcd3bbad0dede.lgb",
+            "sha256": "9b1dcd3bbad0dede389d7295ada28330c504d689e2df6235dbe5ccad6cdf17a7"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_016\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_016\\stdout.log",
+            "sha256": "36e38764fc94d23fb2e813fe695fba8241c8b8c7b17859a22f08f4cad70cc1d1"
+          },
+          "validation_roc_auc": 0.9924703368997387
+        },
+        {
+          "actual_trees": 1459,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_017",
+          "maximum_tree_leaves": 71,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_017-2c7c75acecf6487b.lgb",
+            "sha256": "2c7c75acecf6487bf67b4b2529f576a12b2dac8ccbb74a783fa182f908583896"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_017\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_017\\stdout.log",
+            "sha256": "ed5e4ea4a8f604524a3bd85c7576a8b495d41dc9d3d388e4c32b3216964ef9ab"
+          },
+          "validation_roc_auc": 0.9919970478651953
+        },
+        {
+          "actual_trees": 93,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_018",
+          "maximum_tree_leaves": 975,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_018-abbd5c0b17adc139.lgb",
+            "sha256": "abbd5c0b17adc1396b7da33cad079036d5d42eb8ed031cde22cdd59a1cbbda73"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:975>256"
+          ],
+          "validation_roc_auc": 0.9927940456592739
+        },
+        {
+          "actual_trees": 881,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_019",
+          "maximum_tree_leaves": 59,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_019-062cf3d0bd506881.lgb",
+            "sha256": "062cf3d0bd5068813b14df3108a03c7fcfb20a9bfc8b7ae516d6524e88d7f124"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_019\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_019\\stdout.log",
+            "sha256": "a52ce3af44e7f8e7bac1b7764d0b42b1cdcbb4cd6d15d13d9e477e1f05de5c20"
+          },
+          "validation_roc_auc": 0.9940596169623422
+        },
+        {
+          "actual_trees": 1391,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_020",
+          "maximum_tree_leaves": 23,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_020-8c35bde9817cf4c8.lgb",
+            "sha256": "8c35bde9817cf4c82b5791f1492bd8a1e206c8236d56599b809ff94dea7a1182"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_020\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_020\\stdout.log",
+            "sha256": "e7fcb50c77e12b41c3231cd139f50ad7994465f27563b759a587176c994ad05a"
+          },
+          "validation_roc_auc": 0.9903577664342658
+        },
+        {
+          "actual_trees": 624,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_021",
+          "maximum_tree_leaves": 77,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_021-157029b84b48c09e.lgb",
+            "sha256": "157029b84b48c09e6759ef2aa2d8d1cf104a1845233c1714831264fd3568d6e6"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_021\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_021\\stdout.log",
+            "sha256": "a60a56352387e86dccc4582adc724e447ff428884a88c852f35612c21d4ada8e"
+          },
+          "validation_roc_auc": 0.9931685361459868
+        },
+        {
+          "actual_trees": 1031,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_022",
+          "maximum_tree_leaves": 96,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_022-8925a4537a646998.lgb",
+            "sha256": "8925a4537a64699880a14bced9f16ca7e561e6e0c613bb9ee93053984686f2f9"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_022\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_022\\stdout.log",
+            "sha256": "f4d1533834ebefdc0a68bb91103ca73d8f42ee03d3c548033ef6fa1d49ed7f35"
+          },
+          "validation_roc_auc": 0.9935834339811777
+        },
+        {
+          "actual_trees": 1005,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_023",
+          "maximum_tree_leaves": 10,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_023-04c18a4faffe58a1.lgb",
+            "sha256": "04c18a4faffe58a13beb1260e88fc8b24dd58ba39ecc6319d94afd789e976f86"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_023\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_023\\stdout.log",
+            "sha256": "b43f44ff0bd452b190fcb4ee5777493df453e7b888e468d62d2a6e15eff6c62c"
+          },
+          "validation_roc_auc": 0.9912912463774675
+        },
+        {
+          "actual_trees": 359,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_024",
+          "maximum_tree_leaves": 59,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_024-7683cdfe7762bcc9.lgb",
+            "sha256": "7683cdfe7762bcc95bd4083a5f9ee328006a5e17e5dc6bdc0bc122a527c12fa8"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_024\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_024\\stdout.log",
+            "sha256": "0186d1e963b8f22852e5144686358929ddaec54531b7b7f7cee0b29aad5efa4c"
+          },
+          "validation_roc_auc": 0.993751067076767
+        },
+        {
+          "actual_trees": 310,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_025",
+          "maximum_tree_leaves": 126,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_025-6815a8201610c9a8.lgb",
+            "sha256": "6815a8201610c9a8cf2ea51a665beabfca2f59d1a0d54a133ab6b0cd79dc0b25"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_025\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_025\\stdout.log",
+            "sha256": "fce8bfd8478e0a976f62c942df7bd95ff8b4c438d42251b8ac6ea4382309912d"
+          },
+          "validation_roc_auc": 0.9938357140420716
+        },
+        {
+          "actual_trees": 137,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_026",
+          "maximum_tree_leaves": 99,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_026-63dfa9a4c890c555.lgb",
+            "sha256": "63dfa9a4c890c5557de74f74677d71791c53c7b71a30be160d136b3625843edb"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_026\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_026\\stdout.log",
+            "sha256": "dc6e0bc0f81bf08963c271ffe85a8732e3519dc0065ec64fbd8ef3ee7ed7a894"
+          },
+          "validation_roc_auc": 0.9942268773990355
+        },
+        {
+          "actual_trees": 1322,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_027",
+          "maximum_tree_leaves": 4,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_027-c75dde46a1d7936b.lgb",
+            "sha256": "c75dde46a1d7936b89b99f42d1367eb3bd746a7f501257118034446854380ea1"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_027\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_027\\stdout.log",
+            "sha256": "c0d019b7d74b75f25bdbd72b3be550d2a2e3576fe9d330b2c4cca2e95bd779a4"
+          },
+          "validation_roc_auc": 0.9847017282525743
+        },
+        {
+          "actual_trees": 46,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_028",
+          "maximum_tree_leaves": 135,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_028-840ad602ccb4c4a1.lgb",
+            "sha256": "840ad602ccb4c4a15fe71d51de69b86ba7d9db02cf20c1d9ec628544754608b8"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_028\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_028\\stdout.log",
+            "sha256": "d542dfc03e1ac84abb765c442b9ecf629e2443e01411b1ef6ba43a70f23776e6"
+          },
+          "validation_roc_auc": 0.9931053137299609
+        },
+        {
+          "actual_trees": 238,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_029",
+          "maximum_tree_leaves": 86,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_029-7feefc41e05cb46d.lgb",
+            "sha256": "7feefc41e05cb46d191ac3ca48a11ecbea8187a4baf377632048164bedb3d0f2"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_029\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_029\\stdout.log",
+            "sha256": "03bafba6ed3f9fd48f9932b80d92b16e6b35ed47372f6ddc9abd1589a4b78b99"
+          },
+          "validation_roc_auc": 0.9941587536842159
+        },
+        {
+          "actual_trees": 891,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_030",
+          "maximum_tree_leaves": 4,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_030-aadd133429764222.lgb",
+            "sha256": "aadd133429764222b28bad3fb052e10e85e301efb1c9baeccffbdfdc1bba47a1"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_030\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_030\\stdout.log",
+            "sha256": "ff6047486fb2a54b588faf1f0fe0151f37397569457692b2d6467fd895c08e4c"
+          },
+          "validation_roc_auc": 0.9899325659711175
+        },
+        {
+          "actual_trees": 59,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_031",
+          "maximum_tree_leaves": 416,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_031-c062204af2f460c4.lgb",
+            "sha256": "c062204af2f460c44b62cd6b5f7ca4d1176133e76ef41a8ad9f4ade21b976a3f"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:416>256"
+          ],
+          "validation_roc_auc": 0.9933192160428421
+        },
+        {
+          "actual_trees": 159,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_032",
+          "maximum_tree_leaves": 102,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_032-8aa9daa9a7381ed1.lgb",
+            "sha256": "8aa9daa9a7381ed1f0ed8587533d6be027b097259c92dbe9f35bb3a2f60b219a"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_032\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_032\\stdout.log",
+            "sha256": "7cd2ad1188d1b31d143579b59ad14e3f7d49c57f8ce0fa13cef5b1bf94666f4e"
+          },
+          "validation_roc_auc": 0.9938837703534428
+        },
+        {
+          "actual_trees": 56,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_033",
+          "maximum_tree_leaves": 74,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_033-b7c29592a4ffabeb.lgb",
+            "sha256": "b7c29592a4ffabebb5eb187743c2cf9f322a6f6f9f096695166bcb16a50740c9"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_033\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_033\\stdout.log",
+            "sha256": "aae2b880cf39a4b90a5190db01b07b272d4dfcbc71c59c9a4d59a20a13a768e2"
+          },
+          "validation_roc_auc": 0.9923507272992895
+        },
+        {
+          "actual_trees": 45,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_034",
+          "maximum_tree_leaves": 348,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_034-d7e7d811f52c6eec.lgb",
+            "sha256": "d7e7d811f52c6eec19c2d5af098b2994dc56ff873fa04982af83e5fd72760d3e"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:348>256"
+          ],
+          "validation_roc_auc": 0.9932913328143081
+        },
+        {
+          "actual_trees": 227,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_035",
+          "maximum_tree_leaves": 175,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_035-0034c3f0f7420490.lgb",
+            "sha256": "0034c3f0f7420490af71206029782926c145af69b814a873f3f3cb8437ecdde5"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_035\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_035\\stdout.log",
+            "sha256": "f5b16d1b1311c4c7d30eba3024ebd5c6db88ffe4ce089d3afe6240315838a2bb"
+          },
+          "validation_roc_auc": 0.9937064008489352
+        },
+        {
+          "actual_trees": 494,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_036",
+          "maximum_tree_leaves": 209,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_036-0ce7f38e1262508a.lgb",
+            "sha256": "0ce7f38e1262508af141c7ade7f13eb29297d52566b02bdb962f59e5c535252c"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_036\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_036\\stdout.log",
+            "sha256": "deffdf69c418744b4b5135b4ba17f5690fd3c4f3c53206531ee1d7a8dcda6ceb"
+          },
+          "validation_roc_auc": 0.993487997150314
+        },
+        {
+          "actual_trees": 551,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_037",
+          "maximum_tree_leaves": 8,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_037-e3e26f0f7413c180.lgb",
+            "sha256": "e3e26f0f7413c18059e04404efaa3e626a81eb9abddc7c423aba9280589e9794"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_037\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_037\\stdout.log",
+            "sha256": "f2fc775cff6e5fa4e151e4256feab53730b7fd421f0c705fbf5e04200556cf49"
+          },
+          "validation_roc_auc": 0.9930451104072004
+        },
+        {
+          "actual_trees": 2241,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_038",
+          "maximum_tree_leaves": 136,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_038-6783c6c318065771.lgb",
+            "sha256": "6783c6c3180657715c2a254376e0bff59463a1f1a8c81379ead49426f5eb552e"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_038\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_038\\stdout.log",
+            "sha256": "37c4ab4fb460e27cb28e11c808d28cb5d8eff73d2cb300e182aa592d53f9a5dd"
+          },
+          "validation_roc_auc": 0.9938130697301673
+        },
+        {
+          "actual_trees": 457,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_039",
+          "maximum_tree_leaves": 53,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_039-a03f944b5e7646f5.lgb",
+            "sha256": "a03f944b5e7646f54a53d860f49cc2acaa1c78843646f67773c9443cfa9645dd"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_039\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_039\\stdout.log",
+            "sha256": "a3700acdc3b60dcad3324a7e6044879caefde3fca8a158b12e843c03444f1ba9"
+          },
+          "validation_roc_auc": 0.9932886630192321
+        },
+        {
+          "actual_trees": 48,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_040",
+          "maximum_tree_leaves": 113,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_040-54c515d095db37c1.lgb",
+            "sha256": "54c515d095db37c142b9ef57882e806453a91dacc3289e872abb7bf9c5a60bca"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_040\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_040\\stdout.log",
+            "sha256": "3e197a96038e8b7d6e65a14f06a78b8b88df53d8ce53f764bedb04e87bcc8b96"
+          },
+          "validation_roc_auc": 0.991578789425452
+        },
+        {
+          "actual_trees": 384,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_041",
+          "maximum_tree_leaves": 28,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_041-a7d98a8610cbf65d.lgb",
+            "sha256": "a7d98a8610cbf65db78263021a194c5b6f14d589a711dc31d0d22fbe78e031db"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_041\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_041\\stdout.log",
+            "sha256": "1d0433c781674315f5eb04d5fc1a0b21766b39c242f3e064750706037b71c01b"
+          },
+          "validation_roc_auc": 0.9939227599294937
+        },
+        {
+          "actual_trees": 137,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_042",
+          "maximum_tree_leaves": 14,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_042-2bd601eb9d097c8d.lgb",
+            "sha256": "2bd601eb9d097c8d95bcf615de93e3098741cc0b4407464b0c38b4dde624607d"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_042\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_042\\stdout.log",
+            "sha256": "16c08c918ff16c5a4d3eefb94439f7a66070f94383debc680223fc06128e581f"
+          },
+          "validation_roc_auc": 0.9924108933561603
+        },
+        {
+          "actual_trees": 1304,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_043",
+          "maximum_tree_leaves": 47,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_043-0cf1ad4c2eddefb4.lgb",
+            "sha256": "0cf1ad4c2eddefb42c3126783f84c06bcd06a0f22818a2de2cad940727267457"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_043\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_043\\stdout.log",
+            "sha256": "76e12456adfd5c8eb41172d883469ccae29f546ca85980ebccd57b2ae6ee9812"
+          },
+          "validation_roc_auc": 0.9937358609251861
+        },
+        {
+          "actual_trees": 83,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_044",
+          "maximum_tree_leaves": 735,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_044-0aaccb164f77dc55.lgb",
+            "sha256": "0aaccb164f77dc55c74a35c0a4792d51cb22eee6be9fab08dbc9ae2edd1d6ff0"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:735>256"
+          ],
+          "validation_roc_auc": 0.993502803945048
+        },
+        {
+          "actual_trees": 389,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_045",
+          "maximum_tree_leaves": 76,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_045-d6f2ed58d90ee4bf.lgb",
+            "sha256": "d6f2ed58d90ee4bf19ce104aedd91f7d7f08b56fc40df394204d8c3a9fbbe639"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_045\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_045\\stdout.log",
+            "sha256": "69a54313ace87ac41d67d8d78e0d2fc4145faeb34ad227a567857f73d2ee9e3d"
+          },
+          "validation_roc_auc": 0.9934269756466041
+        },
+        {
+          "actual_trees": 1428,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_046",
+          "maximum_tree_leaves": 200,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_046-e8784fdd4e13dc36.lgb",
+            "sha256": "e8784fdd4e13dc366a9a96e0a3afb3f06fe43a9c0de04509b60df0261999a86e"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_046\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_046\\stdout.log",
+            "sha256": "574dd95af846cd79c253ef64118d0bd6f3a779ff358f66dc4323623cb6abc165"
+          },
+          "validation_roc_auc": 0.9929456794516616
+        },
+        {
+          "actual_trees": 144,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_047",
+          "maximum_tree_leaves": 259,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_047-1f2f896f3eda04df.lgb",
+            "sha256": "1f2f896f3eda04dfd088e1de922f9f9122b5d202b9b543e342536af84dcec144"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:259>256"
+          ],
+          "validation_roc_auc": 0.9939355315616896
+        },
+        {
+          "actual_trees": 418,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_048",
+          "maximum_tree_leaves": 48,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_048-ad38bdf7d2635954.lgb",
+            "sha256": "ad38bdf7d263595499564c13c3ebb7ca78ebe25021a5926403c992a5531270f8"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_048\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_048\\stdout.log",
+            "sha256": "f9a0b70eafa253d07ed0b32fa06e93dbea92b797cac184ad908762389fbf058a"
+          },
+          "validation_roc_auc": 0.9933880389102475
+        },
+        {
+          "actual_trees": 273,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_049",
+          "maximum_tree_leaves": 481,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_049-4027205aa6bd3031.lgb",
+            "sha256": "4027205aa6bd3031b0cc6b75ed0172360d1e7aa81de078bf3e1268ded751fd4a"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:481>256"
+          ],
+          "validation_roc_auc": 0.993623176661923
+        },
+        {
+          "actual_trees": 1281,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_050",
+          "maximum_tree_leaves": 33,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_050-d1e32bdc64aa2999.lgb",
+            "sha256": "d1e32bdc64aa2999cddd8ee9ee02c417b16e5d6a0433cbc932358a16909aea9d"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_050\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\trial_050\\stdout.log",
+            "sha256": "dcbf08f0c389bf539d6e13c741dd0c97c85a2884c05423378f475942307f57a5"
+          },
+          "validation_roc_auc": 0.9935801568077216
+        }
+      ],
+      "excluded_candidates": [
+        {
+          "actual_trees": 1759,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_007",
+          "maximum_tree_leaves": 414,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_007-ee6047b6f599cf66.lgb",
+            "sha256": "ee6047b6f599cf66f7a365a312c542ed3a16123b94121a833eba1ebc82054db5"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:414>256"
+          ],
+          "validation_roc_auc": 0.991978211348518
+        },
+        {
+          "actual_trees": 893,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_011",
+          "maximum_tree_leaves": 789,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_011-28308b9da3fd7a70.lgb",
+            "sha256": "28308b9da3fd7a707f7c55d6d8d6ccde110701fd7654972fc7759dec6a78a827"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:789>256"
+          ],
+          "validation_roc_auc": 0.9937315898092717
+        },
+        {
+          "actual_trees": 2138,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_014",
+          "maximum_tree_leaves": 608,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_014-410aa6d8e8bdfde7.lgb",
+            "sha256": "410aa6d8e8bdfde71893e8d2ac38c20ea2f4ef2b272cd3919eed17ff2704fd66"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:608>256"
+          ],
+          "validation_roc_auc": 0.992348026356604
+        },
+        {
+          "actual_trees": 1165,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_015",
+          "maximum_tree_leaves": 939,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_015-b3ce318f1e7d2efa.lgb",
+            "sha256": "b3ce318f1e7d2efac18d69514a46c7abd71602f58125637e8586086c2e200f83"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:939>256"
+          ],
+          "validation_roc_auc": 0.9937439009018164
+        },
+        {
+          "actual_trees": 93,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_018",
+          "maximum_tree_leaves": 975,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_018-abbd5c0b17adc139.lgb",
+            "sha256": "abbd5c0b17adc1396b7da33cad079036d5d42eb8ed031cde22cdd59a1cbbda73"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:975>256"
+          ],
+          "validation_roc_auc": 0.9927940456592739
+        },
+        {
+          "actual_trees": 59,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_031",
+          "maximum_tree_leaves": 416,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_031-c062204af2f460c4.lgb",
+            "sha256": "c062204af2f460c44b62cd6b5f7ca4d1176133e76ef41a8ad9f4ade21b976a3f"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:416>256"
+          ],
+          "validation_roc_auc": 0.9933192160428421
+        },
+        {
+          "actual_trees": 45,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_034",
+          "maximum_tree_leaves": 348,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_034-d7e7d811f52c6eec.lgb",
+            "sha256": "d7e7d811f52c6eec19c2d5af098b2994dc56ff873fa04982af83e5fd72760d3e"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:348>256"
+          ],
+          "validation_roc_auc": 0.9932913328143081
+        },
+        {
+          "actual_trees": 83,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_044",
+          "maximum_tree_leaves": 735,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_044-0aaccb164f77dc55.lgb",
+            "sha256": "0aaccb164f77dc55c74a35c0a4792d51cb22eee6be9fab08dbc9ae2edd1d6ff0"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:735>256"
+          ],
+          "validation_roc_auc": 0.993502803945048
+        },
+        {
+          "actual_trees": 144,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_047",
+          "maximum_tree_leaves": 259,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_047-1f2f896f3eda04df.lgb",
+            "sha256": "1f2f896f3eda04dfd088e1de922f9f9122b5d202b9b543e342536af84dcec144"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:259>256"
+          ],
+          "validation_roc_auc": 0.9939355315616896
+        },
+        {
+          "actual_trees": 273,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_049",
+          "maximum_tree_leaves": 481,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_049-4027205aa6bd3031.lgb",
+            "sha256": "4027205aa6bd3031b0cc6b75ed0172360d1e7aa81de078bf3e1268ded751fd4a"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:481>256"
+          ],
+          "validation_roc_auc": 0.993623176661923
+        }
+      ],
+      "oracle": {
+        "command": [
+          "C:/Users/serge/.local/bin/uv.exe",
+          "run",
+          "--no-project",
+          "cargo",
+          "test",
+          "--manifest-path",
+          "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\Cargo.toml",
+          "--lib",
+          "--no-default-features",
+          "--locked",
+          "release_bundle_uses_native_fast_plans",
+          "--no-run",
+          "--message-format=json"
+        ],
+        "compile_stderr": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\oracle\\compile.stderr.log",
+          "sha256": "bf73939b1a894cc7668e47673874a1e4110b1801915a82dc412d278c0c4a0741"
+        },
+        "compile_stdout": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\oracle\\compile.stdout.jsonl",
+          "sha256": "e0cda865131c0ffb77467d5f0ea74548840eaa6932fb62ab11ea33885514138d"
+        },
+        "fast_plan_source": {
+          "path": "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\src\\lightgbm_booster\\fast.rs",
+          "sha256": "5606600bcca355df3291a3517716fe0ea1a3fa32517f7cea8ceee2d47edb8507"
+        },
+        "maximum_tree_leaves": 256,
+        "release_test_source": {
+          "path": "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\src\\lightgbm_booster\\fast_tests.rs",
+          "sha256": "54d2e82309c11df4bf47d38d2560d82b845d42ec024257e919df063f380f935b"
+        },
+        "resources": {
+          "allocated_logical_cpus": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11
+          ],
+          "available_logical_cpus": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23
+          ],
+          "compute_threads": 12
+        },
+        "rust_sources": {
+          "s2and_rust/Cargo.lock": "51b31c6112505e1b0898ebdb8f27cca9e1d305c8ed814cd1cdd9643590473a8a",
+          "s2and_rust/Cargo.toml": "876a305039738cc93c3f7680fd421b817a60459e46ae8dbe201da7f36de514d9",
+          "s2and_rust/build.rs": "d64b7d7107f33c71624b12d4f6a30ecff0bd38ac16ce8fb3dca86b00c4507f83",
+          "s2and_rust/src/arrow_batch_lookup.rs": "fc792ffc1cc90372cb95f8759a5611ffc5a57a7a55c38a87391de81ccda4d3c2",
+          "s2and_rust/src/arrow_dataset.rs": "e22fb0fa060698722573e43f1a8c13787d52763226705f5e5014d950b2fe12ef",
+          "s2and_rust/src/artifact_hash.rs": "9d6e669f99c00a0a50abec40d5117385ed5e155d66257eea3d6e07138997de0a",
+          "s2and_rust/src/coauthors.rs": "999583a6e4ac53148984255cbfd6ffe39b6db179dcaa1911c4f16b624d039a86",
+          "s2and_rust/src/constraints.rs": "418662492cc6366d196e5c4e7386256e886e33a1d2a4378a3c38ebc16b362f0f",
+          "s2and_rust/src/feature_schema.rs": "16a16d6b2f5c827bcd8b4f501d81c39d36c91815e3745c96bda3f2949b01a5e8",
+          "s2and_rust/src/features.rs": "022e57e39ee7edafc1fdce228c7df97309ca8218c94165cd96d556efe2a5bf03",
+          "s2and_rust/src/ingest_dataset.rs": "118a80e39fb6468492188ee84123eea880b956728af545075cb1077f35324a9b",
+          "s2and_rust/src/language_detection.rs": "ce7758a12538bff64f3d6503ef13bd4d8e63066ac3cebf2556c10fc5c4778dd3",
+          "s2and_rust/src/lib.rs": "dfd2cc7de7ae2a290d9c69c308358c7ec3c3a28d619bf299ad4c77de2725d2f5",
+          "s2and_rust/src/lightgbm_booster.rs": "29f91a059475371a5529a75522bdc6a89d4dba388fec378b9fd7e033327c2134",
+          "s2and_rust/src/lightgbm_booster/fast.rs": "5606600bcca355df3291a3517716fe0ea1a3fa32517f7cea8ceee2d47edb8507",
+          "s2and_rust/src/lightgbm_booster/fast_tests.rs": "54d2e82309c11df4bf47d38d2560d82b845d42ec024257e919df063f380f935b",
+          "s2and_rust/src/name_counts.rs": "ed6c66978afb9e32675f6586fcfd62bc2db82c05b67617c32395ac9429ad2278",
+          "s2and_rust/src/name_normalization.rs": "1edadcc7a4b6805c817004d72f4bda55bda489ba3084a51722ff09a0a28c8232",
+          "s2and_rust/src/orcid.rs": "70d122de3578e6662f85fb8ee667312c2f235e9beaee217b5cdb658b862f0585",
+          "s2and_rust/src/pair_indexing.rs": "79293900a410c3b7a5deb7545db163bb6c07d50c5e1a72da88fea5c0be1f0657",
+          "s2and_rust/src/promoted_linker.rs": "ac286a8e2e4b9859fb5169dcfcf7fe9d2aa714be0489e6b3f0e8ac03c1158d7f",
+          "s2and_rust/src/raw_arrow/arrow_io.rs": "ace338a24cc0a25a652075f18ad193d192dbdd0a3d5a2c6176862ae8c2cb9202",
+          "s2and_rust/src/raw_arrow/mod.rs": "6ceca56348c1a2b03e84f1456099a1069a7356ff66909855708e8c45bd82273e",
+          "s2and_rust/src/raw_arrow/readers.rs": "db03fde57936f3ece976dfe5b6173ffc054a882fecaa360a935c8c4f6e97f023",
+          "s2and_rust/src/raw_arrow_authors.rs": "c6878e71dcb1416afc287b978fccac567e0a4da5d7d1e540c01d297eba8b16dd",
+          "s2and_rust/src/raw_arrow_features.rs": "28d3b5ff65489330084d233e8e709e9885a9dfbd3e45ccf262dcf52ad5bce4df",
+          "s2and_rust/src/raw_candidate_planner.rs": "d4b339c1bdb9b59c9450b99b3ee95995e8fa64457952a64c0b5b446255cc0992",
+          "s2and_rust/src/rayon_pool.rs": "cb8b3a675c9b1c5f54cdb8c43150e4803ee84b2f977fcbc5c572e0de17c775f2",
+          "s2and_rust/src/retrieval.rs": "da898c2714fcf1dc9184e3161ac6b50d3716d9e1d4b0ff1736ac569020f7388b",
+          "s2and_rust/src/retrieval_overlap.rs": "02d0b18baef6c4b94d1aaa0af5cc44a23bd1d31d44054340238df97bdbddfc5e",
+          "s2and_rust/src/rust_featurizer.rs": "e18ce819a0e605c069d4731d1a08bbf7d09da270248e77911140df1739a37041",
+          "s2and_rust/src/subblocking.rs": "fa890b653c9f1d7286110fa1f54c3bf78c74528faac028f385a6a0d366330269",
+          "s2and_rust/src/text_compat.rs": "0195e53d3f4022795efca714c471e3483ab03fe3fb860a15bb66e6683fb0459a",
+          "s2and_rust/vendor/cld2/Cargo.toml": "c09a087e09126af03d5afa4e82e8b535e7c5d056bb31e8a6608ce86ada4d592f",
+          "s2and_rust/vendor/cld2/src/detection.rs": "866f268c4241f1f003162e4d37a4bc8e57ddf728377104093ae9fc8000f93df1",
+          "s2and_rust/vendor/cld2/src/language.rs": "a1363de06ad45f28a80cc0fa1399e0604897597685b88844514ed7ed0548e2ac",
+          "s2and_rust/vendor/cld2/src/lib.rs": "b6209fad5894a6e2a8954af2dc1dfe431b049ca2b323d7b1629755b2f1b04d88",
+          "s2and_rust/vendor/cld2/src/types.rs": "d2d8d0479d0267998329ed5c0ed29bd5d4981688e4b06fbd94ad2375e4a992aa"
+        },
+        "source_revision": "a41b3bf3c54c130c5969ef9d6d484398d6c7d1fb",
+        "test_binary": {
+          "path": "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+          "sha256": "6a5a71300c3369ef64ef7a1905db8f7ba51ce980996a3515fc3e96c59aaab888"
+        },
+        "test_list_stderr": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\oracle\\test_list.stderr.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "test_list_stdout": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\oracle\\test_list.stdout.log",
+          "sha256": "f9d8286cb3f15aa4ed636a371d2a64fa0d827f917e83c4abd3e2165f93cb575b"
+        },
+        "test_name": "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans"
+      },
+      "policy": "validation_auc_subject_to_existing_native_fast_plan_release_gate",
+      "raw_checkpoint": {
+        "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\search_checkpoint.pickle",
+        "sha256": "c5095f913e7e704cfafb6da7266bc9e1c8bc2cb0f6b073bbe2be8f3ae82c85f4"
+      },
+      "raw_search_run": {
+        "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\run.json",
+        "sha256": "06595ca8575e5957ae9f5ed3255d1664b938beec0416fb284620dd5ea7ac6d02"
+      },
+      "raw_trial_rows": {
+        "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\trials.jsonl",
+        "sha256": "a992821a921921c1bceac4f793b706382d6c0e67c26ca82de54e9012bb095318"
+      },
+      "raw_unconstrained_winner": {
+        "label": "trial_026",
+        "model": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_026-63dfa9a4c890c555.lgb",
+          "sha256": "63dfa9a4c890c5557de74f74677d71791c53c7b71a30be160d136b3625843edb"
+        },
+        "validation_roc_auc": 0.9942268773990355
+      },
+      "rule": "Select the highest validation AUC among models that pass the existing native fast-plan release test.",
+      "selected": {
+        "label": "trial_026",
+        "model": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_main\\models\\trial_026-63dfa9a4c890c555.lgb",
+          "sha256": "63dfa9a4c890c5557de74f74677d71791c53c7b71a30be160d136b3625843edb"
+        },
+        "validation_roc_auc": 0.9942268773990355
+      },
+      "tie_rule": "H13 wins ties; otherwise retain the earliest eligible trial."
+    },
+    "nameless": {
+      "candidates": [
+        {
+          "actual_trees": 238,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "H13_incumbent",
+          "maximum_tree_leaves": 56,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\H13_incumbent-09a0fe45c629b0f5.lgb",
+            "sha256": "09a0fe45c629b0f5de981e9a33daff320438c307c9bdf7894cc5bbe0f33d2b47"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\H13_incumbent\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\H13_incumbent\\stdout.log",
+            "sha256": "0e987672d2169970383dd2c93c1c35df1e9e36719d869d9564dba8ec38865da4"
+          },
+          "validation_roc_auc": 0.9746198751054512
+        },
+        {
+          "actual_trees": 2152,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_001",
+          "maximum_tree_leaves": 192,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_001-a90c3f6016192012.lgb",
+            "sha256": "a90c3f6016192012a36bbd7e41261bfee3bc9c0570dd9f6d4c42e769073fc40c"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_001\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_001\\stdout.log",
+            "sha256": "630d91ae8e285ebe2742f6ceb09782b7e912d0cb8e5c520e394dcfbfffb16a4f"
+          },
+          "validation_roc_auc": 0.9732952763018702
+        },
+        {
+          "actual_trees": 1846,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_002",
+          "maximum_tree_leaves": 10,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_002-002cfa4a08120022.lgb",
+            "sha256": "002cfa4a0812002270d79eaa0008dbf3c195f21f242593f3b69c98296388b995"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_002\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_002\\stdout.log",
+            "sha256": "51666e173e92e8a0c66adb8a8ee0a1e306b114392903723c5d8d789ae5142c5d"
+          },
+          "validation_roc_auc": 0.9740214299711878
+        },
+        {
+          "actual_trees": 1859,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_003",
+          "maximum_tree_leaves": 16,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_003-49bc7702b6ab8bc8.lgb",
+            "sha256": "49bc7702b6ab8bc80af2e552fbd6ceb996927782351ef3762123985f1968378c"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_003\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_003\\stdout.log",
+            "sha256": "d5f81d7db7df7c3cc0829aef3202635ec3e7e6f3f3b8d6b52dbf3dd690df1ac7"
+          },
+          "validation_roc_auc": 0.9738847854095307
+        },
+        {
+          "actual_trees": 510,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_004",
+          "maximum_tree_leaves": 250,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_004-76ac7dc4277fe784.lgb",
+            "sha256": "76ac7dc4277fe784e30381257840248f7fab242a1088034fcbefacc4b16b3ad3"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_004\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_004\\stdout.log",
+            "sha256": "b960c049566a600ce23a56ff74ffd14dd49e3f0730cf6f4c947c2625e5d65108"
+          },
+          "validation_roc_auc": 0.8189708928028008
+        },
+        {
+          "actual_trees": 216,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_005",
+          "maximum_tree_leaves": 42,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_005-0a1135557b97df20.lgb",
+            "sha256": "0a1135557b97df20b8a40404f72cf6165d8d992bb91fa20d87bd719e09fd5ea7"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_005\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_005\\stdout.log",
+            "sha256": "a5c8131222104c2e622e0151191538c88a7c397db8e5b10ab5e3c993cd121756"
+          },
+          "validation_roc_auc": 0.9743517553728532
+        },
+        {
+          "actual_trees": 232,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_006",
+          "maximum_tree_leaves": 110,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_006-6b4c0160a806c8d0.lgb",
+            "sha256": "6b4c0160a806c8d032d8eb7d8cba5faa86912d49e9e7cb9985fc51ac461209e9"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_006\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_006\\stdout.log",
+            "sha256": "81bf062179b42da11d1e050662e56c02aad981622c19e1b2bf1eaa7b583d1c85"
+          },
+          "validation_roc_auc": 0.9741822261665528
+        },
+        {
+          "actual_trees": 1759,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_007",
+          "maximum_tree_leaves": 571,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_007-4144d06cd3a642d9.lgb",
+            "sha256": "4144d06cd3a642d99aad7c31e9dbeeadb39830546f19e1937600bc15a265e149"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:571>256"
+          ],
+          "validation_roc_auc": 0.9732755682083423
+        },
+        {
+          "actual_trees": 1210,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_008",
+          "maximum_tree_leaves": 40,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_008-02a3483b1a40c354.lgb",
+            "sha256": "02a3483b1a40c35401259e230bf6174b3c1c5bb5608d9ee22a9b01f8ab4b7856"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_008\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_008\\stdout.log",
+            "sha256": "c3b95747313aa9504bf44cf18160047bf732152b8923e0f29e00b37f3a46159e"
+          },
+          "validation_roc_auc": 0.9700210646497786
+        },
+        {
+          "actual_trees": 2490,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_009",
+          "maximum_tree_leaves": 130,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_009-0c3325306f9e1d7c.lgb",
+            "sha256": "0c3325306f9e1d7c8089ca3d108552892f5f8fc0708512088a8216c625060ca0"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_009\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_009\\stdout.log",
+            "sha256": "851d35093e15e14c63e6c3ed4931682f9f6f033ccf0893c956f9cdc97dff7522"
+          },
+          "validation_roc_auc": 0.9740664938872445
+        },
+        {
+          "actual_trees": 143,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_010",
+          "maximum_tree_leaves": 250,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_010-39c54660fc00b943.lgb",
+            "sha256": "39c54660fc00b943bdb94bfe926d10385f6d2a2397b1b8607456f679f68e6eaa"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_010\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_010\\stdout.log",
+            "sha256": "4fdcdeaff0d8a5c08e05d187c02d8478be40eeb22e91f93a9a4e3fd85722c20e"
+          },
+          "validation_roc_auc": 0.9742594266284241
+        },
+        {
+          "actual_trees": 719,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_011",
+          "maximum_tree_leaves": 598,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_011-c19be00e08d3307a.lgb",
+            "sha256": "c19be00e08d3307ac567ec033955928fa3e88a93f9819284fdd262d06d01bbb9"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:598>256"
+          ],
+          "validation_roc_auc": 0.9743029086908981
+        },
+        {
+          "actual_trees": 1384,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_012",
+          "maximum_tree_leaves": 34,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_012-d1d0143570ea36e0.lgb",
+            "sha256": "d1d0143570ea36e02d0fdfa1259639f1d277c1afb271902f9022330f63280c0b"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_012\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_012\\stdout.log",
+            "sha256": "4aa5545f39fe3f3671df433b8d7a7d2906adcad5e84a7df65b9c3681d3bc5b00"
+          },
+          "validation_roc_auc": 0.9733878286416371
+        },
+        {
+          "actual_trees": 826,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_013",
+          "maximum_tree_leaves": 22,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_013-d12e7bc80170ffc6.lgb",
+            "sha256": "d12e7bc80170ffc6c16e6d2d50693fa5b2f2a667c0a6807db30c601eea41a8c5"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_013\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_013\\stdout.log",
+            "sha256": "8adcf8f94ff0ddedea51c9516ae5aff6cccff3b4adb03c6fcc6943e09250519b"
+          },
+          "validation_roc_auc": 0.9744221211593297
+        },
+        {
+          "actual_trees": 2138,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_014",
+          "maximum_tree_leaves": 608,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_014-6908d667642b745e.lgb",
+            "sha256": "6908d667642b745e02669ded466588ba23e7b6779a5c57213427b755f094d13b"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:608>256"
+          ],
+          "validation_roc_auc": 0.9737975910147574
+        },
+        {
+          "actual_trees": 1092,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_015",
+          "maximum_tree_leaves": 879,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_015-5e21f0ce75254efe.lgb",
+            "sha256": "5e21f0ce75254efe00dab2e78a4f1ea02fca25d0f5952237fadbad6799bd5d47"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:879>256"
+          ],
+          "validation_roc_auc": 0.9744934558589358
+        },
+        {
+          "actual_trees": 36,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_016",
+          "maximum_tree_leaves": 39,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_016-fd090bd4051643e4.lgb",
+            "sha256": "fd090bd4051643e41db3f8e05defc15e213e0a2167408f4606bea89bc5547a48"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_016\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_016\\stdout.log",
+            "sha256": "2dc1ea9b3d3a328ffc9831d9c4895551fde344ffaeac14441f4944d7b6c0f025"
+          },
+          "validation_roc_auc": 0.9742006566518953
+        },
+        {
+          "actual_trees": 1237,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_017",
+          "maximum_tree_leaves": 71,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_017-892da4244f45f21b.lgb",
+            "sha256": "892da4244f45f21b8ef556b9862d4db9a235a31422389cdeea5efc1e8b9ab8f9"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_017\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_017\\stdout.log",
+            "sha256": "d502f5aafa91d11f3264d9b9f794b0b2efdf5baad12b989973b4c5b861eb1cc6"
+          },
+          "validation_roc_auc": 0.9712640161140643
+        },
+        {
+          "actual_trees": 63,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_018",
+          "maximum_tree_leaves": 975,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_018-d8852c79b4df647f.lgb",
+            "sha256": "d8852c79b4df647f15221e31574f2c438c5a97af1b01cfaf95fc3918e0597b4d"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:975>256"
+          ],
+          "validation_roc_auc": 0.9731471165803252
+        },
+        {
+          "actual_trees": 685,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_019",
+          "maximum_tree_leaves": 59,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_019-ea12759110836a6f.lgb",
+            "sha256": "ea12759110836a6fbe4c8107f23260fa770a0344b2fe3d0f6591b82cf39d7158"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_019\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_019\\stdout.log",
+            "sha256": "865f318893d7d53aad998c62a8b6d3e13f33df0ae7f04182f11df1edc28b6ee2"
+          },
+          "validation_roc_auc": 0.973970104273263
+        },
+        {
+          "actual_trees": 1391,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_020",
+          "maximum_tree_leaves": 23,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_020-f484a2014bbd9cb8.lgb",
+            "sha256": "f484a2014bbd9cb8f0c76729b186389492195fa738709853f6f4b08c06ab35bc"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_020\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_020\\stdout.log",
+            "sha256": "116367b47744be21a8f87abde435e5bbdf900865a101e79252d0c1c5323f1095"
+          },
+          "validation_roc_auc": 0.970572812287123
+        },
+        {
+          "actual_trees": 633,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_021",
+          "maximum_tree_leaves": 13,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_021-e91753b1c9b32efb.lgb",
+            "sha256": "e91753b1c9b32efba46f5933854d7538070f88eaa56a9fdc2a246b65aec0ef3a"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_021\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_021\\stdout.log",
+            "sha256": "c7002f4c77ba5b12cae31ecf8a9db13f35c0a445e7196416f1c0711cc2c972a9"
+          },
+          "validation_roc_auc": 0.9742621236776584
+        },
+        {
+          "actual_trees": 1761,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_022",
+          "maximum_tree_leaves": 8,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_022-4d53b968b329ff2c.lgb",
+            "sha256": "4d53b968b329ff2c3adaba0c82989bda69a242948a9aa3f7df2ec8f863a9225a"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_022\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_022\\stdout.log",
+            "sha256": "cf265a3b80b31a86db894630bbaa7eacbb1a8076a66ae95f59c27d3b538b1071"
+          },
+          "validation_roc_auc": 0.9742897571691114
+        },
+        {
+          "actual_trees": 1008,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_023",
+          "maximum_tree_leaves": 22,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_023-447535b54a22828e.lgb",
+            "sha256": "447535b54a22828e827528ac4374c8df7d20393d546b89a736b28f24afe9bab6"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_023\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_023\\stdout.log",
+            "sha256": "b326369f4f78f5e5b7aeb817e9172e3ff9efc59ed5e15646706e8ee3545ed455"
+          },
+          "validation_roc_auc": 0.9730208847756726
+        },
+        {
+          "actual_trees": 1233,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_024",
+          "maximum_tree_leaves": 103,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_024-246296542e5cf888.lgb",
+            "sha256": "246296542e5cf888ba3f4d72764a8c9d883c9a42699604381e9d68132c368133"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_024\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_024\\stdout.log",
+            "sha256": "d08148a7d80036fa3863c70dae3b58ab15f6e4ccc0300dbbbe3e6f5f1a3285e1"
+          },
+          "validation_roc_auc": 0.9745682362628123
+        },
+        {
+          "actual_trees": 1695,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_025",
+          "maximum_tree_leaves": 139,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_025-ed2279fc1e0201d6.lgb",
+            "sha256": "ed2279fc1e0201d6f674de662c4b5e22eca65ccfce0fedb05a4ef3cb24ad7ad3"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_025\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_025\\stdout.log",
+            "sha256": "8b4dde6ebb6cdfdc1804a8ec3a2b4778ad8b9ea20b9457cc087ebd91f97f229b"
+          },
+          "validation_roc_auc": 0.9739136425570605
+        },
+        {
+          "actual_trees": 1329,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_026",
+          "maximum_tree_leaves": 421,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_026-e37f50cb647d38df.lgb",
+            "sha256": "e37f50cb647d38df884a6fccc9e55f2f47cb4c8e18113fb7376f7e7e3b4880da"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:421>256"
+          ],
+          "validation_roc_auc": 0.9744179635097059
+        },
+        {
+          "actual_trees": 1016,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_027",
+          "maximum_tree_leaves": 100,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_027-f632cb263465bbae.lgb",
+            "sha256": "f632cb263465bbaecb9105f2b4daa6e4dcb4fa2d8889880be6649b1b594a25b0"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_027\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_027\\stdout.log",
+            "sha256": "29178a247e04b5dad4e7bed7e6b134035b9503a9d13c996ff979c90e901ad394"
+          },
+          "validation_roc_auc": 0.9744788264943329
+        },
+        {
+          "actual_trees": 273,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_028",
+          "maximum_tree_leaves": 375,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_028-1c09fbb41a0b66a1.lgb",
+            "sha256": "1c09fbb41a0b66a11de540de97f82b3cfb2761dd96f13e1332047f267280d953"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:375>256"
+          ],
+          "validation_roc_auc": 0.9744591662346335
+        },
+        {
+          "actual_trees": 778,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_029",
+          "maximum_tree_leaves": 183,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_029-5a840e966c04dc95.lgb",
+            "sha256": "5a840e966c04dc95932b7eeeb3c4bad405e9829bdde00981475f38c93fbb487d"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_029\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_029\\stdout.log",
+            "sha256": "bcce8289ff6f740979051a3581da10b9092d9c53cecd946c727c896232c38fcb"
+          },
+          "validation_roc_auc": 0.9745510494570094
+        },
+        {
+          "actual_trees": 1350,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_030",
+          "maximum_tree_leaves": 146,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_030-96a6fc9efe505dbe.lgb",
+            "sha256": "96a6fc9efe505dbeded16b95b50f03b3ba0272b84bccb71123dd5e5f41d29329"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_030\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_030\\stdout.log",
+            "sha256": "c5c1b1320eb0bfc3a0c0181f613c1b9cb9b389d15b58759f9567eb7f19d8b6d3"
+          },
+          "validation_roc_auc": 0.9714022380796457
+        },
+        {
+          "actual_trees": 797,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_031",
+          "maximum_tree_leaves": 79,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_031-fc28c96a9613c4bb.lgb",
+            "sha256": "fc28c96a9613c4bbc2deeca4b70310c07d5598f3c22ddd22721e2ff5490677f0"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_031\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_031\\stdout.log",
+            "sha256": "eda0e1c4ef271b9788bd730ece80dd519713ffe2184288f3578078261c778921"
+          },
+          "validation_roc_auc": 0.9745859153120823
+        },
+        {
+          "actual_trees": 105,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_032",
+          "maximum_tree_leaves": 86,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_032-164c97d4cff73f9a.lgb",
+            "sha256": "164c97d4cff73f9a2790bb3ec2c013f508772555f0e216245564797aaa2c03a4"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_032\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_032\\stdout.log",
+            "sha256": "18201077b9674639b8665a3028155b51bf7b31b340b660b6c6f8cfe59491aa2b"
+          },
+          "validation_roc_auc": 0.9743473201757831
+        },
+        {
+          "actual_trees": 1504,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_033",
+          "maximum_tree_leaves": 56,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_033-87c3eb5b203f9f9b.lgb",
+            "sha256": "87c3eb5b203f9f9ba6ab3209d3ec8ddbfbfe5a982118f6e2fa277ef52a592848"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_033\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_033\\stdout.log",
+            "sha256": "3f8deb501e741a330db9bc39a1fb3ee35517535a6d38161f936fe4f7c119a880"
+          },
+          "validation_roc_auc": 0.9741516286463577
+        },
+        {
+          "actual_trees": 1590,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_034",
+          "maximum_tree_leaves": 90,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_034-598ed563cc3800bf.lgb",
+            "sha256": "598ed563cc3800bf99f8aad7ba1d32d09db5456bbba55021fc602b5ec3e7e1a7"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_034\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_034\\stdout.log",
+            "sha256": "ad36bd2ab338c46928f5704328c86bc8f00e4ed9f6f7e0c0d194260344e99b16"
+          },
+          "validation_roc_auc": 0.9728461049723889
+        },
+        {
+          "actual_trees": 238,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_035",
+          "maximum_tree_leaves": 56,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_035-09a0fe45c629b0f5.lgb",
+            "sha256": "09a0fe45c629b0f5de981e9a33daff320438c307c9bdf7894cc5bbe0f33d2b47"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_035\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_035\\stdout.log",
+            "sha256": "52864857c31670a8116c4fe444cfae22460ae2db6ba31b6f7808c9325878a498"
+          },
+          "validation_roc_auc": 0.9746198751054512
+        },
+        {
+          "actual_trees": 57,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_036",
+          "maximum_tree_leaves": 15,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_036-9c0afe2b5f107059.lgb",
+            "sha256": "9c0afe2b5f107059064b93034fe1d774508aae8c8630d70067e0639636038211"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_036\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_036\\stdout.log",
+            "sha256": "a9ecdb03d63581029c12ad80c59a4d7a6eb63fa604f29ece73b2afde7540d1c2"
+          },
+          "validation_roc_auc": 0.9728423116385514
+        },
+        {
+          "actual_trees": 319,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_037",
+          "maximum_tree_leaves": 28,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_037-6d83e49e17472edd.lgb",
+            "sha256": "6d83e49e17472edda419431ad9804ede7a6175d6f8c6f8ab9e4ad47df1532846"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_037\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_037\\stdout.log",
+            "sha256": "06102ca277edb956760007471fec609b4b0bea9ec2f9bd1a3baa0b1eab673963"
+          },
+          "validation_roc_auc": 0.9743152058782605
+        },
+        {
+          "actual_trees": 2494,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_038",
+          "maximum_tree_leaves": 2,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_038-9081c847636755ea.lgb",
+            "sha256": "9081c847636755eafc9d084670cdca9997c9f7f168c9b7127aeab427634ce03f"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_038\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_038\\stdout.log",
+            "sha256": "f1a4dea09e36aae69bb6f0ca949c32a428152843af480124e1cc085a2bacd95f"
+          },
+          "validation_roc_auc": 0.9689841334846189
+        },
+        {
+          "actual_trees": 24,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_039",
+          "maximum_tree_leaves": 65,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_039-88144f18629c5e44.lgb",
+            "sha256": "88144f18629c5e4471c04718869712de8f47843e81a4a9ad5c41b8b51cf98aa0"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_039\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_039\\stdout.log",
+            "sha256": "7f901ca13b7d9c886c04d728075fad2db447414cc4aa1e428e8276c7d304a93e"
+          },
+          "validation_roc_auc": 0.9739082979610423
+        },
+        {
+          "actual_trees": 50,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_040",
+          "maximum_tree_leaves": 180,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_040-ae4e3284e15fe8d7.lgb",
+            "sha256": "ae4e3284e15fe8d7c88f4768418f87023f2563c56ad1df6f729392986a275e65"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_040\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_040\\stdout.log",
+            "sha256": "eb30bd004860a0e20108296da93a8d199c80839defdc1eecee72b399d701a069"
+          },
+          "validation_roc_auc": 0.973969350056154
+        },
+        {
+          "actual_trees": 511,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_041",
+          "maximum_tree_leaves": 11,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_041-dd372b6198f05378.lgb",
+            "sha256": "dd372b6198f05378430f3a6aa571b6d7101f48df7efc7c39bf969bfc0c448334"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_041\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_041\\stdout.log",
+            "sha256": "34631be5c6914fa4781deccd28e117c5a1d908d8bfe8e8e781d38ec8a20a73d5"
+          },
+          "validation_roc_auc": 0.9742198736143708
+        },
+        {
+          "actual_trees": 577,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_042",
+          "maximum_tree_leaves": 245,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_042-dcf45c01d4e507a3.lgb",
+            "sha256": "dcf45c01d4e507a33fb7a48f9ed3148f038080bf6f754b4e2f79dcb523e53c18"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_042\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_042\\stdout.log",
+            "sha256": "4583a2522fcd96b7e8b5efa5de242b503317de3c85d98b2cc7be47c685a233ca"
+          },
+          "validation_roc_auc": 0.9744764592760322
+        },
+        {
+          "actual_trees": 67,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_043",
+          "maximum_tree_leaves": 80,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_043-a4d6ae92ba4eff19.lgb",
+            "sha256": "a4d6ae92ba4eff190b8d5ed90cfe18f1266fa6c79b28120ae2c9fab19c25e785"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_043\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_043\\stdout.log",
+            "sha256": "21dc5d33e0c60fcaa68356938a02f83cb652ec705325d84491fb01fe6faeb358"
+          },
+          "validation_roc_auc": 0.9744729601758605
+        },
+        {
+          "actual_trees": 351,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_044",
+          "maximum_tree_leaves": 48,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_044-c164fa1be8211aa9.lgb",
+            "sha256": "c164fa1be8211aa9afacc882d4cb2705201f6906d7e19daf9084fa81632efb46"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_044\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_044\\stdout.log",
+            "sha256": "0ef82d3d7a29753fc5ad3e73d49d06f104b05fddfb1a69dec3d641cbc0fb7b19"
+          },
+          "validation_roc_auc": 0.9745856633501719
+        },
+        {
+          "actual_trees": 2394,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_045",
+          "maximum_tree_leaves": 31,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_045-a19772c7e59303cf.lgb",
+            "sha256": "a19772c7e59303cf0555807d69df6b537608ff970a770a9750904883dc40acdc"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_045\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_045\\stdout.log",
+            "sha256": "a1aea10544568b473e6a3f9e3216cb43b06681c6f89c001ad9f8a6db8cd463f1"
+          },
+          "validation_roc_auc": 0.973494463038016
+        },
+        {
+          "actual_trees": 2027,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_046",
+          "maximum_tree_leaves": 8,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_046-b2406d64f6d9984b.lgb",
+            "sha256": "b2406d64f6d9984babbeb5b3f9c937a0667ee6a5bbdc753c939dda13a5fc3b40"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_046\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_046\\stdout.log",
+            "sha256": "d98dc26446b2c0b825de8d0f30ab8ec7944a25768c26d28539cb894dc2275ce8"
+          },
+          "validation_roc_auc": 0.9731615896506747
+        },
+        {
+          "actual_trees": 163,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_047",
+          "maximum_tree_leaves": 128,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_047-4395dc6ba002530a.lgb",
+            "sha256": "4395dc6ba002530a530bcc8ec8323f2bb6fac9cba68aded2d6228b6ccc6c029b"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_047\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_047\\stdout.log",
+            "sha256": "fcff216a1789195c677ef96e6c23cec8354b314856cefcc67e33e62e9b5a16c1"
+          },
+          "validation_roc_auc": 0.9745700111203306
+        },
+        {
+          "actual_trees": 76,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_048",
+          "maximum_tree_leaves": 292,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_048-c781b836bf488306.lgb",
+            "sha256": "c781b836bf488306bd700f118398f6bea4e03d7bb95b5dbadda5761e0348c820"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:292>256"
+          ],
+          "validation_roc_auc": 0.974029512775781
+        },
+        {
+          "actual_trees": 90,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "quickscorer",
+            "nameless": "quickscorer"
+          },
+          "label": "trial_049",
+          "maximum_tree_leaves": 17,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_049-48c78799f2fcbb6f.lgb",
+            "sha256": "48c78799f2fcbb6fe8f2f858afce830333cfcfb11123833155854bfc13340b9d"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_049\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_049\\stdout.log",
+            "sha256": "fdd3814d978eae02ab2e38adfd9968c14cc579c87b530be4cef1139a4955e29a"
+          },
+          "validation_roc_auc": 0.9741425185268677
+        },
+        {
+          "actual_trees": 247,
+          "assessment": "exact_existing_native_release_test",
+          "eligible": true,
+          "exit_code": 0,
+          "kernels": {
+            "main": "lockstep",
+            "nameless": "lockstep"
+          },
+          "label": "trial_050",
+          "maximum_tree_leaves": 191,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_050-39c9cd47ac2b4fd3.lgb",
+            "sha256": "39c9cd47ac2b4fd344a46095aae8c4e71de12f1d2009f1b8317f8fff1d117c53"
+          },
+          "oracle_command": [
+            "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+            "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ],
+          "reasons": [],
+          "stderr": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_050\\stderr.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\trial_050\\stdout.log",
+            "sha256": "85996699dbdd317308109da36258738f98f75ea229f3240b6bd4da28119a197a"
+          },
+          "validation_roc_auc": 0.9741545331609178
+        }
+      ],
+      "excluded_candidates": [
+        {
+          "actual_trees": 1759,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_007",
+          "maximum_tree_leaves": 571,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_007-4144d06cd3a642d9.lgb",
+            "sha256": "4144d06cd3a642d99aad7c31e9dbeeadb39830546f19e1937600bc15a265e149"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:571>256"
+          ],
+          "validation_roc_auc": 0.9732755682083423
+        },
+        {
+          "actual_trees": 719,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_011",
+          "maximum_tree_leaves": 598,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_011-c19be00e08d3307a.lgb",
+            "sha256": "c19be00e08d3307ac567ec033955928fa3e88a93f9819284fdd262d06d01bbb9"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:598>256"
+          ],
+          "validation_roc_auc": 0.9743029086908981
+        },
+        {
+          "actual_trees": 2138,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_014",
+          "maximum_tree_leaves": 608,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_014-6908d667642b745e.lgb",
+            "sha256": "6908d667642b745e02669ded466588ba23e7b6779a5c57213427b755f094d13b"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:608>256"
+          ],
+          "validation_roc_auc": 0.9737975910147574
+        },
+        {
+          "actual_trees": 1092,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_015",
+          "maximum_tree_leaves": 879,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_015-5e21f0ce75254efe.lgb",
+            "sha256": "5e21f0ce75254efe00dab2e78a4f1ea02fca25d0f5952237fadbad6799bd5d47"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:879>256"
+          ],
+          "validation_roc_auc": 0.9744934558589358
+        },
+        {
+          "actual_trees": 63,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_018",
+          "maximum_tree_leaves": 975,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_018-d8852c79b4df647f.lgb",
+            "sha256": "d8852c79b4df647f15221e31574f2c438c5a97af1b01cfaf95fc3918e0597b4d"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:975>256"
+          ],
+          "validation_roc_auc": 0.9731471165803252
+        },
+        {
+          "actual_trees": 1329,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_026",
+          "maximum_tree_leaves": 421,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_026-e37f50cb647d38df.lgb",
+            "sha256": "e37f50cb647d38df884a6fccc9e55f2f47cb4c8e18113fb7376f7e7e3b4880da"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:421>256"
+          ],
+          "validation_roc_auc": 0.9744179635097059
+        },
+        {
+          "actual_trees": 273,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_028",
+          "maximum_tree_leaves": 375,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_028-1c09fbb41a0b66a1.lgb",
+            "sha256": "1c09fbb41a0b66a11de540de97f82b3cfb2761dd96f13e1332047f267280d953"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:375>256"
+          ],
+          "validation_roc_auc": 0.9744591662346335
+        },
+        {
+          "actual_trees": 76,
+          "assessment": "necessary_source_guard_rejects_before_exact_test",
+          "eligible": false,
+          "label": "trial_048",
+          "maximum_tree_leaves": 292,
+          "model": {
+            "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\trial_048-c781b836bf488306.lgb",
+            "sha256": "c781b836bf488306bd700f118398f6bea4e03d7bb95b5dbadda5761e0348c820"
+          },
+          "reasons": [
+            "actual_tree_leaves_exceed_native_limit:292>256"
+          ],
+          "validation_roc_auc": 0.974029512775781
+        }
+      ],
+      "oracle": {
+        "command": [
+          "C:/Users/serge/.local/bin/uv.exe",
+          "run",
+          "--no-project",
+          "cargo",
+          "test",
+          "--manifest-path",
+          "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\Cargo.toml",
+          "--lib",
+          "--no-default-features",
+          "--locked",
+          "release_bundle_uses_native_fast_plans",
+          "--no-run",
+          "--message-format=json"
+        ],
+        "compile_stderr": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\oracle\\compile.stderr.log",
+          "sha256": "bf73939b1a894cc7668e47673874a1e4110b1801915a82dc412d278c0c4a0741"
+        },
+        "compile_stdout": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\oracle\\compile.stdout.jsonl",
+          "sha256": "e0cda865131c0ffb77467d5f0ea74548840eaa6932fb62ab11ea33885514138d"
+        },
+        "fast_plan_source": {
+          "path": "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\src\\lightgbm_booster\\fast.rs",
+          "sha256": "5606600bcca355df3291a3517716fe0ea1a3fa32517f7cea8ceee2d47edb8507"
+        },
+        "maximum_tree_leaves": 256,
+        "release_test_source": {
+          "path": "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\src\\lightgbm_booster\\fast_tests.rs",
+          "sha256": "54d2e82309c11df4bf47d38d2560d82b845d42ec024257e919df063f380f935b"
+        },
+        "resources": {
+          "allocated_logical_cpus": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11
+          ],
+          "available_logical_cpus": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23
+          ],
+          "compute_threads": 12
+        },
+        "rust_sources": {
+          "s2and_rust/Cargo.lock": "51b31c6112505e1b0898ebdb8f27cca9e1d305c8ed814cd1cdd9643590473a8a",
+          "s2and_rust/Cargo.toml": "876a305039738cc93c3f7680fd421b817a60459e46ae8dbe201da7f36de514d9",
+          "s2and_rust/build.rs": "d64b7d7107f33c71624b12d4f6a30ecff0bd38ac16ce8fb3dca86b00c4507f83",
+          "s2and_rust/src/arrow_batch_lookup.rs": "fc792ffc1cc90372cb95f8759a5611ffc5a57a7a55c38a87391de81ccda4d3c2",
+          "s2and_rust/src/arrow_dataset.rs": "e22fb0fa060698722573e43f1a8c13787d52763226705f5e5014d950b2fe12ef",
+          "s2and_rust/src/artifact_hash.rs": "9d6e669f99c00a0a50abec40d5117385ed5e155d66257eea3d6e07138997de0a",
+          "s2and_rust/src/coauthors.rs": "999583a6e4ac53148984255cbfd6ffe39b6db179dcaa1911c4f16b624d039a86",
+          "s2and_rust/src/constraints.rs": "418662492cc6366d196e5c4e7386256e886e33a1d2a4378a3c38ebc16b362f0f",
+          "s2and_rust/src/feature_schema.rs": "16a16d6b2f5c827bcd8b4f501d81c39d36c91815e3745c96bda3f2949b01a5e8",
+          "s2and_rust/src/features.rs": "022e57e39ee7edafc1fdce228c7df97309ca8218c94165cd96d556efe2a5bf03",
+          "s2and_rust/src/ingest_dataset.rs": "118a80e39fb6468492188ee84123eea880b956728af545075cb1077f35324a9b",
+          "s2and_rust/src/language_detection.rs": "ce7758a12538bff64f3d6503ef13bd4d8e63066ac3cebf2556c10fc5c4778dd3",
+          "s2and_rust/src/lib.rs": "dfd2cc7de7ae2a290d9c69c308358c7ec3c3a28d619bf299ad4c77de2725d2f5",
+          "s2and_rust/src/lightgbm_booster.rs": "29f91a059475371a5529a75522bdc6a89d4dba388fec378b9fd7e033327c2134",
+          "s2and_rust/src/lightgbm_booster/fast.rs": "5606600bcca355df3291a3517716fe0ea1a3fa32517f7cea8ceee2d47edb8507",
+          "s2and_rust/src/lightgbm_booster/fast_tests.rs": "54d2e82309c11df4bf47d38d2560d82b845d42ec024257e919df063f380f935b",
+          "s2and_rust/src/name_counts.rs": "ed6c66978afb9e32675f6586fcfd62bc2db82c05b67617c32395ac9429ad2278",
+          "s2and_rust/src/name_normalization.rs": "1edadcc7a4b6805c817004d72f4bda55bda489ba3084a51722ff09a0a28c8232",
+          "s2and_rust/src/orcid.rs": "70d122de3578e6662f85fb8ee667312c2f235e9beaee217b5cdb658b862f0585",
+          "s2and_rust/src/pair_indexing.rs": "79293900a410c3b7a5deb7545db163bb6c07d50c5e1a72da88fea5c0be1f0657",
+          "s2and_rust/src/promoted_linker.rs": "ac286a8e2e4b9859fb5169dcfcf7fe9d2aa714be0489e6b3f0e8ac03c1158d7f",
+          "s2and_rust/src/raw_arrow/arrow_io.rs": "ace338a24cc0a25a652075f18ad193d192dbdd0a3d5a2c6176862ae8c2cb9202",
+          "s2and_rust/src/raw_arrow/mod.rs": "6ceca56348c1a2b03e84f1456099a1069a7356ff66909855708e8c45bd82273e",
+          "s2and_rust/src/raw_arrow/readers.rs": "db03fde57936f3ece976dfe5b6173ffc054a882fecaa360a935c8c4f6e97f023",
+          "s2and_rust/src/raw_arrow_authors.rs": "c6878e71dcb1416afc287b978fccac567e0a4da5d7d1e540c01d297eba8b16dd",
+          "s2and_rust/src/raw_arrow_features.rs": "28d3b5ff65489330084d233e8e709e9885a9dfbd3e45ccf262dcf52ad5bce4df",
+          "s2and_rust/src/raw_candidate_planner.rs": "d4b339c1bdb9b59c9450b99b3ee95995e8fa64457952a64c0b5b446255cc0992",
+          "s2and_rust/src/rayon_pool.rs": "cb8b3a675c9b1c5f54cdb8c43150e4803ee84b2f977fcbc5c572e0de17c775f2",
+          "s2and_rust/src/retrieval.rs": "da898c2714fcf1dc9184e3161ac6b50d3716d9e1d4b0ff1736ac569020f7388b",
+          "s2and_rust/src/retrieval_overlap.rs": "02d0b18baef6c4b94d1aaa0af5cc44a23bd1d31d44054340238df97bdbddfc5e",
+          "s2and_rust/src/rust_featurizer.rs": "e18ce819a0e605c069d4731d1a08bbf7d09da270248e77911140df1739a37041",
+          "s2and_rust/src/subblocking.rs": "fa890b653c9f1d7286110fa1f54c3bf78c74528faac028f385a6a0d366330269",
+          "s2and_rust/src/text_compat.rs": "0195e53d3f4022795efca714c471e3483ab03fe3fb860a15bb66e6683fb0459a",
+          "s2and_rust/vendor/cld2/Cargo.toml": "c09a087e09126af03d5afa4e82e8b535e7c5d056bb31e8a6608ce86ada4d592f",
+          "s2and_rust/vendor/cld2/src/detection.rs": "866f268c4241f1f003162e4d37a4bc8e57ddf728377104093ae9fc8000f93df1",
+          "s2and_rust/vendor/cld2/src/language.rs": "a1363de06ad45f28a80cc0fa1399e0604897597685b88844514ed7ed0548e2ac",
+          "s2and_rust/vendor/cld2/src/lib.rs": "b6209fad5894a6e2a8954af2dc1dfe431b049ca2b323d7b1629755b2f1b04d88",
+          "s2and_rust/vendor/cld2/src/types.rs": "d2d8d0479d0267998329ed5c0ed29bd5d4981688e4b06fbd94ad2375e4a992aa"
+        },
+        "source_revision": "a41b3bf3c54c130c5969ef9d6d484398d6c7d1fb",
+        "test_binary": {
+          "path": "D:\\Google Drive\\code\\ai2\\S2AND\\s2and_rust\\target\\debug\\deps\\_s2and_rust-2e64452f3bc4d6c9.exe",
+          "sha256": "6a5a71300c3369ef64ef7a1905db8f7ba51ce980996a3515fc3e96c59aaab888"
+        },
+        "test_list_stderr": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\oracle\\test_list.stderr.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "test_list_stdout": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\oracle\\test_list.stdout.log",
+          "sha256": "f9d8286cb3f15aa4ed636a371d2a64fa0d827f917e83c4abd3e2165f93cb575b"
+        },
+        "test_name": "lightgbm_booster::fast_tests::release_bundle_uses_native_fast_plans"
+      },
+      "policy": "validation_auc_subject_to_existing_native_fast_plan_release_gate",
+      "raw_checkpoint": {
+        "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\search_checkpoint.pickle",
+        "sha256": "da121fe3ef48f68df60b546e0505d42e7f057a35dd26d6a98ea9e9f59e16077d"
+      },
+      "raw_search_run": {
+        "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\run.json",
+        "sha256": "e09ca9e7d7eed41a445e2e1b65ac584bca9c00f56b3abfd1f67c9d14ebcd2dfa"
+      },
+      "raw_trial_rows": {
+        "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\trials.jsonl",
+        "sha256": "ccdc8617c7985e1316e4b032aa5aba54997c81318fe8a9ee1c9e1b787d610422"
+      },
+      "raw_unconstrained_winner": {
+        "label": "H13_incumbent",
+        "model": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\H13_incumbent-09a0fe45c629b0f5.lgb",
+          "sha256": "09a0fe45c629b0f5de981e9a33daff320438c307c9bdf7894cc5bbe0f33d2b47"
+        },
+        "validation_roc_auc": 0.9746198751054512
+      },
+      "rule": "Select the highest validation AUC among models that pass the existing native fast-plan release test.",
+      "selected": {
+        "label": "H13_incumbent",
+        "model": {
+          "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\fit_nameless\\models\\H13_incumbent-09a0fe45c629b0f5.lgb",
+          "sha256": "09a0fe45c629b0f5de981e9a33daff320438c307c9bdf7894cc5bbe0f33d2b47"
+        },
+        "validation_roc_auc": 0.9746198751054512
+      },
+      "tie_rule": "H13 wins ties; otherwise retain the earliest eligible trial."
+    }
   },
-  "model_plan_sha256": "529c9dcc3eb657f21bc7396e11efb21e6831d5662ea1ba7e428485a54485e070",
+  "head_run_inputs": {
+    "main": {
+      "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\main\\run.json",
+      "sha256": "e0eefc0d2db5ac89cbb665b8bf6fe7cc371f930f5366c41f7b3b1918e5b759fb"
+    },
+    "nameless": {
+      "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\tuned\\release_selection\\nameless\\run.json",
+      "sha256": "f8ad5ecbff7f022c374ec59108bfe53f5ae2e54d32bcdfb05d77830594aab9de"
+    }
+  },
+  "head_searches": {
+    "main": {
+      "completed_trials": 50,
+      "incumbent_validation_roc_auc": 0.9935176435560131,
+      "official_model_pairwise_sha256": "bdde79f2966e0a3728e2e55c4ade4868469a95b9fcf51791588d53e0eca7a767",
+      "search_space_sha256": "e450d6742ab7b605704104f672ee72b586e0a253a8f0d280f34c13e60bd79e0c",
+      "search_trials": 50,
+      "selected_source": "trial_026",
+      "validation_roc_auc": 0.9942268773990355
+    },
+    "nameless": {
+      "completed_trials": 50,
+      "incumbent_validation_roc_auc": 0.9746198751054512,
+      "official_model_pairwise_sha256": "bdde79f2966e0a3728e2e55c4ade4868469a95b9fcf51791588d53e0eca7a767",
+      "search_space_sha256": "e450d6742ab7b605704104f672ee72b586e0a253a8f0d280f34c13e60bd79e0c",
+      "search_trials": 50,
+      "selected_source": "H13_incumbent",
+      "validation_roc_auc": 0.9746198751054512
+    }
+  },
+  "input_artifact_hashes": {
+    "name_counts_manifest_sha256": "87459dc14e41fd676730f56b0857d3eb61015cdc42bd73ec9b8b01e2f2b8f4b3",
+    "name_tuples_data_sha256": "c86d2ccc4d81809cbfdae9a385aefa42b2aa98b83e73861280ca5a81eb480254",
+    "orcid_prefix_counts_data_sha256": "fcb4cb7bdf30f07366b946b9fdb1bb0a807bdb00f7dda521575daea6b2b9d8ce"
+  },
+  "lightgbm_version": "4.7.0",
+  "model_plan_content_sha256": "f12ba0398e4317c75b6844faec828f05e21d8755eb0058ea22d2816762234bdd",
+  "model_plan_sha256": "ebc8dd75be9b61f840e1de927c56ec21c6a64c594aa9a57e639148e666bddb08",
   "model_random_seed": 42,
   "n_iter": 50,
-  "n_jobs": 20,
+  "n_jobs": 12,
   "nameless_features_to_use": [
     "affiliation_similarity",
     "email_similarity",
@@ -127,6 +4050,69 @@
     "journal_similarity"
   ],
   "nan_policy": "preserve_nan",
+  "release_selection_policy": "validation_auc_subject_to_existing_native_fast_plan_release_gate",
+  "selected_parameters": {
+    "main": {
+      "boosting_type": "gbdt",
+      "class_weight": null,
+      "colsample_bytree": 0.6847553914329332,
+      "importance_type": "split",
+      "learning_rate": 0.13173460484375457,
+      "max_depth": 31,
+      "metric": "auc",
+      "min_child_samples": 6511,
+      "min_child_weight": 1.2488014440235635,
+      "min_split_gain": 1.9913571899544529,
+      "monotone_constraints": "1,1,1,0,0,0,0,1,1,1,0,1,0,-1,1,1,0,0,0,0,0,0,-1,-1,-1,0,-1,0,0,0,0,0,0",
+      "monotone_constraints_method": "advanced",
+      "monotone_penalty": 3.481391882223367,
+      "n_estimators": 1647,
+      "n_jobs": 12,
+      "num_leaves": 126,
+      "objective": "binary",
+      "random_state": 42,
+      "reg_alpha": 6.178016710889941e-05,
+      "reg_lambda": 8.967167049866756e-05,
+      "subsample": 0.8274979986934963,
+      "subsample_for_bin": 200000,
+      "subsample_freq": 0,
+      "tree_learner": "data",
+      "verbose": -1
+    },
+    "nameless": {
+      "bagging_seed": 400,
+      "boosting_type": "gbdt",
+      "class_weight": null,
+      "colsample_bytree": 0.5614860537624158,
+      "data_random_seed": 175,
+      "drop_seed": 17869,
+      "extra_seed": 12879,
+      "feature_fraction_seed": 30056,
+      "importance_type": "split",
+      "learning_rate": 0.055501253888052875,
+      "max_depth": 71,
+      "metric": "auc",
+      "min_child_samples": 182,
+      "min_child_weight": 4.359686091488238,
+      "min_split_gain": 1.6033766553047335,
+      "monotone_constraints": "0,1,1,1,0,1,0,-1,1,1,0,0,0,0,0,0,0",
+      "monotone_constraints_method": "advanced",
+      "monotone_penalty": 2.3004538962702163,
+      "n_estimators": 2286,
+      "n_jobs": 12,
+      "num_leaves": 56,
+      "objective": "binary",
+      "objective_seed": 16083,
+      "random_state": 42,
+      "reg_alpha": 4.818759279729245e-06,
+      "reg_lambda": 7.075631585204811e-06,
+      "subsample": 0.5017001691067237,
+      "subsample_for_bin": 200000,
+      "subsample_freq": 0,
+      "tree_learner": "data",
+      "verbose": -1
+    }
+  },
   "source_dataset_names": [
     "aminer",
     "arnetminer",
@@ -137,16 +4123,39 @@
     "zbmath",
     "augmented"
   ],
+  "source_identity": {
+    "native": {
+      "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\runtime\\.venv\\Lib\\site-packages\\s2and_rust\\_s2and_rust.cp311-win_amd64.pyd",
+      "sha256": "cbe7f93ff212ec5e0d112a5ae5f5f2586ef15a5e558c19a606f391b645f8a2e6",
+      "version": "1.0.0"
+    },
+    "revision": "a41b3bf3c54c130c5969ef9d6d484398d6c7d1fb",
+    "sources": {
+      "s2and/arrow_inputs.py": "848cfd61457ae3ae0757d81b51ca7fab5aa6f14e153c65899bc42c4ca22456f2",
+      "s2and/arrow_provenance.py": "45d1810ef4057b15875994c7ff8e39f144450500b57cbbfa6bdfe29b24361d7f",
+      "s2and/data.py": "b3554a9b3ab543b2c609d22af62545b1422d779b99527c86faf2485e61be6fbb",
+      "s2and/feature_port.py": "f36e0110335ee1dbe273863700794d458d3959f12d6651541c5370a43a8f607e",
+      "s2and/feature_schema.py": "f857fe0be0c0258d99b31d84887d5b96021de8debca360540cf72bbbf084c1c5",
+      "s2and/featurizer.py": "26f021875dc31b955db3cfdc637807a9c146025926ca0fc53a95c38bd0a812c1",
+      "s2and/name_counts_index.py": "77eb5c5bac90b586da763a7a022311aa1c66eec9bd4b40524fa459650f6006fa",
+      "s2and/production_training_contract.py": "84b3c13753b60d123790a24f16d21f197c7c29c0a73bf9166cdcc3a0de0bbcd6",
+      "s2and/text.py": "e1af904ccfcbe01cb7a6357bfbcbf8a8be1395d47ef1547ff4f50557327e60ed",
+      "scripts/production/model/augmented_leakage.py": "2e958064e68665ddf7147a41dda3006547b2cf26f5fa29fede51117116a05332",
+      "scripts/production/model/train_pairwise.py": "b72bd81c3678c200e8066f7abbd0ec6a9c44c7eab6ee173cc8d6bd32bc99d9ce",
+      "scripts/production/model/unknown_signatures.py": "f095bb71d309d4a000d1101a559c7301df3173fb1222e4939d8f1d6941743a76"
+    }
+  },
   "train_pairs_size": 100000,
+  "training_method": "official_tpe_with_H13_incumbent",
   "training_scope": "production_full",
   "unknown_signature_inputs": {
     "aminer": {
-      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\aminer\\restored_unknown_signature_ids_20261009.json",
+      "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\aminer\\restored_unknown_signature_ids_20261009.json",
       "sha256": "401c33c063e63bfe8ef0fdca7c6d97d4481cc1039db111695995f2659a19264e",
       "signature_count": 13656
     },
     "arnetminer": {
-      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\arnetminer\\restored_unknown_signature_ids_20261009.json",
+      "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\arnetminer\\restored_unknown_signature_ids_20261009.json",
       "sha256": "3d63f049bd373eb078c47e9abad7fe88ce273458beac6d67bc220e06ec80f6fb",
       "signature_count": 78
     },
@@ -156,27 +4165,27 @@
       "signature_count": 0
     },
     "inspire": {
-      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\inspire\\restored_unknown_signature_ids_20261009.json",
+      "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\inspire\\restored_unknown_signature_ids_20261009.json",
       "sha256": "0a4c080b857923c09aebafade40cc6006f89c0025dd9820db13f450f74c7b8b3",
       "signature_count": 4366
     },
     "kisti": {
-      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\kisti\\restored_unknown_signature_ids_20261009.json",
+      "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\kisti\\restored_unknown_signature_ids_20261009.json",
       "sha256": "c06f2d937e910e8dd22dcddbd3d023702565e4141c56078df770e6812ed710f8",
       "signature_count": 32
     },
     "pubmed": {
-      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\pubmed\\restored_unknown_signature_ids_20261009.json",
+      "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\pubmed\\restored_unknown_signature_ids_20261009.json",
       "sha256": "922b609606ddc48f540ae8236eb05e6304e59c69353305915dedb395c0b524f8",
       "signature_count": 17
     },
     "qian": {
-      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\qian\\restored_unknown_signature_ids_20261009.json",
+      "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\qian\\restored_unknown_signature_ids_20261009.json",
       "sha256": "0809212dbf4503f15a26ccdb6c60989688e848dc0cff730e8f53f75d226904ae",
       "signature_count": 23
     },
     "zbmath": {
-      "path": "D:\\local-unsynced\\s2and_v1.3_prep_20261012\\pairwise_inputs_v1.3\\sources\\model\\zbmath\\restored_unknown_signature_ids_20261009.json",
+      "path": "D:\\local-unsynced\\s2and_ca_mainline_20261017\\snapshot\\pairwise\\sources\\model\\zbmath\\restored_unknown_signature_ids_20261009.json",
       "sha256": "c5366609c6bf2a5ea382b36328f3adc1bb774e03d6f75b2caaaee4152900005f",
       "signature_count": 3
     }

@@ -35,6 +35,11 @@ Common repository paths for release `1.3` are:
 - `artifacts/common/v1.3/name_counts_index`
 - `artifacts/common/v1.3/production_model_v1.3`
 
+The production count authority is A: one contribution per source author-table row.
+The Athena export preserves all raw first/last groups, including null names.
+The current repository normalizer creates the lookup keys after export.
+The [count guide](../scripts/production/counts/README.md) defines the complete build command.
+
 The complete model path contains the verified patent-free candidate.
 The release notes will identify the accepted Git ref after final acceptance.
 Fetch the common assets at the Git ref declared by the release notes:

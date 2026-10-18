@@ -1,4 +1,6 @@
-# Name count and ORCID prefix experiment results
+# Archived mention-count and ORCID prefix experiment results
+
+The author-row count policy replaces M on 2026-10-17. This report preserves the earlier study and its original recommendation.
 
 Keep M, the plain mention count policy. Keep EVENT threshold 10 with all ORCIDs as the existing prefix default.
 The experiments do not identify a unique best prefix threshold.
@@ -15,7 +17,7 @@ The original publication contains the selected table and tuple-dependency manife
 The publication writer uses compact JSON. The original packaged data SHA256 is `e866a498593ca8b9b132bec4da6abd3fabde28cbdad0f3f1749ce17ab0c8ee3b`.
 The original packaged values match the saved study table exactly.
 The original clean wheel and source distribution pass the release inventory and byte-equality checks.
-The [Stage 1 checklist](release.md#stage-1-generate-runtime-data) requires these assets before publication.
+The [Stage 1 checklist](../release.md#stage-1-generate-runtime-data) requires these assets before publication.
 The release workflow enforces the distribution checks. Production models remain external artifacts.
 
 The October 12 prefix rebuild applies EVENT threshold 10 to all saved ORCID contributions, with alias threshold two and the current aliases.

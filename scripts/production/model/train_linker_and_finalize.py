@@ -1848,7 +1848,12 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         required=True,
         help="Calibrated pairwise-only bundle produced by the release workflow.",
     )
-    parser.add_argument("--name-counts-index-root", type=Path, required=True)
+    parser.add_argument(
+        "--name-counts-index-root",
+        type=Path,
+        required=True,
+        help="Use the same resolved index path as the source bundle's Arrow manifests.",
+    )
     parser.add_argument("--n-jobs", type=_positive_int, default=20)
     parser.add_argument("--total-ram-bytes", type=_positive_int, default=DEFAULT_TOTAL_RAM_BYTES)
 

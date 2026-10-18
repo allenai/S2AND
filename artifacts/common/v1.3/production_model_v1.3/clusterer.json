@@ -1,14 +1,14 @@
 {
   "batch_size": 1000000,
   "cluster_model": {
-    "eps": 0.55,
+    "eps": 0.57,
     "linkage": "average"
   },
   "dont_merge_cluster_seeds": true,
   "feature_contract": {
-    "name_counts_manifest_sha256": "85cffc00421f6b8a7ebab6b6bac7da162b4bccde88b83e348c9554e26c7153e7",
-    "name_tuples_data_sha256": "0bcb523ebf8e6f7020883d96cc2822f402f212069214fa23e56b6e7bc0b01f0c",
-    "orcid_prefix_counts_data_sha256": "10c3b6aef4eb4cb61497db4afe942c93263b19115d00c3121626eebe27022a66"
+    "name_counts_manifest_sha256": "87459dc14e41fd676730f56b0857d3eb61015cdc42bd73ec9b8b01e2f2b8f4b3",
+    "name_tuples_data_sha256": "c86d2ccc4d81809cbfdae9a385aefa42b2aa98b83e73861280ca5a81eb480254",
+    "orcid_prefix_counts_data_sha256": "fcb4cb7bdf30f07366b946b9fdb1bb0a807bdb00f7dda521575daea6b2b9d8ce"
   },
   "featurizer_info": {
     "features_to_use": [

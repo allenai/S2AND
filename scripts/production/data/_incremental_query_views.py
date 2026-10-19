@@ -7,7 +7,6 @@ Use this helper only on an unpublished physical copy without open readers.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -33,6 +32,7 @@ from s2and.incremental_linking.feature_block_arrow import (
     write_arrow_batch_lookup_index,
 )
 from s2and.text import canonicalize_name_parts, canonicalize_name_text
+from scripts.production.model.initial_query_sources import derived_query_id as _derived_id
 
 
 @dataclass(frozen=True)
@@ -72,11 +72,6 @@ def mask_initial_query_rows(
     )
     for row in own_rows:
         row["author_name"] = author
-
-
-def _derived_id(prefix: str, signature_id: str, paper_id: str) -> str:
-    payload = json.dumps(["initial-source-v1", signature_id, paper_id], ensure_ascii=False, separators=(",", ":"))
-    return prefix + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _selected_table(paths: Mapping[str, Path], table_name: str, values: set[str]) -> pa.Table:

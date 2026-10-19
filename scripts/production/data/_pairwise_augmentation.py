@@ -33,6 +33,10 @@ from scripts.production.data.prepare_pairwise_inputs import (  # noqa: E402
     sha,
     write,
 )
+from scripts.production.model.unknown_signatures import (  # noqa: E402
+    load_unknown_signatures,
+    validate_unknown_filename,
+)
 
 
 def selected_papers(path: Path, needed: set[str]) -> dict:
@@ -124,7 +128,7 @@ def candidates(
         }
     else:
         clusters = read(source / f"{name}_clusters.json")
-        unknown = set(json.loads((source / unknown_filename).read_bytes()))
+        unknown = load_unknown_signatures({"clusters": source / f"{name}_clusters.json"}, filename=unknown_filename).ids
         populations = read(prepared_root / "populations/identities" / f"{name}.json")
         dataset = dataset_for_split(name, signatures, clusters, seed=seed)
         dataset.random_seed = pair_seed
@@ -254,6 +258,7 @@ def build_augmentation(
     omission_rate: float = 0.5,
 ) -> dict[str, Any]:
     """Create fresh variants from accepted names and current split labels."""
+    validate_unknown_filename(unknown_filename)
     destination = output
     destination.mkdir(parents=True, exist_ok=False)
     old_augmented = read(legacy_root / "augmented/augmented_papers.json") if legacy_root is not None else {}
@@ -398,6 +403,7 @@ def finalize_augmentation(
     unknown_filename: str = "restored_unknown_signature_ids_20261009.json",
 ) -> dict[str, Any]:
     """Attach exact vectors and verify source labels and split boundaries."""
+    validate_unknown_filename(unknown_filename)
     signatures = read(root / "augmented_signatures.json")
     papers = read(root / "augmented_papers.json")
     ids = read(root / "vector_ids.json")
@@ -506,7 +512,9 @@ def finalize_augmentation(
             populations = None
         else:
             labels = members(read(source / f"{name}_clusters.json"))
-            unknown = set(read(source / unknown_filename))
+            unknown = load_unknown_signatures(
+                {"clusters": source / f"{name}_clusters.json"}, filename=unknown_filename
+            ).ids
             populations = read(prepared_root / "populations/identities" / f"{name}.json")
         allowed_by_split = (
             {

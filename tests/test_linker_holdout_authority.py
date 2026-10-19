@@ -9,6 +9,7 @@ import pytest
 
 from s2and.incremental_linking_training import classic
 from scripts.production.model import train_linker_and_finalize as release
+from scripts.production.model.initial_query_sources import InitialQuerySources
 from tests.training_helpers import write_classic_tiny_bundle
 
 
@@ -215,4 +216,5 @@ def test_materializer_filters_before_structural_or_feature_work(
             pairwise_model_nan_value=float("nan"),
             pairwise_aggregate_nan_value=0.0,
             arrow_datasets=cast(Any, {"toy": None}),
+            query_sources=InitialQuerySources({}, None),
         )

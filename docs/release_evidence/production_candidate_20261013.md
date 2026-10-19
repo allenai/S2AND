@@ -24,6 +24,11 @@ Both boosters retain their original bytes and fit records.
 Incremental uses 13 non-patent datasets, 1,454,422 train rows, and 99,545 positive rows.
 Dev retains 4,946 fit queries and 4,941 check queries. Both dev groups fit or select the gate.
 The source snapshot preserves 4,051 initial-query origins.
+The map SHA-256 is `9a5303d497fcded848ecf8cac64f2af795de68b72dfc4e56b6b4ec58a8f029db`.
+The retained fit command record contains this digest.
+
+The current source tables confirm all 4,051 derived signature and paper IDs across 13 datasets.
+This check confirms current source identity; it does not prove which bytes the historical fit reads.
 The trainer excludes each origin record from its derived query's candidate profiles.
 Two matched native feature checks pass within `1e-5`; they do not establish universal parity.
 

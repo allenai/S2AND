@@ -22,7 +22,11 @@ from s2and.incremental_linking_training.classic import (
     _load_classic_stratified_eval_rows,
     load_bundle,
 )
-from scripts.production.model.train_linker_and_finalize import _load_initial_query_sources
+from scripts.production.model.initial_query_sources import (
+    MAP_SHA256_FIELD,
+    InitialQuerySources,
+    load_initial_query_sources,
+)
 
 LABEL_COLUMNS = [
     "row_index",
@@ -50,6 +54,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bundle-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--datasets", nargs="+", required=True)
+    parser.add_argument(
+        "--expected-initial-query-map-sha256", help="Require this frozen initial-query source-map SHA-256."
+    )
     parser.add_argument(
         "--task-splits",
         nargs="+",
@@ -188,7 +195,11 @@ def _build_dataset_constraints(
     bundle_root: Path,
     dataset: str,
     labels: pd.DataFrame,
+    *,
+    query_sources: InitialQuerySources | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    if query_sources is None:
+        query_sources = load_initial_query_sources(bundle_root, dataset_names=(dataset,))
     dataset_labels = labels[labels["dataset"].astype(str) == dataset].copy()
     if dataset_labels.empty:
         raise ValueError(f"No labels for dataset={dataset}")
@@ -209,7 +220,7 @@ def _build_dataset_constraints(
     expanded = expanded[
         expanded["query_signature_id"].astype(str) != expanded["member_signature_id"].astype(str)
     ].copy()
-    origins = _load_initial_query_sources(bundle_root).get(dataset, {})
+    origins = query_sources.origins.get(dataset, {})
     origin_matches = expanded["query_signature_id"].map(origins).eq(expanded["member_signature_id"])
     excluded_origin_rows = int(origin_matches.sum())
     expanded = expanded.loc[~origin_matches].copy()
@@ -240,6 +251,7 @@ def _build_dataset_constraints(
 
     summary = {
         "dataset": dataset,
+        MAP_SHA256_FIELD: query_sources.sha256,
         "label_rows": int(len(dataset_labels)),
         "missing_component_label_rows": missing_components,
         "excluded_initial_origin_rows": excluded_origin_rows,
@@ -278,8 +290,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise ValueError("--max-queries must be positive")
     bundle_root = args.bundle_root.resolve()
     output_dir = args.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
     datasets = {str(dataset) for dataset in args.datasets}
+    query_sources = load_initial_query_sources(
+        bundle_root,
+        dataset_names=sorted(datasets),
+        expected_sha256=getattr(args, "expected_initial_query_map_sha256", None),
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
     labels = _load_label_rows(bundle_root, datasets, args.task_splits)
     if args.max_queries is not None:
         query_keys = labels[["dataset", "query_group_id"]].drop_duplicates().sort_values(["dataset", "query_group_id"])
@@ -293,7 +310,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         conflict_path = output_dir / f"{dataset}_conflicts.parquet"
         if output_path.exists() and not args.overwrite:
             raise FileExistsError(f"{output_path} exists; pass --overwrite")
-        constraints, conflicts, summary = _build_dataset_constraints(bundle_root, dataset, labels)
+        constraints, conflicts, summary = _build_dataset_constraints(
+            bundle_root, dataset, labels, query_sources=query_sources
+        )
         constraints.to_parquet(output_path, index=False)
         output_paths[dataset] = str(output_path)
         summaries.append({**summary, "output_path": str(output_path)})
@@ -304,6 +323,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     summary_payload = {
         "bundle_root": str(bundle_root),
+        MAP_SHA256_FIELD: query_sources.sha256,
         "datasets": sorted(datasets),
         "task_splits": list(args.task_splits),
         "max_queries_per_dataset": args.max_queries,

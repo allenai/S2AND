@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import gc
+import hashlib
 import json
 import math
 import shutil
@@ -84,6 +85,12 @@ from s2and.production_training_contract import (  # noqa: E402
 )
 from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
+from scripts.production.model.initial_query_sources import (  # noqa: E402
+    MAP_RELATIVE_PATH,
+    MAP_SHA256_FIELD,
+    InitialQuerySources,
+    load_initial_query_sources,
+)
 
 DEFAULT_TOTAL_RAM_BYTES = 48 * 1024**3
 PRODUCTION_MAX_EXEMPLARS = 4
@@ -276,6 +283,7 @@ def _clean_arrow_rust_structural_rows(
     rows: pd.DataFrame,
     component_membership_cache: dict[str, pd.DataFrame],
     arrow_datasets: Mapping[str, ArrowDataset],
+    query_sources: InitialQuerySources | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Remove candidate rows with no non-query member using Arrow signature blocks."""
 
@@ -289,7 +297,9 @@ def _clean_arrow_rust_structural_rows(
     query_ids_before = set(rows["query_group_id"].astype(str))
     positive_query_ids_before = set(rows.loc[labels == 1, "query_group_id"].astype(str))
     dataset_summaries: list[dict[str, Any]] = []
-    initial_query_sources = _load_initial_query_sources(source_bundle.root)
+    if query_sources is None:
+        query_sources = load_initial_query_sources(source_bundle.root, arrow_datasets=arrow_datasets)
+    initial_query_sources = query_sources.origins
 
     for dataset_name, dataset_rows in rows.groupby(rows["dataset"].astype(str), sort=False):
         membership = _arrow_component_membership_summary(
@@ -398,22 +408,8 @@ def _component_member_ids_by_key(path: Path) -> dict[str, tuple[str, ...]]:
 
 
 def _load_initial_query_sources(root: Path) -> dict[str, dict[str, str]]:
-    """Read source identities for derived initial-only query records."""
-    path = root / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
-    if not path.exists():
-        return {}
-    sources: dict[str, dict[str, str]] = {}
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        row = json.loads(line)
-        keys = ("dataset", "source_query_signature_id", "initial_query_signature_id")
-        if not isinstance(row, dict) or any(not isinstance(row.get(key), str) or not row[key] for key in keys):
-            raise ValueError(f"Invalid initial-query source map row: {path}:{line_number}")
-        dataset_sources = sources.setdefault(row["dataset"], {})
-        clone = row["initial_query_signature_id"]
-        if clone in dataset_sources:
-            raise ValueError(f"Duplicate initial-query source map identity: {row['dataset']}/{clone}")
-        dataset_sources[clone] = row["source_query_signature_id"]
-    return sources
+    """Load complete source identities against the snapshot's signature tables."""
+    return load_initial_query_sources(root).origins
 
 
 def _load_arrow_seed_constraints(
@@ -509,8 +505,11 @@ def _build_arrow_rust_dataset_context(
     source_bundle: OfficialBundle,
     dataset_name: str,
     arrow_dataset: ArrowDataset,
+    query_sources: InitialQuerySources | None = None,
 ) -> ArrowRustDatasetContext:
     started = time.perf_counter()
+    if query_sources is None:
+        query_sources = load_initial_query_sources(source_bundle.root, arrow_datasets={dataset_name: arrow_dataset})
     member_path = _resolve_path(
         source_bundle,
         str(source_bundle.assets["candidate_members"]["datasets"][dataset_name]),
@@ -548,7 +547,7 @@ def _build_arrow_rust_dataset_context(
         cluster_seeds_require=cluster_seeds_require,
         cluster_seeds_disallow=cluster_seeds_disallow,
         max_block_component_size=int(max_block_component_size),
-        initial_query_sources=_load_initial_query_sources(source_bundle.root).get(dataset_name, {}),
+        initial_query_sources=query_sources.origins.get(dataset_name, {}),
     )
 
 
@@ -775,7 +774,15 @@ def _rows_with_materialized_target_features(
 def _copy_bundle_support_files(
     source_bundle: OfficialBundle,
     output_bundle_root: Path,
+    query_sources: InitialQuerySources | None = None,
 ) -> dict[str, Any]:
+    if query_sources is None:
+        query_sources = load_initial_query_sources(source_bundle.root)
+    map_contents = None
+    if query_sources.sha256 is not None:
+        map_contents = (source_bundle.root / MAP_RELATIVE_PATH).read_bytes()
+        if hashlib.sha256(map_contents).hexdigest() != query_sources.sha256:
+            raise ValueError("Initial-query source map changes after validation")
     if output_bundle_root.exists():
         raise ValueError(f"Fresh feature bundle output already exists: {output_bundle_root}")
     output_bundle_root.mkdir(parents=True)
@@ -784,6 +791,11 @@ def _copy_bundle_support_files(
     payload = json.loads((output_bundle_root / "bundle.json").read_text(encoding="utf-8"))
     payload["bundle_name"] = f"{payload['bundle_name']}_promoted_rust_recomputed_pw"
     payload["expected_metrics"] = {}
+    if map_contents is not None:
+        map_destination = output_bundle_root / MAP_RELATIVE_PATH
+        map_destination.parent.mkdir(parents=True, exist_ok=True)
+        map_destination.write_bytes(map_contents)
+        payload[MAP_SHA256_FIELD] = query_sources.sha256
     (output_bundle_root / "bundle.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -1207,8 +1219,11 @@ def _materialize_arrow_rust_feature_bundle(
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
     arrow_datasets: Mapping[str, ArrowDataset],
+    query_sources: InitialQuerySources | None = None,
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
-    _copy_bundle_support_files(source_bundle, output_bundle_root)
+    if query_sources is None:
+        query_sources = load_initial_query_sources(source_bundle.root, arrow_datasets=arrow_datasets)
+    _copy_bundle_support_files(source_bundle, output_bundle_root, query_sources)
     classic_spec = source_bundle.models.get("classic")
     if not isinstance(classic_spec, Mapping):
         raise ValueError("Source bundle models.classic must be an object")
@@ -1221,7 +1236,7 @@ def _materialize_arrow_rust_feature_bundle(
     table_plan_order: list[str] = []
     pending_by_dataset: dict[str, list[ArrowRustPendingShard]] = {}
     component_membership_cache: dict[str, pd.DataFrame] = {}
-    initial_query_sources = _load_initial_query_sources(source_bundle.root)
+    initial_query_sources = query_sources.origins
     candidate_signature_cache: dict[str, set[str]] = {}
 
     def append_empty_selection_summary(
@@ -1310,6 +1325,7 @@ def _materialize_arrow_rust_feature_bundle(
             rows=labels,
             component_membership_cache=component_membership_cache,
             arrow_datasets=arrow_datasets,
+            query_sources=query_sources,
         )
         if table_key == "train_path" and holdout_identities is not None and labels.empty:
             raise ValueError("No training rows remain after holdout exclusion and structural cleaning")
@@ -1416,6 +1432,7 @@ def _materialize_arrow_rust_feature_bundle(
             source_bundle=source_bundle,
             dataset_name=dataset_name,
             arrow_dataset=arrow_datasets[dataset_name],
+            query_sources=query_sources,
         )
         try:
             for shard in shards:
@@ -1704,6 +1721,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             name_counts_index_root=name_counts_index_root,
             arrow_stack=arrow_stack,
         )
+        query_sources = load_initial_query_sources(
+            source_bundle.root,
+            arrow_datasets=arrow_datasets,
+            expected_sha256=getattr(args, "expected_initial_query_map_sha256", None),
+        )
+        if unknown_origins := set(query_sources.datasets) - set(arrow_datasets):
+            raise ValueError(f"Initial-query source map names absent datasets: {sorted(unknown_origins)}")
         clusterer = load_clusterer(
             args.pairwise_model_path,
             n_jobs=int(args.n_jobs),
@@ -1741,6 +1765,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             pairwise_model_nan_value=pairwise_model_nan_value,
             pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
             arrow_datasets=arrow_datasets,
+            query_sources=query_sources,
         )
 
         started = time.perf_counter()
@@ -1792,6 +1817,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             pairwise_model_nan_value=pairwise_model_nan_value,
             pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
             arrow_datasets=arrow_datasets,
+            query_sources=query_sources,
         )
     evaluation = evaluate_classic(
         evaluation_feature_bundle,
@@ -1808,6 +1834,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "complete_model_path": str(complete_model_dir),
         "model_manifest_path": str(finalized.manifest_path),
         "source_bundle_root": str(source_bundle.root),
+        MAP_SHA256_FIELD: query_sources.sha256,
         "target_json": str(Path(args.target_json).resolve()),
         "feature_count": int(target["feature_count"]),
         "n_estimators": int(active_params["n_estimators"]),
@@ -1840,6 +1867,10 @@ def _positive_int(value: str) -> int:
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source-bundle-root", type=Path, required=True)
+    parser.add_argument(
+        "--expected-initial-query-map-sha256",
+        help="Require this digest for the initial-query source map.",
+    )
     parser.add_argument("--target-json", type=Path, required=True, help="Explicit promoted-linker target JSON.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(

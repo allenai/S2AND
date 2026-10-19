@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +21,50 @@ sys.path.insert(0, str(REPO))
 
 from s2and.data import ANDData  # noqa: E402
 from scripts.convert_to_arrow import join_canonical_benchmark_names  # noqa: E402
+from scripts.production.model.unknown_signatures import (  # noqa: E402
+    load_unknown_signatures,
+    validate_unknown_filename,
+)
 
 DATASETS = ("aminer", "arnetminer", "inspire", "kisti", "medline", "pubmed", "qian", "zbmath")
+
+
+@dataclass(frozen=True)
+class ModelExclusions:
+    """Reserve a declared incremental scope within one source dataset."""
+
+    reserved_block_ids: tuple[str, ...] = ()
+    reserved_author_ids: tuple[str, ...] = ()
+    reserved_query_paper_ids: tuple[str, ...] = ()
+    rationale: str | None = None
+    reference: str | None = None
+
+
+def load_model_exclusions(path: Path) -> dict[str, ModelExclusions]:
+    """Read dataset-keyed block, gold author, and query paper exclusions."""
+    document = read(path)
+    if not isinstance(document, dict):
+        raise ValueError("Model exclusions must contain a dataset-keyed object")
+    result = {}
+    for name, row in document.items():
+        if not isinstance(name, str) or not isinstance(row, dict):
+            raise ValueError("Model exclusions require dataset names and objects")
+        ids = {}
+        for key in ("reserved_block_ids", "reserved_author_ids", "reserved_query_paper_ids"):
+            values = row.get(key, [])
+            if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
+                raise ValueError(f"Model exclusion {key} must contain nonempty string IDs: {name}")
+            if len(set(values)) != len(values):
+                raise ValueError(f"Duplicate model exclusion {key}: {name}")
+            ids[key] = tuple(values)
+        for key in ("rationale", "reference"):
+            if row.get(key) is not None and not isinstance(row[key], str):
+                raise ValueError(f"Model exclusion {key} must contain text: {name}")
+        extra = set(row) - {*ids, "rationale", "reference"}
+        if extra:
+            raise ValueError(f"Unknown model exclusion fields: {name} {sorted(extra)}")
+        result[name] = ModelExclusions(**ids, rationale=row.get("rationale"), reference=row.get("reference"))
+    return result
 
 
 def read(path: Path) -> Any:
@@ -95,6 +138,44 @@ def subset_clusters(clusters: dict, ids: set[str]) -> dict:
     }
 
 
+def reserve_model_scope(
+    name: str,
+    signatures: dict,
+    clusters: dict,
+    blocks: dict[str, list[str]],
+    unknown: set[str],
+    exclusions: ModelExclusions,
+) -> tuple[set[str], dict[str, Any]]:
+    """Exclude reserved blocks and their known authors and papers from model inputs."""
+    reserved_blocks = set(exclusions.reserved_block_ids)
+    if missing := reserved_blocks - blocks.keys():
+        raise ValueError(f"Reserved blocks are absent from source: {name} {sorted(missing)}")
+    labels = members(clusters)
+    reserved_authors = set(exclusions.reserved_author_ids)
+    if missing := reserved_authors - clusters.keys():
+        raise ValueError(f"Reserved authors are absent from source: {name} {sorted(missing)}")
+    reserved_papers = set(exclusions.reserved_query_paper_ids)
+    source_papers = {str(row["paper_id"]) for row in signatures.values()}
+    if missing := reserved_papers - source_papers:
+        raise ValueError(f"Reserved query papers are absent from source: {name} {sorted(missing)}")
+    reserved_members = {sid for block in reserved_blocks for sid in blocks[block]}
+    reserved_authors.update(labels[sid] for sid in reserved_members if sid not in unknown)
+    reserved_papers.update(str(signatures[sid]["paper_id"]) for sid in reserved_members)
+    excluded = reserved_members | {
+        sid
+        for sid, row in signatures.items()
+        if labels[sid] in reserved_authors or str(row["paper_id"]) in reserved_papers
+    }
+    return excluded, {
+        "reserved_block_ids": sorted(reserved_blocks),
+        "reserved_author_ids": sorted(reserved_authors),
+        "reserved_paper_ids": sorted(reserved_papers),
+        "reserved_query_paper_ids": list(exclusions.reserved_query_paper_ids),
+        "rationale": exclusions.rationale,
+        "reference": exclusions.reference,
+    }
+
+
 def link(source: Path, target: Path) -> None:
     """Share immutable paper and vector inputs across populations."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -114,14 +195,23 @@ def prepare_benchmark(
     pair_seed: int = 12455678,
     evaluation_pairs: int = 10000,
     n_jobs: int = 1,
+    model_exclusions: ModelExclusions | None = None,
 ) -> dict:
     """Prepare accepted raw names, current gold, and nested release splits."""
+    validate_unknown_filename(unknown_filename)
+    if name == "medline" and model_exclusions is not None:
+        raise ValueError("Model exclusions require a cluster-based source")
     root = output_root / "benchmark_source"
     destination = root / name
     if destination.exists():
         raise FileExistsError(destination)
-    destination.mkdir(parents=True)
     source = source_root / name
+    unknown_ids = (
+        load_unknown_signatures({"clusters": source / f"{name}_clusters.json"}, filename=unknown_filename).ids
+        if name != "medline"
+        else frozenset()
+    )
+    destination.mkdir(parents=True)
     signature_path = source / f"{name}_signatures.json"
     signatures = read(signature_path)
     report: dict = {"source_signatures_sha256": sha(signature_path), "signature_count": len(signatures)}
@@ -152,7 +242,7 @@ def prepare_benchmark(
         clusters = read(original_path)
         old_members = members(clusters)
         sidecar = source / unknown_filename
-        unknown = set(json.loads(sidecar.read_bytes()))
+        unknown = set(unknown_ids)
         if not unknown <= signatures.keys():
             raise ValueError(f"Unknown IDs are absent from source signatures: {name}")
         report["source_clusters_sha256"] = sha(original_path)
@@ -197,6 +287,20 @@ def prepare_benchmark(
         outer_train, outer_val, heldout = dataset.split_cluster_signatures()
         development_ids = {sid for block in (*outer_train.values(), *outer_val.values()) for sid in block}
         heldout_ids = {sid for block in heldout.values() for sid in block}
+        if development_ids & heldout_ids or development_ids | heldout_ids != set(signatures):
+            raise ValueError(f"Population overlap or loss: {name}")
+        reserved_ids: set[str] = set()
+        if model_exclusions is not None:
+            excluded, exclusion_report = reserve_model_scope(
+                name, signatures, clusters, dataset.get_blocks(), unknown, model_exclusions
+            )
+            reserved_ids = development_ids & excluded
+            development_ids -= reserved_ids
+            report["model_exclusions"] = {
+                **exclusion_report,
+                "excluded_development_signatures": len(reserved_ids),
+                "scope_in_external_test_signatures": len(heldout_ids & excluded),
+            }
         model_signatures = {sid: row for sid, row in signatures.items() if sid in development_ids}
         model_clusters = subset_clusters(clusters, development_ids)
         model_dataset = dataset_for_split(name, model_signatures, model_clusters, seed=seed, n_jobs=n_jobs)
@@ -207,7 +311,11 @@ def prepare_benchmark(
             "unused_internal_test": model_unused,
             "external_test": heldout,
         }
-        if development_ids & heldout_ids or development_ids | heldout_ids != set(signatures):
+        if model_exclusions is not None:
+            populations["reserved_incremental"] = dataset.group_signature_helper(
+                [sid for sid in signatures if sid in reserved_ids]
+            )
+        if development_ids & heldout_ids or development_ids | heldout_ids | reserved_ids != set(signatures):
             raise ValueError(f"Population overlap or loss: {name}")
         selected_root = output_root / "populations"
         model_directory = selected_root / "model_source" / name
@@ -261,6 +369,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     benchmark.add_argument("--correction-receipt", type=Path)
     benchmark.add_argument("--correction-root", type=Path)
     benchmark.add_argument("--evaluation-pairs", type=int, default=10000)
+    benchmark.add_argument(
+        "--model-exclusions",
+        type=Path,
+        help="Dataset-keyed JSON with reserved block, gold author, and query paper IDs; preserve the outer test split.",
+    )
     augmentation = stages.add_parser("augmentation", help="Create fresh omissions and vector refresh inputs")
     for option in ("prepared-root", "output"):
         augmentation.add_argument(f"--{option}", type=Path, required=True)
@@ -284,7 +397,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     finalize.add_argument("--device", default="cuda")
     for stage in (benchmark, augmentation, finalize):
         stage.add_argument("--datasets", nargs="+", default=DATASETS)
-        stage.add_argument("--unknown-filename", default="restored_unknown_signature_ids_20261009.json")
+        stage.add_argument(
+            "--unknown-filename", type=validate_unknown_filename, default="restored_unknown_signature_ids_20261009.json"
+        )
         stage.add_argument("--n-jobs", type=int, default=1)
     for stage in (benchmark, augmentation):
         stage.add_argument("--seed", type=int, default=1111)
@@ -307,9 +422,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.stage == "benchmarks":
             options["output_root"] = options.pop("output")
             datasets = options.pop("datasets")
+            exclusion_path = options.pop("model_exclusions")
+            exclusions = load_model_exclusions(exclusion_path) if exclusion_path is not None else {}
+            if missing := exclusions.keys() - set(datasets):
+                parser.error(f"Model exclusion datasets require --datasets: {sorted(missing)}")
             report = {"seed": args.seed, "pair_seed": args.pair_seed, "datasets": {}}
+            if exclusion_path is not None:
+                report["model_exclusions"] = {"path": str(exclusion_path), "sha256": sha(exclusion_path)}
             for name in datasets:
-                report["datasets"][name] = prepare_benchmark(name, **options)
+                report["datasets"][name] = prepare_benchmark(name, model_exclusions=exclusions.get(name), **options)
                 write(args.output / "population_summary.json", report)
         elif args.stage == "augmentation":
             options.pop("n_jobs")

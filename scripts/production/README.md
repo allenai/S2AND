@@ -139,6 +139,23 @@ The complete model includes the incremental booster, gate metadata, and target J
 The pairwise-only input remains unchanged.
 The linker binds the exact pairwise feature contract and both boosters.
 
+The trainer validates each derived query against its source signature and paper before a model load.
+Every `visibleq:` signature requires a complete source-map entry.
+The feature bundle preserves the map bytes and records `initial_query_sources_sha256` in `bundle.json`.
+The linker evaluation report records the same digest.
+Use `--expected-initial-query-map-sha256` to require a digest from frozen run inputs.
+The trainer also enforces any digest that the source bundle declares.
+
+The EPS gold and sweep commands accept the same digest option.
+Their summaries, references, and plans record the observed map digest.
+EPS application rejects plans with a missing or changed map digest when a source map exists.
+Create new sweep plans before EPS application if existing plans omit the map digest.
+
+Unknown-signature sidecars require one plain basename that matches `restored_unknown_signature_ids_*.json`.
+Preparation rejects an invalid basename before it creates output.
+Preparation, augmentation, packaging, and model readers use the same resolver.
+Legacy model inputs without a sidecar retain an empty exclusion set.
+
 The fixed classic booster target uses 53 features and 675 trees.
 The booster fits train rows.
 Both `calibration_fit` and `calibration_check` select gate features and fit gate coefficients.

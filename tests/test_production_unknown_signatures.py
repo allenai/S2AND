@@ -13,6 +13,7 @@ from scripts.production.model.unknown_signatures import (
     augmented_unknown_ids,
     exclude_unknown_pairs,
     load_unknown_signatures,
+    resolve_unknown_signature_sidecar,
 )
 
 
@@ -44,6 +45,27 @@ def test_legacy_and_ambiguous_unknown_sources(tmp_path: Path) -> None:
         (tmp_path / f"restored_unknown_signature_ids_{date}.json").write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match="Multiple"):
         load_unknown_signatures(files)
+
+
+def test_explicit_sidecar_name_requires_the_discovered_file(tmp_path: Path) -> None:
+    filename = "restored_unknown_signature_ids_reviewed.json"
+    assert resolve_unknown_signature_sidecar(tmp_path) is None
+    with pytest.raises(FileNotFoundError):
+        resolve_unknown_signature_sidecar(tmp_path, filename=filename)
+    other = tmp_path / "restored_unknown_signature_ids_other.json"
+    other.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="Expected unknown-signature sidecar"):
+        resolve_unknown_signature_sidecar(tmp_path, filename=filename)
+    assert resolve_unknown_signature_sidecar(tmp_path, filename=other.name) == other.resolve()
+
+
+@pytest.mark.parametrize(
+    "filename", ["restored_unknown_signature_ids_.json", "restored_unknown_signature_ids_dir.json"]
+)
+def test_unknown_sidecar_rejects_invalid_names_and_directories(tmp_path: Path, filename: str) -> None:
+    (tmp_path / filename).mkdir()
+    with pytest.raises(ValueError, match="Unknown-signature"):
+        load_unknown_signatures({"clusters": tmp_path / "clusters.json"})
 
 
 def test_supervised_pairs_exclude_unknown_augmented_copies_and_keep_order() -> None:

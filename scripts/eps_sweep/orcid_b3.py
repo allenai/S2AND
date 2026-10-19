@@ -17,7 +17,11 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training.classic import _load_classic_stratified_eval_rows, load_bundle
 from s2and.text import normalize_orcid
 from scripts.production.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS
-from scripts.production.model.train_linker_and_finalize import _load_initial_query_sources
+from scripts.production.model.initial_query_sources import (
+    MAP_SHA256_FIELD,
+    InitialQuerySources,
+    load_initial_query_sources,
+)
 
 # Selection references exclude final-test identities and reviewed ORCID errors.
 REFERENCE_POLICY = "final_test_orcid_groups_and_reviewed_error_records_excluded"
@@ -38,25 +42,28 @@ class OrcidReference:
     stats: dict[str, Any]
 
 
-def final_test_query_identities(snapshot_root: Path, dataset: str) -> frozenset[str]:
+def final_test_query_identities(
+    snapshot_root: Path, dataset: str, query_sources: InitialQuerySources | None = None
+) -> frozenset[str]:
     """Return the dataset's frozen final-test query records from a snapshot.
 
     Args:
         snapshot_root: Snapshot with the linker bundle and its frozen split assignments.
         dataset: Incremental dataset name.
+        query_sources: Validated source map from the caller, if available.
 
     Returns:
         Source signature IDs of every final-test query.
     """
+    if query_sources is None:
+        query_sources = load_initial_query_sources(snapshot_root, dataset_names=(dataset,))
     bundle = load_bundle(snapshot_root)
     spec = dict(bundle.models["classic"])
     split_spec = dict(spec["stratified_eval_test_split"])
     rows, assignments = _load_classic_stratified_eval_rows(
         bundle, spec, split_spec, splits=(str(split_spec["test_split"]),), include_calibration_source=True
     )
-    return resolve_test_query_identities(
-        rows, assignments, _load_initial_query_sources(snapshot_root).get(dataset, {}), dataset
-    )
+    return resolve_test_query_identities(rows, assignments, query_sources.origins.get(dataset, {}), dataset)
 
 
 def resolve_test_query_identities(
@@ -104,13 +111,16 @@ def read_reference(
     *,
     test_identities: frozenset[str],
     error_records: frozenset[str],
+    query_sources: InitialQuerySources | None = None,
 ) -> OrcidReference:
     """Build ORCID references outside final-test identities.
 
     A final-test record excludes its complete ORCID group, so test identities do not
     select EPS. Reviewed wrong-ORCID records leave only their own row.
     """
-    origins = _load_initial_query_sources(snapshot_root).get(dataset, {})
+    if query_sources is None:
+        query_sources = load_initial_query_sources(snapshot_root, arrow_datasets={dataset: arrow_dataset})
+    origins = query_sources.origins.get(dataset, {})
     clones = frozenset(origins)
     with arrow_dataset.use() as lease, lease.open_file("signatures") as infile:
         with pa.PythonFile(infile, mode="r") as source:
@@ -147,6 +157,7 @@ def read_reference(
         stats={
             "reference_kind": "repeated_orcid_identity",
             "reference_policy": REFERENCE_POLICY,
+            MAP_SHA256_FIELD: query_sources.sha256,
             "reference_signatures": len(repeated),
             "reference_groups": len(set(repeated.values())),
             "singleton_inclusive_signatures": len(with_singletons),

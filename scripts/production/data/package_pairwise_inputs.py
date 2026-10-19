@@ -21,6 +21,10 @@ from scripts.production.model.linker_source_bundle import (  # noqa: E402
     _dataset_manifests,
     _rebind_dataset_manifests,
 )
+from scripts.production.model.unknown_signatures import (  # noqa: E402
+    load_unknown_signatures,
+    resolve_unknown_signature_sidecar,
+)
 
 BENCHMARKS = ("aminer", "arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath")
 
@@ -54,6 +58,15 @@ def package_pairwise_inputs(
             raise ValueError(f"Arrow dataset population differs: {source}")
         if output.is_relative_to(source):
             raise ValueError("Output must remain outside source Arrow collections")
+    unknown_sidecars: dict[tuple[str, str], Path] = {}
+    for name in datasets:
+        for mode, folder in (("model", "model_source"), ("evaluation", "evaluation_source")):
+            source = prepared / "populations" / folder / name
+            unknown_path = resolve_unknown_signature_sidecar(source)
+            if unknown_path is None:
+                raise ValueError(f"Require one uncertainty sidecar: {source}")
+            load_unknown_signatures({"clusters": source / f"{name}_clusters.json"})
+            unknown_sidecars[mode, name] = unknown_path
     output.mkdir(parents=True)
     shutil.copytree(
         prepared / "name_counts_global" / "name_counts_index",
@@ -85,10 +98,8 @@ def package_pairwise_inputs(
             for role in ("signatures", "clusters"):
                 filename = f"{name}_{role}.json"
                 files[role] = copy_file(source / filename, destination / filename)
-            unknown = sorted(source.glob("restored_unknown_signature_ids_*.json"))
-            if len(unknown) != 1:
-                raise ValueError(f"Require one uncertainty sidecar: {source}")
-            files["unknown_signatures"] = copy_file(unknown[0], destination / unknown[0].name)
+            unknown_path = unknown_sidecars[mode, name]
+            files["unknown_signatures"] = copy_file(unknown_path, destination / unknown_path.name)
             if mode == "evaluation":
                 for role, filename in (("pairs", "test_pairs.json"), ("blocks", "test_blocks.json")):
                     files[role] = copy_file(source / filename, destination / filename)

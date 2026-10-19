@@ -15,23 +15,53 @@ from s2and.metrics import b3_precision_recall_fscore
 from s2and.production_bundle import finalize_production_bundle
 from s2and.production_model import canonical_artifact_hashes, load_production_model
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust
-from scripts.eps_sweep import orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
+from scripts.eps_sweep import build_linking_eps_gold, orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
 from scripts.eps_sweep.apply_reviewed_eps import apply_reviewed_eps
 from scripts.eps_sweep.build_linking_eps_gold import _build_dataset_constraints, parse_args
 from scripts.eps_sweep.common import arrow_dataset_dir, read_sweep_curve, write_json
+from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, derived_query_id
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
-from tests.raw_arrow_helpers import base_arrow_paths
+from tests.raw_arrow_helpers import base_arrow_paths, write_ipc
 from tests.test_production_model import _write_synthetic_linker
 
 
-def _curve(root: Path, model_hash: str = "a" * 64, limited: bool = False, mode: str = "orcid-b3") -> Path:
+def _source_snapshot(root: Path, *, source: str = "q1", with_clone: bool = False) -> Path:
+    dataset = root / "datasets" / "unit"
+    ids, papers = [source, "other"], ["source-paper", "other-paper"]
+    if with_clone:
+        ids.append(derived_query_id("visibleq:", source, "source-paper"))
+        papers.append(derived_query_id("visiblep:", source, "source-paper"))
+    write_ipc(dataset / "signatures.arrow", pa.table({"signature_id": ids, "paper_id": papers}))
+    write_json(dataset / "manifest.json", {"paths": {"signatures": "signatures.arrow"}})
+    path = root / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
+    if with_clone:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"dataset": "unit", "source_query_signature_id": source, "initial_query_signature_id": ids[-1]})
+            + "\n",
+            encoding="utf-8",
+        )
+    return path
+
+
+def _curve(
+    root: Path,
+    model_hash: str = "a" * 64,
+    limited: bool = False,
+    mode: str = "orcid-b3",
+    *,
+    with_source_map: bool = False,
+) -> Path:
     dataset = root / "unit"
     dataset.mkdir(parents=True)
     reference = dataset / "orcid_reference.parquet"
     pd.DataFrame({"signature_id": ["r1", "r2"], "orcid": ["o", "o"], "repeated": [True, True]}).to_parquet(
         reference, index=False
     )
+    snapshot_root = root / "snapshot"
+    map_path = _source_snapshot(snapshot_root, with_clone=with_source_map)
+    map_digest = sha256_file(map_path) if with_source_map else None
     plan = {
         "model_manifest_sha256": model_hash,
         "score_mode": mode,
@@ -39,8 +69,13 @@ def _curve(root: Path, model_hash: str = "a" * 64, limited: bool = False, mode: 
         "eps_values": [0.55, 0.65],
         "use_orcid_subblocking": False,
         "suppress_orcid_constraints": True,
-        "arrow_root": str(root / "snapshot"),
-        "reference": {"reference_policy": orcid_b3.REFERENCE_POLICY, "sha256": sha256_file(reference)},
+        "arrow_root": str(snapshot_root),
+        MAP_SHA256_FIELD: map_digest,
+        "reference": {
+            "reference_policy": orcid_b3.REFERENCE_POLICY,
+            "sha256": sha256_file(reference),
+            MAP_SHA256_FIELD: map_digest,
+        },
     }
     write_json(dataset / "plan.json", plan)
     diagnostic = dataset / "eps_b3_with_singletons.tsv"
@@ -93,7 +128,7 @@ def _apply(
         "Fixture review",
         tmp_path / "review.json",
         release_datasets=("unit",),
-        test_identities=lambda _root, _dataset: test_ids,
+        test_identities=lambda _root, _dataset, _sources: test_ids,
     )
 
 
@@ -117,22 +152,21 @@ def test_orcid_reference_normalizes_ids_and_excludes_copies(tmp_path: Path) -> N
     with pa.OSFile(raw["signatures"], "rb") as source:
         table = pa.ipc.open_file(source).read_all()
     rows = table.to_pylist()
+    clone = derived_query_id("visibleq:", "q1", "p_q")
+    clone_paper = derived_query_id("visiblep:", "q1", "p_q")
     valid = "0000-0002-1694-233X"
     rows[0]["author_orcid"] = "https://orcid.org/" + valid
     rows[1]["author_orcid"] = "000000021694233X"
     rows[2]["author_orcid"] = "https://orcid.org/0000-0002-1825-0097"
     rows.append({**rows[2], "signature_id": "bad_copy"})
-    rows.append({**rows[0], "signature_id": "visibleq:copy"})
+    rows.append({**rows[0], "signature_id": clone, "paper_id": clone_paper})
     rows.append({**rows[0], "signature_id": "lonely", "author_orcid": "0000-0001-5000-0007"})
     paths = write_arrow_tables_bundle(tmp_path / "raw", {"signatures": pa.Table.from_pylist(rows, schema=table.schema)})
     write_test_arrow_artifact_manifest(tmp_path / "raw", {**raw, **paths})
     map_path = tmp_path / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
     map_path.parent.mkdir()
     map_path.write_text(
-        json.dumps(
-            {"dataset": "unit", "source_query_signature_id": "q1", "initial_query_signature_id": "visibleq:copy"}
-        )
-        + "\n",
+        json.dumps({"dataset": "unit", "source_query_signature_id": "q1", "initial_query_signature_id": clone}) + "\n",
         encoding="utf-8",
     )
     other = "0000-0001-5000-0007"
@@ -142,7 +176,8 @@ def test_orcid_reference_normalizes_ids_and_excludes_copies(tmp_path: Path) -> N
         )
         assert reference.repeated == {"q1": valid, "s1": valid}
         assert reference.with_singletons == {"q1": valid, "s1": valid, "lonely": other}
-        assert reference.excluded_copies == {"visibleq:copy"}
+        assert reference.excluded_copies == {clone}
+        assert reference.stats[MAP_SHA256_FIELD] == sha256_file(map_path)
         assert reference.stats["excluded_mixed_orcid_rows"] == 2
         assert reference.stats["reference_policy"] == orcid_b3.REFERENCE_POLICY
         # A final-test record removes its complete ORCID group, not only its own row.
@@ -162,6 +197,13 @@ def test_orcid_reference_normalizes_ids_and_excludes_copies(tmp_path: Path) -> N
         )
         assert corrected.with_singletons == {"q1": valid, "s1": valid}
         assert corrected.stats["excluded_reviewed_error_records"] == 1
+        map_path.write_text(
+            json.dumps({"dataset": "unit", "source_query_signature_id": "s1", "initial_query_signature_id": clone})
+            + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Derived query IDs differ"):
+            orcid_b3.read_reference(dataset, tmp_path, "unit", test_identities=frozenset(), error_records=frozenset())
 
 
 def test_final_test_identities_resolve_copies_and_reject_unmapped_or_missing_rows() -> None:
@@ -292,7 +334,56 @@ def test_release_review_requires_every_frozen_giant(tmp_path: Path) -> None:
         )
 
 
-def test_eps_only_update_preserves_real_complete_artifacts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("change", ["bytes", "missing"])
+def test_release_review_rejects_changed_source_map_before_test_resolution(tmp_path: Path, change: str) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"), with_source_map=True)
+    map_path = tmp_path / "curves/snapshot/incremental_patent_tasks/initial_query_source_map.jsonl"
+    if change == "bytes":
+        map_path.write_text(" " + map_path.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        map_path.unlink()
+    with pytest.raises(ValueError, match="SHA-256 differs"):
+        apply_reviewed_eps(
+            source,
+            tmp_path / "output",
+            tmp_path / "curves",
+            ["unit"],
+            0.65,
+            "Fixture review",
+            tmp_path / "review.json",
+            release_datasets=("unit",),
+        )
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize("command", ["sweep", "gold"])
+@pytest.mark.parametrize("with_source_map", [False, True])
+def test_eps_commands_reject_an_unmatched_expected_source_map(
+    tmp_path: Path, command: str, with_source_map: bool
+) -> None:
+    _source_snapshot(tmp_path, with_clone=with_source_map)
+    args = [
+        "--output-dir",
+        str(tmp_path / "output"),
+        "--expected-initial-query-map-sha256",
+        "0" * 64,
+    ]
+    with pytest.raises(ValueError, match="SHA-256 differs"):
+        if command == "sweep":
+            parsed = sweep_eps_on_linking_gold.parse_args(
+                ["--dataset", "unit", "--arrow-root", str(tmp_path), "--model-path", str(tmp_path / "model"), *args]
+            )
+            sweep_eps_on_linking_gold.run(parsed)
+        else:
+            build_linking_eps_gold.main(["--bundle-root", str(tmp_path), "--datasets", "unit", *args])
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize("with_source_map", [False, True])
+def test_eps_only_update_preserves_real_complete_artifacts(tmp_path: Path, with_source_map: bool) -> None:
     hashes = canonical_artifact_hashes()
     pairwise = tmp_path / "pairwise"
     write_synthetic_pairwise_bundle(pairwise, artifact_hashes=hashes, release_version="9.9")
@@ -305,7 +396,7 @@ def test_eps_only_update_preserves_real_complete_artifacts(tmp_path: Path) -> No
         target_json=target,
     ).bundle_dir
     before = {path.relative_to(source).as_posix(): path.read_bytes() for path in source.rglob("*") if path.is_file()}
-    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"), with_source_map=with_source_map)
     output = tmp_path / "output"
     report = _apply(tmp_path, source)
     assert report["sweep_plans"]["unit"]["reference"]["reference_policy"] == orcid_b3.REFERENCE_POLICY
@@ -316,7 +407,8 @@ def test_eps_only_update_preserves_real_complete_artifacts(tmp_path: Path) -> No
     assert load_production_model(source).cluster_model.eps == 0.5
 
 
-def test_proxy_builder_excludes_initial_query_origin(tmp_path: Path) -> None:
+@pytest.mark.parametrize("valid_origin", [False, True])
+def test_proxy_builder_excludes_initial_query_origin(tmp_path: Path, valid_origin: bool) -> None:
     components = tmp_path / "components"
     components.mkdir()
     pd.DataFrame(
@@ -327,13 +419,8 @@ def test_proxy_builder_excludes_initial_query_origin(tmp_path: Path) -> None:
             "signature_id": ["origin", "other"],
         }
     ).to_parquet(components / "unit_members.parquet", index=False)
-    origins = tmp_path / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
-    origins.parent.mkdir()
-    origins.write_text(
-        json.dumps({"dataset": "unit", "source_query_signature_id": "origin", "initial_query_signature_id": "copy"})
-        + "\n",
-        encoding="utf-8",
-    )
+    map_path = _source_snapshot(tmp_path, source="origin", with_clone=True)
+    clone = derived_query_id("visibleq:", "origin", "source-paper")
     labels = pd.DataFrame(
         [
             {
@@ -344,17 +431,27 @@ def test_proxy_builder_excludes_initial_query_origin(tmp_path: Path) -> None:
                 "source_kind": "manual",
                 "supervision_type": "manual",
                 "query_group_id": "query",
-                "query_signature_id": "copy",
+                "query_signature_id": clone,
                 "query_view": "initial_only",
                 "candidate_component_key": "profile",
                 "label": 1,
             }
         ]
     )
+    if not valid_origin:
+        map_path.write_text(
+            json.dumps({"dataset": "unit", "source_query_signature_id": "absent", "initial_query_signature_id": clone})
+            + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="records are absent"):
+            _build_dataset_constraints(tmp_path, "unit", labels)
+        return
     pairs, conflicts, summary = _build_dataset_constraints(tmp_path, "unit", labels)
     assert pairs["member_signature_id"].tolist() == ["other"]
     assert conflicts.empty
     assert summary["excluded_initial_origin_rows"] == 1
+    assert summary[MAP_SHA256_FIELD] == sha256_file(map_path)
 
 
 def test_proxy_builder_cli_rejects_test_assignment() -> None:

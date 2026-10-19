@@ -555,6 +555,10 @@ def test_release_serializes_complete_bundle_before_evaluation(
         models={"classic": {"feature_columns": ["f0"], "best_params": {"n_estimators": 1}}},
         expected_metrics={},
     )
+    map_path = bundle.root / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
+    map_path.parent.mkdir(parents=True)
+    map_path.write_bytes(b"")
+    map_digest = hashlib.sha256(b"").hexdigest()
     summary = {
         "training_summary": {"rows": 3, "positive_rows": 1},
         "abstain_rule": {"calibration_metrics": {"accuracy": 0.75}},
@@ -692,6 +696,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
         "validate",
     ]
     assert result["pairwise_bundle_binding"] == {"test": "binding"}
+    assert result["initial_query_sources_sha256"] == map_digest
     assert result["complete_model_path"] == str(output_dir / "pairwise-stage")
     assert result["query_predictions"]["rows"] == 1
     assert result["evaluation_summary"] == summary

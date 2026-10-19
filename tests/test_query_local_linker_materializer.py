@@ -18,6 +18,7 @@ from s2and.incremental_linking import runtime as linker_runtime
 from s2and.incremental_linking.feature_block import write_raw_arrow_batch_lookup_indexes
 from s2and.incremental_linking.retrieval import RawArrowPlanBundle, build_linker_retrieval_batch_from_raw_plan_bundle
 from scripts.production.model import train_linker_and_finalize as trainer
+from scripts.production.model.initial_query_sources import derived_query_id
 from tests.raw_arrow_helpers import base_arrow_paths, open_arrow_dataset, write_ipc
 
 
@@ -157,20 +158,22 @@ def test_initial_clone_matches_public_overlay_and_keeps_origin_constraints(
 ) -> None:
     """A cloned query must not use its full source identity as profile evidence."""
     source = tmp_path / "source"
+    clone = derived_query_id("visibleq:", "q1", "p_q")
+    clone_paper = derived_query_id("visiblep:", "q1", "p_q")
     paths = _context_paths(source / "datasets" / "toy")
     for key in ("signatures", "papers", "paper_authors"):
         with pa.OSFile(paths[key], "rb") as file:
             table = pa.ipc.open_file(file).read_all()
         records = table.to_pylist()
         if key == "signatures":
-            records.append({**records[0], "signature_id": "initial_q1", "paper_id": "initial_p_q", "author_first": "A"})
+            records.append({**records[0], "signature_id": clone, "paper_id": clone_paper, "author_first": "A"})
         elif key == "papers":
-            records.append({**records[0], "paper_id": "initial_p_q"})
+            records.append({**records[0], "paper_id": clone_paper})
         else:
             records.extend(
                 {
                     **record,
-                    "paper_id": "initial_p_q",
+                    "paper_id": clone_paper,
                     "author_name": "A Wang" if record["position"] == 0 else record["author_name"],
                 }
                 for record in list(records)
@@ -187,9 +190,9 @@ def test_initial_clone_matches_public_overlay_and_keeps_origin_constraints(
             {
                 "dataset": "toy",
                 "source_query_signature_id": "q1",
-                "initial_query_signature_id": "initial_q1",
+                "initial_query_signature_id": clone,
                 "source_paper_id": "p_q",
-                "initial_paper_id": "initial_p_q",
+                "initial_paper_id": clone_paper,
             }
         )
         + "\n",
@@ -219,7 +222,7 @@ def test_initial_clone_matches_public_overlay_and_keeps_origin_constraints(
         [
             {
                 "dataset": "toy",
-                "query_signature_id": "initial_q1",
+                "query_signature_id": clone,
                 "query_group_id": "initial_case",
                 "query_view": "initial_only",
                 "candidate_component_key": key,

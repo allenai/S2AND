@@ -46,6 +46,7 @@ from scripts.eps_sweep.common import (
     sha1_text,
     write_json,
 )
+from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, load_initial_query_sources
 
 WEIGHT_COLUMNS = [
     "weight_pair",
@@ -93,6 +94,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--gold-path", type=Path, default=None)
     parser.add_argument("--score-mode", choices=["safe-action-proxy", "orcid-b3"], default="safe-action-proxy")
+    parser.add_argument(
+        "--expected-initial-query-map-sha256", help="Require this frozen initial-query source-map SHA-256."
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--distance-cache-dir", type=Path, default=None)
     parser.add_argument("--n-jobs", type=int, default=8)
@@ -1067,47 +1071,55 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     _validate_args(args)
     _configure_runtime_environment(args)
-
     output_dir = _output_dir(args).resolve()
     if any((output_dir / name).exists() for name in ("eps_b3.tsv", "eps_overall.tsv", "summary.json")):
         raise FileExistsError("Use a fresh sweep output; reuse --distance-cache-dir for unchanged distances")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(output_dir / "eps_sweep.log", encoding="utf-8"),
-        ],
+    snapshot_root = args.arrow_root.resolve()
+    query_sources = load_initial_query_sources(
+        snapshot_root,
+        arrow_datasets={},
+        expected_sha256=getattr(args, "expected_initial_query_map_sha256", None),
     )
 
     from s2and.production_model import load_production_model
 
-    dataset_root = arrow_dataset_dir(args.arrow_root.resolve(), args.dataset, args.replay_bundle)
-    gold = None
-    gold_selection: dict[str, Any] = {}
-    if args.score_mode == "safe-action-proxy":
-        gold = _load_gold(_gold_path(args))
-        gold = gold[gold["dataset"].astype(str) == str(args.dataset)].copy()
-        if gold.empty:
-            raise ValueError(f"No gold rows for dataset={args.dataset}")
-        gold_summary_path = _gold_path(args).parent / "summary.json"
-        if gold_summary_path.is_file():
-            gold_selection = json.loads(gold_summary_path.read_text(encoding="utf-8"))
-
-    clusterer = load_production_model(args.model_path)
-    clusterer.n_jobs = int(args.n_jobs)
-    clusterer.suppress_orcid = bool(args.suppress_orcid_constraints)
-    model_eps = None
-    best_params = getattr(clusterer, "best_params", None)
-    if isinstance(best_params, Mapping) and "eps" in best_params:
-        model_eps = float(best_params["eps"])
-
+    dataset_root = arrow_dataset_dir(snapshot_root, args.dataset, args.replay_bundle)
     with ArrowDataset.open(
         dataset_root,
         require_specter=True,
         require_name_counts_index=True,
     ) as arrow_dataset:
+        query_sources.validate_arrow_dataset(args.dataset, arrow_dataset)
+        gold = None
+        gold_selection: dict[str, Any] = {}
+        if args.score_mode == "safe-action-proxy":
+            gold = _load_gold(_gold_path(args))
+            gold = gold[gold["dataset"].astype(str) == str(args.dataset)].copy()
+            if gold.empty:
+                raise ValueError(f"No gold rows for dataset={args.dataset}")
+            gold_summary_path = _gold_path(args).parent / "summary.json"
+            if gold_summary_path.is_file():
+                gold_selection = json.loads(gold_summary_path.read_text(encoding="utf-8"))
+        if MAP_SHA256_FIELD in gold_selection and gold_selection[MAP_SHA256_FIELD] != query_sources.sha256:
+            raise ValueError("The EPS gold uses a different initial-query source map")
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(output_dir / "eps_sweep.log", encoding="utf-8"),
+            ],
+        )
+        clusterer = load_production_model(args.model_path)
+        clusterer.n_jobs = int(args.n_jobs)
+        clusterer.suppress_orcid = bool(args.suppress_orcid_constraints)
+        model_eps = None
+        best_params = getattr(clusterer, "best_params", None)
+        if isinstance(best_params, Mapping) and "eps" in best_params:
+            model_eps = float(best_params["eps"])
+
         identity_reference = None
         diagnostic_reference = None
         reference_stats: dict[str, Any] = {}
@@ -1119,13 +1131,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 reviewed_error_records,
             )
 
-            snapshot_root = args.arrow_root.resolve()
             reference = read_reference(
                 arrow_dataset,
                 snapshot_root,
                 args.dataset,
-                test_identities=final_test_query_identities(snapshot_root, args.dataset),
+                test_identities=final_test_query_identities(snapshot_root, args.dataset, query_sources),
                 error_records=reviewed_error_records(snapshot_root, args.dataset),
+                query_sources=query_sources,
             )
             identity_reference = reference.repeated
             diagnostic_reference = reference.with_singletons
@@ -1152,6 +1164,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         plan["model_manifest_sha256"] = _hash_file(args.model_path / "manifest.json")
         plan["score_mode"] = args.score_mode
         plan["reference"] = reference_stats
+        plan[MAP_SHA256_FIELD] = query_sources.sha256
         plan["limited_run"] = (
             args.max_subblocks is not None or gold_selection.get("max_queries_per_dataset") is not None
         )

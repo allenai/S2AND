@@ -30,22 +30,35 @@ from scripts.eps_sweep.common import (
     write_json,
 )
 from scripts.eps_sweep.orcid_b3 import REFERENCE_POLICY, final_test_query_identities
+from scripts.production.model.initial_query_sources import (
+    MAP_SHA256_FIELD,
+    InitialQuerySources,
+    load_initial_query_sources,
+)
 
-TestIdentityLoader = Callable[[Path, str], frozenset[str]]
+TestIdentityLoader = Callable[[Path, str, InitialQuerySources], frozenset[str]]
 
 
 def _require_test_separated_reference(
-    sweep_root: Path, dataset: str, plan: dict[str, Any], test_identities: TestIdentityLoader
+    sweep_root: Path,
+    dataset: str,
+    plan: dict[str, Any],
+    test_identities: TestIdentityLoader,
+    query_sources: InitialQuerySources,
 ) -> dict[str, Any]:
     """Recheck that the reference used for the curve contains no final-test record."""
     stats = plan.get("reference")
     if not isinstance(stats, dict) or stats.get("reference_policy") != REFERENCE_POLICY:
         raise ValueError(f"The EPS reference does not exclude final-test identities: {dataset}")
+    snapshot_root = Path(plan["arrow_root"])
+    expected_digest = plan.get(MAP_SHA256_FIELD)
+    if query_sources.sha256 != expected_digest or stats.get(MAP_SHA256_FIELD) != expected_digest:
+        raise ValueError(f"The EPS source map changes after its sweep: {dataset}")
     reference_path = sweep_root / dataset / "orcid_reference.parquet"
     if sha256_file(reference_path) != stats.get("sha256"):
         raise ValueError(f"The EPS reference changes after its sweep: {dataset}")
     reference = set(pd.read_parquet(reference_path, columns=["signature_id"])["signature_id"].astype(str))
-    if overlap := reference & test_identities(Path(plan["arrow_root"]), dataset):
+    if overlap := reference & test_identities(snapshot_root, dataset, query_sources):
         raise ValueError(f"The EPS reference contains final-test records: {dataset} {sorted(overlap)[:5]}")
     return stats
 
@@ -78,6 +91,7 @@ def apply_reviewed_eps(
         raise ValueError("The review report must remain outside both model directories")
     source_hash = sha256_file(source / "manifest.json")
     plans: dict[str, dict[str, Any]] = {}
+    source_maps: dict[Path, InitialQuerySources] = {}
     for dataset in dict.fromkeys(datasets):
         plan_path = sweep_root / dataset / "plan.json"
         raw_plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -105,7 +119,14 @@ def apply_reviewed_eps(
             raise ValueError(f"Unknown EPS score mode: {dataset}")
         if not curve[metric_columns].map(lambda value: math.isfinite(value) and 0 <= value <= 1).all().all():
             raise ValueError(f"Invalid EPS metrics: {dataset}")
-        reference = _require_test_separated_reference(sweep_root, dataset, plan, test_identities)
+        snapshot_root = Path(plan["arrow_root"]).resolve()
+        if snapshot_root not in source_maps:
+            source_maps[snapshot_root] = load_initial_query_sources(
+                snapshot_root, dataset_names=release_datasets, expected_sha256=plan.get(MAP_SHA256_FIELD)
+            )
+        reference = _require_test_separated_reference(
+            sweep_root, dataset, plan, test_identities, source_maps[snapshot_root]
+        )
         diagnostic = read_singleton_inclusive_curve(sweep_root, dataset, plan)
         if not diagnostic["reference_coverage"].eq(1).all():
             raise ValueError(f"Incomplete singleton-inclusive ORCID reference coverage: {dataset}")

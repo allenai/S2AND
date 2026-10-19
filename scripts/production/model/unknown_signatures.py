@@ -6,10 +6,58 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
 LabeledPair = tuple[str, str, int | float]
+UNKNOWN_SIGNATURE_FILENAME_PATTERN = "restored_unknown_signature_ids_*.json"
+
+
+def validate_unknown_filename(filename: str) -> str:
+    """Require one portable basename that all uncertainty readers can discover."""
+    if (
+        not fnmatchcase(filename, UNKNOWN_SIGNATURE_FILENAME_PATTERN)
+        or filename == "restored_unknown_signature_ids_.json"
+        or any(ord(character) < 32 or character in '\\/:*?"<>|' for character in filename)
+    ):
+        raise ValueError(
+            "Unknown-signature filename must be a plain basename matching " + UNKNOWN_SIGNATURE_FILENAME_PATTERN
+        )
+    return filename
+
+
+def resolve_unknown_signature_sidecar(directory: Path, *, filename: str | None = None) -> Path | None:
+    """Resolve one valid sidecar; require its presence when a filename is explicit.
+
+    Args:
+        directory: The directory that contains the source labels.
+        filename: The required basename, or ``None`` for legacy discovery.
+
+    Returns:
+        The sidecar path, or ``None`` when legacy inputs have no sidecar.
+
+    Raises:
+        ValueError: If names are invalid, multiple sidecars exist, or the explicit name differs.
+        FileNotFoundError: If the explicit sidecar is absent.
+    """
+    if filename is not None:
+        validate_unknown_filename(filename)
+    candidates = sorted(directory.glob(UNKNOWN_SIGNATURE_FILENAME_PATTERN))
+    for candidate in candidates:
+        validate_unknown_filename(candidate.name)
+        if not candidate.is_file():
+            raise ValueError(f"Unknown-signature sidecar must be a file: {candidate}")
+    if len(candidates) > 1:
+        raise ValueError(f"Multiple unknown-signature sidecars beside labels in {directory}")
+    if not candidates:
+        if filename is not None:
+            raise FileNotFoundError(directory / filename)
+        return None
+    candidate = candidates[0]
+    if filename is not None and candidate.name != filename:
+        raise ValueError(f"Expected unknown-signature sidecar {filename!r}, found {candidate.name!r}")
+    return candidate.absolute()
 
 
 @dataclass(frozen=True)
@@ -29,19 +77,17 @@ class UnknownSignatures:
         }
 
 
-def load_unknown_signatures(files: Mapping[str, Path]) -> UnknownSignatures:
+def load_unknown_signatures(files: Mapping[str, Path], *, filename: str | None = None) -> UnknownSignatures:
     """Read the uncertainty list beside the source labels.
 
     Legacy datasets without a sidecar have no declared unknown IDs.
     Multiple sidecars require an explicit source-directory correction.
     """
     label_path = files["clusters"] if "clusters" in files else files["signatures"]
-    candidates = sorted(label_path.parent.glob("restored_unknown_signature_ids_*.json"))
-    if not candidates:
+    path = resolve_unknown_signature_sidecar(label_path.parent, filename=filename)
+    if path is None:
         return UnknownSignatures(frozenset())
-    if len(candidates) != 1:
-        raise ValueError(f"Multiple unknown-signature sidecars beside {label_path}")
-    path = candidates[0].resolve()
+    path = path.resolve()
     contents = path.read_bytes()
     values = json.loads(contents)
     if not isinstance(values, list):

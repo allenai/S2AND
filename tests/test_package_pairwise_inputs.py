@@ -8,6 +8,8 @@ import pytest
 
 from s2and.arrow_inputs import ArrowDataset
 from scripts.production.data.package_pairwise_inputs import package_pairwise_inputs
+from scripts.production.data.prepare_pairwise_inputs import prepare_benchmark
+from scripts.production.model.unknown_signatures import load_unknown_signatures
 from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import (
     convert_release_arrow,
@@ -98,3 +100,51 @@ def test_package_rejects_incompatible_shared_source(prepared: Path, tmp_path: Pa
     source.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="Model and evaluation papers differ"):
         package_pairwise_inputs(prepared, tmp_path / "package", datasets=("qian",))
+
+
+@pytest.mark.parametrize("sidecar_value", [["duplicate", "duplicate"], {"unknown": []}])
+def test_package_rejects_invalid_sidecars_before_output(prepared: Path, tmp_path: Path, sidecar_value: object) -> None:
+    source = prepared / "populations" / "model_source" / "qian"
+    (source / "restored_unknown_signature_ids_20261009.json").write_text(json.dumps(sidecar_value), encoding="utf-8")
+    output = tmp_path / "package"
+    with pytest.raises(ValueError, match="sidecar"):
+        package_pairwise_inputs(prepared, output, datasets=("qian",))
+    assert not output.exists()
+
+
+def test_prepared_custom_sidecar_reaches_packaging_and_training_discovery(prepared: Path, tmp_path: Path) -> None:
+    source = prepared / "populations" / "model_source"
+    original = source / "qian" / "restored_unknown_signature_ids_20261009.json"
+    filename = "restored_unknown_signature_ids_reviewed.json"
+    original.rename(original.with_name(filename))
+    unknown_ids = {f"signature-{block}-0" for block in range(10)}
+    original.with_name(filename).write_text(json.dumps(sorted(unknown_ids)), encoding="utf-8")
+    current = tmp_path / "current"
+    prepare_benchmark(
+        "qian",
+        source_root=source,
+        fixed_pair_root=source,
+        output_root=current,
+        unknown_filename=filename,
+        evaluation_pairs=10,
+    )
+    shutil.copytree(prepared / "name_counts_global", current / "name_counts_global")
+    shutil.copytree(prepared / "augmented", current / "augmented")
+    (current / "augmented" / "test_pairs.csv").write_text(
+        "signature_id_1,signature_id_2,label\nsignature-1-0,signature-1-1,1\n", encoding="utf-8"
+    )
+    index = current / "name_counts_global" / "name_counts_index"
+    for folder, population in (("release", "model_source"), ("evaluation", "evaluation_source")):
+        arrow = current / "arrow" / folder
+        convert_release_arrow(current / "populations" / population, "qian", arrow, index)
+        convert_release_arrow(current, "augmented", arrow, index)
+    output = tmp_path / "package"
+    result = package_pairwise_inputs(current, output, datasets=("qian",))
+    for mode in ("model", "evaluation"):
+        files = {role: output / spec["path"] for role, spec in result["sources"][mode]["qian"].items()}
+        actual = load_unknown_signatures(files)
+        signatures = json.loads(files["signatures"].read_bytes())
+        assert actual.ids == unknown_ids & signatures.keys()
+        assert actual.ids
+        assert actual.path == files["clusters"].with_name(filename)
+        assert actual.sha256 == result["sources"][mode]["qian"]["unknown_signatures"]["sha256"]

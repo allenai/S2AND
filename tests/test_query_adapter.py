@@ -31,8 +31,8 @@ def _signature(paper_id: str, **overrides: Any) -> SimpleNamespace:
         paper_id=paper_id,
         author_info_first="Alice",
         author_info_middle="",
-        author_info_first_normalized_without_apostrophe="alice",
-        author_info_middle_normalized_without_apostrophe="",
+        author_info_first_normalized="alice",
+        author_info_middle_normalized="",
         author_info_position=0,
         author_info_coauthor_blocks=[],
         author_info_coauthors=[],
@@ -98,8 +98,8 @@ def test_signature_query_author_ignores_raw_full_name_and_uses_canonical_fields(
 
     assert query_adapter_module._signature_query_author(signature) == "b lovelace phd"
 
-    signature.author_info_first_normalized_without_apostrophe = ""
-    signature.author_info_middle_normalized_without_apostrophe = ""
+    signature.author_info_first_normalized = ""
+    signature.author_info_middle_normalized = ""
     signature.author_info_last_normalized = "lovelace"
     signature.author_info_suffix_normalized = "phd"
     assert query_adapter_module._signature_query_author(signature) == "lovelace phd"

@@ -103,6 +103,13 @@ production model and public-data version is `1.3`, on a separate version axis.
   dependency. Production Rust featurization and ingest enter through validated
   Arrow IPC artifacts; classic JSON/`ANDData` remains a Python training,
   fixture, and reference surface for the canonical S2 partition.
+- `Signature.author_info_first_normalized_without_apostrophe` and
+  `Signature.author_info_middle_normalized_without_apostrophe` are renamed to
+  `author_info_first_normalized` and `author_info_middle_normalized`. They hold
+  the canonical name parts, which already delete apostrophes; field order is
+  unchanged. `s2and.text.normalize_text` drops its `special_case_apostrophes`
+  flag. It still replaces apostrophes with spaces in venues, affiliations, and
+  suffixes, so features do not change.
 - Script-side `ANDData` conversion now constructs typed PyArrow
   tables directly. The intermediate `FeatureBlock`, `FeatureBlockSignature`,
   `FeatureBlockPaper`, and `FeatureBlockPaperAuthor` object graph is removed.

@@ -256,8 +256,8 @@ def _get_specter_vector(dataset: ANDData, paper_id: Any) -> np.ndarray | None:
 def _signature_query_author(signature: Any) -> str:
     """Return canonical author text for query-level gate features."""
 
-    stored_first = getattr(signature, "author_info_first_normalized_without_apostrophe", None)
-    stored_middle = getattr(signature, "author_info_middle_normalized_without_apostrophe", None)
+    stored_first = getattr(signature, "author_info_first_normalized", None)
+    stored_middle = getattr(signature, "author_info_middle_normalized", None)
     stored_last = getattr(signature, "author_info_last_normalized", None)
     if stored_first is None or stored_middle is None or stored_last is None:
         canonical = canonicalize_name_parts(

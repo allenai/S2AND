@@ -26,7 +26,7 @@ def test_completion_first_canonicalizes_unprepared_names(raw_first: str | None, 
         name_tuples=set(),
     )
 
-    assert dataset.signatures["0"].author_info_first_normalized_without_apostrophe is None
+    assert dataset.signatures["0"].author_info_first_normalized is None
     assert signature_first(dataset.signatures["0"]) == expected
     assert SignatureFirstNames(dataset.signatures)["0"] == expected
 
@@ -42,8 +42,6 @@ def test_completion_first_preserves_prepared_name(prepared_first: str) -> None:
         name_counts_index=None,
         name_tuples=set(),
     )
-    signature = dataset.signatures["0"]._replace(
-        author_info_first="Ada", author_info_first_normalized_without_apostrophe=prepared_first
-    )
+    signature = dataset.signatures["0"]._replace(author_info_first="Ada", author_info_first_normalized=prepared_first)
 
     assert signature_first(signature) == prepared_first

@@ -129,7 +129,7 @@ def test_singleton_subblocks_still_use_request_threshold(monkeypatch: pytest.Mon
     dataset = build_dummy_dataset("prediction_params_singletons")
     dataset.signatures["1"] = dataset.signatures["1"]._replace(
         author_info_first="a",
-        author_info_first_normalized_without_apostrophe="a",
+        author_info_first_normalized="a",
     )
     blocks = {"one": ["0", "1"]}
     monkeypatch.setattr("s2and.model.make_subblocks", lambda *args, **kwargs: {"full": ["0"], "initial": ["1"]})

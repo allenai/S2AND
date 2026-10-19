@@ -35,9 +35,9 @@ class _SingleBatchArrowLease:
 def _signature(signature_id: str, *, first: str, middle: str | None = None, orcid: str | None = None) -> Signature:
     return Signature(
         author_info_first=first,
-        author_info_first_normalized_without_apostrophe=first,
+        author_info_first_normalized=first,
         author_info_middle=middle,
-        author_info_middle_normalized_without_apostrophe=middle or "",
+        author_info_middle_normalized=middle or "",
         author_info_last_normalized="wang",
         author_info_last="Wang",
         author_info_suffix_normalized=None,
@@ -396,8 +396,8 @@ def test_signature_name_parts_for_subblocking_recomputes_deferred_normalized_fie
         author_info_first="Arif\u2010ullah",
         author_info_middle=None,
         author_info_last="Khan",
-        author_info_first_normalized_without_apostrophe=None,
-        author_info_middle_normalized_without_apostrophe=None,
+        author_info_first_normalized=None,
+        author_info_middle_normalized=None,
     )
 
     assert subblocking.signature_name_parts_for_subblocking(signature) == ("arif ullah", "")
@@ -411,14 +411,14 @@ def test_signature_name_parts_for_subblocking_treats_all_dashes_uniformly() -> N
     unicode_dash = SimpleNamespace(
         author_info_first="Sang\u2010Min",
         author_info_middle=None,
-        author_info_first_normalized_without_apostrophe="sang min",
-        author_info_middle_normalized_without_apostrophe="",
+        author_info_first_normalized="sang min",
+        author_info_middle_normalized="",
     )
     ascii_dash = SimpleNamespace(
         author_info_first="Sang-Min",
         author_info_middle=None,
-        author_info_first_normalized_without_apostrophe="sang min",
-        author_info_middle_normalized_without_apostrophe="",
+        author_info_first_normalized="sang min",
+        author_info_middle_normalized="",
     )
 
     assert subblocking.signature_name_parts_for_subblocking(unicode_dash) == ("sang min", "")

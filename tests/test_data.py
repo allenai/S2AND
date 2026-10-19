@@ -330,7 +330,7 @@ def test_signature_full_name_uses_only_canonical_fields() -> None:
     )
 
     signature = dataset.signatures["s1"]
-    assert signature.author_info_first_normalized_without_apostrophe == ""
+    assert signature.author_info_first_normalized == ""
     assert signature.author_info_full_name == "smith"
     assert dataset.papers["1"].title == "part 1"
     assert dataset.papers["1"].title_ngrams_words["1"] == 1

@@ -327,8 +327,8 @@ impl RustFeaturizer {
     ) -> [f64; FULL_FEATURE_COUNT] {
         let mut feats = [f64::NAN; FULL_FEATURE_COUNT];
 
-        let first1 = s1.first_without_apostrophe();
-        let first2 = s2.first_without_apostrophe();
+        let first1 = s1.first_normalized();
+        let first2 = s2.first_normalized();
         let middle1 = s1.middle.as_deref();
         let middle2 = s2.middle.as_deref();
 
@@ -506,8 +506,8 @@ impl RustFeaturizer {
             return Some(high_value);
         }
 
-        let first1 = s1.first_without_apostrophe().unwrap_or("");
-        let first2 = s2.first_without_apostrophe().unwrap_or("");
+        let first1 = s1.first_normalized().unwrap_or("");
+        let first2 = s2.first_normalized().unwrap_or("");
         if !first1.is_empty() && !first2.is_empty() {
             if let (Some(c1), Some(c2)) = (first1.chars().next(), first2.chars().next()) {
                 if c1 != c2 {
@@ -1676,7 +1676,7 @@ impl RustFeaturizer {
                 self.signatures.get(signature_id).map(|signature| {
                     (
                         signature_id.clone(),
-                        signature.first_without_apostrophe().map(str::to_owned),
+                        signature.first_normalized().map(str::to_owned),
                         signature.orcid.clone(),
                     )
                 })

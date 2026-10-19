@@ -137,7 +137,7 @@ class _ArrowIncrementalSignatureInfo:
     paper_id: str | None
     author_info_first: str | None
     author_info_last: str | None
-    author_info_first_normalized_without_apostrophe: str | None
+    author_info_first_normalized: str | None
     author_info_orcid: str | None
     author_info_middle: str | None = None
 
@@ -473,12 +473,12 @@ def _load_arrow_incremental_signature_info(
                 first = _optional_arrow_string(row.get("author_first"))
                 middle = _optional_arrow_string(row.get("author_middle"))
                 last = _optional_arrow_string(row.get("author_last"))
-                first_without_apostrophe = canonicalize_name_parts(first, middle, last).first
+                first_normalized = canonicalize_name_parts(first, middle, last).first
                 signatures[signature_id] = _ArrowIncrementalSignatureInfo(
                     paper_id=_optional_arrow_string(row.get("paper_id")),
                     author_info_first=first,
                     author_info_last=last,
-                    author_info_first_normalized_without_apostrophe=first_without_apostrophe or None,
+                    author_info_first_normalized=first_normalized or None,
                     author_info_orcid=_optional_arrow_string(row.get("author_orcid")),
                     author_info_middle=middle,
                 )
@@ -616,7 +616,7 @@ def _load_arrow_incremental_orcid_signature_info(
                     paper_id=None,
                     author_info_first=None,
                     author_info_last=None,
-                    author_info_first_normalized_without_apostrophe=None,
+                    author_info_first_normalized=None,
                     author_info_orcid=_optional_arrow_string(row.get("author_orcid")),
                 )
     return signatures

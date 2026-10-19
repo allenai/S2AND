@@ -84,9 +84,9 @@ def build_namedtuples(
         author_info = signature["author_info"]
         signatures[signature_id] = Signature(
             author_info_first=author_info["first"],
-            author_info_first_normalized_without_apostrophe=None,
+            author_info_first_normalized=None,
             author_info_middle=author_info["middle"],
-            author_info_middle_normalized_without_apostrophe=None,
+            author_info_middle_normalized=None,
             author_info_last_normalized=None,
             author_info_last=author_info["last"],
             author_info_suffix_normalized=None,

@@ -102,11 +102,11 @@ def test_featurization_info_rejects_unknown_feature_groups() -> None:
 
 def test_single_pair_featurize_surfaces_missing_preprocessed_fields() -> None:
     dataset = _dummy_dataset("dummy_missing_preprocessed_field")
-    dataset.signatures["0"] = dataset.signatures["0"]._replace(author_info_first_normalized_without_apostrophe=None)
+    dataset.signatures["0"] = dataset.signatures["0"]._replace(author_info_first_normalized=None)
 
     with pytest.raises(
         RuntimeError,
-        match=r"requires preprocessed field signature_1\.author_info_first_normalized_without_apostrophe",
+        match=r"requires preprocessed field signature_1\.author_info_first_normalized",
     ):
         featurizer_module._single_pair_featurize(("0", "1"), dataset=dataset)
 

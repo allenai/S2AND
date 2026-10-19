@@ -28,9 +28,9 @@ def classic() -> tuple[Clusterer, ANDData]:
     for signature_id in ["0", "1", "2", "3"]:
         dataset.signatures[signature_id] = dataset.signatures[signature_id]._replace(
             author_info_first="john",
-            author_info_first_normalized_without_apostrophe="john",
+            author_info_first_normalized="john",
             author_info_middle="",
-            author_info_middle_normalized_without_apostrophe="",
+            author_info_middle_normalized="",
             author_info_last="smith",
             author_info_last_normalized="smith",
             author_info_orcid=None,
@@ -85,7 +85,7 @@ def test_public_incremental_rejects_new_name_conflict(classic):
     clusterer, dataset = classic
     for signature_id, first in [("0", "j"), ("1", "john"), ("2", "james")]:
         dataset.signatures[signature_id] = dataset.signatures[signature_id]._replace(
-            author_info_first=first, author_info_first_normalized_without_apostrophe=first
+            author_info_first=first, author_info_first_normalized=first
         )
     assert dataset.get_constraint("1", "2") == LARGE_DISTANCE
     result = clusterer.predict_incremental(["0", "1", "2"], dataset)["clusters"]
@@ -99,7 +99,7 @@ def test_bulk_initial_attachment_uses_synthetic_seed_state(classic, monkeypatch)
     dataset.cluster_seeds_disallow = {("1", "2")}
     for signature_id in ["1", "2"]:
         dataset.signatures[signature_id] = dataset.signatures[signature_id]._replace(
-            author_info_first="j", author_info_first_normalized_without_apostrophe="j"
+            author_info_first="j", author_info_first_normalized="j"
         )
     monkeypatch.setattr("s2and.model.make_subblocks", lambda *args, **kwargs: {"full": ["0"], "initial": ["1", "2"]})
     result, _ = clusterer.predict({"one": ["0", "1", "2"]}, dataset, batching_threshold=2)
@@ -117,7 +117,7 @@ def test_filter_preserves_default_and_orcid_policy(classic, default_constraints,
     for signature_id, first in [("1", "john"), ("2", "james")]:
         dataset.signatures[signature_id] = dataset.signatures[signature_id]._replace(
             author_info_first=first,
-            author_info_first_normalized_without_apostrophe=first,
+            author_info_first_normalized=first,
             author_info_orcid="0000-0002-1825-0097",
         )
     expected = {"1": "seed"} if default_constraints and suppress_orcid else {"1": "seed", "2": "seed"}
@@ -174,7 +174,7 @@ def test_restored_sibling_explicit_conflicts_and_historical_name_exception(class
     ) == {"1": "split_a"}
     dataset.cluster_seeds_disallow = set()
     dataset.signatures["3"] = dataset.signatures["3"]._replace(
-        author_info_first="james", author_info_first_normalized_without_apostrophe="james"
+        author_info_first="james", author_info_first_normalized="james"
     )
     assert _filter(classic, links={"1": "split_a"}, splits=splits, restored=restored) == {"1": "split_a"}
 

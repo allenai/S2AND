@@ -40,7 +40,7 @@ fn text_unidecode_char(ch: char) -> &'static str {
     }
 }
 
-pub(crate) fn normalize_ascii_text_compat(text: &str, special_case_apostrophes: bool) -> String {
+pub(crate) fn normalize_ascii_text_compat(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
     let mut prev_space = true;
     for byte in text.bytes() {
@@ -48,8 +48,6 @@ pub(crate) fn normalize_ascii_text_compat(text: &str, special_case_apostrophes: 
         if lowered.is_ascii_alphabetic() {
             normalized.push(lowered as char);
             prev_space = false;
-        } else if special_case_apostrophes && lowered == b'\'' {
-            continue;
         } else if !prev_space {
             normalized.push(' ');
             prev_space = true;
@@ -81,16 +79,15 @@ pub(crate) fn normalize_ascii_title_compat(text: &str) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn normalize_text_compat_native(text: &str, special_case_apostrophes: bool) -> String {
-    normalize_text_compat_with_map(text, special_case_apostrophes, None)
+pub(crate) fn normalize_text_compat_native(text: &str) -> String {
+    normalize_text_compat_with_map(text, None)
 }
 
 pub(crate) fn normalize_text_compat_from_map(
     text: &str,
-    special_case_apostrophes: bool,
     unidecode_char_map: &HashMap<char, String>,
 ) -> String {
-    normalize_text_compat_with_map(text, special_case_apostrophes, Some(unidecode_char_map))
+    normalize_text_compat_with_map(text, Some(unidecode_char_map))
 }
 
 pub(crate) fn normalize_title_compat_from_map(
@@ -123,14 +120,13 @@ pub(crate) fn normalize_title_compat_from_map(
 
 fn normalize_text_compat_with_map(
     text: &str,
-    special_case_apostrophes: bool,
     unidecode_char_map: Option<&HashMap<char, String>>,
 ) -> String {
     if text.is_empty() {
         return String::new();
     }
     if text.is_ascii() {
-        return normalize_ascii_text_compat(text, special_case_apostrophes);
+        return normalize_ascii_text_compat(text);
     }
 
     let mut transliterated = String::with_capacity(text.len());
@@ -147,14 +143,9 @@ fn normalize_text_compat_with_map(
         }
     }
 
-    let source = if special_case_apostrophes {
-        transliterated.replace('\'', "")
-    } else {
-        transliterated
-    };
-    let mut normalized = String::with_capacity(source.len());
+    let mut normalized = String::with_capacity(transliterated.len());
     let mut prev_space = true;
-    for ch in source.chars() {
+    for ch in transliterated.chars() {
         if ch.is_ascii_alphabetic() {
             normalized.push(ch);
             prev_space = false;
@@ -690,7 +681,7 @@ mod tests {
     #[test]
     fn normalize_text_compat_preserves_python_boundaries_for_overrides() {
         assert_eq!(
-            normalize_text_compat_native("a\u{0080}b \u{03F4}c \u{02FF}d", false),
+            normalize_text_compat_native("a\u{0080}b \u{03F4}c \u{02FF}d"),
             "ab c d",
         );
     }

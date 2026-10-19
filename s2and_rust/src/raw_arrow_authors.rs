@@ -53,7 +53,7 @@ impl PaperCoauthorBlocks {
         let mut block_counts: Vec<u32> = Vec::new();
         let mut blocked_authors = Vec::new();
         for (position, name) in authors {
-            let normalized = normalize_text_compat_from_map(name, false, unidecode_char_map);
+            let normalized = normalize_text_compat_from_map(name, unidecode_char_map);
             if normalized.is_empty() {
                 continue;
             }
@@ -242,8 +242,7 @@ impl NormalizedAuthors {
                     .map_or(&[][..], Vec::as_slice)
                     .iter()
                     .filter_map(|(position, name)| {
-                        let normalized =
-                            normalize_text_compat_from_map(name, false, unidecode_char_map);
+                        let normalized = normalize_text_compat_from_map(name, unidecode_char_map);
                         (!normalized.is_empty()).then(|| {
                             let shard = name_shard(&normalized) as u8;
                             (*position, normalized, shard)
@@ -506,8 +505,7 @@ mod tests {
         let mut coauthor_blocks = HashSet::new();
         if let Some(signature_position) = position {
             for (position, author_name) in authors.iter() {
-                let normalized =
-                    normalize_text_compat_from_map(author_name, false, unidecode_char_map);
+                let normalized = normalize_text_compat_from_map(author_name, unidecode_char_map);
                 if *position == signature_position {
                     continue;
                 }
@@ -535,7 +533,7 @@ mod tests {
         let mut paper_author_names = HashSet::new();
         let mut local10_author_names = HashSet::new();
         for (author_position, author_name) in authors.iter() {
-            let normalized = normalize_text_compat_from_map(author_name, false, unidecode_char_map);
+            let normalized = normalize_text_compat_from_map(author_name, unidecode_char_map);
             if normalized.is_empty() {
                 continue;
             }

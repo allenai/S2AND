@@ -476,20 +476,20 @@ def _single_pair_featurize(
     paper_2 = dataset.papers[str(paper_id_2)]
 
     first_1 = _require_preprocessed_value(
-        signature_1.author_info_first_normalized_without_apostrophe,
-        field="signature_1.author_info_first_normalized_without_apostrophe",
+        signature_1.author_info_first_normalized,
+        field="signature_1.author_info_first_normalized",
     )
     first_2 = _require_preprocessed_value(
-        signature_2.author_info_first_normalized_without_apostrophe,
-        field="signature_2.author_info_first_normalized_without_apostrophe",
+        signature_2.author_info_first_normalized,
+        field="signature_2.author_info_first_normalized",
     )
     middle_1 = _require_preprocessed_value(
-        signature_1.author_info_middle_normalized_without_apostrophe,
-        field="signature_1.author_info_middle_normalized_without_apostrophe",
+        signature_1.author_info_middle_normalized,
+        field="signature_1.author_info_middle_normalized",
     )
     middle_2 = _require_preprocessed_value(
-        signature_2.author_info_middle_normalized_without_apostrophe,
-        field="signature_2.author_info_middle_normalized_without_apostrophe",
+        signature_2.author_info_middle_normalized,
+        field="signature_2.author_info_middle_normalized",
     )
     affiliation_ngrams_1 = _require_preprocessed_value(
         signature_1.author_info_affiliations_n_grams,

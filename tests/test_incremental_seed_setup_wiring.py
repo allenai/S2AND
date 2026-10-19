@@ -46,7 +46,7 @@ def test_incremental_routes_use_split_members_for_names_and_original_members_for
     def signature(first: str) -> SimpleNamespace:
         return SimpleNamespace(
             author_info_first=first,
-            author_info_first_normalized_without_apostrophe=first.lower(),
+            author_info_first_normalized=first.lower(),
             author_info_last="Jones",
             author_info_orcid=None,
             paper_id=f"p-{first}",

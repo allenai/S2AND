@@ -307,12 +307,12 @@ pub(crate) fn preprocess_stage_papers(
         .map(|paper_input| {
             let title = normalize_title_compat_from_map(&paper_input.raw_title, unidecode_char_map);
             let venue = if preprocess {
-                normalize_text_compat_from_map(&paper_input.raw_venue, false, unidecode_char_map)
+                normalize_text_compat_from_map(&paper_input.raw_venue, unidecode_char_map)
             } else {
                 paper_input.raw_venue.clone()
             };
             let journal_name = if preprocess {
-                normalize_text_compat_from_map(&paper_input.raw_journal, false, unidecode_char_map)
+                normalize_text_compat_from_map(&paper_input.raw_journal, unidecode_char_map)
             } else {
                 paper_input.raw_journal.clone()
             };
@@ -322,7 +322,7 @@ pub(crate) fn preprocess_stage_papers(
                 .map(|(position, raw_name)| {
                     (
                         *position,
-                        normalize_text_compat_from_map(raw_name, false, unidecode_char_map),
+                        normalize_text_compat_from_map(raw_name, unidecode_char_map),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -410,7 +410,7 @@ pub(crate) fn preprocess_stage_signatures(
                     .iter()
                     .filter_map(|affiliation| {
                         let normalized =
-                            normalize_text_compat_from_map(affiliation, false, unidecode_char_map);
+                            normalize_text_compat_from_map(affiliation, unidecode_char_map);
                         if normalized.is_empty() {
                             None
                         } else {

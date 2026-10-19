@@ -57,7 +57,7 @@ pub(crate) fn build_raw_arrow_feature(
 
     let mut normalized_affiliations = Vec::with_capacity(signature.affiliations.len());
     for affiliation in signature.affiliations.iter() {
-        let normalized = normalize_text_compat_from_map(affiliation, false, unidecode_char_map);
+        let normalized = normalize_text_compat_from_map(affiliation, unidecode_char_map);
         if !normalized.is_empty() {
             normalized_affiliations.push(normalized);
         }
@@ -74,8 +74,7 @@ pub(crate) fn build_raw_arrow_feature(
             .copied()
             .collect::<Vec<_>>()
             .join(" ");
-        let normalized_venue =
-            normalize_text_compat_from_map(&venue_text, false, unidecode_char_map);
+        let normalized_venue = normalize_text_compat_from_map(&venue_text, unidecode_char_map);
         let normalized_title =
             normalize_title_compat_from_map(&paper_data.title, unidecode_char_map);
         (
@@ -130,7 +129,7 @@ pub(crate) fn build_raw_arrow_feature(
         .map(Arc::clone);
     let specter_norm = specter.as_ref().map(|values| vector_norm_f32(values));
     let canonical_suffix =
-        normalize_text_compat_from_map(&signature.author_suffix, false, unidecode_char_map);
+        normalize_text_compat_from_map(&signature.author_suffix, unidecode_char_map);
     let query_author = [
         first.as_str(),
         middle.as_str(),

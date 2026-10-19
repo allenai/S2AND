@@ -1157,8 +1157,8 @@ def _load_arrow_graph_subblocking_dataset(
             paper_id=paper_id,
             author_info_first=_optional_str(row.get("author_first")),
             author_info_middle=_optional_str(row.get("author_middle")),
-            author_info_first_normalized_without_apostrophe=None,
-            author_info_middle_normalized_without_apostrophe=None,
+            author_info_first_normalized=None,
+            author_info_middle_normalized=None,
             author_info_affiliations=affiliations,
             author_info_affiliations_n_grams=_affiliation_ngrams_from_raw_affiliations(affiliations),
             author_info_coauthor_blocks=coauthor_blocks,
@@ -1317,8 +1317,8 @@ def signature_name_parts_for_subblocking(signature) -> tuple[str, str]:
     compounds identically.
     """
 
-    first = signature.author_info_first_normalized_without_apostrophe
-    middle = signature.author_info_middle_normalized_without_apostrophe
+    first = signature.author_info_first_normalized
+    middle = signature.author_info_middle_normalized
     if first is not None and middle is not None:
         return first, middle
     # Rust preprocessing can defer normalized name fields; reconstruct with Python-equivalent logic.

@@ -440,9 +440,9 @@ class NameCounts(NamedTuple):
 
 class Signature(NamedTuple):
     author_info_first: str | None
-    author_info_first_normalized_without_apostrophe: str | None
+    author_info_first_normalized: str | None
     author_info_middle: str | None
-    author_info_middle_normalized_without_apostrophe: str | None
+    author_info_middle_normalized: str | None
     author_info_last_normalized: str | None
     author_info_last: str
     author_info_suffix_normalized: str | None
@@ -496,8 +496,8 @@ class _SignaturePreprocessRow(TypedDict):
 
     signature_id: str
     signature: Signature
-    first_without_apostrophe: str | None
-    middle_without_apostrophe: str | None
+    first_normalized: str | None
+    middle_normalized: str | None
     last_normalized: str | None
     suffix_normalized: str | None
     coauthor_set: set[str] | None
@@ -699,9 +699,9 @@ class ANDData:
             for signature_id, signature in raw_signatures.items():
                 self.signatures[signature_id] = Signature(
                     author_info_first=signature["author_info"]["first"],
-                    author_info_first_normalized_without_apostrophe=None,
+                    author_info_first_normalized=None,
                     author_info_middle=signature["author_info"]["middle"],
-                    author_info_middle_normalized_without_apostrophe=None,
+                    author_info_middle_normalized=None,
                     author_info_last_normalized=None,
                     author_info_last=signature["author_info"]["last"],
                     author_info_suffix_normalized=None,
@@ -974,14 +974,14 @@ class ANDData:
         *,
         first_raw: str,
         middle_raw: str,
-        first_without_apostrophe: str | None,
+        first_normalized: str | None,
         last_normalized: str | None,
     ) -> tuple[str | None, str | None, str | None, str | None]:
         # canonical_v2 count keys (D6/D8): keys are the canonical fields after missing
         # and informativeness gating. A missing/uninformative component means no lookup
         # (NaN feature), never a sentinel count; a present key that is absent from the
         # corpus dictionaries keeps the default count of 1.
-        canonical_first = first_without_apostrophe
+        canonical_first = first_normalized
         canonical_last = last_normalized
         if canonical_first is None or canonical_last is None:
             parts = canonicalize_name_parts(first_raw, middle_raw, signature.author_info_last)
@@ -1040,12 +1040,8 @@ class ANDData:
 
                     first_raw = signature.author_info_first or ""
                     middle_raw = signature.author_info_middle or ""
-                    stored_first_without_apostrophe: str | None = (
-                        signature.author_info_first_normalized_without_apostrophe
-                    )
-                    stored_middle_without_apostrophe: str | None = (
-                        signature.author_info_middle_normalized_without_apostrophe
-                    )
+                    stored_first_normalized: str | None = signature.author_info_first_normalized
+                    stored_middle_normalized: str | None = signature.author_info_middle_normalized
                     stored_last_normalized: str | None = signature.author_info_last_normalized
                     stored_suffix_normalized: str | None = signature.author_info_suffix_normalized
 
@@ -1069,8 +1065,8 @@ class ANDData:
 
                     if self.preprocess:
                         if defer_signature_fields_to_rust:
-                            stored_first_without_apostrophe = None
-                            stored_middle_without_apostrophe = None
+                            stored_first_normalized = None
+                            stored_middle_normalized = None
                             stored_last_normalized = None
                             stored_suffix_normalized = None
                             coauthor_set = None
@@ -1090,8 +1086,8 @@ class ANDData:
                                 middle_raw,
                                 signature.author_info_last,
                             )
-                            stored_first_without_apostrophe = canonical_parts.first
-                            stored_middle_without_apostrophe = canonical_parts.middle
+                            stored_first_normalized = canonical_parts.first
+                            stored_middle_normalized = canonical_parts.middle
                             stored_last_normalized = canonical_parts.last
                             stored_suffix_normalized = normalize_text(signature.author_info_suffix or "")
                             affiliations = [
@@ -1113,15 +1109,15 @@ class ANDData:
                                 signature,
                                 first_raw=first_raw,
                                 middle_raw=middle_raw,
-                                first_without_apostrophe=stored_first_without_apostrophe,
+                                first_normalized=stored_first_normalized,
                                 last_normalized=stored_last_normalized,
                             )
 
                         if not defer_signature_fields_to_rust:
                             full_name = _assemble_full_name(
                                 [
-                                    stored_first_without_apostrophe,
-                                    stored_middle_without_apostrophe,
+                                    stored_first_normalized,
+                                    stored_middle_normalized,
                                     stored_last_normalized,
                                     stored_suffix_normalized,
                                 ]
@@ -1134,8 +1130,8 @@ class ANDData:
                         {
                             "signature_id": signature_id,
                             "signature": signature,
-                            "first_without_apostrophe": stored_first_without_apostrophe,
-                            "middle_without_apostrophe": stored_middle_without_apostrophe,
+                            "first_normalized": stored_first_normalized,
+                            "middle_normalized": stored_middle_normalized,
                             "last_normalized": stored_last_normalized,
                             "suffix_normalized": stored_suffix_normalized,
                             "coauthor_set": coauthor_set,
@@ -1192,8 +1188,8 @@ class ANDData:
 
                 for idx, row in enumerate(batch_rows):
                     replace_kwargs: dict[str, Any] = {
-                        "author_info_first_normalized_without_apostrophe": row["first_without_apostrophe"],
-                        "author_info_middle_normalized_without_apostrophe": row["middle_without_apostrophe"],
+                        "author_info_first_normalized": row["first_normalized"],
+                        "author_info_middle_normalized": row["middle_normalized"],
                         "author_info_last_normalized": row["last_normalized"],
                         "author_info_suffix_normalized": row["suffix_normalized"],
                         "author_info_coauthors": row["coauthor_set"],
@@ -1468,8 +1464,8 @@ class ANDData:
         signature_2 = self.signatures[signature_id_2]
 
         def _materialize_constraint_name_parts(signature: Signature) -> tuple[str, str]:
-            first = signature.author_info_first_normalized_without_apostrophe
-            middle = signature.author_info_middle_normalized_without_apostrophe
+            first = signature.author_info_first_normalized
+            middle = signature.author_info_middle_normalized
             if first is None or middle is None:
                 computed = canonicalize_name_parts(
                     signature.author_info_first,

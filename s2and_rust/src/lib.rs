@@ -156,7 +156,7 @@ type PaperId = String;
 
 #[derive(Clone)]
 struct SignatureData {
-    // Python author_info_first_normalized_without_apostrophe.
+    // Python author_info_first_normalized.
     first: Option<String>,
     middle: Option<String>,
     last_normalized: Option<String>,
@@ -172,7 +172,7 @@ struct SignatureData {
 }
 
 impl SignatureData {
-    fn first_without_apostrophe(&self) -> Option<&str> {
+    fn first_normalized(&self) -> Option<&str> {
         self.first.as_deref()
     }
 
@@ -683,12 +683,12 @@ mod tests {
         let unidecode_char_map = HashMap::new();
 
         assert_eq!(
-            normalize_text_compat_from_map("A1 B-2", false, &unidecode_char_map),
+            normalize_text_compat_from_map("A1 B-2", &unidecode_char_map),
             "a b"
         );
         assert_eq!(
-            normalize_text_compat_from_map("O'Neil2", true, &unidecode_char_map),
-            "oneil"
+            normalize_text_compat_from_map("O'Neil2", &unidecode_char_map),
+            "o neil"
         );
     }
 
@@ -706,7 +706,7 @@ mod tests {
     fn normalize_text_compat_missing_mapping_does_not_panic() {
         let unidecode_char_map = HashMap::new();
         assert_eq!(
-            normalize_text_compat_from_map("\u{00C9}lodie", false, &unidecode_char_map),
+            normalize_text_compat_from_map("\u{00C9}lodie", &unidecode_char_map),
             "elodie",
         );
     }
@@ -714,16 +714,12 @@ mod tests {
     #[test]
     fn normalize_text_compat_uses_native_unidecode() {
         assert_eq!(
-            text_compat::normalize_text_compat_native("te'\u{6F22}\u{5B57}xt", false),
+            text_compat::normalize_text_compat_native("te'\u{6F22}\u{5B57}xt"),
             "te han zi xt",
         );
         assert_eq!(
-            text_compat::normalize_text_compat_native("O\u{2019}Neil", false),
+            text_compat::normalize_text_compat_native("O\u{2019}Neil"),
             "o neil",
-        );
-        assert_eq!(
-            text_compat::normalize_text_compat_native("O\u{2019}Neil", true),
-            "oneil",
         );
     }
 

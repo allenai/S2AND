@@ -103,9 +103,9 @@ def load_signatures_from_arrow(
         orcid = row.get("author_orcid")
         signatures[signature_id] = Signature(
             author_info_first=row["author_first"],
-            author_info_first_normalized_without_apostrophe=None,
+            author_info_first_normalized=None,
             author_info_middle=row["author_middle"],
-            author_info_middle_normalized_without_apostrophe=None,
+            author_info_middle_normalized=None,
             author_info_last_normalized=None,
             author_info_last=row["author_last"],
             author_info_suffix_normalized=None,

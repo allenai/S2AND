@@ -1612,8 +1612,7 @@ pub(crate) fn build_native_graph_evidence_store(
                 if trimmed.is_empty() {
                     continue;
                 }
-                let normalized =
-                    normalize_text_compat_from_map(trimmed, false, &unidecode_char_map);
+                let normalized = normalize_text_compat_from_map(trimmed, &unidecode_char_map);
                 let block = compute_block_compat(&normalized);
                 if !block.is_empty() {
                     coauthor_blocks.insert(block);
@@ -1624,8 +1623,7 @@ pub(crate) fn build_native_graph_evidence_store(
             .affiliations
             .iter()
             .filter_map(|affiliation| {
-                let normalized =
-                    normalize_text_compat_from_map(affiliation, false, &unidecode_char_map);
+                let normalized = normalize_text_compat_from_map(affiliation, &unidecode_char_map);
                 if normalized.is_empty() {
                     None
                 } else {

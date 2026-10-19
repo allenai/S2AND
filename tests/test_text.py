@@ -45,7 +45,7 @@ class TestClusterer(unittest.TestCase):
         assert "" == normalize_text("")
         assert "text" == normalize_text("TeXt")
         assert "te han zi xt" == normalize_text("te'漢字xt")
-        assert "text" == normalize_text("te'xt", True)
+        assert "te xt" == normalize_text("te'xt")
         assert "a b" == normalize_text("A1 B-2")
 
     def test_normalize_title_preserves_identifying_digits(self):

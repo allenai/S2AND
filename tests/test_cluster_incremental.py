@@ -79,7 +79,7 @@ def _signature_info_loader(captured: dict[str, Any], *, orcid_signature_id: str 
                 paper_id=f"p{signature_id}",
                 author_info_first="Alex",
                 author_info_last="Smith",
-                author_info_first_normalized_without_apostrophe="alex",
+                author_info_first_normalized="alex",
                 author_info_orcid="0000-0000-0000-0001" if str(signature_id) == orcid_signature_id else None,
             )
             for signature_id in signature_ids
@@ -183,7 +183,7 @@ def test_finish_incremental_lazily_resolves_default_name_tuples_for_direct_arrow
         normalized = first.lower()
         return SimpleNamespace(
             author_info_first=first,
-            author_info_first_normalized_without_apostrophe=normalized,
+            author_info_first_normalized=normalized,
             author_info_last="Jones",
             paper_id=f"p-{normalized}",
         )
@@ -607,7 +607,7 @@ def test_predict_incremental_from_arrow_loads_seed_orcids_for_budget_floor(
                 paper_id=None,
                 author_info_first=None,
                 author_info_last=None,
-                author_info_first_normalized_without_apostrophe=None,
+                author_info_first_normalized=None,
                 author_info_orcid="0000-0000-0000-0001" if str(signature_id) == "8" else None,
             )
             for signature_id in signature_ids
@@ -1880,7 +1880,7 @@ def test_arrow_completion_forwards_first_names_and_orcid_bridges(tmp_path: Path)
         signatures={
             key: SimpleNamespace(
                 author_info_first=name,
-                author_info_first_normalized_without_apostrophe=name,
+                author_info_first_normalized=name,
                 author_info_orcid="0000-0000-0000-0001" if key in {"a2", "b2"} else None,
             )
             for key, name in names.items()

@@ -17,7 +17,7 @@ class CompletionSignature(Protocol):
     def author_info_first(self) -> str | None: ...
 
     @property
-    def author_info_first_normalized_without_apostrophe(self) -> str | None: ...
+    def author_info_first_normalized(self) -> str | None: ...
 
     @property
     def author_info_last(self) -> str | None: ...
@@ -28,7 +28,7 @@ class CompletionSignature(Protocol):
 
 def signature_first(signature: CompletionSignature) -> str:
     """Preserve prepared names, canonicalizing raw input only when unprepared."""
-    prepared_first = signature.author_info_first_normalized_without_apostrophe
+    prepared_first = signature.author_info_first_normalized
     if prepared_first is not None:
         return prepared_first
     return canonicalize_name_parts(signature.author_info_first, None, signature.author_info_last).first

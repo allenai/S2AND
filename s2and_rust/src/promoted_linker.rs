@@ -188,7 +188,7 @@ fn linker_retrieval_ordered_groups(
 }
 
 fn linker_normalize_alpha(value: &str, unidecode_char_map: &HashMap<char, String>) -> String {
-    normalize_text_compat_from_map(value, false, unidecode_char_map)
+    normalize_text_compat_from_map(value, unidecode_char_map)
         .chars()
         .filter(|character| character.is_ascii_alphabetic())
         .collect()

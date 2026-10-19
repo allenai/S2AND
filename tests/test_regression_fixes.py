@@ -33,8 +33,8 @@ def _as_anddata(dataset: object) -> ANDData:
 
 def _subblocking_signature(first_name: str, *, middle_name: str = "", orcid: str | None = None):
     return SimpleNamespace(
-        author_info_first_normalized_without_apostrophe=first_name,
-        author_info_middle_normalized_without_apostrophe=middle_name,
+        author_info_first_normalized=first_name,
+        author_info_middle_normalized=middle_name,
         author_info_first=first_name,
         author_info_middle=middle_name,
         author_info_orcid=orcid,
@@ -338,12 +338,12 @@ def test_residual_first_initial_groups_rejects_whitespace_only_first_initials():
     dataset = SimpleNamespace(
         signatures={
             "s1": SimpleNamespace(
-                author_info_first_normalized_without_apostrophe="",
+                author_info_first_normalized="",
                 author_info_first="  ",
                 author_info_orcid=None,
             ),
             "s2": SimpleNamespace(
-                author_info_first_normalized_without_apostrophe="",
+                author_info_first_normalized="",
                 author_info_first="\t ",
                 author_info_orcid=None,
             ),
@@ -387,8 +387,8 @@ def test_make_subblocks_handles_specter_edge_case_without_unbound_local(monkeypa
         def __init__(self, first_name, middle_name, orcid=None):
             self.author_info_first = first_name
             self.author_info_middle = middle_name
-            self.author_info_first_normalized_without_apostrophe = first_name
-            self.author_info_middle_normalized_without_apostrophe = middle_name
+            self.author_info_first_normalized = first_name
+            self.author_info_middle_normalized = middle_name
             self.author_info_orcid = orcid
 
     anddata = SimpleNamespace(signatures={"s1": Signature("ab", "cd")})

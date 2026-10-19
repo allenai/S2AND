@@ -330,29 +330,23 @@ def detect_language(text: str | None) -> LanguageDetection:
     )
 
 
-def normalize_text(text: str | None, special_case_apostrophes: bool = False) -> str:
-    """
-    Normalize text.
+def normalize_text(text: str | None) -> str:
+    """Normalize free text such as venues, affiliations, and suffixes.
 
-    Parameters
-    ----------
-    text: string
-        the text to normalize
-    special_case_apostrophie: bool
-        whether to replace apostrophes with empty strings rather than spaces
+    Author names use ``canonicalize_name_parts`` instead. This normalizer keeps
+    the trained model's text features stable: it replaces apostrophes with
+    spaces rather than deleting them.
 
-    Returns
-    -------
-    string: the normalized text
+    Args:
+        text: Raw text, or ``None``.
+
+    Returns:
+        Lowercase ASCII letters separated by single spaces.
     """
     if text is None or len(text) == 0:
         return ""
 
     norm_text = unidecode(text).lower()
-
-    if special_case_apostrophes:
-        norm_text = norm_text.replace("'", "")
-
     norm_text = RE_NORMALIZE_WHOLE_NAME.sub(" ", norm_text)
     norm_text = re.sub(r"\s+", " ", norm_text).strip()
 

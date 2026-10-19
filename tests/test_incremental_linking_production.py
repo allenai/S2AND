@@ -347,7 +347,7 @@ def test_attach_name_check_rejects_conflicting_links_in_one_pass(tmp_path, monke
                 paper_id="p0",
                 author_info_first=first,
                 author_info_last="Smith",
-                author_info_first_normalized_without_apostrophe="j",
+                author_info_first_normalized="j",
                 author_info_orcid=None,
                 author_info_middle=middle,
             )

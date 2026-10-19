@@ -455,8 +455,8 @@ def test_arrow_ingestion_reconstructs_training_fields(training_bundle: dict[str,
         ):
             assert getattr(json_signature, field) == getattr(arrow_signature, field), field
         for field in (
-            "author_info_first_normalized_without_apostrophe",
-            "author_info_middle_normalized_without_apostrophe",
+            "author_info_first_normalized",
+            "author_info_middle_normalized",
             "author_info_last_normalized",
             "author_info_suffix_normalized",
             "author_info_coauthors",

@@ -32,6 +32,7 @@ s2and/data/lid.176.bin
 s2and/data/LICENSE.txt
 s2and/data/manifest.json
 s2and/data/release_audit.json
+s2and/data/.*.publish.lock
 s2and/data/joint_*/
 s2and/data/s2and_and_big_blocks_linker_dataset_*/
 s2and/data-backup/

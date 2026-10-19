@@ -16,6 +16,12 @@ Publish those inputs once in S3 with the snapshot.
 Obtain the model and common count index from the declared Git LFS ref.
 No second giant-data copy is required.
 
+The final `1.3` review uses fresh internal Semantic Scholar exports instead of the snapshot giants.
+The NEW `a_khan`, `a_silva`, and `j_smith` blocks carry ORCID references.
+The claimed blocks are `f_matsen`, `s_feldman`, `s_gupta`, `s_park`, `s_lee`, and `h_wang`.
+These exports are not part of the released data, so public users cannot repeat the final review.
+Future releases can also use internal exports for this step.
+
 The original plot script is `scratch/plot_q_class_eps_sweeps.py`.
 It plots positive recall against negative separation from expanded incremental candidate labels.
 Its old reference EPS is `0.6064583976`; a retained topic-split command uses `0.65`.

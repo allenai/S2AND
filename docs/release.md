@@ -79,6 +79,7 @@ It excludes `inventors_s2and` from corrected records, Arrow data, pairwise plans
 Reuse unchanged common assets.
 Regenerate a common asset only when its source data or semantics change.
 Regenerate A after a canonical name-rule change, even when the raw Athena export stays unchanged.
+Only AI2 staff can run the Athena export and rebuild A. Expect this for every future refresh.
 Recompute pairwise and linker features after a count-authority change.
 The ORCID producer preserves the surname rule and excludes the 14 reviewed groups.
 Run the focused producer checks before a bounded rebuild.
@@ -157,6 +158,8 @@ Retain existing manual dev labels after verified query-paper exposure exclusions
 Complete [giant-block EPS review](eps_calibration.md) before final release evaluation.
 Use ORCID-masked B3 curves for identity quality and the original safe-action plot as a diagnostic.
 The release owner selects the final EPS after both views and benchmark validation.
+The final review can use fresh internal production exports that the released data does not include.
+Release `1.3` uses such exports, so public users cannot repeat its final EPS review.
 Apply the reviewed EPS to a fresh complete model without another fit.
 Freeze that package before final acceptance tests.
 

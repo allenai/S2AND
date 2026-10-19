@@ -39,6 +39,9 @@ The production count authority is A: one contribution per source author-table ro
 The Athena export preserves all raw first/last groups, including null names.
 The current repository normalizer creates the lookup keys after export.
 The [count guide](../scripts/production/counts/README.md) defines the complete build command.
+Only AI2 staff can build the index, because its input is an internal Semantic Scholar author-table export.
+Other users use the released index and cannot regenerate it.
+Each future refresh of the index is a staff step.
 
 The complete model path contains the verified patent-free candidate.
 The release notes will identify the accepted Git ref after final acceptance.
@@ -126,8 +129,10 @@ They do not prove independence from every past model or dataset.
 
 ## File formats and compatibility
 
-Giant-block EPS review uses the same research snapshot.
-Its seven giant Arrow datasets, profile memberships, dev labels, and initial-query source map need no second S3 copy.
+The research snapshot supports giant-block EPS review on its seven giant Arrow datasets.
+Their profile memberships, dev labels, and initial-query source map need no second S3 copy.
+The final `1.3` EPS choice also uses fresh internal production exports that the release does not include.
+Public data reproduces the validation EPS calibration but not that final review.
 Calibration reference files and review outputs are derived sidecars.
 Keep them distinct from untouched final test data.
 See [giant-block EPS review](eps_calibration.md) for their production commands.

@@ -1,5 +1,9 @@
 # Author-table name counts
 
+These producers read internal Semantic Scholar exports, so only AI2 staff can run them.
+Public users download the released index and prefix artifacts instead.
+Plan a staff rebuild for every future count refresh.
+
 ## ORCID prefix evidence
 
 Use `generate_orcid_name_prefix_counts` for the final ORCID prefix artifact.

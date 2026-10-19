@@ -129,6 +129,8 @@ uv run --no-project python path/to/script.py
 
 This keeps imports pointed at the installed package and compiled extension in `site-packages`. Avoid setting `PYTHONPATH` to the repo root, which can shadow the compiled module.
 
+For expensive model jobs, follow the [bounded model run instructions](development.md#bounded-model-runs).
+
 ## WSL notes
 
 - Some Ubuntu images do not provide a `python` alias by default. Use `python3` for system-Python commands when needed.

@@ -127,11 +127,14 @@ implementation invariant; the exact tests and real-data traces verify it.
 
 ## Reproduction and retained artifacts
 
-All experiment scripts, original source copies, measurements, and built
-extensions are under `scratch/bulk_fixes_20260904/` (git-ignored). The original
-release extension remains in `scratch/bulk_profile_20260904/release_runtime/`.
-The final wheel is in `final_wheels/`, extracted into `final_runtime/`;
-the default workspace extension was not overwritten.
+Experiment scripts, source copies, measurements, and final builds remain under
+`scratch/bulk_fixes_20260904/` (git-ignored).
+The [scratch archive](</D:/local-unsynced/s2and_scratch_archive_20261013/scratch/bulk_profile_20260904>)
+contains the original release extension and copied inputs.
+`final_wheels/` contains the final wheel. `final_runtime/` contains its extracted files.
+
+Restore `scratch/bulk_profile_20260904/` from that archive before the commands below.
+The harness uses that path for copied Arrow inputs and name counts.
 
 ```powershell
 uv run --no-sync maturin build --release --manifest-path s2and_rust/Cargo.toml --out scratch/bulk_fixes_20260904/final_wheels

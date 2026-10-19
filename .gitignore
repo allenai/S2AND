@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .claude/
+.codex-remote-attachments/
 pypitoken
 *.pickle
 !tests/qian/specter.pickle

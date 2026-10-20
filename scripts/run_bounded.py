@@ -13,7 +13,7 @@ import time
 import traceback
 from ctypes import wintypes
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import psutil
@@ -34,6 +34,14 @@ RECORD_NAMES = (
     "result.json",
     "result.json.tmp",
 )
+# MSVC link.exe starts vctip.exe to upload telemetry. It can outlive the build in the
+# job and would hold a finished command open until its deadline, or forever.
+TELEMETRY_IMAGE = "vctip.exe"
+TELEMETRY_INSTALL_DIR = "microsoft visual studio"
+TELEMETRY_GRACE_SECONDS = 10.0
+# The command's hidden console stays open while vctip.exe is attached to it. It exits
+# by itself after its last client, so the runner tolerates it but never stops it.
+CONSOLE_HOST = PureWindowsPath(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "conhost.exe")
 
 
 def utc_now() -> str:
@@ -92,6 +100,12 @@ class WindowsJob:
         self.kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         self.kernel.OpenProcess.restype = wintypes.HANDLE
         self.kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+        self.kernel.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
         self.kernel.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
         self.kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         self.kernel.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -151,6 +165,55 @@ class WindowsJob:
                         raise TimeoutError(f"An owned process does not exit: {pid}")
             finally:
                 self.kernel.CloseHandle(handle)
+
+    def stop_compiler_telemetry(self) -> list[dict[str, Any]]:
+        """Terminate MSVC telemetry uploaders when nothing else remains in the job.
+
+        Returns:
+            The PID and image path of each terminated uploader. The list is empty, and no
+            member is touched, when a live member is neither an uploader nor the console host.
+        """
+        handles: list[int] = []
+        uploaders: list[tuple[int, int, str]] = []
+        try:
+            for pid in self.pids():
+                handle = self.kernel.OpenProcess(0x100001 | 0x1000, False, pid)
+                if not handle:
+                    if get_last_error() == 87:
+                        continue
+                    raise WinError(get_last_error())
+                handles.append(handle)
+                belongs = wintypes.BOOL()
+                if not self.kernel.IsProcessInJob(handle, self.handle, ctypes.byref(belongs)):
+                    raise WinError(get_last_error())
+                if not belongs.value or self.kernel.WaitForSingleObject(handle, 0) == 0:
+                    continue
+                # The open handle pins the process, so the path cannot belong to a reused PID.
+                size = wintypes.DWORD(32768)
+                buffer = ctypes.create_unicode_buffer(size.value)
+                if not self.kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                    raise WinError(get_last_error())
+                if is_compiler_telemetry(buffer.value):
+                    uploaders.append((pid, handle, buffer.value))
+                elif buffer.value.casefold() != str(CONSOLE_HOST).casefold():
+                    return []
+            stopped = []
+            for pid, handle, image in uploaders:
+                if not self.kernel.TerminateProcess(handle, 1) and self.kernel.WaitForSingleObject(handle, 0) != 0:
+                    raise WinError(get_last_error())
+                if self.kernel.WaitForSingleObject(handle, 5000) != 0:
+                    raise TimeoutError(f"A telemetry process does not exit: {pid}")
+                stopped.append({"pid": pid, "image": image})
+            return stopped
+        finally:
+            for handle in handles:
+                self.kernel.CloseHandle(handle)
+
+
+def is_compiler_telemetry(image: str) -> bool:
+    """Match only vctip.exe inside a Visual Studio installation."""
+    parts = [part.casefold() for part in PureWindowsPath(image).parts]
+    return len(parts) > 1 and parts[-1] == TELEMETRY_IMAGE and TELEMETRY_INSTALL_DIR in parts[:-1]
 
 
 # Windows closes this private handle at process exit, after the final record flush.
@@ -311,6 +374,7 @@ def supervise(args: argparse.Namespace) -> int:
         "rss_samples": 0,
         "command_exit_code": None,
         "containment": "windows_kill_on_close_job" if os.name == "nt" else "posix_process_group",
+        "telemetry_cleanup": [],
     }
     try:
         if os.name == "nt":
@@ -331,8 +395,19 @@ def supervise(args: argparse.Namespace) -> int:
                     telemetry.error(f"Initial record: {type(error).__name__}: {error}")
                 telemetry.event("start", command_pid=child.pid, supervisor_pid=os.getpid())
                 last_event = -1.0
+                command_exited: float | None = None
                 while True:
                     live = child.poll() is None or has_owned_descendants(child, _WINDOWS_JOB)
+                    if live and child.returncode is not None and _WINDOWS_JOB is not None:
+                        # Give real descendants time to finish before a telemetry-only check.
+                        if command_exited is None:
+                            command_exited = time.monotonic()
+                        if time.monotonic() - command_exited >= TELEMETRY_GRACE_SECONDS:
+                            stopped = _WINDOWS_JOB.stop_compiler_telemetry()
+                            if stopped:
+                                result["telemetry_cleanup"].extend(stopped)
+                                telemetry.event("telemetry_cleanup", processes=stopped)
+                                live = has_owned_descendants(child, _WINDOWS_JOB)
                     elapsed = time.monotonic() - started
                     if args.max_seconds is not None and elapsed > args.max_seconds:
                         result["status"] = "deadline"

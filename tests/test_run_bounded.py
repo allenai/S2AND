@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -14,6 +15,8 @@ from pathlib import Path
 
 import psutil
 import pytest
+
+from scripts.run_bounded import is_compiler_telemetry
 
 RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "run_bounded.py"
 CHILD_PYTHON = getattr(sys, "_base_executable", sys.executable)
@@ -443,3 +446,74 @@ def test_external_hard_link_to_record_is_not_an_output(tmp_path: Path) -> None:
     assert process.returncode == 1
     assert result["status"] == "invalid_output"
     assert result["command_exit_code"] == 0
+
+
+@pytest.mark.parametrize(
+    ("image", "expected"),
+    [
+        (r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\bin\Hostx64\x64\vctip.exe", True),
+        (r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\bin\HostX86\x64\VCTIP.EXE", True),
+        (r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\mspdbsrv.exe", False),
+        (r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\bin\Hostx64\x64\link.exe", False),
+        (r"C:\tools\vctip.exe", False),
+        ("vctip.exe", False),
+    ],
+)
+def test_compiler_telemetry_match(image: str, expected: bool) -> None:
+    assert is_compiler_telemetry(image) is expected
+
+
+def fake_uploader(directory: Path) -> Path:
+    """Copy the interpreter and the DLLs it loads under the telemetry image name."""
+    source = Path(CHILD_PYTHON)
+    directory.mkdir(parents=True)
+    for library in source.parent.glob("*.dll"):
+        shutil.copy2(library, directory / library.name)
+    image = directory / "vctip.exe"
+    shutil.copy2(source, image)
+    return image
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MSVC telemetry cleanup uses Windows Job Objects")
+@pytest.mark.parametrize(
+    ("install", "seconds", "status"),
+    [
+        (Path("Microsoft Visual Studio", "2022", "BuildTools", "VC", "bin"), 20, "complete"),
+        (Path("tools"), 3, "deadline"),
+    ],
+)
+def test_lingering_compiler_telemetry(tmp_path: Path, install: Path, seconds: float, status: str) -> None:
+    output, marker = tmp_path / "telemetry", tmp_path / "uploader.json"
+    image = fake_uploader(tmp_path / install)
+    uploader = (
+        "import json,os,time; from pathlib import Path; "
+        f"Path({str(marker) + '.tmp'!r}).write_text(json.dumps({{'members':[os.getpid()]}})); "
+        f"Path({str(marker) + '.tmp'!r}).rename({str(marker)!r}); time.sleep(60)"
+    )
+    # The copied interpreter has no standard library beside it.
+    code = (
+        "import os,subprocess,time; from pathlib import Path\n"
+        f"subprocess.Popen([{str(image)!r},'-c',{uploader!r}],env=dict(os.environ,PYTHONHOME={sys.base_prefix!r}))\n"
+        f"while not Path({str(marker)!r}).exists(): time.sleep(0.01)"
+    )
+    inject = (
+        f"import sys; sys.path.insert(0,{str(RUNNER.parents[1])!r}); from scripts import run_bounded as runner\n"
+        "runner.TELEMETRY_GRACE_SECONDS=0.5\n"
+        "raise SystemExit(runner.main())\n"
+    )
+    process = start(arguments(output, code, seconds=seconds), tmp_path, [sys.executable, "-c", inject])
+    finish(process)
+    result = json.loads((output / "result.json").read_text())
+    pid = json.loads(marker.read_text())["members"][0]
+    assert process.returncode == int(status != "complete")
+    assert result["status"] == status
+    assert result["command_exit_code"] == 0
+    if status == "complete":
+        # A cleanup inside the poll loop leaves nothing for the final forced stop.
+        assert [row["pid"] for row in result["telemetry_cleanup"]] == [pid]
+        assert os.path.samefile(result["telemetry_cleanup"][0]["image"], image)
+        assert not result["cleanup"]["forced"]
+    else:
+        assert result["telemetry_cleanup"] == []
+        assert result["cleanup"]["forced"]
+    assert_family_stops(marker)

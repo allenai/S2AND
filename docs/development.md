@@ -197,6 +197,15 @@ descendants. On POSIX, ownership covers the command's process group. A
 descendant can start a new session outside this group. Hard supervisor death
 can leave group members alive.
 
+A remaining descendant keeps the run open after the command exits. One Windows
+exception exists: MSVC `link.exe` starts `vctip.exe` to upload telemetry, and it
+can linger after a Rust build. Ten seconds after the command exits, the runner
+checks the remaining job members. If each one is `vctip.exe` inside a
+`Microsoft Visual Studio` folder or the command's console host (`conhost.exe`),
+it stops the `vctip.exe` processes and lists them in `telemetry_cleanup` in
+`result.json`. The console host then exits by itself. Any other remaining
+process still keeps the run open.
+
 On Windows, a reader without delete sharing can block atomic file replacement.
 Prefer immutable records and append-only telemetry. If a status file requires
 replacement, close readers promptly and permit delete sharing. Report optional

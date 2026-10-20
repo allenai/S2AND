@@ -15,8 +15,8 @@ v1.3 release work is complete. Release operators must follow
 | `production/data/package_corrected_datasets.py` | Package the final corrected records, pairwise populations, and complete incremental tasks with one common index |
 | `production/data/write_release_bundles.py` | Write the published `inference`, `dataset`, and `source` bundles from the prepared snapshot |
 | `production/model/train_linker_and_finalize.py` | One-fit complete-bundle linker finalization, reload, and evaluation |
-| `production/model/release_pairwise.py` | Validation-only EPS calibration plus measurement components and `evaluate-release` aggregation into one report |
-| `production/model/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs (release Stage 2) |
+| `production/model/release_pairwise.py` | Validation-only EPS calibration, outer-test evaluation (`evaluate-heldout`), and the promotion measurement components with `evaluate-release` aggregation |
+| `production/model/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs. Use only when the accepted support or replay Arrow roots change; see [data preparation](production/data/README.md) |
 | `production/generate_canonical_name_tuples.py` | Deterministically generate the canonical tuple text file from the reviewed source artifact |
 | `production/counts/generate_name_counts.py` | Convert one reviewed, guardrailed CSV export into an immutable native `name_counts_index/`; invoke with `python -m` |
 | `production/counts/generate_orcid_name_prefix_counts.py` | Convert one reviewed, guardrailed CSV export into canonical ORCID prefix-count JSON bound to the packaged tuple artifact; invoke with `python -m` |
@@ -28,7 +28,8 @@ v1.3 release work is complete. Release operators must follow
 | `tutorial_for_predicting_with_the_prod_model.py` | Guide to predicting with a complete production bundle, Arrow input by default; JSON fixtures are opt-in |
 | `tutorial.ipynb` | Notebook walkthrough of the S2AND pipeline on the legacy JSON benchmark files |
 
-The compatible public release remains unpublished.
+> **Update at v1.3 release:** The compatible public release remains unpublished.
+
 The script requires a complete model and format-1 Arrow input.
 The notebook requires the format-1 name-count index.
 Use [the data guide](../docs/data.md) for the common assets and corrected snapshot.
@@ -39,14 +40,14 @@ Use [the data guide](../docs/data.md) for the common assets and corrected snapsh
 |---|---|
 | `extract_big_block_dataset.py` | Stream a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, `specter.pickle`, `cluster_seeds.json`, `altered_cluster_signatures.txt`, and `meta.json`; supports both pretty-printed and minified JSON exports |
 | `convert_to_arrow.py` | Join canonical names into the benchmarks and the augmented training set; convert service JSON, benchmarks, and linker replay inputs into bounded Arrow runtime artifacts with current raw-planner batch indexes; validate name counts/datasets and write checksum-bound collection manifests |
-| `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on an extracted giant block and write preservation metrics, plots, and tables. Uses the same graph fallback as `Clusterer`. Needs the ORCID prefix-count files (see [subblocking](../docs/subblocking.md)). |
+| `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on an extracted giant block and write preservation metrics, plots, and tables. Uses the same graph fallback as `Clusterer`. Uses the packaged ORCID prefix counts. |
 | `bench_preprocess_phases.py` | Benchmark preprocessing phases (papers, signatures) across serial / threads / processes |
 
 ### Evaluation and verification
 
 | Script | What it does |
 |---|---|
-| `eval_prod_models.py` | Evaluate an explicitly supplied SPECTER2 bundle on the full (default) or mini datasets. Requires an explicit `--arrow-data-root` or `--json-data-root` (JSON also needs `--name-counts-index-root` and `--name-tuples-path`). Non-training evaluation uses the test blocks recorded in the bundle, rejects `--seed`, and auto-uses Arrow when complete artifacts exist; SPECTER1 is an explicit `--train` research comparison only. |
+| `eval_prod_models.py` | Evaluate an explicitly supplied SPECTER2 bundle on the full (default) or mini datasets. Requires an explicit `--arrow-data-root` or `--json-data-root` (JSON also needs `--name-counts-index-root` and `--name-tuples-path`). Owner-only: non-training evaluation needs the internal pre-cut `pairwise/arrow/release` root and scores the bundle's inner test blocks. Public outer-test evaluation is `release_pairwise.py evaluate-heldout` ([reproduction](../docs/reproduce.md) step 4). Non-training evaluation rejects `--seed` and auto-uses Arrow when complete artifacts exist; SPECTER1 is an explicit `--train` research comparison only. |
 | `eps_sweep/sweep_eps_on_linking_gold.py` | Giant-block release EPS curves with hidden-ORCID identity B3 or safe-action diagnostics; reuse native distances and linkage trees |
 | `eps_sweep/build_linking_eps_gold.py` | Expand active dev candidate labels into diagnostic pairs; exclude test queries and initial-query origins |
 | `eps_sweep/plot_b3_eps_sweeps.py` | Plot completed giant-block B3 curves for manual EPS review |
@@ -60,6 +61,7 @@ Use [the data guide](../docs/data.md) for the common assets and corrected snapsh
 | `verification/profile_promoted_incremental_arrow.py` | Produce the release performance report from a bounded promoted incremental Arrow workload |
 | `verification/compare_graph_subblocking_arrow_quality.py` | Produce the release subblocking-quality report by comparing Python and Rust graph subblocking on the frozen Arrow and component inputs |
 | `verification/smoke_installed_rust_api.py` | CI smoke that checks the installed `s2and-rust` extension exposes the expected API |
+| `verification/verify_rust_distribution_licenses.py` | Release CI check that Rust wheels and source distributions keep their license notices |
 
 ### CI & release
 
@@ -67,6 +69,7 @@ Use [the data guide](../docs/data.md) for the common assets and corrected snapsh
 |---|---|
 | `run_ci_locally.py` | Shared hosted/local CI policy. With no argument it runs both jobs; pass `lint` or `typecheck-and-test` to run one job. |
 | `sync_version.py` | Sync `VERSION` into Python/Rust manifests and lockfiles |
+| `run_bounded.py` | Run one long model job with RAM, deadline, and expected-output limits and durable run records; see [bounded model runs](../docs/development.md#bounded-model-runs) |
 | `sync_feature_schema.py` | Regenerate the Rust feature-column constants from `s2and/feature_schema.py`; CI runs it with `--check` |
 
 ### Archived historical artifacts
@@ -84,6 +87,6 @@ attempt to rerun one needs an explicit bounded migration plan first.
 | `archive/make_augmentation_dataset_a.py` | Provenance only; incompatible as written | Records pair selection and title-only embedding inputs for the augmented training data |
 | `archive/make_augmentation_dataset_b.py` | Provenance only; incompatible as written | Records the exact feature-corruption and translation policy for the augmented training data |
 | `archive/make_claims_dataset.py` | Historical private-data workflow | Records how block-local Semantic Scholar corrections datasets were constructed |
-| `archive/make_s2and_mini_dataset.py` | Legacy JSON/pickle recipe | Records the source-selection policy for the mini datasets still used in evaluation and conversion |
+| `archive/make_s2and_mini_dataset.py` | Legacy JSON/pickle recipe | Records the source-selection policy for the historical mini datasets |
 | `archive/sota.py` | Historical private-data workflow | Preserves post-paper SOTA splits, metrics, and multi-seed aggregation fixes |
 | `archive/transform_all_datasets.py` | Legacy dry-run utility | Preserves the old-schema conversion and curated dataset corrections |

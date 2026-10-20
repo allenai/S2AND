@@ -28,13 +28,10 @@ The user-facing recovery commands are in
 [install.md](install.md#build-the-rust-extension-from-source). This section
 explains why they are sometimes needed.
 
-Syncing `uv run` decides whether to rebuild `s2and-rust` from the cache keys in
-`s2and_rust/pyproject.toml`: the root Cargo manifest, lockfile and build
-script, the vendored CLD2 manifest, Rust sources under `src/` and
-`vendor/cld2/src/`, plus `s2and_rust/pyproject.toml`, its `README.md`, and the
-Python wrapper files. Editor swap files, build outputs and the unused vendored
-lockfile do not invalidate uv's cached wheel. Cargo still watches source
-directories to detect new modules when a native build runs.
+Syncing `uv run` decides whether to rebuild `s2and-rust` from the `cache-keys`
+list in `s2and_rust/pyproject.toml`. Files outside that list, such as editor
+swap files and build outputs, do not invalidate uv's cached wheel. Cargo still
+watches source directories to detect new modules when a native build runs.
 
 uv's file-glob keys track the newest matching timestamp, not file contents or
 the complete file inventory. Deleting an older file, adding a backdated file,
@@ -73,7 +70,8 @@ uv run --no-project python scripts/run_ci_locally.py
     library-test gates;
   - runs the installed-Rust API smoke and `ty`; and
   - runs the full pytest suite with coverage (branch coverage is configured in
-    `pyproject.toml`) under pytest-xdist with `-n auto`. Pass
+    `pyproject.toml`) under pytest-xdist with `-n auto`, capped at eight
+    workers. Pass
     `--pytest-workers N` to choose a worker count, or `--pytest-workers 0` to
     run it in one process for debugging.
 
@@ -113,16 +111,13 @@ uv run --active --no-project ty check scripts --exclude scripts/archive --ignore
 ```
 
 The scripts check above covers active top-level and nested scripts but deliberately
-excludes retired reference code in `scripts/archive`; hosted CI currently type-checks
-only top-level scripts. Both checks use the `[tool.ty]` defaults; the scripts
+excludes retired reference code in `scripts/archive`; hosted CI checks the same
+set. Both checks use the `[tool.ty]` defaults; the scripts
 check additionally ignores unresolved references and attributes from optional
 and native modules. Type errors remain blocking; warnings remain visible.
 
 The full pytest suite requires the native name-count index. `uv sync --extra dev` builds and installs the extension;
 `uv run --no-project python scripts/run_ci_locally.py` does the same before testing.
-
-Do not set `PYTHONPATH` for normal repo scripts; it can shadow the installed package or compiled Rust extension. Test
-and CI commands may set it only when they are intentionally exercising the checkout source tree.
 
 ## Runtime routing verification
 

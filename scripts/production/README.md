@@ -32,13 +32,14 @@ uv run --no-sync python scripts/production/data/package_corrected_datasets.py `
 ```
 
 The output contains full corrected records, exact pairwise populations, benchmark Arrow tables, and complete incremental support.
-`pairwise/model_plan.json` declares the production fit datasets and EPS policy.
+The internal `pairwise/model_plan.json` names the JSON fit inputs and the EPS policy.
+The trainer rejects it; train from the published plan in the `dataset` bundle.
 The default EPS grid uses steps of `0.01` from `0.00` to `1.00`; both minimum F1 floors equal zero.
 Use explicit EPS options to declare a different policy.
 All operational paths remain relative to the snapshot.
 One physical `name_counts_index` serves all Arrow datasets.
 The dataset manifests bind the common index's exact hash.
-Exclude that index from the S3 payload.
+The `inference` bundle publishes that index; the `dataset` bundle does not contain it.
 
 A future data correction starts from `corrected_sources` in this snapshot.
 Historical review archives and separate pre-correction inputs are not required.
@@ -93,7 +94,7 @@ uv run --no-sync python scripts/production/model/train_pairwise.py `
   --run-full
 ```
 
-The example uses 20 jobs and 128 GiB of RAM.
+The example uses 12 jobs and 128 GiB of RAM.
 Use the approved limits for the actual run.
 The output directory must be new.
 The matrix workspace must be empty and local.
@@ -120,7 +121,6 @@ The training summary records the selected source and both validation scores.
 The output is an immutable pairwise-only model with `eps_calibration: "pending"` and placeholder EPS `0.5`.
 It contains both boosters and both required prediction fixtures.
 The model manifest declares format and feature-contract versions and ordered main/nameless features.
-The generating runtime is provenance, not an exact package-version lock.
 Unversioned stages require an explicit rebuild or export.
 
 ## EPS calibration
@@ -583,6 +583,8 @@ matter. Labels may be `YES`/`NO` or `1`/`0`.
 Before candidate reports, bind the complete model and combined snapshot to the prepared acceptance plans:
 
 ```powershell
+$Snapshot = '<combined-snapshot>'
+
 uv run --no-sync python scripts/production/model/release_pairwise.py bind-candidate `
   --run-root <acceptance-run-root> `
   --candidate-model "$RunRoot/complete/production_model_v1.3" `
@@ -756,7 +758,7 @@ The smoke command uses an 8 GiB budget. The common count index alone exceeds the
 
 ```powershell
 $DistRoot = "$RunRoot\stages\local-dist"
-$PublicDataRoot = $Snapshot
+$PublicDataRoot = $Root
 $SmokeVenv = "$RunRoot\stages\installed-smoke-venv"
 $SmokePython = "$SmokeVenv\Scripts\python.exe"
 $PathConfig = "$RunRoot\stages\installed-smoke-path-config.json"

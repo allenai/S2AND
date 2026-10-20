@@ -1,7 +1,7 @@
 # Training and Evaluation
 
 This guide describes research training and evaluation through the API.
-It uses the corrected research snapshot and the same common name-count index as inference.
+It uses the published data bundles and the same common name-count index as inference.
 The examples expose test metrics for direct research inspection.
 Production release selection uses development data and keeps candidate test scores separate until the declared release evaluation.
 See [the production commands](../scripts/production/README.md#pairwise-model) for the maintained production trainer.
@@ -22,9 +22,9 @@ A historical baseline is not required for this fit.
 The snapshot preserves full corrected records for later corrections and embedding updates.
 Runtime Arrow projections alone do not retain all useful source text.
 The [data guide](data.md) explains source records, incremental tasks, formats, and compatibility.
-The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
+The selected local snapshot path is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
 The snapshot plan uses relative paths.
-The v1.3 model records only its plan bytes, so evaluate it with that exact plan file.
+Calibration and held-out evaluation check the model's recorded development blocks.
 
 ## Build a Rust-backed training dataset
 

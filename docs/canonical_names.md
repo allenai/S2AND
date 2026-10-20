@@ -5,8 +5,9 @@ author names, builds name-count keys, and compares canonical names.
 
 ## Access the current rules and artifacts
 
-Runtime `1.0.0` remains unpublished.
-Use PR 80's `canonical-v2-migration` branch and its local Rust build for the current rules.
+> **Update at v1.3 release:** Runtime `1.0.0` remains unpublished.
+> Use PR 80's `canonical-v2-migration` branch and its local Rust build for the current rules.
+
 Skip automatic Git LFS downloads when you need only normalization and small artifacts:
 
 ```bash
@@ -108,7 +109,7 @@ first, last, first_last, last_first_initial = index.lookup_many(
 
 The index's JSON manifest is ordinary Git; its four binary files use Git LFS.
 Git preserves the manifest's exact bytes because dataset and model contracts bind its SHA-256.
-The index requires about 2.39 GB of local space.
+The index requires about 2.42 GB of local space.
 `None` keys yield `NaN`; informative keys absent from the index yield the default count `1.0`.
 Use [the data guide](data.md) for model assets and the research snapshot.
 

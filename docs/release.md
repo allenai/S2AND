@@ -12,7 +12,7 @@ Fresh author-table counts, A, define the production count authority.
 The selected rebuild uses current normalization and the current packaged tuple and ORCID assets.
 See the [A mainline record](release_evidence/author_counts_mainline_20261017.md) for its status.
 A production release still requires final acceptance and publication.
-No final release model or S3 location is declared here before acceptance and publication.
+The S3 prefixes stay empty until acceptance and publication.
 
 ## Release inputs
 
@@ -71,7 +71,7 @@ A historical baseline is not a prerequisite for snapshot preparation or a pairwi
 4. Verify the declared workload and resource bounds.
 5. Keep the selected snapshot immutable for the run.
 
-The selected local input path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
+The selected local input path is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
 The snapshot passes relocation checks.
 It excludes `inventors_s2and` from corrected records, Arrow data, pairwise plans, and incremental inputs.
 
@@ -114,7 +114,7 @@ The command proves that the benchmark Arrow data rebuilds the snapshot's prepare
 It then writes the dataset model plan.
 See [release bundles](../scripts/production/README.md#release-bundles).
 
-Dataset manifests declare the fit population rather than a fixed seven-source list.
+The model plan declares the fit population rather than a fixed seven-source list.
 The current release declares seven non-patent benchmarks and non-patent augmentation.
 Unknown signatures remain in inference context but do not supply supervised labels.
 Training and external evaluation must satisfy the declared identity overlap rules.
@@ -161,7 +161,7 @@ Distinguish independent release tests from inherited regression tests.
 Compare old and new models on the same population when a matched comparison is required.
 Do not compare historical rates from different data or split populations as a matched baseline.
 
-Run `train_linker_and_finalize.py` once against the calibrated model and snapshot.
+Run `train_linker_and_finalize.py` once against the calibrated model and the synced data root.
 The command computes fresh features, fits the linker, writes a complete sibling, reloads it, and evaluates its declared test split.
 The classic booster fits train rows.
 Both calibration splits select gate features and fit gate coefficients; they serve as dev populations.
@@ -221,6 +221,7 @@ Run one public step from the [reproduction guide](reproduce.md) on that root.
 Record the package, model, research snapshot, and format versions in the release notes.
 Record the common Git ref, asset paths, S3 prefix, manifest hashes, and evaluation decision.
 Replace unpublished placeholders only with verified download locations.
+Resolve every `Update at v1.3 release` note (`git grep -n "Update at v1.3 release"`).
 Tag the exact reviewed source commit.
 
 ## Invalidation rules

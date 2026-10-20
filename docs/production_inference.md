@@ -3,10 +3,11 @@
 Inference users need the common complete model and binary name-count index.
 These large assets use versioned Git LFS paths.
 Small canonical name tuples and ORCID prefix counts ship in the Python wheel.
-The research S3 snapshot does not contain another copy of the common assets.
+The `inference` S3 bundle holds the same model and index as `artifacts/common/v1.3`.
 See [the data guide](data.md) for the combined local layout.
 
-The compatible release locations remain unpublished.
+> **Update at v1.3 release:** The compatible release locations remain unpublished.
+
 Pass an explicit complete model path to `load_production_model`.
 The loader does not select a default model.
 
@@ -368,6 +369,8 @@ production_model_vX.Y/
     metadata.json
   reproducibility/
     incremental_linker_training_target.json
+    pairwise_training_config.json
+    pairwise_training_summary.json
 ```
 
 The root manifest contains `kind: "s2and_model"`, `format_version: 1`, and `feature_contract_version: 1`.
@@ -391,7 +394,7 @@ Export and load compare tuple/ORCID data hashes with the canonical package
 artifacts; the exact name-count manifest and complete ordered feature contract
 are also bound into model and linker provenance.
 
-The linker metadata records `kind: "s2and_incremental_linker"`, format and feature-contract versions, ordered feature names, and generating-runtime provenance.
+The linker metadata records `kind: "s2and_incremental_linker"`, format and feature-contract versions, ordered feature names, retrieval top-k, gate configuration, and binding digests.
 Its checksums bind the booster, pairwise bundle, and complete target JSON.
 The complete model retains the target at `reproducibility/incremental_linker_training_target.json`.
 Finalization and load reject a mismatch.

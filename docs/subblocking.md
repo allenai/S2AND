@@ -152,14 +152,13 @@ classification uses canonical first names.
 
 ## ORCID policy
 
-After Stage 1 artifact promotion, the default merge-prior mapping is loaded lazily from the packaged
+The default merge-prior mapping is loaded lazily from the packaged
 `first_k_letter_counts_from_orcid.json` and its required adjacent
 `.manifest.json`, then resolved at subblocking entry. The loader validates the
 canonical prefix-pair keys and positive integer counts directly; the minimal
 manifest records the canonical name-tuple data hash used to generate them.
 Missing or malformed files fail closed before partitioning, and production
-contracts bind their computed hashes. (The current pre-release tree contains
-neither file; see the release note at the top.) These learned prefix-pair
+contracts bind their computed hashes. These learned prefix-pair
 counts are considered
 only after exact-name and `same_prefix_tokens` merge candidates, so they do not
 override stronger compatibility evidence. A caller may supply an explicit

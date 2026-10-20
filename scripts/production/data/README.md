@@ -12,7 +12,7 @@ Reuse accepted augmentation when source identities and omission policy remain va
 Release `1.3` excludes patent data.
 Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
 Incremental inputs contain the 13 inherited non-patent datasets.
-The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
+The selected local snapshot path is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
 The snapshot passes relocation checks.
 
 ```powershell
@@ -162,10 +162,10 @@ The snapshot uses Arrow IPC, Parquet, JSON, and CSV according to the current con
 It is not an all-IPC dataset.
 Precomputed features are derived caches and do not replace the corrected master.
 
-Publish common large assets through Git LFS.
-Publish the research snapshot to S3 without `name_counts_index` or a production model copy.
-The downloaded S3 files require their exact common index beside them.
-Verify the combined local root after both downloads.
+Publish the common index and complete model through Git LFS.
+Publish the `inference`, `dataset`, and `source` bundles that `write_release_bundles.py` writes.
+Do not publish the snapshot itself.
+Verify one local root that combines `inference` and `dataset`.
 
 See [the production commands](../README.md) for the model fit and EPS calibration.
 See [the release process](../../../docs/release.md) for acceptance and publication.

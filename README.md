@@ -4,7 +4,9 @@ S2AND provides author-name-disambiguation datasets and the reference model from 
 The model predicts author clusters from paper and author records.
 
 This branch prepares Python/Rust runtime `1.0.0` and model/data release `1.3`.
-The complete model and compatible research snapshot are not yet published.
+
+> **Update at v1.3 release:** The complete model and the `1.3` data bundles are not yet published.
+
 Use [the release process](docs/release.md) for current preparation, fit, evaluation, and publication steps.
 
 ## Choose a workflow
@@ -12,17 +14,17 @@ Use [the release process](docs/release.md) for current preparation, fit, evaluat
 | Goal | Required input | Guide |
 | --- | --- | --- |
 | Run the production model | Common model and name-count index; your records and vectors | [Production inference](docs/production_inference.md) |
-| Use corrected research data | Common assets plus the complete S3 research snapshot | [Data and models](docs/data.md) |
-| Correct data or release another model | The same corrected snapshot and maintained scripts | [Release process](docs/release.md) |
+| Use corrected research data | The `inference` and `dataset` S3 bundles | [Data and models](docs/data.md) |
+| Reproduce the production training process | The `inference` and `dataset` S3 bundles | [Reproduce the 1.3 model](docs/reproduce.md) |
+| Correct data or release another model | All three S3 bundles and maintained scripts | [Release process](docs/release.md) |
 | Train or evaluate with the API | Manifest-backed dataset and labels | [Training and evaluation](docs/training.md) |
 | Use current name normalization and small alias artifacts | Source checkout; optional count-index download | [Canonical names](docs/canonical_names.md#access-the-current-rules-and-artifacts) |
 | Work on the repository | Source checkout and development environment | [Development](docs/development.md) |
 
 Common large assets use Git LFS.
 Small name tuples and ORCID prefix counts ship in normal Git and the Python wheel.
-The research snapshot uses S3 and does not duplicate the common model or count index.
-It contains the final output of accepted additions and corrections, with full records, labels, masks, embeddings, and exact splits.
-Use that output as the starting point for future corrections.
+Each release also publishes `inference`, `dataset`, and `source` S3 bundles; see [Download data](#download-data).
+The `source` bundle holds the full corrected records, the starting point for future corrections.
 
 ## Install
 
@@ -42,7 +44,8 @@ Pull LFS assets after a branch or release-ref change that affects those files.
 
 ## Download data
 
-The compatible release locations remain unpublished.
+> **Update at v1.3 release:** The compatible release locations remain unpublished.
+
 The release notes will provide the common Git ref, model path, S3 prefix, and hashes.
 Each release publishes three S3 bundles: `inference`, `dataset`, and `source`.
 The [data guide](docs/data.md#choose-the-required-data) states which bundles each user needs.

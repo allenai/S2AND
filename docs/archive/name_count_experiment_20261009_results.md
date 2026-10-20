@@ -21,7 +21,7 @@ The [Stage 1 checklist](../release.md#stage-1-generate-runtime-data) requires th
 The release workflow enforces the distribution checks. Production models remain external artifacts.
 
 The October 12 prefix rebuild applies EVENT threshold 10 to all saved ORCID contributions, with alias threshold two and the current aliases.
-The current packaged table contains 6,134 prefix pairs across 1,649 outer keys.
+The October 12 packaged table contains 6,134 prefix pairs across 1,649 outer keys.
 Its data SHA256 is `d09f52ec0b0272f9931635f7a27676b2cf90c5645e9166233a5f1630cee9c133`.
 Its tuple dependency SHA256 is `0bcb523ebf8e6f7020883d96cc2822f402f212069214fa23e56b6e7bc0b01f0c`.
 The table adds 160 pairs and changes 32 existing counts. It removes no pairs.

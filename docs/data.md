@@ -109,7 +109,7 @@ The seven current giant replay sources supply abstract presence, not full abstra
 The snapshot preserves their available current records and vectors.
 New abstract-based vectors for those giants require another source of full abstracts.
 
-Benchmark cluster gold remains in `clusters.json` files.
+Benchmark cluster gold remains in `<source>_clusters.json` files.
 Pair-labeled datasets use explicit pair files.
 Unknown signatures remain available for inference but do not supply supervised labels.
 Held-out blocks, fixed pair lists, and the recorded seed preserve the experiment population.

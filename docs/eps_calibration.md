@@ -8,12 +8,11 @@ The scripts do not choose EPS automatically.
 
 ## Inputs and historical procedure
 
-Use the accepted corrected research snapshot and the complete candidate model.
+Use one root that combines the `inference` and `dataset` bundles, and the complete candidate model.
 The seven giant datasets are `a_khan`, `a_silva`, `h_wang`, `j_smith`, `s_gupta`, `s_lee`, and `s_park`.
-Their Arrow data, profile memberships, dev labels, and initial-query source map already belong to the research snapshot.
+Their Arrow data, profile memberships, dev labels, and initial-query source map already belong to the `dataset` bundle.
 Use `--replay-bundle incremental` to select that catalog from the combined public root.
-Publish those inputs once in S3 with the snapshot.
-Obtain the model and common count index from the declared Git LFS ref.
+Obtain the model and index from the `inference` bundle or `artifacts/common/v1.3`.
 No second giant-data copy is required.
 
 The final `1.3` review uses fresh internal Semantic Scholar exports instead of the snapshot giants.
@@ -118,10 +117,10 @@ foreach ($Dataset in $Giants) {
 }
 
 uv run --no-sync python scripts/eps_sweep/plot_b3_eps_sweeps.py `
-  --root "$EpsRun/b3" --datasets $Giants --output "$EpsRun/b3.png" --reference-eps 0.55
+  --root "$EpsRun/b3" --datasets $Giants --output "$EpsRun/b3.png" --reference-eps 0.57
 uv run --no-sync python scripts/eps_sweep/plot_q_class_eps_sweeps.py `
   --root "$EpsRun/proxy" --datasets $Giants --output "$EpsRun/proxy.png" `
-  --weight weight_query_label_balanced --reference-eps 0.55
+  --weight weight_query_label_balanced --reference-eps 0.57
 ```
 
 Set `--reference-eps` to the actual initial EPS for another release.
@@ -163,7 +162,6 @@ Only `clusterer.json` and `manifest.json` change.
 An EPS-only change requires no pairwise or incremental fit.
 Repeat affected cluster evaluation and real-model inference checks with the reviewed package before acceptance.
 
-Publish optional calibration sidecars with the snapshot under its immutable S3 research prefix.
-Keep distance caches local.
+Keep sweep outputs and distance caches local.
 Keep their input roles and hashes distinct from untouched final tests.
 See [the release process](release.md) for acceptance and publication.

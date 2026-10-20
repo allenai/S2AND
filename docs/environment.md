@@ -57,4 +57,3 @@ their runtime explicitly. See [the test suite guide](../tests/README.md).
 - **Rust Arrow routes** parallelize through Rayon using `n_jobs`. Python worker pools (`UniversalPool`) belong to classic `ANDData` paper preprocessing and Python featurization.
 - **Thread env vars** (OMP, MKL, etc.) are typically read at library load time. Setting them after importing `lightgbm` or similar is unreliable.
 - **Windows memory budgeting** uses `GlobalMemoryStatusEx` for total RAM and `GetProcessMemoryInfo` for RSS when `psutil` is unavailable.
-- **Import path policy**: avoid using `PYTHONPATH` for normal repo scripts because it can shadow an installed package or compiled extension. CI/test commands may set it only when intentionally testing the checkout source tree.

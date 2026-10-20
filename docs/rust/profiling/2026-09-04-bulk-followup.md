@@ -106,10 +106,7 @@ from aggregated `rust_featurizer_predict` telemetry, not the last block's
 `GetProcessMemoryInfo` high-water counters, not S2AND's fallback estimates.
 Exact-feature comparison runs are separate from memory acceptance runs.
 
-All commands use a repository-local uv cache in this sandbox:
-
 ```powershell
-$env:UV_CACHE_DIR = Join-Path (Get-Location) 'scratch/uv-cache'
 uv run --no-sync python scratch/bulk_followup_20260904/profile_compare.py --dataset aminer --limit 2500 --blocks 5 --repeat 3 --runtime scratch/bulk_followup_20260904/runtime --baseline --output scratch/bulk_followup_20260904/full_baseline
 ```
 

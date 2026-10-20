@@ -7,7 +7,7 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Status
 
-- The compatible complete model and research snapshot remain unpublished.
+- **Update at v1.3 release:** The compatible complete model and data bundles remain unpublished.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
@@ -28,21 +28,22 @@ production model and public-data version is `1.3`, on a separate version axis.
   complete benchmark Arrow manifest, clusters, held-out blocks, frozen held-out pairs,
   and optional unknown-signature and excluded-signature lists. A fixed-pair dataset
   names its Arrow manifest and train, validation, and held-out pairs.
-  `train_pairwise.py` and `release_pairwise.py calibrate-eps` drop `--arrow-root` and
-  reject plans that name JSON papers or SPECTER pickles. The published `1.3` data
-  reproduces the `1.3` training and validation matrices exactly.
-- `release_pairwise.py evaluate-heldout` takes `--model-plan` instead of `--inputs-json`
-  and `--arrow-root`. EPS calibration, held-out evaluation, and `bind-candidate` bind a
-  model to its data by the recorded development-block membership instead of plan bytes,
-  so the released `1.3` model evaluates on the published data. `bind-candidate` also
-  verifies the training summary against the candidate manifest.
+  `train_pairwise.py` reads its datasets and splits from `--model-plan`. It drops
+  `--production-version`, `--data-dir`, `--datasets`, `--include-augmented`,
+  `--specter-suffix`, `--signatures-suffix`, `--chunk-size`, `--cluster-n-iter`,
+  `--val-test-size`, `--use-cache`, and `--negative-one-for-nan`, and it rejects plans
+  that name JSON papers or SPECTER pickles. The published `1.3` data reproduces the
+  `1.3` training and validation matrices exactly.
+- `release_pairwise.py calibrate-eps` selects EPS on validation blocks, and
+  `release_pairwise.py evaluate-heldout` scores the plan's outer test. Both bind a
+  model to its data by the recorded development-block membership, so the released
+  `1.3` model evaluates on the published data.
 - `train_pairwise.py --incumbent-parameters` lets one known LightGBM configuration per
   head compete with each search winner on validation ROC AUC; the incumbent wins ties.
   `scripts/production/model/pairwise_incumbent_h13.json` holds the `1.3` configuration.
 - `evaluate_incremental_gold.py prepare` binds frozen cases to the benchmark manifest,
   conversion provenance, clusters copy, and unknown-signature list, so evaluation needs
-  only the `dataset` bundle. Cases frozen before this change bind `corrected_sources`
-  files and must be prepared again.
+  only the `dataset` bundle.
 
 - Removes full-file Arrow source fingerprints and the `fingerprint_source`
   writer option. Batch indexes now use `S2ABI003` with a 32-byte header; rebuild
@@ -76,13 +77,12 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 - The production trainer accepts the dataset names declared by the model plan instead of a fixed seven-source set.
   The `1.3` fit excludes `inventors_s2and` and retains the accepted non-patent augmented dataset.
-  Internal `orcid` is not a declared input to that fit.
 - `package_corrected_datasets.py` produces a portable corrected snapshot with complete incremental support and one common count index.
-  Common large assets use Git LFS; the S3 research payload excludes a second common asset copy.
+  Common large assets use Git LFS and the `inference` S3 bundle.
   Corrected source records preserve full paper text where available.
   Existing giant replay sources do not supply full abstract text.
 - Models declare format and feature-contract versions plus ordered feature names.
-  The generating runtime is provenance rather than an exact model-loader package-version lock.
+  The model does not record the producer package version, so the loader does not compare it.
   Installed Python and Rust packages still require matched versions.
 - `ANDData(preprocess=False)` no longer builds per-signature coauthor sets:
   `author_info_coauthors` and `author_info_coauthor_blocks` stay `None`. Python
@@ -92,21 +92,21 @@ production model and public-data version is `1.3`, on a separate version axis.
   Each set holds one entry per paper author, so papers with thousands of
   authors made them quadratic.
 - Release featurization: `train_pairwise.py` and `release_pairwise.py`
-  `calibrate-eps`, `evaluate-pairs`, and `evaluate-clusters` now compute pair
-  features and distances with the Rust featurizer from a required
-  `--arrow-root`. JSON `ANDData` still selects the splits, pairs, blocks,
-  seeds, and truth. On six benchmark datasets, featurization was about 100x
+  `calibrate-eps` and `evaluate-heldout` compute pair features and distances
+  with the Rust featurizer from the model plan's Arrow data.
+  `evaluate-pairs` and `evaluate-clusters` use the same featurizer from a
+  required `--arrow-root`; JSON `ANDData` selects their pairs, blocks, seeds,
+  and truth. On six benchmark datasets, featurization was about 100x
   faster than the Python featurizer, with bit-identical validation distances,
   B3, and trained AUC. `convert_to_arrow.py` now writes
   `conversion_provenance.json` with SHA-256 bindings for signatures, papers,
   selected embeddings, and optional clusters. Public pair CSVs remain outside
   manifest/provenance content binding; release-plan pair inputs are hashed
   separately. Converter revision metadata is informational.
-  Release commands reject any conversion that does not match the plan's
-  signatures, papers, and SPECTER digests. `train_pairwise.py --chunk-size` is
-  removed. The pairwise training config drops `chunk_size` and records
-  `featurization_backend` plus, per dataset, `arrow_dir` and
-  `arrow_conversion_provenance_sha256`. Each command builds the featurizer
+  `evaluate-pairs` and `evaluate-clusters` reject any conversion that does not
+  match the plan's signatures, papers, and SPECTER digests. The pairwise
+  training config drops `chunk_size` and records `featurization_backend` plus,
+  per dataset, `arrow_dir`, the plan file roles, and the split mode. Each command builds the featurizer
   only for the signatures it scores, and cluster evaluation still processes
   one block at a time.
 - The `S2AND_BACKEND` environment variable is removed. Public APIs already chose
@@ -208,11 +208,9 @@ production model and public-data version is `1.3`, on a separate version axis.
   subblocking content/workload identities. A post-finalization
   `run_binding.json` binds both path-independent plans, the complete candidate,
   and the public-data root; all five component reports and the aggregate
-  decision carry that binding. Unreleased manifest/spec formats and their
-  compatibility-free CLI flags are removed.
-  Fixed-role plans and reports no longer carry decorative schema labels.
-  Pairwise training still requires the external name-count index, local matrix
-  workspace, validation-pair size, and explicit full-run acknowledgement.
+  decision carry that binding.
+  Pairwise training requires the external name-count index, local matrix
+  workspace, and explicit full-run acknowledgement.
 - Linker training is one direct entrypoint. It performs one fresh fit
   against the final pairwise bundle, writes a complete bundle with the
   embedded replay target, reloads those exact bytes, and evaluates them.
@@ -321,6 +319,14 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Changed
 
+- Canonical names read a raw first name of two or three capitals, such as `HG`,
+  as initials when the last name is not in capitals. A first name of one capital
+  and one or two lowercase letters with no vowel and no `y`, such as `Jh`, also
+  reads as initials. Given-name abbreviations, titles, suffixes, and real names
+  such as `ED`, `MD`, `Md`, `Ch`, `Jr`, and `Ng` stay names. Python and Rust give
+  the same result. The alias artifact drops the aliases that the rule now covers,
+  and the packaged ORCID prefix counts match the new alias file. See
+  [canonical names](canonical_names.md).
 - `scripts/convert_to_arrow.py join-canonical-augmented-names` gives the
   internal augmented training set its source datasets' canonical names,
   re-shortening the first names the augmentation had cut to an initial, and
@@ -364,9 +370,10 @@ production model and public-data version is `1.3`, on a separate version axis.
   per-version platform wheels. CI runs typecheck-and-test on all three
   interpreters, and the release workflow smokes the installed artifacts and
   compiles the `s2and-rust` sdist on each of them.
-- The canonical alias artifact now contains 5,027 pairs. A manual review of all
+- The canonical alias artifact now contains 5,163 pairs. A manual review of all
   2,266 legacy-only candidates restored 1,343 credible aliases, retained all
-  3,684 existing pairs, and excluded 906 rejects plus 17 unresolved pairs. Tests keep
+  3,684 existing pairs, and excluded 906 rejects plus 17 unresolved pairs.
+  Later reviews add 253 aliases and remove 117. Tests keep
   the adjudication ledger in `tests/fixtures/name_tuples/` consistent with the
   artifact.
 - Promoted query-disallow resolution is request-global and deterministic:
@@ -422,7 +429,7 @@ production model and public-data version is `1.3`, on a separate version axis.
   no legacy override.
   An optional historical model comparison requires its compatible runtime.
   New canonical models use their own `clusterer.json` value.
-- The release workflow has no evidence inputs. It tests the exact commit,
+- The release workflow tests the exact commit,
   builds and installs Python and Rust artifacts outside the source tree, runs
   platform wheel smokes, and enforces the `main` ref in the workflow itself
   before routing publication through the PyPI environment. It publishes Rust,
@@ -432,7 +439,7 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Performance
 
-- Release pairwise training, EPS calibration, and pair and cluster evaluation
+- Release pair and cluster evaluation (`evaluate-pairs`, `evaluate-clusters`)
   load the JSON `ANDData` that selects pairs, splits, blocks, seeds, and truth
   with `preprocess=False` and without SPECTER or name counts, since the Rust
   featurizer computes every feature from Arrow. On aminer, arnetminer,
@@ -515,6 +522,11 @@ production model and public-data version is `1.3`, on a separate version axis.
   tests are removed, repeated cases are curated, and the accidentally
   unbounded booster-parity matrix is deterministically budgeted without
   excluding parity from the default suite.
+
+## 0.51.2
+
+- Ships the package as `0.51.2` and pins optional Rust installs to `s2and-rust==0.51.2`.
+- Adds `fingerprint_source` to `write_arrow_batch_lookup_index` and `write_raw_arrow_batch_lookup_indexes` (default `True`, so existing callers are unchanged). Passing `False` skips the full-file FNV hash of each Arrow table and stores `ARROW_BATCH_LOOKUP_INDEX_UNFINGERPRINTED` in the header, for callers that just wrote the files themselves and index them per request; it cannot be combined with `overwrite=False`. Request-time readers (`read_arrow_batch_lookup_index_batch_indices_for_request`, Rust `open_for_request`) already compare size only and accept such indexes. Strict validation rejects them with an explicit message, and the Rust raw planner's missing-signature diagnostic no longer strict-validates an unfingerprinted index, so a missing query or seed signature still surfaces as `KeyError`. `source_fingerprint_kind` in the returned metrics reports `size_only` for them.
 
 ## 0.51.1
 

@@ -6,7 +6,7 @@ This document covers the fuller install and setup options for S2AND.
 
 - Python `3.11`, `3.12`, or `3.13`
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
-- Git LFS for the LightGBM test fixtures in a source checkout
+- Git LFS for the common model, name-count index, and LightGBM test fixtures in a source checkout
 - Rust, if you are working from a source checkout or building the native extension from source:
   [`rustup`](https://www.rust-lang.org/tools/install)
 
@@ -37,18 +37,17 @@ cargo --version
 
 ## Package install
 
+> **Update at v1.3 release:** PyPI holds only `0.51.2`, which cannot read `1.3` models or data.
+> Use the checkout flow below until `1.0.0` is published.
+
 Runtime install:
 
 ```bash
-uv pip install s2and
+uv pip install "s2and==1.0.0"
 ```
 
-This installs the latest version available from the configured package index.
 The `1.0.0` packages are coordinated `s2and==1.0.0` and `s2and-rust==1.0.0`
 with model/public-data version `1.3`.
-
-The coordinated `1.0.0` release remains unpublished.
-Use the checkout flow below for the current development runtime.
 
 ## Repo checkout
 
@@ -121,13 +120,14 @@ How rebuild detection and the source digest work is described in
 
 ## Running repo scripts
 
-When running scripts from a repo checkout, prefer:
+Run repository scripts with:
 
 ```bash
-uv run --no-project python path/to/script.py
+uv run python path/to/script.py
 ```
 
-This keeps imports pointed at the installed package and compiled extension in `site-packages`. Avoid setting `PYTHONPATH` to the repo root, which can shadow the compiled module.
+The command rebuilds the extension when its inputs change.
+Use `uv run --no-sync python` only in an environment that you already synchronized.
 
 For expensive model jobs, follow the [bounded model run instructions](development.md#bounded-model-runs).
 

@@ -40,6 +40,7 @@ on Windows, so Windows file-lock and open-file cleanup contracts are exercised.
 | `model_helpers.py` | Constant pair probabilities for tests of clustering policy |
 | `training_helpers.py` | Classic training, calibration, and holdout populations |
 | `shell_helpers.py` | Bounded Bash execution with captured diagnostics and native Git Bash selection |
+| `fixture_templates.py` | Per-test copies of module-built fixture trees with rebased absolute paths |
 | `linker_row_feature_reference.py` | Independent row-wise reference for native feature comparisons |
 | `fixtures/rust_lightgbm/` | Serialized models and independent prediction fixtures (LFS) |
 | `fixtures/*.json` | Frozen canonical-name examples and the 53-feature linker training target |

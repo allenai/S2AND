@@ -1026,6 +1026,117 @@ pub(crate) const AFFILIATION_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalO
     multi_token_weight: 1.0,
 };
 
+/// Dot products of `query` with N equal-length vectors in one pass.
+///
+/// Each sum adds `query[i] * vector[i]` in index order, exactly as
+/// `cosine_sim_with_norms` does, so every result is bit-identical. Keeping N
+/// independent sums in one loop lets the CPU overlap them; one sum at a time is
+/// a chain of dependent additions.
+fn fused_dot_products<const N: usize>(query: &[f32], vectors: [&[f32]; N]) -> [f64; N] {
+    let len = query.len();
+    let vectors = vectors.map(|vector| &vector[..len]);
+    let mut sums = [0.0f64; N];
+    for i in 0..len {
+        let q = query[i] as f64;
+        for k in 0..N {
+            sums[k] += q * (vectors[k][i] as f64);
+        }
+    }
+    sums
+}
+
+/// Cosines of `query` with the summary's centroid and exemplars, computed together.
+///
+/// Returns the same value as `centroid.max(specter_exemplar_score(..))` did in
+/// `hybrid_centroid_score`: each cosine follows `cosine_sim_with_norms`
+/// (NaN on a length mismatch, 0.0 for a zero norm), and the maxima fold in the
+/// same order. Retrieval scores every component for every query, so this loop
+/// is the largest CPU cost of incremental planning.
+fn fused_specter_score(query: &RetrievalQueryData, summary: &RetrievalSummaryData) -> f64 {
+    let (Some(query_specter), Some(query_norm)) = (query.specter.as_ref(), query.specter_norm)
+    else {
+        return 0.0;
+    };
+    let query_specter = query_specter.as_slice();
+    let centroid = match (
+        summary.specter_centroid.as_ref(),
+        summary.specter_centroid_norm,
+    ) {
+        (Some(vector), Some(norm)) => Some((vector.as_slice(), norm)),
+        _ => None,
+    };
+    let centroid_slots = usize::from(centroid.is_some());
+    if summary.exemplar_vectors.len() + centroid_slots > 5 {
+        // More vectors than the fused kernel holds: use the reference path.
+        let centroid_score = centroid
+            .map(|(vector, norm)| cosine_sim_with_norms(query_specter, query_norm, vector, norm))
+            .unwrap_or(0.0);
+        return centroid_score.max(specter_exemplar_score(query, summary));
+    }
+    // Slot 0 is the centroid when present; the exemplars follow in order.
+    let mut vectors: [&[f32]; 5] = [&[]; 5];
+    let mut norms = [0.0f64; 5];
+    let mut count = 0;
+    if let Some((vector, norm)) = centroid {
+        vectors[0] = vector;
+        norms[0] = norm;
+        count = 1;
+    }
+    let first_exemplar = count;
+    for (vector, norm) in summary
+        .exemplar_vectors
+        .iter()
+        .zip(summary.exemplar_norms.iter())
+    {
+        vectors[count] = vector.as_slice();
+        norms[count] = *norm;
+        count += 1;
+    }
+    let len = query_specter.len();
+    // Equal-length vectors are summed in the fused pass; others become NaN below.
+    let mut fused_slots = [0usize; 5];
+    let mut fused_vectors: [&[f32]; 5] = [&[]; 5];
+    let mut fused_count = 0;
+    for slot in 0..count {
+        if vectors[slot].len() == len {
+            fused_slots[fused_count] = slot;
+            fused_vectors[fused_count] = vectors[slot];
+            fused_count += 1;
+        }
+    }
+    let v = fused_vectors;
+    let sums: [f64; 5] = match fused_count {
+        0 => [0.0; 5],
+        1 => pad(fused_dot_products(query_specter, [v[0]])),
+        2 => pad(fused_dot_products(query_specter, [v[0], v[1]])),
+        3 => pad(fused_dot_products(query_specter, [v[0], v[1], v[2]])),
+        4 => pad(fused_dot_products(query_specter, [v[0], v[1], v[2], v[3]])),
+        _ => fused_dot_products(query_specter, [v[0], v[1], v[2], v[3], v[4]]),
+    };
+    let mut dots = [0.0f64; 5];
+    for index in 0..fused_count {
+        dots[fused_slots[index]] = sums[index];
+    }
+    let cosine = |slot: usize| -> f64 {
+        if vectors[slot].len() != len {
+            f64::NAN
+        } else if query_norm == 0.0 || norms[slot] == 0.0 {
+            0.0
+        } else {
+            dots[slot] / (query_norm * norms[slot])
+        }
+    };
+    let centroid_score = if centroid.is_some() { cosine(0) } else { 0.0 };
+    let exemplar_score = (first_exemplar..count).map(cosine).fold(0.0f64, f64::max);
+    centroid_score.max(exemplar_score)
+}
+
+fn pad<const N: usize>(values: [f64; N]) -> [f64; 5] {
+    let mut padded = [0.0f64; 5];
+    padded[..N].copy_from_slice(&values);
+    padded
+}
+
 pub(crate) fn specter_exemplar_score(
     query: &RetrievalQueryData,
     summary: &RetrievalSummaryData,
@@ -1090,19 +1201,7 @@ fn hybrid_centroid_score(
             RetrievalFirstNameMode::Prefix
         },
     );
-    let centroid_score = match (
-        query.specter.as_ref(),
-        query.specter_norm,
-        summary.specter_centroid.as_ref(),
-        summary.specter_centroid_norm,
-    ) {
-        (Some(query_specter), Some(query_norm), Some(summary_specter), Some(summary_norm)) => {
-            cosine_sim_with_norms(query_specter, query_norm, summary_specter, summary_norm)
-        }
-        _ => 0.0,
-    };
-    let exemplar_score = specter_exemplar_score(query, summary);
-    let specter_score = centroid_score.max(exemplar_score);
+    let specter_score = fused_specter_score(query, summary);
     (weights.centroid * specter_score
         + weights.coauthor * coauthor_score
         + weights.affiliation * affiliation_score
@@ -1835,5 +1934,48 @@ mod overlap_index_tests {
         });
         assert!(RustHybridCentroidRetriever::from_summaries(vec![bad.clone()], true).is_err());
         assert!(RustHybridCentroidRetriever::from_summaries(vec![bad], false).is_ok());
+    }
+
+    /// The fused centroid and exemplar cosines must equal the one-at-a-time path
+    /// bit for bit, including zero norms, length mismatches, and long exemplar lists.
+    #[test]
+    fn fused_specter_score_matches_reference_bits() {
+        let mut rng = Lcg(11);
+        for case in 0..4000 {
+            let mut summary = summary(&mut rng, format!("c{case}"));
+            let mut query = query(&mut rng, Vec::new());
+            let exemplar_count = rng.below(7) as usize;
+            summary.exemplar_vectors = (0..exemplar_count).map(|_| vector(&mut rng)).collect();
+            if rng.below(10) == 0 && exemplar_count > 0 {
+                // A length mismatch must give the same NaN handling as the reference.
+                summary.exemplar_vectors[0].push(0.5);
+            }
+            summary.exemplar_norms = summary
+                .exemplar_vectors
+                .iter()
+                .map(|values| {
+                    if rng.below(15) == 0 {
+                        0.0
+                    } else {
+                        vector_norm_f32(values)
+                    }
+                })
+                .collect();
+            if rng.below(20) == 0 {
+                query.specter_norm = query.specter_norm.map(|_| 0.0);
+            }
+            let reference = match (
+                query.specter.as_ref(),
+                query.specter_norm,
+                summary.specter_centroid.as_ref(),
+                summary.specter_centroid_norm,
+            ) {
+                (Some(q), Some(qn), Some(c), Some(cn)) => cosine_sim_with_norms(q, qn, c, cn),
+                _ => 0.0,
+            }
+            .max(specter_exemplar_score(&query, &summary));
+            let fused = fused_specter_score(&query, &summary);
+            assert_eq!(fused.to_bits(), reference.to_bits(), "case {case}");
+        }
     }
 }

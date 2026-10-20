@@ -111,7 +111,7 @@ The index's JSON manifest is ordinary Git; its four binary files use Git LFS.
 Git preserves the manifest's exact bytes because dataset and model contracts bind its SHA-256.
 The index requires about 2.42 GB of local space.
 `None` keys yield `NaN`; informative keys absent from the index yield the default count `1.0`.
-Use [the data guide](data.md) for model assets and the research snapshot.
+Use [the data guide](data.md) for model assets and the data bundles.
 
 ## Canonical name contract
 

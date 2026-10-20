@@ -138,7 +138,7 @@ Pass `"$ROOT/production_model_v1.3"` as the model in steps 4 and 5 to score the 
 | Released EPS and its validation B3 F1 | 0.53 and 0.959287 |
 | Outer-test signature-weighted B3 F1 | 0.964372 at EPS 0.53 and 0.963514 at EPS 0.57, on 72,853 signatures |
 | Outer-test pairwise AUROC | 0.989391 |
-| Linker test accuracy | 96.715% on 10,837 queries, scored at EPS 0.57 |
+| Linker test accuracy | 96.715% on 10,837 queries; EPS does not change it |
 | Identity-gold cases | 134 of 152 correct at EPS 0.53 and 0.57 |
 
 Steps 1-5 end at the validation EPS, `0.57`.

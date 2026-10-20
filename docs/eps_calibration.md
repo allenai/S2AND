@@ -75,7 +75,7 @@ Read the negative-separation curve as a safe-action diagnostic, not universal id
 Set explicit paths outside the checkout:
 
 ```powershell
-$Snapshot = '<corrected-research-snapshot>'
+$Snapshot = '<combined-inference-and-dataset-root>'
 $Candidate = '<complete-model-directory>'
 $EpsRun = '<fresh-EPS-run-directory>'
 $Giants = @('a_khan', 'a_silva', 'h_wang', 'j_smith', 's_gupta', 's_lee', 's_park')
@@ -85,9 +85,10 @@ uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
   --dataset j_smith --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
   --score-mode orcid-b3 --output-dir "$EpsRun/smoke/j_smith" `
   --max-subblocks 1 --subblock-selection smallest --compute-missing-dists `
-  --eps-values $Grid --n-jobs 20 --total-ram-bytes 137438953472
+  --eps-values $Grid --n-jobs 12 --total-ram-bytes 137438953472
 ```
 
+The examples use 12 threads and 128 GiB of RAM; set both to your allocation.
 Inspect the smoke log and `plan.json` before a larger run.
 Run `--dry-run` for each full dataset to obtain subblock, signature, and pair counts.
 Use fresh output paths for plans and measured runs.
@@ -105,7 +106,7 @@ foreach ($Dataset in $Giants) {
     --dataset $Dataset --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
     --score-mode orcid-b3 --output-dir "$EpsRun/b3/$Dataset" `
     --distance-cache-dir "$EpsRun/b3-cache/$Dataset" `
-    --eps-values $Grid --n-jobs 20 --total-ram-bytes 137438953472 `
+    --eps-values $Grid --n-jobs 12 --total-ram-bytes 137438953472 `
     --compute-missing-dists --allow-full-run
   if ($LASTEXITCODE -ne 0) { throw "B3 sweep fails for $Dataset" }
 }
@@ -118,7 +119,7 @@ foreach ($Dataset in $Giants) {
     --dataset $Dataset --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
     --gold-path "$EpsRun/proxy-gold/${Dataset}_pair_constraints.parquet" `
     --output-dir "$EpsRun/proxy/$Dataset" `
-    --eps-values $Grid --n-jobs 20 --total-ram-bytes 137438953472 `
+    --eps-values $Grid --n-jobs 12 --total-ram-bytes 137438953472 `
     --compute-missing-dists --allow-full-run
   if ($LASTEXITCODE -ne 0) { throw "Diagnostic sweep fails for $Dataset" }
 }

@@ -1,210 +1,152 @@
-"""Exercise the tutorial's routing, prediction options, and evaluation results."""
+"""Exercise the prediction tutorial's block grouping, routes, and output."""
 
-import sys
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from s2and.arrow_inputs import ArrowDataset
 from scripts import tutorial_for_predicting_with_the_prod_model as tutorial
+from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
-def test_tutorial_json_eval_uses_selected_split_and_scores_predictions() -> None:
-    split = "val"
-    block_dict = {"a": ["s1", "s2"]}
-    predict_calls = []
+def test_arrow_blocks_group_every_signature_by_author_block(tmp_path: Path) -> None:
+    write_minimal_arrow_prediction_bundle(tmp_path / "arrow", include_specter=True)
+    with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+        blocks = tutorial.arrow_blocks(arrow_dataset)
 
-    class Dataset:
-        def get_blocks(self):
-            return block_dict
-
-        def split_blocks_helper(self, blocks):
-            assert blocks is block_dict
-            return tuple(blocks if name == split else {} for name in ("train", "val", "test"))
-
-        def construct_cluster_to_signatures(self, blocks):
-            assert blocks is block_dict
-            return {"truth": ["s1", "s2"]}
-
-    class Clusterer:
-        def predict(self, blocks, dataset, *, use_s2_clusters, batching_threshold):
-            predict_calls.append((blocks, dataset, use_s2_clusters, batching_threshold))
-            return {"predicted1": ["s1"], "predicted2": ["s2"]}, None
-
-    dataset = Dataset()
-    clusterer = Clusterer()
-    metrics, per_signature = tutorial._cluster_eval_with_predict_options(
-        dataset,
-        clusterer,
-        split=split,
-        use_s2_clusters=False,
-        batching_threshold=5_000,
-    )
-
-    assert predict_calls == [(block_dict, dataset, False, 5_000)]
-    assert metrics["B3 (P, R, F1)"] == pytest.approx((1.0, 0.5, 0.667))
-    assert set(per_signature) == {"s1", "s2"}
+    assert blocks == {"a lovelace": [*map(str, range(10)), "q1", "q2", "seed1"]}
 
 
-@pytest.mark.parametrize(("split", "evaluation_fails"), [("val", False), ("test", False), ("test", True)])
-def test_tutorial_arrow_cli_forwards_options_and_closes_dataset(
-    monkeypatch, split: str, evaluation_fails: bool
-) -> None:
+def _load(monkeypatch: pytest.MonkeyPatch, clusterer: object) -> list[tuple[Path, int]]:
     from s2and import production_model
-    from scripts import eval_prod_models
 
-    lifecycle = []
-    clusterer = SimpleNamespace(n_jobs=None)
-    recorded_split = {"block_membership_sha256": "0" * 64, "test_block_ids": ["a"]}
+    loads: list[tuple[Path, int]] = []
 
-    class ArrowDataset:
-        def __enter__(self):
-            lifecycle.append("open")
-            return self
-
-        def __exit__(self, *_exc):
-            lifecycle.append("close")
-
-    arrow_dataset = ArrowDataset()
-
-    def evaluate(dataset, model, **options):
-        assert dataset is arrow_dataset
-        assert model is clusterer
-        assert model.n_jobs == 1
-        assert options == {
-            "random_seed": 7,
-            "n_jobs": 1,
-            "split": split,
-            "total_ram_bytes": 123_456,
-            "batching_threshold": 17,
-            "test_split": recorded_split if split == "test" else None,
-        }
-        lifecycle.append("evaluate")
-        if evaluation_fails:
-            raise ValueError("invalid Arrow input")
-        return {"B3 (P, R, F1)": (1.0, 1.0, 1.0)}, {}
-
-    def load(_path, *, n_jobs):
-        clusterer.n_jobs = n_jobs
+    def load(path: Path, *, n_jobs: int) -> object:
+        loads.append((path, n_jobs))
         return clusterer
 
     monkeypatch.setattr(production_model, "load_production_model", load)
-    monkeypatch.setattr(eval_prod_models, "bundle_data_random_seed", lambda _path: 7)
-    monkeypatch.setattr(eval_prod_models, "bundle_cluster_test_splits", lambda _path: {"dummy": recorded_split})
-    monkeypatch.setattr(eval_prod_models, "resolve_arrow_dataset", lambda *_args: arrow_dataset)
-    monkeypatch.setattr(eval_prod_models, "cluster_eval_arrow", evaluate)
+    return loads
+
+
+def test_arrow_route_predicts_every_block_and_writes_new_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lifecycle: list[str] = []
+    blocks = {"a lovelace": ["s1", "s2"], "b smith": ["s3"]}
+
+    class OpenDataset:
+        def __enter__(self) -> "OpenDataset":
+            lifecycle.append("open")
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            lifecycle.append("close")
+
+    opened = OpenDataset()
+
+    def open_dataset(path: Path, **options: bool) -> OpenDataset:
+        assert path == tmp_path / "qian"
+        assert options == {"require_specter": True, "require_name_counts_index": True}
+        return opened
+
+    def predict_from_arrow(block_dict, arrow_dataset, **options):
+        assert block_dict == blocks and arrow_dataset is opened
+        assert options == {"batching_threshold": 17, "total_ram_bytes": 123}
+        lifecycle.append("predict")
+        return {"c1": ["s2", "s1"], "c2": ["s3"]}, None
+
+    loads = _load(monkeypatch, SimpleNamespace(predict_from_arrow=predict_from_arrow))
+    monkeypatch.setattr(tutorial.ArrowDataset, "open", open_dataset)
+    monkeypatch.setattr(tutorial, "arrow_blocks", lambda dataset: blocks)
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "tutorial",
-            "--model-path",
-            "unused",
-            "--dataset",
-            "dummy",
-            "--input-format",
-            "arrow",
-            "--n-jobs",
-            "1",
-            "--split",
-            split,
-            "--arrow-total-ram-bytes",
-            "123456",
-            "--batching-threshold",
-            "17",
-        ],
-    )
+    output = tmp_path / "clusters.json"
+    arguments = [
+        "--model-path",
+        str(tmp_path / "model"),
+        "--arrow-dataset",
+        str(tmp_path / "qian"),
+        "--n-jobs",
+        "2",
+        "--batching-threshold",
+        "17",
+        "--total-ram-bytes",
+        "123",
+        "--output-json",
+        str(output),
+    ]
 
-    if evaluation_fails:
-        with pytest.raises(ValueError, match="invalid Arrow input"):
-            tutorial.main()
-    else:
-        tutorial.main()
+    tutorial.main(arguments)
 
-    assert lifecycle == ["open", "evaluate", "close"]
+    assert loads == [(tmp_path / "model", 2)]
+    assert lifecycle == ["open", "predict", "close"]
+    assert json.loads(output.read_text(encoding="utf-8")) == {"c1": ["s1", "s2"], "c2": ["s3"]}
+    with pytest.raises(SystemExit):
+        tutorial.main(arguments)
 
 
-@pytest.mark.parametrize(
-    ("requested", "failure", "expected"),
-    [
-        ("auto", FileNotFoundError, "json"),
-        ("json", AssertionError, "json"),
-        ("arrow", FileNotFoundError, FileNotFoundError),
-        ("auto", ValueError, ValueError),
-    ],
-)
-def test_tutorial_input_fallback_only_handles_missing_optional_arrow(requested, failure, expected) -> None:
-    def resolve(*_args):
-        raise failure("cannot open dataset")
+def test_json_route_builds_inference_data_and_predicts_its_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from s2and import data
 
-    options = {
-        "requested_input_format": requested,
-        "dataset_name": "dummy",
-        "arrow_data_root": "unused",
-        "specter_suffix": "_specter2.pkl",
-        "resolve_arrow_dataset": resolve,
-    }
-    if isinstance(expected, str):
-        assert tutorial._select_input_route(**options) == (expected, None)
-    else:
-        with pytest.raises(expected, match="cannot open dataset"):
-            tutorial._select_input_route(**options)
-
-
-def test_tutorial_json_eval_scores_recorded_test_blocks() -> None:
-    from s2and.production_training_contract import block_membership_sha256
-
-    blocks = {"a": ["s1", "s2"], "b": ["s3"]}
-    record = {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": ["a"]}
-    predicted_blocks = []
+    built: list[dict] = []
 
     class Dataset:
-        def get_blocks(self):
-            return blocks
+        def __init__(self, **options: object) -> None:
+            built.append(options)
 
-        def split_blocks_helper(self, _blocks):
-            raise AssertionError("recorded test blocks must not be re-derived from a seed")
+        def get_blocks(self) -> dict[str, list[str]]:
+            return {"a lovelace": ["s1"]}
 
-        def construct_cluster_to_signatures(self, block_dict):
-            assert block_dict == {"a": ["s1", "s2"]}
-            return {"truth": ["s1", "s2"]}
+    def predict(block_dict, dataset, *, batching_threshold):
+        assert block_dict == {"a lovelace": ["s1"]} and isinstance(dataset, Dataset)
+        assert batching_threshold is None
+        return {"c1": ["s1"]}, None
 
-    class Clusterer:
-        def predict(self, block_dict, dataset, *, use_s2_clusters, batching_threshold):
-            predicted_blocks.append(block_dict)
-            return {"predicted": ["s1", "s2"]}, None
+    _load(monkeypatch, SimpleNamespace(predict=predict))
+    monkeypatch.setattr(data, "ANDData", Dataset)
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    records = tmp_path / "qian"
 
-    metrics, _per_signature = tutorial._cluster_eval_with_predict_options(
-        Dataset(),
-        Clusterer(),
-        split="test",
-        use_s2_clusters=False,
-        batching_threshold=None,
-        test_split=record,
+    tutorial.main(
+        [
+            "--model-path",
+            "model",
+            "--json-dir",
+            str(records),
+            "--specter-pickle",
+            "specter2.pkl",
+            "--name-counts-index",
+            "index",
+            "--n-jobs",
+            "1",
+        ]
     )
 
-    assert predicted_blocks == [{"a": ["s1", "s2"]}]
-    assert metrics["B3 (P, R, F1)"] == pytest.approx((1.0, 1.0, 1.0))
+    assert built == [
+        {
+            "signatures": str(records / "signatures.json"),
+            "papers": str(records / "papers.json"),
+            "name": "qian",
+            "mode": "inference",
+            "specter_embeddings": "specter2.pkl",
+            "name_counts_index": "index",
+            "n_jobs": 1,
+        }
+    ]
 
 
-@pytest.mark.parametrize(
-    ("present", "suffix", "expected"),
-    [
-        (["qian_specter2.pkl", "specter2.pkl"], "_specter2.pkl", "qian_specter2.pkl"),
-        (["specter2.pkl", "specter.pickle"], "_specter2.pkl", "specter2.pkl"),
-        (["specter.pickle"], "_specter2.pkl", None),
-        (["specter.pickle"], "_specter.pickle", "specter.pickle"),
-    ],
-    ids=["mini-naming", "fixture-naming", "no-specter1-fallback", "explicit-specter1"],
-)
-def test_tutorial_json_route_selects_requested_specter_generation(tmp_path, present, suffix, expected) -> None:
-    dataset_dir = tmp_path / "qian"
-    dataset_dir.mkdir()
-    for name in present:
-        (dataset_dir / name).write_bytes(b"")
+@pytest.mark.parametrize("missing", ["--specter-pickle", "--name-counts-index"])
+def test_json_route_requires_embeddings_and_index(missing: str) -> None:
+    options = {"--specter-pickle": "specter2.pkl", "--name-counts-index": "index"}
+    del options[missing]
+    arguments = ["--model-path", "model", "--json-dir", "records"]
+    for flag, value in options.items():
+        arguments += [flag, value]
 
-    if expected is None:
-        with pytest.raises(FileNotFoundError):
-            tutorial._json_specter_path(str(tmp_path), "qian", suffix)
-    else:
-        assert tutorial._json_specter_path(str(tmp_path), "qian", suffix) == str(dataset_dir / expected)
+    with pytest.raises(SystemExit):
+        tutorial.main(arguments)

@@ -334,10 +334,11 @@ production model and public-data version is `1.3`, on a separate version axis.
   [canonical names](canonical_names.md).
 - Development: the test suite runs under pytest-xdist (`-n auto`), and
   `run_ci_locally.py --pytest-workers` selects the worker count.
-- `scripts/tutorial_for_predicting_with_the_prod_model.py` scores the bundle's
-  recorded held-out blocks with the trainer's recorded seed, applies
-  `--specter-suffix` to the JSON route as well as Arrow (no silent SPECTER1
-  fallback), and drops `--load-name-counts`, which no production bundle accepts.
+- `scripts/tutorial_for_predicting_with_the_prod_model.py` is a prediction-only
+  example. It clusters every block of one Arrow dataset (`--arrow-dataset`) or
+  S2AND JSON directory (`--json-dir`) and can write the clusters to JSON. It no
+  longer scores splits; `release_pairwise.py evaluate-heldout` computes the
+  release metrics. `scripts/tutorial.ipynb` is removed.
 - `load_production_model(path, n_jobs=N)` sets the prediction worker count at
   load time. Without it, a loaded bundle keeps its stored `n_jobs=1`.
 - Bulk prediction: altered-profile markers no longer trigger temporary seed

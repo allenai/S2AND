@@ -264,6 +264,6 @@ with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
   components, and `evaluate-release` aggregation into one report
 - `scripts/production/model/train_linker_and_finalize.py`: one-fit
   complete-bundle finalization, reload, and evaluation
-- `scripts/tutorial_for_predicting_with_the_prod_model.py`: complete-bundle
-  inference example (requires the v1.3 bundle and data)
+- `scripts/tutorial_for_predicting_with_the_prod_model.py`: complete-model
+  prediction example on one Arrow or JSON dataset
 - `scripts/README.md`: script catalog

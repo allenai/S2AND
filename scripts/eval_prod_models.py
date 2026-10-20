@@ -3,6 +3,13 @@
 """
 Evaluate current SPECTER2 production bundles and embedding retraining experiments.
 
+This is an owner-only research tool. It retrains pairwise models and compares
+SPECTER generations and training modes. Its mini and legacy full benchmarks are
+internal Ai2 data. Bundle evaluation needs the internal pre-cut
+``pairwise/arrow/release`` root and scores the bundle's inner test blocks. For
+release metrics on the published data, use ``release_pairwise.py evaluate-heldout``
+(docs/reproduce.md, step 4).
+
 Current production evaluation is SPECTER2-only. SPECTER1 production belongs to
 S2AND v1.21 and earlier; SPECTER1 remains available here only as an explicit
 ``--train --specter-suffixes _specter.pickle`` research comparison.
@@ -11,8 +18,8 @@ S2AND v1.21 and earlier; SPECTER1 remains available here only as an explicit
 Which bundle the numbers below refer to
 ================================================================================
 
-The expected B3 numbers in this docstring are all measured against the
-**s2and-mini** bundle (`--dataset mini`). Mini is a curated subset of the full
+The expected B3 numbers in this docstring are historical. They are all measured
+against the **s2and-mini** bundle (`--dataset mini`). Mini is a curated subset of the full
 S2AND benchmark; Ai2 employees can find it at
 `s3://ai2-s2-research/s2and/s2and-mini/`.
 

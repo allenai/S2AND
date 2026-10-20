@@ -25,12 +25,12 @@ v1.3 release work is complete. Release operators must follow
 
 | Script | What it does |
 |---|---|
-| `tutorial_for_predicting_with_the_prod_model.py` | Guide to predicting with a complete production bundle, Arrow input by default; JSON fixtures are opt-in |
+| `tutorial_for_predicting_with_the_prod_model.py` | Predict clusters for every block of one Arrow or JSON dataset with a complete production model; prints a summary and can write the clusters to JSON |
 
 > **Update at v1.3 release:** The compatible public release remains unpublished.
 
-The script requires a complete model and format-1 Arrow input.
-Use [the data guide](../docs/data.md) for the common assets and corrected snapshot.
+The script needs the `inference` bundle and an Arrow dataset, such as a benchmark from the `dataset` bundle.
+Use [the data guide](../docs/data.md) to download them.
 
 ### Dataset creation & preprocessing
 

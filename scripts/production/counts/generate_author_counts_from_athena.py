@@ -9,7 +9,6 @@ A complete local resume needs no AWS SDK or credentials.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
@@ -22,6 +21,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from s2and._sha256 import sha256_file
+
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED"}
 
@@ -30,11 +31,6 @@ def _save(path: Path, value: object) -> None:
     temporary = path.with_suffix(".partial")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     temporary.replace(path)
-
-
-def _sha256(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _s3_parts(uri: str) -> tuple[str, str]:
@@ -121,7 +117,7 @@ def plan(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("Cannot locate the production name normalizer")
     return {
         "source_unit": "author_table_row",
-        "normalizer_sha256": _sha256(Path(normalizer_spec.origin)),
+        "normalizer_sha256": sha256_file(Path(normalizer_spec.origin)),
         "source_sql": source_sql,
         "population_audit_sql": (
             f"SELECT sum(author_rows) AS author_rows, count(*) AS raw_groups FROM "
@@ -226,7 +222,7 @@ def _download_sources(s3: Any, paths: list[str], output: Path, record: dict[str,
         path = source_dir / f"source_{position:06d}.parquet"
         if position < len(entries):
             entry = entries[position]
-            if path.stat().st_size != entry["bytes"] or _sha256(path) != entry["sha256"]:
+            if path.stat().st_size != entry["bytes"] or sha256_file(path) != entry["sha256"]:
                 raise ValueError(f"Saved source object differs: {path}")
             continue
         bucket, key = _s3_parts(uri)
@@ -254,7 +250,7 @@ def _download_sources(s3: Any, paths: list[str], output: Path, record: dict[str,
             "path": str(path),
             "bytes": temporary.stat().st_size,
             "rows": rows,
-            "sha256": _sha256(temporary),
+            "sha256": sha256_file(temporary),
         }
         temporary.replace(path)
         entries.append(entry)
@@ -303,7 +299,7 @@ def execute_export(args: argparse.Namespace, run_plan: dict[str, Any], *, sessio
 
     from .generate_name_counts_from_parquet import build_name_counts_from_parquet
 
-    if _sha256(Path(text_normalizer.__file__)) != run_plan["normalizer_sha256"]:
+    if sha256_file(Path(text_normalizer.__file__)) != run_plan["normalizer_sha256"]:
         raise ValueError("Name normalizer changes after the plan")
     output = args.output_dir.resolve()
     record_path = output / "export.json"

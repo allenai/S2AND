@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import time
@@ -17,6 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 import s2and.text as text_normalizer
+from s2and._sha256 import sha256_file
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.feature_block_arrow import _write_sorted_name_count_records
 from s2and.name_counts_index import NameCountsIndex
@@ -64,11 +64,6 @@ def _aggregate(con: duckdb.DuckDBPyConnection, query: str) -> tuple[Any, ...]:
     return row
 
 
-def _sha256(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
-
-
 def _source_files(manifest: Path, expected_rows: int) -> list[str]:
     source = json.loads(manifest.read_text(encoding="utf-8"))
     if not isinstance(source, dict) or source.get("status", "complete") != "complete":
@@ -104,7 +99,7 @@ def _source_files(manifest: Path, expected_rows: int) -> list[str]:
     if rows != expected_rows:
         raise ValueError(f"Source rows {rows} differ from expected rows {expected_rows}")
     for path, checksum in zip(files, checksums, strict=True):
-        if _sha256(Path(path)) != checksum:
+        if sha256_file(Path(path)) != checksum:
             raise ValueError(f"Source checksum differs: {path}")
     return files
 
@@ -131,9 +126,9 @@ def build_name_counts_from_parquet(
     manifest = validate_input_file(input_manifest, option="--input-manifest")
     output = output_dir.resolve()
     identity = {
-        "source_manifest_sha256": _sha256(manifest),
-        "producer_sha256": _sha256(Path(__file__)),
-        "normalizer_sha256": _sha256(Path(text_normalizer.__file__)),
+        "source_manifest_sha256": sha256_file(manifest),
+        "producer_sha256": sha256_file(Path(__file__)),
+        "normalizer_sha256": sha256_file(Path(text_normalizer.__file__)),
         "expected_source_rows": expected_source_rows,
         "expected_source_mentions": expected_source_mentions,
     }
@@ -276,7 +271,7 @@ def build_name_counts_from_parquet(
                         "SELECT hash_1,hash_2,key,count FROM read_parquet(?) ORDER BY hash_1,hash_2,key", [str(hashed)]
                     ).to_arrow_reader(_BATCH_ROWS)
                     _write_sorted_name_count_records(destination, _sorted_records(reader), record_count=count)
-                manifest_files[kind] = {"byte_count": destination.stat().st_size, "sha256": _sha256(destination)}
+                manifest_files[kind] = {"byte_count": destination.stat().st_size, "sha256": sha256_file(destination)}
                 report["stages"][kind] = {
                     "keys": count,
                     "sum_retained_counts": total or 0,

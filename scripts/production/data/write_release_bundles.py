@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import errno
-import hashlib
 import json
 import os
 import shutil
@@ -28,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.arrow_training import load_signatures_from_arrow  # noqa: E402
 from s2and.production_training_contract import load_model_plan  # noqa: E402
@@ -50,14 +50,6 @@ SOURCE_DIRS = ("corrected_sources",)
 SOURCE_OPTIONAL_DIRS = ("corrected_replay",)
 # Windows reports a cross-volume hardlink as ERROR_NOT_SAME_DEVICE.
 _WINDOWS_NOT_SAME_DEVICE = 17
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _read_json(path: Path) -> Any:
@@ -278,7 +270,7 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
         "release_version": old_plan["release_version"],
         "datasets": {
             name: {
-                role: {"path": Path(os.path.relpath(path, pairwise)).as_posix(), "sha256": _sha256(path)}
+                role: {"path": Path(os.path.relpath(path, pairwise)).as_posix(), "sha256": sha256_file(path)}
                 for role, path in roles.items()
             }
             for name, roles in plan_roles.items()
@@ -295,7 +287,7 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
         "output_root": str(output_root),
         "files": {name: len(paths) for name, paths in bundle_files.items()},
         "bytes": {name: sum(path.stat().st_size for path in paths) for name, paths in bundle_files.items()},
-        "model_plan_sha256": _sha256(plan_path),
+        "model_plan_sha256": sha256_file(plan_path),
     }
 
 

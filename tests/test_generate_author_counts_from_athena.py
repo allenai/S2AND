@@ -14,6 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from s2and._sha256 import sha256_file
 from scripts.production.counts import generate_author_counts_from_athena as exporter
 
 ROWS: list[tuple[str | None, str | None, int]] = [
@@ -215,7 +216,7 @@ def test_downloaded_and_complete_local_resume_need_no_aws_sdk(tmp_path: Path, mo
                 "s3_uri": f"s3://example/export/data_{position}",
                 "bytes": path.stat().st_size,
                 "rows": len(rows),
-                "sha256": exporter._sha256(path),
+                "sha256": sha256_file(path),
             }
         )
     exporter._save(

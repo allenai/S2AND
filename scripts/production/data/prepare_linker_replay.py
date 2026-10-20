@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import pickle
 import shutil
@@ -15,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from s2and._sha256 import sha256_file
 
 REPLAY_DATASETS = (
     "a_khan",
@@ -50,11 +51,6 @@ def _write_json(path: Path, value: Any) -> None:
         stream.write("\n")
 
 
-def _sha256(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
 def _vectors(path: Path) -> tuple[np.ndarray, list[str], dict[str, int]]:
     with path.open("rb") as stream:
         vectors, original_keys = pickle.load(stream)
@@ -82,7 +78,7 @@ def _prepare_dataset(
         destinations = [raw_output / "signatures.json", raw_output / "papers.json", embedding_output / "specter2.pkl"]
         for source, destination in zip(source_files, destinations, strict=True):
             shutil.copyfile(source, destination)
-            if _sha256(source) != _sha256(destination):
+            if sha256_file(source) != sha256_file(destination):
                 raise ValueError(f"The unchanged replay copy differs from its source: {dataset}/{source.name}")
         return {"dataset": dataset, "policy": "unchanged_giant_source", "byte_exact_copies": True}
 
@@ -187,7 +183,7 @@ def _prepare_dataset(
         "old_missing_embedding_count": len(set(old_papers) - set(old_index)),
         "missing_embedding_count": len(set(papers) - set(output_keys)),
         "raw_name_parts_exact": raw_name_parts_exact,
-        "source_files": [{"path": str(path), "sha256": _sha256(path)} for path in source_files],
+        "source_files": [{"path": str(path), "sha256": sha256_file(path)} for path in source_files],
     }
 
 

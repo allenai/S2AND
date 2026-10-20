@@ -76,7 +76,6 @@ DEFAULT_SOURCE_DATASET_NAMES = ("aminer", "arnetminer", "inspire", "kisti", "pub
 DEFAULT_TRAIN_PAIRS_SIZE = 100_000
 DEFAULT_VALIDATION_PAIRS_SIZE = 10_000
 DEFAULT_N_ITER = 50
-DEFAULT_N_JOBS = 25
 DEFAULT_RANDOM_SEED = 1111
 
 
@@ -649,7 +648,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit manifest-backed name-count index directory.",
     )
     parser.add_argument("--n-iter", type=int, default=DEFAULT_N_ITER)
-    parser.add_argument("--n-jobs", type=int, default=DEFAULT_N_JOBS)
+    # Require an explicit allocation; a fixed default can exceed the shared CPU budget.
+    parser.add_argument("--n-jobs", type=int, required=True)
     parser.add_argument("--train-pairs-size", type=int, default=DEFAULT_TRAIN_PAIRS_SIZE)
     parser.add_argument(
         "--validation-pairs-size",

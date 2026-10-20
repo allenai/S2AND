@@ -109,8 +109,8 @@ route.
    Most S2AND scripts, including `train_pairwise.py`, `eval_prod_models.py`,
    and `profile_promoted_incremental_arrow.py`, overwrite `OMP_NUM_THREADS`
    after import from their own `n_jobs` setting (a CLI flag or, for the
-   profiler, the frozen workload). `train_pairwise.py` defaults to
-   `--n-jobs 25`. Set each script's `n_jobs` explicitly and treat the parent's
+   profiler, the frozen workload). `train_pairwise.py` and
+   `train_linker_and_finalize.py` require `--n-jobs`. Set each script's `n_jobs` explicitly and treat the parent's
    `OMP_NUM_THREADS` as applying only to libraries that read it before the
    override.
 

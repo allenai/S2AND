@@ -38,6 +38,8 @@ production model and public-data version is `1.3`, on a separate version axis.
   `release_pairwise.py evaluate-heldout` scores the plan's outer test. Both bind a
   model to its data by the recorded development-block membership, so the released
   `1.3` model evaluates on the published data.
+- `train_pairwise.py` and `train_linker_and_finalize.py` require `--n-jobs`. Their
+  former defaults, 25 and 20, could exceed the shared CPU budget.
 - `train_pairwise.py --incumbent-parameters` lets one known LightGBM configuration per
   head compete with each search winner on validation ROC AUC; the incumbent wins ties.
   `scripts/production/model/pairwise_incumbent_h13.json` holds the `1.3` configuration.

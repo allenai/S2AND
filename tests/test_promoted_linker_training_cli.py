@@ -26,6 +26,8 @@ COMMON_TRAINING_ARGS = (
     "target.json",
     "--name-counts-index-root",
     "name-counts-index",
+    "--n-jobs",
+    "1",
 )
 EXPLICIT_ARTIFACT_HASHES = {
     "name_counts_manifest_sha256": "a" * 64,

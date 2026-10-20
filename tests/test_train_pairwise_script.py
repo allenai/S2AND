@@ -12,7 +12,7 @@ import pytest
 
 from s2and import production_training_contract
 from s2and._sha256 import sha256_file
-from scripts.production.model import train_pairwise
+from scripts.production.model import train_linker_and_finalize, train_pairwise
 from tests.helpers import pairwise_training_args as _args
 
 
@@ -440,3 +440,11 @@ def test_incumbent_parameters_require_named_heads(tmp_path: Path) -> None:
     shipped = Path(train_pairwise.__file__).with_name("pairwise_incumbent_h13.json")
     assert set(train_pairwise._load_incumbent_parameters(shipped)) == {"main", "nameless"}
     assert train_pairwise._load_incumbent_parameters(None) == {}
+
+
+@pytest.mark.parametrize("module", [train_pairwise, train_linker_and_finalize])
+def test_trainers_require_an_explicit_thread_allocation(module: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        module.build_parser().parse_args([])
+    required = capsys.readouterr().err.split("the following arguments are required:")[1]
+    assert "--n-jobs" in required

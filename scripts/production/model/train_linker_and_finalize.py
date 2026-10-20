@@ -1885,7 +1885,8 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         required=True,
         help="Use the same resolved index path as the source bundle's Arrow manifests.",
     )
-    parser.add_argument("--n-jobs", type=_positive_int, default=20)
+    # Require an explicit allocation; a fixed default can exceed the shared CPU budget.
+    parser.add_argument("--n-jobs", type=_positive_int, required=True)
     parser.add_argument("--total-ram-bytes", type=_positive_int, default=DEFAULT_TOTAL_RAM_BYTES)
 
 

@@ -21,7 +21,10 @@ AUTODETECT_RAM_SAFETY_FACTOR = 0.8
 DEFAULT_SAFETY_MARGIN_FRACTION = 0.10
 # Rust batch featurization defaults.
 RUST_BATCH_BASE_CHUNK_PAIRS = 0  # Disabled - rely on memory-budget-derived limit
-RUST_BATCH_MAX_CHUNK_PAIRS = 10_000
+# Larger chunks spread the per-call cost of each Rust featurize, constraint, and scoring call.
+# On the 6,495-signature s_feldman block, 100,000 cut full-block prediction from 26.5 s to 19.7 s
+# at the same peak memory, with identical clusters. The RAM budget still lowers the chunk when needed.
+RUST_BATCH_MAX_CHUNK_PAIRS = 100_000
 RUST_BATCH_STAGE_BUDGET_FRACTION = 0.25
 RUST_BATCH_ROW_OVERHEAD_BYTES = 128
 BORROWED_SIGNATURE_INDEX_REMAP_BYTES_PER_PAIR = 2 * 4

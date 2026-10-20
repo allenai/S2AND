@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import pickle
 import random
 import sys
 import time
@@ -64,9 +63,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evaluation-plan", type=Path, required=True)
     parser.add_argument("--run-binding", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--raw-root", type=Path, default=None)
-    parser.add_argument("--specter-pickle", type=Path, default=None)
-    parser.add_argument("--python-source", choices=("raw", "arrow"), default="raw")
     parser.add_argument("--comparison-mode", choices=("python-vs-rust", "rust-only"), default="python-vs-rust")
     parser.add_argument("--component-members-parquet", type=Path, default=None)
     parser.add_argument("--maximum-size", type=int, required=True)
@@ -134,12 +130,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("provide --limit for a bounded run, or --allow-full to run the full block explicitly")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
-    if (
-        args.comparison_mode == "python-vs-rust"
-        and args.python_source == "raw"
-        and (args.raw_root is None or args.specter_pickle is None)
-    ):
-        parser.error("--python-source raw requires --raw-root and --specter-pickle")
     return args
 
 
@@ -151,13 +141,6 @@ def _required_path(path: Path) -> Path:
 
 def _log_progress(message: str) -> None:
     print(f"[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] {message}", file=sys.stderr, flush=True)
-
-
-def _load_json_map(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"Expected object-shaped JSON in {path}")
-    return {str(key): value for key, value in payload.items()}
 
 
 def _select_signature_ids(
@@ -191,91 +174,6 @@ def _paper_author_blocks(paper: Mapping[str, Any] | None, signature_position: in
         if block:
             out.append(block)
     return tuple(sorted(set(out)))
-
-
-def _signature_from_raw(signature_id: str, row: Mapping[str, Any], papers: Mapping[str, Any]) -> SimpleNamespace:
-    author_info = row.get("author_info") or {}
-    paper_id = str(row.get("paper_id"))
-    position_raw = author_info.get("position")
-    try:
-        position = int(position_raw) if position_raw is not None else None
-    except (TypeError, ValueError):
-        position = None
-    affiliations = tuple(str(value) for value in (author_info.get("affiliations") or ()))
-    paper = papers.get(paper_id)
-    return SimpleNamespace(
-        signature_id=str(row.get("signature_id", signature_id)),
-        paper_id=paper_id,
-        author_info_first=author_info.get("first"),
-        author_info_middle=author_info.get("middle"),
-        author_info_first_normalized=None,
-        author_info_middle_normalized=None,
-        author_info_affiliations=affiliations,
-        author_info_affiliations_n_grams=None,
-        author_info_coauthor_blocks=_paper_author_blocks(paper, position),
-        author_info_coauthors=None,
-        author_info_orcid=author_info.get("orcid"),
-        author_info_position=position,
-    )
-
-
-def _load_specter_subset(path: Path, needed_paper_ids: set[str]) -> dict[str, np.ndarray]:
-    with path.open("rb") as infile:
-        payload = pickle.load(infile)
-    if isinstance(payload, tuple) and len(payload) == 2:
-        matrix, paper_ids = payload
-        matrix = np.asarray(matrix, dtype=np.float32)
-        if len(paper_ids) != matrix.shape[0]:
-            raise ValueError(f"SPECTER tuple ids={len(paper_ids)} rows={matrix.shape[0]}")
-        return {
-            str(paper_id): np.asarray(matrix[index], dtype=np.float32)
-            for index, paper_id in enumerate(paper_ids)
-            if str(paper_id) in needed_paper_ids
-        }
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"Unsupported SPECTER pickle payload type: {type(payload).__name__}")
-    out: dict[str, np.ndarray] = {}
-    for paper_id in needed_paper_ids:
-        value = payload.get(paper_id)
-        if value is None:
-            try:
-                value = payload.get(int(paper_id))
-            except ValueError:
-                value = None
-        if value is not None:
-            out[paper_id] = np.asarray(value, dtype=np.float32)
-    return out
-
-
-def load_lightweight_dataset(
-    raw_root: Path,
-    specter_pickle: Path,
-    *,
-    limit: int | None,
-    sample_mode: str,
-    seed: int,
-) -> tuple[SimpleNamespace, list[str]]:
-    signatures_raw = _load_json_map(_required_path(raw_root / "signatures.json"))
-    signature_ids = _select_signature_ids(
-        signatures_raw.keys(),
-        limit=limit,
-        sample_mode=sample_mode,
-        seed=seed,
-    )
-    paper_ids = {str(signatures_raw[signature_id].get("paper_id")) for signature_id in signature_ids}
-    papers_raw = _load_json_map(_required_path(raw_root / "papers.json"))
-    papers = {paper_id: papers_raw[paper_id] for paper_id in paper_ids if paper_id in papers_raw}
-    signatures = {
-        signature_id: _signature_from_raw(signature_id, signatures_raw[signature_id], papers)
-        for signature_id in signature_ids
-    }
-    dataset = SimpleNamespace(
-        signatures=signatures,
-        papers=papers,
-        specter_embeddings=_load_specter_subset(_required_path(specter_pickle), paper_ids),
-        random_seed=int(seed),
-    )
-    return dataset, signature_ids
 
 
 def _read_arrow_column_values(source_file: BinaryIO, column_name: str) -> list[Any]:
@@ -786,8 +684,8 @@ def _validated_release_subblocking_inputs(
     component_path = Path(args.component_members_parquet).resolve()
     if component_path != expected_component_path or sha256_file(component_path) != expected_component_sha256:
         raise ValueError("Subblocking component-members input does not match the frozen evaluation plan")
-    if args.raw_root is not None or args.specter_pickle is not None or args.baseline_summary is not None:
-        raise ValueError("Release subblocking does not accept unbound raw or baseline inputs")
+    if args.baseline_summary is not None:
+        raise ValueError("Release subblocking does not accept an unbound baseline input")
     observed_workload = {
         "allow_full": bool(args.allow_full),
         "comparison_mode": str(args.comparison_mode),
@@ -795,7 +693,8 @@ def _validated_release_subblocking_inputs(
         "limit": args.limit,
         "maximum_size": int(args.maximum_size),
         "orcid_subblocking": bool(args.orcid_subblocking),
-        "python_source": str(args.python_source),
+        # Release plans record the Python input source; this script reads only Arrow.
+        "python_source": "arrow",
         "sample_mode": str(args.sample_mode),
         "seed": int(args.seed),
         "top_diff_subblocks": int(args.top_diff_subblocks),
@@ -824,8 +723,7 @@ def main() -> None:
     config = _graph_config(args)
     _validated_release_subblocking_inputs(args, evaluation_plan.subblocking, config)
     _log_progress(
-        f"starting comparison_mode={args.comparison_mode} python_source={args.python_source} "
-        f"maximum_size={args.maximum_size} limit={args.limit}"
+        f"starting comparison_mode={args.comparison_mode} maximum_size={args.maximum_size} limit={args.limit}"
     )
     load_start = time.perf_counter()
     with ArrowDataset.open(args.arrow_root, require_specter=True) as arrow_dataset:
@@ -895,9 +793,7 @@ def main() -> None:
         **report_identity,
         "inputs": {
             "comparison_mode": "python-vs-rust",
-            "python_source": str(args.python_source),
-            "raw_root": str(args.raw_root) if args.raw_root is not None else None,
-            "specter_pickle": str(args.specter_pickle) if args.specter_pickle is not None else None,
+            "python_source": "arrow",
             "arrow_root": str(args.arrow_root),
             "component_members_parquet": str(args.component_members_parquet)
             if args.component_members_parquet is not None

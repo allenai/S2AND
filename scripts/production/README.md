@@ -670,7 +670,6 @@ uv run python scripts/verification/compare_graph_subblocking_arrow_quality.py `
   --evaluation-plan path/to/run/evaluation_plan.json `
   --run-binding path/to/run/run_binding.json `
   --output-dir path/to/run/reports `
-  --python-source arrow `
   --comparison-mode python-vs-rust `
   --component-members-parquet path/to/reviewed_components.parquet `
   --maximum-size REVIEWED_MAXIMUM_SIZE `

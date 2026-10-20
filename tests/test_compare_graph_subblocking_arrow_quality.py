@@ -1,6 +1,5 @@
 import hashlib
 import json
-import pickle
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -30,10 +29,6 @@ from tests.helpers import tiny_name_counts_tuple, write_minimal_arrow_prediction
 def _base_argv() -> list[str]:
     return [
         "compare_graph_subblocking_arrow_quality.py",
-        "--raw-root",
-        "raw",
-        "--specter-pickle",
-        "specter.pkl",
         "--arrow-root",
         "arrow",
         "--public-data-root",
@@ -64,8 +59,6 @@ def _release_argv(arrow_root, public_data_root, component_members, output_dir) -
         str(output_dir),
         "--comparison-mode",
         "python-vs-rust",
-        "--python-source",
-        "arrow",
         "--component-members-parquet",
         str(component_members),
         "--maximum-size",
@@ -190,34 +183,7 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
     assert np.allclose(dataset.specter_embeddings["p1"], np.array([1.0, 0.0], dtype=np.float32))
 
 
-def test_direct_research_loaders_keep_bounded_input_support(tmp_path: Path) -> None:
-    raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    (raw_root / "signatures.json").write_text(
-        json.dumps(
-            {
-                signature_id: {"paper_id": "p1", "author_info": {"first": "Hui", "position": 0}}
-                for signature_id in ("s1", "s2")
-            }
-        ),
-        encoding="utf-8",
-    )
-    (raw_root / "papers.json").write_text(
-        json.dumps({"p1": {"authors": [{"position": 0, "author_name": "Hui Wang"}]}}),
-        encoding="utf-8",
-    )
-    specter_path = tmp_path / "specter.pkl"
-    specter_path.write_bytes(pickle.dumps({"p1": np.array([1.0, 0.0], dtype=np.float32)}))
-
-    dataset, signature_ids = script.load_lightweight_dataset(
-        raw_root, specter_path, limit=1, sample_mode="first", seed=7
-    )
-
-    assert signature_ids == ["s1"]
-    assert set(dataset.signatures) == {"s1"}
-    assert dataset.signatures["s1"].author_info_first == "Hui"
-    assert np.array_equal(dataset.specter_embeddings["p1"], [1.0, 0.0])
-
+def test_arrow_signature_ids_respect_the_limit(tmp_path: Path) -> None:
     arrow_root = tmp_path / "arrow"
     _write_two_signature_arrow_bundle(arrow_root)
     with ArrowDataset.open(arrow_root) as arrow_dataset:
@@ -387,8 +353,6 @@ def test_subblocking_release_report_contains_metrics_and_artifact(release_inputs
     assert report["counts"]["signature_count"] == 2
     assert report["inputs"]["comparison_mode"] == "python-vs-rust"
     assert report["inputs"]["python_source"] == "arrow"
-    assert report["inputs"]["raw_root"] is None
-    assert report["inputs"]["specter_pickle"] is None
     assert report["inputs"]["limit"] is None
     assert report["inputs"]["allow_full"] is True
     assert report["baseline_deltas"] == {}
@@ -416,7 +380,7 @@ def test_subblocking_release_report_contains_metrics_and_artifact(release_inputs
     "extra_args",
     [
         ["--comparison-mode", "rust-only"],
-        ["--python-source", "raw", "--raw-root", "raw", "--specter-pickle", "specter.pkl"],
+        ["--baseline-summary", "baseline.json"],
         ["--limit", "1"],
         ["--maximum-size", "1"],
     ],

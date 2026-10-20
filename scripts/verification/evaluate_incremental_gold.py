@@ -49,6 +49,32 @@ def case_seeds(block: Mapping[str, Any], case: Mapping[str, Any]) -> dict[str, s
     }
 
 
+def _published_source_digests(
+    snapshot: Path, dataset: str, signatures_path: Path, clusters_path: Path, unknown_path: Path | None
+) -> dict[str, str]:
+    """Bind cases to the benchmark files that publish the corrected records.
+
+    Evaluation then needs only the published dataset bundle. The benchmark Arrow
+    provenance must name the corrected signatures, and the benchmark copies of the
+    labels and the unknown-signature list must equal the corrected files.
+    """
+
+    benchmark = snapshot / "benchmarks" / dataset
+    provenance = benchmark / "conversion_provenance.json"
+    recorded = _read_json(provenance)["sources"]["signatures"]["sha256"]
+    if recorded != sha256_file(signatures_path):
+        raise ValueError(f"Benchmark Arrow was not converted from the corrected signatures: {dataset}")
+    paths = [benchmark / "manifest.json", provenance]
+    for corrected in (clusters_path, unknown_path):
+        if corrected is None:
+            continue
+        published = benchmark / corrected.name
+        if not published.is_file() or sha256_file(published) != sha256_file(corrected):
+            raise ValueError(f"Benchmark copy differs from the corrected file: {dataset}/{corrected.name}")
+        paths.append(published)
+    return {path.relative_to(snapshot).as_posix(): sha256_file(path) for path in paths}
+
+
 def prepare_cases(
     *, snapshot: Path, eligible_mask: Path, max_blocks: int, max_cases: int, seed: int = 13
 ) -> dict[str, Any]:
@@ -90,10 +116,7 @@ def prepare_cases(
                 if signature_id in author_by_signature:
                     raise ValueError(f"Duplicate gold signature: {dataset}/{signature_id}")
                 author_by_signature[signature_id] = author_id
-        source_paths = [signatures_path, clusters_path, snapshot / "benchmarks" / dataset / "manifest.json"]
-        if unknown.path is not None:
-            source_paths.append(unknown.path)
-        sources[dataset] = {path.relative_to(snapshot).as_posix(): sha256_file(path) for path in source_paths}
+        sources[dataset] = _published_source_digests(snapshot, dataset, signatures_path, clusters_path, unknown.path)
         members_by_block: dict[str, list[str]] = defaultdict(list)
         for signature_id, signature in signatures.items():
             block_id = signature["author_info"]["block"]

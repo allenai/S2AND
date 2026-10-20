@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,17 @@ from scripts.verification import smoke_installed_incremental_arrow as smoke
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+
+def _publish(root: Path) -> None:
+    """Publish the corrected labels beside the benchmark Arrow, as the converter does."""
+
+    source = root / "corrected_sources" / "smoke"
+    benchmark = root / "benchmarks" / "smoke"
+    signatures = hashlib.sha256((source / "smoke_signatures.json").read_bytes()).hexdigest()
+    _write_json(benchmark / "conversion_provenance.json", {"sources": {"signatures": {"sha256": signatures}}})
+    for name in ("smoke_clusters.json", "restored_unknown_signature_ids_20261009.json"):
+        shutil.copyfile(source / name, benchmark / name)
 
 
 def _fixture(tmp_path: Path, *, single_author: bool = False) -> tuple[Path, Path]:
@@ -33,6 +46,7 @@ def _fixture(tmp_path: Path, *, single_author: bool = False) -> tuple[Path, Path
     _write_json(source / "smoke_clusters.json", clusters)
     _write_json(source / "restored_unknown_signature_ids_20261009.json", [])
     smoke._write_arrow_request(root / "benchmarks" / "smoke")  # noqa: SLF001
+    _publish(root)
     mask = tmp_path / "mask.json"
     _write_json(
         mask,
@@ -64,6 +78,7 @@ def test_prepare_keeps_pure_profiles_and_excludes_complete_query_paper(tmp_path:
         },
     )
     _write_json(source / "restored_unknown_signature_ids_20261009.json", ["unknown"])
+    _publish(root)
     payload = gold.prepare_cases(snapshot=root, eligible_mask=mask, max_blocks=1, max_cases=4)
     assert payload == gold.prepare_cases(snapshot=root, eligible_mask=mask, max_blocks=1, max_cases=4)
     block = payload["blocks"][0]
@@ -104,6 +119,7 @@ def test_prepare_rejects_known_author_across_selected_blocks(tmp_path: Path) -> 
     signatures = json.loads(source.read_text(encoding="utf-8"))
     signatures["s1"]["author_info"]["block"] = "second_block"
     _write_json(source, signatures)
+    _publish(root)
     eligible = json.loads(mask.read_text(encoding="utf-8"))
     eligible["datasets"]["smoke"]["block_ids"].append("second_block")
     _write_json(mask, eligible)
@@ -175,8 +191,8 @@ def test_two_cases_use_serialized_complete_model_and_actual_arrow(
         row["outcome"] in {"correct_link", "correct_abstain", "false_abstain", "false_link", "wrong_candidate"}
         for row in rows
     )
-    source = root / "corrected_sources" / "smoke" / "smoke_clusters.json"
-    source.write_bytes(source.read_bytes() + b" ")
+    published = root / "benchmarks" / "smoke" / "smoke_clusters.json"
+    published.write_bytes(published.read_bytes() + b" ")
     with pytest.raises(ValueError, match="Frozen source differs"):
         gold.evaluate_cases(
             snapshot=root,
@@ -186,3 +202,31 @@ def test_two_cases_use_serialized_complete_model_and_actual_arrow(
             n_jobs=1,
             total_ram_bytes=2_000_000_000,
         )
+
+
+def test_frozen_cases_bind_only_published_dataset_files(tmp_path: Path) -> None:
+    root, mask = _fixture(tmp_path)
+    payload = gold.prepare_cases(snapshot=root, eligible_mask=mask, max_blocks=1, max_cases=4)
+    assert sorted(payload["source_sha256"]["smoke"]) == [
+        "benchmarks/smoke/conversion_provenance.json",
+        "benchmarks/smoke/manifest.json",
+        "benchmarks/smoke/restored_unknown_signature_ids_20261009.json",
+        "benchmarks/smoke/smoke_clusters.json",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("changed", "message"),
+    [
+        ("smoke_signatures.json", "not converted from the corrected signatures"),
+        ("smoke_clusters.json", "Benchmark copy differs"),
+    ],
+)
+def test_prepare_rejects_benchmarks_that_do_not_publish_the_corrected_sources(
+    tmp_path: Path, changed: str, message: str
+) -> None:
+    root, mask = _fixture(tmp_path)
+    source = root / "corrected_sources" / "smoke" / changed
+    source.write_bytes(source.read_bytes() + b" ")
+    with pytest.raises(ValueError, match=message):
+        gold.prepare_cases(snapshot=root, eligible_mask=mask, max_blocks=1, max_cases=4)

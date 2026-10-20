@@ -10,12 +10,7 @@ import pytest
 
 from s2and.arrow_inputs import ARROW_COLLECTION_KIND
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
-from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.incremental_linking.feature_block import write_name_counts_index
-from scripts.production.model.run_binding import (
-    build_run_binding_payload,
-    evaluation_plan_content_identity,
-)
 from scripts.verification import profile_promoted_incremental_arrow as profile
 from tests.helpers import (
     tiny_name_counts_tuple,
@@ -50,75 +45,27 @@ def _args(tmp_path, **workload_overrides):
         + "\n",
         encoding="utf-8",
     )
-    workload = {
-        "dataset": "dummy",
-        "target_block": "",
-        "query_limit": 25,
-        "max_seed_clusters": 25,
-        "seed_source": "clusters",
-        "runs": 1,
-        "n_jobs": 4,
-        "batching_threshold": None,
-        "total_ram_bytes": None,
-        "synthetic_seeds_when_clusters_missing": False,
-    }
+    workload = {"query_limit": 25, "max_seed_clusters": 25, "synthetic_seeds_when_clusters_missing": False}
     workload.update(workload_overrides)
-    evaluation_plan = tmp_path / "evaluation_plan.json"
-    identity_file = tmp_path / "identity.json"
-    identity_file.write_text("{}\n", encoding="utf-8")
-    identity_sha256 = hashlib.sha256(identity_file.read_bytes()).hexdigest()
-    root_sha256 = hashlib.sha256(root_manifest.read_bytes()).hexdigest()
-    file_spec = {"path": str(identity_file.resolve()), "sha256": identity_sha256}
-    evaluation_payload = {
-        "pairwise": {"dummy": {"pairs": file_spec}},
-        "cluster": {"dummy": {"blocks": file_spec}},
-        "parity": {
-            "block": "dummy",
-            "dataset": "dummy",
-            "files": {"signatures": file_spec},
-            "fixture_dir": str(tmp_path.resolve()),
-            "workload": {"fixture": True},
-        },
-        "performance": {
-            "arrow_root": str((tmp_path / "arrow").resolve()),
-            "arrow_root_manifest_sha256": root_sha256,
-            "workload": workload,
-        },
-        "baseline_record_sha256": "b" * 64,
-        "baselines": {},
-        "gates": {},
-        "subblocking": {
-            "component_members": file_spec,
-            "dataset": "dummy",
-            "workload": {"full": True},
-        },
-    }
-    evaluation_plan.write_text(json.dumps(evaluation_payload), encoding="utf-8")
-    binding = build_run_binding_payload(
-        {
-            "baseline_record_sha256": "b" * 64,
-            "candidate_model_manifest_sha256": hashlib.sha256((model_dir / "manifest.json").read_bytes()).hexdigest(),
-            "evaluation_plan_content_sha256": canonical_json_digest(
-                evaluation_plan_content_identity(evaluation_payload)
-            ),
-            "model_plan_content_sha256": "a" * 64,
-            "public_data_root_manifest_sha256": "c" * 64,
-        }
-    )
-    run_binding = tmp_path / "run_binding.json"
-    run_binding.write_text(json.dumps(binding), encoding="utf-8")
-    return profile.parse_args(
-        [
-            "--evaluation-plan",
-            str(evaluation_plan),
-            "--model-path",
-            str(model_dir),
-            "--run-binding",
-            str(run_binding),
-            "--write-json",
-            str(tmp_path / "report.json"),
-        ]
-    )
+    argv = [
+        "--model-path",
+        str(model_dir),
+        "--arrow-root",
+        str(tmp_path / "arrow"),
+        "--dataset",
+        "dummy",
+        "--query-limit",
+        str(workload["query_limit"]),
+        "--max-seed-clusters",
+        str(workload["max_seed_clusters"]),
+        "--n-jobs",
+        "4",
+        "--write-json",
+        str(tmp_path / "report.json"),
+    ]
+    if workload["synthetic_seeds_when_clusters_missing"]:
+        argv.append("--synthetic-seeds-when-clusters-missing")
+    return profile.parse_args(argv)
 
 
 def _stub_prerun(monkeypatch):
@@ -243,12 +190,18 @@ def test_main_writes_fresh_report_and_rejects_reuse(tmp_path, monkeypatch, capsy
 
     exit_code = profile.main(
         [
-            "--evaluation-plan",
-            "evaluation-plan.json",
             "--model-path",
             "model",
-            "--run-binding",
-            "run_binding.json",
+            "--arrow-root",
+            "arrow",
+            "--dataset",
+            "dummy",
+            "--query-limit",
+            "1",
+            "--max-seed-clusters",
+            "1",
+            "--n-jobs",
+            "1",
             "--write-json",
             str(report_path),
         ]
@@ -262,12 +215,18 @@ def test_main_writes_fresh_report_and_rejects_reuse(tmp_path, monkeypatch, capsy
     with pytest.raises(FileExistsError, match="already exists"):
         profile.main(
             [
-                "--evaluation-plan",
-                "evaluation-plan.json",
                 "--model-path",
                 "model",
-                "--run-binding",
-                "run_binding.json",
+                "--arrow-root",
+                "arrow",
+                "--dataset",
+                "dummy",
+                "--query-limit",
+                "1",
+                "--max-seed-clusters",
+                "1",
+                "--n-jobs",
+                "1",
                 "--write-json",
                 str(report_path),
             ]
@@ -293,7 +252,7 @@ def test_invalid_data_or_model_manifest_fails_from_content(tmp_path, monkeypatch
         profile.run(_args(model_root))
 
 
-def test_report_contains_release_workload_and_metrics(tmp_path, monkeypatch) -> None:
+def test_report_contains_workload_and_metrics(tmp_path, monkeypatch) -> None:
     from s2and import production_model
 
     _stub_prerun(monkeypatch)
@@ -315,7 +274,6 @@ def test_report_contains_release_workload_and_metrics(tmp_path, monkeypatch) -> 
     payload = profile.run(_args(tmp_path))
 
     assert payload["runner"] == "promoted_incremental_arrow_profile"
-    assert len(payload["run_binding_sha256"]) == 64
     assert payload["summary"]["predict_seconds"]["p50"] >= 0
     assert payload["summary"]["peak_rss_gb"]["max"] == 1.25
     assert payload["workload"] == {

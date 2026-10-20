@@ -27,8 +27,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from s2and._sha256 import sha256_file  # noqa: E402
-from s2and.arrow_inputs import ArrowDataset, read_arrow_collection_root  # noqa: E402
+from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.subblocking import (  # noqa: E402
     GraphSubblockingConfig,
     _make_subblocks_with_telemetry_arrow_rust,
@@ -37,9 +36,6 @@ from s2and.subblocking import (  # noqa: E402
     make_subblocks_with_telemetry,
 )
 from s2and.text import compute_block, normalize_text  # noqa: E402
-from scripts.production.model.release_pairwise import _load_evaluation_plan  # noqa: E402
-from scripts.production.model.run_binding import load_run_binding, require_run_binding_matches  # noqa: E402
-from scripts.verification.validate_local_arrow_release import validate_release_root  # noqa: E402
 
 _DEFAULT_GRAPH_CONFIG = GraphSubblockingConfig()
 
@@ -59,12 +55,8 @@ def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arrow-root", type=Path, required=True)
-    parser.add_argument("--public-data-root", type=Path, required=True)
-    parser.add_argument("--evaluation-plan", type=Path, required=True)
-    parser.add_argument("--run-binding", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--comparison-mode", choices=("python-vs-rust", "rust-only"), default="python-vs-rust")
-    parser.add_argument("--component-members-parquet", type=Path, default=None)
+    parser.add_argument("--component-members-parquet", type=Path, required=True)
     parser.add_argument("--maximum-size", type=int, required=True)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--allow-full", action="store_true")
@@ -661,70 +653,14 @@ def _baseline_deltas(summary: dict[str, Any], baseline_path: Path | None) -> dic
     return deltas
 
 
-def _validated_release_subblocking_inputs(
-    args: argparse.Namespace,
-    plan: Mapping[str, Any],
-    config: GraphSubblockingConfig,
-) -> None:
-    public_data_root = Path(args.public_data_root).resolve()
-    validate_release_root(public_data_root)
-    dataset_manifests, _replay_bundles, _release_version = read_arrow_collection_root(
-        public_data_root / "manifest.json"
-    )
-    dataset_manifest = dataset_manifests.get(plan["dataset"])
-    if dataset_manifest is None:
-        raise ValueError("Subblocking dataset is not declared by the public-data root")
-    expected_arrow_root = dataset_manifest.parent
-    if Path(args.arrow_root).resolve() != expected_arrow_root:
-        raise ValueError("Subblocking Arrow dataset does not match the frozen evaluation plan")
-
-    expected_component_path, expected_component_sha256 = plan["component_members"]
-    if args.component_members_parquet is None:
-        raise ValueError("Release subblocking requires the frozen component-members input")
-    component_path = Path(args.component_members_parquet).resolve()
-    if component_path != expected_component_path or sha256_file(component_path) != expected_component_sha256:
-        raise ValueError("Subblocking component-members input does not match the frozen evaluation plan")
-    if args.baseline_summary is not None:
-        raise ValueError("Release subblocking does not accept an unbound baseline input")
-    observed_workload = {
-        "allow_full": bool(args.allow_full),
-        "comparison_mode": str(args.comparison_mode),
-        "graph_config": config.__dict__,
-        "limit": args.limit,
-        "maximum_size": int(args.maximum_size),
-        "orcid_subblocking": bool(args.orcid_subblocking),
-        # Release plans record the Python input source; this script reads only Arrow.
-        "python_source": "arrow",
-        "sample_mode": str(args.sample_mode),
-        "seed": int(args.seed),
-        "top_diff_subblocks": int(args.top_diff_subblocks),
-    }
-    if observed_workload != plan["workload"]:
-        raise ValueError("Subblocking workload does not match the frozen evaluation plan")
-
-
 def main() -> None:
     args = parse_args()
     report_path = args.output_dir / "subblocking_evaluation_report.json"
     if report_path.exists():
         raise FileExistsError(f"Report output already exists: {report_path}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    evaluation_plan_path = Path(args.evaluation_plan).resolve()
-    evaluation_plan = _load_evaluation_plan(evaluation_plan_path)
-    binding = load_run_binding(Path(args.run_binding).resolve())
-    require_run_binding_matches(
-        binding,
-        evaluation_plan=evaluation_plan_path,
-        public_data_root=Path(args.public_data_root).resolve(),
-    )
-    report_identity = {
-        "run_binding_sha256": binding["run_binding_sha256"],
-    }
     config = _graph_config(args)
-    _validated_release_subblocking_inputs(args, evaluation_plan.subblocking, config)
-    _log_progress(
-        f"starting comparison_mode={args.comparison_mode} maximum_size={args.maximum_size} limit={args.limit}"
-    )
+    _log_progress(f"starting maximum_size={args.maximum_size} limit={args.limit}")
     load_start = time.perf_counter()
     with ArrowDataset.open(args.arrow_root, require_specter=True) as arrow_dataset:
         with arrow_dataset.use(require_specter=True) as arrow_lease:
@@ -790,7 +726,6 @@ def main() -> None:
     rust_subblocks_path = args.output_dir / "rust_subblocks.json"
 
     summary = {
-        **report_identity,
         "inputs": {
             "comparison_mode": "python-vs-rust",
             "python_source": "arrow",

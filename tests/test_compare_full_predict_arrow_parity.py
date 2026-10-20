@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import sys
-from hashlib import sha256
-from types import SimpleNamespace
 
 import numpy as np
 import pyarrow as pa
@@ -31,18 +29,16 @@ def _parity_argv(
         "compare_full_predict_arrow_parity.py",
         "--fixture-dir",
         str(fixture_dir or tmp_path),
-        "--evaluation-plan",
-        str(tmp_path / "evaluation_plan.json"),
         "--output-dir",
         str(tmp_path / "out"),
         "--output-json",
         str(tmp_path / "report.json"),
         "--model-path",
         str(model_dir or tmp_path / "model"),
-        "--run-binding",
-        str(tmp_path / "run_binding.json"),
         "--block-size",
         "2",
+        "--n-jobs",
+        "1",
     ]
 
 
@@ -163,58 +159,14 @@ def test_parity_fixture_meta_paths_resolve_relative_to_fixture_dir(tmp_path) -> 
     assert _load_cluster_seeds_require(meta, tmp_path, ["s1"], enabled=True) == {"s1": "c1"}
 
 
-def test_release_parity_inputs_are_content_and_workload_bound(tmp_path) -> None:
-    fixture_dir = tmp_path / "fixture"
-    fixture_dir.mkdir()
-    signatures = fixture_dir / "signatures.json"
-    papers = fixture_dir / "papers.json"
-    signatures.write_text('{"s1": {}}\n', encoding="utf-8")
-    papers.write_text("{}\n", encoding="utf-8")
-    (fixture_dir / "meta.json").write_text(
-        json.dumps(
-            {
-                "block": "reviewed",
-                "dataset": "dummy",
-                "paths": {
-                    "papers": papers.name,
-                    "signatures": signatures.name,
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    workload = {
-        "block_size": 2,
-        "compare_features": True,
-        "include_specter": False,
-        "n_jobs": 1,
-        "total_ram_bytes": 1_000_000,
-        "use_cluster_seeds": False,
-    }
-    plan = {
-        "block": "reviewed",
-        "dataset": "dummy",
-        "files": {
-            "papers": (papers.resolve(), sha256(papers.read_bytes()).hexdigest()),
-            "signatures": (signatures.resolve(), sha256(signatures.read_bytes()).hexdigest()),
-        },
-        "fixture_dir": fixture_dir.resolve(),
-        "workload": workload,
-    }
-    args = SimpleNamespace(
-        block_size=2,
-        compare_features=True,
-        fixture_dir=fixture_dir,
-        n_jobs=1,
-        no_specter=True,
-        total_ram_bytes=1_000_000,
-        use_cluster_seeds=False,
-    )
+def test_parity_meta_requires_exactly_dataset_block_and_paths(tmp_path) -> None:
+    meta = {"block": "reviewed", "dataset": "dummy", "paths": {"signatures": "signatures.json"}}
+    (tmp_path / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    assert parity_module._load_parity_meta(tmp_path) == meta
 
-    assert parity_module._validated_release_parity_inputs(args, plan)["dataset"] == "dummy"
-    signatures.write_text('{"changed": {}}\n', encoding="utf-8")
-    with pytest.raises(ValueError, match="signatures"):
-        parity_module._validated_release_parity_inputs(args, plan)
+    (tmp_path / "meta.json").write_text(json.dumps({**meta, "workload": {}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="exactly block, dataset, and paths"):
+        parity_module._load_parity_meta(tmp_path)
 
 
 def _write_ipc(path, table) -> str:

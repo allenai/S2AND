@@ -25,10 +25,6 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from s2and._sha256 import sha256_file  # noqa: E402
-from scripts.production.model.release_pairwise import _load_evaluation_plan  # noqa: E402
-from scripts.production.model.run_binding import load_run_binding, require_run_binding_matches  # noqa: E402
-
 
 def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
     if path.exists():
@@ -392,47 +388,19 @@ def _resolve_parity_name_counts_index(
     return index_path, "bounded_generated"
 
 
-def _validated_release_parity_inputs(args: argparse.Namespace, plan: Mapping[str, Any]) -> dict[str, Any]:
-    fixture_dir = Path(args.fixture_dir).resolve()
-    if fixture_dir != plan["fixture_dir"]:
-        raise ValueError("Parity fixture directory does not match the frozen evaluation plan")
-    observed_workload = {
-        "block_size": int(args.block_size),
-        "compare_features": bool(args.compare_features),
-        "include_specter": not bool(args.no_specter),
-        "n_jobs": int(args.n_jobs),
-        "total_ram_bytes": int(args.total_ram_bytes),
-        "use_cluster_seeds": bool(args.use_cluster_seeds),
-    }
-    if observed_workload != plan["workload"]:
-        raise ValueError("Parity workload does not match the frozen evaluation plan")
-
+def _load_parity_meta(fixture_dir: Path) -> dict[str, Any]:
+    """Read the fixture's dataset, block, and file roles."""
     meta = _load_json(fixture_dir / "meta.json")
     if not isinstance(meta, Mapping) or set(meta) != {"block", "dataset", "paths"}:
         raise ValueError("Parity meta.json must contain exactly block, dataset, and paths")
-    if meta["dataset"] != plan["dataset"] or meta["block"] != plan["block"]:
-        raise ValueError("Parity fixture dataset or block does not match the frozen evaluation plan")
-    raw_paths = meta["paths"]
-    if not isinstance(raw_paths, Mapping) or set(raw_paths) != set(plan["files"]):
-        raise ValueError("Parity fixture file roles do not match the frozen evaluation plan")
-    for role, (expected_path, expected_sha256) in plan["files"].items():
-        observed_path = _resolve_fixture_path(fixture_dir, raw_paths[role]).resolve()
-        if observed_path != expected_path or sha256_file(observed_path) != expected_sha256:
-            raise ValueError(f"Parity fixture {role} does not match the frozen evaluation plan")
+    if not isinstance(meta["paths"], Mapping):
+        raise ValueError("Parity meta.json paths must be an object")
     return dict(meta)
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
-    evaluation_plan_path = Path(args.evaluation_plan).resolve()
-    evaluation_plan = _load_evaluation_plan(evaluation_plan_path)
-    binding = load_run_binding(Path(args.run_binding).resolve())
-    require_run_binding_matches(
-        binding,
-        evaluation_plan=evaluation_plan_path,
-        candidate_model_dir=Path(args.model_path).resolve(),
-    )
-    meta = _validated_release_parity_inputs(args, evaluation_plan.parity)
+    meta = _load_parity_meta(Path(args.fixture_dir).resolve())
 
     from s2and.arrow_inputs import (
         ArrowDataset,
@@ -632,7 +600,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "arrow_paths": dict(arrow_paths),
         "physical_layout": physical_layout,
         "raw_planner_batch_indexes": raw_planner_index_metrics,
-        "run_binding_sha256": binding["run_binding_sha256"],
         "name_counts_index_metrics": name_counts_index_metrics,
         "name_counts_source": name_counts_source,
         "timings_seconds": {key: float(value) for key, value in timings.items()},
@@ -653,7 +620,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture-dir", type=Path, required=True)
-    parser.add_argument("--evaluation-plan", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument(
@@ -663,9 +629,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional existing public-format-1 canonical name-count index; otherwise a bounded index is generated.",
     )
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
-    parser.add_argument("--run-binding", type=Path, required=True)
     parser.add_argument("--block-size", type=int, required=True)
-    parser.add_argument("--n-jobs", type=int, default=20)
+    # Require an explicit allocation; a fixed default can exceed the shared CPU budget.
+    parser.add_argument("--n-jobs", type=int, required=True)
     parser.add_argument("--total-ram-bytes", type=int, default=1_000_000_000_000)
     parser.add_argument(
         "--compare-features",

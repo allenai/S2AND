@@ -19,6 +19,7 @@ from s2and.orcid_prefix_counts import (
     load_canonical_orcid_prefix_counts,
 )
 from scripts.production.counts import generate_orcid_name_prefix_counts as generator
+from scripts.production.counts._run_support import load_guardrails
 
 ORCID_1 = "0000-0000-0000-0000"
 NAME_TUPLES_PATH = Path(PROJECT_ROOT_PATH) / "s2and" / "data" / "s2and_name_tuples_canonical.txt"
@@ -443,3 +444,21 @@ def test_cli_does_not_publish_cross_surname_orcid_evidence(tmp_path: Path) -> No
         generator.main(_csv_args(tmp_path, rows))
 
     assert not (tmp_path / "publication").exists()
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "zero", "boolean"])
+def test_guardrails_require_exact_positive_integer_fields(tmp_path: Path, change: str) -> None:
+    values: dict[str, object] = dict.fromkeys(sorted(generator.GUARDRAIL_FIELDS), 1)
+    path = tmp_path / "guardrails.json"
+    path.write_text(json.dumps(values), encoding="utf-8")
+    assert load_guardrails(path, fields=generator.GUARDRAIL_FIELDS) == values
+    first = sorted(values)[0]
+    if change == "missing":
+        del values[first]
+    elif change == "extra":
+        values["max_unreviewed_rows"] = 1
+    else:
+        values[first] = 0 if change == "zero" else True
+    path.write_text(json.dumps(values), encoding="utf-8")
+    with pytest.raises(ValueError, match="guardrail"):
+        load_guardrails(path, fields=generator.GUARDRAIL_FIELDS)

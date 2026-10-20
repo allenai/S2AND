@@ -436,6 +436,24 @@ production model and public-data version is `1.3`, on a separate version axis.
   35 MB of working set instead of 3.4 s and 2.46 GB. `open(path, verify=True)` and
   `verify()` run the full checks; publication tools use them. On the s_feldman
   block this removes the index read from every new prediction process.
+- Bulk Arrow prediction scores up to 100,000 pairs per Rust call instead of
+  10,000, and Rust returns constraint labels as one float64 array instead of
+  one Python value per pair. The memory budget still lowers the chunk size when
+  needed. On the 6,495-signature s_feldman block (21.1M pairs, 8 threads),
+  full-block prediction takes 18.0 s instead of 27.7 s, peak working set is
+  0.54 GB instead of 0.64 GB, and clusters are identical.
+- Logistic gate features reduce all queries with the same candidate count as
+  one NumPy block, instead of calling NumPy once per query and feature. Gate
+  matrices are bit-identical. For 6,487 s_feldman queries the gate takes 0.06 s
+  instead of 7.9 s, and incremental prediction takes 18.7 s instead of 36.4 s
+  with identical clusters.
+- Prediction processes no longer import scikit-learn, LightGBM, or pandas.
+  Importing the runtime modules takes 0.66 s instead of 2.20 s, so a
+  200-query s_feldman incremental request takes 3.4 s instead of 5.1 s end to
+  end. `FastCluster` no longer inherits from scikit-learn's `BaseEstimator` and
+  `TransformerMixin`. It keeps `get_params`, `set_params`, its repr, and its
+  error messages, and `sklearn.base.clone` still copies it. Training code
+  imports scikit-learn, LightGBM, and pandas where it uses them.
 - The Rust featurizer stores each paper's coauthor names, name blocks, and
   character n-gram counts once, instead of copying them into every signature on
   the paper. Pair features subtract each signature's own author, and they are

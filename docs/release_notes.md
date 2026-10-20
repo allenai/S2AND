@@ -446,11 +446,14 @@ production model and public-data version is `1.3`, on a separate version axis.
   one NumPy block, instead of calling NumPy once per query and feature. Gate
   matrices are bit-identical. For 6,487 s_feldman queries the gate takes 0.06 s
   instead of 7.9 s, and incremental prediction takes 18.7 s instead of 36.4 s
-  with identical clusters.
+  with identical clusters. The gate parses its feature names once and reduces
+  evidence sources without missing values together. In a 200-query request it
+  re-runs for 158 single queries after links; those calls take 0.20 s instead
+  of 0.66 s.
 - Prediction processes no longer import scikit-learn, LightGBM, or pandas.
-  Importing the runtime modules takes 0.66 s instead of 2.20 s, so a
-  200-query s_feldman incremental request takes 3.4 s instead of 5.1 s end to
-  end. `FastCluster` no longer inherits from scikit-learn's `BaseEstimator` and
+  Importing the runtime modules takes 0.66 s instead of 2.20 s. With the gate
+  change, a 200-query s_feldman incremental request takes 3.0 s instead of
+  5.1 s end to end. `FastCluster` no longer inherits from scikit-learn's `BaseEstimator` and
   `TransformerMixin`. It keeps `get_params`, `set_params`, its repr, and its
   error messages, and `sklearn.base.clone` still copies it. Training code
   imports scikit-learn, LightGBM, and pandas where it uses them.

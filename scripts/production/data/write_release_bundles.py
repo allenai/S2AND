@@ -30,6 +30,7 @@ if str(REPO_ROOT) not in sys.path:
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.arrow_training import load_signatures_from_arrow  # noqa: E402
+from s2and.name_counts_index import NameCountsIndex  # noqa: E402
 from s2and.production_training_contract import load_model_plan  # noqa: E402
 from scripts.production.model.plan_datasets import require_arrow_plan  # noqa: E402
 from scripts.production.model.unknown_signatures import load_unknown_signatures  # noqa: E402
@@ -221,6 +222,8 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
     inputs, files = _resolve_inputs(snapshot)
     inference, dataset, source = (output_root / name for name in ("inference", "dataset", "source"))
 
+    # Runtime opens skip the full digest and record checks, so check the index before publishing it.
+    NameCountsIndex.open(snapshot / "name_counts_index", verify=True)
     _place_tree(snapshot / "name_counts_index", inference / "name_counts_index")
     _place(snapshot / "LICENSE.txt", inference / "LICENSE.txt")
     if model is not None:

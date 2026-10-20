@@ -994,8 +994,12 @@ def validate_arrow_dataset_manifest(
     require_name_counts_index: bool,
     base_dir: Path | None = None,
     require_complete_embeddings: bool = False,
+    verify_name_counts_index: bool = False,
 ) -> dict[str, Any]:
-    """Validate the generated Arrow tables and return compact audit metrics."""
+    """Validate the generated Arrow tables and return compact audit metrics.
+
+    ``verify_name_counts_index`` also checks the index's file digests and records; conversions skip it.
+    """
 
     if not isinstance(manifest.get("paths"), Mapping):
         raise ValueError("manifest is missing paths")
@@ -1116,6 +1120,7 @@ def validate_arrow_dataset_manifest(
         require_name_counts_index_artifact(
             paths["name_counts_index"],
             context="convert_to_arrow dataset validation",
+            verify=verify_name_counts_index,
             producer_hint=(
                 "download the released name_counts_index or rebuild it with "
                 "scripts.production.counts.generate_author_counts_from_athena"
@@ -1151,6 +1156,7 @@ def validate_arrow_dataset_dir(
     require_embeddings: bool,
     require_name_counts_index: bool,
     require_complete_embeddings: bool = False,
+    verify_name_counts_index: bool = False,
 ) -> dict[str, Any]:
     with ArrowDataset.open(
         dataset_dir,
@@ -1167,6 +1173,7 @@ def validate_arrow_dataset_dir(
         require_name_counts_index=require_name_counts_index,
         require_complete_embeddings=require_complete_embeddings,
         base_dir=dataset_dir,
+        verify_name_counts_index=verify_name_counts_index,
     )
 
 
@@ -1281,6 +1288,7 @@ def _run_validate(args: argparse.Namespace) -> None:
         require_embeddings=bool(args.require_embeddings),
         require_name_counts_index=bool(args.require_name_counts_index),
         require_complete_embeddings=bool(args.require_complete_embeddings),
+        verify_name_counts_index=bool(args.require_name_counts_index),
     )
     print(json.dumps(metrics, indent=2, sort_keys=True))
 

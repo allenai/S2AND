@@ -150,7 +150,7 @@ uv run --no-sync --with 'duckdb>=1.5,<2' python -m scripts.production.counts.gen
 The producer checks all source SHA-256 values before the database stage.
 DuckDB stores aggregate tables and sort checkpoints on disk.
 The native batch hash function and existing binary writer produce the index files.
-The native loader verifies the index before publication.
+The producer opens the new index with `verify=True`, which checks every file digest and record, before it publishes the index.
 `run.json` contains source identities, source populations, per-mapping counts, progress, and completion status.
 Keep stdout and stderr logs for long runs.
 

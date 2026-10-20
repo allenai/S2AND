@@ -675,8 +675,9 @@ accept no open-ended metadata and no second schema, normalization, generation,
 or physical-layout authority.
 `ArrowDataset.open()` validates format before opening payloads, then validates
 manifest-relative paths, retained bytes, Arrow table schemas, batch-index
-bytes, and the native name-count index. The release-root validator separately
-owns shared-index topology, including datasets in declared replay collections.
+bytes, and the native name-count index's manifest, file sizes, and headers.
+The release-root validator separately owns shared-index topology, including datasets
+in declared replay collections, and checks every index file digest and record.
 
 Conditional `paths` entries:
 

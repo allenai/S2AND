@@ -372,8 +372,12 @@ def require_name_counts_index_artifact(
     *,
     context: str,
     producer_hint: str,
+    verify: bool = False,
 ) -> str:
-    """Require a manifest-backed name-count index directory."""
+    """Require a manifest-backed name-count index directory.
+
+    Pass ``verify=True`` at publication checks to also check file digests and every record.
+    """
 
     path_text = os.fspath(path) if isinstance(path, os.PathLike) else str(path)
     index_path = Path(path_text)
@@ -384,7 +388,7 @@ def require_name_counts_index_artifact(
         error = f"{index_path} (expected directory)"
     else:
         try:
-            NameCountsIndex.open(index_path)
+            NameCountsIndex.open(index_path, verify=verify)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             error = str(exc)
     if error is not None:

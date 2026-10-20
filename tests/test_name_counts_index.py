@@ -65,9 +65,9 @@ def _write_manifest(index_dir: Path, manifest: dict[str, Any]) -> None:
     )
 
 
-def _assert_native_validation_rejects(index_dir: Path, expected_field: str) -> None:
+def _assert_native_validation_rejects(index_dir: Path, expected_field: str, *, verify: bool = False) -> None:
     with pytest.raises((OSError, RuntimeError, ValueError), match=expected_field):
-        NameCountsIndex.open(index_dir)
+        NameCountsIndex.open(index_dir, verify=verify)
 
 
 def _remove_manifest_field(index_dir: Path, field: str) -> None:
@@ -157,7 +157,8 @@ def test_native_manifest_validation_rejects_structural_identity_and_material_cor
         else:  # pragma: no cover - mutation invariant
             raise AssertionError(f"unknown mutation {mutation}")
         _write_manifest(index_dir, manifest)
-        _assert_native_validation_rejects(index_dir, expected_field)
+        # A fast open checks file sizes; only verification hashes the file contents.
+        _assert_native_validation_rejects(index_dir, expected_field, verify=mutation == "sha256_mismatch")
 
     index_dir = write_index(tmp_path / "renamed-file")
     (index_dir / "first.bin").rename(index_dir / "renamed.bin")
@@ -169,6 +170,35 @@ def test_native_manifest_validation_rejects_structural_identity_and_material_cor
     _write_manifest(index_dir, manifest)
     (index_dir / "first.bin").unlink()
     _assert_native_validation_rejects(index_dir, "format_version")
+
+
+def test_fast_open_checks_layout_and_verify_checks_contents(
+    tmp_path: Path, write_index: Callable[[Path], Path]
+) -> None:
+    corrupt = write_index(tmp_path / "corrupt-name")
+    first = corrupt / "first.bin"
+    payload = bytearray(first.read_bytes())
+    payload[-1] ^= 0x01
+    first.write_bytes(bytes(payload))
+
+    opened = NameCountsIndex.open(corrupt)
+    with pytest.raises(ValueError, match="SHA-256"):
+        opened.verify()
+    with pytest.raises(ValueError, match="SHA-256"):
+        NameCountsIndex.open(corrupt, verify=True)
+    with pytest.raises(ValueError, match="SHA-256"):
+        load_s2and_rust_extension().NameCountsIndex.open(str(corrupt), verify=True)
+    with pytest.raises(MissingArrowArtifactError, match="SHA-256"):
+        require_name_counts_index_artifact(corrupt, context="publication check", producer_hint="rebuild", verify=True)
+
+    bad_header = write_index(tmp_path / "corrupt-header")
+    header = bytearray((bad_header / "last.bin").read_bytes())
+    header[0:8] = b"NOTANIDX"
+    (bad_header / "last.bin").write_bytes(bytes(header))
+    _assert_native_validation_rejects(bad_header, "magic")
+
+    valid = NameCountsIndex.open(write_index(tmp_path / "valid"), verify=True)
+    assert valid.verify() is None
 
 
 def test_arrow_boundary_translates_representative_manifest_failure(

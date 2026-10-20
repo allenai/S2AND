@@ -31,6 +31,7 @@ from s2and.incremental_linking.retrieval import (
     build_linker_retrieval_batch_from_raw_plan_bundle,
 )
 from s2and.incremental_linking.runtime import _seed_map_from_component_members
+from s2and.name_counts_index import NameCountsIndex
 from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import write_test_arrow_artifact_manifest
 from tests.raw_arrow_helpers import (
@@ -1712,7 +1713,7 @@ def test_rust_featurizer_missing_name_counts_presence_is_consistent(
     assert with_name_counts.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
 
 
-def test_rust_featurizer_rejects_out_of_bounds_name_counts_index_record(
+def test_index_verification_rejects_out_of_bounds_record_and_runtime_open_stays_safe(
     tmp_path: Path,
 ) -> None:
     paths = base_arrow_paths(tmp_path)
@@ -1720,4 +1721,6 @@ def test_rust_featurizer_rejects_out_of_bounds_name_counts_index_record(
     _corrupt_first_name_count_record_name_range(paths["name_counts_index"], "first")
 
     with pytest.raises(ValueError, match="outside blob length"):
-        _native_featurizer(paths, ["q1", "s1", "s2"], set())
+        NameCountsIndex.open(paths["name_counts_index"], verify=True)
+    # Runtime opens skip the record walk; lookups bounds-check every name range, so this still builds.
+    assert _native_featurizer(paths, ["q1", "s1", "s2"], set()) is not None

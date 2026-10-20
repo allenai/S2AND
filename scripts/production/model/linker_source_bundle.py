@@ -312,7 +312,7 @@ def export_portable_source_bundle(*, source_bundle: Path, output_source_bundle: 
     if output_source_bundle.is_relative_to(index):
         raise ValueError("portable source bundle output must not be inside the count index")
     require_name_counts_index_artifact(
-        index, context="portable source bundle export", producer_hint="bind a valid shared count index"
+        index, context="portable source bundle export", producer_hint="bind a valid shared count index", verify=True
     )
     _validate_root_name_counts_binding(
         source_bundle,
@@ -362,6 +362,7 @@ def assemble_source_bundle(
         name_counts_index,
         context="linker source assembly",
         producer_hint="pass the reviewed name_counts_index directory with --name-counts-index",
+        verify=True,
     )
     authoritative_manifest_sha256 = sha256_file(name_counts_index / "manifest.json")
     for arrow_root in (benchmark_arrow_root, replay_arrow_root):

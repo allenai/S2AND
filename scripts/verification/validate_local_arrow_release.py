@@ -53,6 +53,7 @@ def _validate_name_counts_index(path: Path, errors: list[str], *, label: str) ->
         require_name_counts_index_artifact(
             path,
             context=label,
+            verify=True,
             producer_hint=(
                 "download the released name_counts_index or rebuild it with "
                 "scripts.production.counts.generate_author_counts_from_athena"

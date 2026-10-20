@@ -78,11 +78,17 @@ def _lookup_many_deduplicated(
 
 
 class NameCountsIndex:
-    """One immutable native handle over four verified memory-mapped indexes."""
+    """One immutable native handle over four memory-mapped indexes.
+
+    Opening checks the manifest, file sizes, file headers, and section bounds, which keeps lookups
+    memory-safe. It does not hash the 2 GB of files. Publication and deployment checks pass
+    ``verify=True``, which also checks every file digest and every record.
+    """
 
     __slots__ = (
         "__weakref__",
         "_native",
+        "_verified",
         "manifest_sha256",
         "path",
     )
@@ -94,19 +100,43 @@ class NameCountsIndex:
         path: str,
     ) -> None:
         self._native = native
+        self._verified = False
         self.path = path
         self.manifest_sha256 = str(native.name_counts_manifest_sha256)
 
+    def verify(self) -> None:
+        """Check every file digest against the manifest and every record, once per handle.
+
+        Raises:
+            ValueError: A file digest differs from the manifest, or a record is invalid.
+        """
+
+        if not self._verified:
+            self._native.verify()
+            self._verified = True
+
     @classmethod
-    def open(cls, path: str | os.PathLike[str]) -> NameCountsIndex:
-        """Verify and share one immutable name-count index at ``path``."""
+    def open(cls, path: str | os.PathLike[str], *, verify: bool = False) -> NameCountsIndex:
+        """Open and share one immutable name-count index at ``path``.
+
+        Args:
+            path: Directory that holds ``manifest.json`` and the four index files.
+            verify: Also check every file digest and every record. Publication checks use it;
+                runtime callers rely on the checks done when the index was published.
+
+        Returns:
+            The shared handle for ``path``.
+        """
 
         resolved_path = str(Path(os.fspath(path)).resolve())
         with _OPEN_CACHE_LOCK:
             cached = _OPEN_CACHE.get(resolved_path)
             if cached is not None:
                 _OPEN_CACHE.move_to_end(resolved_path)
-                return cached
+        if cached is not None:
+            if verify:
+                cached.verify()
+            return cached
 
         from s2and.runtime import load_s2and_rust_extension
 
@@ -116,11 +146,14 @@ class NameCountsIndex:
             cached = _OPEN_CACHE.get(resolved_path)
             if cached is not None:
                 _OPEN_CACHE.move_to_end(resolved_path)
-                return cached
-            _OPEN_CACHE[resolved_path] = opened
-            _OPEN_CACHE.move_to_end(resolved_path)
-            if len(_OPEN_CACHE) > _OPEN_CACHE_MAX_PATHS:
-                _OPEN_CACHE.popitem(last=False)
+                opened = cached
+            else:
+                _OPEN_CACHE[resolved_path] = opened
+                _OPEN_CACHE.move_to_end(resolved_path)
+                if len(_OPEN_CACHE) > _OPEN_CACHE_MAX_PATHS:
+                    _OPEN_CACHE.popitem(last=False)
+        if verify:
+            opened.verify()
         return opened
 
     def lookup_many(

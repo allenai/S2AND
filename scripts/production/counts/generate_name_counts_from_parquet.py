@@ -289,7 +289,8 @@ def build_name_counts_from_parquet(
             (pending / "manifest.json").write_text(
                 json.dumps(publication, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
             )
-            index = native.NameCountsIndex.open(str(pending))
+            # Check every digest and record of the new index before publishing it.
+            index = native.NameCountsIndex.open(str(pending), verify=True)
             index_sha256 = str(index.name_counts_manifest_sha256)
             # Windows blocks the directory move while the native index holds open files.
             del index

@@ -100,7 +100,8 @@ with ArrowDataset.open_trusted(paths) as dataset:
 handle as `open`. It performs no dataset checksum scans and still checks required tables,
 paired optional inputs, Arrow schemas, index structure, and source sizes. The
 caller is responsible for supplying matching, immutable tables and indexes.
-Optional name-count indexes keep their existing independent validation.
+Both modes open a name-count index with the same checks: manifest, file sizes, file headers,
+and section bounds.
 Each trusted open gets a fresh generation ID, so prediction caches can be reused
 within that handle but cannot reuse entries from another trusted open. Its
 `root` property is the directory containing the signatures file.
@@ -446,9 +447,15 @@ gates.
 ## Name-count and reuse boundaries
 
 The current runtime uses one binary `NameCountsIndex` in Python and Rust. Classic
-`ANDData` defaults to the canonical configured index and also accepts a
-verified alternate path, a shared open index handle, or explicit `None` when
-count features are intentionally absent. Arrow routes retain the manifest-bound
+`ANDData` defaults to the canonical configured index and also accepts an
+alternate path, a shared open index handle, or explicit `None` when
+count features are intentionally absent.
+`NameCountsIndex.open` checks the manifest, file sizes, file headers, and section
+bounds; it does not hash the index files. `NameCountsIndex.open(path, verify=True)`
+and `verify()` also check every file digest and every record. The release-root
+validator, `convert_to_arrow.py validate`, dataset packaging, linker-bundle assembly,
+the release bundle writer, and the count producer run that check before publication.
+Run it again when you deploy an index to a new location. Arrow routes retain the manifest-bound
 index inside `ArrowDataset`. Models bind directly to the native index's single
 `manifest_sha256`. The manifest
 contains exactly `kind: "s2and_name_counts"`, public `format_version: 1`, and

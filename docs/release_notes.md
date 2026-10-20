@@ -430,6 +430,12 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Performance
 
+- `NameCountsIndex.open` no longer hashes the index files or checks every record on
+  each open. It checks the manifest, file sizes, file headers, and section bounds,
+  so lookups stay memory-safe. For the 2.3 GB `1.3` index an open takes 0.04 s and
+  35 MB of working set instead of 3.4 s and 2.46 GB. `open(path, verify=True)` and
+  `verify()` run the full checks; publication tools use them. On the s_feldman
+  block this removes the index read from every new prediction process.
 - The Rust featurizer stores each paper's coauthor names, name blocks, and
   character n-gram counts once, instead of copying them into every signature on
   the paper. Pair features subtract each signature's own author, and they are

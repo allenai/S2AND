@@ -246,7 +246,7 @@ def package_corrected_datasets(
     minimum_dataset_f1 = _unit_float(minimum_dataset_f1)
     minimum_signature_weighted_f1 = _unit_float(minimum_signature_weighted_f1)
     require_name_counts_index_artifact(
-        index, context="corrected dataset package", producer_hint="pass the common index"
+        index, context="corrected dataset package", producer_hint="pass the common index", verify=True
     )
     inputs = _read_json(pairwise / "inputs.json")
     version = inputs["release_version"] if release_version is None else release_version

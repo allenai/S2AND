@@ -64,8 +64,8 @@ pub(crate) struct RawNameCountIndex {
     identity: NameCountsIndexIdentity,
 }
 
-/// Python-facing, immutable handle over four manifest- and digest-verified
-/// memory-mapped name-count indexes.
+/// Python-facing, immutable handle over four manifest-checked memory-mapped
+/// name-count indexes. `verify` checks file digests and every record.
 #[pyclass(frozen)]
 pub(crate) struct NameCountsIndex {
     index: Arc<RawNameCountIndex>,
@@ -118,6 +118,62 @@ impl RawNameCountIndex {
     #[cfg(test)]
     pub(crate) fn open(path: &str) -> PyResult<Self> {
         Self::open_fully_validated(path)
+    }
+
+    /// Open after the manifest, file-size, header, and section-bound checks.
+    ///
+    /// This reads the small manifest and four file headers only. It does not hash the
+    /// files or walk their records; `verify` does that at publication and deployment.
+    pub(crate) fn open_layout_validated(path: &str) -> PyResult<Self> {
+        let paths = resolve_name_counts_index_paths(path)?;
+        Ok(Self {
+            first: RawNameCountIndexFile::open_layout_validated(
+                &paths.first.path,
+                RawNameCountKind::First,
+                &paths.first.expected_sha256,
+            )?,
+            last: RawNameCountIndexFile::open_layout_validated(
+                &paths.last.path,
+                RawNameCountKind::Last,
+                &paths.last.expected_sha256,
+            )?,
+            first_last: RawNameCountIndexFile::open_layout_validated(
+                &paths.first_last.path,
+                RawNameCountKind::FirstLast,
+                &paths.first_last.expected_sha256,
+            )?,
+            last_first_initial: RawNameCountIndexFile::open_layout_validated(
+                &paths.last_first_initial.path,
+                RawNameCountKind::LastFirstInitial,
+                &paths.last_first_initial.expected_sha256,
+            )?,
+            identity: paths.identity,
+        })
+    }
+
+    /// Check every file's manifest digest and every record of an open index.
+    pub(crate) fn verify(&self) -> PyResult<()> {
+        let ((first, last), (first_last, last_first_initial)) = rayon::join(
+            || {
+                rayon::join(
+                    || self.first.verify(RawNameCountKind::First),
+                    || self.last.verify(RawNameCountKind::Last),
+                )
+            },
+            || {
+                rayon::join(
+                    || self.first_last.verify(RawNameCountKind::FirstLast),
+                    || {
+                        self.last_first_initial
+                            .verify(RawNameCountKind::LastFirstInitial)
+                    },
+                )
+            },
+        );
+        first?;
+        last?;
+        first_last?;
+        last_first_initial
     }
 
     /// Open and exhaustively validate every record at public artifact boundaries.
@@ -256,15 +312,28 @@ impl NameCountsIndex {
 
 #[pymethods]
 impl NameCountsIndex {
-    /// Open a manifest-backed name-count index after independently verifying
-    /// its kind, format, byte counts, and file digests.
+    /// Open a manifest-backed name-count index after checking its kind, format,
+    /// byte counts, file headers, and section bounds. With `verify=True`, also
+    /// check every file digest and every record before returning.
     #[staticmethod]
-    #[pyo3(name = "open")]
-    fn open_py(py: Python<'_>, path: &str) -> PyResult<Self> {
-        let index = py.allow_threads(|| RawNameCountIndex::open_fully_validated(path))?;
+    #[pyo3(name = "open", signature = (path, verify = false))]
+    fn open_py(py: Python<'_>, path: &str, verify: bool) -> PyResult<Self> {
+        let index = py.allow_threads(|| {
+            if verify {
+                RawNameCountIndex::open_fully_validated(path)
+            } else {
+                RawNameCountIndex::open_layout_validated(path)
+            }
+        })?;
         Ok(Self {
             index: Arc::new(index),
         })
+    }
+
+    /// Check every file digest and every record of this open index.
+    #[pyo3(name = "verify")]
+    fn verify_py(&self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| self.index.verify())
     }
 
     /// Return the digest of the exact manifest snapshot this handle opened.
@@ -322,12 +391,14 @@ impl NameCountsIndex {
 struct RawNameCountIndexFile {
     // Memory-mapped index file. Bulk of the file is the variable-length
     // name blob (hundreds of MB per kind); mmap avoids a second allocated
-    // copy while cold-open digest and semantic validation stream its pages.
-    // Subsequent lookups reuse the validated mapping.
+    // copy. Lookups touch only the pages they need. Full verification
+    // streams every page, so it runs only when a caller asks for it.
     mmap: Mmap,
     record_count: usize,
     blob_offset: usize,
     blob_len: usize,
+    path: PathBuf,
+    expected_sha256: String,
 }
 
 impl RawNameCountIndexFile {
@@ -407,6 +478,18 @@ impl RawNameCountIndexFile {
 
     #[cfg(test)]
     fn open(path: &Path, kind: RawNameCountKind) -> PyResult<Self> {
+        Self::open_layout_validated(path, kind, "")
+    }
+
+    /// Map one file and check its header and section bounds without reading the payload.
+    ///
+    /// Lookups stay memory-safe on any file that passes these checks: record reads stay
+    /// inside the record table, and every name range is bounds-checked against the blob.
+    fn open_layout_validated(
+        path: &Path,
+        kind: RawNameCountKind,
+        expected_sha256: &str,
+    ) -> PyResult<Self> {
         let mmap = Self::mmap(path)?;
         let (record_count, blob_offset, blob_len) = Self::validated_layout(&mmap, path, kind)?;
         Ok(Self {
@@ -414,7 +497,14 @@ impl RawNameCountIndexFile {
             record_count,
             blob_offset,
             blob_len,
+            path: path.to_path_buf(),
+            expected_sha256: expected_sha256.to_owned(),
         })
+    }
+
+    /// Check the manifest digest and every record of an already mapped file.
+    fn verify(&self, kind: RawNameCountKind) -> PyResult<()> {
+        self.validate_all_records(&self.path, kind, &self.expected_sha256)
     }
 
     fn open_manifest_validated(
@@ -436,6 +526,8 @@ impl RawNameCountIndexFile {
             record_count,
             blob_offset,
             blob_len,
+            path: path.to_path_buf(),
+            expected_sha256: expected_sha256.to_owned(),
         };
         index.validate_all_records(path, kind, expected_sha256)?;
         Ok(index)

@@ -76,7 +76,7 @@ from s2and.runtime import (
     stage_uses_rust,
 )
 from s2and.rust_calls import (
-    _get_constraints_block_upper_triangle_values_indexed_rust,
+    _get_constraint_labels_block_upper_triangle_indexed_rust,
     build_block_upper_triangle_feature_matrix_indexed_rust,
     get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
@@ -862,6 +862,26 @@ def _build_partial_supervision_offset_maps_for_block(
             offset = _condensed_pair_index(block_size, right, left)
             reverse_overrides[offset] = adjusted
     return direct_overrides, reverse_overrides
+
+
+def _partial_supervision_label_overrides_for_block(
+    signatures: list[str],
+    partial_supervision: dict[tuple[str, str], int | float],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted condensed pair offsets and their supervision labels for one block.
+
+    A pair given in block order wins over the same pair given in reverse order.
+    """
+    direct_overrides, reverse_overrides = _build_partial_supervision_offset_maps_for_block(
+        signatures,
+        partial_supervision,
+    )
+    overrides = {**reverse_overrides, **direct_overrides}
+    offsets = sorted(overrides)
+    return (
+        np.asarray(offsets, dtype=np.int64),
+        np.asarray([overrides[pair_offset] for pair_offset in offsets], dtype=np.float64),
+    )
 
 
 def _compute_predict_batch_chunk_plan(
@@ -2706,7 +2726,7 @@ class Clusterer:
                 continue
 
             block_signature_indices = [int(signature_index_by_id[str(signature_id)]) for signature_id in signatures]
-            direct_overrides, reverse_overrides = _build_partial_supervision_offset_maps_for_block(
+            override_offsets, override_labels = _partial_supervision_label_overrides_for_block(
                 signatures,
                 partial_supervision,
             )
@@ -2714,42 +2734,41 @@ class Clusterer:
             while offset < block_pair_count:
                 chunk_pair_count = int(min(resolved_pair_chunk_size, block_pair_count - offset))
                 chunk_count += 1
-                local_i: Sequence[Any] | None = None
-                local_j: Sequence[Any] | None = None
                 local_i_array: np.ndarray | None = None
                 local_j_array: np.ndarray | None = None
-                constraint_values: Sequence[Any] | None = None
+                constraint_labels: np.ndarray | None = None
                 if self.use_default_constraints_as_supervision:
                     stage_start = time.perf_counter()
-                    constraint_getter = (
-                        _get_constraints_block_upper_triangle_values_indexed_rust
-                        if uses_fastcluster
-                        else get_constraints_block_upper_triangle_indexed_rust
-                    )
-                    constraint_result = constraint_getter(
-                        block_signature_indices,
-                        start_offset=offset,
-                        max_pairs=chunk_pair_count,
-                        dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                        num_threads=self.n_jobs,
-                        featurizer=rust_featurizer,
-                        suppress_orcid=getattr(self, "suppress_orcid", False),
-                    )
-                    constraint_seconds += time.perf_counter() - stage_start
+                    common_constraint_kwargs = {
+                        "start_offset": offset,
+                        "max_pairs": chunk_pair_count,
+                        "dont_merge_cluster_seeds": self.dont_merge_cluster_seeds,
+                        "incremental_dont_use_cluster_seeds": incremental_dont_use_cluster_seeds,
+                        "num_threads": self.n_jobs,
+                        "featurizer": rust_featurizer,
+                        "suppress_orcid": getattr(self, "suppress_orcid", False),
+                    }
                     if uses_fastcluster:
-                        constraint_values = cast(list[int | float | None], constraint_result)
-                    else:
-                        local_i, local_j, constraint_values = cast(
-                            tuple[list[int], list[int], list[int | float | None]], constraint_result
+                        constraint_labels = _get_constraint_labels_block_upper_triangle_indexed_rust(
+                            block_signature_indices,
+                            large_integer=LARGE_INTEGER,
+                            **common_constraint_kwargs,
                         )
-                    del constraint_result
-                    if not uses_fastcluster:
+                        constraint_seconds += time.perf_counter() - stage_start
+                    else:
+                        local_i, local_j, constraint_values = get_constraints_block_upper_triangle_indexed_rust(
+                            block_signature_indices,
+                            **common_constraint_kwargs,
+                        )
+                        constraint_seconds += time.perf_counter() - stage_start
                         stage_start = time.perf_counter()
                         local_i_array = np.asarray(local_i, dtype=np.intp)
                         local_j_array = np.asarray(local_j, dtype=np.intp)
                         upper_triangle_index_seconds += time.perf_counter() - stage_start
-                    label_count = int(len(constraint_values))
+                        # NumPy reads None as NaN, which marks a pair without a constraint.
+                        constraint_labels = np.asarray(constraint_values, dtype=np.float64) - LARGE_INTEGER
+                        del local_i, local_j, constraint_values
+                    label_count = int(len(constraint_labels))
                     if label_count != chunk_pair_count:
                         raise RuntimeError(
                             "Rust constraint row count mismatch for vector write: "
@@ -2769,27 +2788,14 @@ class Clusterer:
                     label_count = int(len(local_i_array))
 
                 stage_start = time.perf_counter()
-                if not direct_overrides and not reverse_overrides and constraint_values is not None:
-                    labels = np.fromiter(
-                        (np.nan if value is None else float(value - LARGE_INTEGER) for value in constraint_values),
-                        dtype=np.float64,
-                        count=label_count,
-                    )
-                else:
+                if constraint_labels is None:
                     labels = np.full(label_count, np.nan, dtype=np.float64)
-                if direct_overrides or reverse_overrides:
-                    for row_offset in range(label_count):
-                        pair_offset = offset + row_offset
-                        override = direct_overrides.get(pair_offset)
-                        if override is None:
-                            override = reverse_overrides.get(pair_offset)
-                        if override is not None:
-                            labels[row_offset] = float(override)
-                            continue
-                        if constraint_values is not None:
-                            value = constraint_values[row_offset]
-                            if value is not None:
-                                labels[row_offset] = float(value - LARGE_INTEGER)
+                else:
+                    labels = constraint_labels
+                # Partial supervision overrides the constraint label of its pairs.
+                first, stop = np.searchsorted(override_offsets, (offset, offset + label_count))
+                if first < stop:
+                    labels[override_offsets[first:stop] - offset] = override_labels[first:stop]
                 label_build_seconds += time.perf_counter() - stage_start
 
                 stage_start = time.perf_counter()
@@ -2843,11 +2849,9 @@ class Clusterer:
                     batch_features,
                     batch_nameless_features,
                     batch_predictions,
-                    constraint_values,
+                    constraint_labels,
                     labels,
                     scored_rows,
-                    local_i,
-                    local_j,
                     local_i_array,
                     local_j_array,
                 )

@@ -183,8 +183,8 @@ def test_fastcluster_rejects_native_constraint_count_mismatch(
     )
     monkeypatch.setattr(
         model_module,
-        "_get_constraints_block_upper_triangle_values_indexed_rust",
-        lambda _indices, *, max_pairs, **_kwargs: [None] * (max_pairs - 1),
+        "_get_constraint_labels_block_upper_triangle_indexed_rust",
+        lambda _indices, *, max_pairs, **_kwargs: np.full(max_pairs - 1, np.nan),
     )
 
     with pytest.raises(RuntimeError, match="Rust constraint row count mismatch"):

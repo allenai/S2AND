@@ -1623,9 +1623,13 @@ impl RustFeaturizer {
         )
     }
 
+    /// Return `value - large_integer` per pair, or NaN when no constraint applies.
+    ///
+    /// Bulk prediction uses these as model labels. One array avoids a Python float per pair.
     #[pyo3(
         signature = (
             block_signature_indices,
+            large_integer,
             start_offset = 0,
             max_pairs = None,
             low_value = 0.0,
@@ -1636,10 +1640,11 @@ impl RustFeaturizer {
             suppress_orcid = false
         )
     )]
-    fn _get_constraints_block_upper_triangle_values_indexed(
+    fn _constraint_labels_block_upper_triangle_indexed<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         block_signature_indices: Vec<u32>,
+        large_integer: f64,
         start_offset: usize,
         max_pairs: Option<usize>,
         low_value: f64,
@@ -1648,7 +1653,7 @@ impl RustFeaturizer {
         incremental_dont_use_cluster_seeds: bool,
         num_threads: Option<usize>,
         suppress_orcid: bool,
-    ) -> PyResult<Vec<Option<f64>>> {
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let (_, _, values) = self.constraints_block_upper_triangle_indexed_impl(
             py,
             block_signature_indices,
@@ -1662,7 +1667,14 @@ impl RustFeaturizer {
             suppress_orcid,
             false,
         )?;
-        Ok(values)
+        let labels: Vec<f64> = values
+            .into_iter()
+            .map(|value| match value {
+                Some(value) => value - large_integer,
+                None => f64::NAN,
+            })
+            .collect();
+        Ok(numpy::ndarray::Array1::from_vec(labels).to_pyarray(py))
     }
 
     fn signature_ids(&self) -> Vec<String> {

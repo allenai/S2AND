@@ -7,9 +7,8 @@ import logging
 import math
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-import lightgbm as lgb
 import numpy as np
 
 from s2and._sha256 import is_lowercase_sha256
@@ -52,6 +51,9 @@ from s2and.production_bundle_contract import (
 from s2and.runtime import load_s2and_rust_extension
 from s2and.subblocking import canonical_orcid_prefix_counts_data_sha256
 from s2and.thread_config import resolve_n_jobs
+
+if TYPE_CHECKING:
+    import lightgbm as lgb
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +158,8 @@ class NativeLightGBMBinaryClassifier:
     @property
     def booster_(self) -> lgb.Booster:
         if self._lazy_booster is None:
+            import lightgbm as lgb
+
             self._lazy_booster = lgb.Booster(model_file=self.model_path)
         return self._lazy_booster
 

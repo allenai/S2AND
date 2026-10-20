@@ -15,6 +15,8 @@ from types import MappingProxyType
 from typing import Any, BinaryIO
 from uuid import uuid4
 
+import numpy as np
+
 from s2and._sha256 import is_lowercase_sha256
 from s2and._sha256 import sha256_file as _sha256_file
 from s2and.arrow_schema import validate_arrow_schema
@@ -365,6 +367,28 @@ def normalize_arrow_paths(paths: Mapping[Any, Any], *, omit_none: bool = False) 
         labels = {"<None>": "is None", "<empty>": "is empty", ".": "resolves to the current directory"}
         raise ValueError(f"Arrow path for {key!r} {labels.get(reason, f'is invalid: {reason}')}")
     return normalized
+
+
+def arrow_string_array(values: Sequence[str]) -> Any:
+    """Build an Arrow string array of non-null strings from its UTF-8 bytes and offsets.
+
+    ``pa.array`` imports pandas to check its input type, which adds 0.3 s to a new prediction process.
+
+    Raises:
+        ValueError: The strings need more than 2 GiB, the limit of 32-bit string offsets.
+    """
+    import pyarrow as pa
+
+    encoded = [value.encode("utf-8") for value in values]
+    offsets = np.zeros(len(encoded) + 1, dtype=np.int64)
+    np.cumsum([len(value) for value in encoded], out=offsets[1:])
+    if offsets[-1] > np.iinfo(np.int32).max:
+        raise ValueError(f"Arrow string array needs {int(offsets[-1])} bytes, more than 32-bit offsets allow")
+    return pa.StringArray.from_buffers(
+        len(encoded),
+        pa.py_buffer(offsets.astype(np.int32)),
+        pa.py_buffer(b"".join(encoded)),
+    )
 
 
 def require_name_counts_index_artifact(

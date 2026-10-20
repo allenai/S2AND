@@ -16,7 +16,7 @@ def _run_in_fresh_python(script: str) -> None:
 def test_import_does_not_load_plotting_or_training() -> None:
     """Check import boundaries in a fresh interpreter, outside pytest's imports.
 
-    test_production_model.py::test_complete_bundle_native_inference_does_not_load_hyperopt
+    test_production_model.py::test_complete_bundle_native_inference_does_not_load_training_libraries
     checks the s2and.production_model boundary.
     """
     script = textwrap.dedent(
@@ -71,5 +71,26 @@ def test_incremental_linking_modules_import_without_training_or_model_dependenci
         assert modules, "No incremental linking modules were discovered"
         for module in modules:
             importlib.import_module(module.name)
+        """
+    )
+
+
+def test_arrow_string_array_matches_pyarrow_without_importing_pandas() -> None:
+    """pa.array imports pandas, so request-path string arrays are built from buffers."""
+    _run_in_fresh_python(
+        """
+        import sys
+        from s2and.arrow_inputs import arrow_string_array
+
+        values = ["a", "caf\u00e9", "", "xyz"]
+        built = arrow_string_array(values)
+        built.validate(full=True)
+        empty = arrow_string_array([])
+        assert "pandas" not in sys.modules, "arrow_string_array imported pandas"
+
+        import pyarrow as pa
+
+        assert built.equals(pa.array(values, type=pa.string()))
+        assert empty.equals(pa.array([], type=pa.string()))
         """
     )

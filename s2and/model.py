@@ -5,6 +5,7 @@ import hashlib
 import logging
 import math
 import pickle
+import sys
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -15,13 +16,11 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-import lightgbm as lgb
 import numpy as np
-from sklearn.base import clone
 from tqdm import tqdm
 
 from s2and import memory_budget
-from s2and.arrow_inputs import ArrowDataset
+from s2and.arrow_inputs import ArrowDataset, arrow_string_array
 from s2and.consts import (
     DEFAULT_CHUNK_SIZE,
     LARGE_DISTANCE,
@@ -66,7 +65,7 @@ from s2and.incremental_linking.production import (
 )
 from s2and.incremental_linking.seed_assignment import apply_seed_links
 from s2and.metrics import b3_precision_recall_fscore
-from s2and.model_pairwise import FastCluster, intify, predict_pairwise_class0
+from s2and.model_pairwise import FastCluster, clone_cluster_model, intify, predict_pairwise_class0
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.prediction_state import PredictionState
 from s2and.runtime import (
@@ -221,7 +220,7 @@ def _clusterer_with_prediction_params(clusterer: Any, params: dict[str, Any] | N
     if params is getattr(clusterer, "_s2and_prediction_params", None):
         return clusterer
     request = copy.copy(clusterer)
-    request.cluster_model = clone(clusterer.cluster_model)
+    request.cluster_model = clone_cluster_model(clusterer.cluster_model)
     effective_params = {key: intify(value) for key, value in params.items()}
     request.cluster_model.set_params(**effective_params)
     request._s2and_prediction_params_source = params
@@ -442,7 +441,7 @@ def _load_arrow_incremental_signature_info(
 
     pc: Any = __import__("pyarrow.compute").compute
 
-    value_set = pa.array(requested_signature_ids, type=pa.string())
+    value_set = arrow_string_array(requested_signature_ids)
     signatures: dict[str, _ArrowIncrementalSignatureInfo] = {}
     with arrow_dataset.open_file("signatures") as source_file, pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
@@ -583,7 +582,7 @@ def _load_arrow_incremental_orcid_signature_info(
 
     pc: Any = __import__("pyarrow.compute").compute
 
-    value_set = pa.array(requested_signature_ids, type=pa.string())
+    value_set = arrow_string_array(requested_signature_ids)
     signatures: dict[str, _ArrowIncrementalSignatureInfo] = {}
     with arrow_dataset.open_file("signatures") as source_file, pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
@@ -974,7 +973,9 @@ def _ensure_lightgbm_fitted(clf: Any) -> None:
     inner = getattr(clf, "classifier", None)
     if inner is not None and inner is not clf:
         _ensure_lightgbm_fitted(inner)
-    if not hasattr(lgb, "LGBMModel") or not isinstance(clf, lgb.LGBMModel):
+    # A LightGBM estimator exists only after LightGBM was imported, so prediction never imports it here.
+    lgb = sys.modules.get("lightgbm")
+    if lgb is None or not hasattr(lgb, "LGBMModel") or not isinstance(clf, lgb.LGBMModel):
         return
     booster = getattr(clf, "_Booster", None)
     if booster is None:
@@ -3939,7 +3940,7 @@ class Clusterer:
         else:
             params = {k: intify(v) for k, v in params.items()}
         if clone_flag:
-            cluster_model = clone(self.cluster_model)
+            cluster_model = clone_cluster_model(self.cluster_model)
             cluster_model.set_params(**params)
             return cluster_model
         else:
@@ -4564,7 +4565,7 @@ class Clusterer:
         if dist_matrix is None:
             raise ValueError("Distance matrix is required for blocks with more than one signature.")
 
-        cluster_model = clone(self.cluster_model)
+        cluster_model = clone_cluster_model(self.cluster_model)
         params = {k: intify(v) for k, v in (cluster_model_params or {}).items()}
         cluster_model.set_params(**params)
         cluster_model.fit(dist_matrix)

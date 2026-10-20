@@ -310,11 +310,14 @@ def test_native_lightgbm_model_replacement_refreshes_predictions_and_cache_ident
     np.testing.assert_allclose(classifier.booster_.predict(features), expected, rtol=1e-12, atol=1e-12)
 
 
-def test_complete_bundle_native_inference_does_not_load_hyperopt(
+def test_complete_bundle_native_inference_does_not_load_training_libraries(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
-    """Load and score a validated complete bundle without optimizer imports."""
+    """Load, score, and cluster with a complete bundle without optimizer or training-library imports.
+
+    scikit-learn, pandas, and LightGBM add about 1.5 s to each new prediction process.
+    """
     _, source_clusterer = synthetic_pairwise_bundle
     source_clusterer.feature_contract.update(_TEST_EXPLICIT_ARTIFACT_HASHES)
     pairwise_bundle = tmp_path / "explicit-pairwise"
@@ -358,9 +361,12 @@ def test_complete_bundle_native_inference_does_not_load_hyperopt(
         f"""
         import sys
         import numpy as np
+        from s2and.model_pairwise import clone_cluster_model
         from s2and.production_model import load_production_model
 
-        forbidden = ["seaborn", "matplotlib.pyplot", "hyperopt", "s2and.eval"]
+        forbidden = [
+            "seaborn", "matplotlib.pyplot", "hyperopt", "s2and.eval", "sklearn", "pandas", "lightgbm"
+        ]
         loaded = [name for name in forbidden if name in sys.modules]
         assert not loaded, f"Unexpected import dependencies: {{loaded}}"
 
@@ -376,8 +382,12 @@ def test_complete_bundle_native_inference_does_not_load_hyperopt(
                     classifier.predict_proba(fixture[name + "_features"]),
                     fixture[name + "_expected"], rtol=1e-10, atol=1e-10,
                 )
+        cluster_model = clone_cluster_model(clusterer.cluster_model)
+        labels = cluster_model.fit(np.asarray([0.1, 0.9, 0.9], dtype=np.float64)).labels_
+        assert labels[0] == labels[1] != labels[2]
         assert clusterer.search_space is None
-        assert "hyperopt" not in sys.modules
+        loaded = [name for name in forbidden if name in sys.modules]
+        assert not loaded, f"Unexpected import dependencies after inference: {{loaded}}"
         """
     )
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)

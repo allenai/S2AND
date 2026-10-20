@@ -1,19 +1,20 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from fastcluster import linkage
-from lightgbm import Booster, LGBMClassifier
 from scipy.cluster.hierarchy import fcluster
-from sklearn.base import BaseEstimator, TransformerMixin, clone
-from sklearn.metrics import roc_auc_score
 
 from s2and.consts import HARD_LINKAGE_DISTANCE, LARGE_DISTANCE
 
+# Prediction needs none of scikit-learn, LightGBM, or pandas. Training code imports them where it uses
+# them, because together they add about 1.5 s to every new prediction process.
 if TYPE_CHECKING:
     from hyperopt import Trials
+    from lightgbm import Booster
 
 # Giant blocks can hold hard negatives in most pairs; scan in bounded chunks so
 # the temporary mask stays small, not one byte or index per pair.
@@ -59,6 +60,8 @@ def constrained_linkage(distances: np.ndarray, method: str, *, preserve_input: b
 
 def lightgbm_booster(model: Any) -> Booster:
     """Return the fitted booster behind an S2AND or LightGBM model wrapper."""
+
+    from lightgbm import Booster
 
     if isinstance(model, Booster):
         return model
@@ -170,6 +173,8 @@ class PairwiseModeler:
     ):
         from hyperopt import hp
         from hyperopt.pyll import scope
+        from lightgbm import LGBMClassifier
+        from sklearn.base import clone
 
         if estimator is None:
             self.estimator = LGBMClassifier(
@@ -240,6 +245,7 @@ class PairwiseModeler:
         """
         if len(self.search_space) > 0:
             from hyperopt import Trials, fmin, space_eval, tpe
+            from sklearn.metrics import roc_auc_score
 
             def obj(params):
                 params = {k: intify(v) for k, v in params.items()}
@@ -284,9 +290,12 @@ def intify(x):
         return x
 
 
-class FastCluster(TransformerMixin, BaseEstimator):
+class FastCluster:
     """
-    A scikit-learn wrapper for fastcluster.
+    A scikit-learn compatible wrapper for fastcluster.
+
+    It implements the parameter API that ``sklearn.base.clone`` uses, without
+    importing scikit-learn, so prediction processes start faster.
     Inputs:
         linkage: string (default="average")
             Agglomerative linkage method. Defaults to "average".
@@ -335,6 +344,45 @@ class FastCluster(TransformerMixin, BaseEstimator):
         self.preserve_input = preserve_input
         self.input_as_observation_matrix = input_as_observation_matrix
         self.labels_ = None
+
+    @classmethod
+    def _get_param_names(cls) -> list[str]:
+        """Return the constructor parameter names, sorted as scikit-learn sorts them."""
+        parameters = inspect.signature(cls.__init__).parameters.values()
+        return sorted(parameter.name for parameter in parameters if parameter.name != "self")
+
+    def get_params(self, deep: bool = True) -> dict[str, Any]:
+        """Return the constructor parameters, as ``sklearn.base.BaseEstimator.get_params`` does.
+
+        Args:
+            deep: Accepted for scikit-learn compatibility; no parameter is an estimator.
+        """
+        del deep
+        return {name: getattr(self, name) for name in self._get_param_names()}
+
+    def set_params(self, **params: Any) -> FastCluster:
+        """Set constructor parameters, as ``sklearn.base.BaseEstimator.set_params`` does.
+
+        Raises:
+            ValueError: A name is not a constructor parameter.
+        """
+        valid = self._get_param_names()
+        for name, value in params.items():
+            if name not in valid:
+                raise ValueError(f"Invalid parameter {name!r} for estimator {self}. Valid parameters are: {valid!r}.")
+            setattr(self, name, value)
+        return self
+
+    def __repr__(self) -> str:
+        defaults = {
+            parameter.name: parameter.default
+            for parameter in inspect.signature(type(self).__init__).parameters.values()
+            if parameter.name != "self"
+        }
+        changed = ", ".join(
+            f"{name}={value!r}" for name, value in self.get_params().items() if value != defaults.get(name)
+        )
+        return f"{type(self).__name__}({changed})"
 
     def fit(self, X: np.ndarray) -> FastCluster:
         """
@@ -396,3 +444,16 @@ class FastCluster(TransformerMixin, BaseEstimator):
 
     def transform(self, X: np.ndarray):
         raise NotImplementedError("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")
+
+
+def clone_cluster_model(cluster_model: Any) -> Any:
+    """Return an unfitted copy of a clustering estimator with the same parameters.
+
+    A FastCluster copies itself, so prediction does not import scikit-learn.
+    Other estimators use ``sklearn.base.clone``.
+    """
+    if isinstance(cluster_model, FastCluster):
+        return type(cluster_model)(**cluster_model.get_params())
+    from sklearn.base import clone
+
+    return clone(cluster_model)

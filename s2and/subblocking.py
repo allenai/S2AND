@@ -11,11 +11,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
-import pandas as pd
-from sklearn.decomposition import TruncatedSVD
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import MultiLabelBinarizer
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_schema import validate_arrow_schema
@@ -307,6 +302,9 @@ def _exact_neighbor_edge_scores(
     evidences: Sequence[_SignatureEvidence],
     config: GraphSubblockingConfig,
 ) -> dict[tuple[int, int], float]:
+    # Import scikit-learn only when a block needs it; prediction processes start faster without it.
+    from sklearn.neighbors import NearestNeighbors
+
     neighbor_count = min(matrix.shape[0], max(2, int(config.neighbors) + 1))
     nearest = NearestNeighbors(n_neighbors=neighbor_count, metric="cosine", algorithm="brute")
     distances, indices = nearest.fit(matrix).kneighbors(matrix)
@@ -1468,6 +1466,10 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000, com
         )
         X = X_specter
     else:
+        from sklearn.decomposition import TruncatedSVD
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.preprocessing import MultiLabelBinarizer
+
         coauthor_matrix = MultiLabelBinarizer(sparse_output=True).fit_transform(coauthor_values)
         affiliation_matrix = TfidfVectorizer(preprocessor=None, analyzer=lambda x: x).fit_transform(affiliation_values)
         if min(coauthor_matrix.shape) < SPECTER_DIM or min(affiliation_matrix.shape) < SPECTER_DIM:
@@ -1549,6 +1551,8 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
     n_signature_ids = len(signature_ids)
     if n_signature_ids == 0:
         return {}, {}
+    import pandas as pd
+
     output = {}
     output_cant_subdivide = {}
     max_len = max([len(name) for name in names])

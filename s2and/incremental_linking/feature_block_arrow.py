@@ -22,6 +22,7 @@ from s2and.arrow_inputs import (
     RAW_PLANNER_ARROW_BATCH_INDEX_KEYS,
     RAW_PLANNER_ARROW_KEY_COLUMNS,
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
+    arrow_string_array,
     normalize_arrow_paths,
 )
 from s2and.arrow_schema import validate_arrow_schema
@@ -202,8 +203,8 @@ def write_cluster_seeds_arrow(path: Path, cluster_seeds_require: Mapping[Any, An
         items.append((signature_key, cluster_key))
     table = pa.table(
         {
-            "signature_id": pa.array([signature_id for signature_id, _cluster_id in items], type=pa.string()),
-            "cluster_id": pa.array([cluster_id for _signature_id, cluster_id in items], type=pa.string()),
+            "signature_id": arrow_string_array([signature_id for signature_id, _cluster_id in items]),
+            "cluster_id": arrow_string_array([cluster_id for _signature_id, cluster_id in items]),
         }
     )
     with pa.OSFile(str(path), "wb") as sink:
@@ -250,8 +251,8 @@ def write_cluster_seed_disallows_arrow(path: Path, pairs: Iterable[tuple[Any, An
     normalized = normalize_cluster_seed_disallow_pairs(pairs)
     table = pa.table(
         {
-            "signature_id_1": pa.array([left for left, _right in normalized], type=pa.string()),
-            "signature_id_2": pa.array([right for _left, right in normalized], type=pa.string()),
+            "signature_id_1": arrow_string_array([left for left, _right in normalized]),
+            "signature_id_2": arrow_string_array([right for _left, right in normalized]),
         }
     )
     with pa.OSFile(str(path), "wb") as sink:
@@ -294,7 +295,7 @@ def write_altered_cluster_signatures_arrow(path: Path, signature_ids: Iterable[A
         signature_ids,
         table_name="altered cluster signatures",
     )
-    table = pa.table({"signature_id": pa.array(normalized, type=pa.string())})
+    table = pa.table({"signature_id": arrow_string_array(normalized)})
     with pa.OSFile(str(path), "wb") as sink:
         with pa.ipc.new_file(sink, table.schema) as writer:
             writer.write_table(table)

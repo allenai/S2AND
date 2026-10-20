@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import math
@@ -10,12 +12,9 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from functools import cached_property, partial
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
 import numpy as np
-import pandas as pd
-from sklearn.cluster import KMeans
-from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 from s2and.arrow_inputs import ArrowDataset
@@ -53,6 +52,10 @@ from s2and.text import (
     normalize_title,
 )
 from s2and.thread_config import resolve_n_jobs
+
+# Prediction does not need pandas or scikit-learn; the training helpers below import them.
+if TYPE_CHECKING:
+    import pandas as pd
 
 logger = logging.getLogger("s2and")
 
@@ -159,6 +162,8 @@ def _split_train_val_test(
         test_ratio / ratio_total,
     )
 
+    from sklearn.model_selection import train_test_split
+
     heldout_ratio = 1.0 - train_ratio
     if train_ratio == 0.0:
         train_items: list[str] = []
@@ -226,6 +231,8 @@ def _map_fixed_pair_labels(pair_frame: pd.DataFrame, split_name: str) -> pd.Data
             f"Invalid fixed-pair columns in {split_name} split: require label and exactly one of "
             "(signature_id_1, signature_id_2), (pair1, pair2), or (pairs1, pair2), with unique column names"
         )
+    import pandas as pd
+
     output = pair_frame.loc[:, list(column_sets[0])].copy()
     mapped_labels = output["label"].map(_PAIR_LABEL_MAP)
     unknown_mask = mapped_labels.isna()
@@ -372,7 +379,7 @@ def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> b
     return True
 
 
-def _ordered_coauthors_for_signature(signature: "Signature", papers: dict[str, "Paper"]) -> list[str]:
+def _ordered_coauthors_for_signature(signature: Signature, papers: dict[str, Paper]) -> list[str]:
     if signature.author_info_position is None:
         raise ValueError(
             "Signature is missing author_info_position for coauthor ngram materialization "
@@ -582,7 +589,7 @@ class ANDData:
         *,
         arrow_dataset: ArrowDataset,
         **kwargs: Any,
-    ) -> "ANDData":
+    ) -> ANDData:
         """Construct a Rust-training dataset from one open Arrow dataset.
 
         Args:
@@ -1328,6 +1335,8 @@ class ANDData:
         -------
         either the loaded dataframe, or the passed in object
         """
+        import pandas as pd
+
         if isinstance(path_or_dataframe, str):
             return pd.read_csv(path_or_dataframe, sep=",")
         if path_or_dataframe is None or isinstance(path_or_dataframe, pd.DataFrame):
@@ -1558,6 +1567,8 @@ class ANDData:
         for block_id, signature in blocks_dict.items():
             x.append(block_id)
             y.append(len(signature))
+
+        from sklearn.cluster import KMeans
 
         # Explicitly set n_init to silence upcoming sklearn default-change warning
         clustering_model = KMeans(

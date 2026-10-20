@@ -272,7 +272,9 @@ def test_cluster_with_specter_surfaces_unexpected_auxiliary_feature_failures(mon
     def _raise_unexpected(_self, _values):
         raise RuntimeError("unexpected auxiliary failure")
 
-    monkeypatch.setattr(subblocking.MultiLabelBinarizer, "fit_transform", _raise_unexpected)
+    from sklearn.preprocessing import MultiLabelBinarizer
+
+    monkeypatch.setattr(MultiLabelBinarizer, "fit_transform", _raise_unexpected)
 
     with pytest.raises(RuntimeError, match="unexpected auxiliary failure"):
         subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)

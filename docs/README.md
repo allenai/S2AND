@@ -11,6 +11,7 @@ The [project README](../README.md) provides the installation and workflow overvi
 | --- | --- |
 | Run the model on your own records | [Production inference](production_inference.md) |
 | Obtain the common assets and corrected research snapshot | [Data and models](data.md) |
+| Reproduce the production training process on public data | [Reproduce the 1.3 model](reproduce.md) |
 | Correct data, add a dataset, or release another model | [Release process](release.md) |
 | Prepare a new corrected snapshot | [Data preparation commands](../scripts/production/data/README.md) |
 | Fit the production model | [Production commands](../scripts/production/README.md) |

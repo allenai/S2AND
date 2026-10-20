@@ -1,9 +1,11 @@
 # Production commands
 
-Use the complete corrected snapshot for production fits.
-This is the output of all accepted additions and corrections, not a reconstruction from old source archives.
+The release owner prepares one corrected snapshot, then writes the published release bundles from it.
+Every production fit, including the owner's fit, uses the published `inference` and `dataset` bundles.
+Public users therefore run the same commands as the owner.
 The [release process](../../docs/release.md) separates data preparation, fit, acceptance, and publication.
-The [data guide](../../docs/data.md) defines common Git LFS assets and the S3 research snapshot.
+The [data guide](../../docs/data.md) defines the three bundles.
+The [reproduction guide](../../docs/reproduce.md) lists the public commands in order.
 
 Release `1.3` excludes patent data.
 Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
@@ -11,8 +13,7 @@ Incremental inputs contain the 13 inherited non-patent datasets.
 The production count authority is fresh author-table counts, A.
 The [mainline record](../../docs/release_evidence/author_counts_mainline_20261017.md) defines the selected policy and rebuild status.
 The [earlier candidate record](../../docs/release_evidence/production_candidate_20261013.md) preserves the previous model's evidence.
-The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
-The snapshot passes relocation checks.
+The selected local snapshot path is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
 
 ## Corrected snapshot
 
@@ -45,19 +46,46 @@ The two replay options preserve current raw records and vectors for future updat
 Supply both options together when the snapshot includes replay sources.
 See [data preparation](data/README.md) for augmentation and embedding updates.
 
-## Pairwise model
+## Release bundles
 
-Set the snapshot and separate output paths before the fit:
+Write the three published bundles from the snapshot:
 
 ```powershell
-$Snapshot = '<combined-snapshot>'
+uv run --no-sync python scripts/production/data/write_release_bundles.py `
+  --snapshot <combined-snapshot> `
+  --output-root <new-bundle-root> `
+  --model <complete-model-dir>
+```
+
+The command writes `inference`, `dataset`, and `source` under the output root.
+Each bundle mirrors one S3 prefix.
+`--model` is optional, because the dataset bundle exists before the final model.
+Files are hardlinked on the snapshot's volume and copied across volumes.
+
+The dataset model plan, `pairwise/model_plan.json`, names one complete benchmark Arrow dataset per source.
+It also names that source's clusters, held-out blocks, frozen held-out pairs, and unknown-signature list.
+The augmented entry names one Arrow dataset and its fixed train, validation, and held-out pairs.
+Before it writes the plan, the command proves that the Arrow data rebuilds the snapshot's prepared populations.
+Development equals the benchmark minus the held-out blocks and any reserved signatures.
+The command also checks the clusters and the unknown-signature lists.
+The pre-cut pairwise copies, correction ledgers, and audit records stay in the internal snapshot.
+
+Sync `inference` and `dataset` into one folder to train or evaluate.
+The examples below call that folder `$Root`.
+
+## Pairwise model
+
+Set the release root and separate output paths before the fit:
+
+```powershell
+$Root = '<synced-inference-and-dataset>'
 $RunRoot = '<fresh-fit-output>'
 $PairwiseModel = "$RunRoot/pairwise/production_model_v1.3"
 
 uv run --no-sync python scripts/production/model/train_pairwise.py `
-  --model-plan "$Snapshot/pairwise/model_plan.json" `
-  --arrow-root "$Snapshot/pairwise/arrow/release" `
-  --name-counts-index-root "$Snapshot/name_counts_index" `
+  --model-plan "$Root/pairwise/model_plan.json" `
+  --name-counts-index-root "$Root/name_counts_index" `
+  --incumbent-parameters scripts/production/model/pairwise_incumbent_h13.json `
   --output-dir $PairwiseModel `
   --matrix-work-dir "$RunRoot/matrix-work" `
   --total-ram-bytes 137438953472 `
@@ -77,9 +105,17 @@ Existing augmented records derive from non-patent sources and remain part of rel
 
 Use `--help` for pair-count, search, and seed options.
 `--n-jobs` also sets `OMP_NUM_THREADS` for the run.
-Source order affects pair selection, so keep the exact source records and declared splits.
-The trainer rejects invalid augmented source membership before feature allocation.
+The plan binds each Arrow manifest by digest, and the Arrow row order fixes pair selection.
+The published `1.3` data reproduces the `1.3` training and validation matrices exactly.
+The trainer rejects invalid augmented source membership before artifact loading and feature allocation.
 Unknown signatures remain in inference context but do not supply supervised labels.
+
+Each head runs the official 50-trial TPE search.
+`--incumbent-parameters` adds one known LightGBM configuration per head.
+The incumbent fits on the same training rows and wins ties on validation ROC AUC.
+Release `1.3` used the H13 configuration in `pairwise_incumbent_h13.json`.
+The `1.3` main head kept search trial 26; the nameless head kept H13.
+The training summary records the selected source and both validation scores.
 
 The output is an immutable pairwise-only model with `eps_calibration: "pending"` and placeholder EPS `0.5`.
 It contains both boosters and both required prediction fixtures.
@@ -95,17 +131,17 @@ Select EPS from validation data with the same model plan:
 $CalibratedModel = "$RunRoot/calibrated/production_model_v1.3"
 uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-eps `
   --source-bundle $PairwiseModel `
-  --model-plan "$Snapshot/pairwise/model_plan.json" `
+  --model-plan "$Root/pairwise/model_plan.json" `
   --output-bundle $CalibratedModel `
   --output-report "$RunRoot/eps_calibration_report.json" `
-  --name-counts-index-root "$Snapshot/name_counts_index" `
-  --arrow-root "$Snapshot/pairwise/arrow/release" `
+  --name-counts-index-root "$Root/name_counts_index" `
   --total-ram-bytes 137438953472 `
   --n-jobs 12
 ```
 
 The EPS grid and minimum floors come from the model plan.
 Calibration uses validation B3 partitions and the fixed aggregation and tie-break policy.
+It requires the development blocks that the model recorded at training time.
 It writes a fresh calibrated sibling and preserves the boosters.
 This benchmark calibration supplies the initial EPS.
 Complete [giant-block EPS review](../../docs/eps_calibration.md) after the complete candidate exists and before final release evaluation.
@@ -117,15 +153,15 @@ A booster or feature-contract change requires new incremental features and a fre
 ## Complete model and linker evaluation
 
 Freeze incremental task labels, assignments, target, and evaluation policy before the fit:
-Use the index path that the snapshot's Arrow manifests resolve.
+Use the index path that the root's Arrow manifests resolve.
 An identical index at another path does not satisfy the linker preflight check.
 
 ```powershell
 uv run --no-sync python scripts/production/model/train_linker_and_finalize.py `
-  --source-bundle-root $Snapshot `
+  --source-bundle-root $Root `
   --target-json tests/fixtures/incremental_linker_training_target.json `
   --pairwise-model-path $CalibratedModel `
-  --name-counts-index-root "$Snapshot/name_counts_index" `
+  --name-counts-index-root "$Root/name_counts_index" `
   --output-dir "$RunRoot/complete" `
   --n-jobs 12 `
   --total-ram-bytes 137438953472
@@ -276,28 +312,24 @@ scan is required.
 
 ## Exact held-out metrics
 
-Evaluate the complete model on the snapshot's declared outer holdouts and fixed pairs:
+Evaluate the complete model on the model plan's held-out blocks and fixed held-out pairs:
 
 ```powershell
 uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-heldout `
-  --inputs-json "$Snapshot/pairwise/inputs.json" `
+  --model-plan "$Root/pairwise/model_plan.json" `
   --model "$RunRoot/complete/production_model_v1.3" `
-  --arrow-root "$Snapshot/pairwise/arrow/evaluation" `
-  --name-counts-index-root "$Snapshot/name_counts_index" `
+  --name-counts-index-root "$Root/name_counts_index" `
   --output-report "$RunRoot/reports/heldout_metrics.json" `
   --n-jobs 12 `
   --total-ram-bytes 137438953472
 ```
 
-The command verifies source hashes, Arrow provenance, common artifacts, and the model's fit-plan identity.
-The plan identity uses dataset names, file roles, file digests, the release version, and the EPS policy.
-File locations are not part of that identity, so a relocated snapshot matches its model.
-A model that records only plan bytes, such as v1.3, also needs `--original-model-plan <path>`.
-That file must hash to the recorded bytes and have the same content as the snapshot plan.
-For v1.3, use `D:/local-unsynced/s2and_v1.3_train_20261012/model_plan.json`.
-`bind-candidate` and `calibrate-eps` accept the same option.
-The command also requires `sources.model` to equal the verified plan.
-It rejects model or augmented train and validation members in the outer test populations.
+The command verifies plan file digests, Arrow manifests, and common artifacts.
+It binds the model to the plan by the development blocks that the model recorded at training time.
+That binding does not depend on the plan layout, so the published `1.3` model passes it.
+Held-out pairs must stay inside the held-out blocks.
+The command rejects augmented train and validation copies of held-out signatures.
+It also rejects augmented held-out copies of development signatures.
 It uses saved production constraints for B3 prediction.
 Unknown signatures remain in prediction context but do not supply supervised scores.
 The report contains pairwise metrics, B3 metrics, counts, and input identities.
@@ -607,7 +639,8 @@ so a copy (for example, the one inside the assembled linker-source bundle) is
 rejected. The file must contain `signature_id` and `candidate_component_key`
 columns; rows for signatures outside the selected Arrow root are ignored.
 
-Produce pairwise, cluster, subblocking, and parity reports:
+Produce pairwise, cluster, subblocking, and parity reports.
+These promotion evaluators read the owner's internal snapshot, not the published bundles:
 
 ```powershell
 uv run python scripts/production/model/release_pairwise.py evaluate-pairs `

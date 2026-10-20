@@ -35,7 +35,8 @@ Keep source snapshots and fit outputs in separate directories.
 - Keep one common binary name-count index and complete production model in versioned Git LFS assets.
 - Build the common index from author-table rows. Archive mention counts, M, as a research alternative.
 - Keep small name tuples and ORCID prefix counts in normal Git and the Python wheel.
-- Publish corrected research data to S3 without a second model or count index.
+- Publish three S3 bundles, `inference`, `dataset`, and `source`, with one copy of each file.
+- Train every release model from the published `inference` and `dataset` bundles.
 - Use supported formats and schemas for dataset compatibility.
 - Bind models to feature-contract versions, ordered feature names, and exact required artifact hashes.
 - Treat the model's generating runtime version as provenance.
@@ -99,10 +100,19 @@ Encode changed informative text and informative text without a source vector.
 Retain the declared encoder model, adapter, tokenizer, pooling, and truncation recipe.
 
 Package the corrected records, pairwise inputs, benchmark projections, and complete incremental inputs with `package_corrected_datasets.py`.
-The producer writes `pairwise/model_plan.json` and portable paths to one shared count index.
+The producer writes an internal snapshot with portable paths to one shared count index.
 Validate the assembled snapshot after relocation.
 Check record counts, gold coverage, masks, pair endpoints, split assignments, and native Arrow opens.
 See [the preparation commands](../scripts/production/data/README.md).
+
+Freeze identity-gold cases against the final snapshot with `evaluate_incremental_gold.py prepare`.
+The cases bind the published benchmark files, so evaluation needs only the `dataset` bundle.
+Freeze them again after any change to the benchmark Arrow data or the count index.
+
+Write the published bundles with `write_release_bundles.py`.
+The command proves that the benchmark Arrow data rebuilds the snapshot's prepared populations.
+It then writes the dataset model plan.
+See [release bundles](../scripts/production/README.md#release-bundles).
 
 Dataset manifests declare the fit population rather than a fixed seven-source list.
 The current release declares seven non-patent benchmarks and non-patent augmentation.
@@ -111,9 +121,11 @@ Training and external evaluation must satisfy the declared identity overlap rule
 
 ## Stage 3: train the pairwise model
 
-Run `train_pairwise.py` with the snapshot's model plan, fit Arrow root, and common index.
+Sync the `inference` and `dataset` bundles into one root.
+Run `train_pairwise.py` with that root's model plan and common index.
 Use a separate run output and matrix workspace.
 The trainer searches main and nameless models from the declared datasets.
+Pass a known configuration with `--incumbent-parameters` to let it compete with each search winner.
 It writes an immutable pairwise-only stage with EPS marked `pending`.
 It does not require an evaluation baseline or a historical release record.
 
@@ -200,9 +212,11 @@ Do not dispatch publication before model and data acceptance are complete.
 
 Publish the common large assets to Git LFS under a versioned release path.
 Release `1.3` uses `artifacts/common/v1.3` for the index and accepted complete model.
-Publish the research snapshot to an immutable S3 prefix without common assets.
-Download both parts into one local root.
+Write the bundles again with the accepted model, then publish each bundle to its immutable S3 prefix.
+Release `1.3` uses `s3://ai2-s2-research-public/s2and/1.3/` with `inference/`, `dataset/`, and `source/`.
+Sync `inference` and `dataset` into one fresh local root.
 Verify hashes and repeat installed bulk and incremental smoke checks.
+Run one public step from the [reproduction guide](reproduce.md) on that root.
 
 Record the package, model, research snapshot, and format versions in the release notes.
 Record the common Git ref, asset paths, S3 prefix, manifest hashes, and evaluation decision.

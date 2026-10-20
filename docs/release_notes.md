@@ -18,6 +18,32 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Breaking changes
 
+- Releases publish three S3 bundles: `inference` (model and count index), `dataset`
+  (Arrow training and evaluation data), and `source` (editable records).
+  `scripts/production/data/write_release_bundles.py` writes them from the prepared
+  snapshot after it proves that the Arrow data rebuilds the prepared populations.
+  [The reproduction guide](reproduce.md) runs the production training process on
+  `inference` plus `dataset`.
+- Production training uses an Arrow model plan. Each random-block dataset names its
+  complete benchmark Arrow manifest, clusters, held-out blocks, frozen held-out pairs,
+  and optional unknown-signature and excluded-signature lists. A fixed-pair dataset
+  names its Arrow manifest and train, validation, and held-out pairs.
+  `train_pairwise.py` and `release_pairwise.py calibrate-eps` drop `--arrow-root` and
+  reject plans that name JSON papers or SPECTER pickles. The published `1.3` data
+  reproduces the `1.3` training and validation matrices exactly.
+- `release_pairwise.py evaluate-heldout` takes `--model-plan` instead of `--inputs-json`
+  and `--arrow-root`. EPS calibration, held-out evaluation, and `bind-candidate` bind a
+  model to its data by the recorded development-block membership instead of plan bytes,
+  so the released `1.3` model evaluates on the published data. `bind-candidate` also
+  verifies the training summary against the candidate manifest.
+- `train_pairwise.py --incumbent-parameters` lets one known LightGBM configuration per
+  head compete with each search winner on validation ROC AUC; the incumbent wins ties.
+  `scripts/production/model/pairwise_incumbent_h13.json` holds the `1.3` configuration.
+- `evaluate_incremental_gold.py prepare` binds frozen cases to the benchmark manifest,
+  conversion provenance, clusters copy, and unknown-signature list, so evaluation needs
+  only the `dataset` bundle. Cases frozen before this change bind `corrected_sources`
+  files and must be prepared again.
+
 - Removes full-file Arrow source fingerprints and the `fingerprint_source`
   writer option. Batch indexes now use `S2ABI003` with a 32-byte header; rebuild
   older indexes and regenerate their dataset manifest. Validators and

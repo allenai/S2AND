@@ -44,11 +44,12 @@ Pull LFS assets after a branch or release-ref change that affects those files.
 
 The compatible release locations remain unpublished.
 The release notes will provide the common Git ref, model path, S3 prefix, and hashes.
-The [data guide](docs/data.md#dataset-download) defines the local layout and download requirements for each user group.
+Each release publishes three S3 bundles: `inference`, `dataset`, and `source`.
+The [data guide](docs/data.md#choose-the-required-data) states which bundles each user needs.
 Historical Arrow prefixes do not satisfy the current format-1 contract.
 
-Inference users need the common assets and their own data.
-Research users place the S3 snapshot beside the one common index.
+Inference users sync `inference` and supply their own data.
+Training and evaluation users also sync `dataset` into the same folder.
 Classic `ANDData` selects that index through [path configuration](docs/data.md#configuring-s2anddatapath_configjson).
 Arrow and production script calls use explicit paths.
 
@@ -76,7 +77,8 @@ The [inference guide](docs/production_inference.md) describes raw inputs, embedd
 
 ## Training and evaluation
 
-The maintained production pairwise trainer reads `pairwise/model_plan.json` from the corrected research snapshot.
+The [reproduction guide](docs/reproduce.md) runs the production training process on the published data.
+The production pairwise trainer reads `pairwise/model_plan.json` from the synced `dataset` bundle.
 It uses the dataset names that the plan declares.
 The [production commands](scripts/production/README.md#pairwise-model) describe pairwise fit, validation-only EPS selection, and incremental finalization.
 A historical baseline is not a prerequisite for a pairwise fit.

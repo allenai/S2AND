@@ -1,39 +1,46 @@
 # Data and Models
 
-S2AND has one common artifact set and one corrected research snapshot.
-The research snapshot contains the final output of all accepted additions and corrections.
-Use that snapshot as the input to the next correction cycle.
+S2AND publishes each release as three bundles.
+Each bundle is one S3 folder.
+Sync the bundles that you need into one local folder; each bundle adds files beside the others.
+The `source` bundle contains the final output of all accepted additions and corrections.
+Use it as the input to the next correction cycle.
 Historical correction archives are not required.
 
 ## Choose the required data
 
-| User | Required content | Distribution |
-| --- | --- | --- |
-| Inference | Complete production model and binary name-count index | Versioned Git LFS assets |
-| Research | Common assets plus corrected records, labels, embeddings, exact splits, and incremental tasks | S3 research snapshot |
-| Release owner | Research snapshot plus maintained preparation and training scripts | Same snapshot and this repository |
+| Bundle | Use | Contents | Release `1.3` size |
+| --- | --- | --- | --- |
+| `inference/` | Run the production model | Complete production model and binary name-count index | 2.4 GB |
+| `dataset/` | Train, tune, and evaluate models | Benchmark Arrow data with labels, held-out test blocks and pairs, augmented pairs, the model plan, and incremental linker tasks | 9.1 GB |
+| `source/` | Correct records and prepare the next release | Editable JSON records with full paper text, SPECTER2 pickles, and giant-block replay records | 25.6 GB |
 
+Inference needs `inference/` only.
+Training and evaluation need `inference/` and `dataset/`.
+Release preparation needs all three bundles.
+The model and index also remain Git LFS assets under `artifacts/common/v1.3`.
 Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.
-Research data does not contain a second count index or production model.
 The complete model contains both pairwise boosters, calibrated EPS, the incremental linker, and required prediction fixtures.
 See [the inference contract](production_inference.md#complete-model-bundles).
 
-## Dataset download
+## Download
 
-The common count index is available from PR 80's `canonical-v2-migration` branch.
+> **Update at v1.3 release:** The S3 bundles are not published yet.
+> Replace this note with the verified bucket path, the release Git ref, and the manifest hashes.
+
+```bash
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/inference/ s2and-1.3/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/dataset/ s2and-1.3/
+# Release preparation only:
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/source/ s2and-1.3/
+```
+
+The [reproduction guide](reproduce.md) runs the full training process on the synced folder.
 Release `1.3` excludes patent data.
 Its pairwise data contains eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
 Its incremental data contains the 13 inherited non-patent datasets.
-The patent-free complete candidate passes fit, evaluation, and installed Arrow inference checks.
-The research S3 release remains unpublished.
-The release notes will identify the common Git ref, model path, research S3 prefix, and manifest hashes.
 Do not use an older public Arrow prefix with this runtime.
 Older manifests lack the required public format `1` contract.
-
-Common repository paths for release `1.3` are:
-
-- `artifacts/common/v1.3/name_counts_index`
-- `artifacts/common/v1.3/production_model_v1.3`
 
 The production count authority is A: one contribution per source author-table row.
 The Athena export preserves all raw first/last groups, including null names.
@@ -43,54 +50,50 @@ Only AI2 staff can build the index, because its input is an internal Semantic Sc
 Other users use the released index and cannot regenerate it.
 Each future refresh of the index is a staff step.
 
-The complete model path contains the verified patent-free candidate.
-The release notes will identify the accepted Git ref after final acceptance.
-Fetch the common assets at the Git ref declared by the release notes:
+Git LFS supplies the same model and index:
 
 ```bash
 git lfs pull --include="artifacts/common/v1.3/**"
 ```
 
-Use `artifacts/common/v1.3` as the local root when the research files share that root.
-The S3 download then adds research files beside the existing index without another index copy.
-Exclude `name_counts_index/*` and `production_model_*/**` from the research upload.
+To use that copy, sync `dataset/` into `artifacts/common/v1.3`.
+Arrow manifests find the index at `name_counts_index/` in the same folder.
 
-Use one local root for the common count index and research snapshot:
+## Folder layout
 
 ```text
-release-root/
-  name_counts_index/       # Common Git LFS asset; one physical copy
-  production_model_vX.Y/   # Common Git LFS asset
-  manifest.json           # Research public-data manifest
-  corrected_sources/      # Complete best-known records and labels
-  corrected_replay/       # Available giant replay records and vectors
+s2and-1.3/
+  name_counts_index/          # inference: binary name-count index
+  production_model_v1.3/      # inference: complete model
+  manifest.json               # dataset: public-data manifest
+  benchmarks/<source>/        # dataset: Arrow tables, <source>_clusters.json, unknown-signature list
   pairwise/
-    inputs.json
-    model_plan.json
-    sources/              # Exact fit and evaluation source populations
-    arrow/                # Fit and evaluation Arrow projections
-  benchmarks/             # Full benchmark Arrow projections
-  replay_manifest.json
-  bundle.json             # Incremental source configuration
-  labels/
-  components/
-  splits/
-  datasets/               # Incremental replay Arrow projections
+    model_plan.json           # dataset: training populations, held-out tests, EPS policy
+    heldout/<source>/         # dataset: test_blocks.json and test_pairs.json
+    augmented/                # dataset: augmented Arrow tables and fixed pairs
+  replay_manifest.json        # dataset: incremental Arrow catalog
+  bundle.json                 # dataset: incremental source configuration
+  datasets/                   # dataset: incremental Arrow datasets
+  labels/  components/  splits/   # dataset: incremental tasks
+  evaluation_inputs/          # dataset: frozen identity-gold cases
+  incremental_patent_tasks/   # dataset: initial-query source map
+  corrected_sources/          # source: editable benchmark records
+  corrected_replay/           # source: giant-block replay records and vectors
+  augmented/                  # source: editable augmented records
 ```
 
-The S3 snapshot contains the research files in this layout.
-Fetch its matching common index separately into `release-root/name_counts_index`.
-Inference users do not need `corrected_sources`, benchmark labels, or incremental training tasks.
+The model plan names one complete benchmark Arrow dataset per source.
+It also names that source's clusters, held-out blocks, frozen held-out pairs, and unknown-signature list.
+The development population is the benchmark minus its held-out blocks.
+The trainer selects pairs and computes features from the same Arrow data.
+The published `1.3` data reproduces the `1.3` training and validation matrices exactly.
 Dataset manifests use portable paths to the one common index.
 
-The release publisher must exclude common assets from the S3 research upload.
-A standalone local export can contain its own index for transfer.
-Such an export is not the canonical combined publication.
-
-The selected local snapshot path is `D:/local-unsynced/s2and_incremental_fresh_20261014/ready/complete_datasets_no_patents`.
-The snapshot passes relocation checks.
-Its 613 files total 40,268,461,989 logical bytes, including one common count index.
-The S3 research payload excludes that index: 608 files and 37,875,435,573 bytes.
+The release owner writes the bundles from an internal snapshot with
+[`write_release_bundles.py`](../scripts/production/README.md#release-bundles).
+That snapshot also holds pre-cut pairwise copies, correction ledgers, and audit records.
+They are not published.
+The `1.3` snapshot is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
 Patent records and research task packets remain outside the release inputs.
 
 ## Corrected source records
@@ -109,9 +112,9 @@ New abstract-based vectors for those giants require another source of full abstr
 Benchmark cluster gold remains in `clusters.json` files.
 Pair-labeled datasets use explicit pair files.
 Unknown signatures remain available for inference but do not supply supervised labels.
-Exact pair lists and split identities preserve the experiment population; a random seed alone is insufficient.
+Held-out blocks, fixed pair lists, and the recorded seed preserve the experiment population.
 
-The snapshot also contains augmented records and their explicit pair labels.
+The bundles also contain augmented records and their explicit pair labels.
 Augmented source identities link each derived record to its corrected source signature.
 Maintain those identities when the source dataset changes.
 
@@ -129,7 +132,7 @@ They do not prove independence from every past model or dataset.
 
 ## File formats and compatibility
 
-The research snapshot supports giant-block EPS review on its seven giant Arrow datasets.
+The `dataset` bundle supports giant-block EPS review on its seven giant Arrow datasets.
 Their profile memberships, dev labels, and initial-query source map need no second S3 copy.
 The final `1.3` EPS choice also uses fresh internal production exports that the release does not include.
 Public data reproduces the validation EPS calibration but not that final review.

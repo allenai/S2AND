@@ -30,7 +30,9 @@ uv run --no-sync python scripts/production/data/package_corrected_datasets.py `
 The producer copies complete corrected sources and exact fit/evaluation inputs.
 The paired replay options preserve accepted raw replay records and vectors.
 They are optional, but the complete release snapshot supplies both.
-It writes `pairwise/inputs.json` and `pairwise/model_plan.json` with relative paths.
+It writes `pairwise/inputs.json` and an internal `pairwise/model_plan.json` with relative paths.
+Publish and train from the bundles that `write_release_bundles.py` writes from this snapshot.
+See [release bundles](../README.md#release-bundles).
 It includes fit/evaluation Arrow projections, benchmark projections, and the complete incremental source dataset.
 All projections reference one physical count index at the snapshot root.
 It validates hashes, boundaries, source identities, and native loaders.

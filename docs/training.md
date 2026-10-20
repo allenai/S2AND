@@ -9,8 +9,9 @@ See [the release process](release.md) for model acceptance and publication.
 
 ## Production snapshot inputs
 
-The production pairwise trainer reads `pairwise/model_plan.json` from the complete corrected snapshot.
-It computes features from `pairwise/arrow/release` and the one shared `name_counts_index`.
+The production pairwise trainer reads `pairwise/model_plan.json` from the published `dataset` bundle.
+It selects pairs and computes features from each source's benchmark Arrow data and the one shared `name_counts_index`.
+The [reproduction guide](reproduce.md) lists the production commands in order.
 Release `1.3` excludes patent data from its source records, pairwise fit, and incremental inputs.
 Its pairwise plan declares eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
 Its incremental source contains the 13 inherited non-patent datasets.
@@ -108,8 +109,8 @@ pairwise_model = PairwiseModeler(
 pairwise_model.fit(X_train, y_train, X_val, y_val)
 ```
 
-The production `train_pairwise.py` command featurizes from its frozen
-`model_plan.json`; programmatic research callers use `featurize(...)` directly.
+The production `train_pairwise.py` command featurizes from the Arrow data that its
+`model_plan.json` names; programmatic research callers use `featurize(...)` directly.
 
 ## Evaluate the pairwise classifier
 

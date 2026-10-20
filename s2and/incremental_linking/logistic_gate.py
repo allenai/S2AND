@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -127,6 +128,73 @@ _DIRECT_FEATURE_SOURCES = {
     "top_meta_query_first_token_len": "query_first_token",
     "top_meta_query_author_len": "query_author",
 }
+_LIST_OPS = frozenset({"mean", "std", "min", "max"})
+_CATEGORICAL_PREFIXES = ("candidate_kind_", "first_name_bucket_", "query_view_", "gate_bucket_")
+_BUCKET_PREFIXES = ("first_name_bucket_", "gate_bucket_")
+
+
+@dataclass(frozen=True)
+class _GateFeaturePlan:
+    """Parsed gate feature names. Incremental linking re-runs the gate once per query, so parse once."""
+
+    feature_names: tuple[str, ...]
+    positions: Mapping[str, int]
+    probability_names: tuple[str, ...]
+    unsupported_probability_name: str | None
+    categorical: tuple[tuple[str, str, str], ...]
+    bucket_features: tuple[str, ...]
+    source_ops: tuple[tuple[str, frozenset[str]], ...]
+
+
+@functools.lru_cache(maxsize=32)
+def _gate_feature_plan(feature_names: tuple[str, ...]) -> _GateFeaturePlan:
+    """Parse unique gate feature names into the columns each feature family fills."""
+
+    resolved = _validate_unique_feature_names(feature_names)
+    probability_names = tuple(name for name in resolved if name.startswith("prob_"))
+    unsupported = [name for name in probability_names if name not in _PROBABILITY_FEATURES]
+    categorical = []
+    for name in resolved:
+        for prefix in _CATEGORICAL_PREFIXES:
+            if name.startswith(prefix):
+                categorical.append((name, prefix, name.removeprefix(prefix)))
+                break
+    source_ops: dict[str, set[str]] = {}
+    for name in resolved:
+        for prefix, op in _EVIDENCE_AGGREGATE_PREFIX_TO_OP.items():
+            if name.startswith(prefix):
+                source_ops.setdefault(name.removeprefix(prefix), set()).add(op)
+                break
+    return _GateFeaturePlan(
+        feature_names=resolved,
+        positions=MappingProxyType({name: index for index, name in enumerate(resolved)}),
+        probability_names=probability_names,
+        unsupported_probability_name=unsupported[0] if unsupported else None,
+        categorical=tuple(categorical),
+        bucket_features=tuple(name for name in resolved if name.startswith(_BUCKET_PREFIXES)),
+        source_ops=tuple((source, frozenset(ops)) for source, ops in source_ops.items()),
+    )
+
+
+@functools.lru_cache(maxsize=32)
+def _feature_source_requirements(
+    feature_names: tuple[str, ...],
+) -> tuple[tuple[tuple[str, str | None, bool], ...], tuple[str, ...]]:
+    """Return each feature's runtime source and whether it needs query_view, then the bucket features."""
+
+    requirements = []
+    for feature_name in feature_names:
+        source_name = _DIRECT_FEATURE_SOURCES.get(feature_name)
+        if source_name is None:
+            for prefix in _EVIDENCE_AGGREGATE_PREFIX_TO_OP:
+                if feature_name.startswith(prefix):
+                    source_name = feature_name.removeprefix(prefix)
+                    break
+        needs_query_view = feature_name.startswith("query_view_")
+        if source_name is not None or needs_query_view:
+            requirements.append((feature_name, source_name, needs_query_view))
+    bucket_features = tuple(feature_name for feature_name in feature_names if feature_name.startswith(_BUCKET_PREFIXES))
+    return tuple(requirements), bucket_features
 
 
 def _immutable_float64_array(value: Any) -> np.ndarray:
@@ -466,10 +534,22 @@ def _equal_length_blocks(
     """
 
     lengths = np.bincount(group_of_value, minlength=group_count)
+    for positions, index in _length_buckets(lengths):
+        yield positions, grouped_values[index]
+
+
+def _length_buckets(lengths: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Return the positions of the groups of each nonzero length and their value indices.
+
+    The value indices assume the groups' values lie group after group in one array.
+    """
+
     starts = np.cumsum(lengths) - lengths
+    buckets = []
     for length in np.unique(lengths[lengths > 0]).tolist():
         positions = np.flatnonzero(lengths == length)
-        yield positions, grouped_values[starts[positions, None] + np.arange(length)]
+        buckets.append((positions, starts[positions, None] + np.arange(length)))
+    return buckets
 
 
 def _divide_where(numerator: np.ndarray, denominator: np.ndarray, where: np.ndarray) -> np.ndarray:
@@ -561,24 +641,14 @@ def _validate_selected_feature_sources(
 ) -> None:
     """Reject selected gate features whose runtime source column is absent."""
 
+    requirements, bucket_features = _feature_source_requirements(tuple(str(name) for name in feature_names))
     missing: list[tuple[str, str]] = []
-    for feature_name in feature_names:
-        source_name = _DIRECT_FEATURE_SOURCES.get(feature_name)
-        if source_name is None:
-            for prefix in _EVIDENCE_AGGREGATE_PREFIX_TO_OP:
-                if feature_name.startswith(prefix):
-                    source_name = feature_name.removeprefix(prefix)
-                    break
+    for feature_name, source_name, needs_query_view in requirements:
         if source_name is not None and source_name not in feature_values:
             missing.append((feature_name, source_name))
-        elif feature_name.startswith("query_view_") and "query_view" not in feature_values:
+        elif needs_query_view and "query_view" not in feature_values:
             missing.append((feature_name, "query_view"))
 
-    bucket_features = [
-        feature_name
-        for feature_name in feature_names
-        if feature_name.startswith(("first_name_bucket_", "gate_bucket_"))
-    ]
     has_bucket_source = "first_name_bucket" in feature_values or (
         "query_first_token" in feature_values and "query_view" in feature_values
     )
@@ -604,7 +674,8 @@ def build_logistic_gate_matrix(
 ) -> tuple[np.ndarray, LogisticGateQueryRows]:
     """Build per-query logistic gate features from scored candidate rows."""
 
-    resolved_feature_names = _validate_unique_feature_names(feature_names)
+    plan = _gate_feature_plan(tuple(str(feature_name) for feature_name in feature_names))
+    resolved_feature_names = plan.feature_names
     probability_array = np.asarray(probabilities, dtype=np.float64)
     row_count = len(probability_array)
     if retrieval_ranks is None and "retrieval_rank" in feature_values:
@@ -621,7 +692,7 @@ def build_logistic_gate_matrix(
     elif "query_first_token" in feature_values and "query_view" in feature_values:
         first_name_bucket = first_name_bucket_array(feature_values["query_first_token"], feature_values["query_view"])
     else:
-        if any(name.startswith(("first_name_bucket_", "gate_bucket_")) for name in resolved_feature_names):
+        if plan.bucket_features:
             raise ValueError(
                 "logistic gate first_name_bucket_* and gate_bucket_* features require 'first_name_bucket' or both"
                 " 'query_first_token' and 'query_view' in feature_values"
@@ -633,7 +704,7 @@ def build_logistic_gate_matrix(
     query_author = _object_array(feature_values, "query_author", row_count)
 
     matrix = np.empty((len(query_rows.groups), len(resolved_feature_names)), dtype=np.float64)
-    feature_positions = {feature_name: index for index, feature_name in enumerate(resolved_feature_names)}
+    feature_positions = plan.positions
     handled: set[str] = set()
 
     def set_column(name: str, values: np.ndarray) -> None:
@@ -646,7 +717,8 @@ def build_logistic_gate_matrix(
     best_rows = query_rows.best_rows
     group_count = len(query_rows.groups)
     group_lengths = np.asarray([len(group) for group in query_rows.ranked_groups], dtype=np.int64)
-    group_of_row = np.repeat(np.arange(group_count), group_lengths)
+    group_starts = np.cumsum(group_lengths) - group_lengths
+    length_buckets = _length_buckets(group_lengths)
     set_column("chosen_probability", probability_array[best_rows])
     set_column("second_probability", query_rows.runner_up_scores)
     set_column("score_margin", query_rows.score_margins)
@@ -654,15 +726,15 @@ def build_logistic_gate_matrix(
     set_column("raw_candidate_count", group_lengths.astype(np.float64))
 
     ranked_rows = _concatenated_rows(query_rows.ranked_groups)
-    probability_feature_names = [name for name in resolved_feature_names if name.startswith("prob_")]
-    if probability_feature_names:
-        unsupported = [name for name in probability_feature_names if name not in _PROBABILITY_FEATURES]
-        if unsupported:
-            raise KeyError(f"Unsupported logistic gate probability feature: {unsupported[0]}")
-        for positions, probs in _equal_length_blocks(probability_array[ranked_rows], group_of_row, group_count):
-            for feature_name, values in _probability_feature_columns(probs, probability_feature_names).items():
+    if plan.probability_names:
+        if plan.unsupported_probability_name is not None:
+            raise KeyError(f"Unsupported logistic gate probability feature: {plan.unsupported_probability_name}")
+        ranked_probabilities = probability_array[ranked_rows]
+        for positions, index in length_buckets:
+            columns = _probability_feature_columns(ranked_probabilities[index], plan.probability_names)
+            for feature_name, values in columns.items():
                 matrix[positions, feature_positions[feature_name]] = values
-        handled.update(probability_feature_names)
+        handled.update(plan.probability_names)
 
     candidate_kind = np.where(query_rows.has_runner_up, "multi_candidate", "single_candidate")
     best_first_name_bucket = first_name_bucket[best_rows].astype(str)
@@ -671,31 +743,22 @@ def build_logistic_gate_matrix(
         [f"{kind}|{bucket}" for kind, bucket in zip(candidate_kind, best_first_name_bucket, strict=True)],
         dtype=object,
     )
-    for feature_name in resolved_feature_names:
-        if feature_name.startswith("candidate_kind_"):
-            set_column(feature_name, (candidate_kind == feature_name.removeprefix("candidate_kind_")).astype(float))
-        elif feature_name.startswith("first_name_bucket_"):
-            set_column(
-                feature_name,
-                (best_first_name_bucket == feature_name.removeprefix("first_name_bucket_")).astype(float),
-            )
-        elif feature_name.startswith("query_view_"):
-            set_column(feature_name, (best_query_view == feature_name.removeprefix("query_view_")).astype(float))
-        elif feature_name.startswith("gate_bucket_"):
-            set_column(feature_name, (gate_bucket == feature_name.removeprefix("gate_bucket_")).astype(float))
-
-    source_ops: dict[str, set[str]] = {}
-    for feature_name in resolved_feature_names:
-        for prefix, op in _EVIDENCE_AGGREGATE_PREFIX_TO_OP.items():
-            if feature_name.startswith(prefix):
-                source_ops.setdefault(feature_name.removeprefix(prefix), set()).add(op)
-                break
+    categorical_values = {
+        "candidate_kind_": candidate_kind,
+        "first_name_bucket_": best_first_name_bucket,
+        "query_view_": best_query_view,
+        "gate_bucket_": gate_bucket,
+    }
+    for feature_name, prefix, value in plan.categorical:
+        set_column(feature_name, (categorical_values[prefix] == value).astype(float))
 
     has_second = group_lengths > 1
-    second_rows = ranked_rows[(np.cumsum(group_lengths) - group_lengths)[has_second] + 1]
+    second_rows = ranked_rows[group_starts[has_second] + 1]
     group_rows = _concatenated_rows(query_rows.groups)
+    group_of_row = np.repeat(np.arange(group_count), group_lengths)
     cache: dict[str, np.ndarray] = {}
-    for source_name, ops in source_ops.items():
+    finite_list_sources: list[tuple[str, frozenset[str], np.ndarray]] = []
+    for source_name, ops in plan.source_ops:
         values = cache.setdefault(source_name, _feature_array(feature_values, source_name, row_count))
         if "top" in ops:
             set_column(f"top_raw_{source_name}", values[best_rows])
@@ -703,11 +766,14 @@ def build_logistic_gate_matrix(
             deltas = np.full(group_count, np.nan, dtype=np.float64)
             deltas[has_second] = values[best_rows[has_second]] - values[second_rows]
             set_column(f"delta_top_second_{source_name}", deltas)
-        list_ops = ops & {"mean", "std", "min", "max"}
+        list_ops = ops & _LIST_OPS
         if list_ops:
-            aggregates = {op: np.full(group_count, np.nan, dtype=np.float64) for op in list_ops}
             grouped_values = values[group_rows]
             finite = np.isfinite(grouped_values)
+            if finite.all():
+                finite_list_sources.append((source_name, list_ops, grouped_values))
+                continue
+            aggregates = {op: np.full(group_count, np.nan, dtype=np.float64) for op in list_ops}
             # A query whose values are all missing gets no block, so its aggregates stay NaN.
             for positions, block in _equal_length_blocks(grouped_values[finite], group_of_row[finite], group_count):
                 if "mean" in list_ops:
@@ -720,6 +786,27 @@ def build_logistic_gate_matrix(
                     aggregates["max"][positions] = np.max(block, axis=1)
             for op, values_for_op in aggregates.items():
                 set_column(f"list_{op}_{source_name}", values_for_op)
+    if finite_list_sources:
+        # Reduce all sources without missing values at once. Each row of the 2-D block holds one
+        # (source, query) pair in the per-source order. NumPy sums a contiguous row pairwise, as in the
+        # per-source path; a strided row is summed in order and can round differently.
+        stacked = np.stack([grouped_values for _, _, grouped_values in finite_list_sources])
+        source_count = len(finite_list_sources)
+        needed = frozenset().union(*(list_ops for _, list_ops, _ in finite_list_sources))
+        batched = {op: np.full((source_count, group_count), np.nan, dtype=np.float64) for op in needed}
+        for positions, index in length_buckets:
+            block = np.ascontiguousarray(stacked[:, index]).reshape(source_count * len(positions), index.shape[1])
+            if "mean" in needed:
+                batched["mean"][:, positions] = np.mean(block, axis=1).reshape(source_count, -1)
+            if "std" in needed:
+                batched["std"][:, positions] = np.std(block, axis=1, ddof=0).reshape(source_count, -1)
+            if "min" in needed:
+                batched["min"][:, positions] = np.min(block, axis=1).reshape(source_count, -1)
+            if "max" in needed:
+                batched["max"][:, positions] = np.max(block, axis=1).reshape(source_count, -1)
+        for source_position, (source_name, list_ops, _) in enumerate(finite_list_sources):
+            for op in list_ops:
+                set_column(f"list_{op}_{source_name}", batched[op][source_position])
 
     if "top_meta_retrieval_rank" in feature_positions:
         values = cache.setdefault("retrieval_rank", _feature_array(feature_values, "retrieval_rank", row_count))

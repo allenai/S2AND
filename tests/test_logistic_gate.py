@@ -327,12 +327,19 @@ def _per_query_probability_feature(name: str, probs: np.ndarray) -> float:
     return simple[name]
 
 
-@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize("seed", range(5))
 def test_build_logistic_gate_matrix_matches_per_query_definitions(seed: int) -> None:
-    """Grouped NumPy reductions must equal the per-query definitions bit for bit."""
+    """Grouped NumPy reductions must equal the per-query definitions bit for bit.
+
+    Source x has missing values and takes the per-source path. Sources y and z have none and are
+    reduced together, which needs contiguous rows to keep NumPy's pairwise sums.
+    """
     rng = np.random.default_rng(seed)
     lengths = rng.integers(1, 40, size=30)
     lengths[:3] = [1, 2, 3]
+    if seed == 4:
+        # Many queries share each length, and one length has a single query.
+        lengths = np.concatenate([rng.choice([9, 17], size=300), [5]])
     query_indices = np.repeat(np.arange(len(lengths)), lengths)
     rng.shuffle(query_indices)
     row_count = len(query_indices)
@@ -341,34 +348,50 @@ def test_build_logistic_gate_matrix_matches_per_query_definitions(seed: int) -> 
         probabilities = rng.choice([0.0, -0.0, 0.25, 0.5, 0.75, 1.0], size=row_count)
     if seed == 2:
         probabilities[rng.random(row_count) < 0.1] = np.nan
-    values = rng.normal(size=row_count) * 1e3
-    special = rng.random(row_count) < 0.25
-    values[special] = rng.choice([0.0, -0.0, np.nan, np.inf, -np.inf, 5e-324], size=int(special.sum()))
-    values[query_indices == 0] = np.nan
-    feature_names = [*_PROBABILITY_FEATURES] + [
-        f"{prefix}_x" for prefix in ("delta_top_second", "list_mean", "list_std", "list_min", "list_max")
-    ]
+    values = {}
+    for source, specials in (
+        ("x", [0.0, -0.0, np.nan, np.inf, -np.inf, 5e-324]),
+        ("y", [0.0, -0.0, 5e-324, 1e300, -1e300]),
+        ("z", [0.0, -0.0, 1.0]),
+    ):
+        source_values = rng.normal(size=row_count) * 10.0 ** int(rng.integers(-3, 4))
+        special = rng.random(row_count) < 0.25
+        source_values[special] = rng.choice(specials, size=int(special.sum()))
+        values[source] = source_values
+    values["x"][query_indices == 0] = np.nan
+    sources = ("x", "y", "z")
+    prefixes = ("delta_top_second", "list_mean", "list_std", "list_min", "list_max")
+    feature_names = [*_PROBABILITY_FEATURES] + [f"{prefix}_{source}" for source in sources for prefix in prefixes]
 
-    with np.errstate(invalid="ignore", divide="ignore"):
+    # The 1e300 values overflow np.std in both implementations, which must still agree.
+    with np.errstate(all="ignore"):
         matrix, query_rows = build_logistic_gate_matrix(
             feature_names,
             query_indices=query_indices,
             probabilities=probabilities,
-            feature_values={"x": values},
+            feature_values=values,
             retrieval_ranks=rng.integers(0, 9, size=row_count),
         )
         expected = np.full_like(matrix, np.nan)
         for query_pos, (group, ranked) in enumerate(zip(query_rows.groups, query_rows.ranked_groups, strict=True)):
             for column, name in enumerate(_PROBABILITY_FEATURES):
                 expected[query_pos, column] = _per_query_probability_feature(name, probabilities[ranked])
-            column = len(_PROBABILITY_FEATURES)
-            if len(ranked) > 1:
-                expected[query_pos, column] = float(values[ranked[0]] - values[ranked[1]])
-            finite = values[group][np.isfinite(values[group])]
-            if len(finite):
-                expected[query_pos, column + 1 :] = [np.mean(finite), np.std(finite), np.min(finite), np.max(finite)]
+            for source_position, source in enumerate(sources):
+                column = len(_PROBABILITY_FEATURES) + source_position * len(prefixes)
+                source_values = values[source]
+                if len(ranked) > 1:
+                    expected[query_pos, column] = float(source_values[ranked[0]] - source_values[ranked[1]])
+                finite = source_values[group][np.isfinite(source_values[group])]
+                if len(finite):
+                    expected[query_pos, column + 1 : column + 5] = [
+                        np.mean(finite),
+                        np.std(finite),
+                        np.min(finite),
+                        np.max(finite),
+                    ]
 
     same_bits = matrix.view(np.uint64) == expected.view(np.uint64)
     assert np.all(same_bits | (np.isnan(matrix) & np.isnan(expected)))
     all_missing = next(pos for pos, group in enumerate(query_rows.groups) if query_indices[group[0]] == 0)
-    assert np.isnan(matrix[all_missing, -4:]).all()
+    x_list_columns = slice(len(_PROBABILITY_FEATURES) + 1, len(_PROBABILITY_FEATURES) + 5)
+    assert np.isnan(matrix[all_missing, x_list_columns]).all()

@@ -370,12 +370,15 @@ def test_subset_featurizer_matches_a_full_build_bit_for_bit(release_inputs: dict
     np.testing.assert_array_equal(distances[1].view(np.uint64), distances[0].view(np.uint64))
 
 
-def test_provenance_rejects_tables_that_differ_from_the_recorded_conversion(
+def test_provenance_rejects_other_sources_and_tables_that_differ_from_the_recorded_conversion(
     fresh_release_inputs: dict[str, Any],
 ) -> None:
     dataset_dir = fresh_release_inputs["arrow_root"] / "qian"
     expected = source_sha256(fresh_release_inputs["files"])
     verify_conversion_provenance(dataset_dir, expected_source_sha256=expected)
+    for role in expected:
+        with pytest.raises(ArrowProvenanceError, match=f"converted from a different {role} source"):
+            verify_conversion_provenance(dataset_dir, expected_source_sha256={**expected, role: "f" * 64})
 
     record_path = dataset_dir / "conversion_provenance.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))

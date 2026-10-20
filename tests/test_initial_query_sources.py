@@ -9,8 +9,7 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
-from scripts.production.data._incremental_query_views import _derived_id
-from scripts.production.model.initial_query_sources import load_initial_query_sources
+from scripts.production.model.initial_query_sources import derived_query_id, load_initial_query_sources
 from scripts.production.model.train_linker_and_finalize import (
     _copy_bundle_support_files,
     _load_initial_query_sources,
@@ -21,8 +20,8 @@ from tests.raw_arrow_helpers import write_ipc
 
 def _snapshot(root: Path, *, clones: bool = True) -> tuple[Path, list[dict[str, str]]]:
     dataset = root / "datasets" / "unit"
-    clone = _derived_id("visibleq:", "q", "paper")
-    clone_paper = _derived_id("visiblep:", "q", "paper")
+    clone = derived_query_id("visibleq:", "q", "paper")
+    clone_paper = derived_query_id("visiblep:", "q", "paper")
     ids, papers = ["q", "other"], ["paper", "other-paper"]
     if clones:
         ids.append(clone)

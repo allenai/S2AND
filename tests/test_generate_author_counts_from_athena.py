@@ -156,7 +156,7 @@ def test_plan_rejects_sql_injection_and_excess_threads(tmp_path: Path, monkeypat
 def test_export_builds_reference_bytes_and_completed_resume_uses_no_aws(tmp_path: Path) -> None:
     pytest.importorskip("duckdb", minversion="1.5")
     from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
-    from scripts.production.counts.generate_name_counts import build_name_count_dicts
+    from tests.name_count_oracle import build_name_count_dicts
 
     output = tmp_path / "actual"
     args = exporter._parser().parse_args(_arguments(output, "--execute"))

@@ -20,7 +20,7 @@ pytest.importorskip("duckdb", minversion="1.5")
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_counts_index import NameCountsIndex
 from scripts.production.counts import generate_name_counts_from_parquet as producer
-from scripts.production.counts.generate_name_counts import build_name_count_dicts
+from tests.name_count_oracle import build_name_count_dicts
 
 ROWS = [
     ("Ána", "García", 1),

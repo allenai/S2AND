@@ -585,7 +585,10 @@ def _conversion_name_counts_index(
     path = require_name_counts_index_artifact(
         root / "name_counts_index" if index_root is None else index_root,
         context=context,
-        producer_hint="run python -m scripts.production.counts.generate_name_counts first",
+        producer_hint=(
+            "download the released name_counts_index or rebuild it with "
+            "scripts.production.counts.generate_author_counts_from_athena"
+        ),
     )
     return path, time.perf_counter() - start
 
@@ -1113,7 +1116,10 @@ def validate_arrow_dataset_manifest(
         require_name_counts_index_artifact(
             paths["name_counts_index"],
             context="convert_to_arrow dataset validation",
-            producer_hint="run python -m scripts.production.counts.generate_name_counts or rebuild the release bundle",
+            producer_hint=(
+                "download the released name_counts_index or rebuild it with "
+                "scripts.production.counts.generate_author_counts_from_athena"
+            ),
         )
         metrics["name_counts_index_present"] = True
 

@@ -18,7 +18,7 @@ v1.3 release work is complete. Release operators must follow
 | `production/model/release_pairwise.py` | Validation-only EPS calibration, outer-test evaluation (`evaluate-heldout`), and the promotion measurement components with `evaluate-release` aggregation |
 | `production/model/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs. Use only when the accepted support or replay Arrow roots change; see [data preparation](production/data/README.md) |
 | `production/generate_canonical_name_tuples.py` | Deterministically generate the canonical tuple text file from the reviewed source artifact |
-| `production/counts/generate_name_counts.py` | Convert one reviewed, guardrailed CSV export into an immutable native `name_counts_index/`; invoke with `python -m` |
+| `production/counts/generate_author_counts_from_athena.py` | Export author-table name counts from Athena and build an immutable native `name_counts_index/` (AI2 staff only); see [count producers](production/counts/README.md) |
 | `production/counts/generate_orcid_name_prefix_counts.py` | Convert one reviewed, guardrailed CSV export into canonical ORCID prefix-count JSON bound to the packaged tuple artifact; invoke with `python -m` |
 
 ### Tutorials

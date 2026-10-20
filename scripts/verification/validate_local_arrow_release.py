@@ -54,7 +54,8 @@ def _validate_name_counts_index(path: Path, errors: list[str], *, label: str) ->
             path,
             context=label,
             producer_hint=(
-                "run python -m scripts.production.counts.generate_name_counts or refresh the release checkout"
+                "download the released name_counts_index or rebuild it with "
+                "scripts.production.counts.generate_author_counts_from_athena"
             ),
         )
     except (OSError, TypeError, ValueError) as exc:

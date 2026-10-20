@@ -47,6 +47,12 @@ The inherited linker test reports 96.715% accuracy on 10,837 queries.
 
 The local `artifacts/common/v1.3` path contains the matching A index and complete model.
 Full project checks pass, with 2,128 Python tests and 162 Rust tests.
+
+On 2026-10-19 the release owner applied EPS `0.53` from the final giant-block review.
+Only `clusterer.json` and the manifest change; the boosters stay the same.
+The new manifest SHA256 is `1d21148553bac71b4c3561857c2d415586a215b3084c963798326699d7bee232`.
+At `0.53`, the external test reports signature-weighted B3 F1 of 96.44%.
+The identity-gold result stays at 134 of 152 cases.
 Python distribution assets match the source.
 The installed Python and Rust wheels pass bulk and incremental inference.
 The jobs use at most 12 compute threads, with a 128 GiB process-tree limit within the approved 160 GB budget.

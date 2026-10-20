@@ -20,7 +20,7 @@ Training and evaluation need `inference/` and `dataset/`.
 Release preparation needs all three bundles.
 The model and index also remain Git LFS assets under `artifacts/common/v1.3`.
 Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.
-The complete model contains both pairwise boosters, calibrated EPS, the incremental linker, and required prediction fixtures.
+The complete model contains both pairwise boosters, the reviewed EPS, the incremental linker, and required prediction fixtures.
 See [the inference contract](production_inference.md#complete-model-bundles).
 
 ## Download
@@ -135,7 +135,8 @@ They do not prove independence from every past model or dataset.
 The `dataset` bundle supports giant-block EPS review on its seven giant Arrow datasets.
 Their profile memberships, dev labels, and initial-query source map need no second S3 copy.
 The final `1.3` EPS choice also uses fresh internal production exports that the release does not include.
-Public data reproduces the validation EPS calibration but not that final review.
+Public data reproduces the validation EPS calibration, `0.57`, but not that final review.
+The released model uses the reviewed EPS, `0.53`.
 Calibration reference files and review outputs are derived sidecars.
 Keep them distinct from untouched final test data.
 See [giant-block EPS review](eps_calibration.md) for their production commands.

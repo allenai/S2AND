@@ -61,7 +61,7 @@
   "kind": "s2and_model",
   "release_version": "1.3",
   "sha256": {
-    "clusterer.json": "8153d169e54796f4646dc92589b4aff42ae2b5334e13ab1f0b2a3e671d1cc69b",
+    "clusterer.json": "04aeeddde6c9c41a568e19f465ec98663285e937a3e7345b64e2b4c0bf6cb33c",
     "incremental_linker/booster.lgb": "69968ade6b1a90223781c7655bb1a2af2347da89feb0fd731bb08028c8d0fb84",
     "incremental_linker/metadata.json": "190cad4032dde315cc2528d26b76f0fb484fe46ef9c24b9f59c5f4ae9e1d256c",
     "pairwise/main.lgb": "63dfa9a4c890c5557de74f74677d71791c53c7b71a30be160d136b3625843edb",

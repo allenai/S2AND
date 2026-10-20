@@ -21,6 +21,13 @@ The claimed blocks are `f_matsen`, `s_feldman`, `s_gupta`, `s_park`, `s_lee`, an
 These exports are not part of the released data, so public users cannot repeat the final review.
 Future releases can also use internal exports for this step.
 
+The release owner chose EPS `0.53` for `1.3` on 2026-10-19.
+The review scores each tested EPS on nine blocks with S = (2 × B3 precision + B3 recall) / 3.
+It weights each scored signature equally.
+EPS `0.53` gives the best S of the tested values: 90.09%, against 88.99% at `0.57`.
+The same ORCID references select and assess EPS, so this review is not an independent test.
+On the benchmark outer test, signature-weighted B3 F1 rises from 0.963514 at `0.57` to 0.964372 at `0.53`.
+
 The original plot script is `scratch/plot_q_class_eps_sweeps.py`.
 It plots positive recall against negative separation from expanded incremental candidate labels.
 Its old reference EPS is `0.6064583976`; a retained topic-split command uses `0.65`.
@@ -158,6 +165,18 @@ It requires exactly the seven frozen giants and both complete curves for each.
 It reads the final-test assignments again and rejects a reference that contains a final-test record.
 It requires identity B3 curves; the safe-action plot remains diagnostic evidence.
 It writes a fresh complete model and preserves every trained artifact byte.
+
+When internal exports supply the review, omit `--sweep-root` and `--datasets`.
+The command cannot check those curves, so the review note must cite their location.
+It still checks the EPS range, the fresh output paths, the model load, and the unchanged artifacts.
+Release `1.3` used this form:
+
+```powershell
+uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
+  --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3" `
+  --eps 0.53 --review-note '<decision, tradeoff, and internal evidence location>' `
+  --output-report "$EpsRun/eps_review.json"
+```
 Only `clusterer.json` and `manifest.json` change.
 An EPS-only change requires no pairwise or incremental fit.
 Repeat affected cluster evaluation and real-model inference checks with the reviewed package before acceptance.

@@ -1,7 +1,7 @@
 {
   "batch_size": 1000000,
   "cluster_model": {
-    "eps": 0.57,
+    "eps": 0.53,
     "linkage": "average"
   },
   "dont_merge_cluster_seeds": true,

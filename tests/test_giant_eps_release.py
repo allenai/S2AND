@@ -382,29 +382,59 @@ def test_eps_commands_reject_an_unmatched_expected_source_map(
     assert not (tmp_path / "output").exists()
 
 
-@pytest.mark.parametrize("with_source_map", [False, True])
-def test_eps_only_update_preserves_real_complete_artifacts(tmp_path: Path, with_source_map: bool) -> None:
+def _complete_model(tmp_path: Path) -> Path:
     hashes = canonical_artifact_hashes()
     pairwise = tmp_path / "pairwise"
     write_synthetic_pairwise_bundle(pairwise, artifact_hashes=hashes, release_version="9.9")
     linker = tmp_path / "linker"
     target = _write_synthetic_linker(pairwise, linker)
-    source = finalize_production_bundle(
+    return finalize_production_bundle(
         pairwise_bundle_dir=pairwise,
         output_bundle_dir=tmp_path / "source",
         incremental_linker_artifact_dir=linker,
         target_json=target,
     ).bundle_dir
+
+
+def _changed_files(source: Path, output: Path) -> set[str]:
     before = {path.relative_to(source).as_posix(): path.read_bytes() for path in source.rglob("*") if path.is_file()}
+    after = {path.relative_to(output).as_posix(): path.read_bytes() for path in output.rglob("*") if path.is_file()}
+    assert before.keys() == after.keys()
+    return {path for path in before if before[path] != after[path]}
+
+
+@pytest.mark.parametrize("with_source_map", [False, True])
+def test_eps_only_update_preserves_real_complete_artifacts(tmp_path: Path, with_source_map: bool) -> None:
+    source = _complete_model(tmp_path)
     _curve(tmp_path / "curves", sha256_file(source / "manifest.json"), with_source_map=with_source_map)
     output = tmp_path / "output"
     report = _apply(tmp_path, source)
     assert report["sweep_plans"]["unit"]["reference"]["reference_policy"] == orcid_b3.REFERENCE_POLICY
-    after = {path.relative_to(output).as_posix(): path.read_bytes() for path in output.rglob("*") if path.is_file()}
-    assert before.keys() == after.keys()
-    assert {path for path in before if before[path] != after[path]} == {"clusterer.json", "manifest.json"}
+    assert _changed_files(source, output) == {"clusterer.json", "manifest.json"}
     assert load_production_model(output).cluster_model.eps == 0.65
     assert load_production_model(source).cluster_model.eps == 0.5
+
+
+def test_owner_eps_from_internal_review_preserves_real_complete_artifacts(tmp_path: Path) -> None:
+    source = _complete_model(tmp_path)
+    output = tmp_path / "output"
+    report = apply_reviewed_eps(source, output, None, [], 0.53, "Internal review", tmp_path / "review.json")
+    assert report["sweep_plans"] is None
+    assert _changed_files(source, output) == {"clusterer.json", "manifest.json"}
+    assert load_production_model(output).cluster_model.eps == 0.53
+
+
+@pytest.mark.parametrize(("sweep_root", "datasets"), [("curves", []), (None, ["unit"])])
+def test_review_requires_sweep_root_and_datasets_together(
+    tmp_path: Path, sweep_root: str | None, datasets: list[str]
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    root = None if sweep_root is None else tmp_path / sweep_root
+    with pytest.raises(ValueError, match="together"):
+        apply_reviewed_eps(source, tmp_path / "output", root, datasets, 0.53, "Review", tmp_path / "review.json")
+    assert not (tmp_path / "output").exists()
 
 
 @pytest.mark.parametrize("valid_origin", [False, True])

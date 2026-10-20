@@ -5,7 +5,7 @@ The result is approximately the released `1.3` model.
 Three steps stay outside public reproduction:
 
 - **Name counts.** Only AI2 staff can rebuild the name-count index from internal data. Use the released index.
-- **Final EPS review.** The release owner reviews giant-block EPS curves on internal production exports. Public calibration reproduces the validation EPS choice.
+- **Final EPS review.** The release owner reviews giant-block EPS curves on internal production exports. Public calibration reproduces the validation EPS choice, `0.57`. The released model uses the owner's choice, `0.53`.
 - **LightGBM fits.** Multithreaded LightGBM fits can differ slightly across machines and thread counts. Use 12 threads for the closest match.
 
 The published data reproduces the `1.3` training and validation matrices exactly.
@@ -135,14 +135,22 @@ Pass `"$ROOT/production_model_v1.3"` as the model in steps 4 and 5 to score the 
 | Main head validation ROC AUC | 0.994227 (search trial 26) |
 | Nameless head validation ROC AUC | 0.974620 (H13) |
 | Validation EPS and B3 F1 | 0.57 and 0.959781 on 72,649 signatures |
-| Outer-test signature-weighted B3 F1 | 0.963514 on 72,853 signatures |
+| Released EPS and its validation B3 F1 | 0.53 and 0.959287 |
+| Outer-test signature-weighted B3 F1 | 0.964372 at EPS 0.53 and 0.963514 at EPS 0.57, on 72,853 signatures |
 | Outer-test pairwise AUROC | 0.989391 |
-| Linker test accuracy | 96.715% on 10,837 queries |
-| Identity-gold cases | 134 of 152 correct |
+| Linker test accuracy | 96.715% on 10,837 queries, scored at EPS 0.57 |
+| Identity-gold cases | 134 of 152 correct at EPS 0.53 and 0.57 |
 
-The released model uses EPS from the final giant-block review.
+Steps 1-5 end at the validation EPS, `0.57`.
+The released model uses EPS `0.53` from the final giant-block review.
+To compare with the released model, apply that EPS to your complete model:
 
-> **Update at v1.3 release:** Record the final released EPS and replace any value above that the final EPS changes.
+```bash
+uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py   --source-model "$RUN/complete/production_model_v1.3"   --output-model "$RUN/released-eps/production_model_v1.3"   --eps 0.53   --review-note "Released 1.3 EPS from the final giant-block review"   --output-report "$RUN/released_eps.json"
+```
+
+The command changes only `clusterer.json` and the manifest; the boosters stay the same.
+Score the result with steps 4 and 5.
 
 On 12 threads, step 1 takes about one hour and step 3 about 75 minutes.
 Steps 2, 4, and 5 take a few minutes each.

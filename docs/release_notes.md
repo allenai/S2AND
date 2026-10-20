@@ -319,6 +319,11 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Changed
 
+- The `1.3` model uses EPS `0.53` from the final giant-block review; benchmark
+  validation selects `0.57`. `scripts/eps_sweep/apply_reviewed_eps.py` now applies
+  such an owner choice without snapshot sweep curves: omit `--sweep-root` and
+  `--datasets`. It keeps the EPS range, fresh-output, model-load, and
+  unchanged-artifact checks. See [giant-block EPS review](eps_calibration.md).
 - Canonical names read a raw first name of two or three capitals, such as `HG`,
   as initials when the last name is not in capitals. A first name of one capital
   and one or two lowercase letters with no vowel and no `y`, such as `Jh`, also

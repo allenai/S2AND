@@ -172,6 +172,7 @@ Use ORCID-masked B3 curves for identity quality and the original safe-action plo
 The release owner selects the final EPS after both views and benchmark validation.
 The final review can use fresh internal production exports that the released data does not include.
 Release `1.3` uses such exports, so public users cannot repeat its final EPS review.
+That review selects EPS `0.53`; benchmark validation selects `0.57`.
 Apply the reviewed EPS to a fresh complete model without another fit.
 Freeze that package before final acceptance tests.
 

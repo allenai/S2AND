@@ -63,33 +63,17 @@ def _require_test_separated_reference(
     return stats
 
 
-def apply_reviewed_eps(
-    source: Path,
-    output: Path,
+def _validated_sweep_plans(
     sweep_root: Path,
     datasets: Sequence[str],
     eps: float,
-    review_note: str,
-    report_path: Path,
-    *,
-    release_datasets: Sequence[str] = RELEASE_GIANT_DATASETS,
-    test_identities: TestIdentityLoader = final_test_query_identities,
-) -> dict[str, Any]:
-    """Reject stale, bounded, partial, or test-overlapping curves and preserve all trained artifact bytes."""
-    source, output, report_path = source.resolve(), output.resolve(), report_path.resolve()
-    if not math.isfinite(eps) or not 0 <= eps <= 1:
-        raise ValueError("EPS must be finite and within [0, 1]")
-    if not review_note.strip() or not datasets:
-        raise ValueError("A manual review note and dataset list are required")
+    source_hash: str,
+    release_datasets: Sequence[str],
+    test_identities: TestIdentityLoader,
+) -> dict[str, dict[str, Any]]:
+    """Reject stale, bounded, partial, or test-overlapping snapshot curves."""
     if len(set(datasets)) != len(datasets) or set(datasets) != set(release_datasets):
         raise ValueError(f"Release EPS review requires exactly the frozen datasets: {sorted(release_datasets)}")
-    if output.exists() or report_path.exists():
-        raise FileExistsError("Use new model and review-report paths")
-    if source in output.parents or output in source.parents:
-        raise ValueError("The model output must be separate from its source")
-    if report_path in {source, output} or source in report_path.parents or output in report_path.parents:
-        raise ValueError("The review report must remain outside both model directories")
-    source_hash = sha256_file(source / "manifest.json")
     plans: dict[str, dict[str, Any]] = {}
     source_maps: dict[Path, InitialQuerySources] = {}
     for dataset in dict.fromkeys(datasets):
@@ -137,6 +121,45 @@ def apply_reviewed_eps(
             "score_mode": plan["score_mode"],
             "reference": reference,
         }
+    return plans
+
+
+def apply_reviewed_eps(
+    source: Path,
+    output: Path,
+    sweep_root: Path | None,
+    datasets: Sequence[str],
+    eps: float,
+    review_note: str,
+    report_path: Path,
+    *,
+    release_datasets: Sequence[str] = RELEASE_GIANT_DATASETS,
+    test_identities: TestIdentityLoader = final_test_query_identities,
+) -> dict[str, Any]:
+    """Write a fresh complete model with the reviewed EPS and preserve all trained artifact bytes.
+
+    With a sweep root, check the snapshot giant curves first.
+    Without one, the review note must cite the internal evidence, because the curves are not on disk here.
+    """
+    source, output, report_path = source.resolve(), output.resolve(), report_path.resolve()
+    if not math.isfinite(eps) or not 0 <= eps <= 1:
+        raise ValueError("EPS must be finite and within [0, 1]")
+    if not review_note.strip():
+        raise ValueError("A manual review note is required")
+    if (sweep_root is None) != (not datasets):
+        raise ValueError("Pass the sweep root and the dataset list together, or neither")
+    if output.exists() or report_path.exists():
+        raise FileExistsError("Use new model and review-report paths")
+    if source in output.parents or output in source.parents:
+        raise ValueError("The model output must be separate from its source")
+    if report_path in {source, output} or source in report_path.parents or output in report_path.parents:
+        raise ValueError("The review report must remain outside both model directories")
+    source_hash = sha256_file(source / "manifest.json")
+    plans = (
+        None
+        if sweep_root is None
+        else _validated_sweep_plans(sweep_root, datasets, eps, source_hash, release_datasets, test_identities)
+    )
     load_production_model(source)
     manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
     config = json.loads((source / "clusterer.json").read_text(encoding="utf-8"))
@@ -171,8 +194,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-model", type=Path, required=True)
     parser.add_argument("--output-model", type=Path, required=True)
-    parser.add_argument("--sweep-root", type=Path, required=True)
-    parser.add_argument("--datasets", nargs="+", required=True)
+    parser.add_argument(
+        "--sweep-root",
+        type=Path,
+        help="Snapshot giant-block sweep root; omit it with --datasets when internal exports supply the review",
+    )
+    parser.add_argument("--datasets", nargs="+", default=[])
     parser.add_argument("--eps", type=float, required=True)
     parser.add_argument("--review-note", required=True)
     parser.add_argument("--output-report", type=Path, required=True)

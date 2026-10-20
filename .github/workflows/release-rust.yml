@@ -18,14 +18,18 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Version sync check
-        run: uv run --no-project python scripts/sync_version.py --check
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
 
-      - name: Install exact source environment
-        run: uv sync --frozen --extra dev
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-      - name: Run release test suite
-        run: uv run pytest -q
+      # The script checks versions, runs Ruff, ty, and the Rust checks, syncs the locked environment, and runs pytest.
+      - name: Run the full CI policy
+        run: uv run --no-project python scripts/run_ci_locally.py
 
   source-distributions:
     name: source distributions

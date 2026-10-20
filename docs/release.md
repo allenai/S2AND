@@ -204,6 +204,7 @@ The workflow's synthetic smoke does not replace this check.
 See [installed release smoke](../scripts/production/README.md#installed-release-smoke).
 
 Publish through `.github/workflows/release-rust.yml` from the reviewed `main` commit.
+Its validate job runs `scripts/run_ci_locally.py`, the same checks as pull-request CI.
 Verify the workflow commit before approval of its protected PyPI environment.
 Confirm both package versions are absent before the first irreversible publish.
 The workflow publishes Rust first and then the matching Python package.

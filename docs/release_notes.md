@@ -506,8 +506,8 @@ production model and public-data version is `1.3`, on a separate version axis.
 - The `1.0.0` runtime removes legacy pickle/count-dictionary loading and redundant
   artifact plumbing. Bounded native name-count lookups, optimized float32
   scoring, and deterministic component publication reduce resource use and
-  preserve artifact identities. Release-grade v1.3 memory and throughput gates
-  remain pending.
+  preserve artifact identities. **Update at v1.3 release:** Release-grade v1.3
+  memory and throughput gates remain pending.
 
 ### Removed and simplified
 

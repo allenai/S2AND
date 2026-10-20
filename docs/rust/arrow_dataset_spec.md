@@ -792,7 +792,7 @@ Recommended smoke checks:
 These commands require a format-1 corrected snapshot and compatible complete model.
 They use the release owner's internal snapshot, which keeps the pre-cut fit projection.
 The published `dataset` bundle does not contain that projection.
-The public release locations remain unpublished.
+**Update at v1.3 release:** The public release locations remain unpublished.
 Use the snapshot's exact fit projection for evaluation of model-recorded internal test splits.
 A full benchmark projection does not replace that population.
 

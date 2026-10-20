@@ -617,6 +617,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture-dir", type=Path, required=True)
@@ -629,10 +636,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional existing public-format-1 canonical name-count index; otherwise a bounded index is generated.",
     )
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
-    parser.add_argument("--block-size", type=int, required=True)
+    parser.add_argument("--block-size", type=_positive_int, required=True)
     # Require an explicit allocation; a fixed default can exceed the shared CPU budget.
-    parser.add_argument("--n-jobs", type=int, required=True)
-    parser.add_argument("--total-ram-bytes", type=int, default=1_000_000_000_000)
+    parser.add_argument("--n-jobs", type=_positive_int, required=True)
+    parser.add_argument("--total-ram-bytes", type=_positive_int, default=1_000_000_000_000)
     parser.add_argument(
         "--compare-features",
         dest="compare_features",

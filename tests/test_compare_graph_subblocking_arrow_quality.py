@@ -52,6 +52,31 @@ def test_compare_graph_subblocking_parser_requires_bounded_or_explicit_full_run(
         script.parse_args()
 
 
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--min-edge-score", "nan"],
+        ["--specter-weight", "inf"],
+        ["--max-candidate-edges", "0"],
+        ["--neighbors", "-1"],
+        ["--local-move-passes", "-1"],
+        ["--maximum-size", "0"],
+        ["--top-diff-subblocks", "0"],
+    ],
+)
+def test_compare_graph_subblocking_parser_rejects_invalid_numbers(monkeypatch, extra_args) -> None:
+    monkeypatch.setattr(sys, "argv", [*_base_argv(), "--allow-full", *extra_args])
+
+    with pytest.raises(SystemExit):
+        script.parse_args()
+
+
+def test_compare_graph_subblocking_parser_accepts_zero_local_move_passes(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", [*_base_argv(), "--allow-full", "--local-move-passes", "0"])
+
+    assert script.parse_args().local_move_passes == 0
+
+
 def _write_table(path, table) -> None:
     import pyarrow as pa
 

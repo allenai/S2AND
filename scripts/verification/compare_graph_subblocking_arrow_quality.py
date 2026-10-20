@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
 import time
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, BinaryIO
@@ -122,6 +124,13 @@ def parse_args() -> argparse.Namespace:
         parser.error("provide --limit for a bounded run, or --allow-full to run the full block explicitly")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
+    for option in ("maximum_size", "top_diff_subblocks"):
+        if getattr(args, option) <= 0:
+            parser.error(f"--{option.replace('_', '-')} must be positive")
+    try:
+        _graph_config(args)
+    except ValueError as error:
+        parser.error(str(error))
     return args
 
 
@@ -388,32 +397,50 @@ def load_lightweight_dataset_from_arrow(
     )
 
 
+def _validate_graph_config(config: GraphSubblockingConfig) -> GraphSubblockingConfig:
+    """Reject non-finite weights and nonpositive sizes, which silently change the graph."""
+    for field, default in asdict(_DEFAULT_GRAPH_CONFIG).items():
+        value = getattr(config, field)
+        option = "--" + field.replace("_", "-")
+        if isinstance(default, bool | str):
+            continue
+        if isinstance(default, int):
+            minimum = 0 if field == "local_move_passes" else 1
+            if value < minimum:
+                raise ValueError(f"{option} must be at least {minimum}")
+        elif isinstance(default, float) and not math.isfinite(value):
+            raise ValueError(f"{option} must be finite")
+    return config
+
+
 def _graph_config(args: argparse.Namespace) -> GraphSubblockingConfig:
-    return GraphSubblockingConfig(
-        neighbor_mode=str(args.neighbor_mode),
-        neighbors=int(args.neighbors),
-        min_edge_score=float(args.min_edge_score),
-        specter_weight=float(args.specter_weight),
-        coauthor_weight=float(args.coauthor_weight),
-        affiliation_weight=float(args.affiliation_weight),
-        max_exact_knn_group_size=int(args.max_exact_knn_group_size),
-        projection_count=int(args.projection_count),
-        projection_window=int(args.projection_window),
-        max_candidate_edges=int(args.max_candidate_edges),
-        pack_components=bool(args.pack_components),
-        component_pack_strategy=str(args.component_pack_strategy),
-        sparse_evidence_edges=bool(args.sparse_evidence_edges),
-        sparse_evidence_max_posting_size=int(args.sparse_evidence_max_posting_size),
-        sparse_evidence_neighbors=int(args.sparse_evidence_neighbors),
-        sparse_evidence_min_weight=float(args.sparse_evidence_min_weight),
-        sparse_evidence_include_coauthors=bool(args.sparse_evidence_include_coauthors),
-        sparse_evidence_include_affiliations=bool(args.sparse_evidence_include_affiliations),
-        component_pack_top_k=int(args.component_pack_top_k),
-        local_move_passes=int(args.local_move_passes),
-        adaptive_projection=bool(args.adaptive_projection),
-        adaptive_projection_max_group_size=int(args.adaptive_projection_max_group_size),
-        adaptive_projection_count=int(args.adaptive_projection_count),
-        adaptive_projection_window=int(args.adaptive_projection_window),
+    return _validate_graph_config(
+        GraphSubblockingConfig(
+            neighbor_mode=str(args.neighbor_mode),
+            neighbors=int(args.neighbors),
+            min_edge_score=float(args.min_edge_score),
+            specter_weight=float(args.specter_weight),
+            coauthor_weight=float(args.coauthor_weight),
+            affiliation_weight=float(args.affiliation_weight),
+            max_exact_knn_group_size=int(args.max_exact_knn_group_size),
+            projection_count=int(args.projection_count),
+            projection_window=int(args.projection_window),
+            max_candidate_edges=int(args.max_candidate_edges),
+            pack_components=bool(args.pack_components),
+            component_pack_strategy=str(args.component_pack_strategy),
+            sparse_evidence_edges=bool(args.sparse_evidence_edges),
+            sparse_evidence_max_posting_size=int(args.sparse_evidence_max_posting_size),
+            sparse_evidence_neighbors=int(args.sparse_evidence_neighbors),
+            sparse_evidence_min_weight=float(args.sparse_evidence_min_weight),
+            sparse_evidence_include_coauthors=bool(args.sparse_evidence_include_coauthors),
+            sparse_evidence_include_affiliations=bool(args.sparse_evidence_include_affiliations),
+            component_pack_top_k=int(args.component_pack_top_k),
+            local_move_passes=int(args.local_move_passes),
+            adaptive_projection=bool(args.adaptive_projection),
+            adaptive_projection_max_group_size=int(args.adaptive_projection_max_group_size),
+            adaptive_projection_count=int(args.adaptive_projection_count),
+            adaptive_projection_window=int(args.adaptive_projection_window),
+        )
     )
 
 

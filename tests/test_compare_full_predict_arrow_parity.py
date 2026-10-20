@@ -201,3 +201,16 @@ def test_parity_arrow_writer_adds_current_raw_planner_indexes(tmp_path) -> None:
     assert indexed_paths["signatures_batch_index"].endswith("signatures.signatures_batch_index.bin")
     assert index_metrics["signatures_batch_index"]["magic"] == "S2ABI003"
     assert physical_layout["tables"]["signatures"]["batch_index_present"] is True
+
+
+@pytest.mark.parametrize("option", ["--block-size", "--n-jobs", "--total-ram-bytes"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_parity_rejects_nonpositive_sizes(tmp_path, option: str, value: str) -> None:
+    argv = _parity_argv(tmp_path)[1:]
+    if option in argv:
+        argv[argv.index(option) + 1] = value
+    else:
+        argv += [option, value]
+
+    with pytest.raises(SystemExit):
+        parity_module._build_arg_parser().parse_args(argv)

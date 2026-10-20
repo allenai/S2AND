@@ -7,7 +7,8 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Status
 
-- **Update at v1.3 release:** The compatible complete model and data bundles remain unpublished.
+- **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles are on S3 (see [data](data.md)).
+  PyPI has the `1.0.0b1` beta for integration testing; the final `1.0.0` release is pending.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
@@ -376,6 +377,10 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   the same result. The alias artifact drops the aliases that the rule now covers,
   and the packaged ORCID prefix counts match the new alias file. See
   [canonical names](canonical_names.md).
+- Release: `VERSION` accepts PEP 440 pre-releases such as `1.0.0b1`. `sync_version.py`
+  writes the Cargo spelling `1.0.0-beta.1`, and the Rust version check maps it back.
+  The release workflow builds pre-releases from any branch and publishes only from `main`;
+  see [beta pre-releases](release.md#beta-pre-releases).
 - Development: the test suite runs under pytest-xdist (`-n auto`), and
   `run_ci_locally.py --pytest-workers` selects the worker count.
 - `scripts/tutorial_for_predicting_with_the_prod_model.py` is a prediction-only

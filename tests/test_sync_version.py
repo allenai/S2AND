@@ -153,6 +153,24 @@ def test_sync_version_updates_rust_manifests_and_lockfiles(tmp_path: Path) -> No
     assert 'version = "0.50.0"' in (tmp_path / "uv.lock").read_text(encoding="utf-8")
 
 
+def test_sync_version_spells_prereleases_for_python_and_cargo(tmp_path: Path) -> None:
+    _write_version_fixture(tmp_path)
+
+    sync_version.sync_version("0.50.0b1", root=tmp_path)
+    sync_version.verify_version("0.50.0b1", root=tmp_path)
+
+    assert '"s2and-rust==0.50.0b1"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.50.0b1"' in (tmp_path / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.50.0-beta.1"' in (tmp_path / "s2and_rust" / "Cargo.toml").read_text(encoding="utf-8")
+    assert 'version = "0.50.0-beta.1"' in (tmp_path / "s2and_rust" / "Cargo.lock").read_text(encoding="utf-8")
+    assert 'version = "0.50.0b1"' in (tmp_path / "uv.lock").read_text(encoding="utf-8")
+
+    # The final release replaces the pre-release spelling everywhere.
+    sync_version.sync_version("0.50.0", root=tmp_path)
+    sync_version.verify_version("0.50.0", root=tmp_path)
+    assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "Cargo.toml").read_text(encoding="utf-8")
+
+
 def test_sync_version_rejects_ambiguous_targets(tmp_path: Path) -> None:
     _write_version_fixture(tmp_path)
     (tmp_path / "s2and_rust" / "Cargo.toml").write_text(

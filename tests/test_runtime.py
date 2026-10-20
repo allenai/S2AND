@@ -74,6 +74,17 @@ def test_load_rust_extension_validates_package_and_version() -> None:
         runtime.load_s2and_rust_extension(import_module=broken)
 
 
+def test_load_rust_extension_matches_cargo_prerelease_spelling(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The extension reports its Cargo version; the wheel and s2and use the PEP 440 spelling.
+    monkeypatch.setattr(runtime, "__version__", "1.0.0b1")
+    beta = SimpleNamespace(__version__="1.0.0-beta.1")
+    assert runtime.load_s2and_rust_extension(import_module=lambda _name: beta) is beta
+
+    other_beta = SimpleNamespace(__version__="1.0.0-beta.2")
+    with pytest.raises(RuntimeError, match="does not match the pinned dependency"):
+        runtime.load_s2and_rust_extension(import_module=lambda _name: other_beta)
+
+
 def test_dataset_stage_routing_requires_arrow_only_for_rust() -> None:
     rust_context = runtime.RuntimeContext(
         operation="unit_test",

@@ -16,19 +16,30 @@ def release_workflow():
 
 
 @pytest.mark.parametrize(
-    ("ref", "allowed"),
+    ("version", "ref", "allowed"),
     [
-        ("refs/heads/main", True),
-        ("refs/heads/main-backup", False),
-        ("refs/tags/main", False),
-        ("", False),
+        ("1.0.0", "refs/heads/main", True),
+        ("1.0.0", "refs/heads/main-backup", False),
+        ("1.0.0", "refs/tags/main", False),
+        ("1.0.0", "", False),
+        # Pre-releases build on any branch; the publish jobs still require main.
+        ("1.0.0b1", "refs/heads/feature", True),
+        ("1.0.0rc2", "", True),
+        ("1.0.0b1.post1", "refs/heads/feature", False),
     ],
 )
-def test_release_ref_gate_rejects_unapproved_refs(release_workflow, ref: str, allowed: bool) -> None:
-    gate = release_workflow["jobs"]["validate"]["steps"][0]
+def test_release_ref_gate_rejects_unapproved_refs(
+    release_workflow, tmp_path: Path, version: str, ref: str, allowed: bool
+) -> None:
+    steps = release_workflow["jobs"]["validate"]["steps"]
+    # The gate reads VERSION, so only the checkout may run before it.
+    assert steps[0]["uses"].startswith("actions/checkout@")
+    gate = steps[1]
+    assert gate["name"] == "Require main for final releases"
     assert "if" not in gate
     assert gate.get("continue-on-error", "false") == "false"
-    result = run_bash("set -euo pipefail\n" + gate["run"], env={"GITHUB_REF": ref})
+    (tmp_path / "VERSION").write_text(version + "\n", encoding="utf-8")
+    result = run_bash("set -euo pipefail\n" + gate["run"], cwd=tmp_path, env={"GITHUB_REF": ref})
     assert (result.returncode == 0) is allowed, result.stdout + result.stderr
 
 
@@ -49,7 +60,9 @@ def test_release_publication_requires_successful_validation_and_smoke(release_wo
     for name in ("publish-rust", "publish-s2and"):
         assert {"release-smoke", "validate"} <= prerequisites(name)
         assert jobs[name]["environment"] == {"name": "pypi"}
-        assert "if" not in jobs[name], "Publication must retain GitHub's default success dependency condition"
+    # Only main publishes, and publication still requires every prerequisite to succeed.
+    assert jobs["publish-rust"]["if"] == "success() && github.ref == 'refs/heads/main'"
+    assert "if" not in jobs["publish-s2and"], "Publication must retain GitHub's default success dependency condition"
     assert "publish-rust" in prerequisites("publish-s2and")
     for name in ("source-distributions", "wheels-windows", "wheels-macos", "wheels-linux"):
         assert "validate" in prerequisites(name)

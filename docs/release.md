@@ -203,6 +203,22 @@ Confirm both package versions are absent before the first irreversible publish.
 The workflow publishes Rust first and then the matching Python package.
 Do not dispatch publication before model and data acceptance are complete.
 
+### Beta pre-releases
+
+A beta lets integrators test before acceptance. It never replaces Stage 6.
+
+1. Set `VERSION` to a PEP 440 pre-release such as `1.0.0b1`.
+   Run `uv run python scripts/sync_version.py`; Cargo files receive `1.0.0-beta.1`.
+2. Push the branch and dispatch `release-rust.yml` on it.
+   A pre-release builds and smoke-tests on any branch; the publish jobs run only on `main`.
+3. Download the run's `release-distributions` artifact.
+   Confirm every file carries the beta version.
+4. Upload `s2and-rust` first, then `s2and`, with `uv publish` and an API token.
+5. Install `s2and==<beta version>` in an empty environment and run one real prediction.
+
+Installers skip pre-releases unless the requirement names one, so `pip install s2and` stays on the last final release.
+Set `VERSION` back to the final version before Stage 6.
+
 ## Stage 7: finish
 
 Write the bundles again with the accepted model, then publish each bundle to its immutable S3 prefix.

@@ -21,8 +21,10 @@ performs canonical preprocessing while building the scoring view. See
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -231,6 +233,24 @@ def _validate_unique_author_positions(paper_id: str, authors: list[Author]) -> N
         positions.add(author.position)
 
 
+def _select_cluster_members(
+    clusters: str | dict | None,
+    keep_signature: Callable[[str], bool],
+) -> dict | None:
+    """Keep selected cluster members in source order and drop emptied clusters."""
+
+    if clusters is None:
+        return None
+    if not isinstance(clusters, dict):
+        clusters = json.loads(Path(clusters).read_text(encoding="utf-8"))
+    selected = {}
+    for cluster_id, cluster in clusters.items():
+        members = [member for member in cluster["signature_ids"] if keep_signature(str(member))]
+        if members:
+            selected[cluster_id] = {**cluster, "signature_ids": members}
+    return selected
+
+
 def build_training_anddata_from_arrow(
     arrow_dataset: ArrowDataset,
     name: str,
@@ -248,6 +268,7 @@ def build_training_anddata_from_arrow(
     n_jobs: int = 1,
     name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
     use_orcid_id: bool = True,
+    keep_signature: Callable[[str], bool] | None = None,
 ) -> ANDData:
     """Build a fully initialized Rust-backed train ``ANDData``.
 
@@ -259,6 +280,8 @@ def build_training_anddata_from_arrow(
     Python-visible signatures and the Rust featurizer.
     Training cluster-seed constraints remain explicit inputs rather than part
     of the immutable dataset identity.
+    ``keep_signature`` selects one population from a complete dataset, such as
+    its development blocks; clusters keep only selected members in source order.
     """
 
     if not isinstance(arrow_dataset, ArrowDataset):
@@ -273,6 +296,9 @@ def build_training_anddata_from_arrow(
                 signatures_source,
                 use_orcid_id=use_orcid_id,
             )
+    if keep_signature is not None:
+        signatures = {signature_id: value for signature_id, value in signatures.items() if keep_signature(signature_id)}
+        clusters = _select_cluster_members(clusters, keep_signature)
 
     dataset = ANDData._from_arrow_training(
         signatures=signatures,

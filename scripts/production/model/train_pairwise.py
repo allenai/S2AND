@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from lightgbm import LGBMClassifier
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
@@ -31,7 +32,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
-from s2and.arrow_provenance import ArrowProvenanceError, verify_conversion_provenance  # noqa: E402
 from s2and.data import ANDData, _map_fixed_pair_labels  # noqa: E402
 from s2and.feature_port import build_verified_rust_featurizer, featurize_pairs_with_rust  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
@@ -56,12 +56,17 @@ from scripts.production.model.augmented_leakage import (  # noqa: E402
     require_training_members,
     require_validation_members,
     source_members,
-    split_members_from_sources,
+)
+from scripts.production.model.plan_datasets import (  # noqa: E402
+    development_split_members,
+    load_development_dataset,
+    open_plan_arrow,
+    plan_unknown_signatures,
+    require_arrow_plan,
 )
 from scripts.production.model.unknown_signatures import (  # noqa: E402
     augmented_unknown_ids,
     exclude_unknown_pairs,
-    load_unknown_signatures,
 )
 
 logger = logging.getLogger("s2and")
@@ -73,8 +78,6 @@ DEFAULT_VALIDATION_PAIRS_SIZE = 10_000
 DEFAULT_N_ITER = 50
 DEFAULT_N_JOBS = 25
 DEFAULT_RANDOM_SEED = 1111
-# Plan roles that determine Rust pair features; each Arrow conversion must match them.
-ARROW_SOURCE_ROLES = ("signatures", "papers", "specter_embeddings")
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +91,6 @@ class PairwisePreflightPlan:
     model_plan_sha256: str
     model_plan_content_sha256: str
     arrow_dirs: Mapping[str, Path]
-    arrow_provenance_sha256: Mapping[str, str]
     matrix_work_dir: Path
     matrix_work_free_bytes: int
     total_ram_bytes: int | None
@@ -159,21 +161,18 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
     if args.model_plan is None:
         raise SystemExit("production training requires --model-plan")
     model_plan = load_model_plan(Path(args.model_plan).resolve())
+    try:
+        require_arrow_plan(model_plan.datasets)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     dataset_names = tuple(model_plan.datasets)
     if "augmented" in model_plan.datasets and model_plan.datasets["augmented"].split_mode != "fixed_pairs":
         raise SystemExit("model plan augmented dataset requires fixed train and validation pairs")
     if not any(dataset.split_mode == "random_blocks" for dataset in model_plan.datasets.values()):
         raise SystemExit("model plan requires a random-block dataset for EPS calibration")
 
-    arrow_root = Path(args.arrow_root).resolve()
-    arrow_dirs = {name: arrow_root / name for name in dataset_names}
-    arrow_provenance_sha256 = {
-        name: verify_conversion_provenance(
-            arrow_dirs[name],
-            expected_source_sha256={role: model_plan.datasets[name].sha256[role] for role in ARROW_SOURCE_ROLES},
-        )
-        for name in dataset_names
-    }
+    # The plan binds each Arrow manifest by digest, and ArrowDataset.open verifies the files.
+    arrow_dirs = {name: model_plan.datasets[name].files["arrow"].parent for name in dataset_names}
 
     return PairwisePreflightPlan(
         output_dir=output_dir,
@@ -183,7 +182,6 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
         model_plan_sha256=model_plan.sha256,
         model_plan_content_sha256=model_plan.content_sha256,
         arrow_dirs=arrow_dirs,
-        arrow_provenance_sha256=arrow_provenance_sha256,
         matrix_work_dir=matrix_work_dir,
         matrix_work_free_bytes=matrix_work_free_bytes,
         total_ram_bytes=None if requested_total_ram is None else int(requested_total_ram),
@@ -200,13 +198,12 @@ def _training_config(
         "dataset_inputs": {
             name: {
                 "arrow_dir": str(plan.arrow_dirs[name]),
-                "arrow_conversion_provenance_sha256": plan.arrow_provenance_sha256[name],
                 "files": {role: str(path) for role, path in plan.datasets[name].files.items()},
                 "split_mode": plan.datasets[name].split_mode,
             }
             for name in plan.dataset_names
         },
-        "featurization_backend": "rust_from_provenance_bound_arrow",
+        "featurization_backend": "rust_from_model_plan_arrow",
         "features_to_use": list(DEFAULT_FEATURE_GROUPS),
         "training_scope": "production_full",
         "input_artifact_hashes": {str(key): str(value) for key, value in artifact_hashes.items()},
@@ -354,13 +351,30 @@ def _concatenate_staged_arrays(
     return output_path
 
 
+def _load_incumbent_parameters(path: Path | None) -> dict[str, dict[str, Any]]:
+    """Read optional LightGBM parameters that compete with each head's search winner."""
+
+    if path is None:
+        return {}
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or not payload
+        or not set(payload) <= {"main", "nameless"}
+        or any(not isinstance(parameters, dict) or not parameters for parameters in payload.values())
+    ):
+        raise SystemExit("--incumbent-parameters must map 'main' and/or 'nameless' to LightGBM parameters")
+    return payload
+
+
 def _fit_pairwise_model(
     args: argparse.Namespace,
     arrays: Mapping[str, Path],
     *,
     feature_prefix: str,
     monotone_constraints: Any,
-) -> tuple[PairwiseModeler, float]:
+    incumbent: Mapping[str, Any] | None = None,
+) -> tuple[PairwiseModeler, float, dict[str, Any]]:
     model = PairwiseModeler(
         n_iter=int(args.n_iter),
         n_jobs=int(args.n_jobs),
@@ -372,8 +386,27 @@ def _fit_pairwise_model(
     y_val = _load_staged_array(arrays["y_val"])
     model.fit(X_train, y_train, X_val, y_val)
     validation_roc_auc = _finite_validation_roc_auc(roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))
+    selection: dict[str, Any] = {"selected_source": "search", "search_validation_roc_auc": validation_roc_auc}
+    if incumbent is not None:
+        # A known configuration competes on the same train and validation rows; it wins ties,
+        # so the search must improve on it to replace it.
+        parameters = {
+            **incumbent,
+            "n_jobs": int(args.n_jobs),
+            "random_state": 42,
+            "monotone_constraints": monotone_constraints,
+        }
+        classifier = LGBMClassifier().set_params(**parameters).fit(X_train, y_train)
+        probabilities = np.asarray(classifier.predict_proba(X_val), dtype=np.float64)[:, 1]
+        incumbent_roc_auc = _finite_validation_roc_auc(roc_auc_score(y_val, probabilities))
+        selection["incumbent_validation_roc_auc"] = incumbent_roc_auc
+        if incumbent_roc_auc >= validation_roc_auc:
+            model.classifier = classifier
+            model.best_params = dict(incumbent)
+            validation_roc_auc = incumbent_roc_auc
+            selection["selected_source"] = "incumbent"
     gc.collect()
-    return model, validation_roc_auc
+    return model, validation_roc_auc, selection
 
 
 def _publish_result(
@@ -404,7 +437,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     """Train pairwise models and write the pairwise production bundle stage."""
 
     plan = _preflight_pairwise(args)
-    unknown_inputs = {name: load_unknown_signatures(plan.datasets[name].files) for name in plan.dataset_names}
+    unknown_inputs = {name: plan_unknown_signatures(plan.datasets[name]) for name in plan.dataset_names}
     unknown_ids = {name: source.ids for name, source in unknown_inputs.items()}
     augmented_members: dict[str, set[str]] = {}
     augmented_validation_members: dict[str, set[str]] = {}
@@ -429,15 +462,16 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             require_declared_sources(members, plan.dataset_names, context=f"Augmented {population}")
             del pair_frame
     # Copies outside each source fit population must not enter the fit, and validation
-    # copies outside the source validation population must not select the model.
+    # copies outside the source validation population must not select the model. Every
+    # source is checked before artifacts load and before any dataset is featurized.
     for dataset_name in plan.dataset_names:
-        dataset_input = plan.datasets[dataset_name]
         if dataset_name in augmented_members or dataset_name in augmented_validation_members:
-            training, validation = split_members_from_sources(
-                dataset_name, dataset_input.files, random_seed=int(args.random_seed)
+            training, validation = development_split_members(
+                dataset_name, plan.datasets[dataset_name], random_seed=int(args.random_seed)
             )
             require_training_members(augmented_members, dataset_name, training)
             require_validation_members(augmented_validation_members, dataset_name, validation)
+    incumbents = _load_incumbent_parameters(getattr(args, "incumbent_parameters", None))
     artifact_authority = load_packaged_artifact_authority(
         name_counts_index_root=Path(args.name_counts_index_root),
     )
@@ -450,6 +484,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     )
     training_config["unknown_signature_inputs"] = {name: source.binding() for name, source in unknown_inputs.items()}
     training_config["unknown_signature_policy"] = "exclude_pair_endpoints; retain_eps_inputs; score_known_members_only"
+    training_config["incumbent_parameters"] = incumbents
     os.environ["OMP_NUM_THREADS"] = str(int(args.n_jobs))
     logger.info(
         "pairwise resources n_jobs=%d matrix_work_dir=%s free_bytes=%d total_ram_bytes=%s",
@@ -475,61 +510,42 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         for dataset_name in tqdm(plan.dataset_names, desc="Loading and featurizing datasets"):
             logger.info("processing dataset %s", dataset_name)
             dataset_input = plan.datasets[dataset_name]
-            files = dataset_input.files
-            anddata_kwargs: dict[str, Any] = {
-                "signatures": str(files["signatures"]),
-                "papers": str(files["papers"]),
-                "name": dataset_name,
-                "mode": "train",
-                "clusters": str(files["clusters"]) if "clusters" in files else None,
-                "train_pairs": str(files["train_pairs"]) if "train_pairs" in files else None,
-                "val_pairs": str(files["val_pairs"]) if "val_pairs" in files else None,
-                "test_pairs": None,
-                "train_pairs_size": int(args.train_pairs_size),
-                "val_pairs_size": int(args.validation_pairs_size),
-                "random_seed": int(args.random_seed),
-                "name_counts_index": None,
-                "n_jobs": int(args.n_jobs),
-                "preprocess": False,
-                "name_tuples": canonical_name_tuples.pairs,
-            }
-
-            # Selection only: the Rust featurizer computes every feature from Arrow.
-            anddata = ANDData(**anddata_kwargs)
-            if anddata.name_tuples != canonical_name_tuples.pairs:
-                raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
-
-            if dataset_input.split_mode == "random_blocks":
-                # Resolve the same split as pair selection, before allocating feature
-                # matrices. Persist identities so Arrow row sorting cannot change it.
-                train_blocks, val_blocks, test_blocks = anddata.split_cluster_signatures()
-                require_training_members(
-                    augmented_members,
+            with open_plan_arrow(dataset_input) as arrow_dataset:
+                # The same Arrow dataset selects pairs and computes their features.
+                anddata = load_development_dataset(
                     dataset_name,
-                    {signature_id for members in train_blocks.values() for signature_id in members},
+                    dataset_input,
+                    arrow_dataset,
+                    name_tuples=canonical_name_tuples.pairs,
+                    random_seed=int(args.random_seed),
+                    n_jobs=int(args.n_jobs),
+                    train_pairs_size=int(args.train_pairs_size),
+                    val_pairs_size=int(args.validation_pairs_size),
                 )
-                require_validation_members(
-                    augmented_validation_members,
-                    dataset_name,
-                    {signature_id for members in val_blocks.values() for signature_id in members},
-                )
-                cluster_test_splits[dataset_name] = {
-                    "block_membership_sha256": block_membership_sha256(anddata.get_blocks()),
-                    "test_block_ids": list(test_blocks),
-                }
-                del train_blocks, val_blocks, test_blocks
+                if anddata.name_tuples != canonical_name_tuples.pairs:
+                    raise ValueError(
+                        f"Production training dataset {dataset_name!r} does not use the canonical name tuples"
+                    )
 
-            current_provenance = verify_conversion_provenance(
-                plan.arrow_dirs[dataset_name],
-                expected_source_sha256={role: dataset_input.sha256[role] for role in ARROW_SOURCE_ROLES},
-            )
-            if current_provenance != plan.arrow_provenance_sha256[dataset_name]:
-                raise ArrowProvenanceError(f"Arrow conversion provenance changed after preflight for {dataset_name!r}")
-            with ArrowDataset.open(
-                plan.arrow_dirs[dataset_name],
-                require_specter=True,
-                require_name_counts_index=True,
-            ) as arrow_dataset:
+                if dataset_input.split_mode == "random_blocks":
+                    # Resolve the same split as pair selection, before allocating feature matrices.
+                    train_blocks, val_blocks, test_blocks = anddata.split_cluster_signatures()
+                    require_training_members(
+                        augmented_members,
+                        dataset_name,
+                        {signature_id for members in train_blocks.values() for signature_id in members},
+                    )
+                    require_validation_members(
+                        augmented_validation_members,
+                        dataset_name,
+                        {signature_id for members in val_blocks.values() for signature_id in members},
+                    )
+                    cluster_test_splits[dataset_name] = {
+                        "block_membership_sha256": block_membership_sha256(anddata.get_blocks()),
+                        "test_block_ids": list(test_blocks),
+                    }
+                    del train_blocks, val_blocks, test_blocks
+
                 train, val = _featurize_selection(
                     anddata,
                     arrow_dataset,
@@ -570,19 +586,21 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         }
 
         logger.info("fitting pairwise model")
-        union_classifier, main_validation_roc_auc = _fit_pairwise_model(
+        union_classifier, main_validation_roc_auc, main_selection = _fit_pairwise_model(
             args,
             union_arrays,
             feature_prefix="",
             monotone_constraints=monotone_constraints,
+            incumbent=incumbents.get("main"),
         )
 
         logger.info("fitting nameless pairwise model")
-        nameless_union_classifier, nameless_validation_roc_auc = _fit_pairwise_model(
+        nameless_union_classifier, nameless_validation_roc_auc, nameless_selection = _fit_pairwise_model(
             args,
             union_arrays,
             feature_prefix="nameless_",
             monotone_constraints=nameless_monotone_constraints,
+            incumbent=incumbents.get("nameless"),
         )
 
         logger.info("building uncalibrated pairwise bundle")
@@ -606,6 +624,8 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             "nameless_train_rows": int(_load_staged_array(union_arrays["nameless_X_train"]).shape[0]),
             "nameless_val_rows": int(_load_staged_array(union_arrays["nameless_X_val"]).shape[0]),
             "nameless_validation_roc_auc": nameless_validation_roc_auc,
+            **{f"main_{key}": value for key, value in main_selection.items()},
+            **{f"nameless_{key}": value for key, value in nameless_selection.items()},
         }
         logger.info("pairwise training completed in %.3f seconds", time.perf_counter() - started)
     result = _publish_result(
@@ -630,15 +650,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--n-iter", type=int, default=DEFAULT_N_ITER)
     parser.add_argument("--n-jobs", type=int, default=DEFAULT_N_JOBS)
-    parser.add_argument(
-        "--arrow-root",
-        type=Path,
-        required=True,
-        help=(
-            "Directory with one Arrow conversion per training dataset (<root>/<dataset>/), each carrying "
-            "conversion provenance that matches the model plan's signatures, papers and SPECTER files."
-        ),
-    )
     parser.add_argument("--train-pairs-size", type=int, default=DEFAULT_TRAIN_PAIRS_SIZE)
     parser.add_argument(
         "--validation-pairs-size",
@@ -646,12 +657,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_VALIDATION_PAIRS_SIZE,
     )
     parser.add_argument("--random-seed", type=int, default=DEFAULT_RANDOM_SEED)
+    parser.add_argument(
+        "--incumbent-parameters",
+        type=Path,
+        default=None,
+        help="Optional JSON of LightGBM parameters per head that compete with each search winner.",
+    )
     parser.add_argument("--matrix-work-dir", type=Path, required=True)
     parser.add_argument(
         "--model-plan",
         type=Path,
         required=True,
-        help="Training/validation inputs and EPS policy for this release run.",
+        help="Arrow datasets, labels, held-out blocks, and EPS policy for this release run.",
     )
     parser.add_argument(
         "--total-ram-bytes",

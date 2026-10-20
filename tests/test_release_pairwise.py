@@ -17,7 +17,7 @@ from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.production_bundle import write_production_manifest
 from s2and.production_bundle_contract import COMPLETE_MANIFEST_FILES
-from s2and.production_training_contract import load_model_plan
+from s2and.production_training_contract import block_membership_sha256, load_model_plan
 from s2and.subblocking import GraphSubblockingConfig
 from scripts.production.model import release_pairwise
 from scripts.production.model.run_binding import (
@@ -32,6 +32,21 @@ from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# Stubbed datasets expose these development blocks; candidates record their digest.
+_FAKE_BLOCKS = {"b1": ["s1", "s2"], "b2": ["s3"]}
+_RECORDED_POPULATIONS = {
+    "random": {"block_membership_sha256": block_membership_sha256(_FAKE_BLOCKS), "test_block_ids": ["b2"]}
+}
+
+
+def _patch_population_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace JSON dataset loading in binding with the stub development blocks."""
+
+    monkeypatch.setattr(
+        release_pairwise, "_load_anddata", lambda *_args, **_kwargs: argparse.Namespace(get_blocks=lambda: _FAKE_BLOCKS)
+    )
 
 
 def _write_json(path: Path, value: Any) -> Path:
@@ -514,9 +529,13 @@ def _binding_candidate(fixture, model_plan):
         for name, payload in (
             (
                 "config",
-                {"input_artifact_hashes": _artifact_authority().hashes, "model_plan_sha256": _sha256(model_plan)},
+                {
+                    "input_artifact_hashes": _artifact_authority().hashes,
+                    "model_plan_sha256": _sha256(model_plan),
+                    "data_random_seed": 1111,
+                },
             ),
-            ("summary", {"pair_count": 1}),
+            ("summary", {"pair_count": 1, "cluster_test_splits": _RECORDED_POPULATIONS}),
         )
     }
     manifest = _write_json(
@@ -533,6 +552,7 @@ def test_bind_candidate_writes_one_content_based_run_identity(
 ) -> None:
     fixture = _release_fixture(tmp_path)
     model_plan, evaluation_plan = _prepare(fixture)
+    _patch_population_loader(monkeypatch)
     candidate, training_config, candidate_manifest = _binding_candidate(fixture, model_plan)
     config_payload = json.loads(training_config.read_text(encoding="utf-8"))
     config_payload["input_artifact_hashes"]["orcid_prefix_counts_data_sha256"] = historical_prefix_sha256
@@ -659,9 +679,13 @@ def test_bind_candidate_rejects_old_runtime_prefix_even_with_valid_training_prov
     write_synthetic_pairwise_bundle(candidate, artifact_hashes=runtime_hashes, release_version="1.3")
     _write_json(
         candidate / "reproducibility/pairwise_training_config.json",
-        {"input_artifact_hashes": runtime_hashes, "model_plan_sha256": _sha256(model_plan)},
+        {"input_artifact_hashes": runtime_hashes, "model_plan_sha256": _sha256(model_plan), "data_random_seed": 1111},
     )
-    _write_json(candidate / "reproducibility/pairwise_training_summary.json", {"pair_count": 1})
+    _write_json(
+        candidate / "reproducibility/pairwise_training_summary.json",
+        {"pair_count": 1, "cluster_test_splits": _RECORDED_POPULATIONS},
+    )
+    _patch_population_loader(monkeypatch)
     # The loader checks the runtime contract before it reads the linker artifact.
     for relpath in COMPLETE_MANIFEST_FILES.values():
         path = candidate / relpath
@@ -685,11 +709,14 @@ def test_bind_candidate_rejects_mismatched_release_authorities_and_training_plan
 ) -> None:
     fixture = _release_fixture(tmp_path)
     model_plan, _evaluation_plan = _prepare(fixture)
+    _patch_population_loader(monkeypatch)
     candidate, training_config, candidate_manifest = _binding_candidate(fixture, model_plan)
+    training_summary = candidate / "reproducibility" / "pairwise_training_summary.json"
 
     def refresh_training_config_binding() -> None:
         payload = json.loads(candidate_manifest.read_text(encoding="utf-8"))
         payload["sha256"]["reproducibility/pairwise_training_config.json"] = _sha256(training_config)
+        payload["sha256"]["reproducibility/pairwise_training_summary.json"] = _sha256(training_summary)
         _write_json(candidate_manifest, payload)
 
     public_data_root = fixture.run_dir / "stages" / "public_data_root"
@@ -755,11 +782,19 @@ def test_bind_candidate_rejects_mismatched_release_authorities_and_training_plan
     assert len(model_loads) == model_load_count
 
     config_payload["input_artifact_hashes"] = _artifact_authority().hashes
-    config_payload["model_plan_sha256"] = "f" * 64
     _write_json(training_config, config_payload)
+    _write_json(
+        training_summary,
+        {"cluster_test_splits": {"random": {"block_membership_sha256": "f" * 64, "test_block_ids": ["b2"]}}},
+    )
     refresh_training_config_binding()
-    with pytest.raises(ValueError, match="different model plan"):
+    with pytest.raises(ValueError, match="differ from the model's training population"):
         release_pairwise.bind_candidate(args)
+
+    _write_json(training_summary, {"cluster_test_splits": _RECORDED_POPULATIONS, "changed": True})
+    with pytest.raises(ValueError, match="training summary checksum does not match"):
+        release_pairwise.bind_candidate(args)
+    refresh_training_config_binding()
 
     candidate_payload = json.loads(candidate_manifest.read_text(encoding="utf-8"))
     candidate_payload["sha256"].pop("reproducibility/pairwise_training_config.json")
@@ -888,16 +923,51 @@ def _artifact_authority() -> release_pairwise.ProductionArtifactAuthority:
     )
 
 
-def _calibration_bundle(tmp_path: Path, model_plan: Path) -> Path:
+def _arrow_model_plan(
+    tmp_path: Path,
+    *,
+    eps_grid: list[float] | None = None,
+    minimum_dataset_f1: float = 0.0,
+    minimum_signature_weighted_f1: float = 0.0,
+    unknown: list[str] | None = None,
+) -> Path:
+    """Write a one-dataset Arrow plan; calibration stubs replace the Arrow data itself."""
+
+    dataset = tmp_path / "dataset" / "random"
+    files = {
+        "arrow": _write_json(dataset / "manifest.json", {}),
+        "clusters": _write_json(dataset / "random_clusters.json", {"c": {"signature_ids": ["s1", "s2"]}}),
+        "heldout_blocks": _write_json(tmp_path / "dataset" / "heldout" / "test_blocks.json", {"b9": ["t1"]}),
+        "heldout_pairs": _write_json(tmp_path / "dataset" / "heldout" / "test_pairs.json", []),
+    }
+    if unknown is not None:
+        files["unknown_signatures"] = _write_json(dataset / "restored_unknown_signature_ids_20261009.json", unknown)
+    return _write_json(
+        tmp_path / "model_plan.json",
+        {
+            "release_version": "1.3",
+            "datasets": {
+                "random": {role: {"path": str(path), "sha256": _sha256(path)} for role, path in files.items()}
+            },
+            "eps": {
+                "grid": eps_grid or [0.3, 0.6],
+                "minimum_dataset_f1": minimum_dataset_f1,
+                "minimum_signature_weighted_f1": minimum_signature_weighted_f1,
+            },
+        },
+    )
+
+
+def _calibration_bundle(tmp_path: Path) -> Path:
     bundle = tmp_path / "source_bundle"
     (bundle / "reproducibility").mkdir(parents=True)
     _write_json(
         bundle / "reproducibility" / "pairwise_training_config.json",
-        {
-            "training_scope": "production_full",
-            "data_random_seed": 1111,
-            "model_plan_sha256": _sha256(model_plan),
-        },
+        {"training_scope": "production_full", "data_random_seed": 1111},
+    )
+    _write_json(
+        bundle / "reproducibility" / "pairwise_training_summary.json",
+        {"cluster_test_splits": _RECORDED_POPULATIONS},
     )
     _write_json(bundle / "manifest.json", {})
     return bundle
@@ -907,30 +977,38 @@ def _patch_calibration(
     monkeypatch: pytest.MonkeyPatch,
     clusterer: _StubCalibrationClusterer,
     scores: dict[float, float],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     finalizations: list[dict[str, Any]] = []
+    featurizer_calls: list[dict[str, Any]] = []
     monkeypatch.setattr(release_pairwise, "_load_release_artifacts", lambda _args: _artifact_authority())
 
     def load_pending(*_args: Any, **kwargs: Any) -> _StubCalibrationClusterer:
         assert kwargs["expected_eps_calibration"] == "pending"
         return clusterer
 
+    @contextmanager
+    def open_arrow(dataset: Any):
+        yield f"arrow:{dataset.files['arrow'].parent.name}"
+
+    def build_featurizer(dataset: Any, arrow_dataset: Any, **kwargs: Any) -> _FakeRustFeaturizer:
+        featurizer_calls.append({"name": dataset.name, "arrow": arrow_dataset, **kwargs})
+        return _FakeRustFeaturizer(dataset.name)
+
+    monkeypatch.setattr(release_pairwise, "_load_pairwise_staging_model", load_pending)
+    monkeypatch.setattr(release_pairwise, "open_plan_arrow", open_arrow)
     monkeypatch.setattr(
         release_pairwise,
-        "_load_pairwise_staging_model",
-        load_pending,
-    )
-    monkeypatch.setattr(
-        release_pairwise,
-        "_load_anddata",
+        "load_development_dataset",
         lambda name, *_args, **_kwargs: argparse.Namespace(
             name=name,
+            get_blocks=lambda: _FAKE_BLOCKS,
             split_cluster_signatures=lambda: ({}, {"b1": ["s1", "s2"], "b2": ["s3"]}, {}),
             construct_cluster_to_signatures=lambda _blocks: {"c": ["s1", "s2"]},
             cluster_seeds_require={},
             cluster_seeds_disallow=set(),
         ),
     )
+    monkeypatch.setattr(release_pairwise, "build_verified_rust_featurizer", build_featurizer)
     monkeypatch.setattr(
         release_pairwise,
         "_b3_report",
@@ -947,42 +1025,44 @@ def _patch_calibration(
         shutil.copytree(kwargs["source_bundle_dir"], kwargs["output_bundle_dir"])
 
     monkeypatch.setattr(release_pairwise, "finalize_pairwise_eps", finalize)
-    return finalizations
+    return finalizations, featurizer_calls
+
+
+def _calibration_args(tmp_path: Path, bundle: Path, model_plan: Path, *, n_jobs: int = 1) -> argparse.Namespace:
+    return argparse.Namespace(
+        source_bundle=bundle,
+        model_plan=model_plan,
+        output_bundle=tmp_path / "calibrated",
+        output_report=tmp_path / "calibration.json",
+        name_counts_index_root=tmp_path / "counts",
+        n_jobs=n_jobs,
+        total_ram_bytes=2048,
+    )
 
 
 def test_calibrate_eps_binds_plan_reuses_matrices_applies_floors_and_smallest_tie_break(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture = _release_fixture(
+    model_plan = _arrow_model_plan(
         tmp_path,
         eps_grid=[0.6, 0.4, 0.2],
         minimum_dataset_f1=0.75,
         minimum_signature_weighted_f1=0.75,
     )
-    model_plan, _ = _prepare(fixture)
-    bundle = _calibration_bundle(tmp_path, model_plan)
+    bundle = _calibration_bundle(tmp_path)
     clusterer = _StubCalibrationClusterer()
-    finalizations = _patch_calibration(monkeypatch, clusterer, {0.2: 0.8, 0.4: 0.8, 0.6: 0.7})
-    featurizer_calls = _patch_rust_featurizers(monkeypatch)
-    args = argparse.Namespace(
-        source_bundle=bundle,
-        model_plan=model_plan,
-        output_bundle=tmp_path / "calibrated",
-        output_report=tmp_path / "calibration.json",
-        name_counts_index_root=tmp_path / "counts",
-        arrow_root=tmp_path / "converted",
-        n_jobs=5,
-        total_ram_bytes=2048,
-    )
+    finalizations, featurizer_calls = _patch_calibration(monkeypatch, clusterer, {0.2: 0.8, 0.4: 0.8, 0.6: 0.7})
+    args = _calibration_args(tmp_path, bundle, model_plan, n_jobs=5)
 
     report = release_pairwise.calibrate_eps(args)
 
-    assert [(call["arrow_root"], call["name"], call["n_jobs"]) for call in featurizer_calls] == [
-        (tmp_path / "converted", "random", 5)
+    # The plan's own Arrow dataset builds features for the filtered validation blocks only.
+    assert [(call["name"], call["arrow"], call["num_threads"]) for call in featurizer_calls] == [
+        ("random", "arrow:random", 5)
     ]
-    assert featurizer_calls[0]["source_sha256"] == _source_digests(fixture.model["random"])
-    # Only the filtered validation blocks' members are built ("b2" has one signature and is dropped).
+    assert featurizer_calls[0]["name_counts_manifest_sha256"] == "c" * 64
+    # "b2" has one signature and is dropped.
     assert featurizer_calls[0]["signature_ids"] == {"s1", "s2"}
     assert [event for event in clusterer.events if event[0] == "build"] == [("build", "random")]
     assert [event[2] for event in clusterer.events if event[0] == "predict"] == [0.2, 0.4, 0.6]
@@ -1002,46 +1082,40 @@ def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
     monkeypatch: pytest.MonkeyPatch,
     sidecar_change: str | None,
 ) -> None:
-    from scripts.production.model.unknown_signatures import load_unknown_signatures
+    from scripts.production.model.plan_datasets import plan_unknown_signatures
 
     actual_b3_report = release_pairwise._b3_report
-    fixture = _release_fixture(tmp_path, eps_grid=[0.3, 0.6])
-    model_plan, _ = _prepare(fixture)
-    bundle = _calibration_bundle(tmp_path, model_plan)
-    files = {role: Path(path) for role, path in fixture.model["random"].items()}
-    sidecar = files["clusters"].parent / "restored_unknown_signature_ids_20261009.json"
-    _write_json(sidecar, ["s2"])
+    model_plan = _arrow_model_plan(tmp_path, unknown=["s2"])
+    bundle = _calibration_bundle(tmp_path)
+    dataset = load_model_plan(model_plan).datasets["random"]
+    sidecar = dataset.files["unknown_signatures"]
     config_path = bundle / "reproducibility" / "pairwise_training_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if sidecar_change != "unbound":
-        config["unknown_signature_inputs"] = {"random": load_unknown_signatures(files).binding()}
+        config["unknown_signature_inputs"] = {"random": plan_unknown_signatures(dataset).binding()}
         if sidecar_change == "relocated":
             # The training machine recorded another location for the same sidecar bytes.
             config["unknown_signature_inputs"]["random"]["path"] = str(tmp_path / "elsewhere" / sidecar.name)
         _write_json(config_path, config)
+    plan_payload = json.loads(model_plan.read_text(encoding="utf-8"))
     if sidecar_change == "changed":
+        # A fresh plan declares the new list, so only the training record disagrees.
         _write_json(sidecar, [])
+        plan_payload["datasets"]["random"]["unknown_signatures"]["sha256"] = _sha256(sidecar)
     elif sidecar_change == "removed":
         sidecar.unlink()
+        del plan_payload["datasets"]["random"]["unknown_signatures"]
+    _write_json(model_plan, plan_payload)
     clusterer = _StubCalibrationClusterer()
-    _patch_calibration(monkeypatch, clusterer, {0.3: 1.0, 0.6: 1.0})
+    finalizations, featurizer_calls = _patch_calibration(monkeypatch, clusterer, {0.3: 1.0, 0.6: 1.0})
     monkeypatch.setattr(release_pairwise, "_b3_report", actual_b3_report)
-    featurizer_calls = _patch_rust_featurizers(monkeypatch)
-    args = argparse.Namespace(
-        source_bundle=bundle,
-        model_plan=model_plan,
-        output_bundle=tmp_path / "calibrated",
-        output_report=tmp_path / "calibration.json",
-        name_counts_index_root=tmp_path / "counts",
-        arrow_root=tmp_path / "converted",
-        n_jobs=1,
-        total_ram_bytes=2048,
-    )
+    args = _calibration_args(tmp_path, bundle, model_plan)
     if sidecar_change not in {None, "relocated"}:
         message = "trained with unknown-signature" if sidecar_change == "unbound" else "sidecar changed"
         with pytest.raises(ValueError, match=message):
             release_pairwise.calibrate_eps(args)
         assert not featurizer_calls
+        assert not finalizations
         assert not args.output_bundle.exists()
         return
     report = release_pairwise.calibrate_eps(args)
@@ -1054,32 +1128,34 @@ def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
     assert len([event for event in clusterer.events if event[0] == "predict"]) == 2
 
 
-def test_calibrate_eps_rejects_a_different_model_plan_binding_before_model_load(
+def test_calibrate_eps_rejects_a_model_trained_on_other_blocks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture = _release_fixture(tmp_path)
-    model_plan, _ = _prepare(fixture)
-    bundle = _calibration_bundle(tmp_path, model_plan)
-    config = bundle / "reproducibility" / "pairwise_training_config.json"
-    payload = json.loads(config.read_text(encoding="utf-8"))
-    payload["model_plan_sha256"] = "0" * 64
-    _write_json(config, payload)
-    monkeypatch.setattr(
-        release_pairwise,
-        "_load_pairwise_staging_model",
-        lambda *_args, **_kwargs: pytest.fail("model must not load"),
+    model_plan = _arrow_model_plan(tmp_path)
+    bundle = _calibration_bundle(tmp_path)
+    _write_json(
+        bundle / "reproducibility" / "pairwise_training_summary.json",
+        {"cluster_test_splits": {"random": {"block_membership_sha256": "0" * 64, "test_block_ids": ["b2"]}}},
     )
+    clusterer = _StubCalibrationClusterer()
+    finalizations, featurizer_calls = _patch_calibration(monkeypatch, clusterer, {0.3: 1.0, 0.6: 1.0})
+    args = _calibration_args(tmp_path, bundle, model_plan)
 
-    with pytest.raises(ValueError, match="different model plan"):
-        release_pairwise.calibrate_eps(
-            argparse.Namespace(
-                source_bundle=bundle,
-                model_plan=model_plan,
-                output_bundle=tmp_path / "calibrated",
-                output_report=tmp_path / "calibration.json",
-            )
-        )
+    with pytest.raises(ValueError, match="differ from the model's training population for 'random'"):
+        release_pairwise.calibrate_eps(args)
+
+    assert not featurizer_calls
+    assert not finalizations
+    assert not args.output_bundle.exists()
+
+
+def test_calibrate_eps_rejects_a_plan_without_published_arrow_data(tmp_path: Path) -> None:
+    fixture = _release_fixture(tmp_path)
+    json_plan, _ = _prepare(fixture)
+
+    with pytest.raises(ValueError, match="must name published Arrow data"):
+        release_pairwise.calibrate_eps(_calibration_args(tmp_path, _calibration_bundle(tmp_path), json_plan))
 
 
 def _evaluation_args(

@@ -51,6 +51,30 @@ SUPPORTED_OFFICIAL_METRIC_KEYS = (
 _COMMON_MODEL_ROLES = frozenset({"papers", "signatures", "specter_embeddings"})
 _RANDOM_BLOCK_ROLES = _COMMON_MODEL_ROLES | {"clusters"}
 _FIXED_PAIR_ROLES = _COMMON_MODEL_ROLES | {"train_pairs", "val_pairs"}
+# Arrow plans train from the published dataset alone. A random-block dataset names its
+# full benchmark Arrow manifest; held-out blocks and any excluded signatures never enter
+# development, and the frozen held-out pairs score the outer test. The plan also binds the
+# unknown-signature list beside the labels, so a changed list cannot alter scores silently.
+ARROW_RANDOM_BLOCK_ROLES = frozenset({"arrow", "clusters", "heldout_blocks", "heldout_pairs"})
+ARROW_FIXED_PAIR_ROLES = frozenset({"arrow", "train_pairs", "val_pairs", "heldout_pairs"})
+UNKNOWN_SIGNATURES_ROLE = "unknown_signatures"
+EXCLUDED_SIGNATURES_ROLE = "excluded_signatures"
+_OPTIONAL_RANDOM_BLOCK_ROLES = frozenset({UNKNOWN_SIGNATURES_ROLE, EXCLUDED_SIGNATURES_ROLE})
+_OPTIONAL_FIXED_PAIR_ROLES = frozenset({UNKNOWN_SIGNATURES_ROLE})
+
+
+def _split_mode_for_roles(roles: frozenset[str]) -> str | None:
+    """Return the pair-selection mode for one declared role set, or None if it is invalid."""
+
+    if roles == _RANDOM_BLOCK_ROLES or (
+        ARROW_RANDOM_BLOCK_ROLES <= roles <= ARROW_RANDOM_BLOCK_ROLES | _OPTIONAL_RANDOM_BLOCK_ROLES
+    ):
+        return "random_blocks"
+    if roles == _FIXED_PAIR_ROLES or (
+        ARROW_FIXED_PAIR_ROLES <= roles <= ARROW_FIXED_PAIR_ROLES | _OPTIONAL_FIXED_PAIR_ROLES
+    ):
+        return "fixed_pairs"
+    return None
 
 
 def block_membership_sha256(blocks: Mapping[str, Sequence[str]]) -> str:
@@ -96,6 +120,19 @@ def frozen_test_blocks(blocks: Mapping[str, list[str]], record: Mapping[str, Any
     return {block_id: blocks[block_id] for block_id in block_ids}
 
 
+def require_recorded_population(record: Any, blocks: Mapping[str, Sequence[str]], *, name: str) -> None:
+    """Reject development blocks that differ from a model's recorded training population.
+
+    Each production model records the block membership of every random-block
+    population that it trained on. The check therefore binds a model to its data
+    for any plan layout that rebuilds the same blocks.
+    """
+    if not isinstance(record, Mapping) or not is_lowercase_sha256(record.get("block_membership_sha256")):
+        raise ValueError(f"Model records no training population for dataset {name!r}")
+    if block_membership_sha256(blocks) != record["block_membership_sha256"]:
+        raise ValueError(f"Development blocks differ from the model's training population for {name!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class EpsPolicy:
     """EPS candidates and minimum accepted calibration scores."""
@@ -120,12 +157,16 @@ class ModelDataset:
     def split_mode(self) -> str:
         """Infer how pairs are selected from the declared file roles."""
 
-        roles = frozenset(self.files)
-        if roles == _RANDOM_BLOCK_ROLES:
-            return "random_blocks"
-        if roles == _FIXED_PAIR_ROLES:
-            return "fixed_pairs"
-        raise ValueError("invalid model dataset roles")
+        mode = _split_mode_for_roles(frozenset(self.files))
+        if mode is None:
+            raise ValueError("invalid model dataset roles")
+        return mode
+
+    @property
+    def uses_arrow(self) -> bool:
+        """Report whether the dataset selects pairs from its published Arrow data."""
+
+        return "arrow" in self.files
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,7 +278,7 @@ def load_model_plan(path: Path) -> ModelPlan:
             or not isinstance(raw_files, dict)
         ):
             raise ValueError("invalid model dataset")
-        if frozenset(raw_files) not in {_RANDOM_BLOCK_ROLES, _FIXED_PAIR_ROLES}:
+        if _split_mode_for_roles(frozenset(str(role) for role in raw_files)) is None:
             raise ValueError("invalid model dataset roles")
         files: dict[str, Path] = {}
         for role, raw_spec in raw_files.items():

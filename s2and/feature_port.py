@@ -157,8 +157,8 @@ def build_verified_rust_featurizer(
 ) -> Any:
     """Build a Rust featurizer for selected signatures of ``dataset`` from its converted Arrow data.
 
-    ``dataset`` is a JSON-loaded ``ANDData`` that stays the authority for splits,
-    pairs and cluster truth; it need not be preprocessed or carry SPECTER or name
+    ``dataset`` stays the authority for splits, pairs and cluster truth. It is
+    either JSON-loaded or built from ``arrow_dataset`` itself; it need not be preprocessed or carry SPECTER or name
     counts, since every feature comes from Arrow. The caller must already have
     verified the Arrow conversion provenance against ``dataset``'s source files.
     This checks that the Arrow data uses the expected name counts and exactly the
@@ -188,7 +188,13 @@ def build_verified_rust_featurizer(
         )
     json_signature_ids = {str(signature_id) for signature_id in dataset.signatures}
     arrow_signature_ids = _arrow_signature_ids(arrow_dataset)
-    if arrow_signature_ids != json_signature_ids:
+    # A dataset built from this Arrow dataset selects one population from it, such as the
+    # development blocks. A JSON-loaded dataset must name exactly the converted signatures.
+    if getattr(dataset, "arrow_dataset", None) is arrow_dataset:
+        mismatch = not json_signature_ids <= arrow_signature_ids
+    else:
+        mismatch = arrow_signature_ids != json_signature_ids
+    if mismatch:
         raise ValueError(
             f"Arrow signatures for {dataset.name!r} differ from its JSON signatures: "
             f"only_arrow={sorted(arrow_signature_ids - json_signature_ids)[:5]} "

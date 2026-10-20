@@ -13,13 +13,12 @@ import pytest
 
 import scripts.convert_to_arrow as convert_to_arrow
 from s2and._sha256 import sha256_file
-from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_provenance import verify_conversion_provenance
-from s2and.data import ANDData
 from s2and.featurizer import DEFAULT_FEATURE_GROUPS, DEFAULT_NAMELESS_FEATURE_GROUPS, FeaturizationInfo
 from s2and.name_tuple_artifact import load_name_tuple_artifact
 from s2and.production_training_contract import load_model_plan
 from scripts.production.model import train_pairwise
+from scripts.production.model.plan_datasets import load_development_dataset, open_plan_arrow
 from tests.pairwise_release_helpers import write_pairwise_artifacts, write_pairwise_dataset
 
 
@@ -243,23 +242,6 @@ def test_joined_augmented_feature_only_staging_converts_and_selects_frozen_train
         "train_pairs": joined / "train_pairs.csv",
         "val_pairs": joined / "val_pairs.csv",
     }
-    plan_path = tmp_path / "model_plan.json"
-    plan_path.write_text(
-        json.dumps(
-            {
-                "release_version": "1.3",
-                "datasets": {
-                    "augmented": {
-                        role: {"path": str(path.resolve()), "sha256": sha256_file(path)} for role, path in files.items()
-                    }
-                },
-                "eps": {"grid": [0.5], "minimum_dataset_f1": 0.0, "minimum_signature_weighted_f1": 0.0},
-            }
-        ),
-        encoding="utf-8",
-    )
-    plan = load_model_plan(plan_path)
-    model_input = plan.datasets["augmented"]
     staged = tmp_path / "release_feature_sources" / "augmented"
     staged.mkdir(parents=True)
     # These are the explicit feature-source roles copied by the release runbook.
@@ -268,7 +250,7 @@ def test_joined_augmented_feature_only_staging_converts_and_selects_frozen_train
         ("papers", "augmented_papers.json"),
         ("specter_embeddings", "augmented_specter2.pkl"),
     ):
-        shutil.copyfile(model_input.files[role], staged / filename)
+        shutil.copyfile(files[role], staged / filename)
     assert sorted(path.suffix for path in staged.iterdir()) == [".json", ".json", ".pkl"]
     # The converter and selection authority must not need held-out answers after the join.
     (joined / "test_pairs.json").write_text("not read during feature conversion or training", encoding="utf-8")
@@ -297,22 +279,43 @@ def test_joined_augmented_feature_only_staging_converts_and_selects_frozen_train
     convert_to_arrow.main()
     verify_conversion_provenance(
         arrow_root / "augmented",
-        expected_source_sha256={role: model_input.sha256[role] for role in train_pairwise.ARROW_SOURCE_ROLES},
+        expected_source_sha256={
+            role: sha256_file(files[role]) for role in ("signatures", "papers", "specter_embeddings")
+        },
     )
-    selection = ANDData(
-        signatures=str(model_input.files["signatures"]),
-        papers=str(model_input.files["papers"]),
-        train_pairs=str(model_input.files["train_pairs"]),
-        val_pairs=str(model_input.files["val_pairs"]),
-        name="augmented",
-        mode="train",
-        name_counts_index=None,
-        name_tuples=load_name_tuple_artifact(tuple_path).pairs,
-        preprocess=False,
-        n_jobs=1,
+    plan_files = {
+        "arrow": arrow_root / "augmented" / "manifest.json",
+        "train_pairs": joined / "train_pairs.csv",
+        "val_pairs": joined / "val_pairs.csv",
+        "heldout_pairs": joined / "test_pairs.json",
+    }
+    plan_path = tmp_path / "model_plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "release_version": "1.3",
+                "datasets": {
+                    "augmented": {
+                        role: {"path": str(path.resolve()), "sha256": sha256_file(path)}
+                        for role, path in plan_files.items()
+                    }
+                },
+                "eps": {"grid": [0.5], "minimum_dataset_f1": 0.0, "minimum_signature_weighted_f1": 0.0},
+            }
+        ),
+        encoding="utf-8",
     )
-    with ArrowDataset.open(arrow_root / "augmented", require_specter=True, require_name_counts_index=True) as arrow:
+    model_input = load_model_plan(plan_path).datasets["augmented"]
+    with open_plan_arrow(model_input) as arrow:
         assert arrow.name_counts_index is not None
+        selection = load_development_dataset(
+            "augmented",
+            model_input,
+            arrow,
+            name_tuples=load_name_tuple_artifact(tuple_path).pairs,
+            random_seed=1111,
+            n_jobs=1,
+        )
         train, validation = train_pairwise._featurize_selection(
             selection,
             arrow,

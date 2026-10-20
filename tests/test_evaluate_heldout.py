@@ -1,10 +1,11 @@
-"""Held-out metrics use exact portable inputs and a complete native model."""
+"""Held-out metrics use the published Arrow plan and a complete native model."""
 
 from __future__ import annotations
 
 import argparse
 import copy
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -12,14 +13,18 @@ from typing import Any
 import pytest
 
 from s2and._sha256 import sha256_file
-from s2and.arrow_provenance import ArrowProvenanceError
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
 from s2and.model import Clusterer
 from s2and.production_bundle import finalize_production_bundle, write_pairwise_production_bundle
 from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION
 from s2and.production_model import load_production_model, pairwise_bundle_binding
-from s2and.production_training_contract import load_model_plan, load_packaged_artifact_authority
+from s2and.production_training_contract import (
+    block_membership_sha256,
+    load_model_plan,
+    load_packaged_artifact_authority,
+)
 from scripts.production.model import release_pairwise
+from scripts.production.model.plan_datasets import load_development_dataset, open_plan_arrow
 from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import convert_release_arrow, write_pairwise_artifacts, write_pairwise_dataset
 from tests.promoted_linking_helpers import (
@@ -29,112 +34,105 @@ from tests.promoted_linking_helpers import (
 )
 
 
-def _write(path: Path, payload: Any) -> None:
+def _write(path: Path, payload: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_plan(plan_path: Path, files: dict[str, dict[str, Path]]) -> None:
+    """Write a relocatable plan whose paths resolve from the plan directory."""
+
+    _write(
+        plan_path,
+        {
+            "release_version": "9.9",
+            "datasets": {
+                name: {
+                    role: {
+                        "path": Path(os.path.relpath(path, plan_path.parent)).as_posix(),
+                        "sha256": sha256_file(path),
+                    }
+                    for role, path in sorted(roles.items())
+                }
+                for name, roles in files.items()
+            },
+            "eps": {"grid": [0.5], "minimum_dataset_f1": 0.0, "minimum_signature_weighted_f1": 0.0},
+        },
+    )
 
 
 def _build_heldout(tmp_path: Path) -> argparse.Namespace:
     _tuple_path, counts_path, _orcid_path = write_pairwise_artifacts(tmp_path)
     authority = load_packaged_artifact_authority(name_counts_index_root=counts_path)
-    pairwise_root = tmp_path / "snapshot" / "pairwise"
-    source_root = pairwise_root / "sources"
-    files = write_pairwise_dataset(source_root)
-    signatures = json.loads(files["signatures"].read_text(encoding="utf-8"))
+    root = tmp_path / "dataset"
+    source_root = tmp_path / "sources"
+    sources = write_pairwise_dataset(source_root)
+    signatures = json.loads(sources["signatures"].read_text(encoding="utf-8"))
     keep = list(signatures)[:4]
-    clusters = json.loads(files["clusters"].read_text(encoding="utf-8"))
-    model_root = source_root / "model" / "qian"
-    model_files = {
-        "signatures": model_root / "qian_signatures.json",
-        "clusters": model_root / "qian_clusters.json",
-        "papers": model_root / files["papers"].name,
-        "specter_embeddings": model_root / files["specter_embeddings"].name,
-    }
-    model_root.mkdir(parents=True)
-    for role in ("papers", "specter_embeddings"):
-        model_files[role].write_bytes(files[role].read_bytes())
-    _write(model_files["signatures"], {key: value for key, value in signatures.items() if key not in keep})
-    _write(
-        model_files["clusters"],
-        {key: value for key, value in clusters.items() if value["signature_ids"][0] not in keep},
-    )
-    _write(files["signatures"], {key: signatures[key] for key in keep})
-    _write(files["clusters"], {key: value for key, value in clusters.items() if value["signature_ids"][0] in keep})
-    blocks = files["signatures"].parent / "test_blocks.json"
-    _write(blocks, {"a adams": keep})
-    pairs = files["signatures"].parent / "test_pairs.json"
+    development = [key for key in signatures if key not in keep]
+    benchmark = convert_release_arrow(source_root, "qian", root / "benchmarks", counts_path)
+    heldout = root / "pairwise" / "heldout" / "qian"
     rows = [
         {"signature_id_1": keep[left], "signature_id_2": keep[right], "label": label}
         for left, right, label in ((0, 1, 1), (0, 2, 0), (2, 3, 1))
     ]
-    _write(pairs, rows)
-    unknown = files["signatures"].parent / "restored_unknown_signature_ids_test.json"
-    _write(unknown, [keep[3]])
-    files.update(blocks=blocks, pairs=pairs, unknown_signatures=unknown)
-
-    augmented_root = source_root / "augmented"
-    augmented_files = {}
-    for role in ("signatures", "papers", "specter_embeddings"):
-        target = augmented_root / f"augmented_{files[role].name.partition('_')[2]}"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if role == "signatures":
-            augmented_signatures = {}
-            for key in keep:
-                signature = copy.deepcopy(signatures[key])
-                signature["signature_id"] = f"qian___{key}"
-                augmented_signatures[signature["signature_id"]] = signature
-            _write(target, augmented_signatures)
-        else:
-            target.write_bytes(files[role].read_bytes())
-        augmented_files[role] = target
-    augmented_pairs = augmented_root / "test_pairs.json"
-    _write(
-        augmented_pairs,
-        [
-            {
-                **row,
-                "signature_id_1": f"qian___{row['signature_id_1']}",
-                "signature_id_2": f"qian___{row['signature_id_2']}",
-            }
-            for row in rows
-        ],
-    )
-    augmented_files["pairs"] = augmented_pairs
-    arrow_root = pairwise_root / "arrow" / "evaluation"
-    convert_release_arrow(source_root, "qian", arrow_root, counts_path)
-    convert_release_arrow(source_root, "augmented", arrow_root, counts_path)
-
-    def _relative_specs(dataset_files: dict[str, Path]) -> dict[str, dict[str, str]]:
-        return {
-            role: {"path": path.relative_to(pairwise_root).as_posix(), "sha256": sha256_file(path)}
-            for role, path in sorted(dataset_files.items())
-        }
-
-    input_payload = {
-        "release_version": "9.9",
-        "sources": {
-            "model": {"qian": _relative_specs(model_files)},
-            "evaluation": {
-                name: {
-                    role: {"path": path.relative_to(pairwise_root).as_posix(), "sha256": sha256_file(path)}
-                    for role, path in dataset_files.items()
-                }
-                for name, dataset_files in (("qian", files), ("augmented", augmented_files))
-            },
-        },
+    files = {
+        "arrow": benchmark / "manifest.json",
+        "clusters": benchmark / "qian_clusters.json",
+        "heldout_blocks": _write(heldout / "test_blocks.json", {"a adams": keep}),
+        "heldout_pairs": _write(heldout / "test_pairs.json", rows),
+        "unknown_signatures": _write(benchmark / "restored_unknown_signature_ids_test.json", [keep[3]]),
     }
-    inputs_path = pairwise_root / "inputs.json"
-    _write(inputs_path, input_payload)
-    model_plan_path = pairwise_root / "model_plan.json"
-    _write(
-        model_plan_path,
-        {
-            "release_version": "9.9",
-            "datasets": {"qian": _relative_specs(model_files)},
-            "eps": {"grid": [0.5], "minimum_dataset_f1": 0.0, "minimum_signature_weighted_f1": 0.0},
-        },
+
+    # Augmented copies train on development signatures and test on held-out signatures.
+    augmented_source = source_root / "augmented"
+    augmented_signatures = {}
+    for key in (*keep, *development[:4]):
+        signature = copy.deepcopy(signatures[key])
+        signature["signature_id"] = f"qian___{key}"
+        augmented_signatures[signature["signature_id"]] = signature
+    _write(augmented_source / "augmented_signatures.json", augmented_signatures)
+    for role in ("papers", "specter_embeddings"):
+        target = augmented_source / f"augmented_{sources[role].name.partition('_')[2]}"
+        target.write_bytes(sources[role].read_bytes())
+    augmented = convert_release_arrow(source_root, "augmented", root / "pairwise", counts_path)
+    copies = [f"qian___{key}" for key in development[:4]]
+    augmented_files = {
+        "arrow": augmented / "manifest.json",
+        "train_pairs": augmented / "train_pairs.csv",
+        "val_pairs": augmented / "val_pairs.csv",
+        "heldout_pairs": _write(
+            augmented / "test_pairs.json",
+            [
+                {
+                    **row,
+                    "signature_id_1": f"qian___{row['signature_id_1']}",
+                    "signature_id_2": f"qian___{row['signature_id_2']}",
+                }
+                for row in rows
+            ],
+        ),
+    }
+    augmented_files["train_pairs"].write_text(
+        f"signature_id_1,signature_id_2,label\n{copies[0]},{copies[1]},1\n", encoding="utf-8"
     )
-    model_plan = load_model_plan(model_plan_path)
+    augmented_files["val_pairs"].write_text(
+        f"signature_id_1,signature_id_2,label\n{copies[2]},{copies[3]},0\n", encoding="utf-8"
+    )
+    plan_path = root / "pairwise" / "model_plan.json"
+    _write_plan(plan_path, {"qian": files, "augmented": augmented_files})
+    model_plan = load_model_plan(plan_path)
+    with open_plan_arrow(model_plan.datasets["qian"]) as arrow_dataset:
+        development_blocks = load_development_dataset(
+            "qian",
+            model_plan.datasets["qian"],
+            arrow_dataset,
+            name_tuples=authority.name_tuples.pairs,
+            random_seed=1111,
+            n_jobs=1,
+        ).get_blocks()
+
     stage = tmp_path / "pairwise-stage"
     source_clusterer = write_synthetic_pairwise_bundle(
         tmp_path / "model-source", artifact_hashes=authority.hashes, release_version="9.9"
@@ -151,12 +149,18 @@ def _build_heldout(tmp_path: Path) -> argparse.Namespace:
             "data_random_seed": 1111,
             "input_artifact_hashes": authority.hashes,
         },
-        pairwise_training_summary={},
+        pairwise_training_summary={
+            "cluster_test_splits": {
+                "qian": {
+                    "block_membership_sha256": block_membership_sha256(development_blocks),
+                    "test_block_ids": ["a baker"],
+                }
+            }
+        },
     )
     booster, _values = build_tiny_promoted_booster()
     linker = tmp_path / "linker"
-    target = tmp_path / "target.json"
-    _write(target, {})
+    target = _write(tmp_path / "target.json", {})
     save_incremental_linking_artifact(
         booster,
         linker,
@@ -174,15 +178,17 @@ def _build_heldout(tmp_path: Path) -> argparse.Namespace:
     )
     return argparse.Namespace(
         model=complete,
-        inputs_json=inputs_path,
-        arrow_root=arrow_root,
+        model_plan=plan_path,
         name_counts_index_root=counts_path,
         output_report=tmp_path / "report.json",
         n_jobs=1,
         total_ram_bytes=1_000_000_000,
         files=files,
+        augmented_files=augmented_files,
+        dataset_root=root,
         pairwise_stage=stage,
         keep=keep,
+        development=development,
         authority=authority,
     )
 
@@ -196,7 +202,7 @@ def _heldout_template(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, a
 @pytest.fixture
 def heldout_fixture(_heldout_template: tuple[Path, argparse.Namespace], tmp_path: Path) -> argparse.Namespace:
     root, template = _heldout_template
-    # The copy keeps the template depth because relocated plans find the count index by a relative path.
+    # The copy keeps the template depth because Arrow manifests find the count index by a relative path.
     copy_template(root, tmp_path)
 
     def rebase(value: Any) -> Any:
@@ -209,12 +215,22 @@ def heldout_fixture(_heldout_template: tuple[Path, argparse.Namespace], tmp_path
     return argparse.Namespace(**{key: rebase(value) for key, value in vars(template).items()})
 
 
+def _rewrite_plan_digests(fixture: argparse.Namespace) -> None:
+    """Refresh plan digests after a test edits a declared file."""
+
+    payload = json.loads(fixture.model_plan.read_text(encoding="utf-8"))
+    for roles in payload["datasets"].values():
+        for spec in roles.values():
+            spec["sha256"] = sha256_file(fixture.model_plan.parent / spec["path"])
+    _write(fixture.model_plan, payload)
+
+
 def test_heldout_scores_complete_model_exact_pairs_and_full_unknown_context(
     heldout_fixture: argparse.Namespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = heldout_fixture
-    source_bytes = {path: path.read_bytes() for path in fixture.inputs_json.parent.rglob("*") if path.is_file()}
+    source_bytes = {path: path.read_bytes() for path in fixture.dataset_root.rglob("*") if path.is_file()}
     prediction_calls = []
     predict = Clusterer.predict_from_rust_featurizer
 
@@ -226,12 +242,10 @@ def test_heldout_scores_complete_model_exact_pairs_and_full_unknown_context(
     parsed = release_pairwise.build_parser().parse_args(
         [
             "evaluate-heldout",
-            "--inputs-json",
-            str(fixture.inputs_json),
+            "--model-plan",
+            str(fixture.model_plan),
             "--model",
             str(fixture.model),
-            "--arrow-root",
-            str(fixture.arrow_root),
             "--name-counts-index-root",
             str(fixture.name_counts_index_root),
             "--output-report",
@@ -267,8 +281,8 @@ def test_heldout_scores_complete_model_exact_pairs_and_full_unknown_context(
     assert {path: path.read_bytes() for path in source_bytes} == source_bytes
 
 
-@pytest.mark.parametrize("role", ["pairs", "unknown_signatures"])
-def test_heldout_rejects_changed_labels_or_masks_before_features(
+@pytest.mark.parametrize("role", ["heldout_pairs", "unknown_signatures", "arrow"])
+def test_heldout_rejects_changed_plan_files_before_features(
     heldout_fixture: argparse.Namespace,
     monkeypatch: pytest.MonkeyPatch,
     role: str,
@@ -278,28 +292,7 @@ def test_heldout_rejects_changed_labels_or_masks_before_features(
     monkeypatch.setattr(
         release_pairwise, "_pairwise_predictions", lambda *_args: pytest.fail("changed inputs reach prediction")
     )
-    with pytest.raises(ValueError, match="changed after release preparation"):
-        release_pairwise.evaluate_heldout(fixture)
-    assert not fixture.output_report.exists()
-
-
-def test_heldout_rejects_arrow_from_different_actual_source(
-    heldout_fixture: argparse.Namespace,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fixture = heldout_fixture
-    papers = json.loads(fixture.files["papers"].read_text(encoding="utf-8"))
-    next(iter(papers.values()))["title"] = "Changed source title"
-    _write(fixture.files["papers"], papers)
-    inputs = json.loads(fixture.inputs_json.read_text(encoding="utf-8"))
-    for dataset in inputs["sources"]["evaluation"].values():
-        if dataset["papers"]["path"] == fixture.files["papers"].relative_to(fixture.inputs_json.parent).as_posix():
-            dataset["papers"]["sha256"] = sha256_file(fixture.files["papers"])
-    _write(fixture.inputs_json, inputs)
-    monkeypatch.setattr(
-        release_pairwise, "_pairwise_predictions", lambda *_args: pytest.fail("wrong Arrow source reaches prediction")
-    )
-    with pytest.raises(ArrowProvenanceError, match="source"):
+    with pytest.raises(ValueError, match="model file digest mismatch"):
         release_pairwise.evaluate_heldout(fixture)
     assert not fixture.output_report.exists()
 
@@ -312,86 +305,63 @@ def test_heldout_rejects_pairwise_only_stage(heldout_fixture: argparse.Namespace
     assert not fixture.output_report.exists()
 
 
-def test_heldout_rejects_another_training_plan(heldout_fixture: argparse.Namespace) -> None:
+def test_heldout_rejects_a_model_trained_on_other_blocks(heldout_fixture: argparse.Namespace) -> None:
     fixture = heldout_fixture
-    plan = fixture.inputs_json.parent / "model_plan.json"
-    payload = json.loads(plan.read_text(encoding="utf-8"))
-    payload["eps"]["grid"] = [0.5, 0.6]
-    _write(plan, payload)
-    with pytest.raises(ValueError, match="different model plan"):
+    excluded = _write(fixture.model_plan.parent / "excluded_signatures.json", [fixture.development[0]])
+    payload = json.loads(fixture.model_plan.read_text(encoding="utf-8"))
+    payload["datasets"]["qian"]["excluded_signatures"] = {"path": excluded.name, "sha256": sha256_file(excluded)}
+    _write(fixture.model_plan, payload)
+    with pytest.raises(ValueError, match="differ from the model's training population for 'qian'"):
         release_pairwise.evaluate_heldout(fixture)
     assert not fixture.output_report.exists()
 
 
-def test_heldout_accepts_relocated_plan_with_same_content(heldout_fixture: argparse.Namespace, tmp_path: Path) -> None:
+def test_heldout_accepts_a_relocated_dataset_root(heldout_fixture: argparse.Namespace, tmp_path: Path) -> None:
     fixture = heldout_fixture
-    relocated = tmp_path / "relocated" / "pairwise"
-    shutil.copytree(fixture.inputs_json.parent, relocated)
-    plan = relocated / "model_plan.json"
-    # Reformatted bytes keep the same files, roles, digests, and policy.
-    plan.write_text(json.dumps(json.loads(plan.read_text(encoding="utf-8")), indent=2), encoding="utf-8")
-    assert sha256_file(plan) != sha256_file(fixture.inputs_json.parent / "model_plan.json")
-    fixture.inputs_json = relocated / "inputs.json"
-    fixture.arrow_root = relocated / "arrow" / "evaluation"
+    moved = tmp_path / "moved"
+    # Arrow manifests find the count index by relative path, so both move together.
+    counts = fixture.name_counts_index_root.relative_to(fixture.dataset_root.parent)
+    shutil.copytree(fixture.dataset_root, moved / fixture.dataset_root.name)
+    shutil.copytree(fixture.name_counts_index_root, moved / counts)
+    fixture.model_plan = moved / fixture.dataset_root.name / "pairwise" / "model_plan.json"
+    fixture.name_counts_index_root = moved / counts
 
     report = release_pairwise.evaluate_heldout(fixture)
 
     assert report["pairwise"]["aggregate"]["rows"] == 4
 
 
-def test_byte_only_training_record_requires_the_same_plan_bytes(
-    heldout_fixture: argparse.Namespace, tmp_path: Path
-) -> None:
-    original = heldout_fixture.inputs_json.parent / "model_plan.json"
-    record = {"training_scope": "production_full", "model_plan_sha256": sha256_file(original)}
-    release_pairwise._require_trained_plan(record, load_model_plan(original))
-    relocated = tmp_path / "relocated" / "pairwise"
-    shutil.copytree(original.parent, relocated)
-    plan_path = relocated / "model_plan.json"
-    plan_path.write_text(json.dumps(json.loads(plan_path.read_text(encoding="utf-8")), indent=2), encoding="utf-8")
-    with pytest.raises(ValueError, match="different model plan"):
-        release_pairwise._require_trained_plan(record, load_model_plan(plan_path))
-
-
-def test_heldout_rejects_model_sources_that_differ_from_the_plan(heldout_fixture: argparse.Namespace) -> None:
-    fixture = heldout_fixture
-    inputs = json.loads(fixture.inputs_json.read_text(encoding="utf-8"))
-    inputs["sources"]["model"]["qian"]["signatures"]["sha256"] = "0" * 64
-    _write(fixture.inputs_json, inputs)
-    with pytest.raises(ValueError, match="differ from the verified model plan"):
-        release_pairwise.evaluate_heldout(fixture)
-    assert not fixture.output_report.exists()
-
-
-def test_heldout_rejects_model_population_that_overlaps_the_outer_test(
+def test_heldout_rejects_outer_test_pairs_outside_the_heldout_blocks(
     heldout_fixture: argparse.Namespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = heldout_fixture
-    pairwise_root = fixture.inputs_json.parent
-    plan_path = pairwise_root / "model_plan.json"
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    model_files = {role: pairwise_root / spec["path"] for role, spec in plan["datasets"]["qian"].items()}
-    leaked = fixture.keep[0]
-    signatures = json.loads(model_files["signatures"].read_text(encoding="utf-8"))
-    signatures[leaked] = json.loads(fixture.files["signatures"].read_text(encoding="utf-8"))[leaked]
-    _write(model_files["signatures"], signatures)
-    clusters = json.loads(model_files["clusters"].read_text(encoding="utf-8"))
-    clusters["leaked"] = {"cluster_id": "leaked", "signature_ids": [leaked], "model_version": -1}
-    _write(model_files["clusters"], clusters)
-    inputs = json.loads(fixture.inputs_json.read_text(encoding="utf-8"))
-    for role in ("signatures", "clusters"):
-        digest = sha256_file(model_files[role])
-        plan["datasets"]["qian"][role]["sha256"] = digest
-        inputs["sources"]["model"]["qian"][role]["sha256"] = digest
-    _write(plan_path, plan)
-    _write(fixture.inputs_json, inputs)
-    # A real model for the altered plan does not exist; the overlap check itself stays real.
-    monkeypatch.setattr(release_pairwise, "_training_config", lambda *_args, **_kwargs: {})
+    rows = json.loads(fixture.files["heldout_pairs"].read_text(encoding="utf-8"))
+    rows.append({"signature_id_1": fixture.keep[0], "signature_id_2": fixture.development[0], "label": 0})
+    _write(fixture.files["heldout_pairs"], rows)
+    _rewrite_plan_digests(fixture)
     monkeypatch.setattr(
         release_pairwise, "_pairwise_predictions", lambda *_args: pytest.fail("leaked inputs reach prediction")
     )
-    with pytest.raises(ValueError, match=r"contains (test|model .qian.) signatures"):
+    with pytest.raises(ValueError, match="outside the held-out blocks"):
+        release_pairwise.evaluate_heldout(fixture)
+    assert not fixture.output_report.exists()
+
+
+def test_heldout_rejects_augmented_training_copies_of_heldout_signatures(
+    heldout_fixture: argparse.Namespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = heldout_fixture
+    fixture.augmented_files["train_pairs"].write_text(
+        f"signature_id_1,signature_id_2,label\nqian___{fixture.keep[0]},qian___{fixture.development[0]},0\n",
+        encoding="utf-8",
+    )
+    _rewrite_plan_digests(fixture)
+    monkeypatch.setattr(
+        release_pairwise, "_pairwise_predictions", lambda *_args: pytest.fail("leaked inputs reach prediction")
+    )
+    with pytest.raises(ValueError, match="held-out"):
         release_pairwise.evaluate_heldout(fixture)
     assert not fixture.output_report.exists()
 
@@ -401,11 +371,10 @@ def test_heldout_rejects_an_undeclared_uncertainty_sidecar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = heldout_fixture
-    inputs = json.loads(fixture.inputs_json.read_text(encoding="utf-8"))
-    augmented_signatures = (
-        fixture.inputs_json.parent / inputs["sources"]["evaluation"]["augmented"]["signatures"]["path"]
+    _write(
+        fixture.augmented_files["train_pairs"].parent / "restored_unknown_signature_ids_late.json",
+        [f"qian___{fixture.keep[0]}"],
     )
-    _write(augmented_signatures.parent / "restored_unknown_signature_ids_late.json", [f"qian___{fixture.keep[0]}"])
     monkeypatch.setattr(
         release_pairwise, "_pairwise_predictions", lambda *_args: pytest.fail("undeclared mask reaches scoring")
     )

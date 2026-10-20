@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,11 +12,8 @@ import pytest
 
 from s2and import production_training_contract
 from s2and._sha256 import sha256_file
-from s2and.arrow_provenance import ArrowProvenanceError, write_conversion_provenance
 from scripts.production.model import train_pairwise
 from tests.helpers import pairwise_training_args as _args
-
-REQUIRED_ARROW_SOURCE_ROLES = ("signatures", "papers", "specter_embeddings")
 
 
 def _artifact_authority(
@@ -34,24 +33,31 @@ def _artifact_authority(
 
 
 def _write_model_plan(tmp_path: Path, dataset_names: tuple[str, ...] | None = None) -> Path:
+    """Write an Arrow model plan whose files only need stable digests for preflight."""
+
     input_root = tmp_path / "planned_inputs"
-    input_root.mkdir()
     datasets = {}
     names = (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "augmented") if dataset_names is None else dataset_names
     for name in names:
-        roles = {"papers", "signatures", "specter_embeddings"}
-        roles |= {"train_pairs", "val_pairs"} if name == "augmented" else {"clusters"}
+        dataset_dir = input_root / name
+        dataset_dir.mkdir(parents=True)
+        roles = {
+            "arrow": "manifest.json",
+            "heldout_pairs": "test_pairs.json",
+            **(
+                {"train_pairs": "train_pairs.csv", "val_pairs": "val_pairs.csv"}
+                if name == "augmented"
+                else {"clusters": f"{name}_clusters.json", "heldout_blocks": "test_blocks.json"}
+            ),
+        }
         files = {}
-        for role in sorted(roles):
-            path = input_root / f"{name}_{role}"
+        for role, filename in sorted(roles.items()):
+            path = dataset_dir / filename
             if role in {"train_pairs", "val_pairs"}:
                 path.write_text("signature_id_1,signature_id_2,label\nmedline___a,medline___b,1\n", encoding="utf-8")
             else:
                 path.write_text(f"{name}:{role}\n", encoding="utf-8")
-            files[role] = {
-                "path": str(path.resolve()),
-                "sha256": sha256_file(path),
-            }
+            files[role] = {"path": str(path.resolve()), "sha256": sha256_file(path)}
         datasets[name] = files
     plan = {
         "release_version": "9.9",
@@ -67,31 +73,9 @@ def _write_model_plan(tmp_path: Path, dataset_names: tuple[str, ...] | None = No
     return path
 
 
-def _write_arrow_root(tmp_path: Path, plan_path: Path) -> Path:
-    """Write one manifest plus conversion provenance per plan dataset, naming the plan's own files."""
-
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    arrow_root = tmp_path / "arrow"
-    for name, files in plan["datasets"].items():
-        dataset_dir = arrow_root / name
-        dataset_dir.mkdir(parents=True)
-        (dataset_dir / "manifest.json").write_text(json.dumps({"files": {}}), encoding="utf-8")
-        write_conversion_provenance(
-            dataset_dir,
-            sources={role: Path(files[role]["path"]) for role in REQUIRED_ARROW_SOURCE_ROLES},
-            converter={"script": "test"},
-        )
-    return arrow_root
-
-
-def test_preflight_loads_test_free_direct_path_plan(tmp_path: Path) -> None:
+def test_preflight_loads_test_free_arrow_plan(tmp_path: Path) -> None:
     plan_path = _write_model_plan(tmp_path)
-    arrow_root = _write_arrow_root(tmp_path, plan_path)
-    args = _args(
-        tmp_path,
-        model_plan=plan_path,
-        arrow_root=arrow_root,
-    )
+    args = _args(tmp_path, model_plan=plan_path)
 
     plan = train_pairwise._preflight_pairwise(args)
     config = train_pairwise._training_config(args, plan, artifact_hashes={})
@@ -106,14 +90,11 @@ def test_preflight_loads_test_free_direct_path_plan(tmp_path: Path) -> None:
     assert all(
         isinstance(path, str) for dataset in config["dataset_inputs"].values() for path in dataset["files"].values()
     )
-    assert all("test_pairs" not in spec["files"] for spec in config["dataset_inputs"].values())
-    assert config["featurization_backend"] == "rust_from_provenance_bound_arrow"
+    assert config["featurization_backend"] == "rust_from_model_plan_arrow"
     assert "chunk_size" not in config
     for name, spec in config["dataset_inputs"].items():
-        assert spec["arrow_dir"] == str(arrow_root.resolve() / name)
-        assert spec["arrow_conversion_provenance_sha256"] == sha256_file(
-            arrow_root / name / "conversion_provenance.json"
-        )
+        assert spec["arrow_dir"] == str((tmp_path / "planned_inputs" / name).resolve())
+        assert set(spec) == {"arrow_dir", "files", "split_mode"}
     assert list(plan.matrix_work_dir.iterdir()) == []
 
 
@@ -128,8 +109,7 @@ def test_preflight_loads_test_free_direct_path_plan(tmp_path: Path) -> None:
 )
 def test_preflight_uses_only_declared_datasets(tmp_path: Path, dataset_names: tuple[str, ...]) -> None:
     plan_path = _write_model_plan(tmp_path, dataset_names)
-    arrow_root = _write_arrow_root(tmp_path, plan_path)
-    args = _args(tmp_path, model_plan=plan_path, arrow_root=arrow_root)
+    args = _args(tmp_path, model_plan=plan_path)
 
     plan = train_pairwise._preflight_pairwise(args)
     config = train_pairwise._training_config(args, plan, artifact_hashes={})
@@ -149,9 +129,7 @@ def test_preflight_requires_a_cluster_population_for_eps(tmp_path: Path) -> None
 def test_preflight_requires_fixed_augmented_pairs(tmp_path: Path) -> None:
     plan_path = _write_model_plan(tmp_path, ("patents", "augmented"))
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    files = payload["datasets"]["augmented"]
-    files.pop("train_pairs")
-    files["clusters"] = files.pop("val_pairs")
+    payload["datasets"]["augmented"] = payload["datasets"]["patents"]
     plan_path.write_text(json.dumps(payload), encoding="utf-8")
     args = _args(tmp_path, model_plan=plan_path)
 
@@ -159,12 +137,24 @@ def test_preflight_requires_fixed_augmented_pairs(tmp_path: Path) -> None:
         train_pairwise._preflight_pairwise(args)
 
 
+def test_preflight_rejects_a_plan_without_published_arrow_data(tmp_path: Path) -> None:
+    plan_path = _write_model_plan(tmp_path, ("qian",))
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    source = tmp_path / "qian_signatures.json"
+    source.write_text("{}", encoding="utf-8")
+    spec = {"path": str(source), "sha256": sha256_file(source)}
+    payload["datasets"]["qian"] = {role: spec for role in ("signatures", "papers", "specter_embeddings", "clusters")}
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SystemExit, match=r"must name published Arrow data: \['qian'\]"):
+        train_pairwise._preflight_pairwise(_args(tmp_path, model_plan=plan_path))
+
+
 def test_training_without_augmented_data_reaches_artifact_preflight(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan_path = _write_model_plan(tmp_path, ("patents",))
-    args = _args(tmp_path, model_plan=plan_path, arrow_root=_write_arrow_root(tmp_path, plan_path))
+    args = _args(tmp_path, model_plan=_write_model_plan(tmp_path, ("patents",)))
 
     def stop_at_authority(**_kwargs: Any) -> None:
         raise RuntimeError("reached artifact authority")
@@ -172,44 +162,6 @@ def test_training_without_augmented_data_reaches_artifact_preflight(
     monkeypatch.setattr(train_pairwise, "load_packaged_artifact_authority", stop_at_authority)
     with pytest.raises(RuntimeError, match="reached artifact authority"):
         train_pairwise.train_pairwise_bundle(args)
-
-
-@pytest.mark.parametrize("role", REQUIRED_ARROW_SOURCE_ROLES)
-def test_preflight_rejects_arrow_converted_from_different_sources(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    role: str,
-) -> None:
-    plan_path = _write_model_plan(tmp_path)
-    arrow_root = _write_arrow_root(tmp_path, plan_path)
-    other_source = tmp_path / f"other_{role}"
-    other_source.write_text("different content, same role\n", encoding="utf-8")
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    write_conversion_provenance(
-        arrow_root / "kisti",
-        sources={
-            source_role: other_source if source_role == role else Path(plan["datasets"]["kisti"][source_role]["path"])
-            for source_role in REQUIRED_ARROW_SOURCE_ROLES
-        },
-        converter={"script": "test"},
-    )
-    monkeypatch.setattr(
-        train_pairwise,
-        "load_packaged_artifact_authority",
-        lambda **_kwargs: pytest.fail("artifact loading must not run"),
-    )
-
-    with pytest.raises(ArrowProvenanceError, match=rf"kisti was converted from a different {role} source"):
-        train_pairwise.train_pairwise_bundle(_args(tmp_path, model_plan=plan_path, arrow_root=arrow_root))
-
-
-def test_preflight_rejects_a_dataset_without_arrow_provenance(tmp_path: Path) -> None:
-    plan_path = _write_model_plan(tmp_path)
-    arrow_root = _write_arrow_root(tmp_path, plan_path)
-    (arrow_root / "zbmath" / "conversion_provenance.json").unlink()
-
-    with pytest.raises(ArrowProvenanceError, match="zbmath has no conversion provenance record"):
-        train_pairwise._preflight_pairwise(_args(tmp_path, model_plan=plan_path, arrow_root=arrow_root))
 
 
 def test_training_rejects_source_mutation_before_loading_artifacts_or_data(
@@ -226,9 +178,11 @@ def test_training_rejects_source_mutation_before_loading_artifacts_or_data(
         "load_packaged_artifact_authority",
         lambda **_kwargs: pytest.fail("artifact loading must not run"),
     )
-    monkeypatch.setattr(train_pairwise, "ANDData", lambda **_kwargs: pytest.fail("ANDData must not load"))
+    monkeypatch.setattr(
+        train_pairwise, "load_development_dataset", lambda *_args, **_kwargs: pytest.fail("data must not load")
+    )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="model file digest mismatch"):
         train_pairwise.train_pairwise_bundle(args)
 
 
@@ -237,7 +191,7 @@ def test_augmented_dataset_contract_is_checked_before_featurization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plan_path = _write_model_plan(tmp_path)
-    args = _args(tmp_path, model_plan=plan_path, arrow_root=_write_arrow_root(tmp_path, plan_path))
+    args = _args(tmp_path, model_plan=plan_path)
     full_plan = train_pairwise._preflight_pairwise(args)
     augmented_plan = train_pairwise.PairwisePreflightPlan(
         output_dir=full_plan.output_dir,
@@ -247,17 +201,28 @@ def test_augmented_dataset_contract_is_checked_before_featurization(
         model_plan_sha256=full_plan.model_plan_sha256,
         model_plan_content_sha256=full_plan.model_plan_content_sha256,
         arrow_dirs={"augmented": full_plan.arrow_dirs["augmented"]},
-        arrow_provenance_sha256={"augmented": full_plan.arrow_provenance_sha256["augmented"]},
         matrix_work_dir=full_plan.matrix_work_dir,
         matrix_work_free_bytes=full_plan.matrix_work_free_bytes,
         total_ram_bytes=full_plan.total_ram_bytes,
     )
     authority = _artifact_authority()
+    fake_arrow = object()
     fake_dataset = SimpleNamespace(name_tuples=frozenset({("not", "canonical")}))
-    anddata_kwargs: list[dict[str, Any]] = []
+    loads: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    @contextmanager
+    def open_arrow(dataset: Any) -> Iterator[object]:
+        assert dataset is augmented_plan.datasets["augmented"]
+        yield fake_arrow
+
     monkeypatch.setattr(train_pairwise, "_preflight_pairwise", lambda _args: augmented_plan)
     monkeypatch.setattr(train_pairwise, "load_packaged_artifact_authority", lambda **_kwargs: authority)
-    monkeypatch.setattr(train_pairwise, "ANDData", lambda **kwargs: anddata_kwargs.append(kwargs) or fake_dataset)
+    monkeypatch.setattr(train_pairwise, "open_plan_arrow", open_arrow)
+    monkeypatch.setattr(
+        train_pairwise,
+        "load_development_dataset",
+        lambda *call_args, **kwargs: loads.append((call_args, kwargs)) or fake_dataset,
+    )
     monkeypatch.setattr(
         train_pairwise,
         "_featurize_selection",
@@ -266,11 +231,12 @@ def test_augmented_dataset_contract_is_checked_before_featurization(
 
     with pytest.raises(ValueError, match="dataset 'augmented' does not use the canonical name tuples"):
         train_pairwise.train_pairwise_bundle(args)
-    # Selection only: features come from Arrow, so the JSON load skips normalization, SPECTER and counts.
-    [kwargs] = anddata_kwargs
-    assert kwargs["preprocess"] is False
-    assert kwargs["name_counts_index"] is None
-    assert "specter_embeddings" not in kwargs
+    # The same open Arrow dataset selects the pairs that it later featurizes.
+    [(call_args, kwargs)] = loads
+    assert call_args == ("augmented", augmented_plan.datasets["augmented"], fake_arrow)
+    assert kwargs["random_seed"] == args.random_seed
+    assert kwargs["train_pairs_size"] == args.train_pairs_size
+    assert kwargs["val_pairs_size"] == args.validation_pairs_size
 
 
 def test_preflight_rejects_unsafe_launch(tmp_path: Path) -> None:
@@ -384,3 +350,93 @@ def test_selected_validation_roc_auc_must_be_finite() -> None:
     for value in (np.nan, np.inf):
         with pytest.raises(RuntimeError, match="must be finite"):
             train_pairwise._finite_validation_roc_auc(value)
+
+
+class _StubSearch:
+    def __init__(self, **kwargs: Any) -> None:
+        self.init = kwargs
+        self.classifier = "search-classifier"
+        self.best_params = {"num_leaves": 7}
+
+    def fit(self, *_args: Any) -> None:
+        pass
+
+    def predict_proba(self, X: Any) -> np.ndarray:
+        return np.full((len(X), 2), 0.5)
+
+
+class _StubLightGBM:
+    def __init__(self) -> None:
+        self.params: dict[str, Any] = {}
+
+    def set_params(self, **params: Any) -> _StubLightGBM:
+        self.params = params
+        return self
+
+    def fit(self, *_args: Any) -> _StubLightGBM:
+        return self
+
+    def predict_proba(self, X: Any) -> np.ndarray:
+        return np.full((len(X), 2), 0.5)
+
+
+@pytest.mark.parametrize(
+    ("search_auc", "incumbent_auc", "selected"),
+    [(0.8, 0.9, "incumbent"), (0.9, 0.9, "incumbent"), (0.9, 0.8, "search")],
+    ids=["incumbent-better", "tie-keeps-incumbent", "search-better"],
+)
+def test_incumbent_parameters_compete_with_the_search_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    search_auc: float,
+    incumbent_auc: float,
+    selected: str,
+) -> None:
+    arrays = {}
+    for role, values in (
+        ("X_train", np.ones((4, 2))),
+        ("y_train", np.array([0, 1, 0, 1])),
+        ("X_val", np.ones((2, 2))),
+        ("y_val", np.array([0, 1])),
+    ):
+        arrays[role] = tmp_path / f"{role}.npy"
+        np.save(arrays[role], values)
+    scores = iter([search_auc, incumbent_auc])
+    built: list[_StubLightGBM] = []
+    monkeypatch.setattr(train_pairwise, "PairwiseModeler", _StubSearch)
+    monkeypatch.setattr(train_pairwise, "roc_auc_score", lambda *_args: next(scores))
+    monkeypatch.setattr(train_pairwise, "LGBMClassifier", lambda: built.append(_StubLightGBM()) or built[-1])
+    args = _args(tmp_path, n_iter=3, n_jobs=5)
+
+    model, auc, selection = train_pairwise._fit_pairwise_model(
+        args,
+        arrays,
+        feature_prefix="",
+        monotone_constraints="1,0",
+        incumbent={"num_leaves": 99, "n_jobs": 20, "random_state": 7},
+    )
+
+    [incumbent] = built
+    assert incumbent.params == {"num_leaves": 99, "n_jobs": 5, "random_state": 42, "monotone_constraints": "1,0"}
+    assert selection == {
+        "selected_source": selected,
+        "search_validation_roc_auc": search_auc,
+        "incumbent_validation_roc_auc": incumbent_auc,
+    }
+    assert auc == max(search_auc, incumbent_auc)
+    if selected == "incumbent":
+        assert model.classifier is incumbent
+        assert model.best_params == {"num_leaves": 99, "n_jobs": 20, "random_state": 7}
+    else:
+        assert model.classifier == "search-classifier"
+
+
+def test_incumbent_parameters_require_named_heads(tmp_path: Path) -> None:
+    path = tmp_path / "incumbent.json"
+    for payload in ({}, {"other": {"num_leaves": 1}}, {"main": {}}, []):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(SystemExit, match="must map 'main' and/or 'nameless'"):
+            train_pairwise._load_incumbent_parameters(path)
+    shipped = Path(train_pairwise.__file__).with_name("pairwise_incumbent_h13.json")
+    assert set(train_pairwise._load_incumbent_parameters(shipped)) == {"main", "nameless"}
+    assert train_pairwise._load_incumbent_parameters(None) == {}

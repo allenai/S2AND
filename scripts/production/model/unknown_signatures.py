@@ -83,7 +83,8 @@ def load_unknown_signatures(files: Mapping[str, Path], *, filename: str | None =
     Legacy datasets without a sidecar have no declared unknown IDs.
     Multiple sidecars require an explicit source-directory correction.
     """
-    label_path = files["clusters"] if "clusters" in files else files["signatures"]
+    # Arrow fixed-pair entries have no signature file, so their pair labels locate the sidecar.
+    label_path = next(files[role] for role in ("clusters", "signatures", "train_pairs") if role in files)
     path = resolve_unknown_signature_sidecar(label_path.parent, filename=filename)
     if path is None:
         return UnknownSignatures(frozenset())

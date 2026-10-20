@@ -1,12 +1,8 @@
 # Production Inference
 
 Inference users need the common complete model and binary name-count index.
-These large assets use versioned Git LFS paths.
+The `inference` S3 bundle holds both; [the data guide](data.md#download) syncs it into `s2and/data/`.
 Small canonical name tuples and ORCID prefix counts ship in the Python wheel.
-The `inference` S3 bundle holds the same model and index as `artifacts/common/v1.3`.
-See [the data guide](data.md) for the combined local layout.
-
-> **Update at v1.3 release:** The compatible release locations remain unpublished.
 
 Pass an explicit complete model path to `load_production_model`.
 The loader does not select a default model.
@@ -206,6 +202,12 @@ clusters = result["clusters"]
 Optional disallow pairs are passed through `cluster_seeds_disallow`. Seed
 component IDs are preserved, so parity checks should compare partitions when
 another ingestion path assigns different cluster IDs.
+
+The seed mapping holds the signatures of existing author profiles, for example
+the clusters of an earlier run. For a runnable example on released data, the
+[prediction tutorial](../scripts/tutorial_for_predicting_with_the_prod_model.py)
+seeds profiles from one block's labeled signatures on papers before a chosen year
+and links the block's other signatures; see the [README quick start](../README.md#quick-start).
 
 ### Reunite-only memory and time
 
@@ -455,7 +457,8 @@ bounds; it does not hash the index files. `NameCountsIndex.open(path, verify=Tru
 and `verify()` also check every file digest and every record. The release-root
 validator, `convert_to_arrow.py validate`, dataset packaging, linker-bundle assembly,
 the release bundle writer, and the count producer run that check before publication.
-Run it again when you deploy an index to a new location. Arrow routes retain the manifest-bound
+Run it again when you deploy an index to a new location, for example with
+`NameCountsIndex.open("s2and/data/name_counts_index", verify=True)`. Arrow routes retain the manifest-bound
 index inside `ArrowDataset`. Models bind directly to the native index's single
 `manifest_sha256`. The manifest
 contains exactly `kind: "s2and_name_counts"`, public `format_version: 1`, and

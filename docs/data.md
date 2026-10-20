@@ -18,22 +18,38 @@ Historical correction archives are not required.
 Inference needs `inference/` only.
 Training and evaluation need `inference/` and `dataset/`.
 Release preparation needs all three bundles.
-The model and index also remain Git LFS assets under `artifacts/common/v1.3`.
 Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.
 The complete model contains both pairwise boosters, the reviewed EPS, the incremental linker, and required prediction fixtures.
 See [the inference contract](production_inference.md#complete-model-bundles).
 
 ## Download
 
-> **Update at v1.3 release:** The S3 bundles are not published yet.
-> Replace this note with the verified bucket path, the release Git ref, and the manifest hashes.
+> **Update at v1.3 release:** Add the release Git ref.
+
+Sync the bundles into `s2and/data/`, the default data folder of a source checkout.
+The commands use the AWS CLI and need no AWS account.
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/inference/ s2and-1.3/
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/dataset/ s2and-1.3/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/inference/ s2and/data/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/dataset/ s2and/data/
 # Release preparation only:
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/source/ s2and-1.3/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/source/ s2and/data/
 ```
+
+Git ignores everything in `s2and/data/` except its small tracked files.
+Code that reads the name-count index from the default location finds it there without configuration.
+Check the downloaded layout and every index file digest:
+
+```bash
+uv run python scripts/verification/validate_local_arrow_release.py --release-root s2and/data
+```
+
+The model and the index bind their files through these manifests:
+
+| Manifest | SHA-256 |
+| --- | --- |
+| `production_model_v1.3/manifest.json` | `1d21148553bac71b4c3561857c2d415586a215b3084c963798326699d7bee232` |
+| `name_counts_index/manifest.json` | `87459dc14e41fd676730f56b0857d3eb61015cdc42bd73ec9b8b01e2f2b8f4b3` |
 
 The [reproduction guide](reproduce.md) runs the full training process on the synced folder.
 Release `1.3` excludes patent data.
@@ -50,19 +66,11 @@ Only AI2 staff can build the index, because its input is an internal Semantic Sc
 Other users use the released index and cannot regenerate it.
 Each future refresh of the index is a staff step.
 
-Git LFS supplies the same model and index:
-
-```bash
-git lfs pull --include="artifacts/common/v1.3/**"
-```
-
-To use that copy, sync `dataset/` into `artifacts/common/v1.3`.
-Arrow manifests find the index at `name_counts_index/` in the same folder.
-
 ## Folder layout
 
 ```text
-s2and-1.3/
+s2and/data/
+  path_config.json  s2and_name_tuples_*.txt  first_k_letter_counts_from_orcid*.json   # tracked files
   name_counts_index/          # inference: binary name-count index
   production_model_v1.3/      # inference: complete model
   manifest.json               # dataset: public-data manifest

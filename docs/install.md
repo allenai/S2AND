@@ -6,7 +6,7 @@ This document covers the fuller install and setup options for S2AND.
 
 - Python `3.11`, `3.12`, or `3.13`
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
-- Git LFS for the common model, name-count index, and LightGBM test fixtures in a source checkout
+- Git LFS, only to run the test suite, which reads two LightGBM fixtures
 - Rust, if you are working from a source checkout or building the native extension from source:
   [`rustup`](https://www.rust-lang.org/tools/install)
 
@@ -51,18 +51,21 @@ with model/public-data version `1.3`.
 
 ## Repo checkout
 
-Fetch Git LFS common assets and LightGBM parity fixtures after clone or a relevant release-ref change:
+To run the test suite, fetch the LightGBM test fixtures from Git LFS:
 
 ```bash
 git lfs install
-git lfs pull
+git lfs pull --include="tests/fixtures/**"
 ```
+
+Download the model, the index, and the data from S3 with [the data guide](data.md#download).
 
 Install repo dependencies into the project environment (`.venv`), building
 the Rust extension:
 
 ```bash
-uv sync --extra dev
+uv sync               # runtime
+uv sync --extra dev   # runtime plus the test, lint, and build tools
 ```
 
 To choose the interpreter or work in an activated environment instead, create

@@ -2,8 +2,6 @@
 
 The guides describe the current runtime and the corrected dataset release process.
 
-> **Update at v1.3 release:** The compatible model and data download locations remain unpublished.
-
 The [release process](release.md) states the remaining fit, evaluation, and publication steps.
 The [project README](../README.md) provides the installation and workflow overview.
 
@@ -20,7 +18,7 @@ The [project README](../README.md) provides the installation and workflow overvi
 | Run a research API experiment | [Training and evaluation](training.md) |
 
 One complete corrected snapshot supports research and the next correction cycle.
-Common large assets use Git LFS; research data uses S3 without a second common asset copy.
+The model, the name-count index, and the data download from public S3 bundles.
 Small name tuples and ORCID counts remain in normal Git and the wheel.
 The [data guide](data.md) defines the shared local layout and update rules.
 

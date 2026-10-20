@@ -408,6 +408,7 @@ uv run --with psutil python scripts/verification/profile_promoted_incremental_ar
   --write-json "$RunRoot/reports/performance_evaluation_report.json"
 ```
 
+With the released data in `s2and/data/`, use `--arrow-root s2and/data --dataset aminer`.
 The report path must be new.
 Add `--full-run` after the bounded run for a workload above the built-in query or seed limits.
 The report records the workload, the Rust extension identity, per-run time and process-tree RSS, and summary statistics.

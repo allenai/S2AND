@@ -29,20 +29,18 @@ The [install guide](install.md) lists platform requirements.
 
 ## Run inference: one sync
 
-> **Update at v1.3 release:** The S3 bundles are not published yet. Replace this note with the verified location.
-
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/inference/ s2and-1.3/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/inference/ s2and/data/
 ```
 
-The folder now holds `production_model_v1.3/` and `name_counts_index/`.
+`s2and/data/`, the default data folder, now holds `production_model_v1.3/` and `name_counts_index/`.
 [Load a production model](production_inference.md#load-a-production-model) for bulk and incremental prediction.
 
 ## Train and evaluate: a second sync
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/dataset/ s2and-1.3/
-ROOT=$PWD/s2and-1.3
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/dataset/ s2and/data/
+ROOT=$PWD/s2and/data
 RUN=$PWD/runs/1.3
 mkdir -p "$RUN/matrix-work"
 ```

@@ -5,7 +5,8 @@ The model predicts author clusters from paper and author records.
 
 This branch prepares Python/Rust runtime `1.0.0` and model/data release `1.3`.
 
-> **Update at v1.3 release:** The complete model and the `1.3` data bundles are not yet published.
+> **Update at v1.3 release:** Runtime `1.0.0` is not on PyPI yet, and the release tag does not exist yet.
+> Use the `canonical-v2-migration` branch. The `1.3` S3 bundles are published.
 
 Use [the release process](docs/release.md) for current preparation, fit, evaluation, and publication steps.
 
@@ -21,9 +22,9 @@ Use [the release process](docs/release.md) for current preparation, fit, evaluat
 | Use current name normalization and small alias artifacts | Source checkout; optional count-index download | [Canonical names](docs/canonical_names.md#access-the-current-rules-and-artifacts) |
 | Work on the repository | Source checkout and development environment | [Development](docs/development.md) |
 
-Common large assets use Git LFS.
+The model, the name-count index, and the data download from three public S3 bundles: `inference`, `dataset`, and `source`.
+See [Download data](#download-data).
 Small name tuples and ORCID prefix counts ship in normal Git and the Python wheel.
-Each release also publishes `inference`, `dataset`, and `source` S3 bundles; see [Download data](#download-data).
 The `source` bundle holds the full corrected records, the starting point for future corrections.
 
 ## Install
@@ -33,38 +34,65 @@ The `1.0.0` package requires the exactly matched `s2and-rust` package.
 Until publication, use a source checkout:
 
 ```bash
-git lfs install
-git lfs pull
-uv sync --extra dev
+git clone --branch canonical-v2-migration https://github.com/allenai/S2AND.git
+cd S2AND
+uv sync
 ```
 
 `uv sync` builds the native extension from `s2and_rust/`.
+`uv sync --extra dev` also installs the test and lint tools.
 See [installation prerequisites](docs/install.md) for operating-system dependencies and build recovery.
-Pull LFS assets after a branch or release-ref change that affects those files.
 
 ## Download data
 
-> **Update at v1.3 release:** The compatible release locations remain unpublished.
+Sync the bundles into `s2and/data/`, the default data folder.
+The commands use the AWS CLI and need no AWS account.
 
-The release notes will provide the common Git ref, model path, S3 prefix, and hashes.
-Each release publishes three S3 bundles: `inference`, `dataset`, and `source`.
+```bash
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/inference/ s2and/data/
+# Training, evaluation, and the quick start examples also need:
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/dataset/ s2and/data/
+```
+
+`inference` holds the complete model and the name-count index (2.4 GB).
+`dataset` holds the benchmark Arrow data and labels (9.1 GB).
 The [data guide](docs/data.md#choose-the-required-data) states which bundles each user needs.
-Historical Arrow prefixes do not satisfy the current format-1 contract.
-
-Inference users sync `inference` and supply their own data.
-Training and evaluation users also sync `dataset` into the same folder.
-Classic `ANDData` selects that index through [path configuration](docs/data.md#configuring-s2anddatapath_configjson).
+Git ignores the downloaded files.
+Classic `ANDData` finds the index in `s2and/data/` without [path configuration](docs/data.md#configuring-s2anddatapath_configjson).
 Arrow and production script calls use explicit paths.
+Historical Arrow prefixes do not satisfy the current format-1 contract.
 
 ## Quick start
 
-Load the complete model from an explicit path:
+After you [download](#download-data) `inference` and `dataset`, cluster every block of a released benchmark.
+For `qian` the model puts 6,542 signatures into 1,235 clusters:
+
+```bash
+uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
+    --model-path s2and/data/production_model_v1.3 \
+    --arrow-dataset s2and/data/benchmarks/qian --n-jobs 8
+```
+
+Incremental prediction links new signatures to existing author profiles.
+In this example, labeled `j wang` signatures on papers before 2015 seed 481 profiles.
+The block's 308 other signatures arrive as new papers; 245 of them join a profile:
+
+```bash
+uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
+    --model-path s2and/data/production_model_v1.3 \
+    --arrow-dataset s2and/data/benchmarks/aminer \
+    --incremental-block "j wang" \
+    --seed-clusters s2and/data/benchmarks/aminer/aminer_clusters.json \
+    --seed-before-year 2015 --n-jobs 8
+```
+
+In your own code, load the complete model from an explicit path:
 
 ```python
 from s2and.arrow_inputs import ArrowDataset
 from s2and.production_model import load_production_model
 
-clusterer = load_production_model('/path/to/production_model_v1.3', n_jobs=8)
+clusterer = load_production_model('s2and/data/production_model_v1.3', n_jobs=8)
 blocks = {'j smith': ['signature_1', 'signature_2']}
 with ArrowDataset.open('/path/to/your_arrow_dataset') as dataset:
     clusters, distances = clusterer.predict_from_arrow(
@@ -74,7 +102,9 @@ with ArrowDataset.open('/path/to/your_arrow_dataset') as dataset:
     )
 ```
 
-Replace the paths and signature IDs with your complete model and validated dataset.
+Replace the dataset path and signature IDs with your validated Arrow dataset.
+`blocks` maps each S2 author block to its signature IDs.
+The tutorial's `arrow_blocks` function builds that mapping from `signatures.arrow`.
 The loader rejects pickles and pairwise-only stages.
 The [inference guide](docs/production_inference.md) describes raw inputs, embeddings, constraints, incremental calls, and bundle compatibility.
 

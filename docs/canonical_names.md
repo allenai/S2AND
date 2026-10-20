@@ -86,11 +86,10 @@ assert orcid.name_tuples_sha256 == aliases.data_sha256
 `aliases.pairs` contains canonical unordered first-name alias pairs.
 `orcid.counts` contains first-name prefix-pair evidence; it is not the global name-frequency index.
 
-Fetch the common count index only when you need global name frequencies:
+Download the common count index only when you need global name frequencies:
 
 ```bash
-git lfs install --local --skip-smudge
-git lfs pull --include="artifacts/common/v1.3/name_counts_index/*.bin"
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/inference/name_counts_index/ s2and/data/name_counts_index/
 ```
 
 Use the canonical keys with the validated index:
@@ -98,7 +97,7 @@ Use the canonical keys with the validated index:
 ```python
 from s2and.name_counts_index import NameCountsIndex
 
-index = NameCountsIndex.open("artifacts/common/v1.3/name_counts_index")
+index = NameCountsIndex.open("s2and/data/name_counts_index")
 first, last, first_last, last_first_initial = index.lookup_many(
     [keys["first"]],
     [keys["last"]],
@@ -107,8 +106,7 @@ first, last, first_last, last_first_initial = index.lookup_many(
 )
 ```
 
-The index's JSON manifest is ordinary Git; its four binary files use Git LFS.
-Git preserves the manifest's exact bytes because dataset and model contracts bind its SHA-256.
+Dataset and model contracts bind the SHA-256 of the index manifest, so keep its bytes unchanged.
 The index requires about 2.42 GB of local space.
 `None` keys yield `NaN`; informative keys absent from the index yield the default count `1.0`.
 Use [the data guide](data.md) for model assets and the data bundles.

@@ -12,30 +12,15 @@ pypitoken
 # Legacy top-level data root. Current downloads and local datasets live under s2and/data/.
 /data/
 
-s2and/data/aminer/
-s2and/data/arnetminer/
-s2and/data/inspire/
-s2and/data/kisti/
-s2and/data/medline/
-s2and/data/pubmed/
-s2and/data/qian/
-s2and/data/temp/
-s2and/data/s2and_mini*/
-s2and/data/name_counts_index/
-s2and/data/augmented/
-s2and/data/orcid/
-s2and/data/test/
-s2and/data/zbmath/
-s2and/data/inventors*/
-s2and/data/inventors_s2and/
-s2and/data/name_counts_rust.json
-s2and/data/lid.176.bin
-s2and/data/LICENSE.txt
-s2and/data/manifest.json
-s2and/data/release_audit.json
-s2and/data/.*.publish.lock
-s2and/data/joint_*/
-s2and/data/s2and_and_big_blocks_linker_dataset_*/
+# Release bundles download into s2and/data/, the default data folder.
+# Ignore everything there except the small tracked files; add an exception for each new tracked file.
+s2and/data/*
+!s2and/data/path_config.json
+!s2and/data/first_k_letter_counts_from_orcid.json
+!s2and/data/first_k_letter_counts_from_orcid.manifest.json
+!s2and/data/s2and_name_tuples_canonical.txt
+!s2and/data/s2and_name_tuples_filtered.txt
+!s2and/data/s2and_unnormalized_filtered_name_tuples.txt
 s2and/data-backup/
 
 

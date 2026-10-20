@@ -60,9 +60,7 @@ production model and public-data version is `1.3`, on a separate version axis.
   benchmark signatures, and augmented evaluation cannot contain benchmark
   model-development signatures. Before any featurization, pairwise training
   rejects augmented members outside the actual source training blocks, including
-  validation, test, and omitted signatures. `convert_to_arrow.py
-  filter-augmented-pairs` writes reproducible filtered training/evaluation files
-  and counts from a draft release and the training seed, preserving originals.
+  validation, test, and omitted signatures.
 - Arrow bulk prediction keeps zero-valued caller supervision as distance
   overrides during initial-only attachment, rather than treating them as
   mandatory incremental links. Standalone incremental requests retain their
@@ -332,12 +330,6 @@ production model and public-data version is `1.3`, on a separate version axis.
   the same result. The alias artifact drops the aliases that the rule now covers,
   and the packaged ORCID prefix counts match the new alias file. See
   [canonical names](canonical_names.md).
-- `scripts/convert_to_arrow.py join-canonical-augmented-names` gives the
-  internal augmented training set its source datasets' canonical names,
-  re-shortening the first names the augmentation had cut to an initial, and
-  drops signatures and pairs from `--drop-sources` (v1.3: `orcid`). It writes
-  release-ready inputs: training pairs with `signature_id_1`/`signature_id_2`
-  columns and held-out pairs in the pairwise-evaluation JSON format.
 - Development: the test suite runs under pytest-xdist (`-n auto`), and
   `run_ci_locally.py --pytest-workers` selects the worker count.
 - `scripts/tutorial_for_predicting_with_the_prod_model.py` scores the bundle's

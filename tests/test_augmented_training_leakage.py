@@ -2,9 +2,11 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from s2and.data import ANDData
 from scripts.production.model.augmented_leakage import (
     require_declared_sources,
     require_training_members,
@@ -92,3 +94,29 @@ def test_inventor_fit_members_preserve_signature_ids_above_int64(tmp_path: Path)
     members = source_members([(f"inventors_s2and___{signature_id}", "medline___m1")])
     require_declared_sources(members, ("inventors_s2and", "augmented"), context="Test")
     require_training_members(members, "inventors_s2and", training)
+
+
+def test_random_block_fit_members_use_the_real_split_without_packaged_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_files = write_pairwise_dataset(tmp_path / "data", name="qian")
+    reference = ANDData(
+        signatures=str(model_files["signatures"]),
+        papers=str(model_files["papers"]),
+        clusters=str(model_files["clusters"]),
+        name="qian",
+        mode="train",
+        preprocess=False,
+        random_seed=1111,
+        name_counts_index=None,
+        name_tuples=frozenset(),
+        n_jobs=1,
+    )
+    train, _, _ = reference.split_cluster_signatures()
+
+    def forbid_artifact(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("split-only helper must not load the packaged name-tuple artifact")
+
+    monkeypatch.setattr("s2and.data.load_packaged_name_tuple_artifact", forbid_artifact)
+    expected = {sid for members in train.values() for sid in members}
+    assert training_members_from_sources("qian", model_files, random_seed=1111) == expected

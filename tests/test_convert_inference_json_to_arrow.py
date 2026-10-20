@@ -387,9 +387,6 @@ def test_module_entry_point_lists_subcommands() -> None:
     assert result.returncode == 0, result.stderr
     for subcommand in (
         "service-json",
-        "join-canonical-names",
-        "join-canonical-augmented-names",
-        "filter-augmented-pairs",
         "benchmark",
         "linker-replay",
         "validate",

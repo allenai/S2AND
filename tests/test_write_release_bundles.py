@@ -124,6 +124,7 @@ def _write_snapshot(tmp_path: Path) -> Path:
     )
     for name in ("LICENSE.txt", "manifest.json", "replay_manifest.json", "bundle.json"):
         _write(snapshot / name, {"file": name})
+    _write(snapshot / "orcid_error_query_signatures.json", [["a_khan", "error0"]])
     for name in ("datasets", "labels", "components", "splits", "corrected_sources", "corrected_replay"):
         _write(snapshot / name / "placeholder.json", {"folder": name})
     return snapshot
@@ -216,6 +217,8 @@ def test_bundles_declare_signatures_reserved_outside_both_populations(snapshot: 
         ("clusters", "do not rebuild the model labels"),
         ("blocks", "held-out blocks differ"),
         ("unknown", "unknown list is not the benchmark list"),
+        ("duplicate", "duplicate IDs"),
+        ("orcid_errors", "orcid_error_query_signatures.json"),
     ],
 )
 def test_bundles_reject_a_snapshot_that_arrow_cannot_rebuild(
@@ -229,10 +232,14 @@ def test_bundles_reject_a_snapshot_that_arrow_cannot_rebuild(
         _write(sources / "model/qian/qian_clusters.json", clusters)
     elif change == "blocks":
         _write(sources / "evaluation/qian/test_blocks.json", {"a adams": ["signature-0-0"]})
-    else:
+    elif change == "unknown":
         _write(sources / "model/qian/restored_unknown_signature_ids_test.json", [])
+    elif change == "duplicate":
+        _write(sources / "model/qian/restored_unknown_signature_ids_test.json", ["signature-1-0", "signature-1-0"])
+    else:
+        (snapshot / "orcid_error_query_signatures.json").unlink()
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises((ValueError, FileNotFoundError), match=message):
         write_release_bundles(snapshot, tmp_path / "bundles")
 
 

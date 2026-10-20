@@ -32,16 +32,22 @@ from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.arrow_training import load_signatures_from_arrow  # noqa: E402
 from s2and.production_training_contract import load_model_plan  # noqa: E402
 from scripts.production.model.plan_datasets import require_arrow_plan  # noqa: E402
+from scripts.production.model.unknown_signatures import load_unknown_signatures  # noqa: E402
 
-DATASET_FILES = ("LICENSE.txt", "manifest.json", "replay_manifest.json", "bundle.json")
-DATASET_OPTIONAL_FILES = ("orcid_error_query_signatures.json",)
+# The giant-block ORCID B3 sweep reads the ORCID-error list from the data root.
+DATASET_FILES = (
+    "LICENSE.txt",
+    "manifest.json",
+    "replay_manifest.json",
+    "bundle.json",
+    "orcid_error_query_signatures.json",
+)
 DATASET_DIRS = ("benchmarks", "datasets", "labels", "components", "splits")
 DATASET_OPTIONAL_DIRS = ("evaluation_inputs", "incremental_patent_tasks")
 SOURCE_FILES = ("LICENSE.txt",)
 SOURCE_OPTIONAL_FILES = ("excluded_query_views.json",)
 SOURCE_DIRS = ("corrected_sources",)
 SOURCE_OPTIONAL_DIRS = ("corrected_replay",)
-UNKNOWN_PATTERN = "restored_unknown_signature_ids_*.json"
 # Windows reports a cross-volume hardlink as ERROR_NOT_SAME_DEVICE.
 _WINDOWS_NOT_SAME_DEVICE = 17
 
@@ -90,15 +96,6 @@ def _arrow_signature_ids(dataset_dir: Path) -> set[str]:
             return set(load_signatures_from_arrow(source))
 
 
-def _sidecar_ids(directory: Path) -> tuple[Path | None, set[str]]:
-    sidecars = sorted(directory.glob(UNKNOWN_PATTERN))
-    if len(sidecars) > 1:
-        raise ValueError(f"Multiple unknown-signature lists in {directory}")
-    if not sidecars:
-        return None, set()
-    return sidecars[0], set(_read_json(sidecars[0]))
-
-
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)
@@ -137,11 +134,10 @@ def _random_block_roles(
         str(row[key]) for row in _read_json(evaluation["pairs"]) for key in ("signature_id_1", "signature_id_2")
     }
     _require(pair_ids <= block_ids, f"{name}: held-out pairs use signatures outside the held-out blocks")
-    sidecar, unknown = _sidecar_ids(snapshot_benchmark)
-    sidecar = None if sidecar is None else benchmark / sidecar.name
+    unknown = load_unknown_signatures({"clusters": snapshot_benchmark / f"{name}_clusters.json"})
     for population, files, ids in (("development", model, model_ids), ("outer-test", evaluation, evaluation_ids)):
-        _, declared = _sidecar_ids(files["signatures"].parent)
-        _require(declared == unknown & ids, f"{name}: the {population} unknown list is not the benchmark list")
+        declared = load_unknown_signatures(files).ids
+        _require(declared == unknown.ids & ids, f"{name}: the {population} unknown list is not the benchmark list")
 
     heldout = pairwise / "heldout" / name
     _place(evaluation["blocks"], heldout / "test_blocks.json")
@@ -152,8 +148,8 @@ def _random_block_roles(
         "heldout_blocks": heldout / "test_blocks.json",
         "heldout_pairs": heldout / "test_pairs.json",
     }
-    if sidecar is not None:
-        roles["unknown_signatures"] = sidecar
+    if unknown.path is not None:
+        roles["unknown_signatures"] = benchmark / unknown.path.name
     excluded = complete - model_ids - evaluation_ids
     if excluded:
         # Producers can reserve signatures outside both development and the outer test.
@@ -240,9 +236,6 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
 
     for name in DATASET_FILES:
         _place(snapshot / name, dataset / name)
-    for name in DATASET_OPTIONAL_FILES:
-        if (snapshot / name).is_file():
-            _place(snapshot / name, dataset / name)
     for name in DATASET_DIRS:
         _place_tree(snapshot / name, dataset / name)
     for name in DATASET_OPTIONAL_DIRS:

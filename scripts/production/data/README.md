@@ -162,7 +162,6 @@ The snapshot uses Arrow IPC, Parquet, JSON, and CSV according to the current con
 It is not an all-IPC dataset.
 Precomputed features are derived caches and do not replace the corrected master.
 
-Publish the common index and complete model through Git LFS.
 Publish the `inference`, `dataset`, and `source` bundles that `write_release_bundles.py` writes.
 Do not publish the snapshot itself.
 Verify one local root that combines `inference` and `dataset`.

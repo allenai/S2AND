@@ -42,7 +42,7 @@ full CI matrix and the coverage floor.
 | `shell_helpers.py` | Bounded Bash execution with captured diagnostics and native Git Bash selection |
 | `fixture_templates.py` | Per-test copies of module-built fixture trees with rebased absolute paths |
 | `linker_row_feature_reference.py` | Independent row-wise reference for native feature comparisons |
-| `fixtures/rust_lightgbm/` | Serialized models and independent prediction fixtures (LFS) |
+| `fixtures/rust_lightgbm/` | Serialized models and independent prediction fixtures |
 | `fixtures/*.json` | Frozen canonical-name examples and the 53-feature linker training target |
 | `dummy/`, `qian/` | Small JSON/pickle datasets used by classic `ANDData` tests |
 

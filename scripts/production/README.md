@@ -213,10 +213,8 @@ Keep their reports separate.
 
 Reuse unchanged common assets.
 Small tuple and ORCID files remain in normal Git and the wheel.
-The binary name-count index uses Git LFS and remains outside the wheel.
-Release `1.3` uses `artifacts/common/v1.3/name_counts_index`.
-The complete model target is `artifacts/common/v1.3/production_model_v1.3`.
-This path contains the A release candidate. Final release acceptance remains pending.
+The binary name-count index and the complete model ship only in the `inference` S3 bundle, outside the wheel.
+The `1.3` bundle holds the A release candidate. Final release acceptance remains pending.
 See [the count producers](counts/README.md) for source columns, workload bounds, and native index construction.
 
 The reviewed tuple source reproduces the canonical artifact byte-for-byte:

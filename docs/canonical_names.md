@@ -8,16 +8,16 @@ author names, builds name-count keys, and compares canonical names.
 > **Update at v1.3 release:** Runtime `1.0.0` remains unpublished.
 > Use PR 80's `canonical-v2-migration` branch and its local Rust build for the current rules.
 
-Skip automatic Git LFS downloads when you need only normalization and small artifacts:
+Clone the branch and build the environment:
 
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 git clone --branch canonical-v2-migration https://github.com/allenai/S2AND.git
+git clone --branch canonical-v2-migration https://github.com/allenai/S2AND.git
 cd S2AND
-uv sync --extra dev
+uv sync
 ```
 
-The clone retains LFS pointers for the large count index, model weights, and test fixtures.
 Name tuples and ORCID prefix counts are ordinary Git files and wheel assets.
+The large count index downloads separately, as shown below.
 They do not require the count-index download.
 See [installation prerequisites](install.md) before the native build.
 

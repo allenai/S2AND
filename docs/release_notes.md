@@ -78,7 +78,8 @@ production model and public-data version is `1.3`, on a separate version axis.
 - The production trainer accepts the dataset names declared by the model plan instead of a fixed seven-source set.
   The `1.3` fit excludes `inventors_s2and` and retains the accepted non-patent augmented dataset.
 - `package_corrected_datasets.py` produces a portable corrected snapshot with complete incremental support and one common count index.
-  Common large assets use Git LFS and the `inference` S3 bundle.
+  The complete model and the name-count index ship only in the `inference` S3 bundle.
+  The repository no longer uses Git LFS; its two LightGBM test fixtures are ordinary Git files.
   Corrected source records preserve full paper text where available.
   Existing giant replay sources do not supply full abstract text.
 - Models declare format and feature-contract versions plus ordered feature names.

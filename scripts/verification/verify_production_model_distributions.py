@@ -16,8 +16,6 @@ import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path, PurePosixPath
 
-LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
-
 CANONICAL_TUPLE_PATHS = frozenset(
     {
         "s2and/data/s2and_name_tuples_canonical.txt",
@@ -96,29 +94,12 @@ def _verify_archive(
     if forbidden:
         raise ValueError(f"{archive_name} contains forbidden production model paths: {forbidden}")
 
-    unhydrated: list[str] = []
-    unhydrated_source: list[str] = []
     mismatched: list[str] = []
     for path in sorted(expected):
         archive_payload = read_bytes(path)
         source_payload = (source_root / path).read_bytes()
-        if archive_payload[: len(LFS_POINTER_PREFIX)] == LFS_POINTER_PREFIX:
-            unhydrated.append(path)
-            continue
-        if source_payload[: len(LFS_POINTER_PREFIX)] == LFS_POINTER_PREFIX:
-            unhydrated_source.append(path)
-            continue
         if _sha256_bytes(archive_payload) != _sha256_bytes(source_payload):
             mismatched.append(path)
-    if unhydrated:
-        raise ValueError(f"{archive_name} contains unhydrated LFS pointers: {unhydrated}")
-    if unhydrated_source:
-        # Distinguished from content drift: the archive is fine and the checkout
-        # is the problem, so the operator needs `git lfs pull`, not a rebuild.
-        raise ValueError(
-            f"Source tree contains unhydrated LFS pointers, so {archive_name} content "
-            f"cannot be verified against it: {unhydrated_source}"
-        )
     if mismatched:
         raise ValueError(f"{archive_name} content differs from the source tree for: {mismatched}")
 

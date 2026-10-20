@@ -12,8 +12,6 @@ jobs:
         run: test "$GITHUB_REF" = "refs/heads/main"
 
       - uses: actions/checkout@v5
-        with:
-          lfs: true
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
@@ -37,8 +35,6 @@ jobs:
     needs: [validate]
     steps:
       - uses: actions/checkout@v5
-        with:
-          lfs: true
 
       - uses: actions/setup-python@v6
         with:

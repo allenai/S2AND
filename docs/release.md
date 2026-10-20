@@ -30,7 +30,7 @@ Keep source snapshots and fit outputs in separate directories.
 
 ## Fixed decisions
 
-- Keep one common binary name-count index and complete production model in versioned Git LFS assets.
+- Publish the common binary name-count index and complete production model only in the `inference` S3 bundle.
 - Build the common index from author-table rows. Archive mention counts, M, as a research alternative.
 - Keep small name tuples and ORCID prefix counts in normal Git and the Python wheel.
 - Publish three S3 bundles, `inference`, `dataset`, and `source`, with one copy of each file.
@@ -205,8 +205,6 @@ Do not dispatch publication before model and data acceptance are complete.
 
 ## Stage 7: finish
 
-Publish the common large assets to Git LFS under a versioned release path.
-Release `1.3` uses `artifacts/common/v1.3` for the index and accepted complete model.
 Write the bundles again with the accepted model, then publish each bundle to its immutable S3 prefix.
 Release `1.3` uses `s3://ai2-s2-research-public/s2and/1.3/` with `inference/`, `dataset/`, and `source/`.
 Sync `inference` and `dataset` into one fresh local root.

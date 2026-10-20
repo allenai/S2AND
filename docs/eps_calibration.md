@@ -12,7 +12,7 @@ Use one root that combines the `inference` and `dataset` bundles, and the comple
 The seven giant datasets are `a_khan`, `a_silva`, `h_wang`, `j_smith`, `s_gupta`, `s_lee`, and `s_park`.
 Their Arrow data, profile memberships, dev labels, and initial-query source map already belong to the `dataset` bundle.
 Use `--replay-bundle incremental` to select that catalog from the combined public root.
-Obtain the model and index from the `inference` bundle or `artifacts/common/v1.3`.
+Obtain the model and index from the `inference` bundle.
 No second giant-data copy is required.
 
 The final `1.3` review uses fresh internal Semantic Scholar exports instead of the snapshot giants.

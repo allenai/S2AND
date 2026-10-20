@@ -16,6 +16,58 @@ production model and public-data version is `1.3`, on a separate version axis.
   Final acceptance and S3/PyPI publication remain pending.
   See [the release process](release.md).
 
+### Migrating Arrow callers from 0.51
+
+Services that sent Arrow tables to S2AND 0.51 need these changes:
+
+- Pin `s2and==1.0.0`. `s2and-rust` is now a plain dependency, and the `rust` extra is gone.
+- The wheel no longer contains a model or a name-count pickle. Download the model and the
+  name-count index from the `inference` S3 bundle (see [data](data.md)), and load the model with
+  `load_production_model(path, n_jobs=N)`. `production_model_bundle_version` is now
+  `production_model_release_version`, for example `"1.3"`.
+- `predict_from_arrow_paths` and `predict_incremental_from_arrow_paths` are removed. Build batch
+  indexes, open the tables with `ArrowDataset.open_trusted`, and call `predict_from_arrow` or
+  `predict_incremental_from_arrow`.
+- Seeds, exclusions, and altered profiles are prediction arguments, not path keys. 0.51 read the
+  `cluster_seeds`, `cluster_seed_disallows`, and `altered_cluster_signatures` tables from the path
+  mapping; `open_trusted` now rejects those keys.
+- `altered_cluster_signatures=None` means that no profile is altered. 0.51 read a sidecar table
+  instead.
+- Incremental prediction returns a mapping; read `result["clusters"]`. `return_clusters_only` is
+  removed.
+- Omit `name_tuples`, or pass `None`, to use the packaged alias list.
+- `FEATURE_BLOCK_SCHEMA_VERSION`, `NAME_COUNTS_INDEX_SCHEMA_VERSION`, `s2and.file_cache`, and
+  `s2and.data.NAME_COUNTS_PATH` are removed. Check table schemas with
+  `s2and.arrow_schema.validate_arrow_schema`.
+- Papers may omit `predicted_language`, `is_reliable`, and `language_reliability`; S2AND then
+  detects the language from the title. Present values must be consistent: a language for every
+  reliability value, no empty language, and reliability `0.0` when `is_reliable` is false.
+
+```python
+from s2and.arrow_inputs import ArrowDataset
+from s2and.incremental_linking.feature_block import (
+    read_altered_cluster_signatures_arrow,
+    read_cluster_seed_disallows_arrow,
+    read_cluster_seeds_arrow,
+    write_raw_arrow_batch_lookup_indexes,
+)
+
+# tables: {"signatures": path, "papers": path, "paper_authors": path, "specter": path}
+paths, _ = write_raw_arrow_batch_lookup_indexes(tables, request_directory)
+paths["name_counts_index"] = name_counts_index_directory
+with ArrowDataset.open_trusted(paths) as dataset:
+    result = clusterer.predict_incremental_from_arrow(
+        block_signatures,
+        dataset,
+        cluster_seeds_require=read_cluster_seeds_arrow(seeds_path),
+        cluster_seeds_disallow=read_cluster_seed_disallows_arrow(disallows_path),
+        altered_cluster_signatures=read_altered_cluster_signatures_arrow(altered_path),
+    )
+clusters = result["clusters"]
+```
+
+Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disallow` arguments.
+
 ### Breaking changes
 
 - Releases publish three S3 bundles: `inference` (model and count index), `dataset`

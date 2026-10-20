@@ -32,13 +32,10 @@ def test_trusted_features_match_verified_dataset_without_manifest(tmp_path: Path
     with ArrowDataset.open(tmp_path, require_specter=include_specter) as verified:
         expected = _features(verified)
     (tmp_path / "manifest.json").unlink()
-    # Sidecars are request inputs and need not exist when opening the dataset.
-    paths["cluster_seeds"] = str(tmp_path / "nonexistent-sidecar.arrow")
 
     with ArrowDataset.open_trusted(paths, require_specter=include_specter) as dataset:
         assert dataset.root == tmp_path.resolve()
         assert dataset.has("specter") == include_specter
-        assert not dataset.has("cluster_seeds")
         np.testing.assert_array_equal(_features(dataset), expected)
         with dataset.use() as lease, lease.open_file("signatures") as source:
             assert pa.ipc.open_file(source).read_all().num_rows == 13
@@ -47,6 +44,22 @@ def test_trusted_features_match_verified_dataset_without_manifest(tmp_path: Path
     assert dataset.closed
     with pytest.raises(RuntimeError, match="closed"):
         _features(dataset)
+
+
+@pytest.mark.parametrize(
+    ("key", "argument"),
+    [
+        ("cluster_seeds", "cluster_seeds_require"),
+        ("cluster_seed_disallows", "cluster_seeds_disallow"),
+        ("altered_cluster_signatures", "altered_cluster_signatures"),
+    ],
+)
+def test_trusted_open_rejects_request_local_tables(tmp_path: Path, key: str, argument: str) -> None:
+    # A caller ported from 0.51 passes seed tables as paths; ignoring them would drop exclusions silently.
+    paths = write_minimal_arrow_prediction_bundle(tmp_path)
+    paths[key] = str(tmp_path / f"{key}.arrow")
+    with pytest.raises(ValueError, match=f"for '{key}' pass {argument} "):
+        ArrowDataset.open_trusted(paths)
 
 
 def test_trusted_open_skips_hashing_and_isolates_generations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

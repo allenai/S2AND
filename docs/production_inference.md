@@ -96,6 +96,10 @@ with ArrowDataset.open_trusted(paths) as dataset:
 handle as `open`. It performs no dataset checksum scans and still checks required tables,
 paired optional inputs, Arrow schemas, index structure, and source sizes. The
 caller is responsible for supplying matching, immutable tables and indexes.
+It raises `ValueError` for the `cluster_seeds`, `cluster_seed_disallows`, and
+`altered_cluster_signatures` keys. Read those tables with `read_cluster_seeds_arrow`,
+`read_cluster_seed_disallows_arrow`, and `read_altered_cluster_signatures_arrow`, and
+pass them as prediction arguments.
 Both modes open a name-count index with the same checks: manifest, file sizes, file headers,
 and section bounds.
 Each trusted open gets a fresh generation ID, so prediction caches can be reused

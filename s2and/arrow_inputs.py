@@ -83,6 +83,12 @@ _REQUIRED_RUNTIME_KEYS = frozenset(
     }
 )
 _NATIVE_HANDLE_KEYS = _REQUIRED_RUNTIME_KEYS | frozenset({"specter", "specter_batch_index"})
+# Path keys that 0.51 read as request inputs, mapped to the prediction argument that replaces each.
+_REQUEST_LOCAL_PATH_ARGUMENTS = {
+    "cluster_seeds": "cluster_seeds_require (see read_cluster_seeds_arrow)",
+    "cluster_seed_disallows": "cluster_seeds_disallow (see read_cluster_seed_disallows_arrow)",
+    "altered_cluster_signatures": "altered_cluster_signatures (see read_altered_cluster_signatures_arrow)",
+}
 
 
 @dataclass(frozen=True)
@@ -720,8 +726,18 @@ class ArrowDataset:
         immutable until the handle closes. Schemas, index structure, and source
         sizes are still checked. Optional name-count indexes retain their own
         validation. Unrelated path keys are ignored, as in dataset manifests.
+        Request-local seed tables raise ``ValueError``; pass their contents as
+        prediction arguments instead.
         Each open gets a fresh generation ID, isolating prediction caches.
         """
+        # S2AND 0.51 read these tables from the path mapping. Ignoring them here
+        # would silently drop seeds and exclusions from a caller ported from 0.51.
+        request_local = sorted(key for key in paths if key in _REQUEST_LOCAL_PATH_ARGUMENTS)
+        if request_local:
+            raise ValueError(
+                "ArrowDataset.open_trusted does not read request-local tables; "
+                + "; ".join(f"for {key!r} pass {_REQUEST_LOCAL_PATH_ARGUMENTS[key]}" for key in request_local)
+            )
         resolved = {
             key: Path(value)
             for key, value in normalize_arrow_paths(

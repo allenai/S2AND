@@ -317,7 +317,12 @@ def test_initial_clone_matches_public_overlay_and_keeps_origin_constraints(
         ]
         assert projected["cluster_size_log"].tolist() == pytest.approx([np.log1p(1)] * 4)
 
-        overlay_paths = dict(paths)
+        # open_trusted rejects request-local seed tables; this check passes its own seeds below.
+        overlay_paths = {
+            key: value
+            for key, value in paths.items()
+            if key not in {"cluster_seeds", "cluster_seed_disallows", "altered_cluster_signatures"}
+        }
         for key in ("signatures", "paper_authors"):
             with pa.OSFile(paths[key], "rb") as file:
                 table = pa.ipc.open_file(file).read_all()

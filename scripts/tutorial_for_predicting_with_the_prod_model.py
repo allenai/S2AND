@@ -20,29 +20,29 @@ check or re-split public data to claim recorded held-out metrics.
 bundles use SPECTER2.
 
 Update at v1.3 release: every example needs a complete v1.3 production bundle,
-which does not exist yet. The Arrow example also needs public-format-1 data
-(the currently published Arrow release is rejected), the JSON examples need a
-public-format-1 name-count index at `<main_data_dir>/name_counts_index` (see
-docs/data.md), and the subblocking example needs the ORCID prefix-count files
-from release Stage 1. Revise this note once they run against published
-artifacts.
+which is not yet published (Git LFS copy: artifacts/common/v1.3). The Arrow
+example also needs public-format-1 data (the currently published Arrow release
+is rejected), and the JSON examples need a public-format-1 name-count index at
+`<main_data_dir>/name_counts_index` (see docs/data.md). Revise this note once
+they run against published artifacts.
 
 Examples:
-  # Arrow release + explicit Rust API
+  # Arrow release + explicit Rust API (owner-only: the internal pre-cut Arrow root
+  # matches the bundle's recorded test blocks)
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
       --model-path path/to/complete-production-bundle \
-      --input-format arrow --dataset qian --arrow-data-root s2and/data
+      --input-format arrow --dataset qian --arrow-data-root <corrected-snapshot>/pairwise/arrow/release
 
   # Bundled JSON fixture + explicit Python API (the qian fixture ships SPECTER1
   # vectors, so this is a smoke run; its scores are not meaningful for SPECTER2)
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
       --model-path path/to/complete-production-bundle \
-      --input-format json --dataset qian --data-root tests --specter-suffix _specter.pickle
+      --input-format json --dataset qian --data-root tests --specter-suffix _specter.pickle --split val
 
   # Show subblocking for large blocks (the largest qian fixture block has 320 signatures)
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
       --model-path path/to/complete-production-bundle \
-      --input-format json --dataset qian --data-root tests --specter-suffix _specter.pickle \
+      --input-format json --dataset qian --data-root tests --specter-suffix _specter.pickle --split val \
       --batching-threshold 100
 """
 

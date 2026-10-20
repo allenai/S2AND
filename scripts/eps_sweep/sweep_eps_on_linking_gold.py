@@ -1,9 +1,10 @@
-"""Sweep FastCluster EPS values against linker-derived pair gold.
+"""Sweep FastCluster EPS values against linker-derived pair gold or ORCID-masked B3.
 
 This runner consumes Arrow linker-replay datasets, plans target-bearing blocks
 from Arrow signature metadata, computes pairwise distances through the
 Arrow/Rust featurizer path, and sweeps FastCluster EPS values by reusing one
-linkage tree per subblock.
+linkage tree per subblock. ``--score-mode orcid-b3`` scores ORCID-masked
+identity B3; the release EPS review uses that mode.
 """
 
 # ruff: noqa: E402
@@ -84,7 +85,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
 
     parser = argparse.ArgumentParser(
-        description="Cache Arrow/Rust pairwise distances, sweep EPS, and score linker-derived pair gold."
+        description=(
+            "Cache Arrow/Rust pairwise distances, sweep EPS, and score linker-derived pair gold "
+            "or ORCID-masked identity B3 (--score-mode orcid-b3, the release mode)."
+        )
     )
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--arrow-root", type=Path, required=True)

@@ -11,6 +11,7 @@ With no argument, execution order is:
      - sync dependencies, which builds and installs the required Rust extension
      - run Rust formatting, Clippy, and native unit tests
      - smoke-test the installed Rust extension
+     - type-check s2and and the active scripts with ty
      - run the full suite with Python orchestration
 
 Pass ``lint`` or ``typecheck-and-test`` to run only one hosted-CI job.

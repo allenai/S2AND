@@ -1847,7 +1847,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--drop-sources",
         nargs="*",
         default=[],
-        help="Source datasets whose augmented signatures and pairs are removed (v1.3: orcid).",
+        help="Source datasets whose augmented signatures and pairs are removed.",
     )
     augmented_names.add_argument("--output-dir", type=Path, required=True, help="Fresh output directory.")
     augmented_names.set_defaults(func=_run_join_canonical_augmented_names)

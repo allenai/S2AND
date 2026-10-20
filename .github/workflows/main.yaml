@@ -47,7 +47,7 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
-      # Optional: ensure a specific Python (uv can also manage this on its own)
+      # Required: uv uses this interpreter, so each matrix leg tests its own Python.
       - name: Setup Python
         uses: actions/setup-python@v6
         with:

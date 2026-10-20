@@ -278,7 +278,7 @@ def _featurize_selection(
 ) -> tuple[TupleOfArrays, TupleOfArrays]:
     """Featurize release train/validation pairs and never resolve a test split.
 
-    The JSON dataset selects the pairs. A Rust featurizer built only for the
+    The Arrow-backed dataset selects the pairs. A Rust featurizer built only for the
     selected pairs' signatures computes their features.
     """
 

@@ -1,4 +1,4 @@
-"""Read fallback-label exclusions without a change to model-plan file roles."""
+"""Read and validate unknown-signature lists beside source labels."""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ def load_declared_unknown_signatures(
     """Read score exclusions only from the sidecar that the evaluation authority declares.
 
     Args:
-        files: Label files; the sidecar must sit beside ``clusters`` or ``signatures``.
+        files: Label files; the sidecar must sit beside ``clusters``, ``signatures``, or ``train_pairs``.
         declared: The declared sidecar, or ``None`` for a declared absence.
         expected_sha256: The frozen digest of the declared sidecar.
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import os
 import shutil
@@ -19,6 +18,7 @@ import orjson
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
+from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from scripts.convert_to_arrow import join_canonical_benchmark_names  # noqa: E402
 from scripts.production.model.unknown_signatures import (  # noqa: E402
@@ -76,12 +76,6 @@ def write(path: Path, value: object) -> None:
     """Save one preparation output."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(orjson.dumps(value))
-
-
-def sha(path: Path) -> str:
-    """Return a content identity for input checks."""
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def members(clusters: dict) -> dict[str, str]:
@@ -214,7 +208,7 @@ def prepare_benchmark(
     destination.mkdir(parents=True)
     signature_path = source / f"{name}_signatures.json"
     signatures = read(signature_path)
-    report: dict = {"source_signatures_sha256": sha(signature_path), "signature_count": len(signatures)}
+    report: dict = {"source_signatures_sha256": sha256_file(signature_path), "signature_count": len(signatures)}
     rows = []
     scalar_emails = 0
     for sid, signature in signatures.items():
@@ -245,7 +239,7 @@ def prepare_benchmark(
         unknown = set(unknown_ids)
         if not unknown <= signatures.keys():
             raise ValueError(f"Unknown IDs are absent from source signatures: {name}")
-        report["source_clusters_sha256"] = sha(original_path)
+        report["source_clusters_sha256"] = sha256_file(original_path)
         receipt = read(correction_receipt)["datasets"].get(name) if correction_receipt is not None else None
         if receipt is not None:
             if correction_root is None:
@@ -253,7 +247,7 @@ def prepare_benchmark(
             staged_path = correction_root / name / original_path.name
             if report["source_clusters_sha256"] != receipt["before_sha256"]:
                 raise ValueError(f"Correction baseline drift: {name}")
-            if sha(staged_path) != receipt["staged_sha256"]:
+            if sha256_file(staged_path) != receipt["staged_sha256"]:
                 raise ValueError(f"Correction output drift: {name}")
             staged = read(staged_path)
             assigned = members(staged)
@@ -271,7 +265,7 @@ def prepare_benchmark(
                 "rows": receipt["rows"],
                 "moved": receipt["moved"],
                 "new_unknown": len(missing),
-                "sha256": sha(staged_path),
+                "sha256": sha256_file(staged_path),
             }
             current = members(clusters)
             if set(current) != set(old_members):
@@ -428,7 +422,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 parser.error(f"Model exclusion datasets require --datasets: {sorted(missing)}")
             report = {"seed": args.seed, "pair_seed": args.pair_seed, "datasets": {}}
             if exclusion_path is not None:
-                report["model_exclusions"] = {"path": str(exclusion_path), "sha256": sha(exclusion_path)}
+                report["model_exclusions"] = {"path": str(exclusion_path), "sha256": sha256_file(exclusion_path)}
             for name in datasets:
                 report["datasets"][name] = prepare_benchmark(name, model_exclusions=exclusions.get(name), **options)
                 write(args.output / "population_summary.json", report)

@@ -23,6 +23,7 @@ import pyarrow as pa
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
+from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.data import _map_fixed_pair_labels  # noqa: E402
 from s2and.text import normalize_text  # noqa: E402
 from scripts.production.data.prepare_pairwise_inputs import (  # noqa: E402
@@ -30,7 +31,6 @@ from scripts.production.data.prepare_pairwise_inputs import (  # noqa: E402
     dataset_for_split,
     members,
     read,
-    sha,
     write,
 )
 from scripts.production.model.unknown_signatures import (  # noqa: E402
@@ -558,7 +558,7 @@ def finalize_augmentation(
     if not np.array_equal(output, reloaded) or list(reloaded_ids) != ids:
         raise ValueError("Saved embedding roundtrip drift")
     validation["outputs"] = {
-        filename: {"path": str(root / filename), "sha256": sha(root / filename)}
+        filename: {"path": str(root / filename), "sha256": sha256_file(root / filename)}
         for filename in (
             "augmented_signatures.json",
             "augmented_papers.json",

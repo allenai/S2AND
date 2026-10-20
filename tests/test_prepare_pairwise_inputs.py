@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from threadpoolctl import threadpool_limits
 
+from s2and._sha256 import sha256_file
 from scripts.production.data._pairwise_augmentation import (
     build_augmentation,
     finalize_augmentation,
@@ -27,7 +28,6 @@ from scripts.production.data.prepare_pairwise_inputs import (
     members,
     prepare_benchmark,
     read,
-    sha,
     write,
 )
 
@@ -245,7 +245,7 @@ def test_reserved_scope_stays_out_of_pairs_and_eps(inputs: tuple[Path, Path, Pat
         == 0
     )
     summary = read(output / "population_summary.json")
-    assert summary["model_exclusions"]["sha256"] == sha(exclusion_path)
+    assert summary["model_exclusions"]["sha256"] == sha256_file(exclusion_path)
     report = summary["datasets"]["qian"]
     populations = read(output / "populations" / "identities" / "qian.json")
     previous = read(baseline / "populations" / "identities" / "qian.json")
@@ -365,8 +365,8 @@ def test_correction_restores_unknown_and_keeps_known_move(inputs: tuple[Path, Pa
         {
             "datasets": {
                 "qian": {
-                    "before_sha256": sha(original_path),
-                    "staged_sha256": sha(stage_path),
+                    "before_sha256": sha256_file(original_path),
+                    "staged_sha256": sha256_file(stage_path),
                     "unlabeled_ids": ["3"],
                     "rows": 1,
                     "moved": 1,

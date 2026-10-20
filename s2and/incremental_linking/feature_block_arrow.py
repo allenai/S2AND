@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
+import numpy as np
+
 from s2and._atomic_io import fsync_directory
 from s2and._sha256 import sha256_file as _sha256_file
 from s2and.arrow_inputs import (
@@ -42,12 +44,15 @@ _NAME_COUNTS_SORT_BUFFER_RECORDS = 1_000_000
 _NAME_COUNTS_WRITE_BUFFER_BYTES = 1024 * 1024
 _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT = struct.Struct("<8sQQQ")
 _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT = struct.Struct("<QII")
-_ARROW_BATCH_LOOKUP_SORT_BUFFER_RECORDS = 1_000_000
-_ARROW_BATCH_LOOKUP_KEY_CHUNK_ROWS = 16_384
+# Records sorted in memory before spilling a run. NumPy needs about 52 bytes per
+# record while sorting, so 16M records peak near 0.8 GB and fit request tables.
+_ARROW_BATCH_LOOKUP_SORT_BUFFER_RECORDS = 16_000_000
 _ARROW_BATCH_LOOKUP_WRITE_BUFFER_BYTES = 1024 * 1024
 _FNV64_OFFSET = 14695981039346656037
 _FNV64_PRIME = 1099511628211
 _ARROW_BATCH_LOOKUP_INDEX_BUILD_ATTEMPTS = 2
+# One packed index record; matches _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT ("<QII").
+_ARROW_BATCH_LOOKUP_RECORD_DTYPE = np.dtype([("key_hash", "<u8"), ("batch_index", "<u4"), ("reserved", "<u4")])
 
 
 @dataclass(frozen=True)
@@ -63,7 +68,7 @@ class IncrementalQuerySignatureRequest:
 class _ArrowBatchLookupRecords:
     """Bounded-memory records and physical-layout facts for one index build."""
 
-    buffered_records: list[tuple[int, int]]
+    buffered_records: np.ndarray
     run_paths: list[Path]
     row_count: int
     max_batch_rows: int
@@ -704,19 +709,17 @@ def _validate_arrow_batch_lookup_index(
     }
 
 
-def _write_arrow_batch_lookup_sort_run(path: Path, records: list[tuple[int, int]]) -> None:
+def _sorted_arrow_batch_lookup_records(records: np.ndarray) -> np.ndarray:
+    """Order records by key hash, then batch index, as the index format requires."""
+
+    return records[np.lexsort((records["batch_index"], records["key_hash"]))]
+
+
+def _write_arrow_batch_lookup_sort_run(path: Path, records: np.ndarray) -> None:
     """Sort and persist one temporary run in final-record binary form."""
 
-    records.sort()
-    buffer = bytearray()
     with path.open("wb") as output:
-        for key_hash, batch_index in records:
-            buffer.extend(_ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.pack(key_hash, batch_index, 0))
-            if len(buffer) >= _ARROW_BATCH_LOOKUP_WRITE_BUFFER_BYTES:
-                output.write(buffer)
-                buffer.clear()
-        if buffer:
-            output.write(buffer)
+        output.write(_sorted_arrow_batch_lookup_records(records).tobytes())
         output.flush()
         os.fsync(output.fileno())
 
@@ -746,15 +749,19 @@ def _write_sorted_arrow_batch_lookup_records(
             shutil.copyfileobj(source, output, length=_ARROW_BATCH_LOOKUP_WRITE_BUFFER_BYTES)
         return
 
+    if not records.run_paths:
+        if len(records.buffered_records) != records.row_count:
+            raise RuntimeError(
+                f"Arrow batch lookup sort emitted {len(records.buffered_records)} records, expected {records.row_count}"
+            )
+        output.write(_sorted_arrow_batch_lookup_records(records.buffered_records).tobytes())
+        return
+
+    # Tables larger than the in-memory buffer merge their sorted runs with bounded memory.
     run_iterators: list[Generator[tuple[int, int, int], None, None]] = []
     try:
-        if records.run_paths:
-            run_iterators = [_iter_arrow_batch_lookup_sort_run(path) for path in records.run_paths]
-            sorted_records: Iterable[tuple[int, int, int]] = heapq.merge(*run_iterators)
-        else:
-            records.buffered_records.sort()
-            sorted_records = ((key_hash, batch_index, 0) for key_hash, batch_index in records.buffered_records)
-
+        run_iterators = [_iter_arrow_batch_lookup_sort_run(path) for path in records.run_paths]
+        sorted_records: Iterable[tuple[int, int, int]] = heapq.merge(*run_iterators)
         written_records = 0
         buffer = bytearray()
         for key_hash, batch_index, reserved in sorted_records:
@@ -787,17 +794,17 @@ def _read_arrow_batch_lookup_records(
 
     if max_records_in_memory < 1:
         raise ValueError("max_records_in_memory must be positive")
-    buffered_records: list[tuple[int, int]] = []
+    pending: list[np.ndarray] = []
+    pending_count = 0
     run_paths: list[Path] = []
     row_count = 0
     max_batch_rows = 0
     peak_buffered_records = 0
 
-    def flush_run() -> None:
+    def flush_run(records: np.ndarray) -> None:
         run_path = sort_run_dir / f"run-{len(run_paths):06d}.bin"
-        _write_arrow_batch_lookup_sort_run(run_path, buffered_records)
+        _write_arrow_batch_lookup_sort_run(run_path, records)
         run_paths.append(run_path)
-        buffered_records.clear()
 
     with pa.memory_map(str(arrow_path), "r") as source:
         reader = pa.ipc.open_file(source)
@@ -823,16 +830,24 @@ def _read_arrow_batch_lookup_records(
                     f"Arrow IPC file {arrow_path!s} contains null values in key column {key_column!r} "
                     f"for batch {batch_index}"
                 )
-            for offset in range(0, batch_rows, _ARROW_BATCH_LOOKUP_KEY_CHUNK_ROWS):
-                key_chunk = keys.slice(offset, _ARROW_BATCH_LOOKUP_KEY_CHUNK_ROWS).to_pylist()
-                key_hashes = _fnv64_utf8_batch([str(key) for key in key_chunk])
-                for key_hash in key_hashes:
-                    buffered_records.append((key_hash, batch_index))
-                    peak_buffered_records = max(peak_buffered_records, len(buffered_records))
-                    if len(buffered_records) == max_records_in_memory:
-                        flush_run()
-    if run_paths and buffered_records:
-        flush_run()
+            # Annotated because ty reads a structured-dtype np.zeros as a float array.
+            batch_records: np.ndarray = np.zeros(batch_rows, dtype=_ARROW_BATCH_LOOKUP_RECORD_DTYPE)
+            batch_records["key_hash"] = _fnv64_arrow_utf8(keys)
+            batch_records["batch_index"] = batch_index
+            pending.append(batch_records)
+            pending_count += batch_rows
+            peak_buffered_records = max(peak_buffered_records, min(pending_count, max_records_in_memory))
+            if pending_count >= max_records_in_memory:
+                # Spill runs of exactly max_records_in_memory records; keep the remainder buffered.
+                buffered = np.concatenate(pending)
+                while len(buffered) >= max_records_in_memory:
+                    flush_run(buffered[:max_records_in_memory])
+                    buffered = buffered[max_records_in_memory:]
+                pending, pending_count = [buffered], len(buffered)
+    buffered_records = np.concatenate(pending) if pending else np.zeros(0, dtype=_ARROW_BATCH_LOOKUP_RECORD_DTYPE)
+    if run_paths and len(buffered_records):
+        flush_run(buffered_records)
+        buffered_records = buffered_records[:0]
     return _ArrowBatchLookupRecords(
         buffered_records=buffered_records,
         run_paths=run_paths,
@@ -1106,6 +1121,39 @@ def _fnv64_update(digest: int, value: bytes) -> int:
 
 def _fnv64_bytes(value: bytes) -> int:
     return _fnv64_update(_FNV64_OFFSET, value)
+
+
+def _fnv64_arrow_utf8(keys: Any) -> np.ndarray:
+    """Hash every value of an Arrow key array with FNV-1a 64 over its UTF-8 bytes."""
+
+    import pyarrow as pa
+
+    if pa.types.is_string(keys.type):
+        offset_dtype = np.dtype("<i4")
+    elif pa.types.is_large_string(keys.type):
+        offset_dtype = np.dtype("<i8")
+    else:
+        # Non-string keys hash their text form, as the per-key path always did.
+        return np.asarray(_fnv64_utf8_batch([str(key) for key in keys.to_pylist()]), dtype=np.uint64)
+    _validity, offsets_buffer, data_buffer = keys.buffers()
+    offsets = np.frombuffer(
+        offsets_buffer, dtype=offset_dtype, count=len(keys) + 1, offset=keys.offset * offset_dtype.itemsize
+    ).astype(np.int64)
+    data = np.frombuffer(data_buffer, dtype=np.uint8) if data_buffer is not None else np.zeros(0, dtype=np.uint8)
+    starts = offsets[:-1]
+    lengths = offsets[1:] - starts
+    hashes = np.full(len(keys), _FNV64_OFFSET, dtype=np.uint64)
+    # Hash byte position by position across all keys. Shrinking the live set keeps
+    # the total work equal to the number of key bytes, even with a few long keys.
+    live = np.arange(len(keys))
+    position = 0
+    while True:
+        live = live[lengths[live] > position]
+        if not len(live):
+            return hashes
+        byte_values = data[starts[live] + position].astype(np.uint64)
+        hashes[live] = (hashes[live] ^ byte_values) * np.uint64(_FNV64_PRIME)
+        position += 1
 
 
 def _fnv64_utf8_batch(values: Sequence[str]) -> list[int]:

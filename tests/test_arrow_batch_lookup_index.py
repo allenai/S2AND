@@ -69,6 +69,27 @@ def test_native_utf8_batch_hash_matches_python_fnv1a64() -> None:
     ]
 
 
+@pytest.mark.parametrize("arrow_type", ["string", "large_string"])
+def test_vectorized_arrow_hash_matches_python_fnv1a64(arrow_type: str) -> None:
+    import pyarrow as pa
+
+    # Mixed lengths, multi-byte UTF-8, an empty key, and one long key exercise the byte-position loop.
+    values = ["", "abc", "Renée", "李", "emoji-🧪", "x" * 300, "12345678-9"]
+    array = pa.array(["skipped", *values, "tail"], type=getattr(pa, arrow_type)()).slice(1, len(values))
+
+    hashes = feature_block_arrow_module._fnv64_arrow_utf8(array)  # noqa: SLF001
+
+    assert hashes.tolist() == [feature_block_arrow_module._fnv64_bytes(v.encode("utf-8")) for v in values]  # noqa: SLF001
+
+
+def test_vectorized_arrow_hash_uses_text_form_for_non_string_keys() -> None:
+    import pyarrow as pa
+
+    hashes = feature_block_arrow_module._fnv64_arrow_utf8(pa.array([7, 1234], type=pa.int64()))  # noqa: SLF001
+
+    assert hashes.tolist() == [feature_block_arrow_module._fnv64_bytes(v) for v in (b"7", b"1234")]  # noqa: SLF001
+
+
 def test_write_uses_bounded_sorted_runs_and_emits_v3_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

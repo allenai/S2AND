@@ -26,12 +26,10 @@ v1.3 release work is complete. Release operators must follow
 | Script | What it does |
 |---|---|
 | `tutorial_for_predicting_with_the_prod_model.py` | Guide to predicting with a complete production bundle, Arrow input by default; JSON fixtures are opt-in |
-| `tutorial.ipynb` | Notebook walkthrough of the S2AND pipeline on the legacy JSON benchmark files |
 
 > **Update at v1.3 release:** The compatible public release remains unpublished.
 
 The script requires a complete model and format-1 Arrow input.
-The notebook requires the format-1 name-count index.
 Use [the data guide](../docs/data.md) for the common assets and corrected snapshot.
 
 ### Dataset creation & preprocessing

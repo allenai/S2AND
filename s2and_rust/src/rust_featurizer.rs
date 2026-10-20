@@ -1253,6 +1253,71 @@ impl RustFeaturizer {
         self.name_counts_manifest_sha256.as_deref()
     }
 
+    /// View over some of this featurizer's signatures, in the given order, with seed
+    /// constraints read from request sidecars exactly as `from_arrow_dataset` reads them.
+    ///
+    /// Signature and paper preprocessing does not depend on which other signatures are
+    /// loaded, so the view featurizes like a fresh build over `signature_ids`. Subblocked
+    /// attachment passes use it instead of rebuilding the block's featurizer every pass.
+    #[pyo3(signature = (signature_ids, cluster_seeds_path=None, cluster_seed_disallows_path=None))]
+    fn view_with_cluster_seed_sidecars(
+        &self,
+        signature_ids: Vec<String>,
+        cluster_seeds_path: Option<String>,
+        cluster_seed_disallows_path: Option<String>,
+    ) -> PyResult<Self> {
+        let mut selected_signature_id_set = HashSet::<String>::with_capacity(signature_ids.len());
+        let mut ordered_signature_ids = signature_ids;
+        ordered_signature_ids
+            .retain(|signature_id| selected_signature_id_set.insert(signature_id.clone()));
+        let missing_signature_ids = ordered_signature_ids
+            .iter()
+            .filter(|signature_id| !self.signatures.contains_key(*signature_id))
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_signature_ids.is_empty() {
+            return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "featurizer view is missing requested signature ids: {missing_signature_ids:?}"
+            )));
+        }
+        let mut cluster_seeds_require = HashMap::<String, ClusterId>::new();
+        if let Some(path) = cluster_seeds_path.as_ref() {
+            let (_component_order, members_by_component) = read_raw_arrow_cluster_seeds(path)?;
+            for (component_key, members) in members_by_component {
+                for signature_id in members {
+                    if selected_signature_id_set.contains(&signature_id) {
+                        cluster_seeds_require
+                            .insert(signature_id, ClusterId::Str(component_key.clone()));
+                    }
+                }
+            }
+        }
+        let mut cluster_seeds_disallow = HashSet::<(String, String)>::new();
+        if let Some(path) = cluster_seed_disallows_path.as_ref() {
+            for (left, right) in read_raw_arrow_cluster_seed_disallows(path)? {
+                if selected_signature_id_set.contains(&left)
+                    && selected_signature_id_set.contains(&right)
+                {
+                    cluster_seeds_disallow.insert((left, right));
+                }
+            }
+        }
+        Ok(Self {
+            signatures: Arc::clone(&self.signatures),
+            signature_ids: Arc::new(ordered_signature_ids),
+            papers: Arc::clone(&self.papers),
+            name_grams: Arc::clone(&self.name_grams),
+            name_tuples: Arc::clone(&self.name_tuples),
+            cluster_seeds_disallow,
+            cluster_seeds_require,
+            cluster_seed_require_value: self.cluster_seed_require_value,
+            cluster_seed_disallow_value: self.cluster_seed_disallow_value,
+            name_counts_manifest_sha256: self.name_counts_manifest_sha256.clone(),
+            cluster_seeds_disallow_index: OnceLock::new(),
+        })
+    }
+
     /// Create a request-owned seed overlay sharing the prepared feature backing.
     fn with_cluster_seeds(
         &self,

@@ -127,6 +127,48 @@ _ARROW_BULK_DISTANCE_OVERRIDES: ContextVar[bool] = ContextVar("s2and_arrow_bulk_
 _ARROW_ATTACH_NAME_CHECK_EXEMPT: ContextVar[frozenset[str] | None] = ContextVar(
     "s2and_arrow_attach_name_check_exempt", default=None
 )
+# Subblocked attachment passes share native state over the original block: one
+# featurizer that each pass views, and one planner that each pass reloads instead
+# of rebuilding. None builds per pass.
+_ARROW_ATTACH_BLOCK_STATE: ContextVar[_AttachmentBlockState | None] = ContextVar(
+    "s2and_arrow_attach_block_state", default=None
+)
+
+
+class _AttachmentBlockState:
+    """Native state that the attachment passes of one original block share.
+
+    The featurizer is built when a pass first needs features, which skips the cost
+    when the incremental step never featurizes, for example a caller override of
+    ``predict_incremental_from_arrow``. The incremental step stores its planner in
+    ``planner`` (with the build arguments in ``planner_key``) for the next pass.
+    """
+
+    def __init__(
+        self,
+        arrow_dataset: ArrowDataset,
+        signature_ids: list[str],
+        name_tuples: Any,
+        num_threads: int,
+    ) -> None:
+        self.signature_ids = frozenset(signature_ids)
+        self.name_tuples = name_tuples
+        self._build_args = (arrow_dataset, list(signature_ids), num_threads)
+        self._featurizer: Any | None = None
+        self.planner: Any | None = None
+        self.planner_key: tuple[Any, ...] | None = None
+
+    def featurizer(self) -> Any:
+        if self._featurizer is None:
+            arrow_dataset, signature_ids, num_threads = self._build_args
+            self._featurizer = build_rust_featurizer_from_arrow_dataset(
+                arrow_dataset,
+                signature_ids=signature_ids,
+                name_tuples=self.name_tuples,
+                preprocess=True,
+                num_threads=num_threads,
+            )
+        return self._featurizer
 
 
 @dataclass(frozen=True)
@@ -3335,9 +3377,22 @@ class Clusterer:
             if sid in origins:
                 scoped_seeds[origins[sid]][sid] = component
         disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
+        block_state: tuple[str, _AttachmentBlockState] | None = None
         for block_key in sorted(block_dict_single_letter):
             group_signature_ids = [str(signature_id) for signature_id in block_dict_single_letter[block_key]]
             origin = origins[group_signature_ids[0]]
+            if block_state is None or block_state[0] != origin:
+                # Keep one block's native state at a time; release the previous one first.
+                block_state = None
+                block_state = (
+                    origin,
+                    _AttachmentBlockState(
+                        arrow_dataset,
+                        [str(signature_id) for signature_id in original_blocks[origin]],
+                        name_tuples,
+                        self.n_jobs,
+                    ),
+                )
             synthetic_seed_map = restore_seed_membership(
                 scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency
             )
@@ -3358,6 +3413,7 @@ class Clusterer:
             )
             bulk_context_token = _ARROW_BULK_DISTANCE_OVERRIDES.set(True)
             name_check_token = _ARROW_ATTACH_NAME_CHECK_EXEMPT.set(frozenset(scoped_seeds[origin]))
+            block_state_token = _ARROW_ATTACH_BLOCK_STATE.set(block_state[1])
             try:
                 incremental_result = self.predict_incremental_from_arrow(
                     group_signature_ids,
@@ -3373,6 +3429,7 @@ class Clusterer:
                     altered_cluster_signatures=[],
                 )
             finally:
+                _ARROW_ATTACH_BLOCK_STATE.reset(block_state_token)
                 _ARROW_ATTACH_NAME_CHECK_EXEMPT.reset(name_check_token)
                 _ARROW_BULK_DISTANCE_OVERRIDES.reset(bulk_context_token)
             clusters_payload = incremental_result.get("clusters")
@@ -5721,6 +5778,7 @@ class Clusterer:
                 runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
                 batching_threshold=batching_threshold,
+                attachment_state=_ARROW_ATTACH_BLOCK_STATE.get(),
             )
 
     def predict_incremental(

@@ -155,6 +155,8 @@ struct ReusableRawArrowCandidatePlanState {
     affiliation_stopwords: HashSet<String>,
     seed_paper_count: usize,
     seed_specter_count: usize,
+    /// Rows kept for `reload_seed_sidecars`; None unless built with `retain_seed_rows`.
+    retained_seed_rows: Option<RetainedRawArrowSeedRows>,
     build_telemetry: RawArrowPlannerBuildTelemetry,
 }
 
@@ -653,6 +655,7 @@ fn read_reusable_raw_arrow_query_inputs(
     })
 }
 
+#[derive(Clone, Copy)]
 enum RawPlannerQueryMode {
     Declared,
     Auto,
@@ -673,24 +676,19 @@ pub(crate) struct RawBlockQueryCandidatePlanner {
     max_exemplars: usize,
 }
 
-impl RawBlockQueryCandidatePlanner {
-    fn build_from_query_signature_ids(
-        py: Python<'_>,
-        dataset: ArrowDatasetResources,
-        cluster_seeds_path: &str,
-        cluster_seed_disallows_path: Option<&str>,
-        query_signature_ids: Vec<String>,
-        top_k: usize,
-        orcid_enabled: bool,
-        num_threads: Option<usize>,
-        max_exemplars: usize,
-    ) -> PyResult<Self> {
-        validate_retrieval_rank_top_k(top_k)?;
-        validate_raw_arrow_query_signature_ids_allow_empty(&query_signature_ids)?;
-        let planner_query_signature_id_set = query_signature_ids.iter().cloned().collect();
-        let raw_name_counts = dataset.name_counts();
-        let reused_name_counts_index = raw_name_counts.shared_index().is_some();
+/// Seed components and exclusions read from one request's sidecars.
+struct RawArrowSeedLayout {
+    component_order: Vec<String>,
+    members_by_component: HashMap<String, Vec<String>>,
+    component_keys_by_member: HashMap<String, Vec<String>>,
+    seed_signature_ids: Vec<String>,
+    seed_signature_id_set: HashSet<String>,
+    cluster_seed_disallows: HashSet<(String, String)>,
+    read_cluster_seeds_secs: f64,
+}
 
+impl RawArrowSeedLayout {
+    fn read(cluster_seeds_path: &str, cluster_seed_disallows_path: Option<&str>) -> PyResult<Self> {
         let read_cluster_seeds_start = Instant::now();
         let (component_order, members_by_component) =
             read_raw_arrow_cluster_seeds(cluster_seeds_path)?;
@@ -717,15 +715,23 @@ impl RawBlockQueryCandidatePlanner {
             }
         }
         let seed_signature_id_set: HashSet<String> = seed_signature_ids.iter().cloned().collect();
+        Ok(Self {
+            component_order,
+            members_by_component,
+            component_keys_by_member,
+            seed_signature_ids,
+            seed_signature_id_set,
+            cluster_seed_disallows,
+            read_cluster_seeds_secs,
+        })
+    }
 
-        let read_signatures_start = Instant::now();
-        let (signatures, signature_index_stats) = if seed_signature_id_set.is_empty() {
-            (HashMap::new(), IndexedArrowReadStats::default())
-        } else {
-            dataset.read_signatures(Some(&seed_signature_id_set))?
-        };
-        let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
-        for signature_id in seed_signature_ids.iter() {
+    /// Fail on the first seed, in seed order, that has no signature row.
+    fn require_signature_rows(
+        &self,
+        signatures: &HashMap<String, RawArrowSignature>,
+    ) -> PyResult<()> {
+        for signature_id in self.seed_signature_ids.iter() {
             if !signatures.contains_key(signature_id) {
                 return Err(pyo3::exceptions::PyKeyError::new_err(format!(
                     "cluster seed signature_id '{}' is missing from signatures Arrow input",
@@ -733,96 +739,261 @@ impl RawBlockQueryCandidatePlanner {
                 )));
             }
         }
+        Ok(())
+    }
 
-        let needed_paper_ids: HashSet<String> = seed_signature_ids
+    fn needed_paper_ids(&self, signatures: &HashMap<String, RawArrowSignature>) -> HashSet<String> {
+        self.seed_signature_ids
             .iter()
             .filter_map(|signature_id| signatures.get(signature_id))
             .map(|signature| signature.paper_id.clone())
-            .collect();
+            .collect()
+    }
+}
+
+/// Paper, author, and SPECTER rows read in parallel for one set of papers.
+struct RawArrowPaperRows {
+    papers: HashMap<String, RawArrowPaper>,
+    paper_authors: HashMap<String, Vec<(i64, String)>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    raw_name_counts: RawNameCountMaps,
+    paper_index_stats: IndexedArrowReadStats,
+    paper_author_index_stats: IndexedArrowReadStats,
+    specter_index_stats: IndexedArrowReadStats,
+    read_papers_secs: f64,
+    read_paper_authors_secs: f64,
+    read_specter_secs: f64,
+    read_name_counts_secs: f64,
+}
+
+fn read_raw_arrow_paper_rows(
+    py: Python<'_>,
+    dataset: &ArrowDatasetResources,
+    raw_name_counts: &RawNameCountMaps,
+    needed_paper_ids: &HashSet<String>,
+    num_threads: Option<usize>,
+) -> PyResult<RawArrowPaperRows> {
+    let (
+        (papers_result, paper_authors_result),
+        (raw_specter_by_paper_id_result, raw_name_counts_result),
+    ) = py.allow_threads(|| {
+        let compute = || {
+            rayon::join(
+                || {
+                    rayon::join(
+                        || -> PyResult<(
+                            HashMap<String, RawArrowPaper>,
+                            IndexedArrowReadStats,
+                            f64,
+                        )> {
+                            let start = Instant::now();
+                            let (loaded, stats) = if needed_paper_ids.is_empty() {
+                                (HashMap::new(), IndexedArrowReadStats::default())
+                            } else {
+                                dataset.read_papers(needed_paper_ids)?
+                            };
+                            Ok((loaded, stats, start.elapsed().as_secs_f64()))
+                        },
+                        || -> PyResult<(
+                            HashMap<String, Vec<(i64, String)>>,
+                            IndexedArrowReadStats,
+                            f64,
+                        )> {
+                            let start = Instant::now();
+                            let (loaded, stats) = if needed_paper_ids.is_empty() {
+                                (HashMap::new(), IndexedArrowReadStats::default())
+                            } else {
+                                dataset.read_paper_authors(needed_paper_ids)?
+                            };
+                            Ok((loaded, stats, start.elapsed().as_secs_f64()))
+                        },
+                    )
+                },
+                || {
+                    rayon::join(
+                        || -> PyResult<(
+                            Option<HashMap<String, Vec<f32>>>,
+                            IndexedArrowReadStats,
+                            f64,
+                        )> {
+                            let start = Instant::now();
+                            let (loaded, stats) =
+                                if dataset.has_specter() && !needed_paper_ids.is_empty() {
+                                    dataset.read_specter(needed_paper_ids)?
+                                } else {
+                                    (HashMap::new(), IndexedArrowReadStats::default())
+                                };
+                            Ok((
+                                if dataset.has_specter() {
+                                    Some(loaded)
+                                } else {
+                                    None
+                                },
+                                stats,
+                                start.elapsed().as_secs_f64(),
+                            ))
+                        },
+                        || -> PyResult<(RawNameCountMaps, f64)> {
+                            let start = Instant::now();
+                            Ok((raw_name_counts.clone(), start.elapsed().as_secs_f64()))
+                        },
+                    )
+                },
+            )
+        };
+        install_with_optional_rayon_pool(num_threads, compute)
+    });
+    let (papers, paper_index_stats, read_papers_secs) = papers_result?;
+    let (paper_authors, paper_author_index_stats, read_paper_authors_secs) = paper_authors_result?;
+    let (raw_specter_by_paper_id, specter_index_stats, read_specter_secs) =
+        raw_specter_by_paper_id_result?;
+    let (raw_name_counts, read_name_counts_secs) = raw_name_counts_result?;
+    let specter_by_paper_id = raw_specter_by_paper_id.map(|values| {
+        values
+            .into_iter()
+            .map(|(paper_id, vector)| (paper_id, Arc::new(vector)))
+            .collect::<HashMap<_, _>>()
+    });
+    Ok(RawArrowPaperRows {
+        papers,
+        paper_authors,
+        specter_by_paper_id,
+        raw_name_counts,
+        paper_index_stats,
+        paper_author_index_stats,
+        specter_index_stats,
+        read_papers_secs,
+        read_paper_authors_secs,
+        read_specter_secs,
+        read_name_counts_secs,
+    })
+}
+
+/// Raw rows a planner keeps between attachment passes when built with
+/// `retain_seed_rows`; the signature and author rows stay in the plan state.
+struct RetainedRawArrowSeedRows {
+    papers: HashMap<String, RawArrowPaper>,
+    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+}
+
+/// Read timings of one build or reload, reported by `build_telemetry`.
+struct RawArrowSeedReadTelemetry {
+    read_cluster_seeds_secs: f64,
+    read_signatures_secs: f64,
+    read_papers_secs: f64,
+    read_paper_authors_secs: f64,
+    read_specter_secs: f64,
+    read_name_counts_secs: f64,
+    signature_index_stats: IndexedArrowReadStats,
+    paper_index_stats: IndexedArrowReadStats,
+    paper_author_index_stats: IndexedArrowReadStats,
+    specter_index_stats: IndexedArrowReadStats,
+}
+
+impl RawBlockQueryCandidatePlanner {
+    #[allow(clippy::too_many_arguments)]
+    fn build_from_query_signature_ids(
+        py: Python<'_>,
+        dataset: ArrowDatasetResources,
+        cluster_seeds_path: &str,
+        cluster_seed_disallows_path: Option<&str>,
+        query_signature_ids: Vec<String>,
+        top_k: usize,
+        orcid_enabled: bool,
+        num_threads: Option<usize>,
+        max_exemplars: usize,
+        retain_seed_rows: bool,
+    ) -> PyResult<Self> {
+        validate_retrieval_rank_top_k(top_k)?;
+        validate_raw_arrow_query_signature_ids_allow_empty(&query_signature_ids)?;
+        let raw_name_counts = dataset.name_counts();
+
+        let layout = RawArrowSeedLayout::read(cluster_seeds_path, cluster_seed_disallows_path)?;
+
+        let read_signatures_start = Instant::now();
+        let (signatures, signature_index_stats) = if layout.seed_signature_id_set.is_empty() {
+            (HashMap::new(), IndexedArrowReadStats::default())
+        } else {
+            dataset.read_signatures(Some(&layout.seed_signature_id_set))?
+        };
+        let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
+        layout.require_signature_rows(&signatures)?;
+
+        let needed_paper_ids = layout.needed_paper_ids(&signatures);
         let metadata_reads_parallel_start = Instant::now();
-        let (
-            (papers_result, paper_authors_result),
-            (raw_specter_by_paper_id_result, raw_name_counts_result),
-        ) = py.allow_threads(|| {
-            let compute = || {
-                rayon::join(
-                    || {
-                        rayon::join(
-                            || -> PyResult<(
-                                HashMap<String, RawArrowPaper>,
-                                IndexedArrowReadStats,
-                                f64,
-                            )> {
-                                let start = Instant::now();
-                                let (loaded, stats) = if needed_paper_ids.is_empty() {
-                                    (HashMap::new(), IndexedArrowReadStats::default())
-                                } else {
-                                    dataset.read_papers(&needed_paper_ids)?
-                                };
-                                Ok((loaded, stats, start.elapsed().as_secs_f64()))
-                            },
-                            || -> PyResult<(
-                                HashMap<String, Vec<(i64, String)>>,
-                                IndexedArrowReadStats,
-                                f64,
-                            )> {
-                                let start = Instant::now();
-                                let (loaded, stats) = if needed_paper_ids.is_empty() {
-                                    (HashMap::new(), IndexedArrowReadStats::default())
-                                } else {
-                                    dataset.read_paper_authors(&needed_paper_ids)?
-                                };
-                                Ok((loaded, stats, start.elapsed().as_secs_f64()))
-                            },
-                        )
-                    },
-                    || {
-                        rayon::join(
-                            || -> PyResult<(
-                                Option<HashMap<String, Vec<f32>>>,
-                                IndexedArrowReadStats,
-                                f64,
-                            )> {
-                                let start = Instant::now();
-                                let (loaded, stats) =
-                                    if dataset.has_specter() && !needed_paper_ids.is_empty() {
-                                        dataset.read_specter(&needed_paper_ids)?
-                                    } else {
-                                        (HashMap::new(), IndexedArrowReadStats::default())
-                                    };
-                                Ok((
-                                    if dataset.has_specter() {
-                                        Some(loaded)
-                                    } else {
-                                        None
-                                    },
-                                    stats,
-                                    start.elapsed().as_secs_f64(),
-                                ))
-                            },
-                            || -> PyResult<(RawNameCountMaps, f64)> {
-                                let start = Instant::now();
-                                Ok((raw_name_counts.clone(), start.elapsed().as_secs_f64()))
-                            },
-                        )
-                    },
-                )
-            };
-            install_with_optional_rayon_pool(num_threads, compute)
-        });
-        let (papers, paper_index_stats, read_papers_secs) = papers_result?;
-        let (paper_authors, paper_author_index_stats, read_paper_authors_secs) =
-            paper_authors_result?;
-        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers)?;
-        let (raw_specter_by_paper_id, specter_index_stats, read_specter_secs) =
-            raw_specter_by_paper_id_result?;
-        let (raw_name_counts, read_name_counts_secs) = raw_name_counts_result?;
-        let specter_by_paper_id = raw_specter_by_paper_id.map(|values| {
-            values
-                .into_iter()
-                .map(|(paper_id, vector)| (paper_id, Arc::new(vector)))
-                .collect::<HashMap<_, _>>()
-        });
+        let rows = read_raw_arrow_paper_rows(
+            py,
+            &dataset,
+            &raw_name_counts,
+            &needed_paper_ids,
+            num_threads,
+        )?;
+        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &rows.papers)?;
+        let read_telemetry = RawArrowSeedReadTelemetry {
+            read_cluster_seeds_secs: layout.read_cluster_seeds_secs,
+            read_signatures_secs,
+            read_papers_secs: rows.read_papers_secs,
+            read_paper_authors_secs: rows.read_paper_authors_secs,
+            read_specter_secs: rows.read_specter_secs,
+            read_name_counts_secs: rows.read_name_counts_secs,
+            signature_index_stats,
+            paper_index_stats: rows.paper_index_stats,
+            paper_author_index_stats: rows.paper_author_index_stats,
+            specter_index_stats: rows.specter_index_stats,
+        };
+        Self::assemble(
+            py,
+            dataset,
+            layout,
+            signatures,
+            rows.papers,
+            rows.paper_authors,
+            rows.specter_by_paper_id,
+            rows.raw_name_counts,
+            needed_paper_ids.len(),
+            read_telemetry,
+            metadata_reads_parallel_start,
+            query_signature_ids,
+            top_k,
+            orcid_enabled,
+            num_threads,
+            max_exemplars,
+            retain_seed_rows,
+        )
+    }
+
+    /// Build the plan state from complete raw rows of exactly the layout's seeds.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        py: Python<'_>,
+        dataset: ArrowDatasetResources,
+        layout: RawArrowSeedLayout,
+        signatures: HashMap<String, RawArrowSignature>,
+        papers: HashMap<String, RawArrowPaper>,
+        paper_authors: HashMap<String, Vec<(i64, String)>>,
+        specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+        raw_name_counts: RawNameCountMaps,
+        seed_paper_count: usize,
+        read_telemetry: RawArrowSeedReadTelemetry,
+        metadata_reads_parallel_start: Instant,
+        query_signature_ids: Vec<String>,
+        top_k: usize,
+        orcid_enabled: bool,
+        num_threads: Option<usize>,
+        max_exemplars: usize,
+        retain_seed_rows: bool,
+    ) -> PyResult<Self> {
+        let planner_query_signature_id_set = query_signature_ids.iter().cloned().collect();
+        let reused_name_counts_index = raw_name_counts.shared_index().is_some();
+        let RawArrowSeedLayout {
+            component_order,
+            members_by_component,
+            component_keys_by_member,
+            seed_signature_ids,
+            seed_signature_id_set,
+            cluster_seed_disallows,
+            ..
+        } = layout;
 
         let text_context_start = Instant::now();
         let text_module = py.import("s2and.text")?;
@@ -902,6 +1073,11 @@ impl RawBlockQueryCandidatePlanner {
             )?;
         let component_members_secs = component_members_start.elapsed().as_secs_f64();
 
+        let seed_specter_count = specter_by_paper_id.as_ref().map_or(0usize, HashMap::len);
+        let retained_seed_rows = retain_seed_rows.then(|| RetainedRawArrowSeedRows {
+            papers,
+            specter_by_paper_id,
+        });
         Ok(Self {
             dataset,
             state: ReusableRawArrowCandidatePlanState {
@@ -921,15 +1097,16 @@ impl RawBlockQueryCandidatePlanner {
                 unidecode_char_map,
                 name_prefixes,
                 affiliation_stopwords,
-                seed_paper_count: needed_paper_ids.len(),
-                seed_specter_count: specter_by_paper_id.as_ref().map_or(0usize, HashMap::len),
+                seed_paper_count,
+                seed_specter_count,
+                retained_seed_rows,
                 build_telemetry: RawArrowPlannerBuildTelemetry {
-                    read_cluster_seeds_secs,
-                    read_signatures_secs,
-                    read_papers_secs,
-                    read_paper_authors_secs,
-                    read_specter_secs,
-                    read_name_counts_secs,
+                    read_cluster_seeds_secs: read_telemetry.read_cluster_seeds_secs,
+                    read_signatures_secs: read_telemetry.read_signatures_secs,
+                    read_papers_secs: read_telemetry.read_papers_secs,
+                    read_paper_authors_secs: read_telemetry.read_paper_authors_secs,
+                    read_specter_secs: read_telemetry.read_specter_secs,
+                    read_name_counts_secs: read_telemetry.read_name_counts_secs,
                     metadata_reads_parallel_secs: metadata_reads_parallel_start
                         .elapsed()
                         .as_secs_f64(),
@@ -937,10 +1114,10 @@ impl RawBlockQueryCandidatePlanner {
                     feature_secs,
                     summary_secs,
                     component_members_secs,
-                    signature_index_stats,
-                    paper_index_stats,
-                    paper_author_index_stats,
-                    specter_index_stats,
+                    signature_index_stats: read_telemetry.signature_index_stats,
+                    paper_index_stats: read_telemetry.paper_index_stats,
+                    paper_author_index_stats: read_telemetry.paper_author_index_stats,
+                    specter_index_stats: read_telemetry.specter_index_stats,
                     indexed_arrow_candidate_plan: true,
                     reused_name_counts_index,
                 },
@@ -955,6 +1132,129 @@ impl RawBlockQueryCandidatePlanner {
             num_threads,
             max_exemplars,
         })
+    }
+
+    /// Rebuild for new seed sidecars, reading only rows the retained ones lack.
+    ///
+    /// Returns false, without changes, unless this planner retains its rows and the
+    /// new seeds include every current seed. Otherwise the retained rows plus the
+    /// missing ones, trimmed to the new seeds, equal a fresh read, and the state is
+    /// assembled from them by the same code as a fresh build.
+    fn reload_seed_rows(
+        &mut self,
+        py: Python<'_>,
+        cluster_seeds_path: &str,
+        cluster_seed_disallows_path: Option<&str>,
+    ) -> PyResult<bool> {
+        // Declared-query planners carry request rows that a reload would not restore.
+        if self.state.retained_seed_rows.is_none()
+            || !matches!(self.query_mode, RawPlannerQueryMode::Auto)
+        {
+            return Ok(false);
+        }
+        let layout = RawArrowSeedLayout::read(cluster_seeds_path, cluster_seed_disallows_path)?;
+        if !layout
+            .seed_signature_id_set
+            .is_superset(&self.state.seed_signature_id_set)
+        {
+            return Ok(false);
+        }
+        let retained = self
+            .state
+            .retained_seed_rows
+            .take()
+            .expect("checked above that seed rows are retained");
+        let mut signatures = std::mem::take(&mut self.state.signatures);
+        let mut paper_authors = std::mem::take(&mut self.state.paper_authors);
+        let mut papers = retained.papers;
+        let mut specter_by_paper_id = retained.specter_by_paper_id;
+
+        let read_signatures_start = Instant::now();
+        let missing_signature_ids: HashSet<String> = layout
+            .seed_signature_id_set
+            .iter()
+            .filter(|signature_id| !signatures.contains_key(*signature_id))
+            .cloned()
+            .collect();
+        let signature_index_stats = if missing_signature_ids.is_empty() {
+            IndexedArrowReadStats::default()
+        } else {
+            let (loaded, stats) = self.dataset.read_signatures(Some(&missing_signature_ids))?;
+            signatures.extend(loaded);
+            stats
+        };
+        let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
+        signatures.retain(|signature_id, _| layout.seed_signature_id_set.contains(signature_id));
+        layout.require_signature_rows(&signatures)?;
+
+        let needed_paper_ids = layout.needed_paper_ids(&signatures);
+        let missing_paper_ids: HashSet<String> = needed_paper_ids
+            .iter()
+            .filter(|paper_id| !papers.contains_key(*paper_id))
+            .cloned()
+            .collect();
+        let raw_name_counts = self.dataset.name_counts();
+        let metadata_reads_parallel_start = Instant::now();
+        let rows = read_raw_arrow_paper_rows(
+            py,
+            &self.dataset,
+            &raw_name_counts,
+            &missing_paper_ids,
+            self.num_threads,
+        )?;
+        papers.extend(rows.papers);
+        paper_authors.extend(rows.paper_authors);
+        match (specter_by_paper_id.as_mut(), rows.specter_by_paper_id) {
+            (Some(existing), Some(loaded)) => existing.extend(loaded),
+            (None, None) => {}
+            _ => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "retained SPECTER rows disagree with the dataset's SPECTER table",
+                ))
+            }
+        }
+        papers.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
+        paper_authors.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
+        if let Some(specter) = specter_by_paper_id.as_mut() {
+            specter.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
+        }
+        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers)?;
+        let read_telemetry = RawArrowSeedReadTelemetry {
+            read_cluster_seeds_secs: layout.read_cluster_seeds_secs,
+            read_signatures_secs,
+            read_papers_secs: rows.read_papers_secs,
+            read_paper_authors_secs: rows.read_paper_authors_secs,
+            read_specter_secs: rows.read_specter_secs,
+            read_name_counts_secs: rows.read_name_counts_secs,
+            signature_index_stats,
+            paper_index_stats: rows.paper_index_stats,
+            paper_author_index_stats: rows.paper_author_index_stats,
+            specter_index_stats: rows.specter_index_stats,
+        };
+        let query_signature_ids = self.planner_query_signature_ids.clone();
+        let query_mode = self.query_mode;
+        let mut planner = Self::assemble(
+            py,
+            self.dataset.clone(),
+            layout,
+            signatures,
+            papers,
+            paper_authors,
+            specter_by_paper_id,
+            raw_name_counts,
+            needed_paper_ids.len(),
+            read_telemetry,
+            metadata_reads_parallel_start,
+            query_signature_ids,
+            self.top_k,
+            self.orcid_enabled,
+            self.num_threads,
+            self.max_exemplars,
+            true,
+        )?;
+        planner.query_mode = query_mode;
+        *self = planner;
+        Ok(true)
     }
 }
 
@@ -999,6 +1299,7 @@ impl RawBlockQueryCandidatePlanner {
             orcid_enabled,
             num_threads,
             max_exemplars,
+            false,
         )?;
         planner.planner_query_signature_ids = query_signature_ids;
         planner.planner_query_signature_count = query_requests.len();
@@ -1018,8 +1319,10 @@ impl RawBlockQueryCandidatePlanner {
         cluster_seed_disallows_path = None,
         orcid_enabled = true,
         num_threads = None,
-        max_exemplars = 4
+        max_exemplars = 4,
+        retain_seed_rows = false
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn from_auto_queries(
         py: Python<'_>,
         dataset: PyRef<'_, ArrowDataset>,
@@ -1029,6 +1332,7 @@ impl RawBlockQueryCandidatePlanner {
         orcid_enabled: bool,
         num_threads: Option<usize>,
         max_exemplars: usize,
+        retain_seed_rows: bool,
     ) -> PyResult<Self> {
         let mut planner = Self::build_from_query_signature_ids(
             py,
@@ -1040,9 +1344,30 @@ impl RawBlockQueryCandidatePlanner {
             orcid_enabled,
             num_threads,
             max_exemplars,
+            retain_seed_rows,
         )?;
         planner.query_mode = RawPlannerQueryMode::Auto;
         Ok(planner)
+    }
+
+    /// Rebuild in place for new seed sidecars when the new seeds include every
+    /// current seed; returns false and leaves the planner unchanged otherwise.
+    ///
+    /// Subblocked attachment passes call this between passes. Only rows of the new
+    /// seeds are read, and the rebuilt state equals a fresh `from_auto_queries`
+    /// build over the same sidecars.
+    #[pyo3(signature = (cluster_seeds_path, cluster_seed_disallows_path = None))]
+    fn reload_seed_sidecars(
+        &mut self,
+        py: Python<'_>,
+        cluster_seeds_path: String,
+        cluster_seed_disallows_path: Option<String>,
+    ) -> PyResult<bool> {
+        self.reload_seed_rows(
+            py,
+            &cluster_seeds_path,
+            cluster_seed_disallows_path.as_deref(),
+        )
     }
 
     fn build_telemetry(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {

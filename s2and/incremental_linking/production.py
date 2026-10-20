@@ -971,8 +971,15 @@ def predict_incremental_promoted_linker_from_arrow(
     runtime_context: RuntimeContext,
     total_ram_bytes: int | None,
     batching_threshold: int | None,
+    attachment_state: Any | None = None,
 ) -> dict[str, Any]:
-    """Run the promoted linker from one open Arrow dataset."""
+    """Run the promoted linker from one open Arrow dataset.
+
+    ``attachment_state`` is the native state that subblocked attachment passes of
+    one original block share: a lazily built featurizer (``signature_ids``,
+    ``name_tuples``, ``featurizer()``) that query windows view instead of building
+    their own, and a ``planner`` that the next pass reloads instead of rebuilding.
+    """
 
     resolved_total_ram_bytes, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
     prediction_state = PredictionState(
@@ -1110,17 +1117,32 @@ def predict_incremental_promoted_linker_from_arrow(
         raw_request_planner: Any | None = None
         if unassigned_signature_ids:
             planner_build_start = time.perf_counter()
-            raw_request_planner = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner.from_auto_queries(  # noqa: SLF001
-                arrow_dataset.native,
-                str(cluster_seeds_path),
-                top_k=retrieval_top_k,
-                cluster_seed_disallows_path=(
-                    None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path)
-                ),
-                orcid_enabled=bool(orcid_enabled),
-                num_threads=clusterer.n_jobs,
-                max_exemplars=4,
-            )
+            disallows_path_text = None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path)
+            planner_key = (id(arrow_dataset), retrieval_top_k, bool(orcid_enabled), clusterer.n_jobs)
+            if (
+                attachment_state is not None
+                and attachment_state.planner is not None
+                and attachment_state.planner_key == planner_key
+                and attachment_state.planner.reload_seed_sidecars(str(cluster_seeds_path), disallows_path_text)
+            ):
+                # The previous pass's planner, rebuilt for this pass's seeds from its
+                # retained rows: same state as a fresh build, without re-reading the block.
+                raw_request_planner = attachment_state.planner
+            else:
+                planner_class = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner  # noqa: SLF001
+                raw_request_planner = planner_class.from_auto_queries(
+                    arrow_dataset.native,
+                    str(cluster_seeds_path),
+                    top_k=retrieval_top_k,
+                    cluster_seed_disallows_path=disallows_path_text,
+                    orcid_enabled=bool(orcid_enabled),
+                    num_threads=clusterer.n_jobs,
+                    max_exemplars=4,
+                    retain_seed_rows=attachment_state is not None,
+                )
+                if attachment_state is not None:
+                    attachment_state.planner = raw_request_planner
+                    attachment_state.planner_key = planner_key
             raw_planner_build_seconds = time.perf_counter() - planner_build_start
         scoring_batch_size = query_batch_size
         rescore_featurizer_cache = _QueryDisallowFeaturizerCache()
@@ -1171,15 +1193,28 @@ def predict_incremental_promoted_linker_from_arrow(
             del raw_candidate_plan
             featurizer_start = time.perf_counter()
             signature_ids = raw_plan_bundle.signature_order.signature_ids
-            raw_batch_featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
-                arrow_dataset,
-                signature_ids=signature_ids,
-                name_tuples=name_tuples,
-                preprocess=True,
-                num_threads=clusterer.n_jobs,
-                cluster_seeds_path=cluster_seeds_path,
-                cluster_seed_disallows_path=cluster_seed_disallows_path,
-            )
+            if (
+                attachment_state is not None
+                and attachment_state.name_tuples == name_tuples
+                and attachment_state.signature_ids.issuperset(signature_ids)
+            ):
+                # Same features as a fresh build over signature_ids: the view reads the
+                # same seed sidecars and shares the block's per-signature preprocessing.
+                raw_batch_featurizer = attachment_state.featurizer().view_with_cluster_seed_sidecars(
+                    [str(signature_id) for signature_id in signature_ids],
+                    str(cluster_seeds_path),
+                    None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),
+                )
+            else:
+                raw_batch_featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
+                    arrow_dataset,
+                    signature_ids=signature_ids,
+                    name_tuples=name_tuples,
+                    preprocess=True,
+                    num_threads=clusterer.n_jobs,
+                    cluster_seeds_path=cluster_seeds_path,
+                    cluster_seed_disallows_path=cluster_seed_disallows_path,
+                )
             raw_batch_featurizer_seconds += time.perf_counter() - featurizer_start
             raw_batch_featurizer_count += 1
             raw_batch_featurizer_signature_count += len(signature_ids)

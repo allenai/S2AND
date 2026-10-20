@@ -2740,26 +2740,30 @@ class Clusterer:
                 constraint_labels: np.ndarray | None = None
                 if self.use_default_constraints_as_supervision:
                     stage_start = time.perf_counter()
-                    common_constraint_kwargs = {
-                        "start_offset": offset,
-                        "max_pairs": chunk_pair_count,
-                        "dont_merge_cluster_seeds": self.dont_merge_cluster_seeds,
-                        "incremental_dont_use_cluster_seeds": incremental_dont_use_cluster_seeds,
-                        "num_threads": self.n_jobs,
-                        "featurizer": rust_featurizer,
-                        "suppress_orcid": getattr(self, "suppress_orcid", False),
-                    }
+                    suppress_orcid = bool(getattr(self, "suppress_orcid", False))
                     if uses_fastcluster:
                         constraint_labels = _get_constraint_labels_block_upper_triangle_indexed_rust(
                             block_signature_indices,
                             large_integer=LARGE_INTEGER,
-                            **common_constraint_kwargs,
+                            start_offset=offset,
+                            max_pairs=chunk_pair_count,
+                            dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                            num_threads=self.n_jobs,
+                            featurizer=rust_featurizer,
+                            suppress_orcid=suppress_orcid,
                         )
                         constraint_seconds += time.perf_counter() - stage_start
                     else:
                         local_i, local_j, constraint_values = get_constraints_block_upper_triangle_indexed_rust(
                             block_signature_indices,
-                            **common_constraint_kwargs,
+                            start_offset=offset,
+                            max_pairs=chunk_pair_count,
+                            dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                            num_threads=self.n_jobs,
+                            featurizer=rust_featurizer,
+                            suppress_orcid=suppress_orcid,
                         )
                         constraint_seconds += time.perf_counter() - stage_start
                         stage_start = time.perf_counter()

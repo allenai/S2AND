@@ -93,7 +93,7 @@ The release owner writes the bundles from an internal snapshot with
 [`write_release_bundles.py`](../scripts/production/README.md#release-bundles).
 That snapshot also holds pre-cut pairwise copies, correction ledgers, and audit records.
 They are not published.
-The `1.3` snapshot is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
+[Stage 0 of the release process](release.md#stage-0-choose-the-input-snapshot) records the selected snapshot.
 Patent records and research task packets remain outside the release inputs.
 
 ## Corrected source records
@@ -134,12 +134,9 @@ They do not prove independence from every past model or dataset.
 
 The `dataset` bundle supports giant-block EPS review on its seven giant Arrow datasets.
 Their profile memberships, dev labels, and initial-query source map need no second S3 copy.
-The final `1.3` EPS choice also uses fresh internal production exports that the release does not include.
-Public data reproduces the validation EPS calibration, `0.57`, but not that final review.
-The released model uses the reviewed EPS, `0.53`.
 Calibration reference files and review outputs are derived sidecars.
 Keep them distinct from untouched final test data.
-See [giant-block EPS review](eps_calibration.md) for their production commands.
+See [giant-block EPS review](eps_calibration.md) for the commands and the `1.3` EPS decision.
 
 Runtime records and vectors use Arrow IPC.
 Incremental support uses Parquet, JSON, and CSV where those formats form the current contract.

@@ -102,13 +102,7 @@ See [subblocking](docs/subblocking.md), [threading](docs/threading.md), and [env
 
 ## Development
 
-```bash
-uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
-uv run ty check s2and
-uv run --no-project python scripts/run_ci_locally.py
-```
+Run the full CI checks with `uv run --no-project python scripts/run_ci_locally.py`.
 
 The tests require the native extension from the development setup.
 See [the development guide](docs/development.md) for focused checks and native build recovery.
@@ -117,8 +111,7 @@ See [the development guide](docs/development.md) for focused checks and native b
 
 The original paper experiments use the `s2and_paper` branch and Python `3.7.9`.
 Use that branch's pinned environment and experiment commands for those results.
-Archived scripts are historical references, not supported production entrypoints.
-See [the archive catalog](scripts/README.md#archived-historical-artifacts).
+Retired historical scripts remain in Git history; see [the script catalog](scripts/README.md#retired-historical-scripts).
 
 The current process starts from a complete corrected snapshot.
 It preserves exact pair and split identities and uses versioned native models.

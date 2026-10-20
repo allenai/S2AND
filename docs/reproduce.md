@@ -5,7 +5,7 @@ The result is approximately the released `1.3` model.
 Three steps stay outside public reproduction:
 
 - **Name counts.** Only AI2 staff can rebuild the name-count index from internal data. Use the released index.
-- **Final EPS review.** The release owner reviews giant-block EPS curves on internal production exports. Public calibration reproduces the validation EPS choice, `0.57`. The released model uses the owner's choice, `0.53`.
+- **Final EPS review.** The release owner reviews giant-block EPS curves on internal production exports. Public calibration reproduces the validation EPS choice, `0.57`. The released model uses the owner's choice, `0.53`; see [giant-block EPS review](eps_calibration.md).
 - **LightGBM fits.** Multithreaded LightGBM fits can differ slightly across machines and thread counts. Use 12 threads for the closest match.
 
 The published data reproduces the `1.3` training and validation matrices exactly.

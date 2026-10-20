@@ -5,9 +5,7 @@ The Python and Rust package version is `1.0.0`.
 The next model and research snapshot version is `1.3`.
 Public Arrow and name-count data use format `1`.
 
-Release `1.3` excludes patent data.
-Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
-Incremental inputs contain the 13 inherited non-patent datasets.
+The [data guide](data.md#download) lists the release `1.3` populations.
 Fresh author-table counts, A, define the production count authority.
 The selected rebuild uses current normalization and the current packaged tuple and ORCID assets.
 See the [A mainline record](release_evidence/author_counts_mainline_20261017.md) for its status.
@@ -168,11 +166,7 @@ Both calibration splits select gate features and fit gate coefficients; they ser
 Retain existing manual dev labels after verified query-paper exposure exclusions.
 
 Complete [giant-block EPS review](eps_calibration.md) before final release evaluation.
-Use ORCID-masked B3 curves for identity quality and the original safe-action plot as a diagnostic.
-The release owner selects the final EPS after both views and benchmark validation.
-The final review can use fresh internal production exports that the released data does not include.
-Release `1.3` uses such exports, so public users cannot repeat its final EPS review.
-That review selects EPS `0.53`; benchmark validation selects `0.57`.
+The release owner selects the final EPS there; that guide also records the `1.3` decision.
 Apply the reviewed EPS to a fresh complete model without another fit.
 Freeze that package before final acceptance tests.
 

@@ -6,7 +6,7 @@ Giant-block curves supply the final operating-point review.
 The release owner chooses EPS after review of both views and benchmark validation.
 The scripts do not choose EPS automatically.
 
-## Inputs and historical procedure
+## Inputs and the 1.3 decision
 
 Use one root that combines the `inference` and `dataset` bundles, and the complete candidate model.
 The seven giant datasets are `a_khan`, `a_silva`, `h_wang`, `j_smith`, `s_gupta`, `s_lee`, and `s_park`.
@@ -27,19 +27,6 @@ It weights each scored signature equally.
 EPS `0.53` gives the best S of the tested values: 90.09%, against 88.99% at `0.57`.
 The same ORCID references select and assess EPS, so this review is not an independent test.
 On the benchmark outer test, signature-weighted B3 F1 rises from 0.963514 at `0.57` to 0.964372 at `0.53`.
-
-The original plot script is `scratch/plot_q_class_eps_sweeps.py`.
-It plots positive recall against negative separation from expanded incremental candidate labels.
-Its old reference EPS is `0.6064583976`; a retained topic-split command uses `0.65`.
-No retained manual decision record establishes that `0.65` is the final choice.
-The maintained producer and plot now reside in `scripts/eps_sweep`.
-
-A separate July 18 study selects `0.60` with an ORCID-masked B3 objective.
-Its report remains in `scratch/big7_1250_b3_operating_point_v1_20260718/report.md` where available.
-Its source is recoverable from commit `a7e2db9` as `scripts/evaluate_big7_1250_b3_operating_point.py`.
-That study caps each domain at 250,000 pairs and each sampled component at 256 members.
-The current procedure uses the current model and production graph subblocks of the giant Arrow datasets.
-Historical thresholds do not replace current release review.
 
 ## Freeze populations
 

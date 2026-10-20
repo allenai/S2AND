@@ -7,13 +7,11 @@ The [release process](../../docs/release.md) separates data preparation, fit, ac
 The [data guide](../../docs/data.md) defines the three bundles.
 The [reproduction guide](../../docs/reproduce.md) lists the public commands in order.
 
-Release `1.3` excludes patent data.
-Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
-Incremental inputs contain the 13 inherited non-patent datasets.
+The [data guide](../../docs/data.md#download) lists the release `1.3` populations.
 The production count authority is fresh author-table counts, A.
 The [mainline record](../../docs/release_evidence/author_counts_mainline_20261017.md) defines the selected policy and rebuild status.
 The [earlier candidate record](../../docs/release_evidence/production_candidate_20261013.md) preserves the previous model's evidence.
-The selected local snapshot path is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
+[Stage 0 of the release process](../../docs/release.md#stage-0-choose-the-input-snapshot) records the selected local snapshot.
 
 ## Corrected snapshot
 
@@ -63,9 +61,7 @@ Each bundle mirrors one S3 prefix.
 `--model` is optional, because the dataset bundle exists before the final model.
 Files are hardlinked on the snapshot's volume and copied across volumes.
 
-The dataset model plan, `pairwise/model_plan.json`, names one complete benchmark Arrow dataset per source.
-It also names that source's clusters, held-out blocks, frozen held-out pairs, and unknown-signature list.
-The augmented entry names one Arrow dataset and its fixed train, validation, and held-out pairs.
+The [data guide](../../docs/data.md#folder-layout) defines the roles in the dataset model plan, `pairwise/model_plan.json`.
 Before it writes the plan, the command proves that the Arrow data rebuilds the snapshot's prepared populations.
 Development equals the benchmark minus the held-out blocks and any reserved signatures.
 The command also checks the clusters and the unknown-signature lists.
@@ -145,7 +141,6 @@ It requires the development blocks that the model recorded at training time.
 It writes a fresh calibrated sibling and preserves the boosters.
 This benchmark calibration supplies the initial EPS.
 Complete [giant-block EPS review](../../docs/eps_calibration.md) after the complete candidate exists and before final release evaluation.
-Use both ORCID-masked identity B3 and the safe-action diagnostic plot.
 Apply the manual EPS choice with `scripts/eps_sweep/apply_reviewed_eps.py`.
 An EPS-only change does not invalidate incremental features.
 A booster or feature-contract change requires new incremental features and a fresh linker fit.

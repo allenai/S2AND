@@ -21,9 +21,9 @@ or native-test exclusion. Pytest validates configuration and marker names and
 reports skips. Large datasets, paid APIs, and production training are separate
 release checks, not prerequisites for these bounded tests.
 
-The shared CI runner measures branches and enforces the 80% combined coverage
-floor from `pyproject.toml`. PR CI runs Python 3.11–3.13 on Ubuntu and Python 3.11
-on Windows, so Windows file-lock and open-file cleanup contracts are exercised.
+PR CI also runs on Windows, so Windows file-lock and open-file cleanup contracts are
+exercised. The [development guide](../docs/development.md#local-ci-mirror) gives the
+full CI matrix and the coverage floor.
 
 ## Shared infrastructure
 

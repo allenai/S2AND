@@ -7,23 +7,14 @@ Production release selection uses development data and keeps candidate test scor
 See [the production commands](../scripts/production/README.md#pairwise-model) for the maintained production trainer.
 See [the release process](release.md) for model acceptance and publication.
 
-## Production snapshot inputs
+## Production training inputs
 
 The production pairwise trainer reads `pairwise/model_plan.json` from the published `dataset` bundle.
-It selects pairs and computes features from each source's benchmark Arrow data and the one shared `name_counts_index`.
+The [data guide](data.md#folder-layout) defines the plan's roles and the release populations.
+The trainer selects pairs and computes features from each source's benchmark Arrow data and the one shared `name_counts_index`.
+It has no fixed seven-source requirement.
 The [reproduction guide](reproduce.md) lists the production commands in order.
-Release `1.3` excludes patent data from its source records, pairwise fit, and incremental inputs.
-Its pairwise plan declares eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
-Its incremental source contains the 13 inherited non-patent datasets.
-The trainer has no fixed seven-source requirement.
 Use a separate output directory for models and matrix work.
-A historical baseline is not required for this fit.
-
-The snapshot preserves full corrected records for later corrections and embedding updates.
-Runtime Arrow projections alone do not retain all useful source text.
-The [data guide](data.md) explains source records, incremental tasks, formats, and compatibility.
-The selected local snapshot path is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
-The snapshot plan uses relative paths.
 Calibration and held-out evaluation check the model's recorded development blocks.
 
 ## Build a Rust-backed training dataset

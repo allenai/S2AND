@@ -76,5 +76,4 @@ Use [the data guide](../docs/data.md) for the common assets and corrected snapsh
 
 The `archive/` folder held provenance records for the name-tuple curation, the augmented training data,
 the claims datasets, the mini datasets, and the post-paper SOTA runs.
-Commit `f31301f` is the last commit that contains it.
-Read the records there; they do not run against current APIs.
+Read the records at commit `f31301f`; they do not run against current APIs.

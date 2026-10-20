@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -443,15 +443,116 @@ def _optional_text_length(value: Any) -> float:
     return float(len(str(value)))
 
 
-def _normalized_entropy(values: np.ndarray) -> float:
-    if len(values) <= 1:
-        return 0.0
-    total = float(values.sum())
-    if total <= 0.0:
-        return 0.0
-    probabilities = values / total
-    entropy = -float(np.sum(probabilities * np.log(np.clip(probabilities, 1e-12, 1.0))))
-    return entropy / math.log(len(probabilities))
+def _concatenated_rows(groups: Sequence[np.ndarray]) -> np.ndarray:
+    """Return the rows of every group, group after group."""
+
+    if not groups:
+        return np.empty(0, dtype=np.int64)
+    return np.concatenate(groups)
+
+
+def _equal_length_blocks(
+    grouped_values: np.ndarray,
+    group_of_value: np.ndarray,
+    group_count: int,
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """Yield group positions and one 2-D value block per group length.
+
+    ``grouped_values`` holds each group's values in order, group after group, and
+    ``group_of_value`` gives the group of each value. Each block row holds one group's
+    values in their original order. NumPy reduces each row of the C-contiguous block
+    along axis 1 as it reduces that group alone, so the results match a per-group loop.
+    One reduction per group length replaces one NumPy call per group and feature.
+    """
+
+    lengths = np.bincount(group_of_value, minlength=group_count)
+    starts = np.cumsum(lengths) - lengths
+    for length in np.unique(lengths[lengths > 0]).tolist():
+        positions = np.flatnonzero(lengths == length)
+        yield positions, grouped_values[starts[positions, None] + np.arange(length)]
+
+
+def _divide_where(numerator: np.ndarray, denominator: np.ndarray, where: np.ndarray) -> np.ndarray:
+    """Divide where ``where`` holds and return 0.0 elsewhere."""
+
+    result = np.zeros(len(numerator), dtype=np.float64)
+    np.divide(numerator, denominator, out=result, where=where)
+    return result
+
+
+def _probability_feature_columns(probs: np.ndarray, feature_names: Sequence[str]) -> dict[str, np.ndarray]:
+    """Compute probability features for equal-length rows of ranked candidate probabilities.
+
+    Each row holds one query's candidate probabilities, highest first. Each feature uses
+    the same element operations as its per-query definition, including how a NaN sum
+    meets each guard.
+    """
+
+    row_count, n_probs = probs.shape
+    zeros = np.zeros(row_count, dtype=np.float64)
+    top = probs[:, 0]
+    second = probs[:, 1] if n_probs > 1 else zeros
+    third = probs[:, 2] if n_probs > 2 else zeros
+    prob_sum = np.sum(probs, axis=1)
+    count_thresholds = {
+        "prob_count_ge_0_25": 0.25,
+        "prob_count_ge_0_50": 0.50,
+        "prob_count_ge_0_75": 0.75,
+    }
+    top_margins = {
+        "prob_count_within_0_01": 0.01,
+        "prob_count_within_0_05": 0.05,
+        "prob_count_within_0_10": 0.10,
+    }
+    columns: dict[str, np.ndarray] = {}
+    for feature_name in feature_names:
+        if feature_name == "prob_top":
+            value = top
+        elif feature_name == "prob_second":
+            value = second
+        elif feature_name == "prob_third":
+            value = third
+        elif feature_name == "prob_top2_gap":
+            value = top - second
+        elif feature_name == "prob_second_third_gap":
+            value = second - third
+        elif feature_name == "prob_top_share":
+            value = _divide_where(top, prob_sum, prob_sum > 0)
+        elif feature_name == "prob_top2_share":
+            value = _divide_where(np.sum(probs[:, :2], axis=1), prob_sum, prob_sum > 0)
+        elif feature_name == "prob_sum":
+            value = prob_sum
+        elif feature_name == "prob_mean":
+            value = np.mean(probs, axis=1)
+        elif feature_name == "prob_std":
+            value = np.std(probs, axis=1)
+        elif feature_name == "prob_p90":
+            value = np.quantile(probs, 0.9, axis=1)
+        elif feature_name == "prob_p75":
+            value = np.quantile(probs, 0.75, axis=1)
+        elif feature_name == "prob_entropy":
+            value = zeros.copy()
+            if n_probs > 1:
+                # A NaN sum fails the "<= 0" guard, so its row gets NaN, not 0.0.
+                rows = ~(prob_sum <= 0.0)
+                shares = probs[rows] / prob_sum[rows, None]
+                entropy = -np.sum(shares * np.log(np.clip(shares, 1e-12, 1.0)), axis=1)
+                value[rows] = entropy / math.log(n_probs)
+        elif feature_name == "prob_effective_candidates":
+            value = zeros.copy()
+            rows = ~(prob_sum <= 0.0)
+            shares = probs[rows] / prob_sum[rows, None]
+            sums = np.sum(shares * np.log(np.clip(shares, 1e-12, 1.0)), axis=1)
+            # math.exp, not np.exp, keeps the per-query results bit for bit.
+            value[rows] = [math.exp(-total) for total in sums.tolist()]
+        elif feature_name in count_thresholds:
+            value = (probs >= count_thresholds[feature_name]).sum(axis=1).astype(np.float64)
+        elif feature_name in top_margins:
+            value = (probs >= (top - top_margins[feature_name])[:, None]).sum(axis=1).astype(np.float64)
+        else:
+            raise KeyError(f"Unsupported logistic gate probability feature: {feature_name}")
+        columns[feature_name] = value
+    return columns
 
 
 def _validate_selected_feature_sources(
@@ -543,70 +644,24 @@ def build_logistic_gate_matrix(
         handled.add(name)
 
     best_rows = query_rows.best_rows
-    group_sizes = np.asarray([len(group) for group in query_rows.ranked_groups], dtype=np.float64)
+    group_count = len(query_rows.groups)
+    group_lengths = np.asarray([len(group) for group in query_rows.ranked_groups], dtype=np.int64)
+    group_of_row = np.repeat(np.arange(group_count), group_lengths)
     set_column("chosen_probability", probability_array[best_rows])
     set_column("second_probability", query_rows.runner_up_scores)
     set_column("score_margin", query_rows.score_margins)
     set_column("has_runner_up", query_rows.has_runner_up.astype(np.float64))
-    set_column("raw_candidate_count", group_sizes)
+    set_column("raw_candidate_count", group_lengths.astype(np.float64))
 
+    ranked_rows = _concatenated_rows(query_rows.ranked_groups)
     probability_feature_names = [name for name in resolved_feature_names if name.startswith("prob_")]
     if probability_feature_names:
-        for query_pos, ranked in enumerate(query_rows.ranked_groups):
-            probs = probability_array[ranked]
-            n_probs = len(probs)
-            top = float(probs[0]) if n_probs else 0.0
-            second = float(probs[1]) if n_probs > 1 else 0.0
-            third = float(probs[2]) if n_probs > 2 else 0.0
-            prob_sum = float(np.sum(probs))
-            for feature_name in probability_feature_names:
-                if feature_name == "prob_top":
-                    value = top
-                elif feature_name == "prob_second":
-                    value = second
-                elif feature_name == "prob_third":
-                    value = third
-                elif feature_name == "prob_top2_gap":
-                    value = top - second
-                elif feature_name == "prob_second_third_gap":
-                    value = second - third
-                elif feature_name == "prob_top_share":
-                    value = top / prob_sum if prob_sum > 0 else 0.0
-                elif feature_name == "prob_top2_share":
-                    value = float(np.sum(probs[:2])) / prob_sum if prob_sum > 0 else 0.0
-                elif feature_name == "prob_sum":
-                    value = prob_sum
-                elif feature_name == "prob_mean":
-                    value = float(np.mean(probs)) if n_probs else 0.0
-                elif feature_name == "prob_std":
-                    value = float(np.std(probs)) if n_probs else 0.0
-                elif feature_name == "prob_p90":
-                    value = float(np.quantile(probs, 0.9)) if n_probs else 0.0
-                elif feature_name == "prob_p75":
-                    value = float(np.quantile(probs, 0.75)) if n_probs else 0.0
-                elif feature_name == "prob_entropy":
-                    value = _normalized_entropy(probs)
-                elif feature_name == "prob_effective_candidates":
-                    if prob_sum <= 0.0 or not n_probs:
-                        value = 0.0
-                    else:
-                        shares = probs / prob_sum
-                        value = math.exp(-float(np.sum(shares * np.log(np.clip(shares, 1e-12, 1.0)))))
-                elif feature_name == "prob_count_ge_0_25":
-                    value = float((probs >= 0.25).sum())
-                elif feature_name == "prob_count_ge_0_50":
-                    value = float((probs >= 0.50).sum())
-                elif feature_name == "prob_count_ge_0_75":
-                    value = float((probs >= 0.75).sum())
-                elif feature_name == "prob_count_within_0_01":
-                    value = float((probs >= top - 0.01).sum()) if n_probs else 0.0
-                elif feature_name == "prob_count_within_0_05":
-                    value = float((probs >= top - 0.05).sum()) if n_probs else 0.0
-                elif feature_name == "prob_count_within_0_10":
-                    value = float((probs >= top - 0.10).sum()) if n_probs else 0.0
-                else:
-                    raise KeyError(f"Unsupported logistic gate probability feature: {feature_name}")
-                matrix[query_pos, feature_positions[feature_name]] = value
+        unsupported = [name for name in probability_feature_names if name not in _PROBABILITY_FEATURES]
+        if unsupported:
+            raise KeyError(f"Unsupported logistic gate probability feature: {unsupported[0]}")
+        for positions, probs in _equal_length_blocks(probability_array[ranked_rows], group_of_row, group_count):
+            for feature_name, values in _probability_feature_columns(probs, probability_feature_names).items():
+                matrix[positions, feature_positions[feature_name]] = values
         handled.update(probability_feature_names)
 
     candidate_kind = np.where(query_rows.has_runner_up, "multi_candidate", "single_candidate")
@@ -636,33 +691,33 @@ def build_logistic_gate_matrix(
                 source_ops.setdefault(feature_name.removeprefix(prefix), set()).add(op)
                 break
 
+    has_second = group_lengths > 1
+    second_rows = ranked_rows[(np.cumsum(group_lengths) - group_lengths)[has_second] + 1]
+    group_rows = _concatenated_rows(query_rows.groups)
     cache: dict[str, np.ndarray] = {}
     for source_name, ops in source_ops.items():
         values = cache.setdefault(source_name, _feature_array(feature_values, source_name, row_count))
         if "top" in ops:
             set_column(f"top_raw_{source_name}", values[best_rows])
         if "delta" in ops:
-            deltas = np.full(len(query_rows.ranked_groups), np.nan, dtype=np.float64)
-            for query_pos, ranked in enumerate(query_rows.ranked_groups):
-                if len(ranked) > 1:
-                    deltas[query_pos] = float(values[ranked[0]] - values[ranked[1]])
+            deltas = np.full(group_count, np.nan, dtype=np.float64)
+            deltas[has_second] = values[best_rows[has_second]] - values[second_rows]
             set_column(f"delta_top_second_{source_name}", deltas)
         list_ops = ops & {"mean", "std", "min", "max"}
         if list_ops:
-            aggregates = {op: np.full(len(query_rows.groups), np.nan, dtype=np.float64) for op in list_ops}
-            for query_pos, group in enumerate(query_rows.groups):
-                finite = values[group]
-                finite = finite[np.isfinite(finite)]
-                if len(finite) == 0:
-                    continue
+            aggregates = {op: np.full(group_count, np.nan, dtype=np.float64) for op in list_ops}
+            grouped_values = values[group_rows]
+            finite = np.isfinite(grouped_values)
+            # A query whose values are all missing gets no block, so its aggregates stay NaN.
+            for positions, block in _equal_length_blocks(grouped_values[finite], group_of_row[finite], group_count):
                 if "mean" in list_ops:
-                    aggregates["mean"][query_pos] = float(np.mean(finite))
+                    aggregates["mean"][positions] = np.mean(block, axis=1)
                 if "std" in list_ops:
-                    aggregates["std"][query_pos] = float(np.std(finite, ddof=0))
+                    aggregates["std"][positions] = np.std(block, axis=1, ddof=0)
                 if "min" in list_ops:
-                    aggregates["min"][query_pos] = float(np.min(finite))
+                    aggregates["min"][positions] = np.min(block, axis=1)
                 if "max" in list_ops:
-                    aggregates["max"][query_pos] = float(np.max(finite))
+                    aggregates["max"][positions] = np.max(block, axis=1)
             for op, values_for_op in aggregates.items():
                 set_column(f"list_{op}_{source_name}", values_for_op)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, cast
 
 import numpy as np
@@ -8,6 +9,7 @@ import pytest
 from s2and.incremental_linking.features import LinkerFeatureMatrix
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking.logistic_gate import (
+    _PROBABILITY_FEATURES,
     build_logistic_gate_matrix,
     build_runtime_logistic_gate_matrix,
     default_logistic_gate_feature_names,
@@ -283,3 +285,90 @@ def test_default_logistic_gate_feature_names_excludes_unwired_runtime_features()
     }
 
     assert names.isdisjoint(derived)
+
+
+def _per_query_probability_feature(name: str, probs: np.ndarray) -> float:
+    """Compute one probability feature with the per-query definition."""
+    top = float(probs[0])
+    second = float(probs[1]) if len(probs) > 1 else 0.0
+    third = float(probs[2]) if len(probs) > 2 else 0.0
+    prob_sum = float(np.sum(probs))
+    if name == "prob_top2_share":
+        return float(np.sum(probs[:2])) / prob_sum if prob_sum > 0 else 0.0
+    if name == "prob_entropy":
+        if len(probs) <= 1 or prob_sum <= 0.0:
+            return 0.0
+        shares = probs / prob_sum
+        return -float(np.sum(shares * np.log(np.clip(shares, 1e-12, 1.0)))) / math.log(len(probs))
+    if name == "prob_effective_candidates":
+        if prob_sum <= 0.0:
+            return 0.0
+        shares = probs / prob_sum
+        return math.exp(-float(np.sum(shares * np.log(np.clip(shares, 1e-12, 1.0)))))
+    simple = {
+        "prob_top": top,
+        "prob_second": second,
+        "prob_third": third,
+        "prob_top2_gap": top - second,
+        "prob_second_third_gap": second - third,
+        "prob_top_share": top / prob_sum if prob_sum > 0 else 0.0,
+        "prob_sum": prob_sum,
+        "prob_mean": float(np.mean(probs)),
+        "prob_std": float(np.std(probs)),
+        "prob_p90": float(np.quantile(probs, 0.9)),
+        "prob_p75": float(np.quantile(probs, 0.75)),
+        "prob_count_ge_0_25": float((probs >= 0.25).sum()),
+        "prob_count_ge_0_50": float((probs >= 0.50).sum()),
+        "prob_count_ge_0_75": float((probs >= 0.75).sum()),
+        "prob_count_within_0_01": float((probs >= top - 0.01).sum()),
+        "prob_count_within_0_05": float((probs >= top - 0.05).sum()),
+        "prob_count_within_0_10": float((probs >= top - 0.10).sum()),
+    }
+    return simple[name]
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_build_logistic_gate_matrix_matches_per_query_definitions(seed: int) -> None:
+    """Grouped NumPy reductions must equal the per-query definitions bit for bit."""
+    rng = np.random.default_rng(seed)
+    lengths = rng.integers(1, 40, size=30)
+    lengths[:3] = [1, 2, 3]
+    query_indices = np.repeat(np.arange(len(lengths)), lengths)
+    rng.shuffle(query_indices)
+    row_count = len(query_indices)
+    probabilities = rng.random(row_count)
+    if seed == 1:
+        probabilities = rng.choice([0.0, -0.0, 0.25, 0.5, 0.75, 1.0], size=row_count)
+    if seed == 2:
+        probabilities[rng.random(row_count) < 0.1] = np.nan
+    values = rng.normal(size=row_count) * 1e3
+    special = rng.random(row_count) < 0.25
+    values[special] = rng.choice([0.0, -0.0, np.nan, np.inf, -np.inf, 5e-324], size=int(special.sum()))
+    values[query_indices == 0] = np.nan
+    feature_names = [*_PROBABILITY_FEATURES] + [
+        f"{prefix}_x" for prefix in ("delta_top_second", "list_mean", "list_std", "list_min", "list_max")
+    ]
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        matrix, query_rows = build_logistic_gate_matrix(
+            feature_names,
+            query_indices=query_indices,
+            probabilities=probabilities,
+            feature_values={"x": values},
+            retrieval_ranks=rng.integers(0, 9, size=row_count),
+        )
+        expected = np.full_like(matrix, np.nan)
+        for query_pos, (group, ranked) in enumerate(zip(query_rows.groups, query_rows.ranked_groups, strict=True)):
+            for column, name in enumerate(_PROBABILITY_FEATURES):
+                expected[query_pos, column] = _per_query_probability_feature(name, probabilities[ranked])
+            column = len(_PROBABILITY_FEATURES)
+            if len(ranked) > 1:
+                expected[query_pos, column] = float(values[ranked[0]] - values[ranked[1]])
+            finite = values[group][np.isfinite(values[group])]
+            if len(finite):
+                expected[query_pos, column + 1 :] = [np.mean(finite), np.std(finite), np.min(finite), np.max(finite)]
+
+    same_bits = matrix.view(np.uint64) == expected.view(np.uint64)
+    assert np.all(same_bits | (np.isnan(matrix) & np.isnan(expected)))
+    all_missing = next(pos for pos, group in enumerate(query_rows.groups) if query_indices[group[0]] == 0)
+    assert np.isnan(matrix[all_missing, -4:]).all()

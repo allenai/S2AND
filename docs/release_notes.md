@@ -8,7 +8,9 @@ production model and public-data version is `1.3`, on a separate version axis.
 ### Status
 
 - **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles are on S3 (see [data](data.md)).
-  PyPI has the `1.0.0b1` beta for integration testing; the final `1.0.0` release is pending.
+  PyPI has the `1.0.0b2` beta for integration testing; the final `1.0.0` release is pending.
+  uv installs the beta's `s2and-rust` dependency only when it is pinned too
+  (`s2and==1.0.0b2 s2and-rust==1.0.0b2`) or with `--prerelease=allow`; pip needs neither.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
@@ -488,6 +490,29 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
 
 ### Performance
 
+- Request-time batch lookup indexes are built with NumPy instead of a Python loop
+  per row: keys hash from the Arrow buffers, records sort with `lexsort`, and runs
+  write as packed arrays. Index files are byte-identical. For the a_khan request
+  (95,936 signatures, 4.19M author rows) the build takes 0.9 s instead of 13.3 s.
+  Runs spill to disk above 16M records instead of 1M.
+- The `paper_authors` Arrow reader resolves each paper once and hashes rows with
+  `ahash`, instead of three SipHash lookups and a string copy per row. On the
+  j_smith incremental request (110,244 signatures, Linux, 16 threads) prediction
+  takes 37.9 s instead of 40–42 s, with identical clusters.
+- Retrieval scoring computes a query's cosines with a component centroid and its
+  exemplars in one pass. Each sum keeps its order, so scores are bit-identical.
+  At 5 threads, incremental j_smith and a_khan requests use 8–10% less CPU, and
+  the subblocked a_silva full-block request 12% less (731 instead of 834 CPU
+  seconds), with identical clusters.
+- Subblocked attachment passes of one original block share native state. One
+  featurizer over the block is built on first use, and each pass views it with
+  its own seeds instead of rebuilding features; a view matches a fresh build
+  exactly. The incremental planner can reload new seed sidecars when they include
+  every current seed, reading only the missing rows. On the subblocked j_smith
+  full-block request (26 attachment passes, Linux, 16 threads) featurizer time
+  across the passes drops from 173 s to 16 s, and prediction takes 775 s instead
+  of 1,091 s, with identical clusters. Planner reloads still scan most author
+  batches, so they save little so far.
 - `NameCountsIndex.open` no longer hashes the index files or checks every record on
   each open. It checks the manifest, file sizes, file headers, and section bounds,
   so lookups stay memory-safe. For the 2.3 GB `1.3` index an open takes 0.04 s and

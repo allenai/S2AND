@@ -154,6 +154,8 @@ def test_bundles_rebuild_the_prepared_training_population(snapshot: Path, tmp_pa
     output = tmp_path / "bundles"
     summary = write_release_bundles(snapshot, output)
 
+    for written in ("pairwise/model_plan.json", "pairwise/augmented/manifest.json"):
+        assert b"\r\n" not in (output / "dataset" / written).read_bytes()
     plan = load_model_plan(output / "dataset" / "pairwise" / "model_plan.json")
     assert summary["model_plan_sha256"] == sha256_file(output / "dataset" / "pairwise" / "model_plan.json")
     assert list(plan.datasets) == ["qian", "augmented"]

@@ -58,6 +58,11 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _write_json(path: Path, payload: Any, *, sort_keys: bool = False) -> None:
+    # Published bytes must not depend on the writer's platform line endings.
+    path.write_text(json.dumps(payload, indent=2, sort_keys=sort_keys) + "\n", encoding="utf-8", newline="\n")
+
+
 def _place(source: Path, target: Path) -> None:
     """Hardlink one immutable file, or copy it across volumes."""
 
@@ -154,7 +159,7 @@ def _random_block_roles(
         # Producers can reserve signatures outside both development and the outer test.
         roles["excluded_signatures"] = pairwise / "excluded" / f"{name}.json"
         roles["excluded_signatures"].parent.mkdir(parents=True, exist_ok=True)
-        roles["excluded_signatures"].write_text(json.dumps(sorted(excluded)) + "\n", encoding="utf-8")
+        _write_json(roles["excluded_signatures"], sorted(excluded))
     return roles
 
 
@@ -177,7 +182,7 @@ def _fixed_pair_roles(
     # The dataset moves, so only its relative path to the shared count index changes.
     index = Path(os.path.relpath(dataset / "name_counts_index", target)).as_posix()
     manifest["paths"]["name_counts_index"] = index
-    (target / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_json(target / "manifest.json", manifest, sort_keys=True)
     _place(model["train_pairs"], target / "train_pairs.csv")
     _place(model["val_pairs"], target / "val_pairs.csv")
     _place(evaluation["pairs"], target / "test_pairs.json")
@@ -288,7 +293,7 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
         "eps": old_plan["eps"],
     }
     plan_path = pairwise / "model_plan.json"
-    plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    _write_json(plan_path, plan)
     require_arrow_plan(load_model_plan(plan_path).datasets)
     bundle_files = {
         bundle.name: [path for path in bundle.rglob("*") if path.is_file()] for bundle in (inference, dataset, source)

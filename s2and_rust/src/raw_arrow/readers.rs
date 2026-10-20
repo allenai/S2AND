@@ -385,8 +385,13 @@ pub(crate) fn read_raw_arrow_paper_authors_from_batches(
     batches: Vec<RecordBatch>,
     keep_paper_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, Vec<(i64, String)>>> {
-    let mut out: HashMap<String, Vec<(i64, String)>> = HashMap::new();
-    let mut seen_filtered_positions = keep_paper_ids.map(|_| HashSet::<(&str, i64)>::new());
+    // Rows arrive grouped by paper (about 45 per paper), and SipHash on every row
+    // dominated request time. Resolve each paper once to a slot in `papers`, hash
+    // rows with ahash, and build the returned map once per paper.
+    let mut papers: Vec<(String, Vec<(i64, String)>)> = Vec::new();
+    let mut paper_slots: ahash::AHashMap<&str, Option<usize>> = ahash::AHashMap::new();
+    let mut previous_paper: Option<(&str, Option<usize>)> = None;
+    let mut seen_filtered_positions = keep_paper_ids.map(|_| ahash::AHashSet::<(&str, i64)>::new());
     for batch in &batches {
         let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
         let paper_id_values =
@@ -413,16 +418,29 @@ pub(crate) fn read_raw_arrow_paper_authors_from_batches(
                     )));
                 }
             }
-            if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value)) {
-                continue;
+            // None marks a paper outside keep_paper_ids; its rows are skipped.
+            let slot = match previous_paper {
+                Some((previous_id, slot)) if previous_id == paper_id_value => slot,
+                _ => {
+                    let slot = *paper_slots.entry(paper_id_value).or_insert_with(|| {
+                        if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value)) {
+                            None
+                        } else {
+                            papers.push((paper_id_value.to_owned(), Vec::new()));
+                            Some(papers.len() - 1)
+                        }
+                    });
+                    previous_paper = Some((paper_id_value, slot));
+                    slot
+                }
+            };
+            if let Some(index) = slot {
+                papers[index].1.push((position, author_name.to_owned()));
             }
-            let paper_id = paper_id_value.to_owned();
-            out.entry(paper_id)
-                .or_default()
-                .push((position, author_name.to_owned()));
         }
     }
-    for (paper_id, authors) in out.iter_mut() {
+    let mut out: HashMap<String, Vec<(i64, String)>> = HashMap::with_capacity(papers.len());
+    for (paper_id, mut authors) in papers {
         authors.sort_by_key(|(position, _name)| *position);
         if let Some(pair) = authors.windows(2).find(|pair| pair[0].0 == pair[1].0) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -430,6 +448,7 @@ pub(crate) fn read_raw_arrow_paper_authors_from_batches(
                 paper_id, pair[0].0
             )));
         }
+        out.insert(paper_id, authors);
     }
     Ok(out)
 }

@@ -94,17 +94,13 @@ production model and public-data version is `1.3`, on a separate version axis.
 - Release featurization: `train_pairwise.py` and `release_pairwise.py`
   `calibrate-eps` and `evaluate-heldout` compute pair features and distances
   with the Rust featurizer from the model plan's Arrow data.
-  `evaluate-pairs` and `evaluate-clusters` use the same featurizer from a
-  required `--arrow-root`; JSON `ANDData` selects their pairs, blocks, seeds,
-  and truth. On six benchmark datasets, featurization was about 100x
+  On six benchmark datasets, featurization was about 100x
   faster than the Python featurizer, with bit-identical validation distances,
   B3, and trained AUC. `convert_to_arrow.py` now writes
   `conversion_provenance.json` with SHA-256 bindings for signatures, papers,
   selected embeddings, and optional clusters. Public pair CSVs remain outside
   manifest/provenance content binding; release-plan pair inputs are hashed
-  separately. Converter revision metadata is informational.
-  `evaluate-pairs` and `evaluate-clusters` reject any conversion that does not
-  match the plan's signatures, papers, and SPECTER digests. The pairwise
+  separately. Converter revision metadata is informational. The pairwise
   training config drops `chunk_size` and records `featurization_backend` plus,
   per dataset, `arrow_dir`, the plan file roles, and the split mode. Each command builds the featurizer
   only for the signatures it scores, and cluster evaluation still processes
@@ -199,16 +195,11 @@ production model and public-data version is `1.3`, on a separate version axis.
   `ValidatedNameCountsManifest`, and `NameCountsBinding` are removed. Callers
   use `ArrowDataset.name_counts_index` and `NameCountsIndex.path`,
   plus `.manifest_sha256`; feature contracts bind that digest directly.
-- Release orchestration uses one owner-authored `release.json` and
-  two generated plans. `release.json.release_version` is the one human-owned
-  model/data release choice; `model_plan.json` carries it with training,
-  validation, and EPS inputs, and final public-data assembly reads that plan.
-  `evaluation_plan.json` owns held-out inputs, gates,
-  the reviewed baseline identity, performance inputs, and exact parity and
-  subblocking content/workload identities. A post-finalization
-  `run_binding.json` binds both path-independent plans, the complete candidate,
-  and the public-data root; all five component reports and the aggregate
-  decision carry that binding.
+- Release orchestration has no run-preparation step. The dataset bundle's
+  `pairwise/model_plan.json` carries the release version and the training,
+  validation, held-out, and EPS inputs. Acceptance uses `evaluate-heldout`,
+  the identity-gold cases, and parity, subblocking, and performance reports
+  with direct inputs; the release owner reviews them.
   Pairwise training requires the external name-count index, local matrix
   workspace, and explicit full-run acknowledgement.
 - Linker training is one direct entrypoint. It performs one fresh fit
@@ -439,14 +430,6 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 ### Performance
 
-- Release pair and cluster evaluation (`evaluate-pairs`, `evaluate-clusters`)
-  load the JSON `ANDData` that selects pairs, splits, blocks, seeds, and truth
-  with `preprocess=False` and without SPECTER or name counts, since the Rust
-  featurizer computes every feature from Arrow. On aminer, arnetminer,
-  inspire, kisti, orcid, pubmed, qian, zbmath, and augmented, the selection is
-  identical to the preprocessed load. Without the coauthor sets it no longer
-  builds, INSPIRE's load drops from 29 minutes to about one, and the memory it
-  holds from 90 GB to 3 GB.
 - The Rust featurizer stores each paper's coauthor names, name blocks, and
   character n-gram counts once, instead of copying them into every signature on
   the paper. Pair features subtract each signature's own author, and they are

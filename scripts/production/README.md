@@ -331,285 +331,17 @@ The report contains pairwise metrics, B3 metrics, counts, and input identities.
 It requires no baseline and makes no comparison claim.
 Keep fresh incremental identity tests and inherited safe-action reports separate.
 
-## Promotion policy
+## Acceptance checks
 
-The commands below apply release acceptance gates.
-They are not prerequisites for snapshot preparation, pairwise fit, or EPS calibration.
-Freeze their populations, metric contracts, thresholds, and workloads before candidate scores are available.
-A matched baseline uses those same inputs and workloads.
-Historical rates from different data or splits are not a matched comparison.
-The current acceptance CLI requires a baseline record; this requirement belongs to promotion.
+Run these checks on the final complete model before publication.
+Freeze their populations, thresholds, and workloads before you look at candidate scores.
+Compare old and new models only on the same population and workload.
+No command applies thresholds; the release owner reads the reports and decides.
+Keep the finalizer's linker report and the identity-gold report separate from these checks.
 
-## Run preparation for promotion
+### Full-prediction parity
 
-Prepare this separate acceptance plan after the fit inputs are fixed.
-Preparation checks train/validation/held-out identity overlap and writes the
-two plans used by later stages:
-
-```powershell
-uv run python scripts/production/model/release_pairwise.py `
-  prepare-run `
-  --release path/to/run/release.json
-```
-
-The run then contains:
-
-```text
-release.json
-model_plan.json
-evaluation_plan.json
-run_binding.json  # added only after bind-candidate
-stages/
-reports/
-final/            # created by prepare-run; no current command writes to it
-```
-
-Each cluster population declares its uncertainty sidecar as a path, or `null` when none exists.
-Omit the field only when no `restored_unknown_signature_ids_*.json` file sits beside its clusters.
-The evaluation plan freezes the sidecar digest or `null`. The baseline record must use the same identity.
-`evaluate-clusters` rejects a sidecar that is added, changed, or removed after preparation.
-
-This is the smallest random-split `release.json` shape accepted by
-`prepare-run`; it demonstrates the schema and path binding only. Paths are
-resolved relative to the run directory. The numbers are examples, not reviewed
-release values:
-
-```json
-{
-  "release_version": "1.3",
-  "model": {
-    "datasets": {
-      "random": {
-        "signatures": "../inputs/train/random_signatures.json",
-        "papers": "../inputs/train/random_papers.json",
-        "specter_embeddings": "../inputs/train/random_specter2.pkl",
-        "clusters": "../inputs/train/random_clusters.json"
-      }
-    },
-    "eps": {
-      "grid": [0.3, 0.6],
-      "minimum_dataset_f1": 0.0,
-      "minimum_signature_weighted_f1": 0.0
-    }
-  },
-  "evaluation": {
-    "pairwise": {
-      "random": {
-        "signatures": "../inputs/test/random_signatures.json",
-        "papers": "../inputs/test/random_papers.json",
-        "specter_embeddings": "../inputs/test/random_specter2.pkl",
-        "pairs": "../inputs/test/random_pairs.json"
-      }
-    },
-    "cluster": {
-      "random": {
-        "signatures": "../inputs/test/random_signatures.json",
-        "papers": "../inputs/test/random_papers.json",
-        "specter_embeddings": "../inputs/test/random_specter2.pkl",
-        "clusters": "../inputs/test/random_clusters.json",
-        "blocks": "../inputs/test/random_blocks.json",
-        "unknown_signatures": "../inputs/test/restored_unknown_signature_ids_20261009.json"
-      }
-    },
-    "performance": {
-      "arrow_root": "../inputs/performance_arrow",
-      "workload": {
-        "dataset": "random",
-        "target_block": "",
-        "query_limit": 400,
-        "max_seed_clusters": 400,
-        "seed_source": "clusters",
-        "runs": 5,
-        "n_jobs": 4,
-        "batching_threshold": null,
-        "total_ram_bytes": null,
-        "synthetic_seeds_when_clusters_missing": false
-      }
-    },
-    "parity": {
-      "fixture_dir": "../inputs/parity_fixture",
-      "workload": {
-        "block_size": 100,
-        "compare_features": true,
-        "include_specter": true,
-        "n_jobs": 4,
-        "total_ram_bytes": 1000000000,
-        "use_cluster_seeds": false
-      }
-    },
-    "subblocking": {
-      "component_members_parquet": "../inputs/candidate_components.parquet",
-      "dataset": "pubmed",
-      "workload": {
-        "allow_full": true,
-        "comparison_mode": "python-vs-rust",
-        "graph_config": {
-          "neighbor_mode": "projection",
-          "neighbors": 16,
-          "min_edge_score": 0.3,
-          "specter_weight": 1.0,
-          "coauthor_weight": 0.35,
-          "affiliation_weight": 0.2,
-          "max_exact_knn_group_size": 25000,
-          "projection_count": 12,
-          "projection_window": 12,
-          "max_candidate_edges": 5000000,
-          "pack_components": true,
-          "component_pack_strategy": "edge-greedy",
-          "sparse_evidence_edges": true,
-          "sparse_evidence_max_posting_size": 8,
-          "sparse_evidence_neighbors": 1,
-          "sparse_evidence_min_weight": 0.4,
-          "sparse_evidence_include_coauthors": true,
-          "sparse_evidence_include_affiliations": false,
-          "component_pack_top_k": 8,
-          "local_move_passes": 0,
-          "adaptive_projection": false,
-          "adaptive_projection_max_group_size": 5000,
-          "adaptive_projection_count": 24,
-          "adaptive_projection_window": 24
-        },
-        "limit": null,
-        "maximum_size": 100,
-        "orcid_subblocking": true,
-        "python_source": "arrow",
-        "sample_mode": "random",
-        "seed": 42,
-        "top_diff_subblocks": 30
-      }
-    },
-    "baseline": {
-      "path": "../inputs/matched_baseline.json",
-      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    },
-    "gates": {
-      "cluster_signature_weighted_b3_f1_max_drop": 0.005,
-      "pairwise_aggregate_auroc_max_drop": 0.001,
-      "pairwise_aggregate_macro_f1_max_drop": 0.005,
-      "pairwise_dataset_auroc_max_drop": 0.001,
-      "pairwise_dataset_macro_f1_max_drop": 0.005,
-      "peak_rss_absolute_max_gb": 4.0,
-      "runtime_max_ratio": 1.1,
-      "subblocking_maximum_size": 100
-    }
-  }
-}
-```
-
-The referenced baseline record also has an exact shape. It contains no
-authoritative paths: population and performance identities are content hashes,
-and its workload must equal the `release.json` workload:
-
-```json
-{
-  "metric_contract": {
-    "cluster_b3_aggregation": "signature_count_weighted",
-    "pairwise_macro_f1_threshold": {"operator": ">", "value": 0.5},
-    "pairwise_probability_combination": "arithmetic_mean_main_nameless",
-    "performance_statistic": "predict_seconds_p50"
-  },
-  "metrics": {
-    "cluster_signature_weighted_b3_f1": 0.804,
-    "pairwise_aggregate": {"auroc": 0.9005, "macro_f1": 0.804},
-    "pairwise_datasets": {
-      "random": {"auroc": 0.9005, "macro_f1": 0.804}
-    },
-    "predict_seconds_p50": 10.0
-  },
-  "performance": {
-    "arrow_root_manifest_sha256": "<lowercase SHA-256>",
-    "workload": {
-      "dataset": "random",
-      "target_block": "",
-      "query_limit": 400,
-      "max_seed_clusters": 400,
-      "seed_source": "clusters",
-      "runs": 5,
-      "n_jobs": 4,
-      "batching_threshold": null,
-      "total_ram_bytes": null,
-      "synthetic_seeds_when_clusters_missing": false
-    }
-  },
-  "populations": {
-    "pairwise": {
-      "random": {
-        "signatures": "<lowercase SHA-256>",
-        "papers": "<lowercase SHA-256>",
-        "specter_embeddings": "<lowercase SHA-256>",
-        "pairs": "<lowercase SHA-256>"
-      }
-    },
-    "cluster": {
-      "random": {
-        "signatures": "<lowercase SHA-256>",
-        "papers": "<lowercase SHA-256>",
-        "specter_embeddings": "<lowercase SHA-256>",
-        "clusters": "<lowercase SHA-256>",
-        "blocks": "<lowercase SHA-256>",
-        "unknown_signatures": "<lowercase SHA-256 or null>"
-      }
-    }
-  },
-  "provenance": {
-    "source_commit": "e54c6ba9c0e3ca4c2b5a40dcaa9a55c2c771d87d",
-    "model": {"version": "1.21", "eps": 0.65},
-    "data": {"identity": "<reviewed data identity>"},
-    "environment": {"identity": "<reviewed environment identity>"},
-    "commands": ["<exact historical baseline command>"]
-  }
-}
-```
-
-Every object has an exact key set and extra keys fail, except
-`evaluation.performance.workload`: `prepare-run` only requires a nonempty
-mapping equal to the baseline record's workload, and the performance profiler
-enforces its exact keys later. A random-split model
-dataset uses `signatures`, `papers`, `specter_embeddings`, and `clusters`, and
-has same-named pairwise and cluster evaluation datasets. A fixed-pair model
-dataset replaces `clusters` with `train_pairs` and `val_pairs` and has a
-same-named pairwise evaluation dataset. Model and evaluation identities must
-be disjoint.
-
-Fixed-pair training and validation CSVs use `signature_id_1`, `signature_id_2`,
-and `label` columns. Columns are selected by name, so their order does not
-matter. Labels may be `YES`/`NO` or `1`/`0`.
-
-Before candidate reports, bind the complete model and combined snapshot to the prepared acceptance plans:
-
-```powershell
-$Snapshot = '<combined-snapshot>'
-
-uv run --no-sync python scripts/production/model/release_pairwise.py bind-candidate `
-  --run-root <acceptance-run-root> `
-  --candidate-model "$RunRoot/complete/production_model_v1.3" `
-  --public-data-root $Snapshot
-```
-
-The acceptance model plan must identify the same fit inputs, EPS policy, and model-plan content as the candidate's training record.
-Check this binding before report generation.
-Do not substitute a full benchmark projection for the declared fit or evaluation population.
-
-## Evaluation
-
-The component evaluators write numeric pairwise, cluster, subblocking, parity,
-and performance reports. Pairwise, cluster, parity, and performance depend on
-the reloaded complete model. Subblocking depends only on the frozen Arrow and
-candidate-component inputs. The finalizer's linker evaluation report covers a
-different source-bundle split and is retained separately; it is not one of
-these five aggregate-gate inputs.
-
-Put the five reports in the run report directory:
-
-```text
-pairwise_evaluation_report.json
-cluster_evaluation_report.json
-performance_evaluation_report.json
-subblocking_evaluation_report.json
-parity_evaluation_report.json
-```
-
-The parity fixture contains raw incumbent inputs and this `meta.json`:
+The parity fixture holds raw incumbent inputs and this `meta.json`:
 
 ```json
 {
@@ -629,118 +361,58 @@ in `author_info.block`; the command deterministically takes up to
 `paths.cluster_seeds_require` only when passing `--use-cluster-seeds`, or pass
 `--no-specter` when deliberately omitting the embedding pickle.
 
-For subblocking, pass exactly the file frozen as
-`evaluation.subblocking.component_members_parquet` in `release.json`. The
-evaluator compares both its resolved path and SHA-256 with the evaluation plan,
-so a copy (for example, the one inside the assembled linker-source bundle) is
-rejected. The file must contain `signature_id` and `candidate_component_key`
-columns; rows for signatures outside the selected Arrow root are ignored.
+```powershell
+uv run python scripts/verification/compare_full_predict_arrow_parity.py `
+  --fixture-dir path/to/reviewed_parity_fixture `
+  --output-dir path/to/fresh/parity_work `
+  --output-json "$RunRoot/reports/parity_evaluation_report.json" `
+  --name-counts-index "$Root/name_counts_index" `
+  --model-path "$RunRoot/complete/production_model_v1.3" `
+  --block-size REVIEWED_BLOCK_SIZE `
+  --n-jobs 12 `
+  --total-ram-bytes 137438953472
+```
 
-Produce pairwise, cluster, subblocking, and parity reports.
-These promotion evaluators read the owner's internal snapshot, not the published bundles:
+The command compares Python and Arrow distances, features, constraints, and clusters on one block.
+It fails on any mismatch and then writes no report.
+
+### Subblocking quality
 
 ```powershell
-uv run python scripts/production/model/release_pairwise.py evaluate-pairs `
-  --model path/to/production_model_vX.Y `
-  --evaluation-plan path/to/run/evaluation_plan.json `
-  --run-binding path/to/run/run_binding.json `
-  --name-counts-index-root path/to/name_counts_index `
-  --arrow-root "$Snapshot/pairwise/arrow/evaluation" `
-  --output-report path/to/run/reports/pairwise_evaluation_report.json `
-  --n-jobs REVIEWED_N_JOBS `
-  --total-ram-bytes REVIEWED_TOTAL_RAM_BYTES
-
-uv run python scripts/production/model/release_pairwise.py evaluate-clusters `
-  --model path/to/production_model_vX.Y `
-  --evaluation-plan path/to/run/evaluation_plan.json `
-  --run-binding path/to/run/run_binding.json `
-  --name-counts-index-root path/to/name_counts_index `
-  --arrow-root "$Snapshot/pairwise/arrow/evaluation" `
-  --output-report path/to/run/reports/cluster_evaluation_report.json `
-  --n-jobs REVIEWED_N_JOBS
-
 uv run python scripts/verification/compare_graph_subblocking_arrow_quality.py `
-  --public-data-root $Snapshot `
-  --arrow-root "$Snapshot/benchmarks/REVIEWED_DATASET" `
-  --evaluation-plan path/to/run/evaluation_plan.json `
-  --run-binding path/to/run/run_binding.json `
-  --output-dir path/to/run/reports `
-  --comparison-mode python-vs-rust `
+  --arrow-root "$Root/benchmarks/REVIEWED_DATASET" `
   --component-members-parquet path/to/reviewed_components.parquet `
+  --output-dir "$RunRoot/reports/subblocking" `
   --maximum-size REVIEWED_MAXIMUM_SIZE `
   --allow-full `
   --seed REVIEWED_SEED
-
-uv run python scripts/verification/compare_full_predict_arrow_parity.py `
-  --fixture-dir path/to/reviewed_parity_fixture `
-  --evaluation-plan path/to/run/evaluation_plan.json `
-  --output-dir path/to/fresh/parity_work `
-  --output-json path/to/run/reports/parity_evaluation_report.json `
-  --name-counts-index path/to/name_counts_index `
-  --model-path path/to/production_model_vX.Y `
-  --run-binding path/to/run/run_binding.json `
-  --block-size REVIEWED_BLOCK_SIZE `
-  --n-jobs REVIEWED_N_JOBS `
-  --total-ram-bytes REVIEWED_TOTAL_RAM_BYTES
 ```
 
-The parity command verifies every fixture file and all behavior-affecting
-options against the frozen evaluation plan. Subblocking verifies the bound
-public-data root, resolves the frozen dataset name through that root's
-manifest, and verifies the component-members file and full
-workload/configuration. No component report can stamp the run binding on an
-alternate population or workload.
+The component-members file needs `signature_id` and `candidate_component_key` columns.
+Rows for signatures outside the Arrow dataset are ignored.
+Pass `--baseline-summary` with an earlier report to add deltas.
 
-### Promoted incremental performance report
+### Promoted incremental performance
 
-The release performance workload is promoted incremental linking against the
-reviewed Arrow replay root and complete production model. Run a bounded
-profile first:
+Run a bounded profile first:
 
 ```powershell
 uv run --with psutil python scripts/verification/profile_promoted_incremental_arrow.py `
-  --evaluation-plan path/to/run/evaluation_plan.json `
-  --model-path path/to/production_model_vX.Y `
-  --run-binding path/to/run/run_binding.json `
+  --model-path "$RunRoot/complete/production_model_v1.3" `
+  --arrow-root path/to/reviewed_arrow_collection_root `
+  --dataset REVIEWED_DATASET `
+  --query-limit 400 `
+  --max-seed-clusters 400 `
+  --n-jobs 12 `
   --require-rust-release `
-  --write-json path/to/run/reports/performance_evaluation_report.json
+  --write-json "$RunRoot/reports/performance_evaluation_report.json"
 ```
 
-The report path must be fresh. The frozen evaluation plan supplies the Arrow
-root and exact workload. For an approved release workload above the built-in
-query or seed limits, add `--full-run` after the bounded rehearsal; the flag
-does not change the plan's workload or authorize a larger run.
-
-The command records the exact workload, Rust extension identity, per-run
-timing and process-tree RSS, and summary statistics. Release evaluation
-consumes:
-
-- the prepared run's `run_binding_sha256`;
-- the exact reviewed `workload` and `arrow_root`;
-- `summary.predict_seconds.p50`; and
-- `summary.peak_rss_gb.max`.
-
-Keep command logs beside the report. Historical measurements remain in
-[the profiling directory](../../docs/rust/profiling/); they are evidence
-snapshots, not active commands.
-
-### Apply release gates
-
-Apply the gates directly:
-
-```powershell
-uv run python scripts/production/model/release_pairwise.py `
-  evaluate-release `
-  --evaluation-plan path/to/run/evaluation_plan.json `
-  --run-binding path/to/run/run_binding.json `
-  --report-dir path/to/run/reports `
-  --output-report path/to/run/reports/evaluation_report.json
-```
-
-Every component report must carry the same `run_binding_sha256`. The command
-rejects a missing or mixed binding, validates required numeric fields, writes
-the sorted checks and top-level decision with that binding, and exits nonzero
-on a failed gate.
+The report path must be new.
+Add `--full-run` after the bounded run for a workload above the built-in query or seed limits.
+The report records the workload, the Rust extension identity, per-run time and process-tree RSS, and summary statistics.
+Keep command logs beside the report.
+Historical measurements remain in [the profiling directory](../../docs/rust/profiling/); they are evidence snapshots, not active commands.
 
 ## Installed release smoke
 

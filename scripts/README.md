@@ -15,7 +15,7 @@ v1.3 release work is complete. Release operators must follow
 | `production/data/package_corrected_datasets.py` | Package the final corrected records, pairwise populations, and complete incremental tasks with one common index |
 | `production/data/write_release_bundles.py` | Write the published `inference`, `dataset`, and `source` bundles from the prepared snapshot |
 | `production/model/train_linker_and_finalize.py` | One-fit complete-bundle linker finalization, reload, and evaluation |
-| `production/model/release_pairwise.py` | Validation-only EPS calibration, outer-test evaluation (`evaluate-heldout`), and the promotion measurement components with `evaluate-release` aggregation |
+| `production/model/release_pairwise.py` | Validation-only EPS calibration (`calibrate-eps`) and outer-test evaluation (`evaluate-heldout`) |
 | `production/model/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs. Use only when the accepted support or replay Arrow roots change; see [data preparation](production/data/README.md) |
 | `production/generate_canonical_name_tuples.py` | Deterministically generate the canonical tuple text file from the reviewed source artifact |
 | `production/counts/generate_author_counts_from_athena.py` | Export author-table name counts from Athena and build an immutable native `name_counts_index/` (AI2 staff only); see [count producers](production/counts/README.md) |

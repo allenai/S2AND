@@ -230,7 +230,7 @@ Use [evaluate_incremental_gold.py](../scripts/verification/evaluate_incremental_
 Identity gold differs from manual safe-action labels.
 Keep identity and safe-action reports separate.
 
-After a complete bundle passes the release gates, reload it explicitly:
+After a complete bundle passes the acceptance checks, reload it explicitly:
 
 ```python
 from s2and.arrow_inputs import ArrowDataset
@@ -251,8 +251,8 @@ with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
 ## Reference scripts
 
 - `scripts/production/model/train_pairwise.py`: pairwise production-bundle stage
-- `scripts/production/model/release_pairwise.py`: EPS calibration, measurement
-  components, and `evaluate-release` aggregation into one report
+- `scripts/production/model/release_pairwise.py`: EPS calibration and outer-test
+  evaluation
 - `scripts/production/model/train_linker_and_finalize.py`: one-fit
   complete-bundle finalization, reload, and evaluation
 - `scripts/tutorial_for_predicting_with_the_prod_model.py`: complete-model

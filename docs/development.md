@@ -130,7 +130,7 @@ uv run pytest -q tests/test_runtime.py tests/test_data.py tests/test_arrow_train
 
 The [inference guide](production_inference.md#explicit-execution-routes) owns
 the runtime contract. The production command reference covers
-[feature parity and subblocking quality](../scripts/production/README.md#evaluation),
+[feature parity and subblocking quality](../scripts/production/README.md#acceptance-checks),
 [packaging](../scripts/production/README.md#distribution-and-arrow-checks), and
 [installed-runtime checks](../scripts/production/README.md#installed-release-smoke).
 
@@ -277,5 +277,5 @@ Notes:
 - Docs index: [docs/README.md](README.md)
 - Runtime contract: [production_inference.md](production_inference.md#explicit-execution-routes)
 - Promoted incremental performance profiling:
-  [production command reference](../scripts/production/README.md#promoted-incremental-performance-report)
+  [production command reference](../scripts/production/README.md#promoted-incremental-performance)
 - v1.3 release operator runbook: [release.md](release.md)

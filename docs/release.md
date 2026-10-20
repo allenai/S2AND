@@ -177,13 +177,12 @@ Identity gold differs from manual safe-action labels.
 Keep these reports separate.
 
 The public loader requires the two pairwise prediction fixtures and complete incremental artifact.
-Evaluate pairwise, cluster, linker, parity, subblocking quality, and representative performance through the final contract.
+Evaluate the outer test, the identity-gold cases, parity, subblocking quality, and representative performance.
 Model-dependent release metrics must use the serialized complete model without a second fit.
-Use the prepared evaluation plan and run binding when the existing gate tools require them.
-Their baseline record belongs to promotion, not the input or fit stages.
+The [acceptance checks](../scripts/production/README.md#acceptance-checks) list the commands.
 
-Require the declared gates to pass before publication.
-Retain reports for failed gates.
+The release owner compares the reports with the declared thresholds before publication.
+Retain the reports, including those of a failed check.
 A metric, population, threshold, or workload change after test inspection requires a new evaluation decision.
 A changed selection policy requires untouched test data for confirmation.
 

@@ -72,21 +72,9 @@ Use [the data guide](../docs/data.md) for the common assets and corrected snapsh
 | `run_bounded.py` | Run one long model job with RAM, deadline, and expected-output limits and durable run records; see [bounded model runs](../docs/development.md#bounded-model-runs) |
 | `sync_feature_schema.py` | Regenerate the Rust feature-column constants from `s2and/feature_schema.py`; CI runs it with `--check` |
 
-### Archived historical artifacts
+### Retired historical scripts
 
-Files under `archive/` are retained for reproducibility, data lineage, or as
-behavioral specifications. They are not supported current entrypoints. Read the
-warning at the top of each file before use; several require private data, refer
-to legacy APIs, execute work at import time, or can call paid services. Any
-attempt to rerun one needs an explicit bounded migration plan first.
-
-| Script | Status | Why it is retained |
-|---|---|---|
-| `archive/LLM_based_filtering_of_name_tuples.py` | Provenance only; do not run | Records the paid/nondeterministic curation pipeline that produced the raw source consumed by canonical name-tuple generation |
-| `archive/blog_post_eval.py` | Historical private-data workflow | Preserves the blog and claims-evaluation recipe |
-| `archive/make_augmentation_dataset_a.py` | Provenance only; incompatible as written | Records pair selection and title-only embedding inputs for the augmented training data |
-| `archive/make_augmentation_dataset_b.py` | Provenance only; incompatible as written | Records the exact feature-corruption and translation policy for the augmented training data |
-| `archive/make_claims_dataset.py` | Historical private-data workflow | Records how block-local Semantic Scholar corrections datasets were constructed |
-| `archive/make_s2and_mini_dataset.py` | Legacy JSON/pickle recipe | Records the source-selection policy for the historical mini datasets |
-| `archive/sota.py` | Historical private-data workflow | Preserves post-paper SOTA splits, metrics, and multi-seed aggregation fixes |
-| `archive/transform_all_datasets.py` | Legacy dry-run utility | Preserves the old-schema conversion and curated dataset corrections |
+The `archive/` folder held provenance records for the name-tuple curation, the augmented training data,
+the claims datasets, the mini datasets, and the post-paper SOTA runs.
+Commit `f31301f` is the last commit that contains it.
+Read the records there; they do not run against current APIs.

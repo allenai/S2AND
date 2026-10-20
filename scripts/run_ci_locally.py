@@ -54,7 +54,7 @@ REPO = repo_root()
 PYTEST_REPORT_FLAGS = ["-ra"]
 # ty's Python version and rule ignores come from [tool.ty] in pyproject.toml.
 TY_PYTHON_PLATFORM = os.environ.get("S2AND_CI_TY_PLATFORM", "linux")
-# Release tooling lives below scripts/; scripts/archive keeps retired code outside type checks.
+# Type-check the tracked nested script folders together with the top-level scripts.
 ACTIVE_NESTED_SCRIPT_DIRS = ["scripts/eps_sweep", "scripts/production", "scripts/verification"]
 TY_SCRIPT_EXTRA_IGNORES = [
     "unresolved-reference",

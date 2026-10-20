@@ -107,11 +107,10 @@ If you want to skip Rust extension compilation while iterating, run only the sta
 uv run --no-project python scripts/run_ci_locally.py lint
 uv sync --active --extra dev --frozen --no-install-package s2and-rust
 uv run --active --no-project ty check s2and
-uv run --active --no-project ty check scripts --exclude scripts/archive --ignore unresolved-reference --ignore unresolved-attribute
+uv run --active --no-project ty check scripts --ignore unresolved-reference --ignore unresolved-attribute
 ```
 
-The scripts check above covers active top-level and nested scripts but deliberately
-excludes retired reference code in `scripts/archive`; hosted CI checks the same
+The scripts check above covers the top-level and nested scripts; hosted CI checks the same
 set. Both checks use the `[tool.ty]` defaults; the scripts
 check additionally ignores unresolved references and attributes from optional
 and native modules. Type errors remain blocking; warnings remain visible.

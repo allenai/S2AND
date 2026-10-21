@@ -511,8 +511,26 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   every current seed, reading only the missing rows. On the subblocked j_smith
   full-block request (26 attachment passes, Linux, 16 threads) featurizer time
   across the passes drops from 173 s to 16 s, and prediction takes 775 s instead
-  of 1,091 s, with identical clusters. Planner reloads still scan most author
-  batches, so they save little so far.
+  of 1,091 s, with identical clusters.
+- Attachment passes no longer reread or rebuild the block's seed side. The first
+  planner build of a block also reads the rows of its other signatures; later
+  passes plan their queries and reload their seeds from those rows instead of
+  rescanning the Arrow tables. A reload keeps the features of current seeds and
+  moves over the summary of each component whose ordered members are unchanged.
+  Plan row signals and author-list evidence are computed in parallel, and
+  residual clustering inside a pass views the block featurizer instead of
+  building one from Arrow. Plans and features equal fresh builds.
+- When supervision fixes some rows of a bulk chunk, Rust derives the scored rows'
+  pairs from their offsets instead of parsing one Python tuple per pair.
+- The incremental linker finds supervised candidate pairs by index instead of
+  converting every candidate pair to ids, and plan conversion uses C-level loops.
+- Together, on Linux at 16 threads with identical clusters on all 13 scholar
+  export requests, full-block prediction takes 450 s instead of 775 s on j_smith
+  (110,244 signatures), 2,584 s instead of 3,152 s on s_lee (516,747 signatures),
+  181 s instead of 257 s on a_khan, 175 s
+  instead of 221 s on s_gupta, and 108 s instead of 148 s on a_silva. Incremental
+  prediction takes 13–16% less on the larger blocks, for example 129 s instead of
+  153 s on s_lee (516,747 signatures).
 - `NameCountsIndex.open` no longer hashes the index files or checks every record on
   each open. It checks the manifest, file sizes, file headers, and section bounds,
   so lookups stay memory-safe. For the 2.3 GB `1.3` index an open takes 0.04 s and

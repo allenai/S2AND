@@ -162,6 +162,8 @@ struct ReusableRawArrowCandidatePlanState {
     retained_seed_rows: Option<RetainedRawArrowSeedRows>,
     /// Rows of block signatures that later passes plan; see `PrefetchedRawArrowRows`.
     prefetched_rows: Option<PrefetchedRawArrowRows>,
+    /// Query rows of the latest `plan()`, for `build_featurizer`.
+    last_query_inputs: Option<RawArrowQueryInputReadResult>,
     build_telemetry: RawArrowPlannerBuildTelemetry,
 }
 
@@ -1079,6 +1081,77 @@ struct RawArrowSeedReadTelemetry {
 }
 
 impl RawBlockQueryCandidatePlanner {
+    /// Rows of exactly `signature_ids` and their papers from the seed state, the
+    /// latest plan's queries, and prefetched rows; None if any is not held.
+    ///
+    /// Each source holds all of a paper's rows: a paper without author or
+    /// SPECTER rows there has none in the dataset either.
+    fn featurizer_rows(&self, signature_ids: &[String]) -> Option<RawFeaturizerRows> {
+        let retained = self.state.retained_seed_rows.as_ref()?;
+        let query = self.state.last_query_inputs.as_ref();
+        let prefetched = self.state.prefetched_rows.as_ref();
+        let mut signatures = HashMap::with_capacity(signature_ids.len());
+        for signature_id in signature_ids {
+            let signature = self
+                .state
+                .signatures
+                .get(signature_id)
+                .or_else(|| query.and_then(|rows| rows.signatures.get(signature_id)))
+                .or_else(|| prefetched.and_then(|rows| rows.signatures.get(signature_id)))?;
+            signatures.insert(signature_id.clone(), signature.clone());
+        }
+        let paper_ids: HashSet<&str> = signatures
+            .values()
+            .map(|signature: &RawArrowSignature| signature.paper_id.as_str())
+            .collect();
+        let mut papers = HashMap::with_capacity(paper_ids.len());
+        let mut authors_by_paper = HashMap::with_capacity(paper_ids.len());
+        let mut specter_by_paper = HashMap::with_capacity(paper_ids.len());
+        for paper_id in paper_ids {
+            // The seed state, then the latest queries, then prefetched rows.
+            let (paper, authors, specter) = if let Some(paper) = retained.papers.get(paper_id) {
+                (
+                    paper,
+                    self.state.paper_authors.get(paper_id),
+                    retained
+                        .specter_by_paper_id
+                        .as_ref()
+                        .and_then(|specter| specter.get(paper_id)),
+                )
+            } else if let Some(rows) = query.filter(|rows| rows.papers.contains_key(paper_id)) {
+                (
+                    &rows.papers[paper_id],
+                    rows.paper_authors.get(paper_id),
+                    rows.specter_by_paper_id
+                        .as_ref()
+                        .and_then(|specter| specter.get(paper_id)),
+                )
+            } else {
+                let rows = prefetched?;
+                (
+                    rows.papers.get(paper_id)?,
+                    rows.paper_authors.get(paper_id),
+                    rows.specter_by_paper_id
+                        .as_ref()
+                        .and_then(|specter| specter.get(paper_id)),
+                )
+            };
+            papers.insert(paper_id.to_string(), paper.clone());
+            if let Some(authors) = authors {
+                authors_by_paper.insert(paper_id.to_string(), authors.clone());
+            }
+            if let Some(vector) = specter {
+                specter_by_paper.insert(paper_id.to_string(), vector.as_ref().clone());
+            }
+        }
+        Some(RawFeaturizerRows {
+            signatures,
+            papers,
+            authors_by_paper,
+            specter_by_paper,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build_from_query_signature_ids(
         py: Python<'_>,
@@ -1384,6 +1457,7 @@ impl RawBlockQueryCandidatePlanner {
                 seed_specter_count,
                 retained_seed_rows,
                 prefetched_rows: None,
+                last_query_inputs: None,
                 build_telemetry: RawArrowPlannerBuildTelemetry {
                     read_cluster_seeds_secs: read_telemetry.read_cluster_seeds_secs,
                     read_signatures_secs: read_telemetry.read_signatures_secs,
@@ -1784,6 +1858,75 @@ impl RawBlockQueryCandidatePlanner {
         payload.set_item("planner_seed_state", 1)?;
         payload.set_item("timings", timings)?;
         Ok(payload.unbind())
+    }
+
+    /// A featurizer over `signature_ids` built from the rows this planner holds,
+    /// equal to `RustFeaturizer.from_arrow_dataset` over the same arguments.
+    ///
+    /// Returns None when some row is not held (for example a planner built
+    /// without retained seed rows); callers then read from Arrow.
+    #[pyo3(signature = (
+        signature_ids,
+        name_tuples,
+        *,
+        cluster_seeds_path = None,
+        cluster_seed_disallows_path = None,
+        preprocess = true,
+        cluster_seed_require_value = 0.0,
+        cluster_seed_disallow_value = 10000.0,
+        num_threads = None,
+        use_orcid_id = true
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn build_featurizer(
+        &self,
+        py: Python<'_>,
+        signature_ids: Vec<String>,
+        name_tuples: Option<&Bound<'_, PyAny>>,
+        cluster_seeds_path: Option<String>,
+        cluster_seed_disallows_path: Option<String>,
+        preprocess: bool,
+        cluster_seed_require_value: f64,
+        cluster_seed_disallow_value: f64,
+        num_threads: Option<usize>,
+        use_orcid_id: bool,
+    ) -> PyResult<Option<RustFeaturizer>> {
+        // Same de-duplication as `from_arrow_dataset`: first occurrence wins.
+        let mut seen = HashSet::with_capacity(signature_ids.len());
+        let signature_ids: Vec<String> = signature_ids
+            .into_iter()
+            .filter(|signature_id| seen.insert(signature_id.clone()))
+            .collect();
+        let Some(rows) = self.featurizer_rows(&signature_ids) else {
+            return Ok(None);
+        };
+        let needed_paper_ids: HashSet<String> = rows
+            .signatures
+            .values()
+            .map(|signature| signature.paper_id.clone())
+            .collect();
+        let (cluster_seeds_require, cluster_seeds_disallow) =
+            RustFeaturizer::read_seed_constraints(
+                cluster_seeds_path.as_deref(),
+                cluster_seed_disallows_path.as_deref(),
+                &seen,
+            )?;
+        RustFeaturizer::from_raw_rows(
+            py,
+            rows,
+            signature_ids,
+            needed_paper_ids,
+            cluster_seeds_require,
+            cluster_seeds_disallow,
+            self.state.raw_name_counts.clone(),
+            name_tuples,
+            preprocess,
+            cluster_seed_require_value,
+            cluster_seed_disallow_value,
+            num_threads,
+            use_orcid_id,
+        )
+        .map(Some)
     }
 
     fn plan_query_signatures(&mut self, py: Python<'_>) -> PyResult<Py<PyDict>> {
@@ -2661,6 +2804,9 @@ impl RawBlockQueryCandidatePlanner {
         timings.set_item("total_secs", total_start.elapsed().as_secs_f64())?;
         timings.set_item("drop_secs", 0.0)?;
         timings.set_item("wall_secs", total_start.elapsed().as_secs_f64())?;
+        // The caller builds the plan's featurizer next, over these queries and
+        // seeds; keep their rows so it need not read them from Arrow again.
+        self.state.last_query_inputs = Some(query_inputs);
         Ok(payload.unbind())
     }
 }

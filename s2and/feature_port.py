@@ -133,6 +133,36 @@ def build_rust_featurizer_from_arrow_dataset(
     )
 
 
+def build_rust_featurizer_from_planner(
+    planner: Any,
+    *,
+    signature_ids: Sequence[Any],
+    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
+    preprocess: bool = True,
+    num_threads: int | None = None,
+    cluster_seeds_path: Path | None = None,
+    cluster_seed_disallows_path: Path | None = None,
+) -> Any | None:
+    """Build a Rust featurizer from rows a raw candidate planner already holds.
+
+    The planner holds its seeds' rows and its latest plan's query rows, which
+    cover the plan's signatures. The result equals
+    ``build_rust_featurizer_from_arrow_dataset`` over the same arguments, without
+    reading Arrow again. Returns None when the planner lacks some row; callers
+    then build from the Arrow dataset.
+    """
+
+    resolved_name_tuples = load_packaged_name_tuple_artifact().pairs if name_tuples is None else name_tuples
+    return planner.build_featurizer(
+        [str(value) for value in signature_ids],
+        resolved_name_tuples,
+        cluster_seeds_path=None if cluster_seeds_path is None else str(cluster_seeds_path),
+        cluster_seed_disallows_path=(None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path)),
+        preprocess=bool(preprocess),
+        num_threads=None if num_threads is None else resolve_n_jobs(num_threads),
+    )
+
+
 def _arrow_signature_ids(arrow_dataset: ArrowDataset) -> set[str]:
     """Read the Arrow signatures table's IDs without building native signature records."""
 
@@ -423,6 +453,7 @@ __all__ = [
     "build_linker_pair_distance_accumulators_rust",
     "build_linker_pair_features_and_aggregate_stats_arrays_rust",
     "build_rust_featurizer_from_arrow_dataset",
+    "build_rust_featurizer_from_planner",
     "build_verified_rust_featurizer",
     "evict_rust_featurizer",
     "featurize_pairs_with_rust",

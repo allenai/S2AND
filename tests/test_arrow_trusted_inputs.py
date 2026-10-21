@@ -12,11 +12,12 @@ import pytest
 
 import s2and.arrow_inputs as arrow_inputs
 from s2and.arrow_inputs import ArrowDataset, MissingArrowArtifactError
-from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
+from s2and.feature_port import build_rust_featurizer_from_arrow_dataset, build_rust_featurizer_from_planner
 from s2and.incremental_linking.feature_block import write_name_counts_index
 from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import (
     tiny_name_counts_tuple,
+    write_arrow_tables_bundle,
     write_minimal_arrow_prediction_bundle,
 )
 
@@ -327,3 +328,168 @@ def test_planner_prefetched_block_rows_plan_and_reload_like_reads(tmp_path: Path
         assert telemetry["signature_batches_read"] == 0
         assert telemetry["paper_author_batches_read"] == 0
         assert _same_plan(prefetched.plan(later_queries), expected_later)
+
+
+def _write_varied_arrow_bundle(bundle_dir: Path) -> dict[str, str]:
+    # Signatures on several papers with distinct names, coauthors, years, and
+    # vectors. Paper p4 has no author rows and p5 has no SPECTER row.
+    signature_rows = [
+        ("0", "p0", "Ada", 0, None),
+        ("1", "p1", "Ada", 1, "0000-0001"),
+        ("2", "p1", "Augusta", 0, None),
+        ("3", "p2", "A", 2, None),
+        ("4", "p3", "Ada", 0, None),
+        ("5", "p4", "Ada", 0, None),
+        ("6", "p5", "Alan", 1, "0000-0001"),
+        ("7", "p3", "Annabella", 1, None),
+        ("q1", "p2", "Ada", 0, None),
+        ("q2", "p5", "Ada", 0, None),
+        ("q3", "p0", "Ann", 1, None),
+    ]
+    author_rows = [
+        ("p0", 0, "Ada Lovelace"),
+        ("p0", 1, "Ann Lovelace"),
+        ("p0", 2, "Charles Babbage"),
+        ("p1", 0, "Augusta Lovelace"),
+        ("p1", 1, "Ada Lovelace"),
+        ("p2", 0, "Ada Lovelace"),
+        ("p2", 1, "Mary Somerville"),
+        ("p2", 2, "A Lovelace"),
+        ("p3", 0, "Ada Lovelace"),
+        ("p3", 1, "Annabella Lovelace"),
+        ("p5", 0, "Ada Lovelace"),
+        ("p5", 1, "Alan Lovelace"),
+    ]
+    paper_ids = ["p0", "p1", "p2", "p3", "p4", "p5"]
+    tables = {
+        "signatures": pa.table(
+            {
+                "signature_id": [row[0] for row in signature_rows],
+                "paper_id": [row[1] for row in signature_rows],
+                "author_first": [row[2] for row in signature_rows],
+                "author_middle": [""] * len(signature_rows),
+                "author_last": ["Lovelace"] * len(signature_rows),
+                "author_suffix": [""] * len(signature_rows),
+                "author_affiliations": pa.array(
+                    [["Analytical Society"] if index % 2 else [] for index in range(len(signature_rows))],
+                    type=pa.list_(pa.string()),
+                ),
+                "author_position": pa.array([row[3] for row in signature_rows], type=pa.int64()),
+                "author_block": ["a lovelace"] * len(signature_rows),
+                "author_orcid": pa.array([row[4] for row in signature_rows], type=pa.string()),
+            }
+        ),
+        "papers": pa.table(
+            {
+                "paper_id": paper_ids,
+                "title": [
+                    "Notes on the analytical engine",
+                    "Sketch of the engine",
+                    "On the connexion of the physical sciences",
+                    "Bernoulli numbers by machine",
+                    "Letters",
+                    "A poetical science",
+                ],
+                "venue": ["Taylor", "", "Murray", "Taylor", "", "Murray"],
+                "journal_name": ["Scientific Memoirs", "", "", "Scientific Memoirs", "", ""],
+                "year": pa.array([1843, 1842, 1834, None, 1840, 1843], type=pa.int64()),
+                "abstract": ["Engine notes", "", "Physics", "", "", "Poetry"],
+            }
+        ),
+        "paper_authors": pa.table(
+            {
+                "paper_id": [row[0] for row in author_rows],
+                "position": pa.array([row[1] for row in author_rows], type=pa.int64()),
+                "author_name": [row[2] for row in author_rows],
+            }
+        ),
+        "specter": pa.table(
+            {
+                "paper_id": paper_ids[:5],
+                "embedding": pa.array(
+                    [[1.0, 0.0, 0.5], [0.9, 0.1, 0.4], [0.0, 1.0, 0.2], [0.7, 0.7, 0.0], [0.2, 0.3, 0.9]],
+                    type=pa.list_(pa.float32(), 3),
+                ),
+            }
+        ),
+    }
+    return write_arrow_tables_bundle(bundle_dir, tables)
+
+
+def test_planner_featurizer_matches_an_arrow_build(tmp_path: Path) -> None:
+    # Request windows build featurizers from the planner's seed, query, and
+    # prefetched rows; each must featurize and constrain like an Arrow build.
+    from s2and.feature_port import _require_rust_runtime
+    from s2and.incremental_linking.feature_block import (
+        write_cluster_seed_disallows_arrow,
+        write_cluster_seeds_arrow,
+    )
+
+    paths = _write_varied_arrow_bundle(tmp_path / "data")
+    first_seeds = {"0": "a", "1": "a", "2": "b", "3": "b", "4": "c", "5": "c"}
+    later_seeds = {**first_seeds, "q1": "b", "6": "d"}
+    sidecars = {}
+    for name, seeds in (("first", first_seeds), ("later", later_seeds)):
+        sidecars[name] = tmp_path / f"{name}_seeds.arrow"
+        write_cluster_seeds_arrow(sidecars[name], seeds)
+    disallows = tmp_path / "disallows.arrow"
+    write_cluster_seed_disallows_arrow(disallows, [("q1", "4"), ("0", "q3")])
+    name_tuples = frozenset({("ada", "augusta"), ("ann", "annabella")})
+    planner_class = _require_rust_runtime().RawBlockQueryCandidatePlanner
+    options = {"top_k": 3, "orcid_enabled": True, "num_threads": 2, "max_exemplars": 4}
+
+    def assert_matches_arrow(planner: object, signature_ids: list[str], seeds_path: Path) -> None:
+        sidecar_paths = {"cluster_seeds_path": seeds_path, "cluster_seed_disallows_path": disallows}
+        from_planner = build_rust_featurizer_from_planner(
+            planner, signature_ids=signature_ids, name_tuples=name_tuples, num_threads=2, **sidecar_paths
+        )
+        from_arrow = build_rust_featurizer_from_arrow_dataset(
+            dataset, signature_ids=signature_ids, name_tuples=name_tuples, num_threads=2, **sidecar_paths
+        )
+        assert from_planner is not None
+        count = len(dict.fromkeys(signature_ids))
+        pairs = [(left, right) for left in range(count) for right in range(left + 1, count)]
+        np.testing.assert_array_equal(
+            np.asarray(from_planner.featurize_pairs_matrix_indexed(pairs, None, 1, np.nan)),
+            np.asarray(from_arrow.featurize_pairs_matrix_indexed(pairs, None, 1, np.nan)),
+        )
+        assert from_planner.get_constraints_matrix_indexed(
+            pairs, 0.0, 10000.0, False, False, 1, False
+        ) == from_arrow.get_constraints_matrix_indexed(pairs, 0.0, 10000.0, False, False, 1, False)
+        assert from_planner.cluster_seeds_require() == from_arrow.cluster_seeds_require()
+
+    with ArrowDataset.open_trusted(paths, require_specter=True) as dataset:
+        # Seed rows plus the latest plan's query rows, in any order, with repeats.
+        planner = planner_class.from_auto_queries(
+            dataset.native,
+            str(sidecars["first"]),
+            cluster_seed_disallows_path=str(disallows),
+            retain_seed_rows=True,
+            **options,
+        )
+        planner.plan(["q1", "q2", "q3", "6"])
+        assert_matches_arrow(planner, ["q2", "3", "q1", "0", "6", "5", "q3", "1", "2", "4", "q1"], sidecars["first"])
+        # A signature outside the seeds and the latest queries is not held.
+        assert build_rust_featurizer_from_planner(planner, signature_ids=["0", "7"], name_tuples=name_tuples) is None
+        planner.plan(["q2"])
+        assert build_rust_featurizer_from_planner(planner, signature_ids=["q1"], name_tuples=name_tuples) is None
+        # Without retained rows the planner holds no paper rows.
+        unretained = planner_class.from_auto_queries(dataset.native, str(sidecars["first"]), **options)
+        assert build_rust_featurizer_from_planner(unretained, signature_ids=["0"], name_tuples=name_tuples) is None
+
+        # Prefetched block rows, before and after a reload adds seeds.
+        with pa.ipc.open_file(paths["signatures"]) as reader:
+            block = [str(value) for value in reader.read_all().column("signature_id").to_pylist()]
+        prefetched = planner_class.from_auto_queries(
+            dataset.native,
+            str(sidecars["first"]),
+            cluster_seed_disallows_path=str(disallows),
+            retain_seed_rows=True,
+            prefetch_signature_ids=block,
+            **options,
+        )
+        prefetched.plan(["q1", "6"])
+        assert_matches_arrow(prefetched, ["q1", "6", "7", "0", "4"], sidecars["first"])
+        assert prefetched.reload_seed_sidecars(str(sidecars["later"]), str(disallows)) is True
+        prefetched.plan(["q2", "q3"])
+        assert_matches_arrow(prefetched, ["q3", "q2", "q1", "6", "7", "5", "0"], sidecars["later"])

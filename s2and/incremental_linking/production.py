@@ -1138,7 +1138,9 @@ def predict_incremental_promoted_linker_from_arrow(
                     orcid_enabled=bool(orcid_enabled),
                     num_threads=clusterer.n_jobs,
                     max_exemplars=4,
-                    retain_seed_rows=attachment_state is not None,
+                    # Window featurizers build from these rows instead of re-reading Arrow,
+                    # and attachment passes reload from them.
+                    retain_seed_rows=True,
                     # Later passes plan, then seed, the rest of the block; read its rows once.
                     prefetch_signature_ids=None if attachment_state is None else list(attachment_state.signature_ids),
                 )
@@ -1208,8 +1210,10 @@ def predict_incremental_promoted_linker_from_arrow(
                     None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),
                 )
             else:
-                raw_batch_featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
-                    arrow_dataset,
+                # The planner holds the rows of this plan's queries and seeds, so the
+                # build skips the Arrow reads that dominated it.
+                raw_batch_featurizer = feature_port.build_rust_featurizer_from_planner(
+                    raw_request_planner,
                     signature_ids=signature_ids,
                     name_tuples=name_tuples,
                     preprocess=True,
@@ -1217,6 +1221,16 @@ def predict_incremental_promoted_linker_from_arrow(
                     cluster_seeds_path=cluster_seeds_path,
                     cluster_seed_disallows_path=cluster_seed_disallows_path,
                 )
+                if raw_batch_featurizer is None:
+                    raw_batch_featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
+                        arrow_dataset,
+                        signature_ids=signature_ids,
+                        name_tuples=name_tuples,
+                        preprocess=True,
+                        num_threads=clusterer.n_jobs,
+                        cluster_seeds_path=cluster_seeds_path,
+                        cluster_seed_disallows_path=cluster_seed_disallows_path,
+                    )
             raw_batch_featurizer_seconds += time.perf_counter() - featurizer_start
             raw_batch_featurizer_count += 1
             raw_batch_featurizer_signature_count += len(signature_ids)

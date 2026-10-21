@@ -974,87 +974,23 @@ impl RustFeaturizer {
     }
 }
 
-#[pymethods]
-impl RustFeaturizer {
-    #[staticmethod]
-    #[pyo3(
-        signature = (
-            dataset,
-            signature_ids,
-            name_tuples,
-            *,
-            cluster_seeds_path = None,
-            cluster_seed_disallows_path = None,
-            preprocess = true,
-            cluster_seed_require_value = 0.0,
-            cluster_seed_disallow_value = 10000.0,
-            num_threads = None,
-            use_orcid_id = true
-        )
-    )]
-    fn from_arrow_dataset(
-        py: Python<'_>,
-        dataset: PyRef<'_, ArrowDataset>,
-        signature_ids: Option<&Bound<'_, PyAny>>,
-        name_tuples: Option<&Bound<'_, PyAny>>,
-        cluster_seeds_path: Option<String>,
-        cluster_seed_disallows_path: Option<String>,
-        preprocess: bool,
-        cluster_seed_require_value: f64,
-        cluster_seed_disallow_value: f64,
-        num_threads: Option<usize>,
-        use_orcid_id: bool,
-    ) -> PyResult<Self> {
-        let dataset = dataset.shared();
-        let requested_signature_ids = match signature_ids {
-            Some(obj) if !obj.is_none() => Some(
-                PyIterator::from_object(obj)?
-                    .map(|item| item.and_then(|value| value.extract::<String>()))
-                    .collect::<PyResult<Vec<_>>>()?,
-            ),
-            _ => None,
-        };
-        let keep_signature_ids: Option<HashSet<String>> = requested_signature_ids
-            .as_ref()
-            .map(|ids| ids.iter().cloned().collect());
+/// Raw rows of the signatures and papers one featurizer covers.
+pub(crate) struct RawFeaturizerRows {
+    pub(crate) signatures: HashMap<String, RawArrowSignature>,
+    pub(crate) papers: HashMap<String, RawArrowPaper>,
+    pub(crate) authors_by_paper: HashMap<String, Vec<(i64, String)>>,
+    pub(crate) specter_by_paper: HashMap<String, Vec<f32>>,
+}
 
-        let (raw_signatures, _) = dataset.read_signatures(keep_signature_ids.as_ref())?;
-        let mut signature_ids = match requested_signature_ids {
-            Some(ids) => ids,
-            None => {
-                let mut ids = raw_signatures.keys().cloned().collect::<Vec<_>>();
-                ids.sort_unstable();
-                ids
-            }
-        };
-        let mut seen_signature_ids = HashSet::<String>::with_capacity(signature_ids.len());
-        signature_ids.retain(|signature_id| seen_signature_ids.insert(signature_id.clone()));
-        let missing_signature_ids = signature_ids
-            .iter()
-            .filter(|signature_id| !raw_signatures.contains_key(*signature_id))
-            .take(10)
-            .cloned()
-            .collect::<Vec<_>>();
-        if !missing_signature_ids.is_empty() {
-            return Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                "Arrow signatures input is missing requested signature ids: {missing_signature_ids:?}"
-            )));
-        }
-        let selected_signature_id_set = signature_ids.iter().cloned().collect::<HashSet<_>>();
-        let needed_paper_ids = signature_ids
-            .iter()
-            .filter_map(|signature_id| raw_signatures.get(signature_id))
-            .map(|signature| signature.paper_id.clone())
-            .collect::<HashSet<_>>();
-        let (raw_papers, _) = dataset.read_papers(&needed_paper_ids)?;
-        let (mut raw_authors_by_paper, _) = dataset.read_paper_authors(&needed_paper_ids)?;
-        let mut specter_by_paper = if dataset.has_specter() {
-            dataset.read_specter(&needed_paper_ids)?.0
-        } else {
-            HashMap::new()
-        };
+impl RustFeaturizer {
+    /// Seed constraints of the selected signatures, read from request sidecars.
+    pub(crate) fn read_seed_constraints(
+        cluster_seeds_path: Option<&str>,
+        cluster_seed_disallows_path: Option<&str>,
+        selected_signature_id_set: &HashSet<String>,
+    ) -> PyResult<(HashMap<String, ClusterId>, HashSet<(String, String)>)> {
         let mut cluster_seeds_require = HashMap::<String, ClusterId>::new();
-        if let Some(path) = cluster_seeds_path.as_ref() {
+        if let Some(path) = cluster_seeds_path {
             let (_component_order, members_by_component) = read_raw_arrow_cluster_seeds(path)?;
             for (component_key, members) in members_by_component {
                 for signature_id in members {
@@ -1066,7 +1002,7 @@ impl RustFeaturizer {
             }
         }
         let mut cluster_seeds_disallow = HashSet::<(String, String)>::new();
-        if let Some(path) = cluster_seed_disallows_path.as_ref() {
+        if let Some(path) = cluster_seed_disallows_path {
             for (left, right) in read_raw_arrow_cluster_seed_disallows(path)? {
                 if selected_signature_id_set.contains(&left)
                     && selected_signature_id_set.contains(&right)
@@ -1075,13 +1011,40 @@ impl RustFeaturizer {
                 }
             }
         }
+        Ok((cluster_seeds_require, cluster_seeds_disallow))
+    }
+
+    /// Builds a featurizer from raw rows of exactly `signature_ids` and their
+    /// papers. `from_arrow_dataset` reads the rows; a planner that already holds
+    /// them passes them in, so both build identical featurizers.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_raw_rows(
+        py: Python<'_>,
+        rows: RawFeaturizerRows,
+        signature_ids: Vec<String>,
+        needed_paper_ids: HashSet<String>,
+        cluster_seeds_require: HashMap<String, ClusterId>,
+        cluster_seeds_disallow: HashSet<(String, String)>,
+        raw_name_counts: RawNameCountMaps,
+        name_tuples: Option<&Bound<'_, PyAny>>,
+        preprocess: bool,
+        cluster_seed_require_value: f64,
+        cluster_seed_disallow_value: f64,
+        num_threads: Option<usize>,
+        use_orcid_id: bool,
+    ) -> PyResult<Self> {
+        let RawFeaturizerRows {
+            signatures: raw_signatures,
+            papers: raw_papers,
+            authors_by_paper: mut raw_authors_by_paper,
+            mut specter_by_paper,
+        } = rows;
         let text_module = py.import("s2and.text")?;
         let stop_words = extract_required_string_set(&text_module.getattr("STOPWORDS")?)?;
         let venue_stop_words =
             extract_required_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
         let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
         let affiliation_stopwords = extract_affiliation_stopwords(py)?;
-        let raw_name_counts = dataset.name_counts();
         let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
         ensure_unidecode_for_raw_arrow_inputs(
             &raw_signatures,
@@ -1246,6 +1209,113 @@ impl RustFeaturizer {
             name_counts_manifest_sha256: raw_name_counts.manifest_sha256().map(str::to_owned),
             cluster_seeds_disallow_index: OnceLock::new(),
         })
+    }
+}
+
+#[pymethods]
+impl RustFeaturizer {
+    #[staticmethod]
+    #[pyo3(
+        signature = (
+            dataset,
+            signature_ids,
+            name_tuples,
+            *,
+            cluster_seeds_path = None,
+            cluster_seed_disallows_path = None,
+            preprocess = true,
+            cluster_seed_require_value = 0.0,
+            cluster_seed_disallow_value = 10000.0,
+            num_threads = None,
+            use_orcid_id = true
+        )
+    )]
+    fn from_arrow_dataset(
+        py: Python<'_>,
+        dataset: PyRef<'_, ArrowDataset>,
+        signature_ids: Option<&Bound<'_, PyAny>>,
+        name_tuples: Option<&Bound<'_, PyAny>>,
+        cluster_seeds_path: Option<String>,
+        cluster_seed_disallows_path: Option<String>,
+        preprocess: bool,
+        cluster_seed_require_value: f64,
+        cluster_seed_disallow_value: f64,
+        num_threads: Option<usize>,
+        use_orcid_id: bool,
+    ) -> PyResult<Self> {
+        let dataset = dataset.shared();
+        let requested_signature_ids = match signature_ids {
+            Some(obj) if !obj.is_none() => Some(
+                PyIterator::from_object(obj)?
+                    .map(|item| item.and_then(|value| value.extract::<String>()))
+                    .collect::<PyResult<Vec<_>>>()?,
+            ),
+            _ => None,
+        };
+        let keep_signature_ids: Option<HashSet<String>> = requested_signature_ids
+            .as_ref()
+            .map(|ids| ids.iter().cloned().collect());
+
+        let (raw_signatures, _) = dataset.read_signatures(keep_signature_ids.as_ref())?;
+        let mut signature_ids = match requested_signature_ids {
+            Some(ids) => ids,
+            None => {
+                let mut ids = raw_signatures.keys().cloned().collect::<Vec<_>>();
+                ids.sort_unstable();
+                ids
+            }
+        };
+        let mut seen_signature_ids = HashSet::<String>::with_capacity(signature_ids.len());
+        signature_ids.retain(|signature_id| seen_signature_ids.insert(signature_id.clone()));
+        let missing_signature_ids = signature_ids
+            .iter()
+            .filter(|signature_id| !raw_signatures.contains_key(*signature_id))
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_signature_ids.is_empty() {
+            return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "Arrow signatures input is missing requested signature ids: {missing_signature_ids:?}"
+            )));
+        }
+        let selected_signature_id_set = signature_ids.iter().cloned().collect::<HashSet<_>>();
+        let needed_paper_ids = signature_ids
+            .iter()
+            .filter_map(|signature_id| raw_signatures.get(signature_id))
+            .map(|signature| signature.paper_id.clone())
+            .collect::<HashSet<_>>();
+        let (raw_papers, _) = dataset.read_papers(&needed_paper_ids)?;
+        let (raw_authors_by_paper, _) = dataset.read_paper_authors(&needed_paper_ids)?;
+        let specter_by_paper = if dataset.has_specter() {
+            dataset.read_specter(&needed_paper_ids)?.0
+        } else {
+            HashMap::new()
+        };
+        let (cluster_seeds_require, cluster_seeds_disallow) = Self::read_seed_constraints(
+            cluster_seeds_path.as_deref(),
+            cluster_seed_disallows_path.as_deref(),
+            &selected_signature_id_set,
+        )?;
+        Self::from_raw_rows(
+            py,
+            RawFeaturizerRows {
+                signatures: raw_signatures,
+                papers: raw_papers,
+                authors_by_paper: raw_authors_by_paper,
+                specter_by_paper,
+            },
+            signature_ids,
+            needed_paper_ids,
+            cluster_seeds_require,
+            cluster_seeds_disallow,
+            dataset.name_counts(),
+            name_tuples,
+            preprocess,
+            cluster_seed_require_value,
+            cluster_seed_disallow_value,
+            num_threads,
+            use_orcid_id,
+        )
     }
 
     #[getter]

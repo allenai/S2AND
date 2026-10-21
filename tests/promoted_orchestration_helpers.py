@@ -77,6 +77,10 @@ def _patch_fake_raw_arrow_planner(
                 )
             return self._name_counts_index
 
+        def build_featurizer(self, *_args: object, **_kwargs: object) -> None:
+            # Hold no rows, so window featurizers come from the Arrow builder these tests watch.
+            return None
+
         def plan(
             self,
             query_signature_ids: list[str],

@@ -63,7 +63,7 @@ use raw_candidate_planner::raw_arrow_summary_signals_for_members_cached;
 use raw_candidate_planner::{raw_arrow_labeled_candidate_plan, RawBlockQueryCandidatePlanner};
 use rayon_pool::install_with_optional_rayon_pool;
 pub(crate) use retrieval::*;
-pub(crate) use rust_featurizer::RustFeaturizer;
+pub(crate) use rust_featurizer::{RawFeaturizerRows, RustFeaturizer};
 use subblocking::*;
 use text_compat::{
     canonical_name_count_keys_compat, canonicalize_name_parts_compat, ensure_unidecode_for_text,

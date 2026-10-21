@@ -8,9 +8,9 @@ production model and public-data version is `1.3`, on a separate version axis.
 ### Status
 
 - **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles are on S3 (see [data](data.md)).
-  PyPI has the `1.0.0b2` beta for integration testing; the final `1.0.0` release is pending.
+  PyPI has the `1.0.0b3` beta for integration testing; the final `1.0.0` release is pending.
   uv installs the beta's `s2and-rust` dependency only when it is pinned too
-  (`s2and==1.0.0b2 s2and-rust==1.0.0b2`) or with `--prerelease=allow`; pip needs neither.
+  (`s2and==1.0.0b3 s2and-rust==1.0.0b3`) or with `--prerelease=allow`; pip needs neither.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
@@ -524,13 +524,30 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   pairs from their offsets instead of parsing one Python tuple per pair.
 - The incremental linker finds supervised candidate pairs by index instead of
   converting every candidate pair to ids, and plan conversion uses C-level loops.
+- Retrieval scores blocks of 32 queries against each component in turn, so each
+  component's SPECTER vectors stream from memory once per block instead of once
+  per query. Dot products sum in eight fixed lanes, with AVX2 where available
+  and the same lanes otherwise, so scores do not depend on the CPU. Sums can
+  differ from the previous sequential order in the last bits; on the scholar
+  export requests, ranked candidates, scores and clusters were identical. On the
+  s_lee incremental request retrieval takes 13 s instead of 46 s.
+- The incremental linker builds subset-gate features once per scoring batch
+  instead of once per query, and still predicts each query from its own row, so
+  decisions are bit-identical.
+- A filtered `paper_authors` read no longer hashes every row into a duplicate
+  set; the positions of skipped papers are checked per paper instead.
+- Request window featurizers are built from the rows the incremental planner
+  already holds, instead of reading them from Arrow again.
+- The incremental ORCID loader finds its rows with a Python set, because pyarrow's
+  `is_in` rehashed every requested id for each batch. For the 512,686 seeds of the
+  s_lee request it takes 2.5 s instead of 4.5 s.
 - Together, on Linux at 16 threads with identical clusters on all 13 scholar
-  export requests, full-block prediction takes 450 s instead of 775 s on j_smith
-  (110,244 signatures), 2,584 s instead of 3,152 s on s_lee (516,747 signatures),
-  181 s instead of 257 s on a_khan, 175 s
-  instead of 221 s on s_gupta, and 108 s instead of 148 s on a_silva. Incremental
-  prediction takes 13–16% less on the larger blocks, for example 129 s instead of
-  153 s on s_lee (516,747 signatures).
+  export requests, `1.0.0b3` full-block prediction takes 393 s instead of `1.0.0b2`'s
+  775 s on j_smith (110,244 signatures), 2,599 s instead of 3,152 s on s_lee
+  (516,747 signatures), 161 s instead of 257 s on a_khan, 163 s instead of 221 s on
+  s_gupta, and 91 s instead of 148 s on a_silva. Incremental prediction takes 76 s
+  instead of 153 s on s_lee, 22 s instead of 37 s on j_smith, 13 s instead of 27 s on
+  a_khan, and 12 s instead of 16 s on s_gupta.
 - `NameCountsIndex.open` no longer hashes the index files or checks every record on
   each open. It checks the manifest, file sizes, file headers, and section bounds,
   so lookups stay memory-safe. For the 2.3 GB `1.3` index an open takes 0.04 s and

@@ -42,7 +42,7 @@ dependencies = [
   "pyarrow>=20,<21",
   # Memory budgets read total RAM and process RSS from psutil.
   "psutil>=7,<8",
-  "s2and-rust==1.0.0b2",
+  "s2and-rust==1.0.0b3",
 ]
 
 [project.optional-dependencies]

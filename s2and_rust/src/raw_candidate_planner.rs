@@ -133,6 +133,9 @@ struct RawArrowPlannerBuildTelemetry {
     specter_index_stats: IndexedArrowReadStats,
     indexed_arrow_candidate_plan: bool,
     reused_name_counts_index: bool,
+    /// Seed features and component summaries a reload carried over.
+    reused_seed_feature_count: usize,
+    reused_summary_count: usize,
 }
 
 struct ReusableRawArrowCandidatePlanState {
@@ -157,6 +160,8 @@ struct ReusableRawArrowCandidatePlanState {
     seed_specter_count: usize,
     /// Rows kept for `reload_seed_sidecars`; None unless built with `retain_seed_rows`.
     retained_seed_rows: Option<RetainedRawArrowSeedRows>,
+    /// Rows of block signatures that later passes plan; see `PrefetchedRawArrowRows`.
+    prefetched_rows: Option<PrefetchedRawArrowRows>,
     build_telemetry: RawArrowPlannerBuildTelemetry,
 }
 
@@ -346,6 +351,88 @@ fn build_retriever_from_raw_arrow_components(
         })
     })
     .map_err(retrieval_error_to_py)
+}
+
+/// Build the retriever like `build_retriever_from_raw_arrow_components`, moving
+/// over each summary whose component has the same ordered members as before.
+///
+/// Returns the retriever and the number of reused summaries.
+#[allow(clippy::too_many_arguments)]
+fn build_retriever_reusing_summaries(
+    py: Python<'_>,
+    component_order: &[String],
+    members_by_component: &HashMap<String, Vec<String>>,
+    features_by_signature_id: &HashMap<String, RawArrowFeature>,
+    max_exemplars: usize,
+    num_threads: Option<usize>,
+    previous_members_by_component: &HashMap<String, Vec<String>>,
+    previous_component_keys_by_member: &HashMap<String, Vec<String>>,
+    previous_summaries: Vec<RetrievalSummaryData>,
+    previous_component_index_by_key: &HashMap<String, usize>,
+) -> PyResult<(RustHybridCentroidRetriever, usize)> {
+    let mut previous_summaries: Vec<Option<RetrievalSummaryData>> =
+        previous_summaries.into_iter().map(Some).collect();
+    // A component's first member names the previous component it could match.
+    let mut slots: Vec<Option<RetrievalSummaryData>> = component_order
+        .iter()
+        .map(|component_key| {
+            let members = members_by_component.get(component_key)?;
+            let previous_key = previous_component_keys_by_member
+                .get(members.first()?)?
+                .first()?;
+            if previous_members_by_component.get(previous_key)? != members {
+                return None;
+            }
+            let index = *previous_component_index_by_key.get(previous_key)?;
+            let mut summary = previous_summaries.get_mut(index)?.take()?;
+            summary.component_key = component_key.clone();
+            Some(summary)
+        })
+        .collect();
+    drop(previous_summaries);
+    let reused_count = slots.iter().filter(|slot| slot.is_some()).count();
+    let pending: Vec<usize> = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| slot.is_none().then_some(index))
+        .collect();
+    let computed: Vec<Result<RetrievalSummaryData, RetrievalError>> = py.allow_threads(|| {
+        install_with_optional_rayon_pool(num_threads, || {
+            pending
+                .par_iter()
+                .map(|&index| {
+                    let component_key = &component_order[index];
+                    let members = members_by_component.get(component_key).ok_or_else(|| {
+                        RetrievalError::MissingKey(format!(
+                            "component_key '{}' disappeared while building summaries",
+                            component_key
+                        ))
+                    })?;
+                    build_raw_arrow_summary(
+                        component_key,
+                        members,
+                        features_by_signature_id,
+                        max_exemplars,
+                    )
+                })
+                .collect()
+        })
+    });
+    for (index, summary) in pending.into_iter().zip(computed) {
+        slots[index] = Some(summary.map_err(retrieval_error_to_py)?);
+    }
+    let summaries: Vec<RetrievalSummaryData> = slots
+        .into_iter()
+        .map(|slot| slot.expect("every component has a reused or computed summary"))
+        .collect();
+    let retriever = py
+        .allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || {
+                RustHybridCentroidRetriever::from_summaries(summaries, true)
+            })
+        })
+        .map_err(retrieval_error_to_py)?;
+    Ok((retriever, reused_count))
 }
 
 fn raw_arrow_component_member_indices_for_batch(
@@ -876,6 +963,103 @@ struct RetainedRawArrowSeedRows {
     specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
 }
 
+/// Rows of block signatures that are not seeds yet, read with the seeds at build.
+///
+/// Subblocked attachment passes plan each initial-only group as queries, then
+/// hold it as seeds. Their papers are scattered across the Arrow batches, so
+/// reading them per pass rescans almost every batch twice. Served from here,
+/// `plan()` copies query rows and a reload moves new seeds' rows; both equal a
+/// read, because they come from the same readers over the same dataset.
+struct PrefetchedRawArrowRows {
+    signatures: HashMap<String, RawArrowSignature>,
+    papers: HashMap<String, RawArrowPaper>,
+    paper_authors: HashMap<String, Vec<(i64, String)>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+}
+
+impl PrefetchedRawArrowRows {
+    /// The query inputs a read would return, or None unless every row is here.
+    fn query_inputs(&self, query_signature_ids: &[String]) -> Option<RawArrowQueryInputReadResult> {
+        let mut signatures = HashMap::with_capacity(query_signature_ids.len());
+        for signature_id in query_signature_ids {
+            let signature = self.signatures.get(signature_id)?;
+            signatures.insert(signature_id.clone(), signature.clone());
+        }
+        let mut papers = HashMap::new();
+        let mut paper_authors = HashMap::new();
+        let mut specter_by_paper_id = self.specter_by_paper_id.as_ref().map(|_| HashMap::new());
+        for signature in signatures.values() {
+            let paper_id = &signature.paper_id;
+            if papers.contains_key(paper_id) {
+                continue;
+            }
+            // A cached paper carries all of its rows: absent authors or SPECTER
+            // rows are absent from the dataset too.
+            papers.insert(paper_id.clone(), self.papers.get(paper_id)?.clone());
+            if let Some(authors) = self.paper_authors.get(paper_id) {
+                paper_authors.insert(paper_id.clone(), authors.clone());
+            }
+            if let (Some(cached), Some(out)) = (
+                self.specter_by_paper_id.as_ref(),
+                specter_by_paper_id.as_mut(),
+            ) {
+                if let Some(vector) = cached.get(paper_id) {
+                    out.insert(paper_id.clone(), Arc::clone(vector));
+                }
+            }
+        }
+        Some(RawArrowQueryInputReadResult {
+            signatures,
+            papers,
+            paper_authors,
+            specter_by_paper_id,
+            signature_index_stats: IndexedArrowReadStats::default(),
+            paper_index_stats: IndexedArrowReadStats::default(),
+            paper_author_index_stats: IndexedArrowReadStats::default(),
+            specter_index_stats: IndexedArrowReadStats::default(),
+            read_signatures_secs: 0.0,
+            read_papers_secs: 0.0,
+            read_paper_authors_secs: 0.0,
+            read_specter_secs: 0.0,
+            metadata_reads_parallel_secs: 0.0,
+        })
+    }
+}
+
+/// Move the rows of `prefetch` papers out of `rows`; copy those `seed_needed` keeps.
+fn split_prefetched_rows<V: Clone>(
+    rows: &mut HashMap<String, V>,
+    prefetch: &HashSet<String>,
+    seed_needed: &HashSet<String>,
+) -> HashMap<String, V> {
+    prefetch
+        .iter()
+        .filter_map(|paper_id| {
+            let row = if seed_needed.contains(paper_id) {
+                rows.get(paper_id).cloned()
+            } else {
+                rows.remove(paper_id)
+            };
+            row.map(|row| (paper_id.clone(), row))
+        })
+        .collect()
+}
+
+/// Plan state a reload reuses instead of recomputing.
+///
+/// A seed's feature depends only on its own rows, so features of seeds still
+/// present stay valid. A component summary depends only on its key and its
+/// ordered members' features, so a component whose ordered member list is
+/// unchanged keeps its summary under its new key.
+struct ReusableSeedState {
+    features_by_signature_id: HashMap<String, RawArrowFeature>,
+    members_by_component: HashMap<String, Vec<String>>,
+    component_keys_by_member: HashMap<String, Vec<String>>,
+    summaries: Vec<RetrievalSummaryData>,
+    component_index_by_key: HashMap<String, usize>,
+    unidecode_char_map: HashMap<char, String>,
+}
+
 /// Read timings of one build or reload, reported by `build_telemetry`.
 struct RawArrowSeedReadTelemetry {
     read_cluster_seeds_secs: f64,
@@ -903,31 +1087,76 @@ impl RawBlockQueryCandidatePlanner {
         num_threads: Option<usize>,
         max_exemplars: usize,
         retain_seed_rows: bool,
+        prefetch_signature_ids: Vec<String>,
     ) -> PyResult<Self> {
         validate_retrieval_rank_top_k(top_k)?;
         validate_raw_arrow_query_signature_ids_allow_empty(&query_signature_ids)?;
         let raw_name_counts = dataset.name_counts();
 
         let layout = RawArrowSeedLayout::read(cluster_seeds_path, cluster_seed_disallows_path)?;
+        let prefetch_ids: HashSet<String> = prefetch_signature_ids
+            .into_iter()
+            .filter(|signature_id| !layout.seed_signature_id_set.contains(signature_id))
+            .collect();
 
         let read_signatures_start = Instant::now();
-        let (signatures, signature_index_stats) = if layout.seed_signature_id_set.is_empty() {
-            (HashMap::new(), IndexedArrowReadStats::default())
-        } else {
-            dataset.read_signatures(Some(&layout.seed_signature_id_set))?
-        };
+        let (mut signatures, signature_index_stats) =
+            if layout.seed_signature_id_set.is_empty() && prefetch_ids.is_empty() {
+                (HashMap::new(), IndexedArrowReadStats::default())
+            } else if prefetch_ids.is_empty() {
+                dataset.read_signatures(Some(&layout.seed_signature_id_set))?
+            } else {
+                let wanted: HashSet<String> = layout
+                    .seed_signature_id_set
+                    .union(&prefetch_ids)
+                    .cloned()
+                    .collect();
+                dataset.read_signatures(Some(&wanted))?
+            };
+        let prefetched_signatures: HashMap<String, RawArrowSignature> = prefetch_ids
+            .iter()
+            .filter_map(|signature_id| {
+                signatures
+                    .remove(signature_id)
+                    .map(|signature| (signature_id.clone(), signature))
+            })
+            .collect();
         let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
         layout.require_signature_rows(&signatures)?;
 
         let needed_paper_ids = layout.needed_paper_ids(&signatures);
+        let prefetch_paper_ids: HashSet<String> = prefetched_signatures
+            .values()
+            .map(|signature| signature.paper_id.clone())
+            .collect();
         let metadata_reads_parallel_start = Instant::now();
-        let rows = read_raw_arrow_paper_rows(
-            py,
-            &dataset,
-            &raw_name_counts,
-            &needed_paper_ids,
-            num_threads,
-        )?;
+        let mut rows = if prefetch_paper_ids.is_empty() {
+            read_raw_arrow_paper_rows(
+                py,
+                &dataset,
+                &raw_name_counts,
+                &needed_paper_ids,
+                num_threads,
+            )?
+        } else {
+            let wanted: HashSet<String> = needed_paper_ids
+                .union(&prefetch_paper_ids)
+                .cloned()
+                .collect();
+            read_raw_arrow_paper_rows(py, &dataset, &raw_name_counts, &wanted, num_threads)?
+        };
+        let prefetched_rows = (!prefetched_signatures.is_empty()).then(|| PrefetchedRawArrowRows {
+            signatures: prefetched_signatures,
+            papers: split_prefetched_rows(&mut rows.papers, &prefetch_paper_ids, &needed_paper_ids),
+            paper_authors: split_prefetched_rows(
+                &mut rows.paper_authors,
+                &prefetch_paper_ids,
+                &needed_paper_ids,
+            ),
+            specter_by_paper_id: rows.specter_by_paper_id.as_mut().map(|specter| {
+                split_prefetched_rows(specter, &prefetch_paper_ids, &needed_paper_ids)
+            }),
+        });
         validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &rows.papers)?;
         let read_telemetry = RawArrowSeedReadTelemetry {
             read_cluster_seeds_secs: layout.read_cluster_seeds_secs,
@@ -959,7 +1188,12 @@ impl RawBlockQueryCandidatePlanner {
             num_threads,
             max_exemplars,
             retain_seed_rows,
+            None,
         )
+        .map(|mut planner| {
+            planner.state.prefetched_rows = prefetched_rows;
+            planner
+        })
     }
 
     /// Build the plan state from complete raw rows of exactly the layout's seeds.
@@ -982,6 +1216,7 @@ impl RawBlockQueryCandidatePlanner {
         num_threads: Option<usize>,
         max_exemplars: usize,
         retain_seed_rows: bool,
+        previous: Option<ReusableSeedState>,
     ) -> PyResult<Self> {
         let planner_query_signature_id_set = query_signature_ids.iter().cloned().collect();
         let reused_name_counts_index = raw_name_counts.shared_index().is_some();
@@ -999,7 +1234,21 @@ impl RawBlockQueryCandidatePlanner {
         let text_module = py.import("s2and.text")?;
         let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
         let affiliation_stopwords = extract_affiliation_stopwords(py)?;
-        let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
+        let (mut unidecode_char_map, mut features_by_signature_id, previous_summaries) =
+            match previous {
+                // Transliterations are fixed per character, so the previous map stays valid.
+                Some(previous) => (
+                    previous.unidecode_char_map,
+                    previous.features_by_signature_id,
+                    Some((
+                        previous.members_by_component,
+                        previous.component_keys_by_member,
+                        previous.summaries,
+                        previous.component_index_by_key,
+                    )),
+                ),
+                None => (HashMap::new(), HashMap::new(), None),
+            };
         ensure_unidecode_for_raw_arrow_inputs(
             &signatures,
             &papers,
@@ -1009,17 +1258,27 @@ impl RawBlockQueryCandidatePlanner {
         let text_context_secs = text_context_start.elapsed().as_secs_f64();
 
         let feature_start = Instant::now();
+        features_by_signature_id
+            .retain(|signature_id, _| seed_signature_id_set.contains(signature_id));
+        let reused_feature_count = features_by_signature_id.len();
+        let pending_signature_ids: Vec<&String> = seed_signature_ids
+            .iter()
+            .filter(|signature_id| !features_by_signature_id.contains_key(*signature_id))
+            .collect();
         let raw_feature_results: Result<Vec<(String, RawArrowFeature)>, String> =
             py.allow_threads(|| {
                 let compute = || {
+                    // A paper's coauthor blocks depend only on its own author rows.
                     let coauthor_blocks = paper_coauthor_blocks(
-                        signatures.values(),
+                        pending_signature_ids
+                            .iter()
+                            .filter_map(|signature_id| signatures.get(*signature_id)),
                         &paper_authors,
                         &unidecode_char_map,
                     )?;
-                    seed_signature_ids
+                    pending_signature_ids
                         .par_iter()
-                        .map(|signature_id| {
+                        .map(|&signature_id| {
                             let signature = signatures.get(signature_id).ok_or_else(|| {
                                 format!(
                                     "signature_id '{}' is missing from signatures",
@@ -1046,22 +1305,42 @@ impl RawBlockQueryCandidatePlanner {
                 };
                 install_with_optional_rayon_pool(num_threads, compute)
             });
-        let features_by_signature_id: HashMap<String, RawArrowFeature> = raw_feature_results
-            .map_err(pyo3::exceptions::PyKeyError::new_err)?
-            .into_iter()
-            .collect();
+        features_by_signature_id
+            .extend(raw_feature_results.map_err(pyo3::exceptions::PyKeyError::new_err)?);
         let feature_secs = feature_start.elapsed().as_secs_f64();
 
         let summary_start = Instant::now();
-        let retriever = build_retriever_from_raw_arrow_components(
-            py,
-            &component_order,
-            &members_by_component,
-            &features_by_signature_id,
-            max_exemplars,
-            num_threads,
-            true,
-        )?;
+        let (retriever, reused_summary_count) = match previous_summaries {
+            Some((
+                previous_members_by_component,
+                previous_component_keys_by_member,
+                previous_summaries,
+                previous_component_index_by_key,
+            )) => build_retriever_reusing_summaries(
+                py,
+                &component_order,
+                &members_by_component,
+                &features_by_signature_id,
+                max_exemplars,
+                num_threads,
+                &previous_members_by_component,
+                &previous_component_keys_by_member,
+                previous_summaries,
+                &previous_component_index_by_key,
+            )?,
+            None => (
+                build_retriever_from_raw_arrow_components(
+                    py,
+                    &component_order,
+                    &members_by_component,
+                    &features_by_signature_id,
+                    max_exemplars,
+                    num_threads,
+                    true,
+                )?,
+                0,
+            ),
+        };
         let summary_secs = summary_start.elapsed().as_secs_f64();
 
         let component_members_start = Instant::now();
@@ -1100,6 +1379,7 @@ impl RawBlockQueryCandidatePlanner {
                 seed_paper_count,
                 seed_specter_count,
                 retained_seed_rows,
+                prefetched_rows: None,
                 build_telemetry: RawArrowPlannerBuildTelemetry {
                     read_cluster_seeds_secs: read_telemetry.read_cluster_seeds_secs,
                     read_signatures_secs: read_telemetry.read_signatures_secs,
@@ -1120,6 +1400,8 @@ impl RawBlockQueryCandidatePlanner {
                     specter_index_stats: read_telemetry.specter_index_stats,
                     indexed_arrow_candidate_plan: true,
                     reused_name_counts_index,
+                    reused_seed_feature_count: reused_feature_count,
+                    reused_summary_count,
                 },
             },
             planner_query_signature_ids: query_signature_ids.clone(),
@@ -1168,14 +1450,26 @@ impl RawBlockQueryCandidatePlanner {
         let mut paper_authors = std::mem::take(&mut self.state.paper_authors);
         let mut papers = retained.papers;
         let mut specter_by_paper_id = retained.specter_by_paper_id;
+        let mut prefetched = self.state.prefetched_rows.take();
 
         let read_signatures_start = Instant::now();
-        let missing_signature_ids: HashSet<String> = layout
+        let mut missing_signature_ids: HashSet<String> = layout
             .seed_signature_id_set
             .iter()
             .filter(|signature_id| !signatures.contains_key(*signature_id))
             .cloned()
             .collect();
+        if let Some(cache) = prefetched.as_mut() {
+            missing_signature_ids.retain(|signature_id| {
+                match cache.signatures.remove(signature_id) {
+                    Some(signature) => {
+                        signatures.insert(signature_id.clone(), signature);
+                        false
+                    }
+                    None => true,
+                }
+            });
+        }
         let signature_index_stats = if missing_signature_ids.is_empty() {
             IndexedArrowReadStats::default()
         } else {
@@ -1188,11 +1482,32 @@ impl RawBlockQueryCandidatePlanner {
         layout.require_signature_rows(&signatures)?;
 
         let needed_paper_ids = layout.needed_paper_ids(&signatures);
-        let missing_paper_ids: HashSet<String> = needed_paper_ids
+        let mut missing_paper_ids: HashSet<String> = needed_paper_ids
             .iter()
             .filter(|paper_id| !papers.contains_key(*paper_id))
             .cloned()
             .collect();
+        if let Some(cache) = prefetched.as_ref() {
+            // Copy, not move: another cached signature may share the paper.
+            missing_paper_ids.retain(|paper_id| {
+                let Some(paper) = cache.papers.get(paper_id) else {
+                    return true;
+                };
+                papers.insert(paper_id.clone(), paper.clone());
+                if let Some(authors) = cache.paper_authors.get(paper_id) {
+                    paper_authors.insert(paper_id.clone(), authors.clone());
+                }
+                if let (Some(cached), Some(specter)) = (
+                    cache.specter_by_paper_id.as_ref(),
+                    specter_by_paper_id.as_mut(),
+                ) {
+                    if let Some(vector) = cached.get(paper_id) {
+                        specter.insert(paper_id.clone(), Arc::clone(vector));
+                    }
+                }
+                false
+            });
+        }
         let raw_name_counts = self.dataset.name_counts();
         let metadata_reads_parallel_start = Instant::now();
         let rows = read_raw_arrow_paper_rows(
@@ -1231,6 +1546,16 @@ impl RawBlockQueryCandidatePlanner {
             paper_author_index_stats: rows.paper_author_index_stats,
             specter_index_stats: rows.specter_index_stats,
         };
+        let previous = ReusableSeedState {
+            features_by_signature_id: std::mem::take(&mut self.state.features_by_signature_id),
+            members_by_component: std::mem::take(&mut self.state.members_by_component),
+            component_keys_by_member: std::mem::take(&mut self.state.component_keys_by_member),
+            summaries: std::mem::take(&mut self.state.retriever.summaries),
+            component_index_by_key: std::mem::take(
+                &mut self.state.retriever.component_index_by_key,
+            ),
+            unidecode_char_map: std::mem::take(&mut self.state.unidecode_char_map),
+        };
         let query_signature_ids = self.planner_query_signature_ids.clone();
         let query_mode = self.query_mode;
         let mut planner = Self::assemble(
@@ -1251,8 +1576,10 @@ impl RawBlockQueryCandidatePlanner {
             self.num_threads,
             self.max_exemplars,
             true,
+            Some(previous),
         )?;
         planner.query_mode = query_mode;
+        planner.state.prefetched_rows = prefetched;
         *self = planner;
         Ok(true)
     }
@@ -1300,6 +1627,7 @@ impl RawBlockQueryCandidatePlanner {
             num_threads,
             max_exemplars,
             false,
+            Vec::new(),
         )?;
         planner.planner_query_signature_ids = query_signature_ids;
         planner.planner_query_signature_count = query_requests.len();
@@ -1320,7 +1648,8 @@ impl RawBlockQueryCandidatePlanner {
         orcid_enabled = true,
         num_threads = None,
         max_exemplars = 4,
-        retain_seed_rows = false
+        retain_seed_rows = false,
+        prefetch_signature_ids = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn from_auto_queries(
@@ -1333,6 +1662,7 @@ impl RawBlockQueryCandidatePlanner {
         num_threads: Option<usize>,
         max_exemplars: usize,
         retain_seed_rows: bool,
+        prefetch_signature_ids: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let mut planner = Self::build_from_query_signature_ids(
             py,
@@ -1345,6 +1675,7 @@ impl RawBlockQueryCandidatePlanner {
             num_threads,
             max_exemplars,
             retain_seed_rows,
+            prefetch_signature_ids.unwrap_or_default(),
         )?;
         planner.query_mode = RawPlannerQueryMode::Auto;
         Ok(planner)
@@ -1441,6 +1772,11 @@ impl RawBlockQueryCandidatePlanner {
             telemetry.specter_index_stats.rows_scanned,
         )?;
         payload.set_item("unidecode_char_count", self.state.unidecode_char_map.len())?;
+        payload.set_item(
+            "reused_seed_feature_count",
+            telemetry.reused_seed_feature_count,
+        )?;
+        payload.set_item("reused_summary_count", telemetry.reused_summary_count)?;
         payload.set_item("planner_seed_state", 1)?;
         payload.set_item("timings", timings)?;
         Ok(payload.unbind())
@@ -1488,12 +1824,20 @@ impl RawBlockQueryCandidatePlanner {
         }
 
         let total_start = Instant::now();
-        let query_inputs = read_reusable_raw_arrow_query_inputs(
-            py,
-            &self.dataset,
-            &query_signature_ids,
-            self.num_threads,
-        )?;
+        let query_inputs = match self
+            .state
+            .prefetched_rows
+            .as_ref()
+            .and_then(|cache| cache.query_inputs(&query_signature_ids))
+        {
+            Some(query_inputs) => query_inputs,
+            None => read_reusable_raw_arrow_query_inputs(
+                py,
+                &self.dataset,
+                &query_signature_ids,
+                self.num_threads,
+            )?,
+        };
 
         let text_context_start = Instant::now();
         ensure_unidecode_for_raw_arrow_inputs(
@@ -1752,8 +2096,6 @@ impl RawBlockQueryCandidatePlanner {
         let mut pair_row_indices = Vec::<u32>::new();
         let mut filtered_summary_signals_by_component =
             HashMap::<String, RawArrowSummarySignalData>::new();
-        let mut author_signals_by_query_signature_id =
-            HashMap::<String, RawArrowAuthorSignalData>::new();
         let retrieved_member_paper_ids: Vec<&str> = query_results
             .iter()
             .flatten()
@@ -1795,8 +2137,170 @@ impl RawBlockQueryCandidatePlanner {
                 })
             })
             .map_err(pyo3::exceptions::PyKeyError::new_err)?;
-        for query_result in query_results {
-            let mut query_result = query_result.map_err(retrieval_error_to_py)?;
+        let query_results = query_results
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(retrieval_error_to_py)?;
+        for query_result in query_results.iter() {
+            for &query_offset in query_result.row_query_signature_indices.iter() {
+                if query_offset as usize >= query_signature_ids.len() {
+                    return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                        "row query signature offset {} is outside query_signature_ids",
+                        query_offset
+                    )));
+                }
+            }
+        }
+        // Row signals are pure functions of read-only plan state, and big components
+        // make them the costliest part of a plan. Compute them in parallel, then fill
+        // the columns below in the original row order.
+        let num_threads = self.num_threads;
+        let summary_signal_cache = if needs_filtered_retriever {
+            &mut filtered_summary_signals_by_component
+        } else {
+            &mut self.state.summary_signals_by_component
+        };
+        let mut pending_component_keys = HashSet::<&str>::new();
+        let missing_component_keys: Vec<&str> = query_results
+            .iter()
+            .flat_map(|query_result| query_result.row_component_keys.iter())
+            .map(String::as_str)
+            .filter(|component_key| {
+                !summary_signal_cache.contains_key(*component_key)
+                    && pending_component_keys.insert(*component_key)
+            })
+            .collect();
+        let features_by_signature_id = &self.state.features_by_signature_id;
+        let seed_signatures = &self.state.signatures;
+        let seed_author_index = &self.state.seed_author_index;
+        let built_summary_signals = py
+            .allow_threads(|| {
+                install_with_optional_rayon_pool(num_threads, || {
+                    missing_component_keys
+                        .par_iter()
+                        .map(|component_key| {
+                            let members =
+                                members_by_component.get(*component_key).ok_or_else(|| {
+                                    format!(
+                                        "component_key '{}' disappeared while building row signals",
+                                        component_key
+                                    )
+                                })?;
+                            build_raw_arrow_summary_signals(
+                                members,
+                                features_by_signature_id,
+                                seed_signatures,
+                                seed_author_index,
+                            )
+                            .map(|signals| (component_key.to_string(), signals))
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                })
+            })
+            .map_err(pyo3::exceptions::PyKeyError::new_err)?;
+        summary_signal_cache.extend(built_summary_signals);
+        let summary_signal_cache = &*summary_signal_cache;
+
+        let mut pending_query_offsets = HashSet::<u32>::new();
+        let query_offsets_with_rows: Vec<u32> = query_results
+            .iter()
+            .flat_map(|query_result| query_result.row_query_signature_indices.iter().copied())
+            .filter(|query_offset| pending_query_offsets.insert(*query_offset))
+            .collect();
+        let query_signatures = &query_inputs.signatures;
+        let author_signals_by_query_offset: HashMap<u32, RawArrowAuthorSignalData> = py
+            .allow_threads(|| {
+                install_with_optional_rayon_pool(num_threads, || {
+                    query_offsets_with_rows
+                        .par_iter()
+                        .map(|&query_offset| {
+                            let query_signature_id = &query_signature_ids[query_offset as usize];
+                            let query_signature =
+                                query_signatures.get(query_signature_id).ok_or_else(|| {
+                                    format!(
+                                        "query signature_id '{}' is missing from signatures",
+                                        query_signature_id
+                                    )
+                                })?;
+                            query_author_tables
+                                .author_signals(query_signature)
+                                .map(|signals| (query_offset, signals))
+                        })
+                        .collect::<Result<HashMap<_, _>, String>>()
+                })
+            })
+            .map_err(pyo3::exceptions::PyKeyError::new_err)?;
+
+        let row_refs: Vec<(usize, usize)> = query_results
+            .iter()
+            .enumerate()
+            .flat_map(|(result_index, query_result)| {
+                (0..query_result.row_component_keys.len())
+                    .map(move |local_row_index| (result_index, local_row_index))
+            })
+            .collect();
+        let row_signals = py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || {
+                row_refs
+                    .par_iter()
+                    .map(|&(result_index, local_row_index)| {
+                        let query_result = &query_results[result_index];
+                        let component_key = &query_result.row_component_keys[local_row_index];
+                        let query_offset =
+                            query_result.row_query_signature_indices[local_row_index];
+                        let query_signature_id = &query_signature_ids[query_offset as usize];
+                        let query_feature = query_features_by_signature_id
+                            .get(query_signature_id)
+                            .ok_or_else(|| {
+                                pyo3::exceptions::PyKeyError::new_err(format!(
+                                    "query signature_id '{}' is missing from computed raw Arrow features",
+                                    query_signature_id
+                                ))
+                            })?;
+                        // queries has one entry per query_signature_ids entry.
+                        let query = &queries[query_offset as usize];
+                        let component_index = retriever
+                            .component_index_by_key
+                            .get(component_key)
+                            .ok_or_else(|| {
+                                pyo3::exceptions::PyKeyError::new_err(format!(
+                                    "component_key '{}' disappeared while building row signals",
+                                    component_key
+                                ))
+                            })?;
+                        let summary = retriever.summaries.get(*component_index).ok_or_else(|| {
+                            pyo3::exceptions::PyIndexError::new_err(format!(
+                                "component index {} is outside summary table",
+                                component_index
+                            ))
+                        })?;
+                        let summary_signals =
+                            summary_signal_cache.get(component_key).ok_or_else(|| {
+                                pyo3::exceptions::PyKeyError::new_err(format!(
+                                    "component_key '{}' is missing raw row signal summary",
+                                    component_key
+                                ))
+                            })?;
+                        let rarity = raw_arrow_name_count_rarity_row(
+                            query,
+                            &query_feature.name_counts,
+                            summary,
+                            summary_signals,
+                        );
+                        let evidence = raw_arrow_paper_evidence_row(
+                            query_signature_id,
+                            query_feature.paper_author_count,
+                            &author_signals_by_query_offset[&query_offset],
+                            summary_signals,
+                        );
+                        Ok((summary.max_paper_author_count as f32, rarity, evidence))
+                    })
+                    .collect::<PyResult<Vec<_>>>()
+            })
+        })?;
+        let mut row_signals = row_signals.into_iter();
+
+        for mut query_result in query_results {
             let base_row_index = u32::try_from(row_component_keys.len()).map_err(|_| {
                 pyo3::exceptions::PyOverflowError::new_err(
                     "retrieved candidate row count exceeds u32",
@@ -1816,103 +2320,13 @@ impl RawBlockQueryCandidatePlanner {
                     pair_row_indices.push(row_index);
                 }
             }
-            for (local_row_index, component_key) in
-                query_result.row_component_keys.iter().enumerate()
-            {
-                let query_offset =
-                    query_result.row_query_signature_indices[local_row_index] as usize;
-                let query_signature_id =
-                    query_signature_ids.get(query_offset).ok_or_else(|| {
-                        pyo3::exceptions::PyIndexError::new_err(format!(
-                            "row query signature offset {} is outside query_signature_ids",
-                            query_offset
-                        ))
+            for _ in 0..query_result.row_component_keys.len() {
+                let (candidate_cluster_max_paper_author_count, rarity, evidence) =
+                    row_signals.next().ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "raw Arrow row signals ended before the retrieved rows",
+                        )
                     })?;
-                let query_feature = query_features_by_signature_id
-                    .get(query_signature_id)
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyKeyError::new_err(format!(
-                            "query signature_id '{}' is missing from computed raw Arrow features",
-                            query_signature_id
-                        ))
-                    })?;
-                let query = queries.get(query_offset).ok_or_else(|| {
-                    pyo3::exceptions::PyIndexError::new_err(format!(
-                        "row query signature offset {} is outside query feature table",
-                        query_offset
-                    ))
-                })?;
-                let component_index = retriever
-                    .component_index_by_key
-                    .get(component_key)
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyKeyError::new_err(format!(
-                            "component_key '{}' disappeared while building row signals",
-                            component_key
-                        ))
-                    })?;
-                let summary = retriever.summaries.get(*component_index).ok_or_else(|| {
-                    pyo3::exceptions::PyIndexError::new_err(format!(
-                        "component index {} is outside summary table",
-                        component_index
-                    ))
-                })?;
-                let summary_signals = if needs_filtered_retriever {
-                    raw_arrow_summary_signals_cached(
-                        &mut filtered_summary_signals_by_component,
-                        component_key,
-                        members_by_component,
-                        &self.state.features_by_signature_id,
-                        &self.state.signatures,
-                        &self.state.seed_author_index,
-                    )?
-                } else {
-                    raw_arrow_summary_signals_cached(
-                        &mut self.state.summary_signals_by_component,
-                        component_key,
-                        members_by_component,
-                        &self.state.features_by_signature_id,
-                        &self.state.signatures,
-                        &self.state.seed_author_index,
-                    )?
-                };
-                let rarity = raw_arrow_name_count_rarity_row(
-                    query,
-                    &query_feature.name_counts,
-                    summary,
-                    summary_signals,
-                );
-                if let Entry::Vacant(entry) =
-                    author_signals_by_query_signature_id.entry(query_signature_id.clone())
-                {
-                    let query_signature = query_inputs
-                        .signatures
-                        .get(query_signature_id)
-                        .ok_or_else(|| {
-                            pyo3::exceptions::PyKeyError::new_err(format!(
-                                "query signature_id '{}' is missing from signatures",
-                                query_signature_id
-                            ))
-                        })?;
-                    let author_signals = query_author_tables
-                        .author_signals(query_signature)
-                        .map_err(pyo3::exceptions::PyKeyError::new_err)?;
-                    entry.insert(author_signals);
-                }
-                let query_author_signals = author_signals_by_query_signature_id
-                    .get(query_signature_id)
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyKeyError::new_err(format!(
-                            "query signature_id '{}' is missing raw author signals",
-                            query_signature_id
-                        ))
-                    })?;
-                let evidence = raw_arrow_paper_evidence_row(
-                    query_signature_id,
-                    query_feature.paper_author_count,
-                    query_author_signals,
-                    summary_signals,
-                );
                 row_last_name_count_min_rarity.push(rarity.last_name_count_min_rarity);
                 row_candidate_last_name_count_min_rarity
                     .push(rarity.candidate_last_name_count_min_rarity);
@@ -1922,7 +2336,7 @@ impl RawBlockQueryCandidatePlanner {
                 row_first_prefix_x_last_first_name_count_min_rarity
                     .push(rarity.first_prefix_x_last_first_name_count_min_rarity);
                 row_candidate_cluster_max_paper_author_count
-                    .push(summary.max_paper_author_count as f32);
+                    .push(candidate_cluster_max_paper_author_count);
                 row_paper_author_list_max_jaccard.push(evidence.paper_author_list_max_jaccard);
                 row_paper_author_list_max_containment
                     .push(evidence.paper_author_list_max_containment);

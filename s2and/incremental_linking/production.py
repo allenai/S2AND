@@ -1139,6 +1139,8 @@ def predict_incremental_promoted_linker_from_arrow(
                     num_threads=clusterer.n_jobs,
                     max_exemplars=4,
                     retain_seed_rows=attachment_state is not None,
+                    # Later passes plan, then seed, the rest of the block; read its rows once.
+                    prefetch_signature_ids=None if attachment_state is None else list(attachment_state.signature_ids),
                 )
                 if attachment_state is not None:
                     attachment_state.planner = raw_request_planner

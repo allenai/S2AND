@@ -256,3 +256,74 @@ def test_planner_reload_matches_a_fresh_build_for_a_seed_superset(tmp_path: Path
 
         # Without retained rows a planner never reloads.
         assert fresh.reload_seed_sidecars(str(sidecars["later"]), str(disallows)) is False
+
+
+def test_planner_reload_reuses_unchanged_state_and_plans_like_a_fresh_build(tmp_path: Path) -> None:
+    # A reload keeps the features of current seeds and moves over the summary of each
+    # component whose ordered members are unchanged, under the component's new label.
+    from s2and.feature_port import _require_rust_runtime
+    from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
+
+    paths = write_minimal_arrow_prediction_bundle(tmp_path / "data", include_specter=True)
+    first_seeds = {"0": "a", "1": "a", "2": "b"}
+    # Component a keeps members 0, 1 as "x"; b gains 3; c is new.
+    later_seeds = {"0": "x", "1": "x", "2": "b", "3": "b", "4": "c", "seed1": "c"}
+    sidecars = {}
+    for name, seeds in (("first", first_seeds), ("later", later_seeds)):
+        sidecars[name] = tmp_path / f"{name}_seeds.arrow"
+        write_cluster_seeds_arrow(sidecars[name], seeds)
+    planner_class = _require_rust_runtime().RawBlockQueryCandidatePlanner
+    options = {"top_k": 3, "orcid_enabled": True, "num_threads": 2, "max_exemplars": 4}
+    queries = ["q1", "q2", "5", "6"]
+    with ArrowDataset.open_trusted(paths, require_specter=True) as dataset:
+        expected = planner_class.from_auto_queries(dataset.native, str(sidecars["later"]), **options).plan(queries)
+        reused = planner_class.from_auto_queries(
+            dataset.native, str(sidecars["first"]), retain_seed_rows=True, **options
+        )
+        reused.plan(queries)
+        assert reused.reload_seed_sidecars(str(sidecars["later"])) is True
+        telemetry = reused.build_telemetry()
+        assert telemetry["reused_seed_feature_count"] == len(first_seeds)
+        assert telemetry["reused_summary_count"] == 1
+        assert _same_plan(reused.plan(queries), expected)
+
+
+def test_planner_prefetched_block_rows_plan_and_reload_like_reads(tmp_path: Path) -> None:
+    # Attachment passes prefetch the block's rows: plans and reloads must equal
+    # those that read the Arrow tables, and a reload must read nothing new.
+    from s2and.feature_port import _require_rust_runtime
+    from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
+
+    paths = write_minimal_arrow_prediction_bundle(tmp_path / "data", include_specter=True)
+    with pa.ipc.open_file(paths["signatures"]) as reader:
+        block = [str(signature_id) for signature_id in reader.read_all().column("signature_id").to_pylist()]
+    first_seeds = {"0": "a", "1": "a", "2": "b"}
+    later_seeds = {**first_seeds, "q1": "a", "5": "b", "4": "c"}
+    sidecars = {}
+    for name, seeds in (("first", first_seeds), ("later", later_seeds)):
+        sidecars[name] = tmp_path / f"{name}_seeds.arrow"
+        write_cluster_seeds_arrow(sidecars[name], seeds)
+    planner_class = _require_rust_runtime().RawBlockQueryCandidatePlanner
+    options = {"top_k": 3, "orcid_enabled": True, "num_threads": 2, "max_exemplars": 4}
+    first_queries = ["q1", "q2", "5", "6"]
+    later_queries = ["q2", "6"]
+    with ArrowDataset.open_trusted(paths, require_specter=True) as dataset:
+        expected_first = planner_class.from_auto_queries(dataset.native, str(sidecars["first"]), **options).plan(
+            first_queries
+        )
+        expected_later = planner_class.from_auto_queries(dataset.native, str(sidecars["later"]), **options).plan(
+            later_queries
+        )
+        prefetched = planner_class.from_auto_queries(
+            dataset.native,
+            str(sidecars["first"]),
+            retain_seed_rows=True,
+            prefetch_signature_ids=block,
+            **options,
+        )
+        assert _same_plan(prefetched.plan(first_queries), expected_first)
+        assert prefetched.reload_seed_sidecars(str(sidecars["later"])) is True
+        telemetry = prefetched.build_telemetry()
+        assert telemetry["signature_batches_read"] == 0
+        assert telemetry["paper_author_batches_read"] == 0
+        assert _same_plan(prefetched.plan(later_queries), expected_later)

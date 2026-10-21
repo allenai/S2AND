@@ -380,18 +380,29 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
     Ok(out)
 }
 
+/// Where a paper's rows go while reading `paper_authors`.
+#[derive(Clone, Copy)]
+enum PaperSlot {
+    Kept(usize),
+    /// Outside `keep_paper_ids`: only positions are kept, for the duplicate check.
+    Skipped(usize),
+}
+
 pub(crate) fn read_raw_arrow_paper_authors_from_batches(
     path: &str,
     batches: Vec<RecordBatch>,
     keep_paper_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, Vec<(i64, String)>>> {
     // Rows arrive grouped by paper (about 45 per paper), and SipHash on every row
-    // dominated request time. Resolve each paper once to a slot in `papers`, hash
-    // rows with ahash, and build the returned map once per paper.
+    // dominated request time. Resolve each paper once to a slot, hash rows with
+    // ahash, and build the returned map once per paper. A filtered read still
+    // rejects duplicate positions in the papers it skips, as an unfiltered read
+    // would; their positions are checked per paper at the end, which costs far
+    // less than hashing every row of every batch read.
     let mut papers: Vec<(String, Vec<(i64, String)>)> = Vec::new();
-    let mut paper_slots: ahash::AHashMap<&str, Option<usize>> = ahash::AHashMap::new();
-    let mut previous_paper: Option<(&str, Option<usize>)> = None;
-    let mut seen_filtered_positions = keep_paper_ids.map(|_| ahash::AHashSet::<(&str, i64)>::new());
+    let mut skipped_papers: Vec<(&str, Vec<i64>)> = Vec::new();
+    let mut paper_slots: ahash::AHashMap<&str, PaperSlot> = ahash::AHashMap::new();
+    let mut previous_paper: Option<(&str, PaperSlot)> = None;
     for batch in &batches {
         let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
         let paper_id_values =
@@ -410,33 +421,35 @@ pub(crate) fn read_raw_arrow_paper_authors_from_batches(
             }
             let position = position_values.required_value(row, "position")?;
             let author_name = author_name_values.required_value(row, "author_name")?;
-            if let Some(seen_positions) = seen_filtered_positions.as_mut() {
-                if !seen_positions.insert((paper_id_value, position)) {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "paper_authors Arrow contains duplicate (paper_id, position): ({:?}, {})",
-                        paper_id_value, position
-                    )));
-                }
-            }
-            // None marks a paper outside keep_paper_ids; its rows are skipped.
             let slot = match previous_paper {
                 Some((previous_id, slot)) if previous_id == paper_id_value => slot,
                 _ => {
                     let slot = *paper_slots.entry(paper_id_value).or_insert_with(|| {
                         if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value)) {
-                            None
+                            skipped_papers.push((paper_id_value, Vec::new()));
+                            PaperSlot::Skipped(skipped_papers.len() - 1)
                         } else {
                             papers.push((paper_id_value.to_owned(), Vec::new()));
-                            Some(papers.len() - 1)
+                            PaperSlot::Kept(papers.len() - 1)
                         }
                     });
                     previous_paper = Some((paper_id_value, slot));
                     slot
                 }
             };
-            if let Some(index) = slot {
-                papers[index].1.push((position, author_name.to_owned()));
+            match slot {
+                PaperSlot::Kept(index) => papers[index].1.push((position, author_name.to_owned())),
+                PaperSlot::Skipped(index) => skipped_papers[index].1.push(position),
             }
+        }
+    }
+    for (paper_id, mut positions) in skipped_papers {
+        positions.sort_unstable();
+        if let Some(pair) = positions.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "paper_authors Arrow contains duplicate (paper_id, position): ({:?}, {})",
+                paper_id, pair[0]
+            )));
         }
     }
     let mut out: HashMap<String, Vec<(i64, String)>> = HashMap::with_capacity(papers.len());
@@ -1262,6 +1275,24 @@ mod filtered_duplicate_detection_tests {
             message.contains("duplicate (paper_id, position)"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn paper_author_duplicate_across_runs_of_a_skipped_paper_is_rejected() {
+        // p1's rows are split by p2's; the repeated position spans the two runs.
+        let batch = paper_authors_batch(&["p1", "p2", "p1"], &[3, 0, 3], &["A", "B", "C"]);
+        let keep_ids = keep(&["p2"]);
+        let err = read_raw_arrow_paper_authors_from_batches("<test>", vec![batch], Some(&keep_ids))
+            .err()
+            .expect("a duplicate split across runs must be detected");
+        assert!(py_err_message(err).contains("duplicate (paper_id, position)"));
+
+        let batch = paper_authors_batch(&["p1", "p2", "p1"], &[3, 0, 4], &["A", "B", "C"]);
+        let authors =
+            read_raw_arrow_paper_authors_from_batches("<test>", vec![batch], Some(&keep_ids))
+                .expect("distinct positions read");
+        assert_eq!(authors.len(), 1);
+        assert_eq!(authors.get("p2"), Some(&vec![(0, "B".to_string())]));
     }
 
     #[test]

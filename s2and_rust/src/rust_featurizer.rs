@@ -1853,6 +1853,60 @@ impl RustFeaturizer {
         Ok(array.to_pyarray(py))
     }
 
+    /// Features of chosen rows of one chunk of a block's upper triangle.
+    ///
+    /// Equals `featurize_pairs_matrix_indexed` over the pairs of those rows, in
+    /// the order given, without building the pairs as Python tuples. `scored_rows`
+    /// are offsets into the chunk `[start_offset, start_offset + max_pairs)`.
+    #[pyo3(signature = (
+        block_signature_indices,
+        start_offset,
+        max_pairs,
+        scored_rows,
+        selected_indices = None,
+        num_threads = None,
+        nan_value = f64::NAN
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn featurize_block_upper_triangle_rows_indexed<'py>(
+        &self,
+        py: Python<'py>,
+        block_signature_indices: Vec<u32>,
+        start_offset: usize,
+        max_pairs: Option<usize>,
+        scored_rows: PyReadonlyArray1<'py, i64>,
+        selected_indices: Option<Vec<usize>>,
+        num_threads: Option<usize>,
+        nan_value: f64,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let local_pairs =
+            upper_triangle_pairs_for_range(block_signature_indices.len(), start_offset, max_pairs)?;
+        let pairs = scored_rows
+            .as_slice()?
+            .iter()
+            .map(|&row| {
+                usize::try_from(row)
+                    .ok()
+                    .and_then(|row| local_pairs.get(row))
+                    .map(|&(left, right)| {
+                        (
+                            block_signature_indices[left],
+                            block_signature_indices[right],
+                        )
+                    })
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyIndexError::new_err(format!(
+                            "scored row {} is outside the chunk of {} pairs",
+                            row,
+                            local_pairs.len()
+                        ))
+                    })
+            })
+            .collect::<PyResult<Vec<(u32, u32)>>>()?;
+        drop(local_pairs);
+        self.featurize_pairs_matrix_indexed(py, pairs, selected_indices, num_threads, nan_value)
+    }
+
     #[pyo3(
         signature = (
             left_signature_indices,

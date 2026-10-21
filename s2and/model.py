@@ -845,17 +845,17 @@ def _build_block_feature_matrices_indexed_rust(
             featurizer=featurizer,
         )
     else:
-        local_i, local_j = _upper_triangle_indices_for_range(len(block_signature_indices), start_offset, max_pairs)
-        signature_indices = np.asarray(block_signature_indices, dtype=np.uint32)
-        pairs = list(
-            zip(
-                signature_indices[local_i[scored_rows]].tolist(),
-                signature_indices[local_j[scored_rows]].tolist(),
-                strict=True,
-            )
+        # Rust derives the scored rows' pairs itself; Python tuples for millions of
+        # pairs cost more than featurizing them.
+        sparse_features = featurizer.featurize_block_upper_triangle_rows_indexed(
+            block_signature_indices,
+            start_offset,
+            max_pairs,
+            np.ascontiguousarray(scored_rows, dtype=np.int64),
+            union_indices,
+            num_threads,
+            np.nan,
         )
-        sparse_features = featurizer.featurize_pairs_matrix_indexed(pairs, union_indices, num_threads, np.nan)
-        del local_i, local_j, signature_indices, pairs
         # The bulk consumer can keep scored rows compact. Other callers retain
         # full matrix shapes and mask constrained rows before classification.
         if compact:

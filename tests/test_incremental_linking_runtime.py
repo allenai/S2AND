@@ -1521,3 +1521,73 @@ def test_supervised_candidate_pairs_match_the_per_pair_string_path(seed: int) ->
     for a, b in supervision:
         assert ((a, b) in inside) == ((a, b) in all_pairs)
         assert ((b, a) in inside) == ((b, a) in all_pairs)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_batched_subset_gates_match_per_query_gates_bit_for_bit(seed: int) -> None:
+    # The compact decider builds every subset gate in one call; each result must
+    # equal the per-query gate over the same rows, for a gate over every runtime
+    # feature, with missing values, ties, and groups of one to six rows.
+    from s2and.incremental_linking.logistic_gate import default_logistic_gate_feature_names
+
+    rng = np.random.default_rng(seed)
+    names = default_logistic_gate_feature_names()
+    gate = load_logistic_gate_config(
+        logistic_gate_config(
+            feature_names=names,
+            weights=rng.normal(size=(len(names), 3)),
+            bias=rng.normal(size=3),
+            missing_values=rng.normal(size=len(names)),
+            calibration_mode="test",
+        )
+    )
+    group_sizes = rng.integers(1, 7, 40)
+    row_count = int(group_sizes.sum())
+    batch = LinkerCandidateBatch(
+        row_count=row_count,
+        left_signature_indices=np.zeros(0, dtype=np.uint32),
+        right_signature_indices=np.zeros(0, dtype=np.uint32),
+        pair_row_indices=np.zeros(0, dtype=np.uint32),
+        row_query_signature_indices=np.repeat(np.arange(len(group_sizes), dtype=np.uint32), group_sizes),
+        row_component_keys=tuple(f"c{index}" for index in range(row_count)),
+        retrieval_scores=rng.random(row_count).astype(np.float32),
+        retrieval_ranks=np.concatenate([np.arange(1, size + 1) for size in group_sizes]).astype(np.uint16),
+    )
+    values = rng.random((row_count, len(promoted_linker_feature_columns()))).astype(np.float32)
+    values[rng.random(values.shape) < 0.05] = np.nan
+    feature_matrix = LinkerFeatureMatrix(
+        matrix=values,
+        feature_columns=promoted_linker_feature_columns(),
+        candidate_batch=batch,
+        pairwise_stats=None,
+    )
+    # Rounded probabilities make ties that exercise the rank tie-breaks.
+    probabilities = np.round(rng.random(row_count), 1)
+    row_signals = {
+        "query_view": rng.choice(["full", "initial_only"], row_count).astype(object),
+        "query_first_token": rng.choice(["a", "al", "alice", ""], row_count).astype(object),
+        "query_author": rng.choice(["a smith", "alice smith", ""], row_count).astype(object),
+        "first_name_bucket": rng.choice(["single_letter_first", "multi_letter_first"], row_count).astype(object),
+    }
+    starts = np.concatenate([[0], np.cumsum(group_sizes)[:-1]])
+    row_sets = []
+    for start, size in zip(starts, group_sizes, strict=True):
+        group = np.arange(start, start + size, dtype=np.int64)
+        keep = rng.random(size) < 0.7
+        row_sets.append(group[keep] if keep.any() else group[:1])
+    kwargs = {
+        "gate": gate,
+        "feature_matrix": feature_matrix,
+        "probabilities": probabilities,
+        "row_signals": row_signals,
+    }
+
+    batched = runtime_module._gate_decisions_for_row_sets(row_sets, **kwargs)  # noqa: SLF001
+    per_query = [runtime_module._gate_decision_for_rows(rows, **kwargs) for rows in row_sets]  # noqa: SLF001
+
+    assert len(batched) == len(per_query)
+    for (best, runner_up, link), (expected_best, expected_runner_up, expected_link) in zip(
+        batched, per_query, strict=True
+    ):
+        assert (best, link) == (expected_best, expected_link)
+        assert np.float64(runner_up).tobytes() == np.float64(expected_runner_up).tobytes()

@@ -390,6 +390,75 @@ def _gate_decision_for_rows(
     return best_row, runner_up_score, bool(subset_gate_links[0])
 
 
+def _gate_subset_rows(
+    allowed_rows: np.ndarray,
+    *,
+    fast_path_available: bool,
+    orcid_matches: np.ndarray | None,
+    constraint_requires: np.ndarray | None,
+    constraint_vetoes: np.ndarray | None,
+) -> np.ndarray | None:
+    """Rows ``_decide_query_rows`` re-runs the gate over, or None when it does not.
+
+    Mirrors its branches: forced require and ORCID rows skip the gate, vetoes
+    narrow the rows to the eligible ones, and a complete group with a fast path
+    reuses the full-batch gate.
+    """
+    if len(allowed_rows) == 0:
+        return None
+    if constraint_requires is not None and bool(np.any(constraint_requires[allowed_rows])):
+        return None
+    if orcid_matches is not None and bool(np.any(orcid_matches[allowed_rows])):
+        return None
+    if constraint_vetoes is not None:
+        eligible_mask = ~constraint_vetoes[allowed_rows]
+        if not bool(np.all(eligible_mask)):
+            eligible_rows = allowed_rows[eligible_mask]
+            return eligible_rows if len(eligible_rows) else None
+    return None if fast_path_available else allowed_rows
+
+
+def _gate_decisions_for_row_sets(
+    row_sets: Sequence[np.ndarray],
+    *,
+    gate: NumpyLogisticGate,
+    feature_matrix: LinkerFeatureMatrix,
+    probabilities: np.ndarray,
+    row_signals: Mapping[str, Any] | None,
+) -> list[tuple[int, float, bool]]:
+    """``_gate_decision_for_rows`` for many queries' row sets in one gate build.
+
+    Each set holds one query's rows. Gate features depend only on a query's own
+    rows, so each gate row equals its per-query build. Links are predicted one
+    row at a time, as the per-query path does, so the logits keep their
+    one-row rounding.
+    """
+    if not row_sets:
+        return []
+    candidate_batch = feature_matrix.candidate_batch
+    rows = np.concatenate([np.asarray(row_set, dtype=np.int64) for row_set in row_sets])
+    subset_matrix = _subset_feature_matrix_for_rows(feature_matrix, rows)
+    subset_row_signals = _subset_row_signals(row_signals, rows, candidate_batch.row_count)
+    subset_gate_matrix, subset_gate_rows = build_runtime_logistic_gate_matrix(
+        gate,
+        subset_matrix,
+        np.asarray(probabilities[rows], dtype=np.float64),
+        row_signals=subset_row_signals,
+    )
+    if len(subset_gate_rows.groups) != len(row_sets):
+        raise RuntimeError("batched gate must form one group per query row set")
+    decisions: list[tuple[int, float, bool]] = []
+    for position in range(len(row_sets)):
+        gate_link = bool(gate.predict_link(subset_gate_matrix[position : position + 1])[0])
+        subset_ranked = subset_gate_rows.ranked_groups[position]
+        best_row = int(rows[int(subset_gate_rows.best_rows[position])])
+        runner_up_score = (
+            float(probabilities[int(rows[int(subset_ranked[1])])]) if len(subset_ranked) > 1 else float("nan")
+        )
+        decisions.append((best_row, runner_up_score, gate_link))
+    return decisions
+
+
 def _raise_if_require_rows_excluded(
     *,
     excluded_rows: np.ndarray,
@@ -430,6 +499,7 @@ def _decide_query_rows(
     component_keys: tuple[object, ...] | None,
     candidate_batch: LinkerCandidateBatch,
     name_conflict_rows: np.ndarray | None = None,
+    subset_gate: tuple[int, float, bool] | None = None,
 ) -> LinkOrAbstainDecision:
     """Decide link-or-abstain for one query over an explicit allowed row set.
 
@@ -442,6 +512,9 @@ def _decide_query_rows(
     ``name_conflict_rows`` marks rows whose component has a checked member
     that violates the hard name constraint with the query. A link to such a
     row becomes an abstain unless require or ORCID evidence chose the row.
+
+    ``subset_gate``, when given, is ``_gate_decision_for_rows`` over the rows
+    ``_gate_subset_rows`` names for this query, computed in a batch.
     """
 
     if len(allowed_rows) == 0:
@@ -532,12 +605,16 @@ def _decide_query_rows(
                 margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
             action = "abstain"
         else:
-            best_row, runner_up_score, gate_link = _gate_decision_for_rows(
-                eligible_rows,
-                gate=gate,
-                feature_matrix=feature_matrix,
-                probabilities=probabilities,
-                row_signals=row_signals,
+            best_row, runner_up_score, gate_link = (
+                subset_gate
+                if subset_gate is not None
+                else _gate_decision_for_rows(
+                    eligible_rows,
+                    gate=gate,
+                    feature_matrix=feature_matrix,
+                    probabilities=probabilities,
+                    row_signals=row_signals,
+                )
             )
             margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
             action = "link" if gate_link else "abstain"
@@ -546,12 +623,16 @@ def _decide_query_rows(
             best_row, runner_up_score, fast_margin, gate_link = fast_path
             margin = None if np.isnan(runner_up_score) else float(fast_margin)
         else:
-            best_row, runner_up_score, gate_link = _gate_decision_for_rows(
-                allowed_rows,
-                gate=gate,
-                feature_matrix=feature_matrix,
-                probabilities=probabilities,
-                row_signals=row_signals,
+            best_row, runner_up_score, gate_link = (
+                subset_gate
+                if subset_gate is not None
+                else _gate_decision_for_rows(
+                    allowed_rows,
+                    gate=gate,
+                    feature_matrix=feature_matrix,
+                    probabilities=probabilities,
+                    row_signals=row_signals,
+                )
             )
             margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
         action = "link" if gate_link else "abstain"
@@ -657,9 +738,36 @@ def _predict_incremental_link_or_abstain_compact(
         "candidate_batch": candidate_batch,
         "name_conflict_rows": name_conflict_rows,
     }
+    groups = [np.asarray(group, dtype=np.int64) for group in gate_query_rows.groups]
+    # Queries that re-run the gate over a row subset get their gate rows from one
+    # batched build; per query, that build costs far more than the decision.
+    subset_rows_by_position: dict[int, np.ndarray] = {}
+    for query_pos, group in enumerate(groups):
+        excluded = excluded_rows_mask is not None and bool(np.any(excluded_rows_mask[group]))
+        subset_rows = _gate_subset_rows(
+            group[~excluded_rows_mask[group]] if excluded and excluded_rows_mask is not None else group,
+            fast_path_available=not excluded,
+            orcid_matches=orcid_matches,
+            constraint_requires=constraint_requires,
+            constraint_vetoes=constraint_vetoes,
+        )
+        if subset_rows is not None:
+            subset_rows_by_position[query_pos] = subset_rows
+    subset_gates = dict(
+        zip(
+            subset_rows_by_position,
+            _gate_decisions_for_row_sets(
+                list(subset_rows_by_position.values()),
+                gate=gate,
+                feature_matrix=feature_matrix,
+                probabilities=probabilities,
+                row_signals=row_signals,
+            ),
+            strict=True,
+        )
+    )
     decisions: list[LinkOrAbstainDecision] = []
-    for query_pos, group in enumerate(gate_query_rows.groups):
-        group = np.asarray(group, dtype=np.int64)
+    for query_pos, group in enumerate(groups):
         query_signature_index = int(query_indices[int(group[0])])
         allowed_rows = group
         fast_path: tuple[int, float, float, bool] | None = (
@@ -683,6 +791,7 @@ def _predict_incremental_link_or_abstain_compact(
             allowed_rows,
             query_signature_index=query_signature_index,
             fast_path=fast_path,
+            subset_gate=subset_gates.get(query_pos),
             **decide_kwargs,
         )
         if decision.name_conflict:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -175,8 +176,8 @@ class RawArrowPlanBundle:
         owned_query_views = tuple(query_views)
         owned_query_authors = tuple(str(value or "") for value in query_authors)
         owned_row_query_offsets = _readonly_array(row_query_offsets, dtype=np.uint32)
-        owned_left_signature_ids = tuple(str(value) for value in left_signature_ids)
-        owned_right_signature_ids = tuple(str(value) for value in right_signature_ids)
+        owned_left_signature_ids = tuple(map(str, left_signature_ids))
+        owned_right_signature_ids = tuple(map(str, right_signature_ids))
         owned_pair_row_indices = _readonly_array(pair_row_indices, dtype=np.uint32)
         owned_row_component_keys = tuple(str(value) for value in row_component_keys)
         owned_retrieval_scores = _readonly_array(retrieval_scores, dtype=np.float32)
@@ -205,21 +206,15 @@ class RawArrowPlanBundle:
             **owned_normalized_row_signals,
         }
 
-        ordered_ids: list[str] = []
-        seen: set[str] = set()
-        for value in (
-            *owned_query_signature_ids,
-            *owned_left_signature_ids,
-            *owned_right_signature_ids,
-        ):
-            if value in seen:
-                continue
-            seen.add(value)
-            ordered_ids.append(value)
+        ordered_ids = tuple(
+            dict.fromkeys(
+                itertools.chain(owned_query_signature_ids, owned_left_signature_ids, owned_right_signature_ids)
+            )
+        )
 
         return cls(
             signature_order=FeatureBlockSignatureOrder(
-                signature_ids=tuple(ordered_ids),
+                signature_ids=ordered_ids,
                 query_signature_ids=owned_query_signature_ids,
             ),
             query_signature_ids=owned_query_signature_ids,
@@ -229,10 +224,7 @@ class RawArrowPlanBundle:
                 None if seed_signature_ids is None else tuple(str(value) for value in seed_signature_ids)
             ),
             component_members=MappingProxyType(
-                {
-                    str(component_key): tuple(str(member) for member in members)
-                    for component_key, members in component_members.items()
-                }
+                {str(component_key): tuple(map(str, members)) for component_key, members in component_members.items()}
             ),
             telemetry=(
                 None
@@ -326,15 +318,18 @@ class RawArrowPlanBundle:
         )
         left_signature_ids = _raw_plan_id_tuple(plan, "left_signature_ids", pair_count)
         right_signature_ids = _raw_plan_id_tuple(plan, "right_signature_ids", pair_count)
-        for pair_index, (left_signature_id, row_index) in enumerate(
-            zip(left_signature_ids, pair_row_indices, strict=True)
-        ):
-            query_offset = int(row_query_offsets[int(row_index)])
-            expected_left_signature_id = query_signature_ids[query_offset]
-            if left_signature_id != expected_left_signature_id:
+        if pair_count:
+            # Plans carry millions of pairs; compare them in one object-array pass.
+            expected_left_signature_ids = np.asarray(query_signature_ids, dtype=object)[
+                row_query_offsets[pair_row_indices]
+            ]
+            mismatched = np.flatnonzero(np.asarray(left_signature_ids, dtype=object) != expected_left_signature_ids)
+            if len(mismatched):
+                pair_index = int(mismatched[0])
                 raise ValueError(
                     "raw candidate plan left_signature_ids must match each pair row query_signature_ids: "
-                    f"pair {pair_index} has {left_signature_id!r}, expected {expected_left_signature_id!r}"
+                    f"pair {pair_index} has {left_signature_ids[pair_index]!r}, "
+                    f"expected {expected_left_signature_ids[pair_index]!r}"
                 )
 
         normalized_row_signals = {
@@ -442,7 +437,7 @@ def _raw_plan_id_tuple(plan: Mapping[str, Any], key: str, expected_length: int) 
     length = _raw_plan_sequence_length(plan, key)
     if length != int(expected_length):
         raise ValueError(f"raw candidate plan {key} length must match pair_count: {length} != {expected_length}")
-    return tuple(str(value) for value in _required_raw_plan_value(plan, key))
+    return tuple(map(str, _required_raw_plan_value(plan, key)))
 
 
 def _validate_uint32_indices_below(values: np.ndarray, *, key: str, upper_bound: int, bound_name: str) -> None:
@@ -479,7 +474,11 @@ def _signature_indices_from_ids(
     try:
         return as_uint32_1d(
             field_name,
-            [int(signature_id_to_index[str(signature_id)]) for signature_id in signature_ids],
+            np.fromiter(
+                map(signature_id_to_index.__getitem__, map(str, signature_ids)),
+                dtype=np.int64,
+                count=len(signature_ids),
+            ),
         )
     except KeyError as exc:
         raise KeyError(

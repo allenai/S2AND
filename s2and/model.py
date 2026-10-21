@@ -158,6 +158,10 @@ class _AttachmentBlockState:
         self.planner: Any | None = None
         self.planner_key: tuple[Any, ...] | None = None
 
+    @property
+    def arrow_dataset(self) -> ArrowDataset:
+        return self._build_args[0]
+
     def featurizer(self) -> Any:
         if self._featurizer is None:
             arrow_dataset, signature_ids, num_threads = self._build_args
@@ -3556,21 +3560,39 @@ class Clusterer:
                 "oversized_block_count": 0,
             }
         featurizer_start = time.perf_counter()
-        rust_featurizer = build_rust_featurizer_from_arrow_dataset(
-            arrow_dataset,
-            signature_ids=featurizer_signature_ids,
-            name_tuples=prediction_name_tuples,
-            preprocess=True,
-            num_threads=self.n_jobs,
-            cluster_seeds_path=(
-                Path(cluster_seed_sidecars["cluster_seeds"]) if "cluster_seeds" in cluster_seed_sidecars else None
-            ),
-            cluster_seed_disallows_path=(
-                Path(cluster_seed_sidecars["cluster_seed_disallows"])
-                if "cluster_seed_disallows" in cluster_seed_sidecars
-                else None
-            ),
+        cluster_seeds_path = (
+            Path(cluster_seed_sidecars["cluster_seeds"]) if "cluster_seeds" in cluster_seed_sidecars else None
         )
+        cluster_seed_disallows_path = (
+            Path(cluster_seed_sidecars["cluster_seed_disallows"])
+            if "cluster_seed_disallows" in cluster_seed_sidecars
+            else None
+        )
+        attachment_state = _ARROW_ATTACH_BLOCK_STATE.get()
+        if (
+            attachment_state is not None
+            and attachment_state.arrow_dataset is arrow_dataset
+            and attachment_state.name_tuples == prediction_name_tuples
+            and attachment_state.signature_ids.issuperset(featurizer_signature_ids)
+        ):
+            # Residual clustering inside an attachment pass covers a few hundred
+            # signatures, but a fresh build rescans the block's Arrow tables to find
+            # them. A view of the block featurizer equals that build exactly.
+            rust_featurizer = attachment_state.featurizer().view_with_cluster_seed_sidecars(
+                [str(signature_id) for signature_id in featurizer_signature_ids],
+                None if cluster_seeds_path is None else str(cluster_seeds_path),
+                None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),
+            )
+        else:
+            rust_featurizer = build_rust_featurizer_from_arrow_dataset(
+                arrow_dataset,
+                signature_ids=featurizer_signature_ids,
+                name_tuples=prediction_name_tuples,
+                preprocess=True,
+                num_threads=self.n_jobs,
+                cluster_seeds_path=cluster_seeds_path,
+                cluster_seed_disallows_path=cluster_seed_disallows_path,
+            )
         arrow_featurizer_seconds = time.perf_counter() - featurizer_start
         predict_start = time.perf_counter()
         if needs_subblocking:

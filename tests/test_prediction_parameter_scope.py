@@ -293,3 +293,75 @@ def test_each_block_fits_a_fresh_estimator(monkeypatch: pytest.MonkeyPatch) -> N
     )
     assert len(fitted) == 2 and fitted[0] is not fitted[1]
     assert model.cluster_model.labels_ is None
+
+
+def test_nested_residual_prediction_views_the_attachment_block_featurizer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Residual clustering in a pass views the block featurizer; clusters match a fresh build."""
+    import s2and.model as model_module
+
+    dataset = build_dummy_dataset("prediction_params_arrow_residual_view")
+    dataset.specter_embeddings = {str(paper_id): np.ones(768, dtype=np.float32) for paper_id in dataset.papers}
+    training = build_arrow_training_dataset(dataset, tmp_path / "arrow")
+    arrow = training.arrow_dataset
+    assert arrow is not None
+    monkeypatch.setattr(
+        Clusterer,
+        "_build_arrow_subblocked_block_dict",
+        lambda *args, **kwargs: ({"full": ["0", "1"], "initial": ["2", "3"]}, {}),
+    )
+    monkeypatch.setattr(
+        Clusterer,
+        "_partition_subblocked_first_name_groups",
+        lambda *args, **kwargs: ({"full": ["0", "1"]}, {"initial": ["2", "3"]}, False),
+    )
+    fresh_builds: list[list[str]] = []
+    original_build = model_module.build_rust_featurizer_from_arrow_dataset
+
+    def recording_build(arrow_dataset: Any, **kwargs: Any) -> Any:
+        fresh_builds.append([str(signature_id) for signature_id in kwargs["signature_ids"]])
+        return original_build(arrow_dataset, **kwargs)
+
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", recording_build)
+
+    def complete_with_residuals(self: Clusterer, signatures: list[str], arrow_dataset: Any, **kwargs: Any):
+        # Like the production request dataset, the residual step carries the pass's name tuples.
+        dataset.name_tuples = kwargs["name_tuples"]
+        residual = self._make_residual_clusterer(
+            dataset,
+            partial_supervision={},
+            runtime_context=kwargs["runtime_context"],
+            total_ram_bytes=None,
+            arrow_dataset=arrow_dataset,
+        )(signatures)
+        seeds: dict[str, list[str]] = {}
+        for signature_id, component in kwargs["cluster_seeds_require"].items():
+            seeds.setdefault(str(component), []).append(signature_id)
+        return {"clusters": {**seeds, **{f"residual_{key}": values for key, values in residual.items()}}}
+
+    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", complete_with_residuals)
+
+    def predict() -> set[frozenset[str]]:
+        actual, _ = clusterer().predict_from_arrow(
+            {"block": ["0", "1", "2", "3"]},
+            arrow,
+            batching_threshold=2,
+            cluster_model_params={"eps": 0.8},
+            name_tuples=frozenset(),
+        )
+        return partition(actual)
+
+    try:
+        viewed = predict()
+        # The bulk featurizer, then the block featurizer that the residual step views.
+        assert fresh_builds == [["0", "1"], ["0", "1", "2", "3"]]
+        fresh_builds.clear()
+        with monkeypatch.context() as patch:
+            # A block state that never matches the dataset forces the fresh build.
+            patch.setattr(model_module._AttachmentBlockState, "arrow_dataset", property(lambda self: None))
+            built = predict()
+        assert fresh_builds == [["0", "1"], ["2", "3"]]
+        assert viewed == built == {frozenset({"0", "1"}), frozenset({"2", "3"})}
+    finally:
+        arrow.close()

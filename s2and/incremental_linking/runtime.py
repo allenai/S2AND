@@ -1204,6 +1204,73 @@ def _empty_retrieval_batch() -> LinkerRetrievalBatch:
     return LinkerRetrievalBatch(candidate_batch=candidate_batch, row_signals={})
 
 
+def _string_keyed_supervision(
+    partial_supervision: Mapping[tuple[Any, Any], int | float] | None,
+) -> Mapping[tuple[str, str], int | float]:
+    """Supervision keyed by string ids; an already string-keyed dict is used as is.
+
+    Callers only read the result. Subblocked attachment passes hand over large,
+    already normalized dicts, so copying them every pass costs more than scoring.
+    """
+    if not partial_supervision:
+        return {}
+    if isinstance(partial_supervision, dict) and all(
+        type(left) is str and type(right) is str for left, right in partial_supervision
+    ):
+        return partial_supervision
+    return {(str(left), str(right)): value for (left, right), value in partial_supervision.items()}
+
+
+def _string_keyed_seed_map(seed_signature_to_component: Mapping[Any, Any]) -> Mapping[str, Any]:
+    """Seed map keyed by string ids; an already string-keyed map is used as is."""
+    if all(type(signature_id) is str for signature_id in seed_signature_to_component):
+        return seed_signature_to_component
+    return {str(signature_id): component for signature_id, component in seed_signature_to_component.items()}
+
+
+def _supervised_candidate_pairs(
+    partial_supervision: Mapping[tuple[str, str], int | float],
+    signature_id_to_index: Mapping[str, int],
+    candidate_batch: LinkerCandidateBatch,
+) -> tuple[np.ndarray, set[tuple[str, str]]]:
+    """Find supervised pairs among the batch pairs by signature index.
+
+    Requires one index per signature id. Returns the per-pair mask of pairs that
+    supervision names in either orientation, which is what
+    ``_partial_supervision_distance(...) is not None`` gives per pair, and both
+    orientations of each supervision pair that is a batch pair in either
+    orientation, which is what the validation membership test needs.
+    """
+    signature_count = len(signature_id_to_index)
+    left = np.asarray(candidate_batch.left_signature_indices, dtype=np.int64)
+    right = np.asarray(candidate_batch.right_signature_indices, dtype=np.int64)
+    out_of_range = np.flatnonzero((left >= signature_count) | (right >= signature_count))
+    if len(out_of_range):
+        first = int(out_of_range[0])
+        raise IndexError(
+            "candidate batch pair index out of range for linker runtime signature_ids: "
+            f"left={int(left[first])} right={int(right[first])} signature_count={signature_count}"
+        )
+    pair_keys = left * signature_count + right
+    supervised_keys: dict[int, tuple[str, str]] = {}
+    for left_id, right_id in partial_supervision:
+        left_index = signature_id_to_index.get(left_id)
+        right_index = signature_id_to_index.get(right_id)
+        if left_index is None or right_index is None:
+            continue
+        supervised_keys[left_index * signature_count + right_index] = (left_id, right_id)
+        supervised_keys[right_index * signature_count + left_index] = (right_id, left_id)
+    if not supervised_keys:
+        return np.zeros(len(pair_keys), dtype=bool), set()
+    mask = np.isin(pair_keys, np.fromiter(supervised_keys, dtype=np.int64, count=len(supervised_keys)))
+    inside_window_pairs: set[tuple[str, str]] = set()
+    for key in np.unique(pair_keys[mask]).tolist():
+        left_id, right_id = supervised_keys[int(key)]
+        inside_window_pairs.add((left_id, right_id))
+        inside_window_pairs.add((right_id, left_id))
+    return mask, inside_window_pairs
+
+
 def _candidate_pair_ids(
     signature_ids_by_index: Sequence[Any],
     candidate_batch: LinkerCandidateBatch,
@@ -1243,7 +1310,13 @@ def _resolve_candidate_batch_pair_labels_rust(
     dont_merge_cluster_seeds: bool,
     n_jobs: int,
     featurizer: Any | None,
+    supervised_pair_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, Any]:
+    """Constraint labels of the batch pairs, with supervision distances applied.
+
+    ``supervised_pair_mask``, when given, marks exactly the pairs supervision
+    names (see ``_supervised_candidate_pairs``); only those are looked up.
+    """
     pair_count = int(candidate_batch.pair_count)
     start_seconds = time.perf_counter()
     labels = np.full(pair_count, np.nan, dtype=np.float64)
@@ -1259,7 +1332,17 @@ def _resolve_candidate_batch_pair_labels_rust(
         )
 
     partial_hits = 0
-    if partial_supervision:
+    if partial_supervision and supervised_pair_mask is not None:
+        left_indices = np.asarray(candidate_batch.left_signature_indices)
+        right_indices = np.asarray(candidate_batch.right_signature_indices)
+        for pair_offset in np.flatnonzero(supervised_pair_mask).tolist():
+            left_id = str(signature_ids_by_index[int(left_indices[pair_offset])])
+            right_id = str(signature_ids_by_index[int(right_indices[pair_offset])])
+            distance = _partial_supervision_distance(partial_supervision, left_id, right_id)
+            if distance is not None:
+                labels[pair_offset] = float(distance - LARGE_INTEGER)
+                partial_hits += 1
+    elif partial_supervision:
         signature_count = len(signature_ids_by_index)
         for pair_offset, (left_index, right_index) in enumerate(
             zip(candidate_batch.left_signature_indices, candidate_batch.right_signature_indices, strict=True)
@@ -1305,8 +1388,14 @@ def _validate_partial_supervision_window(
     query_signature_ids: set[str],
     seed_signature_to_component: Mapping[str, Any],
     candidate_pair_ids: Sequence[tuple[str, str]],
+    inside_window_pairs: set[tuple[str, str]] | None = None,
     partial_supervision_is_distance_override: bool = False,
 ) -> dict[str, int]:
+    """Validate and count supervision against one retrieval window.
+
+    ``inside_window_pairs``, when given, replaces the candidate pairs: it holds
+    both orientations of every supervision pair that is a candidate pair.
+    """
     telemetry = {
         "partial_supervision_pair_count": int(len(partial_supervision)),
         "partial_supervision_require_outside_retrieval_window": 0,
@@ -1314,11 +1403,12 @@ def _validate_partial_supervision_window(
         "partial_supervision_disallow_between_residual_queries": 0,
         "partial_supervision_ignored_outside_window": 0,
     }
-    inside_window_pairs: set[tuple[str, str]] = set()
     require_components_by_query: dict[str, set[str]] = {}
-    for left, right in candidate_pair_ids:
-        inside_window_pairs.add((left, right))
-        inside_window_pairs.add((right, left))
+    if inside_window_pairs is None:
+        inside_window_pairs = set()
+        for left, right in candidate_pair_ids:
+            inside_window_pairs.add((left, right))
+            inside_window_pairs.add((right, left))
 
     for (left_raw, right_raw), value in partial_supervision.items():
         left = str(left_raw)
@@ -1553,9 +1643,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         "incremental_link_or_abstain_from_retrieval_private",
         backend="rust",
     )
-    partial_supervision_dict = {
-        (str(left), str(right)): value for (left, right), value in (partial_supervision or {}).items()
-    }
+    partial_supervision_dict = _string_keyed_supervision(partial_supervision)
     n_jobs_resolved = resolve_n_jobs(getattr(clusterer, "n_jobs", 1) if n_jobs is None else n_jobs)
     retrieval_top_k_resolved = int(artifact.retrieval_top_k if retrieval_top_k is None else retrieval_top_k)
     signature_id_to_index = signature_id_to_index_map(featurizer)
@@ -1593,31 +1681,42 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         dtype=np.uint32,
     )
     distance_override_mask = None
+    supervised_pair_mask: np.ndarray | None = None
     if partial_supervision_dict:
-        pair_ids = _candidate_pair_ids(signature_ids_by_index, candidate_batch)
-        if partial_supervision_is_distance_override:
-            # Bulk caller distances still affect pairwise features, but a zero
-            # override does not become a mandatory incremental attachment.
-            distance_override_mask = np.asarray(
+        if len(signature_id_to_index) == len(signature_ids_by_index):
+            # Supervision names a handful of pairs; locate them by index instead
+            # of materializing every candidate pair's ids.
+            supervised_pair_mask, inside_window_pairs = _supervised_candidate_pairs(
+                partial_supervision_dict,
+                signature_id_to_index,
+                candidate_batch,
+            )
+            pair_ids: Sequence[tuple[str, str]] = ()
+        else:
+            pair_ids = _candidate_pair_ids(signature_ids_by_index, candidate_batch)
+            supervised_pair_mask = np.asarray(
                 [
                     _partial_supervision_distance(partial_supervision_dict, left, right) is not None
                     for left, right in pair_ids
                 ],
                 dtype=bool,
             )
-        validation_seed_signature_to_component = (
-            {
-                str(signature_id): component
-                for signature_id, component in partial_supervision_seed_signature_to_component.items()
-            }
-            if partial_supervision_seed_signature_to_component is not None
-            else {str(signature_id): component for signature_id, component in cluster_seeds_require.items()}
+            inside_window_pairs = None
+        if partial_supervision_is_distance_override:
+            # Bulk caller distances still affect pairwise features, but a zero
+            # override does not become a mandatory incremental attachment.
+            distance_override_mask = supervised_pair_mask
+        validation_seed_signature_to_component = _string_keyed_seed_map(
+            cluster_seeds_require
+            if partial_supervision_seed_signature_to_component is None
+            else partial_supervision_seed_signature_to_component
         )
         partial_telemetry = _validate_partial_supervision_window(
             partial_supervision=partial_supervision_dict,
             query_signature_ids=set(query_signature_id_strings),
             seed_signature_to_component=validation_seed_signature_to_component,
             candidate_pair_ids=pair_ids,
+            inside_window_pairs=inside_window_pairs,
             partial_supervision_is_distance_override=partial_supervision_is_distance_override,
         )
     else:
@@ -1637,6 +1736,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         dont_merge_cluster_seeds=bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
         n_jobs=n_jobs_resolved,
         featurizer=featurizer,
+        supervised_pair_mask=supervised_pair_mask if partial_supervision_dict else None,
     )
     if pair_labels.shape != (candidate_batch.pair_count,):
         raise ValueError(

@@ -1481,3 +1481,43 @@ def test_from_retrieval_name_check_skips_required_seed_members(
     # One disallow in three pairs stays below the share veto in every case.
     assert result.compact_result.decisions[0].action == expected_action
     assert ("constraint_name_check_disallow_count" in result.decision_row_signals) == (exempt is not None)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_supervised_candidate_pairs_match_the_per_pair_string_path(seed: int) -> None:
+    # The indexed lookup replaces per-pair id tuples; it must give the same
+    # distance-override mask and the same window membership answers.
+    rng = np.random.default_rng(seed)
+    signature_ids = tuple(f"s{index}" for index in range(40))
+    pair_count = 300
+    left = rng.integers(0, len(signature_ids), pair_count).astype(np.uint32)
+    right = rng.integers(0, len(signature_ids), pair_count).astype(np.uint32)
+    candidate_batch = LinkerCandidateBatch(
+        row_count=1,
+        left_signature_indices=left,
+        right_signature_indices=right,
+        pair_row_indices=np.zeros(pair_count, dtype=np.uint32),
+    )
+    supervision: dict[tuple[str, str], int | float] = {}
+    for _ in range(25):
+        a, b = rng.integers(0, len(signature_ids) + 5, 2)
+        # Ids beyond the featurizer's are supervision the batch cannot contain.
+        supervision[(f"s{a}", f"s{b}")] = float(rng.choice([0.0, LARGE_DISTANCE]))
+    for index in rng.integers(0, pair_count, 6):
+        supervision[(signature_ids[int(right[index])], signature_ids[int(left[index])])] = 0.0
+    signature_id_to_index = {signature_id: index for index, signature_id in enumerate(signature_ids)}
+
+    mask, inside = runtime_module._supervised_candidate_pairs(  # noqa: SLF001
+        supervision, signature_id_to_index, candidate_batch
+    )
+
+    pair_ids = runtime_module._candidate_pair_ids(signature_ids, candidate_batch)  # noqa: SLF001
+    expected_mask = [
+        runtime_module._partial_supervision_distance(supervision, a, b) is not None  # noqa: SLF001
+        for a, b in pair_ids
+    ]
+    assert mask.tolist() == expected_mask
+    all_pairs = {pair for a, b in pair_ids for pair in ((a, b), (b, a))}
+    for a, b in supervision:
+        assert ((a, b) in inside) == ((a, b) in all_pairs)
+        assert ((b, a) in inside) == ((b, a) in all_pairs)

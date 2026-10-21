@@ -626,9 +626,6 @@ def _load_arrow_incremental_orcid_signature_info(
     required_columns = {"signature_id"}
     import pyarrow as pa
 
-    pc: Any = __import__("pyarrow.compute").compute
-
-    value_set = arrow_string_array(requested_signature_ids)
     signatures: dict[str, _ArrowIncrementalSignatureInfo] = {}
     with arrow_dataset.open_file("signatures") as source_file, pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
@@ -639,30 +636,26 @@ def _load_arrow_incremental_orcid_signature_info(
             )
         if "author_orcid" not in reader.schema.names:
             return {}
-        required_column_names = ["author_orcid", "signature_id"]
         signature_id_column_index = reader.schema.get_field_index("signature_id")
+        orcid_column_index = reader.schema.get_field_index("author_orcid")
         for batch_index in _signature_batch_indices_for_request(arrow_dataset, requested_signature_ids):
             batch = reader.get_batch(batch_index)
-            signature_id_column = batch.column(signature_id_column_index)
-            mask = pc.is_in(signature_id_column, value_set=value_set)
-            if not bool(pc.any(mask).as_py()):
-                continue
-            filtered = pa.Table.from_batches([batch], schema=reader.schema).select(required_column_names).filter(mask)
-            for row in filtered.to_pylist():
-                signature_id_value = row.get("signature_id")
-                if signature_id_value is None:
-                    raise ValueError("signatures Arrow cannot contain null signature_id values")
-                signature_id = str(signature_id_value)
+            # A set lookup per row: pyarrow's is_in rehashes the whole request's ids
+            # on every batch, which took seconds on large blocks.
+            orcid_values: list[Any] | None = None
+            for row, signature_id in enumerate(batch.column(signature_id_column_index).to_pylist()):
                 if signature_id not in requested_signature_id_set:
                     continue
                 if signature_id in signatures:
                     raise ValueError(f"signatures Arrow contains duplicate signature_id: {signature_id!r}")
+                if orcid_values is None:
+                    orcid_values = batch.column(orcid_column_index).to_pylist()
                 signatures[signature_id] = _ArrowIncrementalSignatureInfo(
                     paper_id=None,
                     author_info_first=None,
                     author_info_last=None,
                     author_info_first_normalized=None,
-                    author_info_orcid=_optional_arrow_string(row.get("author_orcid")),
+                    author_info_orcid=_optional_arrow_string(orcid_values[row]),
                 )
     return signatures
 

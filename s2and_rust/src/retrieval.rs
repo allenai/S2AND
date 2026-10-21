@@ -309,16 +309,45 @@ impl RustHybridCentroidRetriever {
         idx: usize,
         override_index: Option<usize>,
         override_summary: Option<&RetrievalSummaryData>,
+        specter_scores: Option<&[f64]>,
     ) -> f32 {
         let summary = self.summary_for_candidate_index(idx, override_index, override_summary);
-        let overlap = if Some(idx) == override_index && override_summary.is_some() {
+        let overridden = Some(idx) == override_index && override_summary.is_some();
+        let overlap = if overridden {
             component_overlap(query_data, prepared, summary)
         } else {
             overlaps[idx]
         };
         let (coauthor_score, affiliation_score) =
             overlap_scores(query_data, prepared, summary, &overlap);
-        hybrid_centroid_score(query_data, summary, coauthor_score, affiliation_score)
+        // A precomputed row holds this query's SPECTER score of every summary;
+        // an override summary is not in it.
+        let specter_score = match specter_scores {
+            Some(row) if !overridden => row[idx],
+            _ => fused_specter_score(query_data, summary),
+        };
+        hybrid_centroid_score(
+            query_data,
+            summary,
+            coauthor_score,
+            affiliation_score,
+            specter_score,
+        )
+    }
+
+    /// SPECTER scores of each query against every summary, one row per query.
+    ///
+    /// Summaries are the outer loop, so each summary's vectors are read from
+    /// memory once per block of queries instead of once per query; at hundreds
+    /// of thousands of summaries that traffic, not arithmetic, bounds scoring.
+    pub(crate) fn specter_score_rows(&self, queries: &[RetrievalQueryData]) -> Vec<Vec<f64>> {
+        let mut rows = vec![vec![0.0f64; self.summaries.len()]; queries.len()];
+        for (index, summary) in self.summaries.iter().enumerate() {
+            for (row, query) in rows.iter_mut().zip(queries) {
+                row[index] = fused_specter_score(query, summary);
+            }
+        }
+        rows
     }
 
     fn summary_for_candidate_index<'a>(
@@ -384,6 +413,7 @@ impl RustHybridCentroidRetriever {
         top_k: usize,
         override_index: Option<usize>,
         override_summary: Option<&RetrievalSummaryData>,
+        specter_scores: Option<&[f64]>,
     ) -> Vec<(usize, f32)> {
         let prepared = self.prepare_query(query_data);
         let overlaps =
@@ -401,6 +431,7 @@ impl RustHybridCentroidRetriever {
                         *idx,
                         override_index,
                         override_summary,
+                        specter_scores,
                     ),
                 )
             })
@@ -524,6 +555,7 @@ impl RustHybridCentroidRetriever {
         excluded_candidate_indices: Option<&HashSet<usize>>,
         component_member_indices: &HashMap<String, Vec<u32>>,
         top_k: usize,
+        specter_scores: Option<&[f64]>,
     ) -> Result<RetrievalPairPlanQueryResult, RetrievalError> {
         let selection =
             self.candidate_indices_for_pair_plan_query(current_query, excluded_candidate_indices);
@@ -541,6 +573,7 @@ impl RustHybridCentroidRetriever {
             effective_top_k,
             None,
             None,
+            specter_scores,
         );
 
         let mut result = RetrievalPairPlanQueryResult::default();
@@ -667,6 +700,7 @@ impl RustHybridCentroidRetriever {
                                 *idx,
                                 override_index,
                                 override_summary,
+                                None,
                             ),
                         )
                     })
@@ -1026,21 +1060,104 @@ pub(crate) const AFFILIATION_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalO
     multi_token_weight: 1.0,
 };
 
-/// Dot products of `query` with N equal-length vectors in one pass.
+/// Independent partial sums per dot product; a multiple of every SIMD width.
+const DOT_LANES: usize = 8;
+
+/// Dot products of `query` with N equal-length vectors in one pass, in f64.
 ///
-/// Each sum adds `query[i] * vector[i]` in index order, exactly as
-/// `cosine_sim_with_norms` does, so every result is bit-identical. Keeping N
-/// independent sums in one loop lets the CPU overlap them; one sum at a time is
-/// a chain of dependent additions.
+/// Retrieval scores every component for every query, so these sums are most of
+/// incremental planning's CPU time. Each product keeps `DOT_LANES` partial sums
+/// that the compiler vectorizes, then folds them in a fixed order, so results
+/// are deterministic. The order differs from a sequential sum, so values can
+/// differ from `cosine_sim_with_norms` by about 1e-15 relative; scores are
+/// rounded to f32 afterwards, and retrieval only ranks them.
 fn fused_dot_products<const N: usize>(query: &[f32], vectors: [&[f32]; N]) -> [f64; N] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the running CPU supports AVX2.
+            return unsafe { fused_dot_products_avx2(query, vectors) };
+        }
+    }
+    lane_dot_products(query, vectors)
+}
+
+/// `lane_dot_products` with AVX2 intrinsics. Lanes 0-3 and 4-7 of each sum live
+/// in two 256-bit registers and take the same separate multiply and add, so the
+/// results equal the portable code on every CPU.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn fused_dot_products_avx2<const N: usize>(query: &[f32], vectors: [&[f32]; N]) -> [f64; N] {
+    use std::arch::x86_64::{
+        _mm256_add_pd, _mm256_castps256_ps128, _mm256_cvtps_pd, _mm256_extractf128_ps,
+        _mm256_loadu_ps, _mm256_mul_pd, _mm256_setzero_pd, _mm256_storeu_pd,
+    };
     let len = query.len();
     let vectors = vectors.map(|vector| &vector[..len]);
-    let mut sums = [0.0f64; N];
-    for i in 0..len {
-        let q = query[i] as f64;
+    let body = len - len % DOT_LANES;
+    let mut low = [_mm256_setzero_pd(); N];
+    let mut high = [_mm256_setzero_pd(); N];
+    let mut start = 0;
+    while start < body {
+        let q = _mm256_loadu_ps(query.as_ptr().add(start));
+        let q_low = _mm256_cvtps_pd(_mm256_castps256_ps128(q));
+        let q_high = _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(q));
         for k in 0..N {
-            sums[k] += q * (vectors[k][i] as f64);
+            let v = _mm256_loadu_ps(vectors[k].as_ptr().add(start));
+            low[k] = _mm256_add_pd(
+                low[k],
+                _mm256_mul_pd(q_low, _mm256_cvtps_pd(_mm256_castps256_ps128(v))),
+            );
+            high[k] = _mm256_add_pd(
+                high[k],
+                _mm256_mul_pd(q_high, _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(v))),
+            );
         }
+        start += DOT_LANES;
+    }
+    let mut sums = [0.0f64; N];
+    for k in 0..N {
+        let mut partial = [0.0f64; DOT_LANES];
+        _mm256_storeu_pd(partial.as_mut_ptr(), low[k]);
+        _mm256_storeu_pd(partial.as_mut_ptr().add(4), high[k]);
+        sums[k] = fold_lanes(&partial, query, vectors[k], body);
+    }
+    sums
+}
+
+/// Fixed-order fold of the lane sums, then the remainder in index order.
+#[inline(always)]
+fn fold_lanes(partial: &[f64; DOT_LANES], query: &[f32], vector: &[f32], body: usize) -> f64 {
+    let mut sum = ((partial[0] + partial[1]) + (partial[2] + partial[3]))
+        + ((partial[4] + partial[5]) + (partial[6] + partial[7]));
+    for i in body..query.len() {
+        sum += f64::from(query[i]) * f64::from(vector[i]);
+    }
+    sum
+}
+
+#[inline(always)]
+fn lane_dot_products<const N: usize>(query: &[f32], vectors: [&[f32]; N]) -> [f64; N] {
+    let len = query.len();
+    let vectors = vectors.map(|vector| &vector[..len]);
+    let body = len - len % DOT_LANES;
+    let mut lanes = [[0.0f64; DOT_LANES]; N];
+    for (chunk_index, query_chunk) in query[..body].chunks_exact(DOT_LANES).enumerate() {
+        let start = chunk_index * DOT_LANES;
+        let mut q = [0.0f64; DOT_LANES];
+        for (lane, value) in q.iter_mut().zip(query_chunk) {
+            *lane = f64::from(*value);
+        }
+        for k in 0..N {
+            let vector_chunk = &vectors[k][start..start + DOT_LANES];
+            for lane in 0..DOT_LANES {
+                lanes[k][lane] += q[lane] * f64::from(vector_chunk[lane]);
+            }
+        }
+    }
+    let mut sums = [0.0f64; N];
+    for k in 0..N {
+        sums[k] = fold_lanes(&lanes[k], query, vectors[k], body);
     }
     sums
 }
@@ -1171,7 +1288,13 @@ pub(crate) fn score_hybrid_centroid_query(
     );
     let overlap = component_overlap(query, &prepared, summary);
     let (coauthor_score, affiliation_score) = overlap_scores(query, &prepared, summary, &overlap);
-    hybrid_centroid_score(query, summary, coauthor_score, affiliation_score)
+    hybrid_centroid_score(
+        query,
+        summary,
+        coauthor_score,
+        affiliation_score,
+        fused_specter_score(query, summary),
+    )
 }
 
 /// Weighted sum of the hybrid score terms, given the two overlap scores.
@@ -1180,6 +1303,7 @@ fn hybrid_centroid_score(
     summary: &RetrievalSummaryData,
     coauthor_score: f64,
     affiliation_score: f64,
+    specter_score: f64,
 ) -> f32 {
     let weights = if query.has_full_first {
         DEFAULT_HYBRID_CENTROID_WEIGHTS
@@ -1201,7 +1325,6 @@ fn hybrid_centroid_score(
             RetrievalFirstNameMode::Prefix
         },
     );
-    let specter_score = fused_specter_score(query, summary);
     (weights.centroid * specter_score
         + weights.coauthor * coauthor_score
         + weights.affiliation * affiliation_score
@@ -1811,8 +1934,8 @@ mod overlap_index_tests {
                     &retriever.affiliation_cluster_df,
                     retriever.summaries.len(),
                 );
-                let indexed =
-                    retriever.score_candidate(&query, &prepared, &overlaps, index, None, None);
+                let indexed = retriever
+                    .score_candidate(&query, &prepared, &overlaps, index, None, None, None);
                 assert_eq!(
                     direct.to_bits(),
                     reference.to_bits(),
@@ -1897,7 +2020,7 @@ mod overlap_index_tests {
                 .count();
             for top_k in [1usize, 25, expected.len()] {
                 let result = retriever
-                    .build_pair_plan_query_result(&query, "anna", 0, None, &members, top_k)
+                    .build_pair_plan_query_result(&query, "anna", 0, None, &members, top_k, None)
                     .expect("plan row");
                 let observed: Vec<(String, u32)> = result
                     .row_component_keys
@@ -1936,16 +2059,38 @@ mod overlap_index_tests {
         assert!(RustHybridCentroidRetriever::from_summaries(vec![bad], false).is_ok());
     }
 
-    /// The fused centroid and exemplar cosines must equal the one-at-a-time path
-    /// bit for bit, including zero norms, length mismatches, and long exemplar lists.
+    /// The fused centroid and exemplar cosines must match the one-at-a-time path
+    /// to rounding, and exactly for zero norms, length mismatches, and long
+    /// exemplar lists (which keep the reference path).
     #[test]
-    fn fused_specter_score_matches_reference_bits() {
+    fn fused_specter_score_matches_reference_to_rounding() {
         let mut rng = Lcg(11);
         for case in 0..4000 {
             let mut summary = summary(&mut rng, format!("c{case}"));
             let mut query = query(&mut rng, Vec::new());
+            // Half the cases use long vectors: several lane chunks plus a remainder.
+            let length = [8usize, 13, 64, 768][if case % 2 == 0 {
+                0
+            } else {
+                1 + rng.below(3) as usize
+            }];
+            let long_vector = |rng: &mut Lcg| -> Vec<f32> {
+                (0..length)
+                    .map(|_| rng.below(1000) as f32 / 500.0 - 1.0)
+                    .collect()
+            };
+            if length != 8 {
+                let values = long_vector(&mut rng);
+                query.specter_norm = Some(vector_norm_f32(&values));
+                query.specter = Some(std::sync::Arc::new(values));
+                if summary.specter_centroid.is_some() {
+                    let centroid = long_vector(&mut rng);
+                    summary.specter_centroid_norm = Some(vector_norm_f32(&centroid));
+                    summary.specter_centroid = Some(centroid);
+                }
+            }
             let exemplar_count = rng.below(7) as usize;
-            summary.exemplar_vectors = (0..exemplar_count).map(|_| vector(&mut rng)).collect();
+            summary.exemplar_vectors = (0..exemplar_count).map(|_| long_vector(&mut rng)).collect();
             if rng.below(10) == 0 && exemplar_count > 0 {
                 // A length mismatch must give the same NaN handling as the reference.
                 summary.exemplar_vectors[0].push(0.5);
@@ -1975,7 +2120,125 @@ mod overlap_index_tests {
             }
             .max(specter_exemplar_score(&query, &summary));
             let fused = fused_specter_score(&query, &summary);
-            assert_eq!(fused.to_bits(), reference.to_bits(), "case {case}");
+            if reference.is_nan() || reference == 0.0 {
+                assert_eq!(fused.to_bits(), reference.to_bits(), "case {case}");
+            } else {
+                let tolerance = 1e-12 * reference.abs().max(1e-3);
+                assert!(
+                    (fused - reference).abs() <= tolerance,
+                    "case {case}: {fused} vs {reference}"
+                );
+            }
+        }
+    }
+
+    /// The AVX2 kernel must equal the portable one bit for bit, so scores do not
+    /// depend on the CPU.
+    #[test]
+    fn avx2_dot_products_match_portable_bits() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::arch::is_x86_feature_detected!("avx2") {
+                return;
+            }
+            let mut rng = Lcg(23);
+            for case in 0..500 {
+                let length = [1usize, 7, 8, 9, 64, 767, 768, 1031][case % 8];
+                let random = |rng: &mut Lcg| -> Vec<f32> {
+                    (0..length)
+                        .map(|_| rng.below(20001) as f32 / 1000.0 - 10.0)
+                        .collect()
+                };
+                let query = random(&mut rng);
+                let vectors: Vec<Vec<f32>> = (0..5).map(|_| random(&mut rng)).collect();
+                let slices = [
+                    vectors[0].as_slice(),
+                    vectors[1].as_slice(),
+                    vectors[2].as_slice(),
+                    vectors[3].as_slice(),
+                    vectors[4].as_slice(),
+                ];
+                let portable = lane_dot_products(&query, slices);
+                // SAFETY: AVX2 was detected above.
+                let avx2 = unsafe { fused_dot_products_avx2(&query, slices) };
+                for k in 0..5 {
+                    assert_eq!(
+                        portable[k].to_bits(),
+                        avx2[k].to_bits(),
+                        "case {case} vector {k}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Lane-summed SPECTER scoring versus the sequential reference, 768-dim vectors.
+    /// Run with `--ignored --nocapture` in a release build.
+    #[test]
+    #[ignore = "benchmark"]
+    fn fused_specter_score_timing() {
+        let mut rng = Lcg(5);
+        let dim = 768;
+        let random_vector = |rng: &mut Lcg| -> Vec<f32> {
+            (0..dim)
+                .map(|_| rng.below(2001) as f32 / 1000.0 - 1.0)
+                .collect()
+        };
+        let query_vector = random_vector(&mut rng);
+        let query = RetrievalQueryData {
+            specter_norm: Some(vector_norm_f32(&query_vector)),
+            specter: Some(std::sync::Arc::new(query_vector)),
+            ..query(&mut rng, Vec::new())
+        };
+        let component_count: usize = std::env::var("BENCH_COMPONENTS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2000);
+        let summaries: Vec<RetrievalSummaryData> = (0..component_count)
+            .map(|index| {
+                let mut summary = summary(&mut rng, format!("c{index}"));
+                let centroid = random_vector(&mut rng);
+                summary.specter_centroid_norm = Some(vector_norm_f32(&centroid));
+                summary.specter_centroid = Some(centroid);
+                summary.exemplar_vectors = (0..4).map(|_| random_vector(&mut rng)).collect();
+                summary.exemplar_norms = summary
+                    .exemplar_vectors
+                    .iter()
+                    .map(|values| vector_norm_f32(values))
+                    .collect();
+                summary
+            })
+            .collect();
+        let reference = |summary: &RetrievalSummaryData| -> f64 {
+            cosine_sim_with_norms(
+                query.specter.as_ref().unwrap(),
+                query.specter_norm.unwrap(),
+                summary.specter_centroid.as_ref().unwrap(),
+                summary.specter_centroid_norm.unwrap(),
+            )
+            .max(specter_exemplar_score(&query, summary))
+        };
+        for (label, fast) in [
+            ("reference", false),
+            ("lanes", true),
+            ("reference", false),
+            ("lanes", true),
+        ] {
+            let start = std::time::Instant::now();
+            let mut total = 0.0;
+            let repeats = 40_000 / summaries.len();
+            for _ in 0..repeats {
+                for summary in &summaries {
+                    total += if fast {
+                        fused_specter_score(&query, summary)
+                    } else {
+                        reference(summary)
+                    };
+                }
+            }
+            let per_score =
+                start.elapsed().as_secs_f64() * 1e9 / ((repeats * summaries.len()) as f64);
+            println!("{label}: {per_score:.0} ns per score (checksum {total:.6})");
         }
     }
 }

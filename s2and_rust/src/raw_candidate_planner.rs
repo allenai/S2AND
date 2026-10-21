@@ -309,6 +309,10 @@ fn validate_required_raw_arrow_paper_metadata(
     Ok(())
 }
 
+/// Queries scored together against each summary in `plan()`; bounds the
+/// precomputed SPECTER rows to this many times the summary count.
+const RETRIEVAL_QUERY_BLOCK: usize = 32;
+
 fn build_retriever_from_raw_arrow_components(
     py: Python<'_>,
     component_order: &[String],
@@ -2031,25 +2035,45 @@ impl RawBlockQueryCandidatePlanner {
         let query_results: Vec<Result<RetrievalPairPlanQueryResult, RetrievalError>> = py
             .allow_threads(|| {
                 let compute = || {
+                    // Each block's SPECTER scores read every summary once; see
+                    // `specter_score_rows`.
                     queries
-                        .par_iter()
+                        .par_chunks(RETRIEVAL_QUERY_BLOCK)
                         .enumerate()
-                        .map(|(query_offset, current_query)| {
-                            let query_index = u32::try_from(query_offset).map_err(|_| {
-                                RetrievalError::Overflow("query index exceeds u32".to_string())
-                            })?;
-                            let excluded_candidate_indices = excluded_candidate_indices_by_query
-                                .as_ref()
-                                .and_then(|values| values[query_offset].as_ref());
-                            retriever.build_pair_plan_query_result(
-                                current_query,
-                                query_first_tokens[query_offset].as_str(),
-                                query_index,
-                                excluded_candidate_indices,
-                                &component_member_indices,
-                                self.top_k,
-                            )
+                        .map(|(block_index, block)| {
+                            let specter_rows = retriever.specter_score_rows(block);
+                            block
+                                .iter()
+                                .zip(&specter_rows)
+                                .enumerate()
+                                .map(|(block_offset, (current_query, specter_row))| {
+                                    let query_offset =
+                                        block_index * RETRIEVAL_QUERY_BLOCK + block_offset;
+                                    let query_index =
+                                        u32::try_from(query_offset).map_err(|_| {
+                                            RetrievalError::Overflow(
+                                                "query index exceeds u32".to_string(),
+                                            )
+                                        })?;
+                                    let excluded_candidate_indices =
+                                        excluded_candidate_indices_by_query
+                                            .as_ref()
+                                            .and_then(|values| values[query_offset].as_ref());
+                                    retriever.build_pair_plan_query_result(
+                                        current_query,
+                                        query_first_tokens[query_offset].as_str(),
+                                        query_index,
+                                        excluded_candidate_indices,
+                                        &component_member_indices,
+                                        self.top_k,
+                                        Some(specter_row.as_slice()),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
                         })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .flatten()
                         .collect::<Vec<_>>()
                 };
                 install_with_optional_rayon_pool(self.num_threads, compute)

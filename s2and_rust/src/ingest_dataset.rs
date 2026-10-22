@@ -142,6 +142,8 @@ pub(crate) fn prefilter_affiliation_text(
     tokens.join(" ")
 }
 
+/// Counter data of a map of string counts; the reference for the gram counters.
+#[cfg(test)]
 pub(crate) fn counter_data_from_usize_map(
     counter_map: HashMap<String, usize>,
 ) -> Option<CounterData> {
@@ -312,39 +314,19 @@ pub(crate) fn preprocess_stage_papers(
                     )
                 })
                 .collect::<Vec<_>>();
-            let title_words = counter_data_from_usize_map(word_ngrams_counter_python_compat(
-                &title, stop_words, false,
-            ));
+            let title_words = title_word_counter_data(&title, stop_words, false);
             let title_chars = if preprocess {
-                counter_data_from_usize_map(char_ngrams_counter_python_compat(
-                    &title,
-                    false,
-                    true,
-                    Some(stop_words),
-                    true,
-                ))
+                char_ngram_counter_data(&title, false, true, Some(stop_words), true)
             } else {
                 None
             };
             let venue_ngrams = if preprocess {
-                counter_data_from_usize_map(char_ngrams_counter_python_compat(
-                    &venue,
-                    false,
-                    true,
-                    Some(venue_stop_words),
-                    true,
-                ))
+                char_ngram_counter_data(&venue, false, true, Some(venue_stop_words), true)
             } else {
                 None
             };
             let journal_ngrams = if preprocess {
-                counter_data_from_usize_map(char_ngrams_counter_python_compat(
-                    &journal_name,
-                    false,
-                    true,
-                    Some(venue_stop_words),
-                    true,
-                ))
+                char_ngram_counter_data(&journal_name, false, true, Some(venue_stop_words), true)
             } else {
                 None
             };
@@ -413,7 +395,7 @@ pub(crate) fn preprocess_stage_signatures(
                 String::new()
             };
             let affiliations = if preprocess && !affiliation_text.is_empty() {
-                counter_data_from_usize_map(word_ngrams_counter(&affiliation_text))
+                word_counter_data(&affiliation_text)
             } else {
                 None
             };

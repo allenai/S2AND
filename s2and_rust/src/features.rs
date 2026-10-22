@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use crate::constraints::count_initials;
 use crate::name_counts::NameCountsData;
 use crate::text_compat::is_python_whitespace_compat;
-use crate::{py_len, py_len_is_one, CounterData};
+use crate::{fnv64_update, py_len, py_len_above_one, py_len_is_one, CounterData, FNV_OFFSET};
 
 pub(crate) fn filter_text_for_char_ngrams(
     text: &str,
@@ -20,6 +20,8 @@ pub(crate) fn filter_text_for_char_ngrams(
         .join(" ")
 }
 
+/// The map form of `char_ngram_counter_data`; its reference in tests.
+#[cfg(test)]
 pub(crate) fn char_ngrams_counter_python_compat(
     text: &str,
     use_unigrams: bool,
@@ -87,6 +89,120 @@ pub(crate) fn char_ngrams_counter_python_compat(
     out
 }
 
+/// `counter_data_from_usize_map(char_ngrams_counter_python_compat(..))` without
+/// a String and a map entry per gram.
+///
+/// Featurizer builds count grams of every title and venue, and the formatted
+/// keys and hashed map inserts dominated that work. A gram's hash is taken over
+/// its characters' UTF-8 bytes, which equal the bytes of the formatted gram.
+/// Grams are counted by sorting on hash, then length and characters, so distinct
+/// grams with colliding hashes stay separate entries. Entries and their f32 sum
+/// follow hash order, as before.
+pub(crate) fn char_ngram_counter_data(
+    text: &str,
+    use_unigrams: bool,
+    use_bigrams: bool,
+    stopwords: Option<&HashSet<String>>,
+    drop_short_tokens: bool,
+) -> Option<CounterData> {
+    if text.is_empty() {
+        return None;
+    }
+    let filtered_text = filter_text_for_char_ngrams(text, stopwords, drop_short_tokens);
+    let chars: Vec<char> = filtered_text.chars().collect();
+    // (hash, length, characters); unused character slots hold '\0'.
+    let mut grams: Vec<(u64, u8, [char; 4])> = Vec::new();
+    let mut push = |gram: &[char]| {
+        let mut hash = FNV_OFFSET;
+        let mut buffer = [0u8; 4];
+        for ch in gram {
+            hash = fnv64_update(hash, ch.encode_utf8(&mut buffer).as_bytes());
+        }
+        let mut key = ['\0'; 4];
+        key[..gram.len()].copy_from_slice(gram);
+        grams.push((hash, gram.len() as u8, key));
+    };
+    if use_unigrams {
+        for ch in chars.iter().filter(|ch| **ch != ' ') {
+            push(std::slice::from_ref(ch));
+        }
+    }
+    for (enabled, width) in [(use_bigrams, 2), (true, 3), (true, 4)] {
+        if enabled {
+            for window in chars.windows(width).filter(|window| !window.contains(&' ')) {
+                push(window);
+            }
+        }
+    }
+    if grams.is_empty() {
+        return None;
+    }
+    grams.sort_unstable();
+    let mut entries: Vec<(u64, f32)> = Vec::new();
+    for run in grams.chunk_by(|left, right| left == right) {
+        entries.push((run[0].0, run.len() as f32));
+    }
+    let sum: f32 = entries.iter().map(|entry| entry.1).sum();
+    Some(CounterData { entries, sum })
+}
+
+/// The words `word_ngrams_counter_python_compat` counts.
+fn filtered_words<'a>(
+    text: &'a str,
+    stopwords: &HashSet<String>,
+    drop_short_tokens: bool,
+) -> Vec<&'a str> {
+    text.split_whitespace()
+        .filter(|word| !stopwords.contains(*word) && (!drop_short_tokens || py_len_above_one(word)))
+        .collect()
+}
+
+/// Counter data of the word unigrams, bigrams and trigrams of `words`, equal to
+/// `counter_data_from_usize_map` over the counts the map counters build.
+///
+/// Grams join words with one space and words hold no whitespace, so a gram's
+/// hash is its words' bytes with a space byte between them. Counting by sorting
+/// on hash, then length and words, avoids a String and a map entry per gram and
+/// keeps distinct grams with colliding hashes as separate entries.
+fn word_gram_counter_data(words: &[&str]) -> Option<CounterData> {
+    let mut grams: Vec<(u64, u8, [&str; 3])> = Vec::with_capacity(3 * words.len());
+    for width in 1..=3 {
+        for window in words.windows(width) {
+            let mut hash = fnv64_update(FNV_OFFSET, window[0].as_bytes());
+            for word in &window[1..] {
+                hash = fnv64_update(fnv64_update(hash, b" "), word.as_bytes());
+            }
+            let mut key = [""; 3];
+            key[..width].copy_from_slice(window);
+            grams.push((hash, width as u8, key));
+        }
+    }
+    if grams.is_empty() {
+        return None;
+    }
+    grams.sort_unstable();
+    let mut entries: Vec<(u64, f32)> = Vec::new();
+    for run in grams.chunk_by(|left, right| left == right) {
+        entries.push((run[0].0, run.len() as f32));
+    }
+    let sum: f32 = entries.iter().map(|entry| entry.1).sum();
+    Some(CounterData { entries, sum })
+}
+
+/// `counter_data_from_usize_map(word_ngrams_counter_python_compat(..))`.
+pub(crate) fn title_word_counter_data(
+    text: &str,
+    stopwords: &HashSet<String>,
+    drop_short_tokens: bool,
+) -> Option<CounterData> {
+    word_gram_counter_data(&filtered_words(text, stopwords, drop_short_tokens))
+}
+
+/// `counter_data_from_usize_map(word_ngrams_counter(..))`.
+pub(crate) fn word_counter_data(text: &str) -> Option<CounterData> {
+    word_gram_counter_data(&text.split_whitespace().collect::<Vec<_>>())
+}
+
 pub(crate) fn word_ngrams_counter_python_compat(
     text: &str,
     stopwords: &HashSet<String>,
@@ -95,10 +211,7 @@ pub(crate) fn word_ngrams_counter_python_compat(
     if text.is_empty() {
         return HashMap::new();
     }
-    let text_split: Vec<&str> = text
-        .split_whitespace()
-        .filter(|word| !stopwords.contains(*word) && (!drop_short_tokens || py_len(word) > 1))
-        .collect();
+    let text_split = filtered_words(text, stopwords, drop_short_tokens);
     if text_split.is_empty() {
         return HashMap::new();
     }
@@ -164,6 +277,85 @@ mod char_ngram_tests {
         assert!(unfiltered.contains_key("li"));
         assert!(unfiltered.contains_key("wu"));
         assert!(unfiltered.contains_key("ab"));
+    }
+
+    #[test]
+    fn counter_data_matches_the_map_form() {
+        use super::char_ngram_counter_data;
+        use crate::counter_data_from_usize_map;
+        use std::collections::HashSet;
+
+        let alphabet: Vec<char> = "ab c  déé文字ßxyz\u{1F600}\u{0}".chars().collect();
+        let stopwords: HashSet<String> = ["ab", "the", "c"]
+            .iter()
+            .map(|word| word.to_string())
+            .collect();
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound as u64) as usize
+        };
+        let mut texts: Vec<String> = vec![String::new(), " ".into(), "a".into(), "the ab c".into()];
+        for _ in 0..3000 {
+            let length = next(40);
+            texts.push(
+                (0..length)
+                    .map(|_| alphabet[next(alphabet.len())])
+                    .collect(),
+            );
+        }
+        for text in &texts {
+            for flags in 0..8 {
+                let (unigrams, bigrams, drop_short) =
+                    (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
+                for words in [None, Some(&stopwords)] {
+                    let expected = counter_data_from_usize_map(char_ngrams_counter_python_compat(
+                        text, unigrams, bigrams, words, drop_short,
+                    ));
+                    let actual =
+                        char_ngram_counter_data(text, unigrams, bigrams, words, drop_short);
+                    match (expected, actual) {
+                        (None, None) => {}
+                        (Some(expected), Some(actual)) => {
+                            assert_eq!(actual.entries, expected.entries, "{text:?} {flags}");
+                            assert_eq!(actual.sum.to_bits(), expected.sum.to_bits(), "{text:?}");
+                        }
+                        (expected, actual) => panic!(
+                            "{text:?} {flags}: {} vs {}",
+                            expected.is_some(),
+                            actual.is_some()
+                        ),
+                    }
+                }
+            }
+            let word_cases = [
+                (
+                    counter_data_from_usize_map(super::word_ngrams_counter(text)),
+                    super::word_counter_data(text),
+                ),
+                (
+                    counter_data_from_usize_map(super::word_ngrams_counter_python_compat(
+                        text, &stopwords, true,
+                    )),
+                    super::title_word_counter_data(text, &stopwords, true),
+                ),
+                (
+                    counter_data_from_usize_map(super::word_ngrams_counter_python_compat(
+                        text, &stopwords, false,
+                    )),
+                    super::title_word_counter_data(text, &stopwords, false),
+                ),
+            ];
+            for (expected, actual) in word_cases {
+                assert_eq!(
+                    expected.map(|data| (data.entries, data.sum.to_bits())),
+                    actual.map(|data| (data.entries, data.sum.to_bits())),
+                    "words of {text:?}"
+                );
+            }
+        }
     }
 }
 

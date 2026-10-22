@@ -155,12 +155,31 @@ class _AttachmentBlockState:
         self.name_tuples = name_tuples
         self._build_args = (arrow_dataset, list(signature_ids), num_threads)
         self._featurizer: Any | None = None
+        self._orcid_info: dict[str, _ArrowIncrementalSignatureInfo] | None = None
         self.planner: Any | None = None
         self.planner_key: tuple[Any, ...] | None = None
 
     @property
     def arrow_dataset(self) -> ArrowDataset:
         return self._build_args[0]
+
+    def orcid_signature_info(
+        self, arrow_lease: Any, signature_ids: Sequence[str]
+    ) -> dict[str, _ArrowIncrementalSignatureInfo]:
+        """Return `_load_arrow_incremental_orcid_signature_info` for ``signature_ids``.
+
+        Every pass asks for most of the block's seeds, so the block's ORCIDs are
+        read once, through the calling pass's lease, instead of once per pass.
+        Entries keep the loader's Arrow row order.
+        """
+        if any(signature_id not in self.signature_ids for signature_id in signature_ids):
+            # Rows outside the block can sit anywhere in the table, so read all
+            # requested ids together to keep the loader's order.
+            return _load_arrow_incremental_orcid_signature_info(arrow_lease, signature_ids)
+        if self._orcid_info is None:
+            self._orcid_info = _load_arrow_incremental_orcid_signature_info(arrow_lease, self._build_args[1])
+        requested = set(signature_ids)
+        return {signature_id: info for signature_id, info in self._orcid_info.items() if signature_id in requested}
 
     def featurizer(self) -> Any:
         if self._featurizer is None:
@@ -5758,8 +5777,11 @@ class Clusterer:
                 seed_orcid_signature_ids = [
                     signature_id for signature_id in seed_signature_to_cluster if signature_id not in signatures
                 ]
+                attachment_state = _ARROW_ATTACH_BLOCK_STATE.get()
                 signatures.update(
-                    _load_arrow_incremental_orcid_signature_info(
+                    attachment_state.orcid_signature_info(arrow_lease, seed_orcid_signature_ids)
+                    if attachment_state is not None
+                    else _load_arrow_incremental_orcid_signature_info(
                         arrow_lease,
                         seed_orcid_signature_ids,
                     )

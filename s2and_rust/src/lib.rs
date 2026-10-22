@@ -1,4 +1,4 @@
-use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, ToPyArray};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyIterator, PyModule};
 use pyo3::Bound;

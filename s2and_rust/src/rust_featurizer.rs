@@ -1969,7 +1969,7 @@ impl RustFeaturizer {
             };
             install_with_optional_rayon_pool(num_threads, compute)
         })?;
-        Ok(numpy::ndarray::Array1::from_vec(labels).to_pyarray(py))
+        Ok(numpy::ndarray::Array1::from_vec(labels).into_pyarray(py))
     }
 
     #[pyo3(
@@ -2100,10 +2100,10 @@ impl RustFeaturizer {
                     ))
                 })?;
         Ok((
-            numpy::ndarray::Array1::from_vec(accumulator.counts).to_pyarray(py),
-            numpy::ndarray::Array1::from_vec(accumulator.sums).to_pyarray(py),
-            numpy::ndarray::Array1::from_vec(accumulator.mins).to_pyarray(py),
-            top_array.to_pyarray(py),
+            numpy::ndarray::Array1::from_vec(accumulator.counts).into_pyarray(py),
+            numpy::ndarray::Array1::from_vec(accumulator.sums).into_pyarray(py),
+            numpy::ndarray::Array1::from_vec(accumulator.mins).into_pyarray(py),
+            top_array.into_pyarray(py),
             accumulator.hard_disallow_pair_count,
         ))
     }
@@ -2200,7 +2200,7 @@ impl RustFeaturizer {
                 None => f64::NAN,
             })
             .collect();
-        Ok(numpy::ndarray::Array1::from_vec(labels).to_pyarray(py))
+        Ok(numpy::ndarray::Array1::from_vec(labels).into_pyarray(py))
     }
 
     fn signature_ids(&self) -> Vec<String> {
@@ -2278,7 +2278,7 @@ impl RustFeaturizer {
         let out_cols = indices.len();
         if row_count == 0 {
             let empty = numpy::ndarray::Array2::<f64>::zeros((0, out_cols));
-            return Ok(empty.to_pyarray(py));
+            return Ok(empty.into_pyarray(py));
         }
 
         let lookup = py.allow_threads(|| {
@@ -2289,7 +2289,7 @@ impl RustFeaturizer {
 
         if out_cols == 0 {
             let empty_cols = numpy::ndarray::Array2::<f64>::zeros((row_count, 0));
-            return Ok(empty_cols.to_pyarray(py));
+            return Ok(empty_cols.into_pyarray(py));
         }
 
         let out = py.allow_threads(|| {
@@ -2315,7 +2315,7 @@ impl RustFeaturizer {
                     err
                 ))
             })?;
-        Ok(array.to_pyarray(py))
+        Ok(array.into_pyarray(py))
     }
 
     /// Features of chosen rows of one chunk of a block's upper triangle.
@@ -2518,12 +2518,12 @@ impl RustFeaturizer {
                 ))
             })?;
             return Ok((
-                matrix_array.to_pyarray(py),
-                numpy::ndarray::Array1::from_vec(aggregate_buffers.counts).to_pyarray(py),
-                valid_counts_array.to_pyarray(py),
-                sums_array.to_pyarray(py),
-                mins_array.to_pyarray(py),
-                maxs_array.to_pyarray(py),
+                matrix_array.into_pyarray(py),
+                numpy::ndarray::Array1::from_vec(aggregate_buffers.counts).into_pyarray(py),
+                valid_counts_array.into_pyarray(py),
+                sums_array.into_pyarray(py),
+                mins_array.into_pyarray(py),
+                maxs_array.into_pyarray(py),
             ));
         }
 
@@ -2646,12 +2646,12 @@ impl RustFeaturizer {
                 ))
             })?;
         Ok((
-            matrix_array.to_pyarray(py),
-            numpy::ndarray::Array1::from_vec(counts).to_pyarray(py),
-            valid_counts_array.to_pyarray(py),
-            sums_array.to_pyarray(py),
-            mins_array.to_pyarray(py),
-            maxs_array.to_pyarray(py),
+            matrix_array.into_pyarray(py),
+            numpy::ndarray::Array1::from_vec(counts).into_pyarray(py),
+            valid_counts_array.into_pyarray(py),
+            sums_array.into_pyarray(py),
+            mins_array.into_pyarray(py),
+            maxs_array.into_pyarray(py),
         ))
     }
 
@@ -2710,12 +2710,12 @@ impl RustFeaturizer {
         let row_count = local_pairs.len();
         if row_count == 0 {
             let empty = numpy::ndarray::Array2::<f64>::zeros((0, out_cols));
-            return Ok(empty.to_pyarray(py));
+            return Ok(empty.into_pyarray(py));
         }
 
         if out_cols == 0 {
             let empty_cols = numpy::ndarray::Array2::<f64>::zeros((row_count, 0));
-            return Ok(empty_cols.to_pyarray(py));
+            return Ok(empty_cols.into_pyarray(py));
         }
 
         let out = py.allow_threads(|| {
@@ -2748,6 +2748,6 @@ impl RustFeaturizer {
                     err
                 ))
             })?;
-        Ok(array.to_pyarray(py))
+        Ok(array.into_pyarray(py))
     }
 }

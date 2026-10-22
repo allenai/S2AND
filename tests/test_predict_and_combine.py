@@ -116,3 +116,38 @@ def test_real_native_and_python_scorers_combine_distances_in_original_row_order(
 
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
     np.testing.assert_array_equal(actual[[1, 3]], [0.0, 1.0])
+
+
+@pytest.mark.parametrize("copy_budget", [1, 1_000_000], ids=["chunked", "one-batch"])
+def test_native_scorers_take_compact_rows_as_views(
+    trained_scorers: tuple[tuple[LGBMClassifier, NativeLightGBMBinaryClassifier], ...],
+    monkeypatch: pytest.MonkeyPatch,
+    copy_budget: int,
+) -> None:
+    """Compact rows reach native scorers without copies and score as the dense rows do."""
+    monkeypatch.setattr(model_module, "_PREDICT_FEATURE_COPY_MAX_BYTES", copy_budget)
+    main, nameless = trained_scorers[0][1], trained_scorers[1][1]
+    dense_main = np.linspace(-4.0, 4.0, 9).reshape(-1, 1)
+    dense_nameless = dense_main[::-1].copy()
+    labels = np.full(9, np.nan)
+    labels[[1, 4]] = [-LARGE_INTEGER, 1 - LARGE_INTEGER]
+    rows = np.flatnonzero(np.isnan(labels))
+    dense, _ = _predict_and_combine(main, nameless, dense_main, labels, dense_nameless, "dense")
+
+    seen: list[np.ndarray] = []
+    original = NativeLightGBMBinaryClassifier.predict_proba_positive
+
+    def recording(self: NativeLightGBMBinaryClassifier, features: np.ndarray, **kwargs: object) -> np.ndarray:
+        seen.append(features)
+        return original(self, features, **kwargs)
+
+    monkeypatch.setattr(NativeLightGBMBinaryClassifier, "predict_proba_positive", recording)
+    compact_main = dense_main[rows].copy()
+    compact_nameless = dense_nameless[rows].copy()
+    compact, _ = _predict_and_combine(
+        main, nameless, compact_main, labels, compact_nameless, "compact", compact_rows=rows
+    )
+
+    assert compact.tobytes() == dense.tobytes()
+    assert seen
+    assert all(np.shares_memory(batch, compact_main) or np.shares_memory(batch, compact_nameless) for batch in seen)

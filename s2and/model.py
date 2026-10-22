@@ -1279,6 +1279,13 @@ def _predict_and_combine(
                 int(predicted_rows) * int(nameless_features.shape[1]) * int(nameless_features.dtype.itemsize)
             )
 
+    # Compact rows are the predicted rows in order, so each batch is a contiguous
+    # range. The native scorer copies its input and scores rows independently,
+    # so it takes those ranges as views; the copies cost seconds per giant block.
+    compact_views = compact_rows is not None and all(
+        model is None or str(getattr(model, "prediction_backend", "python")) == "rust_lightgbm"
+        for model in (classifier, nameless_classifier)
+    )
     if predicted_rows > 0:
         if predicted_rows == row_count:
             combined_predictions, batch_seconds = _predict_rows(
@@ -1294,7 +1301,12 @@ def _predict_and_combine(
             rows_per_chunk = max(1, _PREDICT_FEATURE_COPY_MAX_BYTES // bytes_per_row)
             for start in range(0, predicted_rows, rows_per_chunk):
                 row_indices = predicted_indices[start : start + rows_per_chunk]
-                feature_rows = row_indices if compact_rows is None else np.arange(start, start + len(row_indices))
+                if compact_views:
+                    feature_rows: Any = slice(start, start + len(row_indices))
+                elif compact_rows is None:
+                    feature_rows = row_indices
+                else:
+                    feature_rows = np.arange(start, start + len(row_indices))
                 predict_features = features[feature_rows, :]
                 predict_nameless_features = (
                     nameless_features[feature_rows, :] if nameless_features is not None else None
@@ -1307,7 +1319,12 @@ def _predict_and_combine(
                 predictions[row_indices] = combined_predictions
                 seconds += batch_seconds
         else:
-            feature_rows = predict_flag if compact_rows is None else np.arange(predicted_rows)
+            if compact_views:
+                feature_rows = slice(0, predicted_rows)
+            elif compact_rows is None:
+                feature_rows = predict_flag
+            else:
+                feature_rows = np.arange(predicted_rows)
             predict_features = features[feature_rows, :]
             predict_nameless_features = nameless_features[feature_rows, :] if nameless_features is not None else None
             combined_predictions, batch_seconds = _predict_rows(

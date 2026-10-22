@@ -44,10 +44,12 @@ mod text_compat;
 use arrow_batch_lookup::IndexedArrowReadStats;
 use arrow_dataset::{ArrowDataset, ArrowDatasetResources};
 use coauthors::{CoauthorTables, NameGrams, PaperCoauthors, SignatureCoauthors};
+#[cfg(test)]
 use constraints::{
     constraint_middle_tokens, first_names_name_compatible, lasts_equivalent_for_constraint,
-    middle_names_conflict, same_prefix_tokens,
+    middle_names_conflict,
 };
+use constraints::{constraint_names_conflict, same_prefix_tokens, ConstraintNameKey};
 use feature_schema::FULL_FEATURE_COUNT;
 use features::*;
 pub(crate) use ingest_dataset::*;

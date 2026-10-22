@@ -12,6 +12,7 @@ pub(crate) fn count_initials(s: &str) -> HashMap<char, usize> {
     counts
 }
 
+#[cfg(test)]
 // Compare-time equivalence for canonical last names: joined and spaced
 // spellings of one surname are equivalent ("ou yang" == "ouyang"). Deliberate
 // canonical_v2 compare-time policy (not a legacy artifact shim); mirrors
@@ -25,6 +26,206 @@ pub(crate) fn lasts_equivalent_for_constraint(l1: &str, l2: &str) -> bool {
 
 pub(crate) fn same_prefix_tokens(a: &str, b: &str) -> bool {
     same_prefix_token_iters(a.split_whitespace(), b.split_whitespace())
+}
+
+/// Name inputs of the hard constraint for one signature, split once.
+///
+/// Blocks compare every pair, so splitting per signature instead of per pair
+/// removes most of the constraint's string work.
+pub(crate) struct ConstraintNameKey<'a> {
+    last: &'a str,
+    /// The last name without spaces; it borrows `last` when there are none.
+    last_compact: std::borrow::Cow<'a, str>,
+    first_initial: Option<char>,
+    first_tokens: Vec<&'a str>,
+    middle_tokens: Vec<&'a str>,
+}
+
+impl<'a> ConstraintNameKey<'a> {
+    pub(crate) fn new(first: &'a str, middle: &'a str, last: &'a str) -> Self {
+        let last_compact = if last.contains(' ') {
+            std::borrow::Cow::Owned(last.replace(' ', ""))
+        } else {
+            std::borrow::Cow::Borrowed(last)
+        };
+        Self {
+            last,
+            last_compact,
+            first_initial: if first.is_empty() {
+                None
+            } else {
+                first.chars().next()
+            },
+            first_tokens: first.split_whitespace().collect(),
+            middle_tokens: middle.split_whitespace().collect(),
+        }
+    }
+}
+
+/// Return whether two signatures' names violate the hard constraint.
+///
+/// Matches the name steps of `RustFeaturizer::constraint_value_from_records`:
+/// last names, first initials, first-name compatibility, then middle names.
+/// `first_aliases` answers the name-tuple lookup, which only runs for first
+/// names that share no prefix.
+pub(crate) fn constraint_names_conflict(
+    key_1: &ConstraintNameKey<'_>,
+    key_2: &ConstraintNameKey<'_>,
+    first_aliases: impl FnOnce() -> bool,
+) -> bool {
+    if key_1.last != key_2.last && key_1.last_compact != key_2.last_compact {
+        return true;
+    }
+    if let (Some(c1), Some(c2)) = (key_1.first_initial, key_2.first_initial) {
+        if c1 != c2 {
+            return true;
+        }
+    }
+    let has_first_1 = !key_1.first_tokens.is_empty();
+    let has_first_2 = !key_2.first_tokens.is_empty();
+    let same_prefix = has_first_1
+        && has_first_2
+        && same_prefix_token_iters(
+            key_1.first_tokens.iter().copied(),
+            key_2.first_tokens.iter().copied(),
+        );
+    if has_first_1 && has_first_2 && !same_prefix && !first_aliases() {
+        return true;
+    }
+    let has_tail = key_1.first_tokens.len() > 1 || key_2.first_tokens.len() > 1;
+    if has_tail && (!has_first_1 || !has_first_2 || same_prefix) {
+        let mut tokens_1 = key_1.first_tokens
+            [uncovered_first_tail_start(&key_1.first_tokens, &key_2.first_tokens)..]
+            .to_vec();
+        let mut tokens_2 = key_2.first_tokens
+            [uncovered_first_tail_start(&key_2.first_tokens, &key_1.first_tokens)..]
+            .to_vec();
+        tokens_1.extend_from_slice(&key_1.middle_tokens);
+        tokens_2.extend_from_slice(&key_2.middle_tokens);
+        return middle_names_conflict_small(&tokens_1, &tokens_2);
+    }
+    middle_names_conflict_small(&key_1.middle_tokens, &key_2.middle_tokens)
+}
+
+/// Token and character capacities of the stack summaries in
+/// `middle_names_conflict_small`; longer names use `middle_names_conflict`.
+const SMALL_MIDDLE_TOKENS: usize = 16;
+const SMALL_MIDDLE_CHARS: usize = 96;
+
+/// The sorted, deduplicated summary of one side's middle tokens.
+struct SmallMiddleSummary<'a> {
+    words: [&'a str; SMALL_MIDDLE_TOKENS],
+    word_count: usize,
+    initials: [char; SMALL_MIDDLE_TOKENS],
+    initial_count: usize,
+    chars: [char; SMALL_MIDDLE_CHARS],
+    char_count: usize,
+}
+
+impl<'a> SmallMiddleSummary<'a> {
+    /// Summarize `tokens` like `middle_token_summary`, skipping dropped
+    /// affixes that both sides contain. Return None past the capacities.
+    fn new(tokens: &[&'a str], other: &[&str]) -> Option<Self> {
+        let mut summary = Self {
+            words: [""; SMALL_MIDDLE_TOKENS],
+            word_count: 0,
+            initials: ['\0'; SMALL_MIDDLE_TOKENS],
+            initial_count: 0,
+            chars: ['\0'; SMALL_MIDDLE_CHARS],
+            char_count: 0,
+        };
+        for token in tokens.iter().copied() {
+            if token.is_empty() || (crate::is_dropped_affix(token) && other.contains(&token)) {
+                continue;
+            }
+            let mut chars = token.chars();
+            if let Some(initial) = chars.next() {
+                summary.initials[summary.initial_count] = initial;
+                summary.initial_count += 1;
+            }
+            if chars.next().is_some() {
+                summary.words[summary.word_count] = token;
+                summary.word_count += 1;
+                for ch in token.chars() {
+                    if summary.char_count == SMALL_MIDDLE_CHARS {
+                        return None;
+                    }
+                    summary.chars[summary.char_count] = ch;
+                    summary.char_count += 1;
+                }
+            }
+        }
+        summary.word_count = sort_dedup(&mut summary.words[..summary.word_count]);
+        summary.initial_count = sort_dedup(&mut summary.initials[..summary.initial_count]);
+        summary.char_count = sort_dedup(&mut summary.chars[..summary.char_count]);
+        Some(summary)
+    }
+
+    fn words(&self) -> &[&'a str] {
+        &self.words[..self.word_count]
+    }
+
+    fn initials(&self) -> &[char] {
+        &self.initials[..self.initial_count]
+    }
+
+    fn chars(&self) -> &[char] {
+        &self.chars[..self.char_count]
+    }
+}
+
+/// Sort `values` and move its distinct values to the front; return their count.
+fn sort_dedup<T: Ord + Copy>(values: &mut [T]) -> usize {
+    values.sort_unstable();
+    let mut count = 0;
+    for index in 0..values.len() {
+        if count == 0 || values[index] != values[count - 1] {
+            values[count] = values[index];
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Return whether two sorted, deduplicated slices share no value.
+fn sorted_disjoint<T: Ord>(left: &[T], right: &[T]) -> bool {
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        match left[i].cmp(&right[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => return false,
+        }
+    }
+    true
+}
+
+/// `middle_names_conflict` on stack arrays instead of hash sets.
+///
+/// Pairs dominate constraint time, and their middle names are short, so the
+/// summaries fit on the stack. Longer names take the hash-set version.
+pub(crate) fn middle_names_conflict_small(middle_1: &[&str], middle_2: &[&str]) -> bool {
+    if middle_1.is_empty() || middle_2.is_empty() {
+        return false;
+    }
+    if middle_1.len() > SMALL_MIDDLE_TOKENS || middle_2.len() > SMALL_MIDDLE_TOKENS {
+        return middle_names_conflict(middle_1, middle_2);
+    }
+    let (Some(summary_1), Some(summary_2)) = (
+        SmallMiddleSummary::new(middle_1, middle_2),
+        SmallMiddleSummary::new(middle_2, middle_1),
+    ) else {
+        return middle_names_conflict(middle_1, middle_2);
+    };
+    let conflicting_initials = !summary_1.initials().is_empty()
+        && !summary_2.initials().is_empty()
+        && sorted_disjoint(summary_1.initials(), summary_2.initials());
+    let conflicting_full_names = !summary_1.words().is_empty()
+        && !summary_2.words().is_empty()
+        && sorted_disjoint(summary_1.words(), summary_2.words())
+        && summary_1.chars() != summary_2.chars()
+        && !same_prefix_token_iters(middle_1.iter().copied(), middle_2.iter().copied());
+    conflicting_initials || conflicting_full_names
 }
 
 fn same_prefix_token_iters<'a>(
@@ -73,6 +274,7 @@ fn uncovered_first_tail_start(tokens: &[&str], other: &[&str]) -> usize {
     start
 }
 
+#[cfg(test)]
 /// Return the middle-name tokens that the hard name constraint compares.
 ///
 /// Mirrors `s2and.text.constraint_middle_tokens`. Call it only for compatible
@@ -159,6 +361,7 @@ pub(crate) fn middle_names_conflict(middle_1: &[&str], middle_2: &[&str]) -> boo
     conflicting_initials || conflicting_full_names
 }
 
+#[cfg(test)]
 pub(crate) fn name_tuple_contains(
     map: &HashMap<String, HashSet<String>>,
     a: &str,
@@ -169,6 +372,7 @@ pub(crate) fn name_tuple_contains(
     map.get(a).map_or(false, |vals| vals.contains(b))
 }
 
+#[cfg(test)]
 pub(crate) fn first_names_name_compatible(
     first_1: &str,
     first_2: &str,

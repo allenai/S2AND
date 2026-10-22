@@ -19,6 +19,199 @@ pub(crate) struct RustFeaturizer {
 }
 
 #[cfg(test)]
+mod constraint_key_tests {
+    use super::*;
+
+    /// A deterministic xorshift generator, so the test needs no new dependency.
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+
+        fn tokens(&mut self, vocabulary: &[&str], max_count: usize) -> String {
+            let count = self.below(max_count + 1);
+            let tokens: Vec<&str> = (0..count)
+                .map(|_| vocabulary[self.below(vocabulary.len())])
+                .collect();
+            // Odd spacing checks that splitting matches split_whitespace.
+            let separator = if self.below(8) == 0 { "  " } else { " " };
+            tokens.join(separator)
+        }
+    }
+
+    const FIRST_TOKENS: [&str; 14] = [
+        "j", "jo", "john", "johnny", "james", "jim", "xiao", "qing", "xiaoqing", "jean", "daniel",
+        "é", "émile", "x",
+    ];
+    const MIDDLE_TOKENS: [&str; 18] = [
+        "a",
+        "b",
+        "j",
+        "anne",
+        "ann",
+        "marie",
+        "maria",
+        "van",
+        "de",
+        "der",
+        "mac",
+        "al",
+        "é",
+        "ö",
+        "q",
+        "daniel",
+        "dan",
+        "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+    ];
+    const LASTS: [&str; 7] = [
+        "smith", "ou yang", "ouyang", "li", "lee", "van dyke", "vandyke",
+    ];
+
+    fn signature(first: String, middle: String, last: &str, orcid: Option<&str>) -> SignatureData {
+        SignatureData {
+            first: Some(first.clone()),
+            middle: Some(middle),
+            last_normalized: Some(last.to_string()),
+            orcid: orcid.map(str::to_string),
+            email: None,
+            affiliations: None,
+            coauthors: SignatureCoauthors::default(),
+            position: 0,
+            paper_id: "p".to_string(),
+            name_counts: None,
+            adv_name: Some(first),
+        }
+    }
+
+    fn featurizer(rng: &mut XorShift, count: usize) -> RustFeaturizer {
+        let mut signatures = HashMap::new();
+        let mut signature_ids = Vec::new();
+        for index in 0..count {
+            let first = rng.tokens(&FIRST_TOKENS, 3);
+            let middle = if rng.below(10) == 0 {
+                // Past the stack capacities, so the hash-set fallback runs too.
+                vec!["anne"; 20].join(" ")
+            } else {
+                rng.tokens(&MIDDLE_TOKENS, 4)
+            };
+            let last = LASTS[rng.below(LASTS.len())];
+            let orcid = [None, None, Some("0000-0001"), Some("0000-0002")][rng.below(4)];
+            let signature_id = format!("s{index}");
+            signatures.insert(signature_id.clone(), signature(first, middle, last, orcid));
+            signature_ids.push(signature_id);
+        }
+        let mut name_tuples = HashMap::new();
+        for (a, b) in [
+            ("john", "johnny"),
+            ("james", "jim"),
+            ("xiao", "xiaoqing"),
+            ("jean", "j"),
+        ] {
+            crate::insert_name_tuple_alias(&mut name_tuples, a.to_string(), b.to_string());
+        }
+        let mut cluster_seeds_require = HashMap::new();
+        for _ in 0..count / 5 {
+            let signature_id = format!("s{}", rng.below(count));
+            let cluster = match rng.below(4) {
+                0 => ClusterId::Str("profile".to_string()),
+                value => ClusterId::Int(value as i64),
+            };
+            cluster_seeds_require.insert(signature_id, cluster);
+        }
+        let mut cluster_seeds_disallow = HashSet::new();
+        for _ in 0..count / 5 {
+            let left = format!("s{}", rng.below(count));
+            let right = format!("s{}", rng.below(count));
+            cluster_seeds_disallow.insert(canonical_signature_pair_owned(left, right));
+        }
+        RustFeaturizer {
+            signatures: Arc::new(signatures),
+            signature_ids: Arc::new(signature_ids),
+            papers: Arc::new(HashMap::new()),
+            name_grams: Arc::new(NameGrams::default()),
+            name_tuples: Arc::new(name_tuples),
+            cluster_seeds_disallow,
+            cluster_seeds_require,
+            cluster_seed_require_value: -1.0,
+            cluster_seed_disallow_value: 1e6,
+            name_counts_manifest_sha256: None,
+            cluster_seeds_disallow_index: OnceLock::new(),
+        }
+    }
+
+    #[test]
+    fn keyed_constraints_match_the_per_pair_reference() {
+        let mut rng = XorShift(0x5eed_1234_abcd_0001);
+        for _ in 0..3 {
+            let featurizer = featurizer(&mut rng, 160);
+            let entries: Vec<(&str, &SignatureData)> = featurizer
+                .signature_ids
+                .iter()
+                .map(|signature_id| (signature_id.as_str(), &featurizer.signatures[signature_id]))
+                .collect();
+            let keys = featurizer.constraint_keys(&entries);
+            let mut outcomes = HashSet::new();
+            for flags in 0..8_u8 {
+                let (dont_merge, dont_use_seeds, suppress_orcid) =
+                    (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
+                for left in 0..entries.len() {
+                    for right in 0..entries.len() {
+                        if left == right {
+                            continue;
+                        }
+                        let (left_id, s1) = entries[left];
+                        let (right_id, s2) = entries[right];
+                        let expected = featurizer.constraint_value_from_records(
+                            left_id,
+                            right_id,
+                            s1,
+                            s2,
+                            0.0,
+                            1e4,
+                            dont_merge,
+                            dont_use_seeds,
+                            suppress_orcid,
+                        );
+                        let actual = featurizer.constraint_value_from_keys(
+                            &keys,
+                            left,
+                            right,
+                            0.0,
+                            1e4,
+                            dont_merge,
+                            dont_use_seeds,
+                            suppress_orcid,
+                        );
+                        assert_eq!(
+                            expected.map(f64::to_bits),
+                            actual.map(f64::to_bits),
+                            "{left_id} {right_id} flags={flags}"
+                        );
+                        outcomes.insert(expected.map(f64::to_bits));
+                    }
+                }
+            }
+            // Every outcome occurs, so no branch went untested.
+            for value in [None, Some(0.0), Some(1e4), Some(-1.0), Some(1e6)] {
+                assert!(
+                    outcomes.contains(&value.map(f64::to_bits)),
+                    "{value:?} never occurred"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod compact_index_tests {
     use super::{select_signature_index_layout, SignatureIndexLayout};
 
@@ -73,6 +266,19 @@ mod compact_index_tests {
             .expect_err("out-of-range indices must fail");
         assert!(error.contains("index=2 signature_count=2"));
     }
+}
+
+/// Per-signature constraint inputs, split once for all pairs of one call.
+struct ConstraintKeys<'a> {
+    signature_ids: Vec<&'a str>,
+    names: Vec<ConstraintNameKey<'a>>,
+    orcids: Vec<Option<&'a str>>,
+    requires: Vec<Option<&'a ClusterId>>,
+    /// Whether a signature appears in any disallowed seed pair.
+    in_disallow: Vec<bool>,
+    first_ids: Vec<u32>,
+    /// Sorted ids of the first names each interned first name aliases.
+    first_aliases: Vec<Vec<u32>>,
 }
 
 #[derive(Clone, Copy)]
@@ -246,7 +452,7 @@ impl RustFeaturizer {
             }
         }
 
-        let mut block_lookup: Vec<(&String, &SignatureData)> =
+        let mut block_lookup: Vec<(&str, &SignatureData)> =
             Vec::with_capacity(block_signature_indices.len());
         for signature_index in block_signature_indices.iter() {
             let global_idx = *signature_index as usize;
@@ -255,7 +461,7 @@ impl RustFeaturizer {
                 .signatures
                 .get(signature_id)
                 .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
-            block_lookup.push((signature_id, signature));
+            block_lookup.push((signature_id.as_str(), signature));
         }
 
         let local_pairs =
@@ -274,16 +480,14 @@ impl RustFeaturizer {
         };
         let values = py.allow_threads(|| {
             let compute = || {
+                let keys = self.constraint_keys(&block_lookup);
                 local_pairs
                     .par_iter()
                     .map(|(left_idx, right_idx)| {
-                        let (left_id, s1) = block_lookup[*left_idx];
-                        let (right_id, s2) = block_lookup[*right_idx];
-                        self.constraint_value_from_records(
-                            left_id,
-                            right_id,
-                            s1,
-                            s2,
+                        self.constraint_value_from_keys(
+                            &keys,
+                            *left_idx,
+                            *right_idx,
                             low_value,
                             high_value,
                             dont_merge_cluster_seeds,
@@ -454,6 +658,8 @@ impl RustFeaturizer {
         feats
     }
 
+    /// The per-pair reference for `constraint_value_from_keys`.
+    #[cfg(test)]
     fn constraint_value_from_records(
         &self,
         sig_id1: &str,
@@ -532,6 +738,162 @@ impl RustFeaturizer {
         None
     }
 
+    /// Split the constraint inputs of `entries` once, for pairs among them.
+    fn constraint_keys<'a>(
+        &'a self,
+        entries: &[(&'a str, &'a SignatureData)],
+    ) -> ConstraintKeys<'a> {
+        let names = entries
+            .par_iter()
+            .map(|(_, signature)| {
+                ConstraintNameKey::new(
+                    signature.first_normalized().unwrap_or(""),
+                    signature.middle.as_deref().unwrap_or(""),
+                    signature.last_normalized.as_deref().unwrap_or(""),
+                )
+            })
+            .collect();
+        let requires = if self.cluster_seeds_require.is_empty() {
+            vec![None; entries.len()]
+        } else {
+            entries
+                .iter()
+                .map(|(signature_id, _)| self.cluster_seeds_require.get(*signature_id))
+                .collect()
+        };
+        let in_disallow = if self.cluster_seeds_disallow.is_empty() {
+            vec![false; entries.len()]
+        } else {
+            let members: HashSet<&str> = self
+                .cluster_seeds_disallow
+                .iter()
+                .flat_map(|(left, right)| [left.as_str(), right.as_str()])
+                .collect();
+            entries
+                .iter()
+                .map(|(signature_id, _)| members.contains(signature_id))
+                .collect()
+        };
+        // Intern first names so the name-tuple lookup becomes a search in a
+        // short sorted list instead of two string hashes per pair.
+        let mut first_index: ahash::AHashMap<&str, u32> = ahash::AHashMap::new();
+        let mut distinct_firsts: Vec<&str> = Vec::new();
+        let first_ids = entries
+            .iter()
+            .map(|(_, signature)| {
+                let first = signature.first_normalized().unwrap_or("");
+                *first_index.entry(first).or_insert_with(|| {
+                    distinct_firsts.push(first);
+                    (distinct_firsts.len() - 1) as u32
+                })
+            })
+            .collect();
+        let first_aliases = distinct_firsts
+            .iter()
+            .map(|first| {
+                let mut aliases: Vec<u32> = self
+                    .name_tuples
+                    .get(*first)
+                    .map(|names| {
+                        names
+                            .iter()
+                            .filter_map(|name| first_index.get(name.as_str()).copied())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                aliases.sort_unstable();
+                aliases
+            })
+            .collect();
+        ConstraintKeys {
+            signature_ids: entries
+                .iter()
+                .map(|(signature_id, _)| *signature_id)
+                .collect(),
+            names,
+            orcids: entries
+                .iter()
+                .map(|(_, signature)| signature.orcid.as_deref())
+                .collect(),
+            requires,
+            in_disallow,
+            first_ids,
+            first_aliases,
+        }
+    }
+
+    /// `constraint_value_from_records` for entries `left` and `right` of `keys`.
+    fn constraint_value_from_keys(
+        &self,
+        keys: &ConstraintKeys<'_>,
+        left: usize,
+        right: usize,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        suppress_orcid: bool,
+    ) -> Option<f64> {
+        if keys.in_disallow[left]
+            && keys.in_disallow[right]
+            && self.cluster_seeds_disallow_contains(
+                keys.signature_ids[left],
+                keys.signature_ids[right],
+            )
+        {
+            return Some(self.cluster_seed_disallow_value);
+        }
+        if !incremental_dont_use_cluster_seeds {
+            if let (Some(c1), Some(c2)) = (keys.requires[left], keys.requires[right]) {
+                if c1 == c2 {
+                    return Some(self.cluster_seed_require_value);
+                }
+                if dont_merge_cluster_seeds {
+                    return Some(self.cluster_seed_disallow_value);
+                }
+            }
+        }
+        if !suppress_orcid {
+            if let (Some(o1), Some(o2)) = (keys.orcids[left], keys.orcids[right]) {
+                if o1 == o2 {
+                    return Some(low_value);
+                }
+            }
+        }
+        let first_id_2 = keys.first_ids[right];
+        let aliases = &keys.first_aliases[keys.first_ids[left] as usize];
+        if constraint_names_conflict(&keys.names[left], &keys.names[right], || {
+            aliases.binary_search(&first_id_2).is_ok()
+        }) {
+            return Some(high_value);
+        }
+        None
+    }
+
+    /// Constraint keys for the signatures that `pairs` index, and each global
+    /// index's slot in them (`u32::MAX` when unused).
+    fn constraint_keys_for_pairs<'a>(
+        &'a self,
+        signature_ids: &'a [String],
+        pairs: impl Iterator<Item = (u32, u32)>,
+    ) -> PyResult<(ConstraintKeys<'a>, Vec<u32>)> {
+        let mut slots = vec![u32::MAX; signature_ids.len()];
+        let mut entries: Vec<(&'a str, &'a SignatureData)> = Vec::new();
+        for (left, right) in pairs {
+            for index in [left as usize, right as usize] {
+                if slots[index] == u32::MAX {
+                    let signature_id = &signature_ids[index];
+                    let signature = self.signatures.get(signature_id).ok_or_else(|| {
+                        pyo3::exceptions::PyKeyError::new_err(signature_id.clone())
+                    })?;
+                    slots[index] = entries.len() as u32;
+                    entries.push((signature_id.as_str(), signature));
+                }
+            }
+        }
+        Ok((self.constraint_keys(&entries), slots))
+    }
+
     fn signature_id_order(&self) -> &[String] {
         debug_assert_eq!(self.signature_ids.len(), self.signatures.len());
         self.signature_ids.as_slice()
@@ -539,19 +901,6 @@ impl RustFeaturizer {
 
     fn full_feature_count(&self) -> usize {
         FULL_FEATURE_COUNT
-    }
-
-    fn signature_lookup(&self) -> PyResult<Vec<&SignatureData>> {
-        let signature_ids = self.signature_id_order();
-        let mut lookup: Vec<&SignatureData> = Vec::with_capacity(signature_ids.len());
-        for signature_id in signature_ids.iter() {
-            let signature = self
-                .signatures
-                .get(signature_id)
-                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
-            lookup.push(signature);
-        }
-        Ok(lookup)
     }
 
     fn signature_paper_entry(&self, index: usize) -> PyResult<(&SignatureData, &PaperData)> {
@@ -1478,27 +1827,17 @@ impl RustFeaturizer {
             }
         }
 
-        let mut lookup: Vec<(&String, &SignatureData)> = Vec::with_capacity(signature_count);
-        for signature_id in signature_ids.iter() {
-            let signature = self
-                .signatures
-                .get(signature_id)
-                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
-            lookup.push((signature_id, signature));
-        }
-
         let values = py.allow_threads(|| {
-            let compute = || {
-                pairs
+            let compute = || -> PyResult<Vec<Option<f64>>> {
+                let (keys, slots) =
+                    self.constraint_keys_for_pairs(signature_ids, pairs.iter().copied())?;
+                Ok(pairs
                     .par_iter()
                     .map(|(left_idx, right_idx)| {
-                        let (left_id, s1) = lookup[*left_idx as usize];
-                        let (right_id, s2) = lookup[*right_idx as usize];
-                        self.constraint_value_from_records(
-                            left_id,
-                            right_id,
-                            s1,
-                            s2,
+                        self.constraint_value_from_keys(
+                            &keys,
+                            slots[*left_idx as usize] as usize,
+                            slots[*right_idx as usize] as usize,
                             low_value,
                             high_value,
                             dont_merge_cluster_seeds,
@@ -1506,10 +1845,10 @@ impl RustFeaturizer {
                             suppress_orcid,
                         )
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>())
             };
             install_with_optional_rayon_pool(num_threads, compute)
-        });
+        })?;
 
         Ok(values)
     }
@@ -1565,24 +1904,23 @@ impl RustFeaturizer {
             }
         }
 
-        let lookup = self.signature_lookup()?;
         let labels = py.allow_threads(|| {
-            let compute = || {
-                left_indices
+            let compute = || -> PyResult<Vec<f64>> {
+                let (keys, slots) = self.constraint_keys_for_pairs(
+                    signature_ids,
+                    left_indices
+                        .iter()
+                        .copied()
+                        .zip(right_indices.iter().copied()),
+                )?;
+                Ok(left_indices
                     .par_iter()
                     .zip(right_indices.par_iter())
                     .map(|(left_idx, right_idx)| {
-                        let left = *left_idx as usize;
-                        let right = *right_idx as usize;
-                        let sig_id1 = signature_ids[left].as_str();
-                        let sig_id2 = signature_ids[right].as_str();
-                        let s1 = lookup[left];
-                        let s2 = lookup[right];
-                        match self.constraint_value_from_records(
-                            sig_id1,
-                            sig_id2,
-                            s1,
-                            s2,
+                        match self.constraint_value_from_keys(
+                            &keys,
+                            slots[*left_idx as usize] as usize,
+                            slots[*right_idx as usize] as usize,
                             low_value,
                             high_value,
                             dont_merge_cluster_seeds,
@@ -1593,10 +1931,10 @@ impl RustFeaturizer {
                             None => f64::NAN,
                         }
                     })
-                    .collect::<Vec<f64>>()
+                    .collect::<Vec<f64>>())
             };
             install_with_optional_rayon_pool(num_threads, compute)
-        });
+        })?;
         Ok(numpy::ndarray::Array1::from_vec(labels).to_pyarray(py))
     }
 

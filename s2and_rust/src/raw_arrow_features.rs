@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::constraints::same_prefix_tokens;
@@ -84,7 +84,7 @@ pub(crate) fn build_raw_arrow_feature(
             paper_data.year.filter(|year| *year > 0),
         )
     } else {
-        (HashSet::new(), HashSet::new(), None)
+        (HashSet::default(), HashSet::default(), None)
     };
 
     let coauthor_hashes = coauthor_terms.iter().map(|term| term.hash).collect();
@@ -319,13 +319,13 @@ pub(crate) fn build_raw_arrow_summary<S: AsRef<str>>(
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     max_exemplars: usize,
 ) -> Result<RetrievalSummaryData, RetrievalError> {
-    let mut first_name_counts: HashMap<String, usize> = HashMap::new();
-    let mut middle_initial_counts: HashMap<u64, usize> = HashMap::new();
-    let mut coauthor_counts: HashMap<u64, usize> = HashMap::new();
-    let mut non_mega_coauthor_counts: HashMap<u64, usize> = HashMap::new();
-    let mut affiliation_counts: HashMap<u64, usize> = HashMap::new();
-    let mut venue_counts: HashMap<u64, usize> = HashMap::new();
-    let mut title_counts: HashMap<u64, usize> = HashMap::new();
+    let mut first_name_counts: HashMap<String, usize> = HashMap::default();
+    let mut middle_initial_counts: HashMap<u64, usize> = HashMap::default();
+    let mut coauthor_counts: HashMap<u64, usize> = HashMap::default();
+    let mut non_mega_coauthor_counts: HashMap<u64, usize> = HashMap::default();
+    let mut affiliation_counts: HashMap<u64, usize> = HashMap::default();
+    let mut venue_counts: HashMap<u64, usize> = HashMap::default();
+    let mut title_counts: HashMap<u64, usize> = HashMap::default();
     let mut years = Vec::<i64>::new();
     let mut orcid_hashes = Vec::<u64>::new();
     let mut specter_vectors = Vec::<&[f32]>::new();
@@ -710,9 +710,9 @@ mod tests {
             None,
             None,
             &RawNameCountMaps::default(),
-            &HashSet::new(),
-            &HashSet::new(),
-            &HashMap::new(),
+            &HashSet::default(),
+            &HashSet::default(),
+            &HashMap::default(),
             false,
         );
 
@@ -735,7 +735,7 @@ mod tests {
             orcid: None,
             position: Some(0),
         };
-        let paper_authors = HashMap::from([(
+        let paper_authors = HashMap::from_iter([(
             "p1".to_string(),
             vec![
                 (0, "Alice Smith".to_string()),
@@ -745,10 +745,11 @@ mod tests {
             ],
         )]);
         let coauthor_blocks =
-            paper_coauthor_blocks([&signature], &paper_authors, &HashMap::new()).expect("blocks");
+            paper_coauthor_blocks([&signature], &paper_authors, &HashMap::default())
+                .expect("blocks");
         let mut author_index = PaperAuthorIndex::default();
         author_index
-            .extend(["p1"], &paper_authors, &HashMap::new())
+            .extend(["p1"], &paper_authors, &HashMap::default())
             .expect("index");
 
         let feature = build_raw_arrow_feature(
@@ -757,9 +758,9 @@ mod tests {
             coauthor_blocks.get("p1"),
             None,
             &RawNameCountMaps::default(),
-            &HashSet::new(),
-            &HashSet::new(),
-            &HashMap::new(),
+            &HashSet::default(),
+            &HashSet::default(),
+            &HashMap::default(),
             false,
         );
         let author_signals = author_index.author_signals(&signature).expect("indexed");
@@ -805,14 +806,14 @@ mod tests {
                 None,
                 None,
                 &RawNameCountMaps::default(),
-                &HashSet::new(),
-                &HashSet::new(),
-                &HashMap::new(),
+                &HashSet::default(),
+                &HashSet::default(),
+                &HashMap::default(),
                 false,
             );
 
             assert_eq!(feature.query.year, None, "raw year={year:?}");
-            let features = HashMap::from([("s1".to_string(), feature)]);
+            let features = HashMap::from_iter([("s1".to_string(), feature)]);
             let summary = build_raw_arrow_summary("cluster", &["s1".to_string()], &features, 1)
                 .expect("missing years must produce a valid retrieval summary");
             assert_eq!(summary.year_min, None, "raw year={year:?}");

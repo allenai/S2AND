@@ -257,10 +257,11 @@ impl RustHybridCentroidRetriever {
         summaries: Vec<RetrievalSummaryData>,
         with_overlap_index: bool,
     ) -> Result<Self, RetrievalError> {
-        let mut component_index_by_key = HashMap::with_capacity(summaries.len());
-        let mut coauthor_cluster_df = HashMap::new();
-        let mut non_mega_coauthor_cluster_df = HashMap::new();
-        let mut affiliation_cluster_df = HashMap::new();
+        let mut component_index_by_key =
+            HashMap::with_capacity_and_hasher(summaries.len(), Default::default());
+        let mut coauthor_cluster_df = HashMap::default();
+        let mut non_mega_coauthor_cluster_df = HashMap::default();
+        let mut affiliation_cluster_df = HashMap::default();
         for (index, summary) in summaries.iter().enumerate() {
             component_index_by_key.insert(summary.component_key.clone(), index);
             increment_df_from_counter(&summary.coauthor_counts, &mut coauthor_cluster_df);

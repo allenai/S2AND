@@ -16,9 +16,9 @@
 //! equality, gram keys are injective, and every count is an integer summed
 //! without rounding.
 
+use crate::HashMap;
 use pyo3::prelude::*;
 use rayon::prelude::*;
-use std::collections::HashMap;
 
 use crate::text_compat::compute_block_compat;
 use crate::PaperId;
@@ -241,7 +241,7 @@ impl CoauthorTables {
         papers: impl IntoIterator<Item = (&'a PaperId, &'a [(i64, String)])>,
         with_grams: bool,
     ) -> PyResult<Self> {
-        let mut name_ids: HashMap<&str, u32> = HashMap::new();
+        let mut name_ids: HashMap<&str, u32> = HashMap::default();
         let mut names: Vec<&str> = Vec::new();
         let mut paper_authors: Vec<(&PaperId, Vec<(i64, u32)>)> = Vec::new();
         for (paper_id, authors) in papers {
@@ -270,7 +270,7 @@ impl CoauthorTables {
             .par_iter()
             .map(|name| compute_block_compat(name))
             .collect();
-        let mut block_ids: HashMap<&str, u32> = HashMap::new();
+        let mut block_ids: HashMap<&str, u32> = HashMap::default();
         let name_blocks: Vec<u32> = block_names
             .iter()
             .map(|block| {
@@ -527,8 +527,8 @@ fn removed_gram_jaccard(
 mod tests {
     use super::*;
     use crate::features::counter_jaccard_data;
+    use crate::HashSet;
     use crate::{fnv64, CounterData};
-    use std::collections::HashSet;
 
     /// The per-signature coauthor records this module replaces, built exactly
     /// as `preprocess_stage_signatures` did.
@@ -540,7 +540,7 @@ mod tests {
 
     fn reference_char_ngrams_counter(text: &str) -> HashMap<String, usize> {
         let chars: Vec<char> = text.chars().collect();
-        let mut out: HashMap<String, usize> = HashMap::new();
+        let mut out: HashMap<String, usize> = HashMap::default();
         for width in [2usize, 3usize, 4usize] {
             if chars.len() < width {
                 continue;
@@ -865,7 +865,7 @@ mod tests {
                 gram.pop();
             }
         }
-        let (mut hashes, mut keys) = (HashSet::new(), HashSet::new());
+        let (mut hashes, mut keys) = (HashSet::default(), HashSet::default());
         visit(&mut Vec::with_capacity(4), &mut hashes, &mut keys);
         assert_eq!(
             hashes.len(),

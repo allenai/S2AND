@@ -4,7 +4,13 @@ use pyo3::types::{PyAny, PyDict, PyIterator, PyModule};
 use pyo3::Bound;
 use rayon::prelude::*;
 use std::cmp::Ordering;
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::hash_map::Entry;
+
+/// Hash maps and sets with aHash. Planner, featurizer and reader maps hold
+/// millions of string keys, and SipHash dominated their inserts and lookups.
+/// Both hashers are seeded per process, so no result depends on map order.
+pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, ahash::RandomState>;
+pub(crate) type HashSet<T> = std::collections::HashSet<T, ahash::RandomState>;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -425,10 +431,10 @@ mod tests {
         let mut output = OrderedSubblocks::default();
         output.insert("alice".to_string(), vec!["s1".to_string()]);
         output.insert("bob".to_string(), vec!["s2".to_string()]);
-        let mut counts = HashMap::<String, HashMap<String, f64>>::new();
+        let mut counts = HashMap::<String, HashMap<String, f64>>::default();
         counts.insert(
             "alice".to_string(),
-            HashMap::from([("bob".to_string(), f64::NAN)]),
+            HashMap::from_iter([("bob".to_string(), f64::NAN)]),
         );
 
         let result = sorted_subblock_merge_candidates(&output, 3, &counts);
@@ -466,7 +472,7 @@ mod tests {
             vec!["s3".to_string(), "s4".to_string(), "s5".to_string()],
         );
 
-        let candidates = sorted_subblock_merge_candidates(&output, 5, &HashMap::new())
+        let candidates = sorted_subblock_merge_candidates(&output, 5, &HashMap::default())
             .expect("merge candidates");
 
         assert_eq!(
@@ -480,7 +486,10 @@ mod tests {
 
     #[test]
     fn sorted_subblock_merge_candidates_orcid_counts_are_order_independent() {
-        let counts = HashMap::from([("wei".to_string(), HashMap::from([("li".to_string(), 7.0)]))]);
+        let counts = HashMap::from_iter([(
+            "wei".to_string(),
+            HashMap::from_iter([("li".to_string(), 7.0)]),
+        )]);
         let mut forward = OrderedSubblocks::default();
         forward.insert("a|middle=wei".to_string(), vec!["s1".to_string()]);
         forward.insert("a|middle=li".to_string(), vec!["s2".to_string()]);
@@ -496,11 +505,11 @@ mod tests {
         assert_eq!(forward_candidates[0].1, 7.0);
         assert_eq!(reverse_candidates[0].1, 7.0);
         assert_eq!(
-            HashSet::from([
+            HashSet::from_iter([
                 forward_candidates[0].0 .0.clone(),
                 forward_candidates[0].0 .1.clone()
             ]),
-            HashSet::from([
+            HashSet::from_iter([
                 reverse_candidates[0].0 .0.clone(),
                 reverse_candidates[0].0 .1.clone()
             ])
@@ -513,7 +522,7 @@ mod tests {
         output.insert("a".to_string(), vec!["s1".to_string()]);
         output.insert("b".to_string(), vec!["s2".to_string(), "s3".to_string()]);
         output.insert("c".to_string(), vec!["s4".to_string()]);
-        let rows = HashMap::from([
+        let rows = HashMap::from_iter([
             (
                 "s1".to_string(),
                 SubblockingSignatureRow {
@@ -574,7 +583,7 @@ mod tests {
 
         assert_eq!(
             output.to_hashmap(),
-            HashMap::from([
+            HashMap::from_iter([
                 ("a".to_string(), vec!["s1".to_string()]),
                 ("b".to_string(), vec!["s2".to_string(), "s3".to_string()]),
                 ("c".to_string(), vec!["s4".to_string()]),
@@ -592,7 +601,7 @@ mod tests {
         let mut output = OrderedSubblocks::default();
         output.insert("a".to_string(), vec!["s1".to_string()]);
         output.insert("b".to_string(), vec!["s1".to_string(), "s2".to_string()]);
-        let rows = HashMap::new();
+        let rows = HashMap::default();
         let mut telemetry = SubblockingTelemetry::default();
 
         let error = apply_orcid_subblocking(&mut output, &rows, 3, &mut telemetry)
@@ -677,11 +686,11 @@ mod tests {
                 position: None,
             },
         ];
-        let prefixes = HashSet::new();
+        let prefixes = HashSet::default();
         // canonical_v2 pretranslation maps every dash-like code point (here
         // U+2010) to '-' before transliteration, so no unidecode entry is
         // needed for the dash.
-        let unidecode_char_map = HashMap::new();
+        let unidecode_char_map = HashMap::default();
 
         normalize_subblocking_signature_rows(&mut rows, &prefixes, &unidecode_char_map);
 
@@ -706,7 +715,7 @@ mod tests {
 
     #[test]
     fn normalize_text_compat_drops_digits_like_python_reference() {
-        let unidecode_char_map = HashMap::new();
+        let unidecode_char_map = HashMap::default();
 
         assert_eq!(
             normalize_text_compat_from_map("A1 B-2", &unidecode_char_map),
@@ -720,7 +729,7 @@ mod tests {
 
     #[test]
     fn normalize_title_compat_preserves_identifying_digits() {
-        let unidecode_char_map = HashMap::new();
+        let unidecode_char_map = HashMap::default();
 
         assert_eq!(
             normalize_title_compat_from_map("Part 1: Co3O4 in 2025", &unidecode_char_map),
@@ -730,7 +739,7 @@ mod tests {
 
     #[test]
     fn normalize_text_compat_missing_mapping_does_not_panic() {
-        let unidecode_char_map = HashMap::new();
+        let unidecode_char_map = HashMap::default();
         assert_eq!(
             normalize_text_compat_from_map("\u{00C9}lodie", &unidecode_char_map),
             "elodie",
@@ -766,9 +775,9 @@ mod tests {
         let papers = preprocess_stage_papers(
             &[input],
             false,
-            &HashMap::new(),
-            &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::default(),
+            &HashSet::default(),
+            &HashSet::default(),
         );
 
         let paper = &papers[0].1;
@@ -791,7 +800,7 @@ mod tests {
 
     #[test]
     fn raw_arrow_summary_rejects_out_of_range_year_before_mean_sum() {
-        let features = HashMap::from([(
+        let features = HashMap::from_iter([(
             "s1".to_string(),
             raw_arrow_feature_for_test("alice", Some(i64::MAX)),
         )]);
@@ -827,8 +836,8 @@ mod tests {
 
     #[test]
     fn residual_summary_signal_cache_uses_tuple_key_for_nul_collisions() {
-        let mut cache = HashMap::<(String, String), RawArrowSummarySignalData>::new();
-        let features = HashMap::from([
+        let mut cache = HashMap::<(String, String), RawArrowSummarySignalData>::default();
+        let features = HashMap::from_iter([
             (
                 "m1".to_string(),
                 raw_arrow_feature_for_test("alice", Some(2020)),
@@ -838,13 +847,13 @@ mod tests {
                 raw_arrow_feature_for_test("bob", Some(2021)),
             ),
         ]);
-        let signatures = HashMap::from([
+        let signatures = HashMap::from_iter([
             ("m1".to_string(), raw_arrow_signature_for_test("p1")),
             ("m2".to_string(), raw_arrow_signature_for_test("p2")),
         ]);
         let mut author_index = PaperAuthorIndex::default();
         author_index
-            .extend(["p1", "p2"], &HashMap::new(), &HashMap::new())
+            .extend(["p1", "p2"], &HashMap::default(), &HashMap::default())
             .expect("papers without author rows index empty");
 
         let first_member_ids = {

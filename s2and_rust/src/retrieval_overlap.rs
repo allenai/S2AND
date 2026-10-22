@@ -16,8 +16,8 @@
 //! sums are the same. Hit counts for the mega-author rescue rule are integer
 //! counts of the same lookups. Scores are bit-identical either way.
 
+use crate::HashMap;
 use rayon::prelude::*;
-use std::collections::HashMap;
 
 use crate::{
     overlap_query_term_weight, CounterData, RetrievalError, RetrievalOverlapConfig,

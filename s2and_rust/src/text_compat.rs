@@ -1,5 +1,5 @@
+use crate::{HashMap, HashSet};
 use pyo3::prelude::PyResult;
-use std::collections::{HashMap, HashSet};
 
 pub(crate) fn ensure_unidecode_for_text(
     text: &str,
@@ -532,7 +532,7 @@ mod tests {
         canonical_name_count_keys_compat, canonicalize_name_parts_compat,
         normalize_text_compat_native, text_unidecode_char, MIXED_CASE_NON_INITIALS,
     };
-    use std::collections::HashSet;
+    use crate::HashSet;
     use std::path::Path;
 
     #[test]

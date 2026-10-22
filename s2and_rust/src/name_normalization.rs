@@ -1,6 +1,6 @@
 //! Public canonical_v2 name helpers share the runtime normalization rules.
 
-use std::collections::HashMap;
+use crate::HashMap;
 use std::sync::OnceLock;
 
 use pyo3::prelude::*;
@@ -107,7 +107,7 @@ fn py_canonical_name_count_keys(
         middle: parts.1,
         last: parts.2,
     });
-    HashMap::from([
+    HashMap::from_iter([
         ("first".to_string(), keys.first),
         ("last".to_string(), keys.last),
         ("first_last".to_string(), keys.first_last),

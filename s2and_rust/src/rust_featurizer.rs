@@ -93,7 +93,7 @@ mod constraint_key_tests {
     }
 
     fn featurizer(rng: &mut XorShift, count: usize) -> RustFeaturizer {
-        let mut signatures = HashMap::new();
+        let mut signatures = HashMap::default();
         let mut signature_ids = Vec::new();
         for index in 0..count {
             let first = rng.tokens(&FIRST_TOKENS, 3);
@@ -109,7 +109,7 @@ mod constraint_key_tests {
             signatures.insert(signature_id.clone(), signature(first, middle, last, orcid));
             signature_ids.push(signature_id);
         }
-        let mut name_tuples = HashMap::new();
+        let mut name_tuples = HashMap::default();
         for (a, b) in [
             ("john", "johnny"),
             ("james", "jim"),
@@ -118,7 +118,7 @@ mod constraint_key_tests {
         ] {
             crate::insert_name_tuple_alias(&mut name_tuples, a.to_string(), b.to_string());
         }
-        let mut cluster_seeds_require = HashMap::new();
+        let mut cluster_seeds_require = HashMap::default();
         for _ in 0..count / 5 {
             let signature_id = format!("s{}", rng.below(count));
             let cluster = match rng.below(4) {
@@ -127,7 +127,7 @@ mod constraint_key_tests {
             };
             cluster_seeds_require.insert(signature_id, cluster);
         }
-        let mut cluster_seeds_disallow = HashSet::new();
+        let mut cluster_seeds_disallow = HashSet::default();
         for _ in 0..count / 5 {
             let left = format!("s{}", rng.below(count));
             let right = format!("s{}", rng.below(count));
@@ -136,7 +136,7 @@ mod constraint_key_tests {
         RustFeaturizer {
             signatures: Arc::new(signatures),
             signature_ids: Arc::new(signature_ids),
-            papers: Arc::new(HashMap::new()),
+            papers: Arc::new(HashMap::default()),
             name_grams: Arc::new(NameGrams::default()),
             name_tuples: Arc::new(name_tuples),
             cluster_seeds_disallow,
@@ -159,7 +159,7 @@ mod constraint_key_tests {
                 .map(|signature_id| (signature_id.as_str(), &featurizer.signatures[signature_id]))
                 .collect();
             let keys = featurizer.constraint_keys(&entries);
-            let mut outcomes = HashSet::new();
+            let mut outcomes = HashSet::default();
             for flags in 0..8_u8 {
                 let (dont_merge, dont_use_seeds, suppress_orcid) =
                     (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
@@ -508,11 +508,11 @@ impl RustFeaturizer {
 
     fn cluster_seeds_disallow_index(&self) -> &HashMap<String, HashSet<String>> {
         self.cluster_seeds_disallow_index.get_or_init(|| {
-            let mut index: HashMap<String, HashSet<String>> = HashMap::new();
+            let mut index: HashMap<String, HashSet<String>> = HashMap::default();
             for (left, right) in self.cluster_seeds_disallow.iter() {
                 index
                     .entry(left.clone())
-                    .or_insert_with(HashSet::new)
+                    .or_insert_with(HashSet::default)
                     .insert(right.clone());
             }
             index
@@ -780,7 +780,7 @@ impl RustFeaturizer {
         };
         // Intern first names so the name-tuple lookup becomes a search in a
         // short sorted list instead of two string hashes per pair.
-        let mut first_index: ahash::AHashMap<&str, u32> = ahash::AHashMap::new();
+        let mut first_index: ahash::AHashMap<&str, u32> = ahash::AHashMap::default();
         let mut distinct_firsts: Vec<&str> = Vec::new();
         let first_ids = entries
             .iter()
@@ -1350,7 +1350,7 @@ impl RustFeaturizer {
         cluster_seed_disallows_path: Option<&str>,
         selected_signature_id_set: &HashSet<String>,
     ) -> PyResult<(HashMap<String, ClusterId>, HashSet<(String, String)>)> {
-        let mut cluster_seeds_require = HashMap::<String, ClusterId>::new();
+        let mut cluster_seeds_require = HashMap::<String, ClusterId>::default();
         if let Some(path) = cluster_seeds_path {
             let (_component_order, members_by_component) = read_raw_arrow_cluster_seeds(path)?;
             for (component_key, members) in members_by_component {
@@ -1362,7 +1362,7 @@ impl RustFeaturizer {
                 }
             }
         }
-        let mut cluster_seeds_disallow = HashSet::<(String, String)>::new();
+        let mut cluster_seeds_disallow = HashSet::<(String, String)>::default();
         if let Some(path) = cluster_seed_disallows_path {
             for (left, right) in read_raw_arrow_cluster_seed_disallows(path)? {
                 if selected_signature_id_set.contains(&left)
@@ -1653,7 +1653,8 @@ impl RustFeaturizer {
                 ids
             }
         };
-        let mut seen_signature_ids = HashSet::<String>::with_capacity(signature_ids.len());
+        let mut seen_signature_ids =
+            HashSet::<String>::with_capacity_and_hasher(signature_ids.len(), Default::default());
         signature_ids.retain(|signature_id| seen_signature_ids.insert(signature_id.clone()));
         let missing_signature_ids = signature_ids
             .iter()
@@ -1686,7 +1687,7 @@ impl RustFeaturizer {
                                         .read_specter(&needed_paper_ids, num_threads)
                                         .map(|(specter, _)| specter)
                                 } else {
-                                    Ok(HashMap::new())
+                                    Ok(HashMap::default())
                                 }
                             },
                         )
@@ -1742,7 +1743,8 @@ impl RustFeaturizer {
         cluster_seeds_path: Option<String>,
         cluster_seed_disallows_path: Option<String>,
     ) -> PyResult<Self> {
-        let mut selected_signature_id_set = HashSet::<String>::with_capacity(signature_ids.len());
+        let mut selected_signature_id_set =
+            HashSet::<String>::with_capacity_and_hasher(signature_ids.len(), Default::default());
         let mut ordered_signature_ids = signature_ids;
         ordered_signature_ids
             .retain(|signature_id| selected_signature_id_set.insert(signature_id.clone()));
@@ -1757,7 +1759,7 @@ impl RustFeaturizer {
                 "featurizer view is missing requested signature ids: {missing_signature_ids:?}"
             )));
         }
-        let mut cluster_seeds_require = HashMap::<String, ClusterId>::new();
+        let mut cluster_seeds_require = HashMap::<String, ClusterId>::default();
         if let Some(path) = cluster_seeds_path.as_ref() {
             let (_component_order, members_by_component) = read_raw_arrow_cluster_seeds(path)?;
             for (component_key, members) in members_by_component {
@@ -1769,7 +1771,7 @@ impl RustFeaturizer {
                 }
             }
         }
-        let mut cluster_seeds_disallow = HashSet::<(String, String)>::new();
+        let mut cluster_seeds_disallow = HashSet::<(String, String)>::default();
         if let Some(path) = cluster_seed_disallows_path.as_ref() {
             for (left, right) in read_raw_arrow_cluster_seed_disallows(path)? {
                 if selected_signature_id_set.contains(&left)

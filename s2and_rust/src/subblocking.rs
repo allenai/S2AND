@@ -1,7 +1,8 @@
+use crate::{HashMap, HashSet};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use pyo3::Bound;
-use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
+use std::collections::{hash_map::Entry, BTreeMap};
 use std::time::Instant;
 
 use crate::arrow_dataset::ArrowDatasetResources;
@@ -64,8 +65,8 @@ pub(crate) fn apply_subblocking_key_names(
     maximum_size: usize,
 ) {
     let rewrites: Vec<(usize, String, String)> = {
-        let mut first_counts: HashMap<&str, usize> = HashMap::new();
-        let mut split_counts: HashMap<(&str, &str), usize> = HashMap::new();
+        let mut first_counts: HashMap<&str, usize> = HashMap::default();
+        let mut split_counts: HashMap<(&str, &str), usize> = HashMap::default();
         for row in rows.iter() {
             *first_counts.entry(row.first.as_str()).or_insert(0) += 1;
             if !row.first.contains(' ') {
@@ -744,7 +745,7 @@ pub(crate) fn exact_native_graph_edge_scores(
     config: &NativeGraphSubblockingConfig,
 ) -> HashMap<(usize, usize), f64> {
     let neighbor_count = evidences.len().min((config.neighbors + 1).max(2));
-    let mut edge_scores = HashMap::<(usize, usize), f64>::new();
+    let mut edge_scores = HashMap::<(usize, usize), f64>::default();
     for left_index in 0..evidences.len() {
         let mut neighbors: Vec<(usize, f64)> = (0..evidences.len())
             .map(|right_index| {
@@ -821,7 +822,7 @@ pub(crate) fn projection_native_graph_edge_scores(
     random_seed: u64,
     dimension: usize,
 ) -> HashMap<(usize, usize), f64> {
-    let mut edge_scores = HashMap::<(usize, usize), f64>::new();
+    let mut edge_scores = HashMap::<(usize, usize), f64>::default();
     let mut state = projection_seed(signature_ids, random_seed);
     for _projection_index in 0..config.projection_count {
         let mut projection = vec![0.0_f32; dimension];
@@ -883,7 +884,7 @@ pub(crate) fn add_sparse_native_graph_edge_scores(
         sparse_evidence_neighbors: config.sparse_evidence_neighbors,
         ..SparseEvidenceStats::default()
     };
-    let mut postings: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut postings: HashMap<String, Vec<usize>> = HashMap::default();
     for (index, evidence) in evidences.iter().enumerate() {
         if config.sparse_evidence_include_coauthors {
             for value in evidence.coauthor_blocks.iter() {
@@ -1019,7 +1020,7 @@ pub(crate) fn ordered_native_graph_components(
     uf: &mut NativeGraphUnionFind,
 ) -> (Vec<Vec<String>>, Vec<usize>, HashMap<usize, usize>) {
     let mut root_by_index = Vec::with_capacity(signature_ids.len());
-    let mut components_by_root: HashMap<usize, Vec<String>> = HashMap::new();
+    let mut components_by_root: HashMap<usize, Vec<String>> = HashMap::default();
     for (index, signature_id) in signature_ids.iter().enumerate() {
         let root = uf.find(index);
         root_by_index.push(root);
@@ -1060,7 +1061,7 @@ pub(crate) fn native_component_adjacency(
     component_id_by_root: &HashMap<usize, usize>,
     aggregate: bool,
 ) -> HashMap<usize, HashMap<usize, f64>> {
-    let mut adjacency: HashMap<usize, HashMap<usize, f64>> = HashMap::new();
+    let mut adjacency: HashMap<usize, HashMap<usize, f64>> = HashMap::default();
     for ((left_index, right_index), score) in edge_scores {
         let left_component = component_id_by_root[&root_by_index[*left_index]];
         let right_component = component_id_by_root[&root_by_index[*right_index]];
@@ -1101,7 +1102,7 @@ pub(crate) fn component_affinities_to_bins(
     adjacency: &HashMap<usize, HashMap<usize, f64>>,
     top_k: usize,
 ) -> HashMap<usize, f64> {
-    let mut scores_by_bin: HashMap<usize, Vec<f64>> = HashMap::new();
+    let mut scores_by_bin: HashMap<usize, Vec<f64>> = HashMap::default();
     if let Some(neighbors) = adjacency.get(&component_id) {
         for (neighbor_component_id, score) in neighbors {
             if let Some(bin_index) = component_to_bin.get(neighbor_component_id) {
@@ -1109,7 +1110,7 @@ pub(crate) fn component_affinities_to_bins(
             }
         }
     }
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for (bin_index, mut scores) in scores_by_bin {
         if top_k > 0 && scores.len() > top_k {
             scores.sort_by(|left, right| right.total_cmp(left));
@@ -1182,7 +1183,7 @@ pub(crate) fn pack_native_component_ids_greedy(
     });
     let mut bins: Vec<Vec<usize>> = Vec::new();
     let mut bin_sizes: Vec<usize> = Vec::new();
-    let mut component_to_bin: HashMap<usize, usize> = HashMap::new();
+    let mut component_to_bin: HashMap<usize, usize> = HashMap::default();
     for component_id in component_order {
         let component_size = components[component_id].len();
         if component_size > target_subblock_size {
@@ -1190,7 +1191,7 @@ pub(crate) fn pack_native_component_ids_greedy(
                 "Graph component size {component_size} exceeds target_subblock_size={target_subblock_size}"
             )));
         }
-        let mut candidate_bins: HashMap<usize, f64> = HashMap::new();
+        let mut candidate_bins: HashMap<usize, f64> = HashMap::default();
         if use_aggregate {
             for (bin_index, affinity) in component_affinities_to_bins(
                 component_id,
@@ -1294,7 +1295,7 @@ pub(crate) fn local_move_native_component_bins(
         .collect();
     for _pass_index in 0..passes {
         let mut moved = false;
-        let mut component_to_bin: HashMap<usize, usize> = HashMap::new();
+        let mut component_to_bin: HashMap<usize, usize> = HashMap::default();
         for (bin_index, component_ids) in working_bins.iter().enumerate() {
             for component_id in component_ids {
                 component_to_bin.insert(*component_id, bin_index);
@@ -1415,10 +1416,10 @@ pub(crate) fn native_graph_cluster(
 ) -> PyResult<HashMap<String, Vec<String>>> {
     let fallback_start = Instant::now();
     if signature_ids.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(HashMap::default());
     }
     if signature_ids.len() <= target_subblock_size {
-        return Ok(HashMap::from([("0".to_string(), signature_ids)]));
+        return Ok(HashMap::from_iter([("0".to_string(), signature_ids)]));
     }
     let config = config.effective_for_group(signature_ids.len());
     if config.neighbor_mode == "exact" && signature_ids.len() > config.max_exact_knn_group_size {
@@ -1521,7 +1522,7 @@ pub(crate) fn native_graph_cluster(
 pub(crate) fn collect_native_graph_signature_groups(
     signature_groups: &[Vec<String>],
 ) -> Vec<String> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut out = Vec::new();
     for group in signature_groups {
         for signature_id in group {
@@ -1545,7 +1546,7 @@ pub(crate) fn build_native_graph_evidence_store(
     telemetry.load_metrics.signatures_record_batches_scanned = 0;
     telemetry.load_metrics.signatures_rows_scanned = fallback_signature_ids.len();
     telemetry.load_metrics.signatures_rows_loaded = fallback_signature_ids.len();
-    let mut paper_ids = HashSet::<String>::new();
+    let mut paper_ids = HashSet::<String>::default();
     for signature_id in fallback_signature_ids.iter() {
         let row = row_by_signature_id.get(signature_id).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
@@ -1578,7 +1579,7 @@ pub(crate) fn build_native_graph_evidence_store(
     telemetry.load_metrics.specter_rows_loaded = specter_by_paper_id.len();
 
     let affiliation_stopwords = extract_affiliation_stopwords(py)?;
-    let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
+    let mut unidecode_char_map: HashMap<char, String> = HashMap::default();
     for signature_id in fallback_signature_ids.iter() {
         let row = row_by_signature_id
             .get(signature_id)
@@ -1594,7 +1595,8 @@ pub(crate) fn build_native_graph_evidence_store(
     }
 
     let dimension = specter_by_paper_id.values().next().map_or(0usize, Vec::len);
-    let mut signatures = HashMap::with_capacity(fallback_signature_ids.len());
+    let mut signatures =
+        HashMap::with_capacity_and_hasher(fallback_signature_ids.len(), Default::default());
     for signature_id in fallback_signature_ids {
         let row = row_by_signature_id
             .get(&signature_id)
@@ -1606,7 +1608,7 @@ pub(crate) fn build_native_graph_evidence_store(
         let position = row
             .position
             .expect("fallback signature row author_position was validated");
-        let mut coauthor_blocks = HashSet::new();
+        let mut coauthor_blocks = HashSet::default();
         if let Some(authors) = paper_authors.get(&row.paper_id) {
             for (author_position, author_name) in authors {
                 if *author_position == position {
@@ -1820,7 +1822,7 @@ pub(crate) fn prefix_counts(
     signature_ids: &[String],
     width: usize,
 ) -> Vec<PrefixCount> {
-    let mut counts: HashMap<String, PrefixCount> = HashMap::new();
+    let mut counts: HashMap<String, PrefixCount> = HashMap::default();
     for (index, (name, signature_id)) in names.iter().zip(signature_ids.iter()).enumerate() {
         let prefix = py_prefix(name, width);
         let entry = counts.entry(prefix.clone()).or_insert_with(|| PrefixCount {
@@ -2001,7 +2003,7 @@ pub(crate) fn sorted_subblock_merge_candidates(
     maximum_size: usize,
     first_k_letter_counts_sorted: &HashMap<String, HashMap<String, f64>>,
 ) -> PyResult<Vec<((String, String), f64)>> {
-    let mut metadata: HashMap<String, SubblockMergeMetadata> = HashMap::new();
+    let mut metadata: HashMap<String, SubblockMergeMetadata> = HashMap::default();
     let mut mergeable_keys = Vec::<String>::new();
     for (key, values) in output.iter() {
         if values.len() >= maximum_size {
@@ -2076,7 +2078,7 @@ mod subdivision_tests {
         sorted_subblock_merge_candidates, subdivide_helper_rust, OrderedSubblocks,
         SubblockingSignatureRow,
     };
-    use std::collections::HashMap;
+    use crate::HashMap;
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
@@ -2084,11 +2086,14 @@ mod subdivision_tests {
 
     #[test]
     fn native_graph_edge_pruning_breaks_score_ties_by_ascending_pair() {
-        let mut edge_scores = HashMap::from([((0, 3), 1.0), ((0, 1), 1.0), ((0, 2), 1.0)]);
+        let mut edge_scores = HashMap::from_iter([((0, 3), 1.0), ((0, 1), 1.0), ((0, 2), 1.0)]);
 
         prune_native_graph_edge_scores(&mut edge_scores, 2);
 
-        assert_eq!(edge_scores, HashMap::from([((0, 1), 1.0), ((0, 2), 1.0)]));
+        assert_eq!(
+            edge_scores,
+            HashMap::from_iter([((0, 1), 1.0), ((0, 2), 1.0)])
+        );
     }
 
     #[test]
@@ -2180,7 +2185,7 @@ mod subdivision_tests {
         output.insert("cheng".to_string(), strings(&["s2"]));
 
         let candidates =
-            sorted_subblock_merge_candidates(&output, 2, &HashMap::new()).expect("valid keys");
+            sorted_subblock_merge_candidates(&output, 2, &HashMap::default()).expect("valid keys");
 
         assert_eq!(
             candidates,
@@ -2360,14 +2365,14 @@ pub(crate) fn merge_small_subblocks(
     let candidates =
         sorted_subblock_merge_candidates(output, maximum_size, first_k_letter_counts_sorted)?;
     let mut merging_log: BTreeMap<usize, HashSet<String>> = BTreeMap::new();
-    let mut inverse_merging_log: HashMap<String, usize> = HashMap::new();
+    let mut inverse_merging_log: HashMap<String, usize> = HashMap::default();
     let mut cluster_id = 0usize;
 
     for (pair, _score) in candidates {
         let pair_1_cluster_id = inverse_merging_log.get(&pair.0).copied();
         let pair_2_cluster_id = inverse_merging_log.get(&pair.1).copied();
         if pair_1_cluster_id.is_none() && pair_2_cluster_id.is_none() {
-            let mut keys = HashSet::new();
+            let mut keys = HashSet::default();
             keys.insert(pair.0.clone());
             keys.insert(pair.1.clone());
             merging_log.insert(cluster_id, keys);
@@ -2438,7 +2443,7 @@ pub(crate) fn merge_small_subblocks(
         }
     }
 
-    let mut counter_of_keys: HashMap<String, usize> = HashMap::new();
+    let mut counter_of_keys: HashMap<String, usize> = HashMap::default();
     for keys_to_merge in merging_log.values() {
         for key in keys_to_merge {
             *counter_of_keys.entry(key.clone()).or_insert(0) += 1;
@@ -2499,7 +2504,7 @@ pub(crate) fn apply_orcid_subblocking(
     telemetry: &mut SubblockingTelemetry,
 ) -> PyResult<()> {
     let subblock_ids: Vec<String> = output.iter().map(|(key, _values)| key.clone()).collect();
-    let mut sig_id_to_subblock_index: HashMap<String, usize> = HashMap::new();
+    let mut sig_id_to_subblock_index: HashMap<String, usize> = HashMap::default();
     let mut sig_id_order = Vec::<String>::new();
     for (subblock_index, (subblock_id, sig_ids)) in output.entries.iter().enumerate() {
         for sig_id in sig_ids {
@@ -2519,7 +2524,7 @@ pub(crate) fn apply_orcid_subblocking(
         }
     }
 
-    let mut orcid_to_sig_ids: HashMap<String, Vec<String>> = HashMap::new();
+    let mut orcid_to_sig_ids: HashMap<String, Vec<String>> = HashMap::default();
     let mut orcid_order = Vec::<String>::new();
     for sig_id in sig_id_order.iter() {
         let Some(row) = row_by_signature_id.get(sig_id) else {
@@ -2541,12 +2546,12 @@ pub(crate) fn apply_orcid_subblocking(
     }
 
     let mut parent: Vec<usize> = (0..subblock_ids.len()).collect();
-    let mut orcid_to_subblock_indices: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut orcid_to_subblock_indices: HashMap<String, Vec<usize>> = HashMap::default();
     for orcid in orcid_order.iter() {
         let Some(orcid_sig_ids) = orcid_to_sig_ids.get(orcid) else {
             continue;
         };
-        let mut seen_subblock_indices = HashSet::<usize>::new();
+        let mut seen_subblock_indices = HashSet::<usize>::default();
         let mut unique_subblock_indices = Vec::<usize>::new();
         for sig_id in orcid_sig_ids {
             let Some(subblock_index) = sig_id_to_subblock_index.get(sig_id).copied() else {
@@ -2566,9 +2571,9 @@ pub(crate) fn apply_orcid_subblocking(
         orcid_to_subblock_indices.insert(orcid.clone(), unique_subblock_indices);
     }
 
-    let mut components_by_root: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut components_by_root: HashMap<usize, Vec<usize>> = HashMap::default();
     let mut component_roots = Vec::<usize>::new();
-    let mut seen_roots = HashSet::<usize>::new();
+    let mut seen_roots = HashSet::<usize>::default();
     for subblock_index in 0..subblock_ids.len() {
         let root = find_orcid_subblock_root(&mut parent, subblock_index);
         components_by_root
@@ -2580,7 +2585,7 @@ pub(crate) fn apply_orcid_subblocking(
         }
     }
 
-    let mut skipped_orcid_counts_by_root: HashMap<usize, Vec<(String, usize)>> = HashMap::new();
+    let mut skipped_orcid_counts_by_root: HashMap<usize, Vec<(String, usize)>> = HashMap::default();
     for orcid in orcid_order.iter() {
         let Some(unique_subblock_indices) = orcid_to_subblock_indices.get(orcid) else {
             continue;
@@ -2849,11 +2854,11 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     // subblocks would pass a set check but bind to an arbitrary subblock in the
     // downstream ORCID merge, silently diverging from the Python implementation
     // (which asserts multiset equality).
-    let mut input_counts: HashMap<String, usize> = HashMap::new();
+    let mut input_counts: HashMap<String, usize> = HashMap::default();
     for signature_id in signature_ids.into_iter() {
         *input_counts.entry(signature_id).or_insert(0) += 1;
     }
-    let mut output_counts: HashMap<String, usize> = HashMap::new();
+    let mut output_counts: HashMap<String, usize> = HashMap::default();
     for (_key, values) in output.iter() {
         for signature_id in values.iter() {
             *output_counts.entry(signature_id.clone()).or_insert(0) += 1;
@@ -2896,7 +2901,7 @@ pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
     use_orcid_subblocking: bool,
 ) -> PyResult<SubblockPlan> {
     let dataset = dataset.shared();
-    let mut seen_signature_ids = HashSet::<String>::new();
+    let mut seen_signature_ids = HashSet::<String>::default();
     for signature_id in &signature_ids {
         if !seen_signature_ids.insert(signature_id.clone()) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -2931,7 +2936,7 @@ pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
         .collect();
     let text_module = py.import("s2and.text")?;
     let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
-    let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
+    let mut unidecode_char_map: HashMap<char, String> = HashMap::default();
     for row in signature_rows.iter() {
         ensure_unidecode_for_text(&row.first, &mut unidecode_char_map)?;
         ensure_unidecode_for_text(&row.middle, &mut unidecode_char_map)?;

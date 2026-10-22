@@ -1,5 +1,5 @@
+use crate::HashMap;
 use rayon::ThreadPoolBuilder;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 const RAYON_POOL_CACHE_MAX_ENTRIES: usize = 8;
@@ -17,7 +17,7 @@ struct RayonPoolCache {
 impl RayonPoolCache {
     fn new() -> Self {
         Self {
-            pools: HashMap::new(),
+            pools: HashMap::default(),
             access_counter: 0,
         }
     }

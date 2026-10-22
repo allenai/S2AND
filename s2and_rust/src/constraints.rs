@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use crate::{HashMap, HashSet};
 
 pub(crate) fn count_initials(s: &str) -> HashMap<char, usize> {
-    let mut counts = HashMap::new();
+    let mut counts = HashMap::default();
     for part in s.split(' ') {
         if !part.is_empty() {
             if let Some(ch) = part.chars().next() {
@@ -317,9 +317,9 @@ fn middle_token_summary<'a>(
     tokens: &[&'a str],
     overlapping_affixes: &HashSet<&str>,
 ) -> (HashSet<&'a str>, HashSet<char>, HashSet<char>) {
-    let mut words = HashSet::new();
-    let mut initials = HashSet::new();
-    let mut word_chars = HashSet::new();
+    let mut words = HashSet::default();
+    let mut initials = HashSet::default();
+    let mut word_chars = HashSet::default();
     for token in tokens.iter().copied() {
         if token.is_empty() || overlapping_affixes.contains(token) {
             continue;
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn name_tuple_compatibility_does_not_apply_extra_case_normalization() {
-        let mut name_tuples = HashMap::new();
+        let mut name_tuples = HashMap::default();
         crate::insert_name_tuple_alias(&mut name_tuples, "Bill".to_string(), "William".to_string());
 
         assert!(first_names_name_compatible("Bill", "William", &name_tuples));
@@ -412,7 +412,11 @@ mod tests {
     fn empty_prefix_tokens_are_not_positive_evidence() {
         assert!(!same_prefix_tokens("", "alice"));
         assert!(!same_prefix_tokens("", ""));
-        assert!(first_names_name_compatible("", "alice", &HashMap::new()));
+        assert!(first_names_name_compatible(
+            "",
+            "alice",
+            &HashMap::default()
+        ));
     }
 
     fn conflict(first_1: &str, middle_1: &str, first_2: &str, middle_2: &str) -> bool {

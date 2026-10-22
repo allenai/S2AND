@@ -10,8 +10,8 @@
 //! evidence. A signature's values are read off its paper's table, so they
 //! equal the per-signature computation exactly.
 
+use crate::{HashMap, HashSet};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::raw_arrow::readers::{RawArrowAuthorSignalData, RawArrowSignature};
@@ -49,7 +49,7 @@ impl PaperCoauthorBlocks {
         authors: &[(i64, String)],
         unidecode_char_map: &HashMap<char, String>,
     ) -> Result<Self, String> {
-        let mut block_indices: HashMap<String, u32> = HashMap::new();
+        let mut block_indices: HashMap<String, u32> = HashMap::default();
         let mut block_counts: Vec<u32> = Vec::new();
         let mut blocked_authors = Vec::new();
         for (position, name) in authors {
@@ -205,8 +205,8 @@ pub(crate) struct QueryPaperAuthorTables<'a> {
 impl Default for PaperAuthorIndex {
     fn default() -> Self {
         Self {
-            name_shards: (0..NAME_SHARDS).map(|_| HashMap::new()).collect(),
-            papers: HashMap::new(),
+            name_shards: (0..NAME_SHARDS).map(|_| HashMap::default()).collect(),
+            papers: HashMap::default(),
         }
     }
 }
@@ -317,7 +317,7 @@ impl PaperAuthorIndex {
         paper_authors: &HashMap<String, Vec<(i64, String)>>,
         unidecode_char_map: &HashMap<char, String>,
     ) -> Result<(), String> {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let pending: Vec<&str> = paper_ids
             .into_iter()
             .filter(|paper_id| !self.papers.contains_key(*paper_id) && seen.insert(*paper_id))
@@ -365,7 +365,7 @@ impl PaperAuthorIndex {
         paper_authors: &HashMap<String, Vec<(i64, String)>>,
         unidecode_char_map: &HashMap<char, String>,
     ) -> Result<QueryPaperAuthorTables<'_>, String> {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let pending: Vec<&str> = paper_ids
             .into_iter()
             .filter(|paper_id| !self.papers.contains_key(*paper_id) && seen.insert(*paper_id))
@@ -373,7 +373,7 @@ impl PaperAuthorIndex {
         if pending.is_empty() {
             return Ok(QueryPaperAuthorTables {
                 seeds: self,
-                papers: HashMap::new(),
+                papers: HashMap::default(),
             });
         }
         let normalized = NormalizedAuthors::new(&pending, paper_authors, unidecode_char_map);
@@ -383,7 +383,7 @@ impl PaperAuthorIndex {
             .zip(normalized.buckets.par_iter())
             .enumerate()
             .map(|(shard, (seeds, bucket))| {
-                let mut query_names = HashMap::<&str, u32>::new();
+                let mut query_names = HashMap::<&str, u32>::default();
                 bucket
                     .iter()
                     .map(|(paper, author)| {
@@ -502,7 +502,7 @@ mod tests {
         authors: &[(i64, String)],
         unidecode_char_map: &HashMap<char, String>,
     ) -> Vec<(u64, u8)> {
-        let mut coauthor_blocks = HashSet::new();
+        let mut coauthor_blocks = HashSet::default();
         if let Some(signature_position) = position {
             for (position, author_name) in authors.iter() {
                 let normalized = normalize_text_compat_from_map(author_name, unidecode_char_map);
@@ -530,8 +530,8 @@ mod tests {
         authors: &[(i64, String)],
         unidecode_char_map: &HashMap<char, String>,
     ) -> (HashSet<String>, HashSet<String>) {
-        let mut paper_author_names = HashSet::new();
-        let mut local10_author_names = HashSet::new();
+        let mut paper_author_names = HashSet::default();
+        let mut local10_author_names = HashSet::default();
         for (author_position, author_name) in authors.iter() {
             let normalized = normalize_text_compat_from_map(author_name, unidecode_char_map);
             if normalized.is_empty() {
@@ -660,7 +660,7 @@ mod tests {
     /// drawn from the same names. Keys are paper ids.
     fn synthetic_papers() -> HashMap<String, Vec<(i64, String)>> {
         let mut rng = Lcg(3);
-        let mut papers = HashMap::new();
+        let mut papers = HashMap::default();
         let mut giant: Vec<(i64, String)> = (0..3000)
             .map(|index| (index as i64 * 3 - 40, raw_name(&mut rng)))
             .collect();
@@ -683,7 +683,7 @@ mod tests {
     }
 
     fn unidecode_map(papers: &HashMap<String, Vec<(i64, String)>>) -> HashMap<char, String> {
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         for authors in papers.values() {
             for (_, name) in authors {
                 crate::text_compat::ensure_unidecode_for_text(name, &mut map)
@@ -748,7 +748,7 @@ mod tests {
         index
             .extend(papers.keys().map(String::as_str), &papers, &map)
             .expect("index");
-        let mut names_by_id = HashMap::new();
+        let mut names_by_id = HashMap::default();
         for (shard, names) in index.name_shards.iter().enumerate() {
             for (name, local) in names {
                 assert_eq!(name_shard(name), shard);
@@ -977,7 +977,7 @@ mod tests {
             .take(3)
             .collect();
         assert_eq!(names.len(), 3);
-        let papers = HashMap::from([
+        let papers = HashMap::from_iter([
             ("seed".to_string(), vec![(0, names[0].clone())]),
             ("query-a".to_string(), vec![(0, names[1].clone())]),
             ("query-b".to_string(), vec![(0, names[2].clone())]),
@@ -986,7 +986,7 @@ mod tests {
                 vec![(0, names[1].clone()), (1, names[1].clone())],
             ),
         ]);
-        let map = HashMap::new();
+        let map = HashMap::default();
         let mut seeds = PaperAuthorIndex::default();
         seeds.extend(["seed"], &papers, &map).unwrap();
         let cached_seed = seeds.author_signals(&signature("seed", Some(0))).unwrap();
@@ -1071,14 +1071,15 @@ mod tests {
     fn unindexed_papers_are_errors_and_duplicate_positions_are_rejected() {
         let index = PaperAuthorIndex::default();
         assert!(index.author_signals(&signature("p", Some(0))).is_err());
-        let papers = HashMap::from([(
+        let papers = HashMap::from_iter([(
             "p".to_string(),
             vec![(0, "anna li".to_string()), (0, "bo li".to_string())],
         )]);
         let mut index = PaperAuthorIndex::default();
-        assert!(index.extend(["p"], &papers, &HashMap::new()).is_err());
+        assert!(index.extend(["p"], &papers, &HashMap::default()).is_err());
         assert!(
-            paper_coauthor_blocks([&signature("p", Some(0))], &papers, &HashMap::new()).is_err()
+            paper_coauthor_blocks([&signature("p", Some(0))], &papers, &HashMap::default())
+                .is_err()
         );
     }
 }

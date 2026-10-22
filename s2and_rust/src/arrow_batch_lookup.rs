@@ -1,9 +1,9 @@
+use crate::HashSet;
 use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::record_batch::RecordBatch;
 use memmap2::Mmap;
 use pyo3::PyResult;
 use rayon::prelude::*;
-use std::collections::HashSet;
 
 use crate::arrow_dataset::RetainedFile;
 use crate::fnv64;
@@ -188,7 +188,7 @@ impl ArrowBatchLookupIndex {
     /// Return a superset of needed batches. Consumers must still exact-filter
     /// ids because the compact index stores only 64-bit hashes.
     pub(crate) fn sorted_batch_indices(&self, keys: &HashSet<String>) -> Vec<usize> {
-        let mut out = HashSet::new();
+        let mut out = HashSet::default();
         for key in keys {
             let hash = fnv64(key.as_bytes());
             let mut index = self.lower_bound(hash);

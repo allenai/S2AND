@@ -39,9 +39,9 @@ pub(crate) fn canonical_signature_pair_owned(a: String, b: String) -> (String, S
 
 pub(crate) fn extract_pair_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<(String, String)>> {
     if obj.is_none() {
-        return Ok(HashSet::new());
+        return Ok(HashSet::default());
     }
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for item in PyIterator::from_object(obj)? {
         let tuple = item?;
         let (a, b): (String, String) = tuple.extract()?;
@@ -56,9 +56,9 @@ pub(crate) fn insert_name_tuple_alias(
     b: String,
 ) {
     map.entry(a.clone())
-        .or_insert_with(HashSet::new)
+        .or_insert_with(HashSet::default)
         .insert(b.clone());
-    map.entry(b).or_insert_with(HashSet::new).insert(a);
+    map.entry(b).or_insert_with(HashSet::default).insert(a);
 }
 
 pub(crate) fn extract_name_tuples_map(
@@ -69,7 +69,7 @@ pub(crate) fn extract_name_tuples_map(
             "name_tuples must be an explicit collection of pairs, not a path or string sentinel",
         ));
     }
-    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut out: HashMap<String, HashSet<String>> = HashMap::default();
     for item in PyIterator::from_object(obj)? {
         let tuple = item?;
         let (a, b): (String, String) = tuple.extract()?;
@@ -82,10 +82,10 @@ pub(crate) fn extract_cluster_seeds_require(
     obj: &Bound<'_, PyAny>,
 ) -> PyResult<HashMap<String, ClusterId>> {
     if obj.is_none() {
-        return Ok(HashMap::new());
+        return Ok(HashMap::default());
     }
     let dict = obj.downcast::<PyDict>()?;
-    let mut out = HashMap::with_capacity(dict.len());
+    let mut out = HashMap::with_capacity_and_hasher(dict.len(), Default::default());
     for (k, v) in dict.iter() {
         let key: String = k.extract()?;
         let val: ClusterId = if let Ok(i) = v.extract::<i64>() {
@@ -110,7 +110,7 @@ pub(crate) fn cluster_id_to_string(cluster_id: &ClusterId) -> String {
 }
 
 pub(crate) fn extract_required_string_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<String>> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for item in PyIterator::from_object(obj)? {
         out.insert(item?.extract()?);
     }
@@ -248,7 +248,7 @@ pub(crate) fn unidecode_map_for_raw_arrow_inputs(
     }
     let signature_chars = signatures
         .par_iter()
-        .fold(HashSet::new, |mut chars, (_, signature)| {
+        .fold(HashSet::default, |mut chars, (_, signature)| {
             add_chars(&mut chars, &signature.author_first);
             add_chars(&mut chars, &signature.author_middle);
             add_chars(&mut chars, &signature.author_last);
@@ -258,25 +258,25 @@ pub(crate) fn unidecode_map_for_raw_arrow_inputs(
             }
             chars
         })
-        .reduce(HashSet::new, union);
+        .reduce(HashSet::default, union);
     let paper_chars = papers
         .par_iter()
-        .fold(HashSet::new, |mut chars, (_, paper)| {
+        .fold(HashSet::default, |mut chars, (_, paper)| {
             add_chars(&mut chars, &paper.title);
             add_chars(&mut chars, &paper.venue);
             add_chars(&mut chars, &paper.journal_name);
             chars
         })
-        .reduce(HashSet::new, union);
+        .reduce(HashSet::default, union);
     let author_chars = paper_authors
         .par_iter()
-        .fold(HashSet::new, |mut chars, (_, authors)| {
+        .fold(HashSet::default, |mut chars, (_, authors)| {
             for (_position, author_name) in authors.iter() {
                 add_chars(&mut chars, author_name);
             }
             chars
         })
-        .reduce(HashSet::new, union);
+        .reduce(HashSet::default, union);
     union(union(signature_chars, paper_chars), author_chars)
         .into_iter()
         .map(|ch| (ch, crate::text_compat::text_unidecode_char(ch).to_string()))

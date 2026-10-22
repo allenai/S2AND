@@ -1,7 +1,8 @@
+use crate::{HashMap, HashSet};
 use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
 use rayon::prelude::*;
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use crate::name_counts::NameCountsData;
@@ -166,7 +167,8 @@ fn read_keyed_batches_in_parallel<V: Send>(
         .par_iter()
         .map(|batch| read_batch(batch).ok())
         .collect::<Option<Vec<_>>>()?;
-    let mut out = HashMap::with_capacity(parts.iter().map(HashMap::len).sum());
+    let mut out =
+        HashMap::with_capacity_and_hasher(parts.iter().map(HashMap::len).sum(), Default::default());
     for part in parts {
         for (key, value) in part {
             if out.insert(key, value).is_some() {
@@ -223,10 +225,10 @@ fn read_signature_batches(
     batches: &[RecordBatch],
     keep_signature_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, RawArrowSignature>> {
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     // Borrow ids directly from the retained Arrow batches so corruption checks
     // do not allocate one String for every index false-positive row.
-    let mut seen_filtered_scan_ids = keep_signature_ids.map(|_| HashSet::<&str>::new());
+    let mut seen_filtered_scan_ids = keep_signature_ids.map(|_| HashSet::<&str>::default());
     for batch in batches {
         let signature_id_col = batch.column(arrow_column_index(&batch, "signature_id", path)?);
         let signature_id_values =
@@ -373,8 +375,8 @@ fn read_paper_batches(
     batches: &[RecordBatch],
     keep_paper_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, RawArrowPaper>> {
-    let mut out = HashMap::new();
-    let mut seen_filtered_scan_ids = keep_paper_ids.map(|_| HashSet::<&str>::new());
+    let mut out = HashMap::default();
+    let mut seen_filtered_scan_ids = keep_paper_ids.map(|_| HashSet::<&str>::default());
     for batch in batches {
         let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
         let paper_id_values =
@@ -510,7 +512,7 @@ impl<'a> PaperAuthorRows<'a> {
         Self {
             papers: Vec::new(),
             skipped_papers: Vec::new(),
-            paper_slots: ahash::AHashMap::new(),
+            paper_slots: ahash::AHashMap::default(),
         }
     }
 
@@ -594,7 +596,7 @@ impl<'a> PaperAuthorRows<'a> {
             }
         }
         let mut out: HashMap<String, Vec<(i64, String)>> =
-            HashMap::with_capacity(self.papers.len());
+            HashMap::with_capacity_and_hasher(self.papers.len(), Default::default());
         for (paper_id, mut authors) in self.papers {
             authors.sort_by_key(|(position, _name)| *position);
             if let Some(pair) = authors.windows(2).find(|pair| pair[0].0 == pair[1].0) {
@@ -653,8 +655,8 @@ pub(crate) fn read_raw_arrow_cluster_seeds(
     path: &str,
 ) -> PyResult<(Vec<String>, HashMap<String, Vec<String>>)> {
     let mut component_order = Vec::new();
-    let mut members_by_component: HashMap<String, Vec<String>> = HashMap::new();
-    let mut component_by_signature_id = HashMap::<String, String>::new();
+    let mut members_by_component: HashMap<String, Vec<String>> = HashMap::default();
+    let mut component_by_signature_id = HashMap::<String, String>::default();
     for batch in read_arrow_batches(path)? {
         let signature_id_col = batch.column(arrow_column_index(&batch, "signature_id", path)?);
         let signature_id_values =
@@ -726,7 +728,7 @@ pub(crate) fn insert_canonical_cluster_seed_disallow(
 pub(crate) fn read_raw_arrow_cluster_seed_disallows(
     path: &str,
 ) -> PyResult<HashSet<(String, String)>> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for batch in read_arrow_batches(path)? {
         let left_col = batch.column(arrow_column_index(&batch, "signature_id_1", path)?);
         let right_col = batch.column(arrow_column_index(&batch, "signature_id_2", path)?);
@@ -773,7 +775,7 @@ pub(crate) fn read_raw_arrow_query_signatures(
     path: &str,
 ) -> PyResult<Vec<RawArrowQuerySignatureRequest>> {
     let mut rows = Vec::<RawArrowQuerySignatureRequest>::new();
-    let mut seen_signature_ids = HashSet::<String>::new();
+    let mut seen_signature_ids = HashSet::<String>::default();
     for batch in read_arrow_batches(path)? {
         let signature_id_col = batch.column(arrow_column_index(&batch, "signature_id", path)?);
         let signature_id_values =
@@ -840,8 +842,8 @@ fn read_specter_batches(
     batches: &[RecordBatch],
     keep_paper_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, Vec<f32>>> {
-    let mut out = HashMap::new();
-    let mut seen_filtered_scan_ids = keep_paper_ids.map(|_| HashSet::<&str>::new());
+    let mut out = HashMap::default();
+    let mut seen_filtered_scan_ids = keep_paper_ids.map(|_| HashSet::<&str>::default());
     for batch in batches {
         let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
         let paper_id_values =
@@ -1305,12 +1307,12 @@ mod filtered_duplicate_detection_tests {
         read_raw_arrow_papers_from_batches, read_raw_arrow_specter_from_batches,
         read_specter_batches,
     };
+    use crate::HashSet;
     use arrow::array::{ArrayRef, FixedSizeListArray, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Float32Type, Schema};
     use arrow::record_batch::RecordBatch;
     use pyo3::types::PyAnyMethods;
     use pyo3::{PyErr, Python};
-    use std::collections::HashSet;
     use std::sync::Arc;
 
     fn py_err_message(err: PyErr) -> String {

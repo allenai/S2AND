@@ -186,7 +186,8 @@ struct RawArrowQueryInputReadResult {
 fn validate_raw_arrow_query_signature_ids_allow_empty(
     query_signature_ids: &[String],
 ) -> PyResult<()> {
-    let mut seen = HashSet::<&str>::with_capacity(query_signature_ids.len());
+    let mut seen =
+        HashSet::<&str>::with_capacity_and_hasher(query_signature_ids.len(), Default::default());
     for signature_id in query_signature_ids.iter() {
         if !seen.insert(signature_id.as_str()) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -209,7 +210,7 @@ fn validate_raw_arrow_query_signature_ids(query_signature_ids: &[String]) -> PyR
 fn validate_additional_cluster_seed_disallows(
     pairs: Vec<(String, String)>,
 ) -> PyResult<HashSet<(String, String)>> {
-    let mut out = HashSet::with_capacity(pairs.len());
+    let mut out = HashSet::with_capacity_and_hasher(pairs.len(), Default::default());
     for (left, right) in pairs {
         crate::raw_arrow::readers::insert_canonical_cluster_seed_disallow(
             &mut out,
@@ -226,7 +227,7 @@ mod additional_cluster_seed_disallow_tests {
     use super::{
         raw_arrow_excluded_candidate_indices_by_query, validate_additional_cluster_seed_disallows,
     };
-    use std::collections::{HashMap, HashSet};
+    use crate::{HashMap, HashSet};
 
     #[test]
     fn additional_pairs_are_canonicalized() {
@@ -262,12 +263,12 @@ mod additional_cluster_seed_disallow_tests {
     fn stored_and_additional_pairs_are_streamed_as_an_exact_union() {
         let query_ids = vec!["query".to_string()];
         let component_order = vec!["component".to_string()];
-        let component_keys_by_member = HashMap::from([
+        let component_keys_by_member = HashMap::from_iter([
             ("seed-a".to_string(), vec!["component".to_string()]),
             ("seed-b".to_string(), vec!["component".to_string()]),
         ]);
-        let stored = HashSet::from([("query".to_string(), "seed-a".to_string())]);
-        let additional = HashSet::from([
+        let stored = HashSet::from_iter([("query".to_string(), "seed-a".to_string())]);
+        let additional = HashSet::from_iter([
             ("query".to_string(), "seed-a".to_string()),
             ("query".to_string(), "seed-b".to_string()),
         ]);
@@ -286,7 +287,7 @@ mod additional_cluster_seed_disallow_tests {
         assert_eq!(candidate_count, 1);
         assert_eq!(
             excluded.expect("one query exclusion")[0],
-            Some(HashSet::from([0]))
+            Some(HashSet::from_iter([0]))
         );
     }
 }
@@ -447,7 +448,7 @@ fn raw_arrow_component_member_indices_for_batch(
     members_by_component: &HashMap<String, Vec<String>>,
     query_count: usize,
 ) -> PyResult<(HashMap<String, Vec<u32>>, Vec<String>, Vec<String>)> {
-    let mut component_member_indices = HashMap::<String, Vec<u32>>::new();
+    let mut component_member_indices = HashMap::<String, Vec<u32>>::default();
     let mut seed_signature_ids = Vec::<String>::new();
     let mut seed_component_keys = Vec::<String>::new();
     let query_count_u32 = u32::try_from(query_count)
@@ -485,7 +486,7 @@ fn raw_arrow_excluded_candidate_indices_by_query(
 ) -> PyResult<(Option<Vec<Option<HashSet<usize>>>>, usize, usize)> {
     let query_signature_id_set: HashSet<&str> =
         query_signature_ids.iter().map(String::as_str).collect();
-    let mut disallowed_members_by_query = HashMap::<String, HashSet<String>>::new();
+    let mut disallowed_members_by_query = HashMap::<String, HashSet<String>>::default();
     let mut register_pair = |left: &String, right: &String| -> PyResult<()> {
         let left_is_query = query_signature_id_set.contains(left.as_str());
         let right_is_query = query_signature_id_set.contains(right.as_str());
@@ -531,8 +532,10 @@ fn raw_arrow_excluded_candidate_indices_by_query(
     let excluded_indices_by_query = if disallowed_members_by_query.is_empty() {
         None
     } else {
-        let mut component_index_by_key =
-            HashMap::<&str, usize>::with_capacity(component_order.len());
+        let mut component_index_by_key = HashMap::<&str, usize>::with_capacity_and_hasher(
+            component_order.len(),
+            Default::default(),
+        );
         for (component_index, component_key) in component_order.iter().enumerate() {
             component_index_by_key.insert(component_key.as_str(), component_index);
         }
@@ -545,7 +548,7 @@ fn raw_arrow_excluded_candidate_indices_by_query(
                     else {
                         return None;
                     };
-                    let mut excluded_indices = HashSet::<usize>::new();
+                    let mut excluded_indices = HashSet::<usize>::default();
                     for disallowed_member in disallowed_members.iter() {
                         if let Some(component_keys) =
                             component_keys_by_member.get(disallowed_member.as_str())
@@ -705,7 +708,7 @@ fn read_reusable_raw_arrow_query_inputs(
                         let (loaded, stats) = if dataset.has_specter() {
                             dataset.read_specter(&needed_paper_ids, num_threads)?
                         } else {
-                            (HashMap::new(), IndexedArrowReadStats::default())
+                            (HashMap::default(), IndexedArrowReadStats::default())
                         };
                         Ok((
                             if dataset.has_specter() {
@@ -789,11 +792,11 @@ impl RawArrowSeedLayout {
         let read_cluster_seeds_secs = read_cluster_seeds_start.elapsed().as_secs_f64();
         let cluster_seed_disallows = match cluster_seed_disallows_path {
             Some(path) => read_raw_arrow_cluster_seed_disallows(path)?,
-            None => HashSet::new(),
+            None => HashSet::default(),
         };
 
         let mut seed_signature_ids = Vec::<String>::new();
-        let mut component_keys_by_member = HashMap::<String, Vec<String>>::new();
+        let mut component_keys_by_member = HashMap::<String, Vec<String>>::default();
         for component_key in component_order.iter() {
             if let Some(members) = members_by_component.get(component_key) {
                 for signature_id in members {
@@ -887,7 +890,7 @@ fn read_raw_arrow_paper_rows(
                         )> {
                             let start = Instant::now();
                             let (loaded, stats) = if needed_paper_ids.is_empty() {
-                                (HashMap::new(), IndexedArrowReadStats::default())
+                                (HashMap::default(), IndexedArrowReadStats::default())
                             } else {
                                 dataset.read_papers(needed_paper_ids, num_threads)?
                             };
@@ -900,7 +903,7 @@ fn read_raw_arrow_paper_rows(
                         )> {
                             let start = Instant::now();
                             let (loaded, stats) = if needed_paper_ids.is_empty() {
-                                (HashMap::new(), IndexedArrowReadStats::default())
+                                (HashMap::default(), IndexedArrowReadStats::default())
                             } else {
                                 dataset.read_paper_authors(needed_paper_ids, num_threads)?
                             };
@@ -920,7 +923,7 @@ fn read_raw_arrow_paper_rows(
                                 if dataset.has_specter() && !needed_paper_ids.is_empty() {
                                     dataset.read_specter(needed_paper_ids, num_threads)?
                                 } else {
-                                    (HashMap::new(), IndexedArrowReadStats::default())
+                                    (HashMap::default(), IndexedArrowReadStats::default())
                                 };
                             Ok((
                                 if dataset.has_specter() {
@@ -992,14 +995,18 @@ struct PrefetchedRawArrowRows {
 impl PrefetchedRawArrowRows {
     /// The query inputs a read would return, or None unless every row is here.
     fn query_inputs(&self, query_signature_ids: &[String]) -> Option<RawArrowQueryInputReadResult> {
-        let mut signatures = HashMap::with_capacity(query_signature_ids.len());
+        let mut signatures =
+            HashMap::with_capacity_and_hasher(query_signature_ids.len(), Default::default());
         for signature_id in query_signature_ids {
             let signature = self.signatures.get(signature_id)?;
             signatures.insert(signature_id.clone(), signature.clone());
         }
-        let mut papers = HashMap::new();
-        let mut paper_authors = HashMap::new();
-        let mut specter_by_paper_id = self.specter_by_paper_id.as_ref().map(|_| HashMap::new());
+        let mut papers = HashMap::default();
+        let mut paper_authors = HashMap::default();
+        let mut specter_by_paper_id = self
+            .specter_by_paper_id
+            .as_ref()
+            .map(|_| HashMap::default());
         for signature in signatures.values() {
             let paper_id = &signature.paper_id;
             if papers.contains_key(paper_id) {
@@ -1158,9 +1165,11 @@ impl RawBlockQueryCandidatePlanner {
             })
             .collect::<Option<Vec<_>>>()?;
         let signatures: HashMap<String, RawArrowSignature> = signature_rows.into_iter().collect();
-        let mut papers = HashMap::with_capacity(paper_rows.len());
-        let mut authors_by_paper = HashMap::with_capacity(paper_rows.len());
-        let mut specter_by_paper = HashMap::with_capacity(paper_rows.len());
+        let mut papers = HashMap::with_capacity_and_hasher(paper_rows.len(), Default::default());
+        let mut authors_by_paper =
+            HashMap::with_capacity_and_hasher(paper_rows.len(), Default::default());
+        let mut specter_by_paper =
+            HashMap::with_capacity_and_hasher(paper_rows.len(), Default::default());
         for (paper_id, paper, authors, specter) in paper_rows {
             if let Some(authors) = authors {
                 authors_by_paper.insert(paper_id.clone(), authors);
@@ -1205,7 +1214,7 @@ impl RawBlockQueryCandidatePlanner {
         let read_signatures_start = Instant::now();
         let (mut signatures, signature_index_stats) =
             if layout.seed_signature_id_set.is_empty() && prefetch_ids.is_empty() {
-                (HashMap::new(), IndexedArrowReadStats::default())
+                (HashMap::default(), IndexedArrowReadStats::default())
             } else if prefetch_ids.is_empty() {
                 py.allow_threads(|| {
                     dataset.read_signatures(Some(&layout.seed_signature_id_set), num_threads)
@@ -1352,7 +1361,7 @@ impl RawBlockQueryCandidatePlanner {
                         previous.component_index_by_key,
                     )),
                 ),
-                None => (HashMap::new(), HashMap::new(), None),
+                None => (HashMap::default(), HashMap::default(), None),
             };
         ensure_unidecode_for_raw_arrow_inputs(
             &signatures,
@@ -1473,7 +1482,7 @@ impl RawBlockQueryCandidatePlanner {
                 raw_name_counts,
                 members_by_component,
                 component_keys_by_member,
-                summary_signals_by_component: HashMap::new(),
+                summary_signals_by_component: HashMap::default(),
                 retriever,
                 component_order,
                 seed_signature_ids: flat_seed_signature_ids,
@@ -1514,7 +1523,7 @@ impl RawBlockQueryCandidatePlanner {
             planner_query_signature_ids: query_signature_ids.clone(),
             planner_query_signature_count: query_signature_ids.len(),
             planner_query_signature_id_set,
-            planner_query_requests_by_signature_id: HashMap::new(),
+            planner_query_requests_by_signature_id: HashMap::default(),
             query_mode: RawPlannerQueryMode::Declared,
             top_k,
             orcid_enabled,
@@ -1925,7 +1934,7 @@ impl RawBlockQueryCandidatePlanner {
         use_orcid_id: bool,
     ) -> PyResult<Option<RustFeaturizer>> {
         // Same de-duplication as `from_arrow_dataset`: first occurrence wins.
-        let mut seen = HashSet::with_capacity(signature_ids.len());
+        let mut seen = HashSet::with_capacity_and_hasher(signature_ids.len(), Default::default());
         let signature_ids: Vec<String> = signature_ids
             .into_iter()
             .filter(|signature_id| seen.insert(signature_id.clone()))
@@ -2129,7 +2138,7 @@ impl RawBlockQueryCandidatePlanner {
         }
         let mut excluded_query_seed_count = 0usize;
         let mut filtered_component_order = Vec::<String>::new();
-        let mut filtered_members_by_component = HashMap::<String, Vec<String>>::new();
+        let mut filtered_members_by_component = HashMap::<String, Vec<String>>::default();
         let needs_filtered_retriever = !overlapping_query_seed_ids.is_empty();
         let summary_start = Instant::now();
         let filtered_retriever = if needs_filtered_retriever {
@@ -2298,7 +2307,7 @@ impl RawBlockQueryCandidatePlanner {
         let mut right_signature_indices = Vec::<u32>::new();
         let mut pair_row_indices = Vec::<u32>::new();
         let mut filtered_summary_signals_by_component =
-            HashMap::<String, RawArrowSummarySignalData>::new();
+            HashMap::<String, RawArrowSummarySignalData>::default();
         let retrieved_member_paper_ids: Vec<&str> = query_results
             .iter()
             .flatten()
@@ -2363,7 +2372,7 @@ impl RawBlockQueryCandidatePlanner {
         } else {
             &mut self.state.summary_signals_by_component
         };
-        let mut pending_component_keys = HashSet::<&str>::new();
+        let mut pending_component_keys = HashSet::<&str>::default();
         let missing_component_keys: Vec<&str> = query_results
             .iter()
             .flat_map(|query_result| query_result.row_component_keys.iter())
@@ -2404,7 +2413,7 @@ impl RawBlockQueryCandidatePlanner {
         summary_signal_cache.extend(built_summary_signals);
         let summary_signal_cache = &*summary_signal_cache;
 
-        let mut pending_query_offsets = HashSet::<u32>::new();
+        let mut pending_query_offsets = HashSet::<u32>::default();
         let query_offsets_with_rows: Vec<u32> = query_results
             .iter()
             .flat_map(|query_result| query_result.row_query_signature_indices.iter().copied())
@@ -2664,7 +2673,7 @@ impl RawBlockQueryCandidatePlanner {
             "signature_count",
             query_signature_ids.len() + seed_signature_ids.len(),
         )?;
-        let mut telemetry_paper_ids = HashSet::<&str>::new();
+        let mut telemetry_paper_ids = HashSet::<&str>::default();
         for signature_id in query_signature_ids.iter() {
             if let Some(signature) = query_inputs.signatures.get(signature_id) {
                 telemetry_paper_ids.insert(signature.paper_id.as_str());
@@ -2697,7 +2706,7 @@ impl RawBlockQueryCandidatePlanner {
             "cluster_seed_disallowed_candidate_count",
             cluster_seed_disallowed_candidate_count,
         )?;
-        let mut telemetry_specter_ids = HashSet::<&str>::new();
+        let mut telemetry_specter_ids = HashSet::<&str>::default();
         for signature_id in seed_signature_ids.iter() {
             if self
                 .state
@@ -3031,7 +3040,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
 
     let dataset = dataset.shared();
     let mut query_signature_ids = Vec::<String>::new();
-    let mut query_seen = HashSet::<String>::new();
+    let mut query_seen = HashSet::<String>::default();
     for signature_id in row_query_signature_ids.iter() {
         if query_seen.insert(signature_id.clone()) {
             query_signature_ids.push(signature_id.clone());
@@ -3041,7 +3050,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
 
     let component_entries = extract_string_vec_entries(component_members)?;
     let row_component_key_set: HashSet<String> = row_component_keys.iter().cloned().collect();
-    let mut raw_members_by_component = HashMap::<String, Vec<String>>::new();
+    let mut raw_members_by_component = HashMap::<String, Vec<String>>::default();
     let mut component_order = Vec::<String>::new();
     for (component_key, members) in component_entries {
         if raw_members_by_component
@@ -3067,7 +3076,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     }
 
     let mut needed_signature_ids = Vec::<String>::new();
-    let mut needed_seen = HashSet::<String>::new();
+    let mut needed_seen = HashSet::<String>::default();
     for signature_id in query_signature_ids.iter() {
         if needed_seen.insert(signature_id.clone()) {
             needed_signature_ids.push(signature_id.clone());
@@ -3096,7 +3105,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     let text_module = py.import("s2and.text")?;
     let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
     let affiliation_stopwords = extract_affiliation_stopwords(py)?;
-    let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
+    let mut unidecode_char_map: HashMap<char, String> = HashMap::default();
     ensure_unidecode_for_raw_arrow_inputs(
         &query_inputs.signatures,
         &query_inputs.papers,
@@ -3161,7 +3170,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         .collect();
     let feature_secs = feature_start.elapsed().as_secs_f64();
 
-    let mut members_by_component = HashMap::<String, Vec<String>>::new();
+    let mut members_by_component = HashMap::<String, Vec<String>>::default();
     for component_key in component_order.iter() {
         let raw_members = raw_members_by_component.get(component_key).ok_or_else(|| {
             pyo3::exceptions::PyKeyError::new_err(format!(
@@ -3198,8 +3207,8 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     let summary_secs = summary_start.elapsed().as_secs_f64();
 
     let mut group_order = Vec::<String>::new();
-    let mut group_seen = HashSet::<String>::new();
-    let mut rows_by_group = HashMap::<String, Vec<usize>>::new();
+    let mut group_seen = HashSet::<String>::default();
+    let mut rows_by_group = HashMap::<String, Vec<usize>>::default();
     for (row_index, group_id) in row_query_group_ids.iter().enumerate() {
         if group_seen.insert(group_id.clone()) {
             group_order.push(group_id.clone());
@@ -3309,7 +3318,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     }
 
     let mut signature_ids = Vec::<String>::new();
-    let mut signature_index_by_id = HashMap::<String, u32>::new();
+    let mut signature_index_by_id = HashMap::<String, u32>::default();
     for signature_id in row_query_signature_ids.iter() {
         if !signature_index_by_id.contains_key(signature_id) {
             let signature_index = u32::try_from(signature_ids.len()).map_err(|_| {
@@ -3402,11 +3411,11 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     let mut row_local_author_window10_jaccard_max = Vec::<f32>::with_capacity(row_count);
     let mut row_local_author_window10_overlap_count_max = Vec::<f32>::with_capacity(row_count);
     let mut row_best_author_count_log_absdiff = Vec::<f32>::with_capacity(row_count);
-    let mut full_summary_signal_cache = HashMap::<String, RawArrowSummarySignalData>::new();
+    let mut full_summary_signal_cache = HashMap::<String, RawArrowSummarySignalData>::default();
     let mut residual_summary_signal_cache =
-        HashMap::<(String, String), RawArrowSummarySignalData>::new();
+        HashMap::<(String, String), RawArrowSummarySignalData>::default();
     let mut author_signals_by_query_signature_id =
-        HashMap::<String, RawArrowAuthorSignalData>::new();
+        HashMap::<String, RawArrowAuthorSignalData>::default();
     for row_index in 0..row_count {
         let query_signature_id = row_query_signature_ids[row_index].as_str();
         let component_key = row_component_keys[row_index].as_str();
@@ -3582,8 +3591,8 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         row_best_author_count_log_absdiff.push(evidence.best_author_count_log_absdiff);
     }
 
-    let mut query_view_by_signature_id = HashMap::<String, String>::new();
-    let mut query_author_by_signature_id = HashMap::<String, String>::new();
+    let mut query_view_by_signature_id = HashMap::<String, String>::default();
+    let mut query_author_by_signature_id = HashMap::<String, String>::default();
     for ((signature_id, resolved_view), query_author) in row_query_signature_ids
         .iter()
         .zip(resolved_row_query_views.iter())

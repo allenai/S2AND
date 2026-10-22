@@ -1,6 +1,6 @@
+use crate::{HashMap, HashSet};
 use arrow::ipc::reader::FileReader as ArrowFileReader;
 use pyo3::prelude::*;
-use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -372,7 +372,8 @@ impl ArrowDataset {
         mut handles: HashMap<String, (isize, String)>,
         name_counts_index: Option<Py<NameCountsIndex>>,
     ) -> PyResult<Self> {
-        let mut tables = HashMap::with_capacity(REQUIRED_TABLES.len());
+        let mut tables =
+            HashMap::with_capacity_and_hasher(REQUIRED_TABLES.len(), Default::default());
         for (key, key_column) in REQUIRED_TABLES {
             tables.insert(key, open_table(&mut handles, key, key_column)?);
         }
@@ -527,7 +528,7 @@ mod tests {
         assert_eq!(values.value(0), "old");
         assert_eq!(stats.batches_read, 1);
         assert_eq!(
-            table.batch_indices(&HashSet::from(["old".to_string()])),
+            table.batch_indices(&HashSet::from_iter(["old".to_string()])),
             [0]
         );
 

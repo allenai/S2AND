@@ -1,9 +1,9 @@
 use super::{ensure_unidecode_for_text, normalize_text_compat_from_map, py_len};
+use crate::HashMap;
 use numpy::{PyArray1, PyArrayMethods, ToPyArray};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyIterator, PyModule};
 use pyo3::Bound;
-use std::collections::HashMap;
 
 pub(super) fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(
@@ -198,7 +198,7 @@ fn linker_normalized_alpha_vec(
     values: &[String],
     unidecode_char_map: &HashMap<char, String>,
 ) -> Vec<String> {
-    let mut cache = HashMap::<&str, String>::new();
+    let mut cache = HashMap::<&str, String>::default();
     let mut out = Vec::with_capacity(values.len());
     for value in values {
         if let Some(normalized) = cache.get(value.as_str()) {
@@ -458,7 +458,7 @@ fn promoted_linker_non_pairwise_features<'py>(
         .zip(component_keys.iter())
         .filter(|(family, component)| !family.is_empty() && *family != *component)
         .count();
-    let mut linker_unidecode_char_map = HashMap::<char, String>::new();
+    let mut linker_unidecode_char_map = HashMap::<char, String>::default();
     for value in query_first_token.iter().chain(dominant_first_name.iter()) {
         ensure_unidecode_for_text(value, &mut linker_unidecode_char_map)?;
     }
@@ -696,7 +696,7 @@ mod tests {
     use super::*;
     #[test]
     fn linker_alpha_normalization_uses_text_normalization() {
-        let unidecode_char_map = HashMap::from([('\u{00C9}', "E".to_string())]);
+        let unidecode_char_map = HashMap::from_iter([('\u{00C9}', "E".to_string())]);
         assert_eq!(
             linker_normalize_alpha("\u{00C9}lodie-2", &unidecode_char_map),
             "elodie"

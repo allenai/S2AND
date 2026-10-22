@@ -1,5 +1,5 @@
+use crate::{HashMap, HashSet};
 use pyo3::prelude::*;
-use std::collections::{HashMap, HashSet};
 
 use crate::constraints::count_initials;
 use crate::name_counts::NameCountsData;
@@ -30,18 +30,18 @@ pub(crate) fn char_ngrams_counter_python_compat(
     drop_short_tokens: bool,
 ) -> HashMap<String, usize> {
     if text.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
     let filtered_text = filter_text_for_char_ngrams(text, stopwords, drop_short_tokens);
     if filtered_text.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
     let chars: Vec<char> = filtered_text.chars().collect();
     if chars.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
 
-    let mut out: HashMap<String, usize> = HashMap::new();
+    let mut out: HashMap<String, usize> = HashMap::default();
     if use_unigrams {
         for ch in chars.iter() {
             if *ch != ' ' {
@@ -209,13 +209,13 @@ pub(crate) fn word_ngrams_counter_python_compat(
     drop_short_tokens: bool,
 ) -> HashMap<String, usize> {
     if text.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
     let text_split = filtered_words(text, stopwords, drop_short_tokens);
     if text_split.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
-    let mut out: HashMap<String, usize> = HashMap::new();
+    let mut out: HashMap<String, usize> = HashMap::default();
     for token in text_split.iter() {
         *out.entry((*token).to_string()).or_insert(0) += 1;
     }
@@ -236,15 +236,15 @@ pub(crate) fn word_ngrams_counter_python_compat(
 
 pub(crate) fn word_ngrams_counter(text: &str) -> HashMap<String, usize> {
     if text.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
 
     let tokens: Vec<&str> = text.split_whitespace().collect();
     if tokens.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
 
-    let mut out: HashMap<String, usize> = HashMap::new();
+    let mut out: HashMap<String, usize> = HashMap::default();
     for tok in tokens.iter() {
         *out.entry((*tok).to_string()).or_insert(0) += 1;
     }
@@ -283,7 +283,7 @@ mod char_ngram_tests {
     fn counter_data_matches_the_map_form() {
         use super::char_ngram_counter_data;
         use crate::counter_data_from_usize_map;
-        use std::collections::HashSet;
+        use crate::HashSet;
 
         let alphabet: Vec<char> = "ab c  déé文字ßxyz\u{1F600}\u{0}".chars().collect();
         let stopwords: HashSet<String> = ["ab", "the", "c"]
@@ -939,7 +939,7 @@ pub(crate) fn matrix_positions_for_feature_indices(
     aggregate_indices: &[usize],
 ) -> PyResult<Vec<usize>> {
     let mut first_position_by_feature: HashMap<usize, usize> =
-        HashMap::with_capacity(matrix_indices.len());
+        HashMap::with_capacity_and_hasher(matrix_indices.len(), Default::default());
     for (position, feature_index) in matrix_indices.iter().enumerate() {
         first_position_by_feature
             .entry(*feature_index)

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use crate::constraints::count_initials;
 use crate::name_counts::NameCountsData;
 use crate::text_compat::is_python_whitespace_compat;
-use crate::{py_len, CounterData};
+use crate::{py_len, py_len_is_one, CounterData};
 
 pub(crate) fn filter_text_for_char_ngrams(
     text: &str,
@@ -13,7 +13,7 @@ pub(crate) fn filter_text_for_char_ngrams(
 ) -> String {
     text.split(' ')
         .filter(|word| {
-            (!drop_short_tokens || py_len(word) > 2)
+            (!drop_short_tokens || word.chars().nth(2).is_some())
                 && stopwords.map_or(true, |stopwords_set| !stopwords_set.contains(*word))
         })
         .collect::<Vec<_>>()
@@ -192,13 +192,11 @@ pub(crate) fn counter_jaccard_data(
             let (large_hash, large_value) = large.entries[large_idx];
             if small_hash == large_hash {
                 intersection += small_value.min(large_value) as f64;
-                small_idx += 1;
-                large_idx += 1;
-            } else if small_hash < large_hash {
-                small_idx += 1;
-            } else {
-                large_idx += 1;
             }
+            // Advance without a hash-dependent branch; equal hashes move both,
+            // so the sum keeps its order.
+            small_idx += usize::from(small_hash <= large_hash);
+            large_idx += usize::from(large_hash <= small_hash);
         }
     } else {
         for (h, v1) in small.entries.iter() {
@@ -320,13 +318,13 @@ pub(crate) fn middle_names_equal(name1: Option<&str>, name2: Option<&str>) -> f6
     let (Some(n1), Some(n2)) = (name1, name2) else {
         return f64::NAN;
     };
-    if py_len(n1) == 0 || py_len(n2) == 0 {
+    if n1.is_empty() || n2.is_empty() {
         return f64::NAN;
     }
     // When either side is a single-character initial, compare the sets of token
     // initials so a joined multi-token middle ("james lee") matches the other
     // side's initial for ANY of its tokens, not just the first one.
-    if py_len(n1) == 1 || py_len(n2) == 1 {
+    if py_len_is_one(n1) || py_len_is_one(n2) {
         for initial_1 in n1.split(' ').filter_map(|t| t.chars().next()) {
             for initial_2 in n2.split(' ').filter_map(|t| t.chars().next()) {
                 if initial_1 == initial_2 {
@@ -346,9 +344,7 @@ pub(crate) fn middle_names_equal(name1: Option<&str>, name2: Option<&str>) -> f6
 pub(crate) fn middle_one_missing(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let n1 = name1.unwrap_or("");
     let n2 = name2.unwrap_or("");
-    let len1 = py_len(n1);
-    let len2 = py_len(n2);
-    let val = (len1 == 0 && len2 != 0) || (len2 == 0 && len1 != 0);
+    let val = n1.is_empty() != n2.is_empty();
     if val {
         1.0
     } else {
@@ -359,7 +355,7 @@ pub(crate) fn middle_one_missing(name1: Option<&str>, name2: Option<&str>) -> f6
 pub(crate) fn single_char_first(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let n1 = name1.unwrap_or("");
     let n2 = name2.unwrap_or("");
-    let val = py_len(n1) == 1 || py_len(n2) == 1;
+    let val = py_len_is_one(n1) || py_len_is_one(n2);
     if val {
         1.0
     } else {
@@ -372,14 +368,14 @@ pub(crate) fn single_char_middle(name1: Option<&str>, name2: Option<&str>) -> f6
     let n2 = name2.unwrap_or("");
     let mut val = false;
     for part in n1.split(' ') {
-        if py_len(part) == 1 {
+        if py_len_is_one(part) {
             val = true;
             break;
         }
     }
     if !val {
         for part in n2.split(' ') {
-            if py_len(part) == 1 {
+            if py_len_is_one(part) {
                 val = true;
                 break;
             }
@@ -416,7 +412,7 @@ pub(crate) fn email_pair_parts(
     let (Some(e1), Some(e2)) = (email1, email2) else {
         return None;
     };
-    if py_len(e1) == 0 || py_len(e2) == 0 {
+    if e1.is_empty() || e2.is_empty() {
         return None;
     }
     Some((email_parts(e1)?, email_parts(e2)?))
@@ -693,7 +689,7 @@ pub(crate) fn name_text_features(name1: Option<&str>, name2: Option<&str>) -> [f
     let (Some(n1), Some(n2)) = (name1, name2) else {
         return [f64::NAN; 4];
     };
-    if py_len(n1) == 0 || py_len(n2) == 0 {
+    if n1.is_empty() || n2.is_empty() {
         return [f64::NAN; 4];
     }
     let lev = levenshtein_distance(n1, n2) as f64 / (py_len(n1).max(py_len(n2)) as f64);

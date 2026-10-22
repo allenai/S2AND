@@ -15,9 +15,10 @@ use crate::text_compat::{
 };
 use crate::{
     build_name_counts_data_from_artifact, counter_data_from_hash_count_map, fnv64,
-    hash_string_values, prefilter_affiliation_text, py_len, query_terms_from_values,
-    raw_arrow_year_mean, term_set_from_normalized_text, validate_row_signal_year, vector_norm_f32,
-    RetrievalError, RetrievalQueryData, RetrievalSummaryData, RETRIEVAL_MEGA_AUTHOR_THRESHOLD,
+    hash_string_values, prefilter_affiliation_text, py_len, py_len_above_one,
+    query_terms_from_values, raw_arrow_year_mean, term_set_from_normalized_text,
+    validate_row_signal_year, vector_norm_f32, RetrievalError, RetrievalQueryData,
+    RetrievalSummaryData, RETRIEVAL_MEGA_AUTHOR_THRESHOLD,
 };
 pub(crate) fn build_raw_arrow_feature(
     signature: &RawArrowSignature,
@@ -542,9 +543,11 @@ pub(crate) fn raw_arrow_name_count_rarity_row(
     }
 
     let mut first_prefix_match = 0.0f64;
-    if py_len(&query.first) > 1 && summary.size > 0 {
+    if py_len_above_one(&query.first) && summary.size > 0 {
         for (candidate_first, count) in summary.first_name_counts.iter() {
-            if py_len(candidate_first) > 1 && same_prefix_tokens(&query.first, candidate_first) {
+            if py_len_above_one(candidate_first)
+                && same_prefix_tokens(&query.first, candidate_first)
+            {
                 first_prefix_match =
                     first_prefix_match.max((*count as f64) / (summary.size as f64));
             }

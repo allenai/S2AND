@@ -864,12 +864,12 @@ pub(crate) fn first_name_score_mode(
     size: usize,
     mode: RetrievalFirstNameMode,
 ) -> f64 {
-    if size == 0 || py_len(query_first) <= 1 || counts.is_empty() {
+    if size == 0 || !py_len_above_one(query_first) || counts.is_empty() {
         return 0.0;
     }
     let mut best = 0.0f64;
     for (first_name, count) in counts.iter() {
-        if py_len(first_name) <= 1 {
+        if !py_len_above_one(first_name) {
             continue;
         }
         let share = (*count as f64) / (size as f64);

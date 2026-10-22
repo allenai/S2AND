@@ -453,13 +453,10 @@ fn for_each_common<T>(
         let (small_key, large_key) = (key(&small[small_index]), key(&large[large_index]));
         if small_key == large_key {
             emit(&small[small_index], &large[large_index]);
-            small_index += 1;
-            large_index += 1;
-        } else if small_key < large_key {
-            small_index += 1;
-        } else {
-            large_index += 1;
         }
+        // Advance without a key-dependent branch; equal keys move both, as before.
+        small_index += usize::from(small_key <= large_key);
+        large_index += usize::from(large_key <= small_key);
     }
 }
 

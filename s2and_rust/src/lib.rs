@@ -84,6 +84,20 @@ fn py_len(s: &str) -> usize {
     s.chars().count()
 }
 
+/// `py_len(s) == 1`, decoding at most two characters instead of counting all.
+///
+/// Pair features and retrieval test name lengths for every pair, so full
+/// character counts were a visible share of their time.
+fn py_len_is_one(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some() && chars.next().is_none()
+}
+
+/// `py_len(s) > 1`, decoding at most two characters instead of counting all.
+fn py_len_above_one(s: &str) -> bool {
+    s.chars().nth(1).is_some()
+}
+
 const DROPPED_AFFIXES: [&str; 48] = [
     "ab", "am", "ap", "abu", "al", "auf", "aus", "bar", "bath", "bat", "bet", "bint", "dall",
     "dalla", "das", "de", "degli", "del", "dell", "della", "dem", "den", "der", "di", "do", "dos",

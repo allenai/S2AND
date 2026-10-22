@@ -11,6 +11,7 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial, wraps
@@ -3142,58 +3143,86 @@ class Clusterer:
                 if any(len(signatures) > 1 for signatures in block_dict.values())
                 else None
             )
-            for block_key, signatures in block_dict.items():
-                if len(signatures) <= 1:
-                    if signatures:
-                        pred_clusters[block_key + "_0"].append(signatures[0])
-                    continue
-                assert signature_index_by_id is not None
-                make_block_start = time.perf_counter()
-                block_partial_supervision = _partial_supervision_with_cluster_seed_overrides(
-                    signatures,
-                    partial_supervision,
-                    cluster_seeds_require=explicit_cluster_seeds_require,
-                    cluster_seeds_disallow=resolved_cluster_seeds_disallow,
-                    dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                )
-                make_dists_incremental_dont_use_cluster_seeds = (
-                    incremental_dont_use_cluster_seeds or explicit_cluster_seeds_require is not None
-                )
-                block_dists = self._make_distance_matrices_from_verified_rust_featurizer(
-                    {block_key: signatures},
-                    rust_featurizer,
-                    partial_supervision=block_partial_supervision,
-                    incremental_dont_use_cluster_seeds=make_dists_incremental_dont_use_cluster_seeds,
-                    runtime_context=runtime_context,
-                    total_ram_bytes=total_ram_bytes,
-                    signature_index_by_id=signature_index_by_id,
-                    prediction_state=prediction_state,
-                )
-                make_dists_seconds += time.perf_counter() - make_block_start
-                block_make_dists_telemetry = dict(prediction_state.telemetry.get("rust_featurizer_make_dists", {}))
-                for key, value in block_make_dists_telemetry.items():
-                    if isinstance(value, int | float) and not isinstance(value, bool):
-                        make_dists_telemetry[key] = float(make_dists_telemetry.get(key, 0.0)) + float(value)
-                    elif key not in make_dists_telemetry:
-                        make_dists_telemetry[key] = value
-                cluster_block_start = time.perf_counter()
+            # Linkage releases the GIL, so one block clusters on a worker while the
+            # next block's distances build. At most two matrices are alive, and two
+            # only while the clustering one is under a tenth of the RAM budget.
+            # Results are collected in block order.
+            overlap_limit_bytes = memory_budget.resolve_total_ram_bytes(total_ram_bytes)[0] // 10
+            block_results: list[tuple[str, list[str], Future[tuple[list, float]] | None]] = []
+            pending: Future[tuple[list, float]] | None = None
+            pending_bytes = 0
+
+            def timed_cluster(
+                block_key: str, signatures: list[str], dist_matrix: np.ndarray | None
+            ) -> tuple[list, float]:
+                start = time.perf_counter()
                 labels = self._cluster_one_block_with_logging(
                     signatures,
-                    block_dists[block_key],
+                    dist_matrix,
                     effective_cluster_model_params,
                     cast(Any, proxy_dataset),
                     disallow_adjacency,
                     block_key=block_key,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 )
-                cluster_seconds += time.perf_counter() - cluster_block_start
+                return labels, time.perf_counter() - start
+
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="s2and-cluster") as cluster_pool:
+                for block_key, signatures in block_dict.items():
+                    if len(signatures) <= 1:
+                        block_results.append((block_key, signatures, None))
+                        continue
+                    if pending is not None and pending_bytes > overlap_limit_bytes:
+                        pending.result()
+                    assert signature_index_by_id is not None
+                    make_block_start = time.perf_counter()
+                    block_partial_supervision = _partial_supervision_with_cluster_seed_overrides(
+                        signatures,
+                        partial_supervision,
+                        cluster_seeds_require=explicit_cluster_seeds_require,
+                        cluster_seeds_disallow=resolved_cluster_seeds_disallow,
+                        dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                    )
+                    make_dists_incremental_dont_use_cluster_seeds = (
+                        incremental_dont_use_cluster_seeds or explicit_cluster_seeds_require is not None
+                    )
+                    block_dists = self._make_distance_matrices_from_verified_rust_featurizer(
+                        {block_key: signatures},
+                        rust_featurizer,
+                        partial_supervision=block_partial_supervision,
+                        incremental_dont_use_cluster_seeds=make_dists_incremental_dont_use_cluster_seeds,
+                        runtime_context=runtime_context,
+                        total_ram_bytes=total_ram_bytes,
+                        signature_index_by_id=signature_index_by_id,
+                        prediction_state=prediction_state,
+                    )
+                    make_dists_seconds += time.perf_counter() - make_block_start
+                    block_make_dists_telemetry = dict(prediction_state.telemetry.get("rust_featurizer_make_dists", {}))
+                    for key, value in block_make_dists_telemetry.items():
+                        if isinstance(value, int | float) and not isinstance(value, bool):
+                            make_dists_telemetry[key] = float(make_dists_telemetry.get(key, 0.0)) + float(value)
+                        elif key not in make_dists_telemetry:
+                            make_dists_telemetry[key] = value
+                    dist_matrix = block_dists[block_key]
+                    # Drop this frame's references once the worker holds the matrix, so
+                    # it is freed when clustering ends.
+                    del block_dists
+                    if pending is not None:
+                        pending.result()
+                    pending = cluster_pool.submit(timed_cluster, block_key, signatures, dist_matrix)
+                    pending_bytes = 0 if dist_matrix is None else int(dist_matrix.nbytes)
+                    block_results.append((block_key, signatures, pending))
+                    del dist_matrix
+            for block_key, signatures, outcome in block_results:
+                if outcome is None:
+                    if signatures:
+                        pred_clusters[block_key + "_0"].append(signatures[0])
+                    continue
+                labels, block_cluster_seconds = outcome.result()
+                cluster_seconds += block_cluster_seconds
                 for signature, label in zip(signatures, labels, strict=True):
                     pred_clusters[block_key + "_" + str(label)].append(signature)
-                # Drop the consumed matrix before the next helper allocates its
-                # block. Assignment would otherwise keep this value alive until
-                # after the next right-hand side finished building.
-                del block_dists
             make_dists_telemetry["total_seconds"] = float(make_dists_seconds)
             make_dists_telemetry["block_count"] = int(len(block_dict))
             make_dists_telemetry["pair_count"] = int(

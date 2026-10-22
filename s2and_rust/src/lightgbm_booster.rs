@@ -588,6 +588,36 @@ fn predict_rows_f32(
     scores
 }
 
+/// Elements per parallel task when copying scoring inputs.
+const COPY_CHUNK: usize = 1 << 16;
+
+/// Owned C-ordered copy of `features`, so the batch can be scored with the GIL
+/// released. The copy is taken while the GIL is held, so Python cannot change
+/// the array meanwhile. C-contiguous inputs are copied on the pool: one serial
+/// memcpy of a multi-gigabyte batch held the GIL for seconds. Other layouts take
+/// the element iterator.
+fn owned_rows<T>(features: &PyReadonlyArray2<'_, T>, threads: usize) -> Vec<T>
+where
+    T: numpy::Element + Copy + Default + Send + Sync,
+{
+    // `as_slice` also accepts Fortran order, so check C order first.
+    match features.as_slice() {
+        Ok(slice) if features.is_c_contiguous() => {
+            if threads <= 1 || slice.len() <= COPY_CHUNK {
+                return slice.to_vec();
+            }
+            let mut rows = vec![T::default(); slice.len()];
+            install_with_optional_rayon_pool(Some(threads), || {
+                rows.par_chunks_mut(COPY_CHUNK)
+                    .zip(slice.par_chunks(COPY_CHUNK))
+                    .for_each(|(target, source)| target.copy_from_slice(source));
+            });
+            rows
+        }
+        _ => features.as_array().iter().copied().collect(),
+    }
+}
+
 /// Pure-Rust scorer for S2AND's native LightGBM binary classifiers.
 #[pyclass]
 pub(crate) struct RustLightGBMBooster {
@@ -629,9 +659,7 @@ impl RustLightGBMBooster {
         let threads = num_threads.unwrap_or(1).max(1);
         let model = &self.model;
         let fast_plan = self.fast_plan.as_ref();
-        // Owned standard-layout copy so non-C-contiguous inputs work and the
-        // buffer can be scored with the GIL released.
-        let rows: Vec<f64> = features.as_array().iter().copied().collect();
+        let rows = owned_rows(&features, threads);
         let scores = py.allow_threads(move || match fast_plan {
             Some(plan) => plan.predict_rows(model, &rows, threads, apply_sigmoid),
             None => predict_rows(model, &rows, column_count, threads, apply_sigmoid),
@@ -656,7 +684,7 @@ impl RustLightGBMBooster {
         let model = &self.model;
         let fast_plan = self.fast_plan.as_ref();
         // Keep the owned GIL-independent copy at the caller's float32 width.
-        let rows: Vec<f32> = features.as_array().iter().copied().collect();
+        let rows = owned_rows(&features, threads);
         let scores = py.allow_threads(move || match fast_plan {
             Some(plan) => plan.predict_rows(model, &rows, threads, apply_sigmoid),
             None => predict_rows_f32(model, &rows, column_count, threads, apply_sigmoid),

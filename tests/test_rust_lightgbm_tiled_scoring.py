@@ -51,3 +51,14 @@ def test_tiled_scores_match_single_rows_exactly(row_count, dtype, probability):
     assert actual.shape == (row_count,)
     assert actual.dtype == np.float64
     assert actual.tobytes() == expected.tobytes()
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_parallel_input_copy_matches_the_serial_copy(dtype):
+    """Contiguous batches above the copy chunk are copied on the pool."""
+    booster = RustLightGBMBooster.from_string(ONE_SPLIT_INTERIOR_ZERO_MODEL)
+    rows = np.random.default_rng(3).standard_normal((3 * 65536 + 17, 1)).astype(dtype)
+    rows[::7] = np.nan
+    assert rows.flags.c_contiguous
+    predict = booster.predict_raw_f32 if dtype == np.float32 else booster.predict_raw
+    assert predict(rows, num_threads=10).tobytes() == predict(rows, num_threads=1).tobytes()

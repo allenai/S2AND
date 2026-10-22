@@ -111,7 +111,8 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
 
 - Code is licensed under MIT; distributed data assets use CC-BY-4.0. See
   [LICENSE](../LICENSE) and [LICENSE-DATA](../LICENSE-DATA). Rust distributions
-  include the code license and notices for the bundled CLD2 dependency.
+  include the code license and notices for the bundled CLD2 and mimalloc
+  dependencies.
 - Release preparation resolves augmented source identities when checking
   held-out overlap in both directions: augmented training cannot contain held-out
   benchmark signatures, and augmented evaluation cannot contain benchmark

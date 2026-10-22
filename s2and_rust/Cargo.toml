@@ -27,5 +27,10 @@ unidecode = "0.3.0"
 memmap2 = "0.9"
 unicode-properties = "0.1"
 
+# Worker threads that allocate in parallel contend for glibc malloc arenas.
+# Musl wheels keep the system allocator, because CI never imports them.
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 [build-dependencies]
 sha2 = "0.10"

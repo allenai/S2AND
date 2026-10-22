@@ -8,6 +8,12 @@ use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+// Parallel readers allocate on worker threads; with glibc malloc that slows
+// later kernels through arena contention, and mimalloc avoids it.
+#[cfg(not(target_env = "musl"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod arrow_batch_lookup;
 mod arrow_dataset;
 mod artifact_hash;

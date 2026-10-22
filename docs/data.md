@@ -147,6 +147,10 @@ Keep them distinct from untouched final test data.
 See [giant-block EPS review](eps_calibration.md) for the commands and the `1.3` EPS decision.
 
 Runtime records and vectors use Arrow IPC.
+Public giant-block email fields contain separate hashes of the normalized local part and domain.
+This preserves pairwise email equality and incremental email features.
+Malformed emails remain missing feature evidence after hashing.
+This applies to dedicated email fields; contact strings embedded in other metadata remain unchanged.
 Incremental support uses Parquet, JSON, and CSV where those formats form the current contract.
 Cluster labels remain JSON; fixed pairs and some split assignments remain CSV.
 The snapshot is not an all-IPC dataset.

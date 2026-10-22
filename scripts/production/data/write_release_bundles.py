@@ -32,6 +32,7 @@ from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.arrow_training import load_signatures_from_arrow  # noqa: E402
 from s2and.name_counts_index import NameCountsIndex  # noqa: E402
 from s2and.production_training_contract import load_model_plan  # noqa: E402
+from scripts.production.data.hash_release_emails import hash_release_emails  # noqa: E402
 from scripts.production.model.plan_datasets import require_arrow_plan  # noqa: E402
 from scripts.production.model.unknown_signatures import load_unknown_signatures  # noqa: E402
 
@@ -283,6 +284,7 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
     plan_path = pairwise / "model_plan.json"
     _write_json(plan_path, plan)
     require_arrow_plan(load_model_plan(plan_path).datasets)
+    hash_release_emails(output_root)
     bundle_files = {
         bundle.name: [path for path in bundle.rglob("*") if path.is_file()] for bundle in (inference, dataset, source)
     }

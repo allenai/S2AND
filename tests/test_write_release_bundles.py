@@ -9,10 +9,12 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pytest
 
 from s2and._sha256 import sha256_file
 from s2and.production_training_contract import load_model_plan, load_packaged_artifact_authority
+from scripts.production.data.hash_release_emails import hash_feature_email
 from scripts.production.data.write_release_bundles import write_release_bundles
 from scripts.production.model.plan_datasets import (
     load_development_dataset,
@@ -209,6 +211,29 @@ def test_bundles_declare_signatures_reserved_outside_both_populations(snapshot: 
     plan = load_model_plan(output / "dataset" / "pairwise" / "model_plan.json")
     excluded = plan.datasets["qian"].files["excluded_signatures"]
     assert json.loads(excluded.read_text(encoding="utf-8")) == [reserved]
+
+
+def test_bundles_hash_giant_emails_before_publication(snapshot: Path, tmp_path: Path) -> None:
+    giant = snapshot / "datasets/a_khan"
+    shutil.copytree(snapshot / "benchmarks/qian", giant)
+    _write(snapshot / "replay_manifest.json", {"dataset_manifests": {"a_khan": {"sha256": "old"}}})
+    _write(snapshot / "manifest.json", {"replay_bundles": {"incremental": {"sha256": "old"}}})
+    source = snapshot / "corrected_replay/raw/a_khan/signatures.json"
+    _write(source, {"s1": {"author_info": {"email": "J.Smith@MIT.edu."}}})
+    original_sha = sha256_file(giant / "signatures.arrow")
+    with pa.memory_map(str(giant / "signatures.arrow"), "r") as stream:
+        original_emails = pa.ipc.open_file(stream).read_all()["author_email"].to_pylist()
+
+    output = tmp_path / "bundles"
+    write_release_bundles(snapshot, output)
+
+    assert sha256_file(giant / "signatures.arrow") == original_sha
+    with pa.memory_map(str(output / "dataset/datasets/a_khan/signatures.arrow"), "r") as stream:
+        emails = pa.ipc.open_file(stream).read_all()["author_email"].to_pylist()
+    assert emails == [hash_feature_email(value) for value in original_emails]
+    public_source = json.loads((output / "source/corrected_replay/raw/a_khan/signatures.json").read_text())
+    assert public_source["s1"]["author_info"]["email"] == hash_feature_email("J.Smith@MIT.edu.")
+    assert json.loads(source.read_text())["s1"]["author_info"]["email"] == "J.Smith@MIT.edu."
 
 
 @pytest.mark.parametrize(

@@ -922,18 +922,26 @@ impl RustFeaturizer {
         max_index: usize,
         indices: impl Iterator<Item = u32>,
     ) -> PyResult<Vec<Option<(&SignatureData, &PaperData)>>> {
-        let mut indices = indices.peekable();
-        if indices.peek().is_none() {
+        let mut used = vec![false; max_index + 1];
+        let mut any_used = false;
+        for raw_index in indices {
+            used[raw_index as usize] = true;
+            any_used = true;
+        }
+        if !any_used {
             return Ok(Vec::new());
         }
-        let mut lookup = vec![None; max_index + 1];
-        for raw_index in indices {
-            let index = raw_index as usize;
-            if lookup[index].is_none() {
-                lookup[index] = Some(self.signature_paper_entry(index)?);
-            }
-        }
-        Ok(lookup)
+        // Two string hashes per signature; resolve them on the caller's pool.
+        used.par_iter()
+            .enumerate()
+            .map(|(index, used)| {
+                if *used {
+                    self.signature_paper_entry(index).map(Some)
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect()
     }
 
     fn compact_signature_paper_lookup(
@@ -941,7 +949,7 @@ impl RustFeaturizer {
         global_indices: &[usize],
     ) -> PyResult<Vec<(&SignatureData, &PaperData)>> {
         global_indices
-            .iter()
+            .par_iter()
             .map(|index| self.signature_paper_entry(*index))
             .collect()
     }
@@ -970,14 +978,14 @@ impl RustFeaturizer {
                     .iter()
                     .enumerate()
                     .map(|(local_index, global_index)| (*global_index as u32, local_index as u32))
-                    .collect::<HashMap<_, _>>();
+                    .collect::<ahash::AHashMap<_, _>>();
                 let remap = |index: &u32| {
                     *global_to_local
                         .get(index)
                         .expect("validated used signature index must have a compact index")
                 };
-                let remapped_left = left_indices.iter().map(remap).collect();
-                let remapped_right = right_indices.iter().map(remap).collect();
+                let remapped_left = left_indices.par_iter().map(remap).collect();
+                let remapped_right = right_indices.par_iter().map(remap).collect();
                 drop(global_to_local);
                 let lookup = self.compact_signature_paper_lookup(&global_indices)?;
                 Ok(BorrowedSignaturePaperLookup::Compact {
@@ -1012,15 +1020,15 @@ impl RustFeaturizer {
                     .iter()
                     .enumerate()
                     .map(|(local_index, global_index)| (*global_index as u32, local_index as u32))
-                    .collect::<HashMap<_, _>>();
-                for (left, right) in pairs.iter_mut() {
+                    .collect::<ahash::AHashMap<_, _>>();
+                pairs.par_iter_mut().for_each(|(left, right)| {
                     *left = *global_to_local
                         .get(left)
                         .expect("validated left signature index must have a compact index");
                     *right = *global_to_local
                         .get(right)
                         .expect("validated right signature index must have a compact index");
-                }
+                });
                 drop(global_to_local);
                 Ok(OwnedSignaturePaperLookup::Compact(
                     self.compact_signature_paper_lookup(&global_indices)?,
@@ -2247,7 +2255,11 @@ impl RustFeaturizer {
             return Ok(empty.to_pyarray(py));
         }
 
-        let lookup = self.adaptive_signature_paper_lookup_for_pair_tuples(&mut pairs)?;
+        let lookup = py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || {
+                self.adaptive_signature_paper_lookup_for_pair_tuples(&mut pairs)
+            })
+        })?;
 
         if out_cols == 0 {
             let empty_cols = numpy::ndarray::Array2::<f64>::zeros((row_count, 0));
@@ -2382,8 +2394,11 @@ impl RustFeaturizer {
             )));
         }
 
-        let lookup =
-            self.adaptive_signature_paper_lookup_for_indices(left_indices, right_indices)?;
+        let lookup = py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || {
+                self.adaptive_signature_paper_lookup_for_indices(left_indices, right_indices)
+            })
+        })?;
         for row_index in owner_row_indices.iter() {
             let bounded = *row_index as usize;
             if bounded >= row_count {

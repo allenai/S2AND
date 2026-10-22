@@ -162,8 +162,8 @@ class RawArrowPlanBundle:
         component_members: Mapping[Any, Sequence[Any]],
         telemetry: Mapping[Any, Any] | None,
         row_query_offsets: Any,
-        left_signature_ids: Sequence[Any],
-        right_signature_ids: Sequence[Any],
+        left_signature_ids: tuple[str, ...],
+        right_signature_ids: tuple[str, ...],
         pair_row_indices: Any,
         row_component_keys: Sequence[Any],
         retrieval_scores: Any,
@@ -176,8 +176,9 @@ class RawArrowPlanBundle:
         owned_query_views = tuple(query_views)
         owned_query_authors = tuple(str(value or "") for value in query_authors)
         owned_row_query_offsets = _readonly_array(row_query_offsets, dtype=np.uint32)
-        owned_left_signature_ids = tuple(map(str, left_signature_ids))
-        owned_right_signature_ids = tuple(map(str, right_signature_ids))
+        # The caller already converted the pair ids to tuples of str.
+        owned_left_signature_ids = left_signature_ids
+        owned_right_signature_ids = right_signature_ids
         owned_pair_row_indices = _readonly_array(pair_row_indices, dtype=np.uint32)
         owned_row_component_keys = tuple(str(value) for value in row_component_keys)
         owned_retrieval_scores = _readonly_array(retrieval_scores, dtype=np.float32)
@@ -206,11 +207,9 @@ class RawArrowPlanBundle:
             **owned_normalized_row_signals,
         }
 
-        ordered_ids = tuple(
-            dict.fromkeys(
-                itertools.chain(owned_query_signature_ids, owned_left_signature_ids, owned_right_signature_ids)
-            )
-        )
+        # Every left id is its row's query id (checked by from_native_mapping), so
+        # the left ids add nothing to the order of first appearance.
+        ordered_ids = tuple(dict.fromkeys(itertools.chain(owned_query_signature_ids, owned_right_signature_ids)))
 
         return cls(
             signature_order=FeatureBlockSignatureOrder(
@@ -466,7 +465,7 @@ def _raw_plan_sequence_length(plan: Mapping[str, Any], key: str) -> int:
 
 
 def _signature_indices_from_ids(
-    signature_ids: Sequence[Any],
+    signature_ids: Sequence[str],
     signature_id_to_index: Mapping[str, int],
     *,
     field_name: str,
@@ -475,7 +474,7 @@ def _signature_indices_from_ids(
         return as_uint32_1d(
             field_name,
             np.fromiter(
-                map(signature_id_to_index.__getitem__, map(str, signature_ids)),
+                map(signature_id_to_index.__getitem__, signature_ids),
                 dtype=np.int64,
                 count=len(signature_ids),
             ),
@@ -523,11 +522,9 @@ def build_linker_retrieval_batch_from_raw_plan_bundle(
         field_name="query_signature_ids",
     )
     row_query_signature_indices = query_indices_by_offset[bundle.row_query_offsets]
-    left_signature_indices = _signature_indices_from_ids(
-        bundle.left_signature_ids,
-        signature_id_to_index,
-        field_name="left_signature_ids",
-    )
+    # Every left id is its row's query id (checked by from_native_mapping), so a
+    # gather replaces one dict lookup per pair.
+    left_signature_indices = row_query_signature_indices[bundle.pair_row_indices]
     right_signature_indices = _signature_indices_from_ids(
         bundle.right_signature_ids,
         signature_id_to_index,

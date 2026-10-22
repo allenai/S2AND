@@ -1402,113 +1402,132 @@ impl RustFeaturizer {
             extract_required_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
         let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
         let affiliation_stopwords = extract_affiliation_stopwords(py)?;
-        let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
-        ensure_unidecode_for_raw_arrow_inputs(
-            &raw_signatures,
-            &raw_papers,
-            &raw_authors_by_paper,
-            &mut unidecode_char_map,
-        )?;
-        let mut signature_inputs = Vec::<StageSignatureInput>::with_capacity(signature_ids.len());
-        for signature_id in signature_ids.iter() {
-            let raw_signature = raw_signatures.get(signature_id).ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err(format!(
-                    "Arrow signatures input is missing signature_id '{signature_id}'"
-                ))
-            })?;
-            let position = raw_signature.position.ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "signatures Arrow author_position is null for signature_id '{signature_id}'"
-                ))
-            })?;
-            signature_inputs.push(StageSignatureInput {
-                sig_id: signature_id.clone(),
-                paper_id: raw_signature.paper_id.clone(),
-                raw_first: raw_signature.author_first.clone(),
-                raw_middle: raw_signature.author_middle.clone(),
-                raw_last: raw_signature.author_last.clone(),
-                email: raw_signature.email.clone(),
-                position,
-                affiliation_values: raw_signature.affiliations.clone(),
-                orcid: if use_orcid_id {
-                    raw_signature.orcid.clone()
-                } else {
-                    None
-                },
-            });
-        }
+        // Staging, language detection and assembly run on the request's pool:
+        // they were serial loops over every signature and paper of the window.
+        let (signatures, papers, name_grams) = py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || -> PyResult<_> {
+                let needed_paper_ids: Vec<&String> = needed_paper_ids.iter().collect();
+                // The CLD2 wrapper serializes detection behind a global lock, and
+                // parallel callers only convoy on it. One thread detects the titles
+                // while the others build the unidecode map and stage signatures.
+                let (detected_languages, (unidecode_char_map, signature_inputs)) = rayon::join(
+                    || {
+                        needed_paper_ids
+                            .iter()
+                            .map(|paper_id| {
+                                raw_papers
+                                    .get(*paper_id)
+                                    .filter(|paper| paper.predicted_language.is_none())
+                                    .map(|paper| detect_language_compat(&paper.title))
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                    || {
+                        let unidecode_char_map = unidecode_map_for_raw_arrow_inputs(
+                            &raw_signatures,
+                            &raw_papers,
+                            &raw_authors_by_paper,
+                        );
+                        let signature_inputs = signature_ids
+                            .par_iter()
+                            .map(|signature_id| -> PyResult<StageSignatureInput> {
+                                let raw_signature = raw_signatures.get(signature_id).ok_or_else(|| {
+                                    pyo3::exceptions::PyKeyError::new_err(format!(
+                                        "Arrow signatures input is missing signature_id '{signature_id}'"
+                                    ))
+                                })?;
+                                let position = raw_signature.position.ok_or_else(|| {
+                                    pyo3::exceptions::PyValueError::new_err(format!(
+                                        "signatures Arrow author_position is null for signature_id '{signature_id}'"
+                                    ))
+                                })?;
+                                Ok(StageSignatureInput {
+                                    sig_id: signature_id.clone(),
+                                    paper_id: raw_signature.paper_id.clone(),
+                                    raw_first: raw_signature.author_first.clone(),
+                                    raw_middle: raw_signature.author_middle.clone(),
+                                    raw_last: raw_signature.author_last.clone(),
+                                    email: raw_signature.email.clone(),
+                                    position,
+                                    affiliation_values: raw_signature.affiliations.clone(),
+                                    orcid: if use_orcid_id {
+                                        raw_signature.orcid.clone()
+                                    } else {
+                                        None
+                                    },
+                                })
+                            })
+                            .collect::<PyResult<Vec<_>>>();
+                        (unidecode_char_map, signature_inputs)
+                    },
+                );
+                let signature_inputs = signature_inputs?;
 
-        let mut paper_inputs = Vec::<StagePaperInput>::with_capacity(needed_paper_ids.len());
-        for paper_id in needed_paper_ids.iter() {
-            let Some(raw_paper) = raw_papers.get(paper_id) else {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Arrow signatures reference missing paper_id '{paper_id}'"
-                )));
-            };
-            // An empty source author list has no rows in the Arrow author table.
-            let raw_authors = raw_authors_by_paper.remove(paper_id).unwrap_or_default();
-            let (predicted_language, language_reliability) = if raw_paper
-                .predicted_language
-                .is_some()
-            {
-                raw_paper.is_reliable.ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "papers Arrow predicted_language requires is_reliable for paper_id {paper_id:?}"
-                    ))
-                })?;
-                let language_reliability = raw_paper.language_reliability.ok_or_else(|| {
-                        pyo3::exceptions::PyValueError::new_err(format!(
-                            "papers Arrow predicted_language requires language_reliability for paper_id {paper_id:?}"
-                        ))
-                    })?;
-                (raw_paper.predicted_language.clone(), language_reliability)
-            } else {
-                let audit = detect_language_compat(&raw_paper.title);
-                (Some(audit.predicted_language), audit.language_reliability)
-            };
-            paper_inputs.push(StagePaperInput {
-                paper_id: paper_id.clone(),
-                raw_title: raw_paper.title.clone(),
-                raw_venue: raw_paper.venue.clone(),
-                raw_journal: raw_paper.journal_name.clone(),
-                raw_authors,
-                year: raw_paper.year.filter(|year| *year > 0),
-                has_abstract: !raw_paper.abstract_text.is_empty(),
-                predicted_language,
-                language_reliability,
-            });
-        }
+                // Move each paper's authors out first; the map is then read-only.
+                let paper_authors: Vec<Vec<(i64, String)>> = needed_paper_ids
+                    .iter()
+                    .map(|paper_id| raw_authors_by_paper.remove(*paper_id).unwrap_or_default())
+                    .collect();
+                let paper_inputs = needed_paper_ids
+                    .par_iter()
+                    .zip(paper_authors.into_par_iter())
+                    .zip(detected_languages.into_par_iter())
+                    .map(|((paper_id, raw_authors), detected)| -> PyResult<StagePaperInput> {
+                        let Some(raw_paper) = raw_papers.get(*paper_id) else {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "Arrow signatures reference missing paper_id '{paper_id}'"
+                            )));
+                        };
+                        let (predicted_language, language_reliability) =
+                            if raw_paper.predicted_language.is_some() {
+                                raw_paper.is_reliable.ok_or_else(|| {
+                                    pyo3::exceptions::PyValueError::new_err(format!(
+                                        "papers Arrow predicted_language requires is_reliable for paper_id {paper_id:?}"
+                                    ))
+                                })?;
+                                let language_reliability =
+                                    raw_paper.language_reliability.ok_or_else(|| {
+                                        pyo3::exceptions::PyValueError::new_err(format!(
+                                            "papers Arrow predicted_language requires language_reliability for paper_id {paper_id:?}"
+                                        ))
+                                    })?;
+                                (raw_paper.predicted_language.clone(), language_reliability)
+                            } else {
+                                let audit = detected
+                                    .expect("titles without a stored language were detected");
+                                (Some(audit.predicted_language), audit.language_reliability)
+                            };
+                        Ok(StagePaperInput {
+                            paper_id: (*paper_id).clone(),
+                            raw_title: raw_paper.title.clone(),
+                            raw_venue: raw_paper.venue.clone(),
+                            raw_journal: raw_paper.journal_name.clone(),
+                            raw_authors,
+                            year: raw_paper.year.filter(|year| *year > 0),
+                            has_abstract: raw_paper.has_abstract,
+                            predicted_language,
+                            language_reliability,
+                        })
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
 
-        let computed_papers = py.allow_threads(|| {
-            let compute = || {
-                preprocess_stage_papers(
+                let computed_papers = preprocess_stage_papers(
                     &paper_inputs,
                     preprocess,
                     &unidecode_char_map,
                     &stop_words,
                     &venue_stop_words,
-                )
-            };
-            install_with_optional_rayon_pool(num_threads, compute)
-        });
-        let mut preprocessed_papers: HashMap<PaperId, StagePaperPreprocessed> =
-            HashMap::with_capacity(computed_papers.len());
-        for (paper_id, preprocessed) in computed_papers {
-            preprocessed_papers.insert(paper_id, preprocessed);
-        }
-        let coauthor_tables = py.allow_threads(|| {
-            install_with_optional_rayon_pool(num_threads, || {
-                CoauthorTables::build(
-                    preprocessed_papers
+                );
+                drop(paper_inputs);
+                // Paper order does not change the tables: this used to iterate a
+                // HashMap, whose order differs between runs.
+                let coauthor_tables = CoauthorTables::build(
+                    computed_papers
                         .iter()
                         .map(|(paper_id, paper)| (paper_id, paper.authors.as_slice())),
                     preprocess,
-                )
-            })
-        })?;
-        let computed_signatures = py.allow_threads(|| {
-            let compute = || {
-                preprocess_stage_signatures(
+                )?;
+                let computed_signatures = preprocess_stage_signatures(
                     &signature_inputs,
                     &coauthor_tables,
                     &raw_name_counts,
@@ -1516,41 +1535,48 @@ impl RustFeaturizer {
                     &affiliation_stopwords,
                     &unidecode_char_map,
                     preprocess,
-                )
-            };
-            install_with_optional_rayon_pool(num_threads, compute)
-        });
-        let mut signatures: HashMap<String, SignatureData> =
-            HashMap::with_capacity(computed_signatures.len());
-        for (sig_id, signature) in computed_signatures {
-            signatures.insert(sig_id, signature);
-        }
-        let (mut paper_coauthors, name_grams) = coauthor_tables.into_parts();
-        let mut papers: HashMap<PaperId, PaperData> =
-            HashMap::with_capacity(preprocessed_papers.len());
-        for (paper_id, paper) in preprocessed_papers.into_iter() {
-            let coauthors = paper_coauthors
-                .remove(&paper_id)
-                .expect("every preprocessed paper has coauthor aggregates");
-            let specter = specter_by_paper.remove(&paper_id);
-            let specter_norm = specter.as_ref().map(|values| vector_norm_f32(values));
-            papers.insert(
-                paper_id,
-                PaperData {
-                    venue_ngrams: paper.venue_ngrams,
-                    title_words: paper.title_words,
-                    title_chars: paper.title_chars,
-                    year: paper.year,
-                    has_abstract: paper.has_abstract,
-                    predicted_language: paper.predicted_language,
-                    language_reliability: paper.language_reliability,
-                    journal_ngrams: paper.journal_ngrams,
-                    coauthors,
-                    specter,
-                    specter_norm,
-                },
-            );
-        }
+                );
+                drop(signature_inputs);
+                let signatures: HashMap<String, SignatureData> =
+                    computed_signatures.into_iter().collect();
+                let (mut paper_coauthors, name_grams) = coauthor_tables.into_parts();
+                let paper_parts: Vec<_> = computed_papers
+                    .into_iter()
+                    .map(|(paper_id, paper)| {
+                        let coauthors = paper_coauthors
+                            .remove(&paper_id)
+                            .expect("every preprocessed paper has coauthor aggregates");
+                        let specter = specter_by_paper.remove(&paper_id);
+                        (paper_id, paper, coauthors, specter)
+                    })
+                    .collect();
+                let papers: HashMap<PaperId, PaperData> = paper_parts
+                    .into_par_iter()
+                    .map(|(paper_id, paper, coauthors, specter)| {
+                        let specter_norm = specter.as_ref().map(|values| vector_norm_f32(values));
+                        (
+                            paper_id,
+                            PaperData {
+                                venue_ngrams: paper.venue_ngrams,
+                                title_words: paper.title_words,
+                                title_chars: paper.title_chars,
+                                year: paper.year,
+                                has_abstract: paper.has_abstract,
+                                predicted_language: paper.predicted_language,
+                                language_reliability: paper.language_reliability,
+                                journal_ngrams: paper.journal_ngrams,
+                                coauthors,
+                                specter,
+                                specter_norm,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .collect();
+                Ok((signatures, papers, name_grams))
+            })
+        })?;
         let name_tuples = extract_name_tuples_argument(name_tuples)?;
 
         Ok(RustFeaturizer {

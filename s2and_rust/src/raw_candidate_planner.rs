@@ -1090,59 +1090,79 @@ impl RawBlockQueryCandidatePlanner {
         let retained = self.state.retained_seed_rows.as_ref()?;
         let query = self.state.last_query_inputs.as_ref();
         let prefetched = self.state.prefetched_rows.as_ref();
-        let mut signatures = HashMap::with_capacity(signature_ids.len());
-        for signature_id in signature_ids {
-            let signature = self
-                .state
-                .signatures
-                .get(signature_id)
-                .or_else(|| query.and_then(|rows| rows.signatures.get(signature_id)))
-                .or_else(|| prefetched.and_then(|rows| rows.signatures.get(signature_id)))?;
-            signatures.insert(signature_id.clone(), signature.clone());
-        }
-        let paper_ids: HashSet<&str> = signatures
-            .values()
-            .map(|signature: &RawArrowSignature| signature.paper_id.as_str())
+        // Rows are cloned in parallel: windows cover hundreds of thousands of
+        // signatures, and the serial copies dominated the featurizer build.
+        let signature_rows = signature_ids
+            .par_iter()
+            .map(|signature_id| {
+                let signature = self
+                    .state
+                    .signatures
+                    .get(signature_id)
+                    .or_else(|| query.and_then(|rows| rows.signatures.get(signature_id)))
+                    .or_else(|| prefetched.and_then(|rows| rows.signatures.get(signature_id)))?;
+                Some((signature_id.clone(), signature.clone()))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut paper_ids: Vec<&str> = signature_rows
+            .iter()
+            .map(|(_, signature)| signature.paper_id.as_str())
             .collect();
-        let mut papers = HashMap::with_capacity(paper_ids.len());
-        let mut authors_by_paper = HashMap::with_capacity(paper_ids.len());
-        let mut specter_by_paper = HashMap::with_capacity(paper_ids.len());
-        for paper_id in paper_ids {
-            // The seed state, then the latest queries, then prefetched rows.
-            let (paper, authors, specter) = if let Some(paper) = retained.papers.get(paper_id) {
-                (
-                    paper,
-                    self.state.paper_authors.get(paper_id),
-                    retained
-                        .specter_by_paper_id
-                        .as_ref()
-                        .and_then(|specter| specter.get(paper_id)),
-                )
-            } else if let Some(rows) = query.filter(|rows| rows.papers.contains_key(paper_id)) {
-                (
-                    &rows.papers[paper_id],
-                    rows.paper_authors.get(paper_id),
-                    rows.specter_by_paper_id
-                        .as_ref()
-                        .and_then(|specter| specter.get(paper_id)),
-                )
-            } else {
-                let rows = prefetched?;
-                (
-                    rows.papers.get(paper_id)?,
-                    rows.paper_authors.get(paper_id),
-                    rows.specter_by_paper_id
-                        .as_ref()
-                        .and_then(|specter| specter.get(paper_id)),
-                )
-            };
-            papers.insert(paper_id.to_string(), paper.clone());
+        paper_ids.par_sort_unstable();
+        paper_ids.dedup();
+        let paper_rows = paper_ids
+            .par_iter()
+            .map(|paper_id| {
+                // The seed state, then the latest queries, then prefetched rows.
+                let (paper, authors, specter) = if let Some(paper) = retained.papers.get(*paper_id)
+                {
+                    (
+                        paper,
+                        self.state.paper_authors.get(*paper_id),
+                        retained
+                            .specter_by_paper_id
+                            .as_ref()
+                            .and_then(|specter| specter.get(*paper_id)),
+                    )
+                } else if let Some(rows) = query.filter(|rows| rows.papers.contains_key(*paper_id))
+                {
+                    (
+                        &rows.papers[*paper_id],
+                        rows.paper_authors.get(*paper_id),
+                        rows.specter_by_paper_id
+                            .as_ref()
+                            .and_then(|specter| specter.get(*paper_id)),
+                    )
+                } else {
+                    let rows = prefetched?;
+                    (
+                        rows.papers.get(*paper_id)?,
+                        rows.paper_authors.get(*paper_id),
+                        rows.specter_by_paper_id
+                            .as_ref()
+                            .and_then(|specter| specter.get(*paper_id)),
+                    )
+                };
+                Some((
+                    paper_id.to_string(),
+                    paper.clone(),
+                    authors.cloned(),
+                    specter.map(|vector| vector.as_ref().clone()),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let signatures: HashMap<String, RawArrowSignature> = signature_rows.into_iter().collect();
+        let mut papers = HashMap::with_capacity(paper_rows.len());
+        let mut authors_by_paper = HashMap::with_capacity(paper_rows.len());
+        let mut specter_by_paper = HashMap::with_capacity(paper_rows.len());
+        for (paper_id, paper, authors, specter) in paper_rows {
             if let Some(authors) = authors {
-                authors_by_paper.insert(paper_id.to_string(), authors.clone());
+                authors_by_paper.insert(paper_id.clone(), authors);
             }
             if let Some(vector) = specter {
-                specter_by_paper.insert(paper_id.to_string(), vector.as_ref().clone());
+                specter_by_paper.insert(paper_id.clone(), vector);
             }
+            papers.insert(paper_id, paper);
         }
         Some(RawFeaturizerRows {
             signatures,
@@ -1333,6 +1353,7 @@ impl RawBlockQueryCandidatePlanner {
             &papers,
             &paper_authors,
             &mut unidecode_char_map,
+            num_threads,
         )?;
         let text_context_secs = text_context_start.elapsed().as_secs_f64();
 
@@ -1903,7 +1924,9 @@ impl RawBlockQueryCandidatePlanner {
             .into_iter()
             .filter(|signature_id| seen.insert(signature_id.clone()))
             .collect();
-        let Some(rows) = self.featurizer_rows(&signature_ids) else {
+        let Some(rows) = py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || self.featurizer_rows(&signature_ids))
+        }) else {
             return Ok(None);
         };
         let needed_paper_ids: HashSet<String> = rows
@@ -1998,6 +2021,7 @@ impl RawBlockQueryCandidatePlanner {
             &query_inputs.papers,
             &query_inputs.paper_authors,
             &mut self.state.unidecode_char_map,
+            self.num_threads,
         )?;
         let text_context_secs = text_context_start.elapsed().as_secs_f64();
 
@@ -3072,6 +3096,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         &query_inputs.papers,
         &query_inputs.paper_authors,
         &mut unidecode_char_map,
+        num_threads,
     )?;
     let text_context_secs = text_context_start.elapsed().as_secs_f64();
 

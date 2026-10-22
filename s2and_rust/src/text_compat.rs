@@ -17,7 +17,7 @@ pub(crate) fn ensure_unidecode_for_text(
     Ok(())
 }
 
-fn text_unidecode_char(ch: char) -> &'static str {
+pub(crate) fn text_unidecode_char(ch: char) -> &'static str {
     match ch as u32 {
         0x0080 | 0x0082 | 0x0083 | 0x0084 | 0x0085 | 0x0086 | 0x0087 | 0x0088 | 0x0089 | 0x008A
         | 0x008B | 0x008C | 0x008E | 0x0091 | 0x0092 | 0x0093 | 0x0094 | 0x0095 | 0x0096

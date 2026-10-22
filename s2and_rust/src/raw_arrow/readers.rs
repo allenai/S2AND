@@ -30,7 +30,9 @@ pub(crate) struct RawArrowSignature {
 #[derive(Clone)]
 pub(crate) struct RawArrowPaper {
     pub(crate) title: String,
-    pub(crate) abstract_text: String,
+    /// Whether the abstract is non-empty. Features use only that, so readers
+    /// skip copying every abstract.
+    pub(crate) has_abstract: bool,
     pub(crate) venue: String,
     pub(crate) journal_name: String,
     pub(crate) year: Option<i64>,
@@ -461,10 +463,10 @@ fn read_paper_batches(
                         // empty. Coerce NULL -> "" to match Python parity (see
                         // the signature author-name note above).
                         title: title_values.optional_owned(row).unwrap_or_default(),
-                        abstract_text: abstract_values
+                        has_abstract: abstract_values
                             .as_ref()
-                            .and_then(|col| col.optional_owned(row))
-                            .unwrap_or_default(),
+                            .and_then(|col| col.optional_value(row))
+                            .is_some_and(|text| !text.is_empty()),
                         venue: venue_values.optional_owned(row).unwrap_or_default(),
                         journal_name: journal_values.optional_owned(row).unwrap_or_default(),
                         year: match year_values.as_ref() {

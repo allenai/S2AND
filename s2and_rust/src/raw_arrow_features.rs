@@ -695,7 +695,7 @@ mod tests {
         };
         let paper = RawArrowPaper {
             title: "Part 1: Co3O4".to_string(),
-            abstract_text: String::new(),
+            has_abstract: false,
             venue: String::new(),
             journal_name: String::new(),
             year: None,
@@ -791,7 +791,7 @@ mod tests {
             };
             let paper = RawArrowPaper {
                 title: String::new(),
-                abstract_text: String::new(),
+                has_abstract: false,
                 venue: String::new(),
                 journal_name: String::new(),
                 year,

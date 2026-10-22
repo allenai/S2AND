@@ -210,89 +210,75 @@ pub(crate) fn term_set_from_normalized_text(text: &str) -> HashSet<String> {
         .collect()
 }
 
-struct SignatureTextFields<'a> {
-    author_first: &'a str,
-    author_middle: &'a str,
-    author_last: &'a str,
-    author_suffix: &'a str,
-    affiliations: &'a [String],
-}
-
-struct PaperTextFields<'a> {
-    title: &'a str,
-    venue: &'a str,
-    journal_name: &'a str,
-}
-
-fn ensure_unidecode_for_signature_texts<'a>(
-    signatures: impl IntoIterator<Item = SignatureTextFields<'a>>,
-    unidecode_char_map: &mut HashMap<char, String>,
-) -> PyResult<()> {
-    for signature in signatures {
-        ensure_unidecode_for_text(signature.author_first, unidecode_char_map)?;
-        ensure_unidecode_for_text(signature.author_middle, unidecode_char_map)?;
-        ensure_unidecode_for_text(signature.author_last, unidecode_char_map)?;
-        ensure_unidecode_for_text(signature.author_suffix, unidecode_char_map)?;
-        for affiliation in signature.affiliations.iter() {
-            ensure_unidecode_for_text(affiliation, unidecode_char_map)?;
-        }
-    }
-    Ok(())
-}
-
-fn ensure_unidecode_for_paper_texts<'a>(
-    papers: impl IntoIterator<Item = PaperTextFields<'a>>,
-    unidecode_char_map: &mut HashMap<char, String>,
-) -> PyResult<()> {
-    for paper in papers {
-        ensure_unidecode_for_text(paper.title, unidecode_char_map)?;
-        ensure_unidecode_for_text(paper.venue, unidecode_char_map)?;
-        ensure_unidecode_for_text(paper.journal_name, unidecode_char_map)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn ensure_unidecode_for_paper_author_texts<'a>(
-    paper_authors: impl IntoIterator<Item = &'a [(i64, String)]>,
-    unidecode_char_map: &mut HashMap<char, String>,
-) -> PyResult<()> {
-    for authors in paper_authors {
-        for (_position, author_name) in authors.iter() {
-            ensure_unidecode_for_text(author_name, unidecode_char_map)?;
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn ensure_unidecode_for_raw_arrow_inputs(
     signatures: &HashMap<String, RawArrowSignature>,
     papers: &HashMap<String, RawArrowPaper>,
     paper_authors: &HashMap<String, Vec<(i64, String)>>,
     unidecode_char_map: &mut HashMap<char, String>,
+    num_threads: Option<usize>,
 ) -> PyResult<()> {
-    ensure_unidecode_for_signature_texts(
-        signatures.values().map(|signature| SignatureTextFields {
-            author_first: &signature.author_first,
-            author_middle: &signature.author_middle,
-            author_last: &signature.author_last,
-            author_suffix: &signature.author_suffix,
-            affiliations: &signature.affiliations,
-        }),
-        unidecode_char_map,
-    )?;
-    ensure_unidecode_for_paper_texts(
-        papers.values().map(|paper| PaperTextFields {
-            title: &paper.title,
-            venue: &paper.venue,
-            journal_name: &paper.journal_name,
-        }),
-        unidecode_char_map,
-    )?;
-    ensure_unidecode_for_paper_author_texts(
-        paper_authors.values().map(Vec::as_slice),
-        unidecode_char_map,
-    )?;
+    let additions = install_with_optional_rayon_pool(num_threads, || {
+        unidecode_map_for_raw_arrow_inputs(signatures, papers, paper_authors)
+    });
+    for (ch, replacement) in additions {
+        unidecode_char_map.entry(ch).or_insert(replacement);
+    }
     Ok(())
+}
+
+/// The unidecode map of every non-ASCII character in the raw inputs.
+///
+/// A character's replacement does not depend on its text, so the map needs
+/// only the distinct characters, which are collected in parallel.
+pub(crate) fn unidecode_map_for_raw_arrow_inputs(
+    signatures: &HashMap<String, RawArrowSignature>,
+    papers: &HashMap<String, RawArrowPaper>,
+    paper_authors: &HashMap<String, Vec<(i64, String)>>,
+) -> HashMap<char, String> {
+    fn add_chars(chars: &mut HashSet<char>, text: &str) {
+        if !text.is_ascii() {
+            chars.extend(text.chars().filter(|ch| !ch.is_ascii()));
+        }
+    }
+    fn union(mut left: HashSet<char>, right: HashSet<char>) -> HashSet<char> {
+        left.extend(right);
+        left
+    }
+    let signature_chars = signatures
+        .par_iter()
+        .fold(HashSet::new, |mut chars, (_, signature)| {
+            add_chars(&mut chars, &signature.author_first);
+            add_chars(&mut chars, &signature.author_middle);
+            add_chars(&mut chars, &signature.author_last);
+            add_chars(&mut chars, &signature.author_suffix);
+            for affiliation in signature.affiliations.iter() {
+                add_chars(&mut chars, affiliation);
+            }
+            chars
+        })
+        .reduce(HashSet::new, union);
+    let paper_chars = papers
+        .par_iter()
+        .fold(HashSet::new, |mut chars, (_, paper)| {
+            add_chars(&mut chars, &paper.title);
+            add_chars(&mut chars, &paper.venue);
+            add_chars(&mut chars, &paper.journal_name);
+            chars
+        })
+        .reduce(HashSet::new, union);
+    let author_chars = paper_authors
+        .par_iter()
+        .fold(HashSet::new, |mut chars, (_, authors)| {
+            for (_position, author_name) in authors.iter() {
+                add_chars(&mut chars, author_name);
+            }
+            chars
+        })
+        .reduce(HashSet::new, union);
+    union(union(signature_chars, paper_chars), author_chars)
+        .into_iter()
+        .map(|ch| (ch, crate::text_compat::text_unidecode_char(ch).to_string()))
+        .collect()
 }
 
 pub(crate) fn preprocess_stage_papers(

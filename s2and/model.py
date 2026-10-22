@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 import hashlib
 import logging
 import math
@@ -12,9 +13,9 @@ from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from functools import partial
+from functools import partial, wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeVar, cast
 
 import numpy as np
 from tqdm import tqdm
@@ -133,6 +134,32 @@ _ARROW_ATTACH_NAME_CHECK_EXEMPT: ContextVar[frozenset[str] | None] = ContextVar(
 _ARROW_ATTACH_BLOCK_STATE: ContextVar[_AttachmentBlockState | None] = ContextVar(
     "s2and_arrow_attach_block_state", default=None
 )
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _gc_paused(method: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Pause Python's cyclic garbage collector while ``method`` runs.
+
+    Predictions allocate millions of short-lived containers, and each full
+    collection walks every live object; that took 1-2% of large requests.
+    Reference counting still frees acyclic objects at once, and the collector
+    resumes afterwards for cycles. A nested call leaves the pause to its caller.
+    """
+
+    @wraps(method)
+    def paused(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        if not gc.isenabled():
+            return method(*args, **kwargs)
+        gc.disable()
+        try:
+            return method(*args, **kwargs)
+        finally:
+            gc.enable()
+
+    return paused
 
 
 class _AttachmentBlockState:
@@ -3708,6 +3735,7 @@ class Clusterer:
         )
         return result
 
+    @_gc_paused
     def predict_from_arrow(
         self,
         block_dict: dict[str, list[str]],
@@ -5689,6 +5717,7 @@ class Clusterer:
             prediction_state=prediction_state,
         )
 
+    @_gc_paused
     def predict_incremental_from_arrow(
         self,
         block_signatures: list[str],

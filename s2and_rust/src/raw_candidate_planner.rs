@@ -294,16 +294,17 @@ mod additional_cluster_seed_disallow_tests {
 fn validate_required_raw_arrow_paper_metadata(
     required_paper_ids: &HashSet<String>,
     papers: &HashMap<String, RawArrowPaper>,
+    num_threads: Option<usize>,
 ) -> PyResult<()> {
-    let mut required_paper_ids = required_paper_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    required_paper_ids.sort_unstable();
-    if let Some(paper_id) = required_paper_ids
-        .iter()
-        .find(|paper_id| !papers.contains_key(**paper_id))
-    {
+    // Report the smallest missing id, as a sorted scan would, without sorting
+    // every id when none is missing.
+    let missing = install_with_optional_rayon_pool(num_threads, || {
+        required_paper_ids
+            .par_iter()
+            .filter(|paper_id| !papers.contains_key(*paper_id))
+            .min()
+    });
+    if let Some(paper_id) = missing {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Arrow signatures reference missing paper_id '{paper_id}' in papers Arrow input"
         )));
@@ -722,7 +723,7 @@ fn read_reusable_raw_arrow_query_inputs(
         });
     let (papers, paper_index_stats, read_papers_secs) = papers_result?;
     let (paper_authors, paper_author_index_stats, read_paper_authors_secs) = paper_authors_result?;
-    validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers)?;
+    validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, num_threads)?;
     let (raw_specter_by_paper_id, specter_index_stats, read_specter_secs) =
         raw_specter_by_paper_id_result?;
     let specter_by_paper_id = raw_specter_by_paper_id.map(|values| {
@@ -823,14 +824,19 @@ impl RawArrowSeedLayout {
     fn require_signature_rows(
         &self,
         signatures: &HashMap<String, RawArrowSignature>,
+        num_threads: Option<usize>,
     ) -> PyResult<()> {
-        for signature_id in self.seed_signature_ids.iter() {
-            if !signatures.contains_key(signature_id) {
-                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                    "cluster seed signature_id '{}' is missing from signatures Arrow input",
-                    signature_id
-                )));
-            }
+        // The first missing seed in seed order, as the serial loop reported it.
+        let missing = install_with_optional_rayon_pool(num_threads, || {
+            self.seed_signature_ids
+                .par_iter()
+                .find_first(|signature_id| !signatures.contains_key(*signature_id))
+        });
+        if let Some(signature_id) = missing {
+            return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "cluster seed signature_id '{}' is missing from signatures Arrow input",
+                signature_id
+            )));
         }
         Ok(())
     }
@@ -1221,7 +1227,7 @@ impl RawBlockQueryCandidatePlanner {
             })
             .collect();
         let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
-        layout.require_signature_rows(&signatures)?;
+        layout.require_signature_rows(&signatures, num_threads)?;
 
         let needed_paper_ids = layout.needed_paper_ids(&signatures);
         let prefetch_paper_ids: HashSet<String> = prefetched_signatures
@@ -1256,7 +1262,7 @@ impl RawBlockQueryCandidatePlanner {
                 split_prefetched_rows(specter, &prefetch_paper_ids, &needed_paper_ids)
             }),
         });
-        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &rows.papers)?;
+        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &rows.papers, num_threads)?;
         let read_telemetry = RawArrowSeedReadTelemetry {
             read_cluster_seeds_secs: layout.read_cluster_seeds_secs,
             read_signatures_secs,
@@ -1584,7 +1590,7 @@ impl RawBlockQueryCandidatePlanner {
         };
         let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
         signatures.retain(|signature_id, _| layout.seed_signature_id_set.contains(signature_id));
-        layout.require_signature_rows(&signatures)?;
+        layout.require_signature_rows(&signatures, self.num_threads)?;
 
         let needed_paper_ids = layout.needed_paper_ids(&signatures);
         let mut missing_paper_ids: HashSet<String> = needed_paper_ids
@@ -1638,7 +1644,7 @@ impl RawBlockQueryCandidatePlanner {
         if let Some(specter) = specter_by_paper_id.as_mut() {
             specter.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
         }
-        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers)?;
+        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, self.num_threads)?;
         let read_telemetry = RawArrowSeedReadTelemetry {
             read_cluster_seeds_secs: layout.read_cluster_seeds_secs,
             read_signatures_secs,

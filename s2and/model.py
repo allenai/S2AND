@@ -81,6 +81,7 @@ from s2and.rust_calls import (
     build_block_upper_triangle_feature_matrix_indexed_rust,
     get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
+    take_feature_columns_rust,
 )
 from s2and.seed_merging import (
     filter_generated_seed_negatives,
@@ -913,7 +914,11 @@ def _build_block_feature_matrices_indexed_rust(
     def project(indices: list[int]) -> np.ndarray:
         if indices == union_indices:
             return union_features
-        return np.take(union_features, [position_by_index[index] for index in indices], axis=1)
+        return take_feature_columns_rust(
+            union_features,
+            [position_by_index[index] for index in indices],
+            num_threads=num_threads,
+        )
 
     return project(main_indices), None if nameless_indices is None else project(nameless_indices)
 

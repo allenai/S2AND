@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 
 from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER
 from s2and.incremental_linking.array_validation import as_uint32_1d
+from s2and.runtime import load_s2and_rust_extension
 from s2and.thread_config import resolve_n_jobs
 
 
@@ -17,6 +19,33 @@ def _six_array_result(result: Any, method_name: str) -> tuple[Any, Any, Any, Any
     if not isinstance(result, tuple) or len(result) != 6:
         raise RuntimeError(f"RustFeaturizer.{method_name} violated its six-array result contract")
     return result
+
+
+def take_feature_columns_rust(
+    features: np.ndarray,
+    columns: Sequence[int],
+    *,
+    num_threads: int | None = None,
+) -> np.ndarray:
+    """Return ``np.take(features, columns, axis=1)``, gathered on the Rust pool.
+
+    numpy gathers columns on one thread; feature matrices hold millions of rows.
+
+    Args:
+        features: Float64 feature matrix in any memory layout.
+        columns: Column positions to copy, in output order.
+        num_threads: Rust pool size; None uses the default pool.
+
+    Returns:
+        A C-ordered float64 matrix with one column per entry of ``columns``.
+    """
+
+    resolved_num_threads = None if num_threads is None else resolve_n_jobs(num_threads)
+    return load_s2and_rust_extension().take_feature_columns(
+        features,
+        [int(column) for column in columns],
+        resolved_num_threads,
+    )
 
 
 def get_constraints_matrix_indexed_rust(

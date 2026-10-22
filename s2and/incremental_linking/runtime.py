@@ -45,6 +45,7 @@ from s2and.incremental_linking.retrieval import (
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features_with_telemetry
 from s2and.model_pairwise import predict_pairwise_class0
 from s2and.runtime import build_runtime_context
+from s2and.rust_calls import take_feature_columns_rust
 from s2and.thread_config import resolve_n_jobs
 
 LinkAction = Literal["link", "abstain"]
@@ -1035,11 +1036,15 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
             model_pair_features[np.isnan(model_pair_features)] = float(pairwise_model_nan_value)
         model_distances = _predict_pairwise_model_distances(
             classifier=classifier,
-            features=model_pair_features[:, main_positions],
+            features=take_feature_columns_rust(model_pair_features, main_positions, num_threads=n_jobs),
             labels=labels_chunk,
             num_threads=resolve_n_jobs(n_jobs),
             nameless_classifier=nameless_classifier,
-            nameless_features=model_pair_features[:, nameless_positions] if nameless_positions else None,
+            nameless_features=(
+                take_feature_columns_rust(model_pair_features, nameless_positions, num_threads=n_jobs)
+                if nameless_positions
+                else None
+            ),
         )
         predict_seconds += time.perf_counter() - predict_start
         distance_accumulators = _accumulate_pairwise_distance_chunk(

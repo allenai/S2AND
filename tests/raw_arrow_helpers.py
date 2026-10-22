@@ -114,8 +114,40 @@ def native_labeled_plan(paths: dict[str, str], *args: Any, **kwargs: Any) -> dic
         return load_s2and_rust_extension().raw_arrow_labeled_candidate_plan(arrow_dataset.native, *args, **kwargs)
 
 
+def pair_position_keys(
+    query_signature_ids: list[str], left_signature_ids: list[str], right_signature_ids: list[str]
+) -> dict[str, Any]:
+    """Plan keys for pairs given as ids: the pair signature order and each pair's positions in it."""
+    order = list(dict.fromkeys([*query_signature_ids, *right_signature_ids]))
+    position = {signature_id: index for index, signature_id in enumerate(order)}
+    return {
+        "pair_signature_ids": order,
+        "left_pair_signature_indices": np.asarray([position[value] for value in left_signature_ids], dtype=np.uint32),
+        "right_pair_signature_indices": np.asarray([position[value] for value in right_signature_ids], dtype=np.uint32),
+    }
+
+
+def plan_pair_ids(plan: Any) -> tuple[list[str], list[str]]:
+    """Left and right signature ids of each pair of a planner plan, labeled plan or plan bundle."""
+    if hasattr(plan, "signature_order"):
+        order = plan.signature_order.signature_ids
+        left, right = plan.left_pair_signature_indices, plan.right_pair_signature_indices
+    elif "pair_signature_ids" in plan:
+        order = plan["pair_signature_ids"]
+        left, right = plan["left_pair_signature_indices"], plan["right_pair_signature_indices"]
+    else:
+        return list(plan["left_signature_ids"]), list(plan["right_signature_ids"])
+    return [order[int(index)] for index in left], [order[int(index)] for index in right]
+
+
 def minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
-    """Build a fresh empty raw-plan payload, with explicit row/pair overrides."""
+    """Build a fresh empty raw-plan payload, with explicit row/pair overrides.
+
+    Pairs may be given as left_signature_ids and right_signature_ids; they become
+    the plan's pair signature order and positions.
+    """
+    left_signature_ids = overrides.pop("left_signature_ids", None)
+    right_signature_ids = overrides.pop("right_signature_ids", None)
     query_signature_ids = list(overrides.pop("query_signature_ids", ["q0"]))
     row_count = int(overrides.pop("row_count", 0))
     pair_count = int(overrides.pop("pair_count", 0))
@@ -130,8 +162,6 @@ def minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
         "retrieval_scores": np.zeros(row_count, dtype=np.float32),
         "retrieval_ranks": np.arange(1, row_count + 1, dtype=np.uint16),
         "pair_row_indices": np.zeros(pair_count, dtype=np.uint32),
-        "left_signature_ids": [(query_signature_ids[0] if query_signature_ids else "")] * pair_count,
-        "right_signature_ids": [f"s{index}" for index in range(pair_count)],
         "component_members": {},
         "telemetry": {},
     }
@@ -141,4 +171,12 @@ def minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
         else:
             plan[raw_key] = np.zeros(row_count, dtype=dtype)
     plan.update(overrides)
+    if "pair_signature_ids" in plan:
+        return plan
+    queries = list(plan["query_signature_ids"])
+    if left_signature_ids is None:
+        left_signature_ids = [(queries[0] if queries else "")] * pair_count
+    if right_signature_ids is None:
+        right_signature_ids = [f"s{index}" for index in range(pair_count)]
+    plan.update(pair_position_keys(queries, list(left_signature_ids), list(right_signature_ids)))
     return plan

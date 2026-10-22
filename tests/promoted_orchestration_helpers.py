@@ -102,8 +102,9 @@ def _patch_fake_raw_arrow_planner(
                 "retrieval_scores": np.asarray([], dtype=np.float32),
                 "retrieval_ranks": np.asarray([], dtype=np.uint16),
                 "pair_row_indices": np.asarray([], dtype=np.uint32),
-                "left_signature_ids": [],
-                "right_signature_ids": [],
+                "pair_signature_ids": list(query_ids),
+                "left_pair_signature_indices": np.asarray([], dtype=np.uint32),
+                "right_pair_signature_indices": np.asarray([], dtype=np.uint32),
                 "component_members": {},
             }
             for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:

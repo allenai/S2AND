@@ -39,6 +39,7 @@ from tests.raw_arrow_helpers import (
     native_auto_planner,
     native_labeled_plan,
     open_arrow_dataset,
+    plan_pair_ids,
     write_ipc,
 )
 from tests.raw_arrow_helpers import (
@@ -74,7 +75,7 @@ def _indexed_pair_matrix(featurizer: Any, pairs: list[tuple[str, str]]) -> np.nd
                 "right_signature_ids": ["s1"],
                 "component_members": {"c1": ["s1"]},
             },
-            "left_signature_ids must match",
+            "left_pair_signature_indices must match",
         ),
         (
             {
@@ -85,8 +86,54 @@ def _indexed_pair_matrix(featurizer: Any, pairs: list[tuple[str, str]]) -> np.nd
             "query_signature_ids must be unique",
         ),
         ({"component_members": []}, "component_members must be a mapping"),
+        (
+            {
+                "row_count": 1,
+                "pair_count": 2,
+                "row_query_signature_indices": np.asarray([0], dtype=np.uint32),
+                "row_component_keys": ["c1"],
+                "pair_row_indices": np.asarray([0, 0], dtype=np.uint32),
+                "left_pair_signature_indices": np.asarray([0, 0], dtype=np.uint32),
+                "pair_signature_ids": ["x", "s0", "s1"],
+                "right_pair_signature_indices": np.asarray([1, 2], dtype=np.uint32),
+            },
+            "pair_signature_ids must start with query_signature_ids",
+        ),
+        (
+            {
+                "row_count": 1,
+                "pair_count": 2,
+                "row_query_signature_indices": np.asarray([0], dtype=np.uint32),
+                "row_component_keys": ["c1"],
+                "pair_row_indices": np.asarray([0, 0], dtype=np.uint32),
+                "left_pair_signature_indices": np.asarray([0, 0], dtype=np.uint32),
+                "pair_signature_ids": ["q0", "s1", "s0"],
+                "right_pair_signature_indices": np.asarray([2, 1], dtype=np.uint32),
+            },
+            "order of first appearance",
+        ),
+        (
+            {
+                "row_count": 1,
+                "pair_count": 2,
+                "row_query_signature_indices": np.asarray([0], dtype=np.uint32),
+                "row_component_keys": ["c1"],
+                "pair_row_indices": np.asarray([0, 0], dtype=np.uint32),
+                "left_pair_signature_indices": np.asarray([0, 0], dtype=np.uint32),
+                "pair_signature_ids": ["q0", "s0"],
+                "right_pair_signature_indices": np.asarray([1, 5], dtype=np.uint32),
+            },
+            "right_pair_signature_indices contains index 5 outside pair_signature_ids length=2",
+        ),
     ],
-    ids=["pair-left-query-mismatch", "duplicate-query", "nonmapping-members"],
+    ids=[
+        "pair-left-query-mismatch",
+        "duplicate-query",
+        "nonmapping-members",
+        "pair-ids-without-query-prefix",
+        "right-ids-out-of-appearance-order",
+        "right-position-out-of-range",
+    ],
 )
 def test_raw_arrow_plan_bundle_rejects_invalid_mapping(overrides, message) -> None:
     with pytest.raises(ValueError, match=message):
@@ -438,7 +485,7 @@ def test_raw_arrow_candidate_plans_accept_empty_paper_author_lists(
 
     for plan in (online, labeled):
         assert set(plan["row_component_keys"]) == {"c_match", "c_other"}
-        assert set(plan["right_signature_ids"]) == {"s1", "s2"}
+        assert set(plan_pair_ids(plan)[1]) == {"s1", "s2"}
         matching_row = plan["row_component_keys"].index("c_match")
         assert plan["coauthor_overlap"][matching_row] == 0
         if "p_q" in empty_roster_papers:
@@ -476,7 +523,7 @@ def test_raw_arrow_candidate_planner_rejects_multi_query_seed_overlap(tmp_path: 
 
     planned = planner.plan(["q1"])
     assert planned["row_component_keys"] == ["c_match", "c_other"]
-    assert planned["right_signature_ids"] == ["s1", "s2"]
+    assert plan_pair_ids(planned)[1] == ["s1", "s2"]
 
 
 def test_reusable_raw_arrow_planner_applies_dynamic_disallows_without_retaining_them(tmp_path: Path) -> None:
@@ -738,7 +785,7 @@ def test_raw_arrow_candidate_plan_extra_hash_selected_batch_is_exact_filtered(tm
 
     plan = _raw_candidate_plan_arrow(indexed_paths, ["q1"])
 
-    assert plan["right_signature_ids"] == ["s1", "s2"]
+    assert plan_pair_ids(plan)[1] == ["s1", "s2"]
     assert plan["telemetry"]["signature_count"] == 3
     assert plan["telemetry"]["signature_rows_scanned"] == 2
 
@@ -783,7 +830,7 @@ def test_retained_batch_index_preserves_plan_and_missing_signature_errors(tmp_pa
 
     plan = _raw_candidate_plan_arrow(indexed_paths, ["q1"])
     assert plan["query_signature_ids"] == ["q1"]
-    assert plan["right_signature_ids"] == ["s1", "s2"]
+    assert plan_pair_ids(plan)[1] == ["s1", "s2"]
     with pytest.raises(KeyError, match="query signature_id 'missing_query' is missing from signatures"):
         _raw_candidate_plan_arrow(indexed_paths, ["missing_query"])
 
@@ -965,8 +1012,9 @@ def test_raw_arrow_candidate_plan_orcid_override_returns_all_matches(tmp_path: P
 
     expected = {"c_middle", "c_year"} if disallow else {"c_good", "c_middle", "c_year"}
     assert set(plan["row_component_keys"]) == expected
-    assert set(plan["left_signature_ids"]) == {"q1"}
-    assert set(plan["right_signature_ids"]) == {key.replace("c_", "s_") for key in expected}
+    left_ids, right_ids = plan_pair_ids(plan)
+    assert set(left_ids) == {"q1"}
+    assert set(right_ids) == {key.replace("c_", "s_") for key in expected}
     assert plan["row_orcid_match"].tolist() == [1] * len(expected)
     assert plan["telemetry"]["cluster_seed_disallowed_candidate_count"] == int(disallow)
     assert plan["telemetry"]["cluster_seed_disallow_pair_count"] == int(disallow)
@@ -1079,11 +1127,14 @@ def test_raw_arrow_candidate_plan_matches_multi_query_auto_views_and_specter(tmp
     raw_plan = _raw_candidate_plan_arrow(paths, ["q_full", "q_initial"], query_view="auto")
 
     assert raw_plan["query_views"] == ["full", "initial_only"]
-    assert raw_plan["left_signature_ids"] == ["q_full", "q_full", "q_initial", "q_initial"]
-    assert raw_plan["right_signature_ids"] == ["s_full", "s_other", "s_initial", "s_other"]
-    assert raw_plan["left_signature_ids"][0] is raw_plan["left_signature_ids"][1]
-    assert raw_plan["left_signature_ids"][2] is raw_plan["left_signature_ids"][3]
-    assert raw_plan["right_signature_ids"][1] is raw_plan["right_signature_ids"][3]
+    assert plan_pair_ids(raw_plan) == (
+        ["q_full", "q_full", "q_initial", "q_initial"],
+        ["s_full", "s_other", "s_initial", "s_other"],
+    )
+    # Each distinct signature is sent once; repeated pairs share its position.
+    assert raw_plan["pair_signature_ids"] == ["q_full", "q_initial", "s_full", "s_other", "s_initial"]
+    assert raw_plan["left_pair_signature_indices"].tolist() == [0, 0, 1, 1]
+    assert raw_plan["right_pair_signature_indices"].tolist() == [2, 3, 4, 3]
 
 
 def test_raw_arrow_candidate_plan_excludes_query_seed_and_handles_missing_metadata(tmp_path: Path) -> None:
@@ -1137,8 +1188,8 @@ def test_raw_arrow_candidate_plan_excludes_query_seed_and_handles_missing_metada
     assert plan["seed_signature_ids"] == []
     assert plan["telemetry"]["payload_seed_signature_count"] == 0
     assert "seed_component_keys" not in plan
-    assert "q1" not in plan["right_signature_ids"]
-    assert set(plan["right_signature_ids"]) == {"s1", "s2"}
+    assert "q1" not in plan_pair_ids(plan)[1]
+    assert set(plan_pair_ids(plan)[1]) == {"s1", "s2"}
     assert plan["query_views"] == ["full"]
     np.testing.assert_array_equal(plan["row_query_has_coauthors"], np.zeros(int(plan["row_count"]), dtype=np.uint8))
     np.testing.assert_allclose(plan["coauthor_overlap"], np.zeros(int(plan["row_count"]), dtype=np.float32))
@@ -1206,8 +1257,9 @@ def test_raw_arrow_plan_bundle_derives_signature_order_from_rust_plan(tmp_path: 
         "query_authors",
         "seed_signature_ids",
         "component_members",
-        "left_signature_ids",
-        "right_signature_ids",
+        "pair_signature_ids",
+        "left_pair_signature_indices",
+        "right_pair_signature_indices",
         "pair_row_indices",
         "row_query_signature_indices",
         "row_component_keys",
@@ -1270,8 +1322,7 @@ def test_raw_arrow_plan_bundle_freezes_native_plan_values(monkeypatch: pytest.Mo
     raw_plan["query_views"][0] = "initial_only"
     raw_plan["query_authors"][0] = "Changed Author"
     raw_plan["row_component_keys"][0] = "changed-component"
-    raw_plan["left_signature_ids"][0] = "changed-query"
-    raw_plan["right_signature_ids"][0] = "changed-signature"
+    raw_plan["pair_signature_ids"][1] = "changed-signature"
     raw_plan["component_members"]["c0"][0] = "changed-signature"
     raw_plan["telemetry"]["seed_signature_count"] = 99
     raw_plan["telemetry"]["timings"]["total_secs"] = 99.0
@@ -1302,8 +1353,7 @@ def test_raw_arrow_plan_bundle_freezes_native_plan_values(monkeypatch: pytest.Mo
     assert retrieval_batch.row_signals["cluster_size"].tolist() == pytest.approx([3.0])
     assert bundle.query_signature_ids == ("q0",)
     assert bundle.row_component_keys == ("c0",)
-    assert bundle.left_signature_ids == ("q0",)
-    assert bundle.right_signature_ids == ("s0",)
+    assert plan_pair_ids(bundle) == (["q0"], ["s0"])
     assert bundle.component_members["c0"] == ("s0",)
     assert bundle.telemetry is not None
     assert bundle.telemetry["seed_signature_count"] == 1
@@ -1331,6 +1381,8 @@ def test_raw_arrow_plan_bundle_adopts_native_numeric_arrays_without_copying() ->
     adopted_arrays = {
         "row_query_signature_indices": bundle.row_query_offsets,
         "pair_row_indices": bundle.pair_row_indices,
+        "left_pair_signature_indices": bundle.left_pair_signature_indices,
+        "right_pair_signature_indices": bundle.right_pair_signature_indices,
         "retrieval_scores": bundle.retrieval_scores,
         "retrieval_ranks": bundle.retrieval_ranks,
         **{

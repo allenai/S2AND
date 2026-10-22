@@ -348,7 +348,7 @@ def test_initial_clone_matches_public_overlay_and_keeps_origin_constraints(
             )  # noqa: SLF001
             featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
                 overlay,
-                signature_ids=tuple(dict.fromkeys((*plan["query_signature_ids"], *plan["right_signature_ids"]))),
+                signature_ids=tuple(plan["pair_signature_ids"]),
                 name_tuples=frozenset(),
                 num_threads=1,
             )

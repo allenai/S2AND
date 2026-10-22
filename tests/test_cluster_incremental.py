@@ -46,6 +46,7 @@ from tests.promoted_orchestration_helpers import (
     _mock_promoted_limits,
     _patch_fake_raw_arrow_planner,
 )
+from tests.raw_arrow_helpers import pair_position_keys, plan_pair_ids
 
 _PROMOTED_TEST_FEATURIZER_INFO = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
 _PROMOTED_TEST_FEATURE_COLUMNS = ("test_link_probability",)
@@ -153,8 +154,7 @@ def test_raw_plan_contiguous_query_slice_rebases_rows_and_pairs() -> None:
         "retrieval_scores": np.asarray([0.9, 0.8, 0.7, 0.6], dtype=np.float32),
         "retrieval_ranks": np.asarray([1, 2, 1, 1], dtype=np.uint16),
         "pair_row_indices": np.asarray([0, 1, 2, 3], dtype=np.uint32),
-        "left_signature_ids": ["q0", "q0", "q1", "q2"],
-        "right_signature_ids": ["s0", "s1", "s2", "s3"],
+        **pair_position_keys(["q0", "q1", "q2"], ["q0", "q0", "q1", "q2"], ["s0", "s1", "s2", "s3"]),
         "component_members": {f"c{index}": [f"s{index}"] for index in range(4)},
         "telemetry": {"query_signature_count": 3},
     }
@@ -171,8 +171,7 @@ def test_raw_plan_contiguous_query_slice_rebases_rows_and_pairs() -> None:
     assert remainder.query_signature_ids == ("q1", "q2")
     assert remainder.row_query_offsets.tolist() == [0, 1]
     assert remainder.pair_row_indices.tolist() == [0, 1]
-    assert remainder.left_signature_ids == ("q1", "q2")
-    assert remainder.right_signature_ids == ("s2", "s3")
+    assert plan_pair_ids(remainder) == (["q1", "q2"], ["s2", "s3"])
     assert np.shares_memory(remainder.retrieval_scores, bundle.retrieval_scores)
 
 
@@ -849,7 +848,7 @@ def test_native_planner_exclusions_match_scored_supervision_direction(
         n_jobs=1,
         featurizer=None,
     )
-    pair_offset = bundle.right_signature_ids.index("s1")
+    pair_offset = plan_pair_ids(bundle)[1].index("s1")
     effective_distance = direct if direct is not None else reverse
     assert labels[pair_offset] + LARGE_INTEGER == pytest.approx(effective_distance)
     exclusions = production_module._partial_supervision_plan_disallows(  # noqa: SLF001

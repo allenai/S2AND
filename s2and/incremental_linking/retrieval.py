@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -75,11 +74,12 @@ RAW_CANDIDATE_PLAN_ROW_KEYS: tuple[str, ...] = (
     *RAW_CANDIDATE_PLAN_BATCH_ROW_KEYS,
     *(raw_key for raw_key, _signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS),
 )
-RAW_CANDIDATE_PLAN_PAIR_INDEX_KEYS: tuple[str, ...] = ("pair_row_indices",)
-RAW_CANDIDATE_PLAN_PAIR_ID_KEYS: tuple[str, ...] = (
-    "left_signature_ids",
-    "right_signature_ids",
+RAW_CANDIDATE_PLAN_PAIR_INDEX_KEYS: tuple[str, ...] = (
+    "pair_row_indices",
+    "left_pair_signature_indices",
+    "right_pair_signature_indices",
 )
+RAW_CANDIDATE_PLAN_PAIR_ID_KEYS: tuple[str, ...] = ("pair_signature_ids",)
 RAW_CANDIDATE_PLAN_PAIR_KEYS: tuple[str, ...] = (
     *RAW_CANDIDATE_PLAN_PAIR_INDEX_KEYS,
     *RAW_CANDIDATE_PLAN_PAIR_ID_KEYS,
@@ -108,8 +108,9 @@ class RawArrowPlanBundle:
     row_count: int
     pair_count: int
     row_query_offsets: np.ndarray
-    left_signature_ids: tuple[str, ...]
-    right_signature_ids: tuple[str, ...]
+    # Positions of each pair's signatures in signature_order.signature_ids.
+    left_pair_signature_indices: np.ndarray
+    right_pair_signature_indices: np.ndarray
     pair_row_indices: np.ndarray
     row_component_keys: tuple[str, ...]
     retrieval_scores: np.ndarray
@@ -142,8 +143,8 @@ class RawArrowPlanBundle:
             row_count=row_stop - row_start,
             pair_count=pair_stop - pair_start,
             row_query_offsets=row_query_offsets,
-            left_signature_ids=self.left_signature_ids[pair_start:pair_stop],
-            right_signature_ids=self.right_signature_ids[pair_start:pair_stop],
+            left_pair_signature_indices=self.left_pair_signature_indices[pair_start:pair_stop],
+            right_pair_signature_indices=self.right_pair_signature_indices[pair_start:pair_stop],
             pair_row_indices=pair_row_indices,
             row_component_keys=self.row_component_keys[row_start:row_stop],
             retrieval_scores=self.retrieval_scores[row_start:row_stop],
@@ -162,8 +163,9 @@ class RawArrowPlanBundle:
         component_members: Mapping[Any, Sequence[Any]],
         telemetry: Mapping[Any, Any] | None,
         row_query_offsets: Any,
-        left_signature_ids: tuple[str, ...],
-        right_signature_ids: tuple[str, ...],
+        pair_signature_ids: tuple[str, ...],
+        left_pair_signature_indices: Any,
+        right_pair_signature_indices: Any,
         pair_row_indices: Any,
         row_component_keys: Sequence[Any],
         retrieval_scores: Any,
@@ -176,9 +178,8 @@ class RawArrowPlanBundle:
         owned_query_views = tuple(query_views)
         owned_query_authors = tuple(str(value or "") for value in query_authors)
         owned_row_query_offsets = _readonly_array(row_query_offsets, dtype=np.uint32)
-        # The caller already converted the pair ids to tuples of str.
-        owned_left_signature_ids = left_signature_ids
-        owned_right_signature_ids = right_signature_ids
+        owned_left_pair_signature_indices = _readonly_array(left_pair_signature_indices, dtype=np.uint32)
+        owned_right_pair_signature_indices = _readonly_array(right_pair_signature_indices, dtype=np.uint32)
         owned_pair_row_indices = _readonly_array(pair_row_indices, dtype=np.uint32)
         owned_row_component_keys = tuple(str(value) for value in row_component_keys)
         owned_retrieval_scores = _readonly_array(retrieval_scores, dtype=np.float32)
@@ -207,13 +208,9 @@ class RawArrowPlanBundle:
             **owned_normalized_row_signals,
         }
 
-        # Every left id is its row's query id (checked by from_native_mapping), so
-        # the left ids add nothing to the order of first appearance.
-        ordered_ids = tuple(dict.fromkeys(itertools.chain(owned_query_signature_ids, owned_right_signature_ids)))
-
         return cls(
             signature_order=FeatureBlockSignatureOrder(
-                signature_ids=ordered_ids,
+                signature_ids=pair_signature_ids,
                 query_signature_ids=owned_query_signature_ids,
             ),
             query_signature_ids=owned_query_signature_ids,
@@ -233,8 +230,8 @@ class RawArrowPlanBundle:
             row_count=len(owned_row_query_offsets),
             pair_count=len(owned_pair_row_indices),
             row_query_offsets=owned_row_query_offsets,
-            left_signature_ids=owned_left_signature_ids,
-            right_signature_ids=owned_right_signature_ids,
+            left_pair_signature_indices=owned_left_pair_signature_indices,
+            right_pair_signature_indices=owned_right_pair_signature_indices,
             pair_row_indices=owned_pair_row_indices,
             row_component_keys=owned_row_component_keys,
             retrieval_scores=owned_retrieval_scores,
@@ -315,21 +312,38 @@ class RawArrowPlanBundle:
             upper_bound=row_count,
             bound_name="row_count",
         )
-        left_signature_ids = _raw_plan_id_tuple(plan, "left_signature_ids", pair_count)
-        right_signature_ids = _raw_plan_id_tuple(plan, "right_signature_ids", pair_count)
+        # The planner sends each distinct pair signature once, queries first, and
+        # per-pair positions into that list; plans carry millions of pairs.
+        pair_signature_ids = tuple(str(value) for value in _required_raw_plan_value(plan, "pair_signature_ids"))
+        if pair_signature_ids[:query_count] != query_signature_ids:
+            raise ValueError("raw candidate plan pair_signature_ids must start with query_signature_ids")
+        left_pair_signature_indices = _raw_plan_array(plan, "left_pair_signature_indices", np.uint32, pair_count)
+        right_pair_signature_indices = _raw_plan_array(plan, "right_pair_signature_indices", np.uint32, pair_count)
+        for key, positions in (
+            ("left_pair_signature_indices", left_pair_signature_indices),
+            ("right_pair_signature_indices", right_pair_signature_indices),
+        ):
+            _validate_uint32_indices_below(
+                positions,
+                key=key,
+                upper_bound=len(pair_signature_ids),
+                bound_name="pair_signature_ids length",
+            )
         if pair_count:
-            # Plans carry millions of pairs; compare them in one object-array pass.
-            expected_left_signature_ids = np.asarray(query_signature_ids, dtype=object)[
-                row_query_offsets[pair_row_indices]
-            ]
-            mismatched = np.flatnonzero(np.asarray(left_signature_ids, dtype=object) != expected_left_signature_ids)
+            expected_left = row_query_offsets[pair_row_indices]
+            mismatched = np.flatnonzero(left_pair_signature_indices != expected_left)
             if len(mismatched):
                 pair_index = int(mismatched[0])
                 raise ValueError(
-                    "raw candidate plan left_signature_ids must match each pair row query_signature_ids: "
-                    f"pair {pair_index} has {left_signature_ids[pair_index]!r}, "
-                    f"expected {expected_left_signature_ids[pair_index]!r}"
+                    "raw candidate plan left_pair_signature_indices must match each pair row query_signature_ids: "
+                    f"pair {pair_index} has {pair_signature_ids[int(left_pair_signature_indices[pair_index])]!r}, "
+                    f"expected {query_signature_ids[int(expected_left[pair_index])]!r}"
                 )
+        if not _in_first_appearance_order(right_pair_signature_indices, query_count, len(pair_signature_ids)):
+            raise ValueError(
+                "raw candidate plan pair_signature_ids after the queries must be the right signatures "
+                "in order of first appearance"
+            )
 
         normalized_row_signals = {
             signal_key: _raw_plan_array(plan, raw_key, dtype, row_count)
@@ -343,8 +357,9 @@ class RawArrowPlanBundle:
             component_members=component_members,
             telemetry=telemetry,
             row_query_offsets=row_query_offsets,
-            left_signature_ids=left_signature_ids,
-            right_signature_ids=right_signature_ids,
+            pair_signature_ids=pair_signature_ids,
+            left_pair_signature_indices=left_pair_signature_indices,
+            right_pair_signature_indices=right_pair_signature_indices,
             pair_row_indices=pair_row_indices,
             row_component_keys=row_component_keys,
             retrieval_scores=retrieval_scores,
@@ -432,11 +447,19 @@ def _raw_plan_retrieval_ranks(plan: Mapping[str, Any], expected_length: int) -> 
     return ranks
 
 
-def _raw_plan_id_tuple(plan: Mapping[str, Any], key: str, expected_length: int) -> tuple[str, ...]:
-    length = _raw_plan_sequence_length(plan, key)
-    if length != int(expected_length):
-        raise ValueError(f"raw candidate plan {key} length must match pair_count: {length} != {expected_length}")
-    return tuple(map(str, _required_raw_plan_value(plan, key)))
+def _in_first_appearance_order(positions: np.ndarray, start: int, stop: int) -> bool:
+    """Whether positions from `start` up first appear as start, start + 1, ..., stop - 1.
+
+    That is the order dict.fromkeys gives the right signatures after the queries:
+    each new position exceeds every earlier one by exactly one.
+    """
+
+    beyond = positions[positions >= start].astype(np.int64)
+    if len(beyond) == 0:
+        return stop == start
+    running_max = np.maximum.accumulate(beyond)
+    previous_max = np.concatenate(([start - 1], running_max[:-1]))
+    return bool(np.all(beyond <= previous_max + 1)) and int(running_max[-1]) == stop - 1
 
 
 def _validate_uint32_indices_below(values: np.ndarray, *, key: str, upper_bound: int, bound_name: str) -> None:
@@ -522,14 +545,24 @@ def build_linker_retrieval_batch_from_raw_plan_bundle(
         field_name="query_signature_ids",
     )
     row_query_signature_indices = query_indices_by_offset[bundle.row_query_offsets]
-    # Every left id is its row's query id (checked by from_native_mapping), so a
+    # Every left signature is its row's query (checked by from_native_mapping), so a
     # gather replaces one dict lookup per pair.
     left_signature_indices = row_query_signature_indices[bundle.pair_row_indices]
-    right_signature_indices = _signature_indices_from_ids(
-        bundle.right_signature_ids,
-        signature_id_to_index,
-        field_name="right_signature_ids",
+    # Map each distinct pair signature once, then gather per pair.
+    order_ids = bundle.signature_order.signature_ids
+    mapped_order = np.fromiter(
+        (signature_id_to_index.get(signature_id, -1) for signature_id in order_ids),
+        dtype=np.int64,
+        count=len(order_ids),
     )
+    right_mapped = mapped_order[bundle.right_pair_signature_indices]
+    missing = np.flatnonzero(right_mapped < 0)
+    if len(missing):
+        missing_id = order_ids[int(bundle.right_pair_signature_indices[int(missing[0])])]
+        raise KeyError(
+            f"right_signature_ids contains signature_id not present in signature_id_to_index: {missing_id!r}"
+        )
+    right_signature_indices = as_uint32_1d("right_signature_ids", right_mapped)
     candidate_batch = LinkerCandidateBatch(
         row_count=row_count,
         left_signature_indices=left_signature_indices,

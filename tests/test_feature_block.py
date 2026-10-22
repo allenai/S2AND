@@ -56,6 +56,7 @@ from tests.helpers import (
     write_minimal_arrow_prediction_bundle,
     write_test_arrow_artifact_manifest,
 )
+from tests.raw_arrow_helpers import pair_position_keys
 
 
 def _raw_test_clusterer(
@@ -165,8 +166,7 @@ def _raw_plan() -> dict[str, Any]:
         "query_signature_ids": ["q"],
         "query_views": ["full"],
         "row_query_signature_indices": np.asarray([0, 0], dtype=np.uint32),
-        "left_signature_ids": ["q", "q", "q"],
-        "right_signature_ids": ["s1", "s2", "s3"],
+        **pair_position_keys(["q"], ["q", "q", "q"], ["s1", "s2", "s3"]),
         "pair_row_indices": np.asarray([0, 1, 1], dtype=np.uint32),
         "row_component_keys": ["c_ada", "c_other"],
         "retrieval_scores": np.asarray([0.9, 0.2], dtype=np.float32),

@@ -2609,23 +2609,49 @@ impl RawBlockQueryCandidatePlanner {
                 )));
             }
         }
-        let signature_id_objects: Vec<_> = query_signature_ids
+        // Python orders a plan's signatures as its queries, then right signatures
+        // by first appearance. Send that order once, with each pair's positions
+        // in it: two id strings per pair cost Python several passes over
+        // millions of pairs. Ids are deduplicated by value, as Python's order is.
+        let query_count = query_signature_ids.len();
+        let table_id = |index: u32| -> &str {
+            let index = index as usize;
+            if index < query_count {
+                &query_signature_ids[index]
+            } else {
+                &seed_signature_ids[index - query_count]
+            }
+        };
+        let mut pair_signature_ids: Vec<&str> =
+            query_signature_ids.iter().map(String::as_str).collect();
+        let mut position_by_id: HashMap<&str, u32> = pair_signature_ids
             .iter()
-            .chain(seed_signature_ids.iter())
-            .map(|signature_id| PyString::new(py, signature_id).unbind())
+            .enumerate()
+            .map(|(position, signature_id)| (*signature_id, position as u32))
             .collect();
-        let left_signature_ids = PyList::new(
-            py,
-            left_signature_indices
-                .iter()
-                .map(|index| signature_id_objects[*index as usize].clone_ref(py)),
-        )?;
-        let right_signature_ids = PyList::new(
-            py,
-            right_signature_indices
-                .iter()
-                .map(|index| signature_id_objects[*index as usize].clone_ref(py)),
-        )?;
+        let mut position_by_table_index = vec![u32::MAX; signature_index_count];
+        let mut position_of = |index: u32| -> u32 {
+            let slot = &mut position_by_table_index[index as usize];
+            if *slot == u32::MAX {
+                let signature_id = table_id(index);
+                *slot = *position_by_id.entry(signature_id).or_insert_with(|| {
+                    pair_signature_ids.push(signature_id);
+                    (pair_signature_ids.len() - 1) as u32
+                });
+            }
+            *slot
+        };
+        // Right signatures first, in pair order, so new ids follow first appearance;
+        // left signatures are queries and add no ids.
+        let right_pair_signature_indices: Vec<u32> = right_signature_indices
+            .iter()
+            .map(|index| position_of(*index))
+            .collect();
+        let left_pair_signature_indices: Vec<u32> = left_signature_indices
+            .iter()
+            .map(|index| position_of(*index))
+            .collect();
+        let pair_signature_ids = PyList::new(py, pair_signature_ids)?;
         let pair_signature_ids_secs = pair_signature_ids_start.elapsed().as_secs_f64();
 
         let component_members_payload_start = Instant::now();
@@ -2778,8 +2804,15 @@ impl RawBlockQueryCandidatePlanner {
         payload.set_item("query_authors", query_authors)?;
         payload.set_item("seed_signature_ids", Vec::<String>::new())?;
         payload.set_item("component_members", component_members)?;
-        payload.set_item("left_signature_ids", left_signature_ids)?;
-        payload.set_item("right_signature_ids", right_signature_ids)?;
+        payload.set_item("pair_signature_ids", pair_signature_ids)?;
+        payload.set_item(
+            "left_pair_signature_indices",
+            left_pair_signature_indices.into_pyarray(py),
+        )?;
+        payload.set_item(
+            "right_pair_signature_indices",
+            right_pair_signature_indices.into_pyarray(py),
+        )?;
         payload.set_item("pair_row_indices", pair_row_indices.into_pyarray(py))?;
         payload.set_item(
             "row_query_signature_indices",

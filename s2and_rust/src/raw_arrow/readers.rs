@@ -1,5 +1,6 @@
 use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -129,16 +130,102 @@ pub(crate) struct RawArrowPaperEvidenceRow {
     pub(crate) best_author_count_log_absdiff: f32,
 }
 
+/// Filtered reads that keep fewer ids stay serial. Their batches are mostly
+/// skipped rows, and the parallel path's extra cross-batch checks made the many
+/// small reads of full-block requests slower. Tests take the parallel path for
+/// every multi-batch read.
+const PARALLEL_READ_MIN_KEPT_IDS: usize = if cfg!(test) { 1 } else { 10_000 };
+
+/// Whether a read of `batches` keeping `keep_ids` takes the parallel path.
+fn read_in_parallel(batches: &[RecordBatch], keep_ids: Option<&HashSet<String>>) -> bool {
+    batches.len() > 1 && keep_ids.map_or(true, |keep| keep.len() >= PARALLEL_READ_MIN_KEPT_IDS)
+}
+
+/// Reads batches in parallel with `read_batch`, one task per batch, and merges
+/// the results; None when any batch fails or a key repeats across batches.
+///
+/// Callers then rerun their serial reader, which reports the first problem in
+/// row order as before, so only valid input takes this path. A filtered read
+/// must also reject keys repeated among the rows it skips.
+fn read_keyed_batches_in_parallel<V: Send>(
+    path: &str,
+    batches: &[RecordBatch],
+    keep_ids: Option<&HashSet<String>>,
+    key_column: &str,
+    read_batch: impl Fn(&RecordBatch) -> PyResult<HashMap<String, V>> + Sync,
+) -> Option<HashMap<String, V>> {
+    if !read_in_parallel(batches, keep_ids) {
+        return None;
+    }
+    if keep_ids.is_some() && !scanned_keys_are_unique(path, batches, key_column) {
+        return None;
+    }
+    let parts = batches
+        .par_iter()
+        .map(|batch| read_batch(batch).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let mut out = HashMap::with_capacity(parts.iter().map(HashMap::len).sum());
+    for part in parts {
+        for (key, value) in part {
+            if out.insert(key, value).is_some() {
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Whether every row's `key_column` value is present and distinct across batches.
+fn scanned_keys_are_unique(path: &str, batches: &[RecordBatch], key_column: &str) -> bool {
+    let keys = batches
+        .par_iter()
+        .map(|batch| -> PyResult<Vec<&str>> {
+            let column = batch.column(arrow_column_index(batch, key_column, path)?);
+            let values = ArrowStringColumn::from_string_array(column.as_ref(), key_column)?;
+            (0..batch.num_rows())
+                .map(|row| values.required_value(row, key_column))
+                .collect()
+        })
+        .collect::<PyResult<Vec<_>>>();
+    let Ok(keys) = keys else {
+        return false;
+    };
+    let mut keys: Vec<&str> = keys.into_iter().flatten().collect();
+    keys.par_sort_unstable();
+    keys.windows(2).all(|pair| pair[0] != pair[1])
+}
+
+// Each reader below converts batches in parallel and falls back to its serial
+// reader on any error, so results and error messages match a serial read.
+
 pub(crate) fn read_raw_arrow_signatures_from_batches(
     path: &str,
     batches: Vec<RecordBatch>,
+    keep_signature_ids: Option<&HashSet<String>>,
+) -> PyResult<HashMap<String, RawArrowSignature>> {
+    let parallel = read_keyed_batches_in_parallel(
+        path,
+        &batches,
+        keep_signature_ids,
+        "signature_id",
+        |batch| read_signature_batches(path, std::slice::from_ref(batch), keep_signature_ids),
+    );
+    match parallel {
+        Some(out) => Ok(out),
+        None => read_signature_batches(path, &batches, keep_signature_ids),
+    }
+}
+
+fn read_signature_batches(
+    path: &str,
+    batches: &[RecordBatch],
     keep_signature_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, RawArrowSignature>> {
     let mut out = HashMap::new();
     // Borrow ids directly from the retained Arrow batches so corruption checks
     // do not allocate one String for every index false-positive row.
     let mut seen_filtered_scan_ids = keep_signature_ids.map(|_| HashSet::<&str>::new());
-    for batch in &batches {
+    for batch in batches {
         let signature_id_col = batch.column(arrow_column_index(&batch, "signature_id", path)?);
         let signature_id_values =
             ArrowStringColumn::from_string_array(signature_id_col.as_ref(), "signature_id")?;
@@ -269,9 +356,24 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
     batches: Vec<RecordBatch>,
     keep_paper_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, RawArrowPaper>> {
+    let parallel =
+        read_keyed_batches_in_parallel(path, &batches, keep_paper_ids, "paper_id", |batch| {
+            read_paper_batches(path, std::slice::from_ref(batch), keep_paper_ids)
+        });
+    match parallel {
+        Some(out) => Ok(out),
+        None => read_paper_batches(path, &batches, keep_paper_ids),
+    }
+}
+
+fn read_paper_batches(
+    path: &str,
+    batches: &[RecordBatch],
+    keep_paper_ids: Option<&HashSet<String>>,
+) -> PyResult<HashMap<String, RawArrowPaper>> {
     let mut out = HashMap::new();
     let mut seen_filtered_scan_ids = keep_paper_ids.map(|_| HashSet::<&str>::new());
-    for batch in &batches {
+    for batch in batches {
         let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
         let paper_id_values =
             ArrowStringColumn::from_string_array(paper_id_col.as_ref(), "paper_id")?;
@@ -388,30 +490,55 @@ enum PaperSlot {
     Skipped(usize),
 }
 
-pub(crate) fn read_raw_arrow_paper_authors_from_batches(
-    path: &str,
-    batches: Vec<RecordBatch>,
-    keep_paper_ids: Option<&HashSet<String>>,
-) -> PyResult<HashMap<String, Vec<(i64, String)>>> {
-    // Rows arrive grouped by paper (about 45 per paper), and SipHash on every row
-    // dominated request time. Resolve each paper once to a slot, hash rows with
-    // ahash, and build the returned map once per paper. A filtered read still
-    // rejects duplicate positions in the papers it skips, as an unfiltered read
-    // would; their positions are checked per paper at the end, which costs far
-    // less than hashing every row of every batch read.
-    let mut papers: Vec<(String, Vec<(i64, String)>)> = Vec::new();
-    let mut skipped_papers: Vec<(&str, Vec<i64>)> = Vec::new();
-    let mut paper_slots: ahash::AHashMap<&str, PaperSlot> = ahash::AHashMap::new();
-    let mut previous_paper: Option<(&str, PaperSlot)> = None;
-    for batch in &batches {
-        let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
+/// Rows of `paper_authors` batches grouped by paper, before sorting and checks.
+///
+/// Rows arrive grouped by paper (about 45 per paper), and SipHash on every row
+/// dominated request time. Each paper resolves once to a slot and rows hash with
+/// ahash. A filtered read still rejects duplicate positions in the papers it
+/// skips, as an unfiltered read would; their positions are checked per paper at
+/// the end, which costs far less than hashing every row of every batch read.
+struct PaperAuthorRows<'a> {
+    papers: Vec<(&'a str, Vec<(i64, String)>)>,
+    skipped_papers: Vec<(&'a str, Vec<i64>)>,
+    paper_slots: ahash::AHashMap<&'a str, PaperSlot>,
+}
+
+impl<'a> PaperAuthorRows<'a> {
+    fn new() -> Self {
+        Self {
+            papers: Vec::new(),
+            skipped_papers: Vec::new(),
+            paper_slots: ahash::AHashMap::new(),
+        }
+    }
+
+    fn slot(&mut self, paper_id: &'a str, keep_paper_ids: Option<&HashSet<String>>) -> PaperSlot {
+        *self.paper_slots.entry(paper_id).or_insert_with(|| {
+            if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id)) {
+                self.skipped_papers.push((paper_id, Vec::new()));
+                PaperSlot::Skipped(self.skipped_papers.len() - 1)
+            } else {
+                self.papers.push((paper_id, Vec::new()));
+                PaperSlot::Kept(self.papers.len() - 1)
+            }
+        })
+    }
+
+    fn add_batch(
+        &mut self,
+        path: &str,
+        batch: &'a RecordBatch,
+        keep_paper_ids: Option<&HashSet<String>>,
+    ) -> PyResult<()> {
+        let paper_id_col = batch.column(arrow_column_index(batch, "paper_id", path)?);
         let paper_id_values =
             ArrowStringColumn::from_string_array(paper_id_col.as_ref(), "paper_id")?;
-        let position_col = batch.column(arrow_column_index(&batch, "position", path)?);
+        let position_col = batch.column(arrow_column_index(batch, "position", path)?);
         let position_values = ArrowI64Column::from_i64_array(position_col.as_ref(), "position")?;
-        let author_name_col = batch.column(arrow_column_index(&batch, "author_name", path)?);
+        let author_name_col = batch.column(arrow_column_index(batch, "author_name", path)?);
         let author_name_values =
             ArrowStringColumn::from_string_array(author_name_col.as_ref(), "author_name")?;
+        let mut previous_paper: Option<(&str, PaperSlot)> = None;
         for row in 0..batch.num_rows() {
             let paper_id_value = paper_id_values.required_value(row, "paper_id")?;
             if paper_id_value.is_empty() {
@@ -424,46 +551,100 @@ pub(crate) fn read_raw_arrow_paper_authors_from_batches(
             let slot = match previous_paper {
                 Some((previous_id, slot)) if previous_id == paper_id_value => slot,
                 _ => {
-                    let slot = *paper_slots.entry(paper_id_value).or_insert_with(|| {
-                        if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value)) {
-                            skipped_papers.push((paper_id_value, Vec::new()));
-                            PaperSlot::Skipped(skipped_papers.len() - 1)
-                        } else {
-                            papers.push((paper_id_value.to_owned(), Vec::new()));
-                            PaperSlot::Kept(papers.len() - 1)
-                        }
-                    });
+                    let slot = self.slot(paper_id_value, keep_paper_ids);
                     previous_paper = Some((paper_id_value, slot));
                     slot
                 }
             };
             match slot {
-                PaperSlot::Kept(index) => papers[index].1.push((position, author_name.to_owned())),
-                PaperSlot::Skipped(index) => skipped_papers[index].1.push(position),
+                PaperSlot::Kept(index) => self.papers[index]
+                    .1
+                    .push((position, author_name.to_owned())),
+                PaperSlot::Skipped(index) => self.skipped_papers[index].1.push(position),
+            }
+        }
+        Ok(())
+    }
+
+    /// Appends the rows of a later batch range, as if read after this one. Both
+    /// sides classify a paper by the same keep set, so their slots agree.
+    fn merge(&mut self, later: PaperAuthorRows<'a>, keep_paper_ids: Option<&HashSet<String>>) {
+        for (paper_id, rows) in later.papers {
+            if let PaperSlot::Kept(index) = self.slot(paper_id, keep_paper_ids) {
+                self.papers[index].1.extend(rows);
+            }
+        }
+        for (paper_id, positions) in later.skipped_papers {
+            if let PaperSlot::Skipped(index) = self.slot(paper_id, keep_paper_ids) {
+                self.skipped_papers[index].1.extend(positions);
             }
         }
     }
-    for (paper_id, mut positions) in skipped_papers {
-        positions.sort_unstable();
-        if let Some(pair) = positions.windows(2).find(|pair| pair[0] == pair[1]) {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "paper_authors Arrow contains duplicate (paper_id, position): ({:?}, {})",
-                paper_id, pair[0]
-            )));
+
+    fn finish(self) -> PyResult<HashMap<String, Vec<(i64, String)>>> {
+        for (paper_id, mut positions) in self.skipped_papers {
+            positions.sort_unstable();
+            if let Some(pair) = positions.windows(2).find(|pair| pair[0] == pair[1]) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "paper_authors Arrow contains duplicate (paper_id, position): ({:?}, {})",
+                    paper_id, pair[0]
+                )));
+            }
+        }
+        let mut out: HashMap<String, Vec<(i64, String)>> =
+            HashMap::with_capacity(self.papers.len());
+        for (paper_id, mut authors) in self.papers {
+            authors.sort_by_key(|(position, _name)| *position);
+            if let Some(pair) = authors.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "paper_authors Arrow contains duplicate (paper_id, position): ({:?}, {})",
+                    paper_id, pair[0].0
+                )));
+            }
+            out.insert(paper_id.to_owned(), authors);
+        }
+        Ok(out)
+    }
+}
+
+pub(crate) fn read_raw_arrow_paper_authors_from_batches(
+    path: &str,
+    batches: Vec<RecordBatch>,
+    keep_paper_ids: Option<&HashSet<String>>,
+) -> PyResult<HashMap<String, Vec<(i64, String)>>> {
+    if read_in_parallel(&batches, keep_paper_ids) {
+        let parts = batches
+            .par_iter()
+            .map(|batch| {
+                let mut rows = PaperAuthorRows::new();
+                rows.add_batch(path, batch, keep_paper_ids)
+                    .ok()
+                    .map(|()| rows)
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(parts) = parts {
+            let mut merged = PaperAuthorRows::new();
+            for part in parts {
+                merged.merge(part, keep_paper_ids);
+            }
+            if let Ok(out) = merged.finish() {
+                return Ok(out);
+            }
         }
     }
-    let mut out: HashMap<String, Vec<(i64, String)>> = HashMap::with_capacity(papers.len());
-    for (paper_id, mut authors) in papers {
-        authors.sort_by_key(|(position, _name)| *position);
-        if let Some(pair) = authors.windows(2).find(|pair| pair[0].0 == pair[1].0) {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "paper_authors Arrow contains duplicate (paper_id, position): ({:?}, {})",
-                paper_id, pair[0].0
-            )));
-        }
-        out.insert(paper_id, authors);
+    read_paper_author_batches(path, &batches, keep_paper_ids)
+}
+
+fn read_paper_author_batches(
+    path: &str,
+    batches: &[RecordBatch],
+    keep_paper_ids: Option<&HashSet<String>>,
+) -> PyResult<HashMap<String, Vec<(i64, String)>>> {
+    let mut rows = PaperAuthorRows::new();
+    for batch in batches {
+        rows.add_batch(path, batch, keep_paper_ids)?;
     }
-    Ok(out)
+    rows.finish()
 }
 
 pub(crate) fn read_raw_arrow_cluster_seeds(
@@ -642,9 +823,24 @@ pub(crate) fn read_raw_arrow_specter_from_batches(
     batches: Vec<RecordBatch>,
     keep_paper_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, Vec<f32>>> {
+    let parallel =
+        read_keyed_batches_in_parallel(path, &batches, keep_paper_ids, "paper_id", |batch| {
+            read_specter_batches(path, std::slice::from_ref(batch), keep_paper_ids)
+        });
+    match parallel {
+        Some(out) => Ok(out),
+        None => read_specter_batches(path, &batches, keep_paper_ids),
+    }
+}
+
+fn read_specter_batches(
+    path: &str,
+    batches: &[RecordBatch],
+    keep_paper_ids: Option<&HashSet<String>>,
+) -> PyResult<HashMap<String, Vec<f32>>> {
     let mut out = HashMap::new();
     let mut seen_filtered_scan_ids = keep_paper_ids.map(|_| HashSet::<&str>::new());
-    for batch in &batches {
+    for batch in batches {
         let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
         let paper_id_values =
             ArrowStringColumn::from_string_array(paper_id_col.as_ref(), "paper_id")?;
@@ -1103,8 +1299,9 @@ mod language_reliability_tests {
 #[cfg(test)]
 mod filtered_duplicate_detection_tests {
     use super::{
-        read_raw_arrow_paper_authors_from_batches, read_raw_arrow_papers_from_batches,
-        read_raw_arrow_specter_from_batches,
+        read_paper_author_batches, read_paper_batches, read_raw_arrow_paper_authors_from_batches,
+        read_raw_arrow_papers_from_batches, read_raw_arrow_specter_from_batches,
+        read_specter_batches,
     };
     use arrow::array::{ArrayRef, FixedSizeListArray, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Float32Type, Schema};
@@ -1331,5 +1528,113 @@ mod filtered_duplicate_detection_tests {
             message.contains("author_name is null at row 0"),
             "{message}"
         );
+    }
+
+    // Multi-batch reads run in parallel and must equal the serial readers,
+    // including the error a serial read reports first.
+
+    fn serial_error(result: pyo3::PyResult<impl Sized>) -> String {
+        py_err_message(result.err().expect("the serial read fails"))
+    }
+
+    #[test]
+    fn parallel_multi_batch_reads_equal_serial_reads() {
+        let paper_batches = vec![
+            papers_batch(&["p1", "p2"]),
+            papers_batch(&["p3", "p4"]),
+            papers_batch(&["p5"]),
+        ];
+        let specter_batches = vec![specter_batch(&["p1", "p2"]), specter_batch(&["p3", "p5"])];
+        // p1 spans two batches with its positions out of order.
+        let author_batches = vec![
+            paper_authors_batch(&["p1", "p1", "p2"], &[2, 0, 0], &["C", "A", "X"]),
+            paper_authors_batch(&["p1", "p3"], &[1, 0], &["B", "Y"]),
+        ];
+        for keep_ids in [None, Some(keep(&["p1", "p3", "p5"]))] {
+            let keep_ids = keep_ids.as_ref();
+            let papers =
+                read_raw_arrow_papers_from_batches("<test>", paper_batches.clone(), keep_ids)
+                    .expect("papers read");
+            let serial = read_paper_batches("<test>", &paper_batches, keep_ids).expect("serial");
+            let mut keys: Vec<_> = papers.keys().collect();
+            let mut serial_keys: Vec<_> = serial.keys().collect();
+            keys.sort();
+            serial_keys.sort();
+            assert_eq!(keys, serial_keys);
+
+            let specter =
+                read_raw_arrow_specter_from_batches("<test>", specter_batches.clone(), keep_ids)
+                    .expect("specter read");
+            assert_eq!(
+                specter,
+                read_specter_batches("<test>", &specter_batches, keep_ids).expect("serial")
+            );
+
+            let authors = read_raw_arrow_paper_authors_from_batches(
+                "<test>",
+                author_batches.clone(),
+                keep_ids,
+            )
+            .expect("authors read");
+            assert_eq!(
+                authors,
+                read_paper_author_batches("<test>", &author_batches, keep_ids).expect("serial")
+            );
+            assert_eq!(
+                authors.get("p1"),
+                Some(&vec![
+                    (0, "A".to_string()),
+                    (1, "B".to_string()),
+                    (2, "C".to_string())
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_reads_report_cross_batch_duplicates_like_serial_reads() {
+        // p1 repeats across batches: kept without a filter, skipped with one.
+        let paper_batches = vec![papers_batch(&["p1", "p2"]), papers_batch(&["p1", "p3"])];
+        let specter_batches = vec![specter_batch(&["p1", "p2"]), specter_batch(&["p3", "p1"])];
+        let author_batches = vec![
+            paper_authors_batch(&["p1", "p2"], &[0, 0], &["A", "X"]),
+            paper_authors_batch(&["p3", "p1"], &[0, 0], &["Y", "B"]),
+        ];
+        for keep_ids in [None, Some(keep(&["p2", "p3"]))] {
+            let keep_ids = keep_ids.as_ref();
+            assert_eq!(
+                serial_error(read_raw_arrow_papers_from_batches(
+                    "<test>",
+                    paper_batches.clone(),
+                    keep_ids
+                )),
+                serial_error(read_paper_batches("<test>", &paper_batches, keep_ids))
+            );
+            assert_eq!(
+                serial_error(read_raw_arrow_specter_from_batches(
+                    "<test>",
+                    specter_batches.clone(),
+                    keep_ids
+                )),
+                serial_error(read_specter_batches("<test>", &specter_batches, keep_ids))
+            );
+            let message = serial_error(read_raw_arrow_paper_authors_from_batches(
+                "<test>",
+                author_batches.clone(),
+                keep_ids,
+            ));
+            assert!(
+                message.contains("duplicate (paper_id, position)"),
+                "{message}"
+            );
+            assert_eq!(
+                message,
+                serial_error(read_paper_author_batches(
+                    "<test>",
+                    &author_batches,
+                    keep_ids
+                ))
+            );
+        }
     }
 }

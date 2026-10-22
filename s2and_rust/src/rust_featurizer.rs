@@ -1256,7 +1256,8 @@ impl RustFeaturizer {
             .as_ref()
             .map(|ids| ids.iter().cloned().collect());
 
-        let (raw_signatures, _) = dataset.read_signatures(keep_signature_ids.as_ref())?;
+        let (raw_signatures, _) =
+            py.allow_threads(|| dataset.read_signatures(keep_signature_ids.as_ref(), num_threads))?;
         let mut signature_ids = match requested_signature_ids {
             Some(ids) => ids,
             None => {
@@ -1284,13 +1285,31 @@ impl RustFeaturizer {
             .filter_map(|signature_id| raw_signatures.get(signature_id))
             .map(|signature| signature.paper_id.clone())
             .collect::<HashSet<_>>();
-        let (raw_papers, _) = dataset.read_papers(&needed_paper_ids)?;
-        let (raw_authors_by_paper, _) = dataset.read_paper_authors(&needed_paper_ids)?;
-        let specter_by_paper = if dataset.has_specter() {
-            dataset.read_specter(&needed_paper_ids)?.0
-        } else {
-            HashMap::new()
-        };
+        // The three tables read concurrently; errors keep their serial precedence.
+        let (papers_result, (authors_result, specter_result)) = py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || {
+                rayon::join(
+                    || dataset.read_papers(&needed_paper_ids, num_threads),
+                    || {
+                        rayon::join(
+                            || dataset.read_paper_authors(&needed_paper_ids, num_threads),
+                            || {
+                                if dataset.has_specter() {
+                                    dataset
+                                        .read_specter(&needed_paper_ids, num_threads)
+                                        .map(|(specter, _)| specter)
+                                } else {
+                                    Ok(HashMap::new())
+                                }
+                            },
+                        )
+                    },
+                )
+            })
+        });
+        let (raw_papers, _) = papers_result?;
+        let (raw_authors_by_paper, _) = authors_result?;
+        let specter_by_paper = specter_result?;
         let (cluster_seeds_require, cluster_seeds_disallow) = Self::read_seed_constraints(
             cluster_seeds_path.as_deref(),
             cluster_seed_disallows_path.as_deref(),

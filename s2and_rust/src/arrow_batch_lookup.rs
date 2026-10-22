@@ -2,6 +2,7 @@ use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::record_batch::RecordBatch;
 use memmap2::Mmap;
 use pyo3::PyResult;
+use rayon::prelude::*;
 use std::collections::HashSet;
 
 use crate::arrow_dataset::RetainedFile;
@@ -227,46 +228,70 @@ impl ArrowBatchLookupIndex {
             return Ok((Vec::new(), IndexedArrowReadStats::default()));
         }
         let batch_indices = self.sorted_batch_indices(keep_ids);
-        let mut reader = ArrowFileReader::try_new(source.reader(), None).map_err(|err| {
-            arrow_error_to_py("failed to read Arrow IPC schema from", source.label(), err)
-        })?;
-        let mut batches = Vec::with_capacity(batch_indices.len());
-        let mut rows_scanned = 0usize;
-        for batch_index in batch_indices {
-            reader.set_index(batch_index).map_err(|err| {
-                arrow_error_to_py(
-                    "failed to seek Arrow IPC record batch in",
-                    source.label(),
-                    err,
-                )
-            })?;
-            let batch = reader
-                .next()
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "Arrow IPC file '{}' is missing indexed record batch {batch_index}",
-                        source.label()
-                    ))
-                })?
-                .map_err(|err| {
-                    arrow_error_to_py(
-                        "failed to read Arrow IPC record batch from",
-                        source.label(),
-                        err,
-                    )
-                })?;
-            rows_scanned += batch.num_rows();
-            batches.push(batch);
-        }
-        let batches_read = batches.len();
+        let batches = decode_record_batches(source, &batch_indices)?;
+        let rows_scanned = batches.iter().map(RecordBatch::num_rows).sum();
         Ok((
             batches,
             IndexedArrowReadStats {
-                batches_read,
+                batches_read: batch_indices.len(),
                 rows_scanned,
             },
         ))
     }
+}
+
+/// Decodes record batches `batch_indices` of `source`, in that order.
+///
+/// Tasks decode contiguous runs in parallel, each with its own positional
+/// reader. An error reports the first failing batch in order, as a serial
+/// decode would.
+pub(crate) fn decode_record_batches(
+    source: &RetainedFile,
+    batch_indices: &[usize],
+) -> PyResult<Vec<RecordBatch>> {
+    let run_len = batch_indices
+        .len()
+        .div_ceil(rayon::current_num_threads() * 4)
+        .max(1);
+    let runs = batch_indices
+        .par_chunks(run_len)
+        .map(|run| -> PyResult<Vec<RecordBatch>> {
+            let mut reader = ArrowFileReader::try_new(source.reader(), None).map_err(|err| {
+                arrow_error_to_py("failed to read Arrow IPC schema from", source.label(), err)
+            })?;
+            run.iter()
+                .map(|&batch_index| {
+                    reader.set_index(batch_index).map_err(|err| {
+                        arrow_error_to_py(
+                            "failed to seek Arrow IPC record batch in",
+                            source.label(),
+                            err,
+                        )
+                    })?;
+                    reader
+                        .next()
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "Arrow IPC file '{}' is missing indexed record batch {batch_index}",
+                                source.label()
+                            ))
+                        })?
+                        .map_err(|err| {
+                            arrow_error_to_py(
+                                "failed to read Arrow IPC record batch from",
+                                source.label(),
+                                err,
+                            )
+                        })
+                })
+                .collect()
+        })
+        .collect::<Vec<_>>();
+    let mut batches = Vec::with_capacity(batch_indices.len());
+    for run in runs {
+        batches.extend(run?);
+    }
+    Ok(batches)
 }
 
 #[derive(Clone, Copy, Default)]

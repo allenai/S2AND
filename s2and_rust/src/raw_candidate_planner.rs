@@ -652,7 +652,7 @@ fn read_reusable_raw_arrow_query_inputs(
     let query_signature_id_set: HashSet<String> = query_signature_ids.iter().cloned().collect();
     let read_signatures_start = Instant::now();
     let (signatures, signature_index_stats) =
-        dataset.read_signatures(Some(&query_signature_id_set))?;
+        py.allow_threads(|| dataset.read_signatures(Some(&query_signature_id_set), num_threads))?;
     let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
     for signature_id in query_signature_ids.iter() {
         if !signatures.contains_key(signature_id) {
@@ -680,7 +680,7 @@ fn read_reusable_raw_arrow_query_inputs(
                                 f64,
                             )> {
                                 let start = Instant::now();
-                                let (loaded, stats) = dataset.read_papers(&needed_paper_ids)?;
+                                let (loaded, stats) = dataset.read_papers(&needed_paper_ids, num_threads)?;
                                 Ok((loaded, stats, start.elapsed().as_secs_f64()))
                             },
                             || -> PyResult<(
@@ -690,7 +690,7 @@ fn read_reusable_raw_arrow_query_inputs(
                             )> {
                                 let start = Instant::now();
                                 let (loaded, stats) =
-                                    dataset.read_paper_authors(&needed_paper_ids)?;
+                                    dataset.read_paper_authors(&needed_paper_ids, num_threads)?;
                                 Ok((loaded, stats, start.elapsed().as_secs_f64()))
                             },
                         )
@@ -702,7 +702,7 @@ fn read_reusable_raw_arrow_query_inputs(
                     )> {
                         let start = Instant::now();
                         let (loaded, stats) = if dataset.has_specter() {
-                            dataset.read_specter(&needed_paper_ids)?
+                            dataset.read_specter(&needed_paper_ids, num_threads)?
                         } else {
                             (HashMap::new(), IndexedArrowReadStats::default())
                         };
@@ -883,7 +883,7 @@ fn read_raw_arrow_paper_rows(
                             let (loaded, stats) = if needed_paper_ids.is_empty() {
                                 (HashMap::new(), IndexedArrowReadStats::default())
                             } else {
-                                dataset.read_papers(needed_paper_ids)?
+                                dataset.read_papers(needed_paper_ids, num_threads)?
                             };
                             Ok((loaded, stats, start.elapsed().as_secs_f64()))
                         },
@@ -896,7 +896,7 @@ fn read_raw_arrow_paper_rows(
                             let (loaded, stats) = if needed_paper_ids.is_empty() {
                                 (HashMap::new(), IndexedArrowReadStats::default())
                             } else {
-                                dataset.read_paper_authors(needed_paper_ids)?
+                                dataset.read_paper_authors(needed_paper_ids, num_threads)?
                             };
                             Ok((loaded, stats, start.elapsed().as_secs_f64()))
                         },
@@ -912,7 +912,7 @@ fn read_raw_arrow_paper_rows(
                             let start = Instant::now();
                             let (loaded, stats) =
                                 if dataset.has_specter() && !needed_paper_ids.is_empty() {
-                                    dataset.read_specter(needed_paper_ids)?
+                                    dataset.read_specter(needed_paper_ids, num_threads)?
                                 } else {
                                     (HashMap::new(), IndexedArrowReadStats::default())
                                 };
@@ -1181,14 +1181,16 @@ impl RawBlockQueryCandidatePlanner {
             if layout.seed_signature_id_set.is_empty() && prefetch_ids.is_empty() {
                 (HashMap::new(), IndexedArrowReadStats::default())
             } else if prefetch_ids.is_empty() {
-                dataset.read_signatures(Some(&layout.seed_signature_id_set))?
+                py.allow_threads(|| {
+                    dataset.read_signatures(Some(&layout.seed_signature_id_set), num_threads)
+                })?
             } else {
                 let wanted: HashSet<String> = layout
                     .seed_signature_id_set
                     .union(&prefetch_ids)
                     .cloned()
                     .collect();
-                dataset.read_signatures(Some(&wanted))?
+                py.allow_threads(|| dataset.read_signatures(Some(&wanted), num_threads))?
             };
         let prefetched_signatures: HashMap<String, RawArrowSignature> = prefetch_ids
             .iter()
@@ -1551,7 +1553,11 @@ impl RawBlockQueryCandidatePlanner {
         let signature_index_stats = if missing_signature_ids.is_empty() {
             IndexedArrowReadStats::default()
         } else {
-            let (loaded, stats) = self.dataset.read_signatures(Some(&missing_signature_ids))?;
+            let dataset = &self.dataset;
+            let num_threads = self.num_threads;
+            let (loaded, stats) = py.allow_threads(|| {
+                dataset.read_signatures(Some(&missing_signature_ids), num_threads)
+            })?;
             signatures.extend(loaded);
             stats
         };

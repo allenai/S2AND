@@ -5,7 +5,9 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
-use crate::arrow_batch_lookup::{ArrowBatchLookupIndex, IndexedArrowReadStats};
+use crate::arrow_batch_lookup::{
+    decode_record_batches, ArrowBatchLookupIndex, IndexedArrowReadStats,
+};
 use crate::name_counts::{NameCountsIndex, RawNameCountMaps};
 use crate::raw_arrow::arrow_io::{arrow_error_to_py, io_error_to_py};
 use crate::raw_arrow::readers::{
@@ -13,6 +15,7 @@ use crate::raw_arrow::readers::{
     read_raw_arrow_signatures_from_batches, read_raw_arrow_specter_from_batches, RawArrowPaper,
     RawArrowSignature,
 };
+use crate::rayon_pool::install_with_optional_rayon_pool;
 
 const REQUIRED_TABLES: [(&str, &str); 3] = [
     ("signatures", "signature_id"),
@@ -208,17 +211,8 @@ impl RetainedArrowTable {
                             err,
                         )
                     })?;
-                let batches = reader
-                    .map(|batch| {
-                        batch.map_err(|err| {
-                            arrow_error_to_py(
-                                "failed to read Arrow IPC record batch from",
-                                self.source.label(),
-                                err,
-                            )
-                        })
-                    })
-                    .collect::<PyResult<Vec<_>>>()?;
+                let all_batches: Vec<usize> = (0..reader.num_batches()).collect();
+                let batches = decode_record_batches(&self.source, &all_batches)?;
                 let batches_read = batches.len();
                 let rows_scanned = batches.iter().map(|batch| batch.num_rows()).sum();
                 Ok((
@@ -271,52 +265,67 @@ impl ArrowDatasetResources {
         self.specter.is_some()
     }
 
+    // Reads decode and convert batches in parallel on the `num_threads` pool,
+    // or on the current pool when None. Callers holding the GIL release it first.
+
     pub(crate) fn read_signatures(
         &self,
         keep_ids: Option<&HashSet<String>>,
+        num_threads: Option<usize>,
     ) -> PyResult<(HashMap<String, RawArrowSignature>, IndexedArrowReadStats)> {
         let table = &self.signatures;
-        let (batches, stats) = table.read_batches(keep_ids)?;
-        Ok((
-            read_raw_arrow_signatures_from_batches(table.label(), batches, keep_ids)?,
-            stats,
-        ))
+        install_with_optional_rayon_pool(num_threads, || {
+            let (batches, stats) = table.read_batches(keep_ids)?;
+            Ok((
+                read_raw_arrow_signatures_from_batches(table.label(), batches, keep_ids)?,
+                stats,
+            ))
+        })
     }
 
     pub(crate) fn read_papers(
         &self,
         keep_ids: &HashSet<String>,
+        num_threads: Option<usize>,
     ) -> PyResult<(HashMap<String, RawArrowPaper>, IndexedArrowReadStats)> {
         let table = &self.papers;
-        let (batches, stats) = table.read_batches(Some(keep_ids))?;
-        Ok((
-            read_raw_arrow_papers_from_batches(table.label(), batches, Some(keep_ids))?,
-            stats,
-        ))
+        install_with_optional_rayon_pool(num_threads, || {
+            let (batches, stats) = table.read_batches(Some(keep_ids))?;
+            Ok((
+                read_raw_arrow_papers_from_batches(table.label(), batches, Some(keep_ids))?,
+                stats,
+            ))
+        })
     }
 
     pub(crate) fn read_paper_authors(
         &self,
         keep_ids: &HashSet<String>,
+        num_threads: Option<usize>,
     ) -> PyResult<(HashMap<String, Vec<(i64, String)>>, IndexedArrowReadStats)> {
         let table = &self.paper_authors;
-        let (batches, stats) = table.read_batches(Some(keep_ids))?;
-        Ok((
-            read_raw_arrow_paper_authors_from_batches(table.label(), batches, Some(keep_ids))?,
-            stats,
-        ))
+        install_with_optional_rayon_pool(num_threads, || {
+            let (batches, stats) = table.read_batches(Some(keep_ids))?;
+            Ok((
+                read_raw_arrow_paper_authors_from_batches(table.label(), batches, Some(keep_ids))?,
+                stats,
+            ))
+        })
     }
 
     pub(crate) fn read_specter(
         &self,
         keep_ids: &HashSet<String>,
+        num_threads: Option<usize>,
     ) -> PyResult<(HashMap<String, Vec<f32>>, IndexedArrowReadStats)> {
         let table = self.table("specter")?;
-        let (batches, stats) = table.read_batches(Some(keep_ids))?;
-        Ok((
-            read_raw_arrow_specter_from_batches(table.label(), batches, Some(keep_ids))?,
-            stats,
-        ))
+        install_with_optional_rayon_pool(num_threads, || {
+            let (batches, stats) = table.read_batches(Some(keep_ids))?;
+            Ok((
+                read_raw_arrow_specter_from_batches(table.label(), batches, Some(keep_ids))?,
+                stats,
+            ))
+        })
     }
 }
 

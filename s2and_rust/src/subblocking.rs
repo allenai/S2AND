@@ -113,7 +113,8 @@ pub(crate) fn read_subblocking_signature_rows(
     dataset: &ArrowDatasetResources,
     keep_signature_ids: &HashSet<String>,
 ) -> PyResult<HashMap<String, SubblockingSignatureRow>> {
-    let (signatures, _stats) = dataset.read_signatures(Some(keep_signature_ids))?;
+    // Subblocking has no thread budget; it reads on one thread.
+    let (signatures, _stats) = dataset.read_signatures(Some(keep_signature_ids), Some(1))?;
     Ok(signatures
         .into_iter()
         .map(|(signature_id, signature)| {
@@ -1563,8 +1564,11 @@ pub(crate) fn build_native_graph_evidence_store(
         }
         paper_ids.insert(row.paper_id.clone());
     }
-    let (paper_authors, paper_author_stats) = dataset.read_paper_authors(&paper_ids)?;
-    let (specter_by_paper_id, specter_stats) = dataset.read_specter(&paper_ids)?;
+    // Subblocking has no thread budget; it reads on one thread.
+    let (paper_authors, paper_author_stats) =
+        py.allow_threads(|| dataset.read_paper_authors(&paper_ids, Some(1)))?;
+    let (specter_by_paper_id, specter_stats) =
+        py.allow_threads(|| dataset.read_specter(&paper_ids, Some(1)))?;
     telemetry.load_metrics.paper_authors_record_batches_scanned = paper_author_stats.batches_read;
     telemetry.load_metrics.paper_authors_rows_scanned = paper_author_stats.rows_scanned;
     telemetry.load_metrics.paper_authors_rows_loaded =
@@ -2902,7 +2906,8 @@ pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
     }
     let requested_signature_ids = signature_ids;
     let keep_signature_ids: HashSet<String> = requested_signature_ids.iter().cloned().collect();
-    let subblocking_rows = read_subblocking_signature_rows(&dataset, &keep_signature_ids)?;
+    let subblocking_rows =
+        py.allow_threads(|| read_subblocking_signature_rows(&dataset, &keep_signature_ids))?;
     let missing_signature_ids: Vec<String> = requested_signature_ids
         .iter()
         .filter(|signature_id| !subblocking_rows.contains_key(*signature_id))

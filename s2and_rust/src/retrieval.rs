@@ -337,14 +337,106 @@ impl RustHybridCentroidRetriever {
 
     /// SPECTER scores of each query against every summary, one row per query.
     ///
-    /// Summaries are the outer loop, so each summary's vectors are read from
-    /// memory once per block of queries instead of once per query; at hundreds
-    /// of thousands of summaries that traffic, not arithmetic, bounds scoring.
+    /// Equals `fused_specter_score` for every pair, bit for bit. Summaries are
+    /// the outer loop, so each summary's vectors are read from memory once per
+    /// block of queries. Queries are converted to f64 once, and each vector
+    /// chunk is converted once for a group of up to four queries; the old
+    /// per-pair calls repeated both conversions for every summary.
     pub(crate) fn specter_score_rows(&self, queries: &[RetrievalQueryData]) -> Vec<Vec<f64>> {
         let mut rows = vec![vec![0.0f64; self.summaries.len()]; queries.len()];
+        let prepared: Vec<Option<(Vec<f64>, f64)>> = queries
+            .iter()
+            .map(|query| match (query.specter.as_ref(), query.specter_norm) {
+                (Some(values), Some(norm)) => {
+                    Some((values.iter().map(|value| f64::from(*value)).collect(), norm))
+                }
+                _ => None,
+            })
+            .collect();
+        // Query indices with a vector, by vector length (one length in practice).
+        let mut by_length: Vec<(usize, Vec<usize>)> = Vec::new();
+        for (query_index, query) in prepared.iter().enumerate() {
+            if let Some((values, _)) = query {
+                match by_length.iter_mut().find(|(len, _)| *len == values.len()) {
+                    Some((_, members)) => members.push(query_index),
+                    None => by_length.push((values.len(), vec![query_index])),
+                }
+            }
+        }
+        let mut dots = vec![[0.0f64; 5]; queries.len()];
         for (index, summary) in self.summaries.iter().enumerate() {
-            for (row, query) in rows.iter_mut().zip(queries) {
-                row[index] = fused_specter_score(query, summary);
+            let centroid = match (
+                summary.specter_centroid.as_ref(),
+                summary.specter_centroid_norm,
+            ) {
+                (Some(vector), Some(norm)) => Some((vector.as_slice(), norm)),
+                _ => None,
+            };
+            let centroid_slots = usize::from(centroid.is_some());
+            if summary.exemplar_vectors.len() + centroid_slots > 5 {
+                // More vectors than the fused kernel holds: the reference path.
+                for (row, query) in rows.iter_mut().zip(queries) {
+                    row[index] = fused_specter_score(query, summary);
+                }
+                continue;
+            }
+            // Slot 0 is the centroid when present; the exemplars follow in order.
+            let mut vectors: [&[f32]; 5] = [&[]; 5];
+            let mut norms = [0.0f64; 5];
+            let mut count = 0;
+            if let Some((vector, norm)) = centroid {
+                vectors[0] = vector;
+                norms[0] = norm;
+                count = 1;
+            }
+            let first_exemplar = count;
+            for (vector, norm) in summary
+                .exemplar_vectors
+                .iter()
+                .zip(summary.exemplar_norms.iter())
+            {
+                vectors[count] = vector.as_slice();
+                norms[count] = *norm;
+                count += 1;
+            }
+            for slot in 0..count {
+                let vector = vectors[slot];
+                // Only equal-length queries take a dot product; others score NaN.
+                let Some((_, members)) = by_length.iter().find(|(len, _)| *len == vector.len())
+                else {
+                    continue;
+                };
+                for chunk in members.chunks(QUERY_GROUP) {
+                    let mut query_values: [&[f64]; QUERY_GROUP] = [&[]; QUERY_GROUP];
+                    for (position, query_index) in chunk.iter().enumerate() {
+                        if let Some((values, _)) = &prepared[*query_index] {
+                            query_values[position] = values.as_slice();
+                        }
+                    }
+                    let sums = grouped_dot_products(&query_values[..chunk.len()], vector);
+                    for (position, query_index) in chunk.iter().enumerate() {
+                        dots[*query_index][slot] = sums[position];
+                    }
+                }
+            }
+            for (query_index, query) in prepared.iter().enumerate() {
+                let Some((query_values, query_norm)) = query else {
+                    rows[query_index][index] = 0.0;
+                    continue;
+                };
+                let len = query_values.len();
+                let cosine = |slot: usize| -> f64 {
+                    if vectors[slot].len() != len {
+                        f64::NAN
+                    } else if *query_norm == 0.0 || norms[slot] == 0.0 {
+                        0.0
+                    } else {
+                        dots[query_index][slot] / (query_norm * norms[slot])
+                    }
+                };
+                let centroid_score = if centroid.is_some() { cosine(0) } else { 0.0 };
+                let exemplar_score = (first_exemplar..count).map(cosine).fold(0.0f64, f64::max);
+                rows[query_index][index] = centroid_score.max(exemplar_score);
             }
         }
         rows
@@ -1132,6 +1224,117 @@ fn fold_lanes(partial: &[f64; DOT_LANES], query: &[f32], vector: &[f32], body: u
         + ((partial[4] + partial[5]) + (partial[6] + partial[7]));
     for i in body..query.len() {
         sum += f64::from(query[i]) * f64::from(vector[i]);
+    }
+    sum
+}
+
+/// Queries scored together against one vector by `grouped_dot_products`.
+const QUERY_GROUP: usize = 4;
+
+/// Dot products of up to `QUERY_GROUP` f64 queries with one f32 vector.
+///
+/// Each product is summed exactly as `fused_dot_products` sums it: the same
+/// `DOT_LANES` partial sums, each a separate multiply then add, folded by
+/// `fold_lanes`. The queries are the f32 values converted once, so the
+/// results match bit for bit. Every query has the vector's length.
+fn grouped_dot_products(queries: &[&[f64]], vector: &[f32]) -> [f64; QUERY_GROUP] {
+    fn pad<const N: usize>(values: [f64; N]) -> [f64; QUERY_GROUP] {
+        let mut padded = [0.0f64; QUERY_GROUP];
+        padded[..N].copy_from_slice(&values);
+        padded
+    }
+    match queries.len() {
+        0 => [0.0; QUERY_GROUP],
+        1 => pad(grouped_dots::<1>([queries[0]], vector)),
+        2 => pad(grouped_dots::<2>([queries[0], queries[1]], vector)),
+        3 => pad(grouped_dots::<3>(
+            [queries[0], queries[1], queries[2]],
+            vector,
+        )),
+        _ => grouped_dots::<4>([queries[0], queries[1], queries[2], queries[3]], vector),
+    }
+}
+
+fn grouped_dots<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the running CPU supports AVX2.
+            return unsafe { grouped_dots_avx2(queries, vector) };
+        }
+    }
+    grouped_dots_portable(queries, vector)
+}
+
+/// `grouped_dots_portable` with AVX2 intrinsics; lanes 0-3 and 4-7 of each sum
+/// take the same separate multiply and add, so results equal the portable code.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn grouped_dots_avx2<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q] {
+    use std::arch::x86_64::{
+        _mm256_add_pd, _mm256_castps256_ps128, _mm256_cvtps_pd, _mm256_extractf128_ps,
+        _mm256_loadu_pd, _mm256_loadu_ps, _mm256_mul_pd, _mm256_setzero_pd, _mm256_storeu_pd,
+    };
+    let len = vector.len();
+    let queries = queries.map(|query| &query[..len]);
+    let body = len - len % DOT_LANES;
+    let mut low = [_mm256_setzero_pd(); Q];
+    let mut high = [_mm256_setzero_pd(); Q];
+    let mut start = 0;
+    while start < body {
+        let v = _mm256_loadu_ps(vector.as_ptr().add(start));
+        let v_low = _mm256_cvtps_pd(_mm256_castps256_ps128(v));
+        let v_high = _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(v));
+        for q in 0..Q {
+            let q_low = _mm256_loadu_pd(queries[q].as_ptr().add(start));
+            let q_high = _mm256_loadu_pd(queries[q].as_ptr().add(start + 4));
+            low[q] = _mm256_add_pd(low[q], _mm256_mul_pd(q_low, v_low));
+            high[q] = _mm256_add_pd(high[q], _mm256_mul_pd(q_high, v_high));
+        }
+        start += DOT_LANES;
+    }
+    let mut sums = [0.0f64; Q];
+    for q in 0..Q {
+        let mut partial = [0.0f64; DOT_LANES];
+        _mm256_storeu_pd(partial.as_mut_ptr(), low[q]);
+        _mm256_storeu_pd(partial.as_mut_ptr().add(4), high[q]);
+        sums[q] = fold_lanes_f64(&partial, queries[q], vector, body);
+    }
+    sums
+}
+
+#[inline(always)]
+fn grouped_dots_portable<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q] {
+    let len = vector.len();
+    let queries = queries.map(|query| &query[..len]);
+    let body = len - len % DOT_LANES;
+    let mut lanes = [[0.0f64; DOT_LANES]; Q];
+    for (chunk_index, vector_chunk) in vector[..body].chunks_exact(DOT_LANES).enumerate() {
+        let start = chunk_index * DOT_LANES;
+        let mut v = [0.0f64; DOT_LANES];
+        for (lane, value) in v.iter_mut().zip(vector_chunk) {
+            *lane = f64::from(*value);
+        }
+        for q in 0..Q {
+            for lane in 0..DOT_LANES {
+                lanes[q][lane] += queries[q][start + lane] * v[lane];
+            }
+        }
+    }
+    let mut sums = [0.0f64; Q];
+    for q in 0..Q {
+        sums[q] = fold_lanes_f64(&lanes[q], queries[q], vector, body);
+    }
+    sums
+}
+
+/// `fold_lanes` for a query already converted to f64.
+#[inline(always)]
+fn fold_lanes_f64(partial: &[f64; DOT_LANES], query: &[f64], vector: &[f32], body: usize) -> f64 {
+    let mut sum = ((partial[0] + partial[1]) + (partial[2] + partial[3]))
+        + ((partial[4] + partial[5]) + (partial[6] + partial[7]));
+    for i in body..vector.len() {
+        sum += query[i] * f64::from(vector[i]);
     }
     sum
 }
@@ -2128,6 +2331,89 @@ mod overlap_index_tests {
                     (fused - reference).abs() <= tolerance,
                     "case {case}: {fused} vs {reference}"
                 );
+            }
+        }
+    }
+
+    /// Grouped scoring must equal the per-pair fused score bit for bit, with
+    /// query groups of every size, mixed lengths, missing vectors, zero norms,
+    /// and summaries past the fused kernel's five vectors.
+    #[test]
+    fn specter_score_rows_match_per_pair_scores() {
+        let mut rng = Lcg(29);
+        for round in 0..60 {
+            let length = [8usize, 13, 64, 768][round % 4];
+            let long_vector = |rng: &mut Lcg, length: usize| -> Vec<f32> {
+                (0..length)
+                    .map(|_| rng.below(1000) as f32 / 500.0 - 1.0)
+                    .collect()
+            };
+            let mut summaries = Vec::new();
+            for index in 0..20 {
+                let mut summary = summary(&mut rng, format!("r{round}c{index}"));
+                if summary.specter_centroid.is_some() {
+                    let centroid = long_vector(&mut rng, length);
+                    summary.specter_centroid_norm = Some(vector_norm_f32(&centroid));
+                    summary.specter_centroid = Some(centroid);
+                }
+                let exemplar_count = rng.below(7) as usize;
+                summary.exemplar_vectors = (0..exemplar_count)
+                    .map(|_| long_vector(&mut rng, length))
+                    .collect();
+                if rng.below(10) == 0 && exemplar_count > 0 {
+                    summary.exemplar_vectors[0].push(0.5);
+                }
+                summary.exemplar_norms = summary
+                    .exemplar_vectors
+                    .iter()
+                    .map(|values| {
+                        if rng.below(15) == 0 {
+                            0.0
+                        } else {
+                            vector_norm_f32(values)
+                        }
+                    })
+                    .collect();
+                summaries.push(summary);
+            }
+            let retriever = RustHybridCentroidRetriever::from_summaries(summaries, true)
+                .expect("valid summaries");
+            let query_count = 1 + rng.below(11) as usize;
+            let queries: Vec<RetrievalQueryData> = (0..query_count)
+                .map(|_| {
+                    let mut query = query(&mut rng, Vec::new());
+                    match rng.below(6) {
+                        0 => {
+                            query.specter = None;
+                            query.specter_norm = None;
+                        }
+                        1 => {
+                            let values = long_vector(&mut rng, length + 1);
+                            query.specter_norm = Some(vector_norm_f32(&values));
+                            query.specter = Some(std::sync::Arc::new(values));
+                        }
+                        _ => {
+                            let values = long_vector(&mut rng, length);
+                            query.specter_norm = Some(if rng.below(20) == 0 {
+                                0.0
+                            } else {
+                                vector_norm_f32(&values)
+                            });
+                            query.specter = Some(std::sync::Arc::new(values));
+                        }
+                    }
+                    query
+                })
+                .collect();
+            let rows = retriever.specter_score_rows(&queries);
+            for (query_index, query) in queries.iter().enumerate() {
+                for (summary_index, summary) in retriever.summaries.iter().enumerate() {
+                    assert_eq!(
+                        rows[query_index][summary_index].to_bits(),
+                        fused_specter_score(query, summary).to_bits(),
+                        "round {round} query {query_index} summary {summary_index}"
+                    );
+                }
             }
         }
     }

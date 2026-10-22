@@ -57,7 +57,9 @@ pub(crate) use ingest_dataset::*;
 use language_detection::detect_language_compat;
 use name_counts::{NameCountsData, NameCountsIndex, RawNameCountKind, RawNameCountMaps};
 use orcid::{normalize_orcid_compact_owned, normalize_orcid_owned};
-use pair_indexing::upper_triangle_pairs_for_range;
+use pair_indexing::{
+    upper_triangle_pair_at, upper_triangle_pairs_for_range, upper_triangle_range_len,
+};
 use raw_arrow::readers::{
     read_raw_arrow_cluster_seed_disallows, read_raw_arrow_cluster_seeds,
     read_raw_arrow_query_signatures, RawArrowAuthorSignalData, RawArrowFeature, RawArrowPaper,

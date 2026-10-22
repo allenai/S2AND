@@ -464,8 +464,12 @@ impl RustFeaturizer {
             block_lookup.push((signature_id.as_str(), signature));
         }
 
-        let local_pairs =
-            upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
+        let local_pairs = upper_triangle_pairs_for_range(
+            block_lookup.len(),
+            start_offset,
+            max_pairs,
+            num_threads,
+        )?;
         if local_pairs.is_empty() {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
@@ -2344,16 +2348,19 @@ impl RustFeaturizer {
         num_threads: Option<usize>,
         nan_value: f64,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        let local_pairs =
-            upper_triangle_pairs_for_range(block_signature_indices.len(), start_offset, max_pairs)?;
+        let block_size = block_signature_indices.len();
+        let chunk_pair_count = upper_triangle_range_len(block_size, start_offset, max_pairs)?;
+        // Each scored row's pair comes from its offset; listing the whole chunk
+        // only to pick a few rows cost a pass over millions of pairs.
         let pairs = scored_rows
             .as_slice()?
             .iter()
             .map(|&row| {
                 usize::try_from(row)
                     .ok()
-                    .and_then(|row| local_pairs.get(row))
-                    .map(|&(left, right)| {
+                    .filter(|row| *row < chunk_pair_count)
+                    .map(|row| {
+                        let (left, right) = upper_triangle_pair_at(block_size, start_offset + row);
                         (
                             block_signature_indices[left],
                             block_signature_indices[right],
@@ -2362,13 +2369,11 @@ impl RustFeaturizer {
                     .ok_or_else(|| {
                         pyo3::exceptions::PyIndexError::new_err(format!(
                             "scored row {} is outside the chunk of {} pairs",
-                            row,
-                            local_pairs.len()
+                            row, chunk_pair_count
                         ))
                     })
             })
             .collect::<PyResult<Vec<(u32, u32)>>>()?;
-        drop(local_pairs);
         self.featurize_pairs_matrix_indexed(py, pairs, selected_indices, num_threads, nan_value)
     }
 
@@ -2705,8 +2710,12 @@ impl RustFeaturizer {
             block_lookup.push((signature, paper));
         }
 
-        let local_pairs =
-            upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
+        let local_pairs = upper_triangle_pairs_for_range(
+            block_lookup.len(),
+            start_offset,
+            max_pairs,
+            num_threads,
+        )?;
         let row_count = local_pairs.len();
         if row_count == 0 {
             let empty = numpy::ndarray::Array2::<f64>::zeros((0, out_cols));

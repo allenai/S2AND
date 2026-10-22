@@ -10,7 +10,8 @@ use std::time::Instant;
 
 // Parallel readers allocate on worker threads; with glibc malloc that slows
 // later kernels through arena contention, and mimalloc avoids it.
-#[cfg(not(target_env = "musl"))]
+// Cargo.toml explains the targets that keep the system allocator.
+#[cfg(not(any(target_env = "musl", all(target_os = "linux", target_arch = "aarch64"))))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

@@ -15,7 +15,7 @@ to expose the language results used by its featurizer. Its upstream project is
 <https://github.com/emk/rust-cld2>; CLD2's upstream project is
 <https://github.com/CLD2Owners/cld2>.
 
-The s2and-rust wheels for Linux (glibc), macOS and Windows include mimalloc,
+The s2and-rust wheels for x86_64 Linux (glibc), macOS and Windows include mimalloc,
 through the `mimalloc` and `libmimalloc-sys` Rust crates, as their memory
 allocator. Its upstream project is <https://github.com/microsoft/mimalloc>.
 mimalloc is distributed under the MIT License:

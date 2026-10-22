@@ -551,9 +551,10 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   a_khan, and 12 s instead of 16 s on s_gupta. (The `1.0.0b3` notes compared against
   earlier `1.0.0b2` runs that a busier machine had slowed; these `1.0.0b2` times are
   reruns beside `1.0.0b1`.)
-- The extension uses mimalloc as its memory allocator on glibc Linux, macOS, and
-  Windows. Worker threads that allocate in parallel contended for glibc's malloc
-  arenas, which slowed later kernels. Musl wheels keep the system allocator. With
+- The extension uses mimalloc as its memory allocator on x86_64 Linux (glibc),
+  macOS, and Windows. Worker threads that allocate in parallel contended for glibc's
+  malloc arenas, which slowed later kernels. Musl and aarch64 Linux wheels keep the
+  system allocator; the aarch64 manylinux2014 cross compiler cannot build mimalloc. With
   identical clusters, the s_lee incremental request with one new signature takes
   21.6 s instead of 31.9 s, and the j_smith full block 399 s instead of 454 s.
 - Arrow reads decode and convert record batches in parallel on the request's thread

@@ -29,7 +29,9 @@ unicode-properties = "0.1"
 
 # Worker threads that allocate in parallel contend for glibc malloc arenas.
 # Musl wheels keep the system allocator, because CI never imports them.
-[target.'cfg(not(target_env = "musl"))'.dependencies]
+# Linux aarch64 wheels keep it too: the manylinux2014 cross GCC cannot build mimalloc.
+# Keep this cfg equal to the global allocator's cfg in src/lib.rs.
+[target.'cfg(not(any(target_env = "musl", all(target_os = "linux", target_arch = "aarch64"))))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
 [build-dependencies]

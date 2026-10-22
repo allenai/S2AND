@@ -329,11 +329,27 @@ def test_supervisor_exception_stops_real_family(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Hard supervisor death requires Windows Job Object containment")
-def test_hard_supervisor_death_stops_real_family(tmp_path: Path) -> None:
+@pytest.mark.parametrize("delay_initial_record", [False, True])
+def test_hard_supervisor_death_stops_real_family(tmp_path: Path, delay_initial_record: bool) -> None:
     output, marker = tmp_path / "hard_death", tmp_path / "family.json"
-    process = start(arguments(output, family_code(marker)), tmp_path)
+    prefix = None
+    if delay_initial_record:
+        # Let the family start before the supervisor publishes its separate record.
+        inject = (
+            f"import sys,time; sys.path.insert(0,{str(RUNNER.parents[1])!r})\n"
+            "from scripts import run_bounded as runner\n"
+            "original=runner.publish\n"
+            "def delayed_publish(path,payload):\n"
+            "    if path.name == 'run.json': time.sleep(1)\n"
+            "    return original(path,payload)\n"
+            "runner.publish=delayed_publish\n"
+            "raise SystemExit(runner.main())\n"
+        )
+        prefix = [sys.executable, "-c", inject]
+    process = start(arguments(output, family_code(marker)), tmp_path, prefix)
     try:
         wait_file(marker, process)
+        wait_file(output / "run.json", process)
         initial = json.loads((output / "run.json").read_text())
         assert initial["containment"] == "windows_kill_on_close_job"
         psutil.Process(initial["supervisor_pid"]).kill()

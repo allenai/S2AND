@@ -94,7 +94,9 @@ The model plan names one complete benchmark Arrow dataset per source.
 It also names that source's clusters, held-out blocks, frozen held-out pairs, and unknown-signature list.
 The development population is the benchmark minus its held-out blocks.
 The trainer selects pairs and computes features from the same Arrow data.
-The published `1.3` data reproduces the `1.3` training and validation matrices exactly.
+The original `1.3` data reproduced the `1.3` training and validation matrices exactly.
+The distribution correction removes papers absent from production S2AG and their dependent records.
+The corrected populations do not reproduce the original model fit.
 Dataset manifests use portable paths to the one common index.
 
 The release owner writes the bundles from an internal snapshot with
@@ -106,13 +108,20 @@ Patent records and research task packets remain outside the release inputs.
 
 ## Corrected source records
 
-`corrected_sources` contains the final records after additions and corrections, not the earlier inputs or correction history.
-It preserves signature identities, record order, full paper text, current labels, uncertainty masks, embeddings, and required producer sidecars.
-Full abstracts permit later text corrections and SPECTER2 updates.
+`corrected_sources` contains the final records after additions and corrections.
+Some records retain changed-field history.
+It preserves retained signature identities, record order, current labels, uncertainty masks, embeddings, and required producer sidecars.
+Published paper records must appear in production S2AG papers.
+Remove excluded papers and their signatures from source records, Arrow tables, embeddings, labels, pairs, and tasks.
+Publish full abstract text only when the S2AG abstract-sharing gate permits it.
+Use the nonempty `Has Abstract` marker for a present abstract whose text cannot be shared.
+Preserve empty or missing abstracts and the existing SPECTER2 vectors.
+Apply this rule to abstract correction-history fields too.
 Runtime Arrow paper tables retain abstract presence rather than full abstract text.
-They therefore do not replace the corrected source records.
+Pairwise and incremental features need abstract presence and the vectors, not abstract text.
+Regenerating vectors for restricted abstracts requires authorized internal text sources.
 
-Benchmark masters preserve full text where it exists.
+Internal benchmark masters preserve full text where it exists.
 The seven current giant replay sources supply abstract presence, not full abstract text.
 The snapshot preserves their available current records and vectors.
 New abstract-based vectors for those giants require another source of full abstracts.

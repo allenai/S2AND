@@ -34,6 +34,9 @@ Keep source snapshots and fit outputs in separate directories.
 - Build the common index from author-table rows. Archive mention counts, M, as a research alternative.
 - Keep small name tuples and ORCID prefix counts in normal Git and the Python wheel.
 - Publish three S3 bundles, `inference`, `dataset`, and `source`, with one copy of each file.
+- Publish only papers present in production S2AG and remove their excluded dependent records.
+- Publish abstract text only when the production S2AG sharing gate permits it.
+- Preserve abstract presence and existing SPECTER2 vectors when removing restricted text.
 - Train every release model from the published `inference` and `dataset` bundles.
 - Use supported formats and schemas for dataset compatibility.
 - Bind models to feature-contract versions, ordered feature names, and exact required artifact hashes.
@@ -68,6 +71,17 @@ A historical baseline is not a prerequisite for snapshot preparation or a pairwi
 3. Declare fit datasets, split identities, pair lists, and the EPS policy.
 4. Verify the declared workload and resource bounds.
 5. Keep the selected snapshot immutable for the run.
+
+Before publication, compare every released paper corpus ID with production S2AG papers.
+Use the same production snapshot's abstract-sharing gate for source text.
+Check augmented paper origins and initial-query source mappings too.
+Remove excluded papers, signatures, vectors, cluster memberships, pairs, and task references.
+Refresh batch indexes, manifests, provenance, and split counts after filtering.
+Keep incremental tasks when their queries and usable profile members survive.
+Remove candidate rows with no usable non-query members.
+Remove query groups whose query disappears or whose positive support disappears entirely.
+Record the removed rows and query groups.
+Do not claim that filtered training populations reproduce an earlier model fit.
 
 The selected local input path is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
 The snapshot passes relocation checks.

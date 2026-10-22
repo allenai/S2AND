@@ -149,6 +149,50 @@ def test_distance_row_signals_distinguish_top3_and_top5_means() -> None:
     assert signals["top5_mean_distance"][0] == pytest.approx(0.3)
 
 
+def test_vectorized_top_distances_match_the_per_row_loops_bit_for_bit() -> None:
+    rng = np.random.default_rng(7)
+    row_count = 300
+    top_distances = np.full((row_count, 5), np.inf)
+    reference = top_distances.copy()
+    for _ in range(8):
+        rows = np.sort(rng.choice(row_count, size=120, replace=False))
+        # Wide magnitudes expose any change in summation order; ties and
+        # non-finite values cover the insertion rules.
+        chunk = rng.standard_normal((120, 5)) * 10.0 ** rng.integers(-3, 12, size=(120, 5))
+        chunk[:, 1] = chunk[:, 0]
+        chunk[rng.random((120, 5)) < 0.3] = np.inf
+        chunk[rng.random((120, 5)) < 0.05] = np.nan
+        runtime_module._merge_top_distances(top_distances, rows, chunk)
+        # The per-row insertion this replaced.
+        for row, values in zip(rows, chunk, strict=True):
+            for value in values[np.isfinite(values)]:
+                reference_row = reference[row]
+                if value >= reference_row[-1]:
+                    continue
+                reference_row[-1] = value
+                reference_row.sort()
+    assert top_distances.tobytes() == reference.tobytes()
+
+    counts = rng.integers(0, 3, size=row_count).astype(np.uint64)
+    signals = runtime_module._distance_row_signals(
+        counts=counts,
+        sums=rng.random(row_count),
+        mins=rng.random(row_count),
+        top_distances=top_distances,
+    )
+    for limit, key in ((3, "top3_mean_distance"), (5, "top5_mean_distance")):
+        # The float64 means, before the float32 cast hides rounding differences.
+        rows, means = runtime_module._leading_finite_means(top_distances, np.arange(row_count), limit)
+        expected_means = [float(np.mean(top_distances[row][np.isfinite(top_distances[row])][:limit])) for row in rows]
+        assert means.tobytes() == np.asarray(expected_means).tobytes(), limit
+        expected = np.full(row_count, 1.0, dtype=np.float32)
+        for row in np.flatnonzero(counts > 0):
+            finite = top_distances[row][np.isfinite(top_distances[row])]
+            if len(finite):
+                expected[row] = float(np.mean(finite[:limit]))
+        assert signals[key].tobytes() == expected.tobytes(), key
+
+
 def _minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
     raw_plan = minimal_raw_candidate_plan(
         row_count=1,

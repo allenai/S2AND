@@ -859,23 +859,52 @@ def _predict_pairwise_model_distances(
     predictions = np.zeros(len(labels), dtype=np.float64)
     predict = np.isnan(labels)
     if np.any(predict):
-        predicted = predict_pairwise_class0(classifier, features[predict])
+        # Production pairs carry no labels; a full boolean mask would copy every row.
+        predict_all = bool(np.all(predict))
+        predicted = predict_pairwise_class0(classifier, features if predict_all else features[predict])
         if nameless_classifier is not None and nameless_features is not None:
             nameless_predicted = predict_pairwise_class0(
                 nameless_classifier,
-                nameless_features[predict],
+                nameless_features if predict_all else nameless_features[predict],
             )
             predicted = (predicted + nameless_predicted) / 2.0
         predictions[predict] = predicted
     return predictions
 
 
-def _update_top_distances(top_distances: np.ndarray, row_index: int, distance: float) -> None:
-    row = top_distances[row_index]
-    if distance >= row[-1]:
-        return
-    row[-1] = distance
-    row.sort()
+def _merge_top_distances(top_distances: np.ndarray, rows: np.ndarray, chunk_top_distances: np.ndarray) -> None:
+    """Keep each row's smallest distances from its current values and a chunk's finite ones.
+
+    Equals inserting the chunk's finite values one at a time into each sorted row
+    and keeping the smallest: both keep the smallest values of the union, sorted.
+    Per-row Python loops cost seconds on large attachment passes.
+    """
+
+    chunk_values = np.where(np.isfinite(chunk_top_distances), chunk_top_distances, np.inf)
+    union = np.concatenate((top_distances[rows], chunk_values), axis=1)
+    union.sort(axis=1)
+    top_distances[rows] = union[:, : top_distances.shape[1]]
+
+
+def _leading_finite_means(top_distances: np.ndarray, rows: np.ndarray, limit: int) -> tuple[np.ndarray, np.ndarray]:
+    """Means of each row's first `limit` finite distances, summed left to right.
+
+    Matches `np.mean` on each row's finite values, which sums short arrays in
+    order and divides by the count. Returns the rows with a finite value and
+    their means.
+    """
+
+    finite = np.isfinite(top_distances[rows])
+    # A stable sort on "not finite" moves finite values first, in their order.
+    order = np.argsort(~finite, axis=1, kind="stable")
+    ordered = np.take_along_axis(top_distances[rows], order, axis=1)
+    prefix_sums = ordered.copy()
+    for column in range(1, ordered.shape[1]):
+        prefix_sums[:, column] = prefix_sums[:, column - 1] + ordered[:, column]
+    counts = np.minimum(finite.sum(axis=1), limit)
+    kept = counts > 0
+    means = prefix_sums[kept, counts[kept] - 1] / counts[kept]
+    return rows[kept], means
 
 
 def _distance_row_signals(
@@ -896,12 +925,10 @@ def _distance_row_signals(
     if np.any(observed):
         min_distance[observed] = mins[observed].astype(np.float32, copy=False)
         mean_distance[observed] = (sums[observed] / counts[observed]).astype(np.float32, copy=False)
-        for row_index in np.flatnonzero(observed):
-            finite = top_distances[row_index][np.isfinite(top_distances[row_index])]
-            if len(finite) == 0:
-                continue
-            top3_mean_distance[row_index] = float(np.mean(finite[:3]))
-            top5_mean_distance[row_index] = float(np.mean(finite[:5]))
+        observed_rows = np.flatnonzero(observed)
+        for limit, output in ((3, top3_mean_distance), (5, top5_mean_distance)):
+            rows, means = _leading_finite_means(top_distances, observed_rows, limit)
+            output[rows] = means
     return {
         "min_distance": min_distance,
         "mean_distance": mean_distance,
@@ -1062,15 +1089,7 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
             distance_counts[rows] += chunk_counts[observed_distance_rows].astype(np.uint64, copy=False)
             distance_sums[rows] += chunk_sums[observed_distance_rows]
             distance_mins[rows] = np.minimum(distance_mins[rows], chunk_mins[observed_distance_rows])
-            for local_row_index, global_row_index in zip(
-                np.flatnonzero(observed_distance_rows),
-                rows,
-                strict=True,
-            ):
-                row_top_distances = chunk_top_distances[int(local_row_index)]
-                finite = row_top_distances[np.isfinite(row_top_distances)]
-                for value in finite:
-                    _update_top_distances(top_distances, int(global_row_index), float(value))
+            _merge_top_distances(top_distances, rows, chunk_top_distances[observed_distance_rows])
         hard_disallow_distance_pair_count += int(chunk_hard_disallow_count)
 
     pairwise_stats = PairwiseAggregateStats(

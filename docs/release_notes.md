@@ -8,9 +8,9 @@ production model and public-data version is `1.3`, on a separate version axis.
 ### Status
 
 - **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles are on S3 (see [data](data.md)).
-  PyPI has the `1.0.0b3` beta for integration testing; the final `1.0.0` release is pending.
+  PyPI has the `1.0.0b4` beta for integration testing; the final `1.0.0` release is pending.
   uv installs the beta's `s2and-rust` dependency only when it is pinned too
-  (`s2and==1.0.0b3 s2and-rust==1.0.0b3`) or with `--prerelease=allow`; pip needs neither.
+  (`s2and==1.0.0b4 s2and-rust==1.0.0b4`) or with `--prerelease=allow`; pip needs neither.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
@@ -544,11 +544,31 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   s_lee request it takes 2.5 s instead of 4.5 s.
 - Together, on Linux at 16 threads with identical clusters on all 13 scholar
   export requests, `1.0.0b3` full-block prediction takes 393 s instead of `1.0.0b2`'s
-  775 s on j_smith (110,244 signatures), 2,599 s instead of 3,152 s on s_lee
-  (516,747 signatures), 161 s instead of 257 s on a_khan, 163 s instead of 221 s on
-  s_gupta, and 91 s instead of 148 s on a_silva. Incremental prediction takes 76 s
-  instead of 153 s on s_lee, 22 s instead of 37 s on j_smith, 13 s instead of 27 s on
-  a_khan, and 12 s instead of 16 s on s_gupta.
+  706 s on j_smith (110,244 signatures), 2,599 s instead of 3,152 s on s_lee
+  (516,747 signatures), 161 s instead of 221 s on a_khan, 163 s instead of 221 s on
+  s_gupta, and 91 s instead of 123 s on a_silva. Incremental prediction takes 76 s
+  instead of 133 s on s_lee, 22 s instead of 33 s on j_smith, 13 s instead of 25 s on
+  a_khan, and 12 s instead of 16 s on s_gupta. (The `1.0.0b3` notes compared against
+  earlier `1.0.0b2` runs that a busier machine had slowed; these `1.0.0b2` times are
+  reruns beside `1.0.0b1`.)
+- The extension uses mimalloc as its memory allocator on glibc Linux, macOS, and
+  Windows. Worker threads that allocate in parallel contended for glibc's malloc
+  arenas, which slowed later kernels. Musl wheels keep the system allocator. With
+  identical clusters, the s_lee incremental request with one new signature takes
+  21.6 s instead of 31.9 s, and the j_smith full block 399 s instead of 454 s.
+- Arrow reads decode and convert record batches in parallel on the request's thread
+  budget and release the GIL. Any error or cross-batch duplicate falls back to the
+  serial reader, so results and error messages are unchanged. On top of mimalloc,
+  the one-signature s_lee request takes 17.5 s instead of 20.9 s, and the a_silva
+  full block 90 s instead of 101 s.
+- Together, on the same 13 requests with identical clusters, `1.0.0b4` incremental
+  prediction takes 52 s instead of `1.0.0b3`'s 76 s on s_lee, 15 s instead of 22 s on
+  j_smith, 8.9 s instead of 12.9 s on a_khan, and 8.2 s instead of 12.0 s on s_gupta.
+  Full-block prediction takes 2,142 s instead of 2,599 s on s_lee, 342 s instead of
+  393 s on j_smith, 148 s instead of 161 s on a_khan, 150 s instead of 163 s on
+  s_gupta, and 82 s instead of 91 s on a_silva. One new signature into s_lee's
+  512,686 seeds takes 15.8 s instead of 28.4 s. Peak RSS of the s_lee full block is
+  15.2 GB instead of 17.7 GB; the smallest requests use about 0.1 GB more.
 - `NameCountsIndex.open` no longer hashes the index files or checks every record on
   each open. It checks the manifest, file sizes, file headers, and section bounds,
   so lookups stay memory-safe. For the 2.3 GB `1.3` index an open takes 0.04 s and

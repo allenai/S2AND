@@ -665,6 +665,15 @@ def _group_subblocking_firsts(
     return firsts
 
 
+_NO_ORCID_SIGNATURE_INFO = _ArrowIncrementalSignatureInfo(
+    paper_id=None,
+    author_info_first=None,
+    author_info_last=None,
+    author_info_first_normalized=None,
+    author_info_orcid=None,
+)
+
+
 def _load_arrow_incremental_orcid_signature_info(
     arrow_dataset: Any,
     signature_ids: Iterable[Any],
@@ -688,8 +697,11 @@ def _load_arrow_incremental_orcid_signature_info(
     )
     if rows is None:
         return {}
+    # Most seeds carry no ORCID; they share one record, which is never mutated.
     return {
-        signature_id: _ArrowIncrementalSignatureInfo(
+        signature_id: _NO_ORCID_SIGNATURE_INFO
+        if orcid is None
+        else _ArrowIncrementalSignatureInfo(
             paper_id=None,
             author_info_first=None,
             author_info_last=None,

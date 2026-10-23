@@ -225,6 +225,25 @@ def read_cluster_seeds_arrow(path: Path) -> dict[str, str]:
     with pa.memory_map(str(path), "r") as source:
         table = pa.ipc.open_file(source).read_all()
     validate_arrow_schema(table.schema, table_name="cluster_seeds")
+    signature_column = table["signature_id"]
+    cluster_column = table["cluster_id"]
+    # Whole-column conversion: a per-row as_py loop took seconds for 500K seeds.
+    signature_ids = signature_column.to_pylist()
+    cluster_ids = cluster_column.to_pylist()
+    rows = dict(zip(signature_ids, cluster_ids, strict=True))
+    if (
+        not signature_column.null_count
+        and not cluster_column.null_count
+        and len(rows) == len(signature_ids)
+        and "" not in rows
+        and all(cluster_ids)
+    ):
+        return rows
+    # The row walk reports the first bad row, as before.
+    return _cluster_seeds_rows_checked(table)
+
+
+def _cluster_seeds_rows_checked(table: Any) -> dict[str, str]:
     rows: dict[str, str] = {}
     for index in range(table.num_rows):
         signature_value = table["signature_id"][index].as_py()

@@ -740,11 +740,18 @@ def promoted_incremental_orcid_fanout_by_query(
     resolved_component_sizes = component_sizes
     if resolved_component_sizes is None:
         resolved_component_sizes = promoted_incremental_component_sizes(cluster_seeds_require)
+    # Inlined `_signature_orcid`: this loop visits every seed of the request.
+    signatures = dataset.signatures
     for seed_signature_id, component in cluster_seeds_require.items():
-        component_key = str(component)
-        seed_orcid = _signature_orcid(dataset, str(seed_signature_id))
+        signature = signatures.get(str(seed_signature_id))
+        if signature is None:
+            continue
+        value = getattr(signature, "author_info_orcid", None)
+        if value is None:
+            continue
+        seed_orcid = normalize_orcid(value)
         if seed_orcid in query_orcids:
-            component_orcids.setdefault(component_key, set()).add(str(seed_orcid))
+            component_orcids.setdefault(str(component), set()).add(str(seed_orcid))
 
     if not component_orcids:
         return {}

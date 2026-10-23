@@ -301,15 +301,16 @@ impl ArrowDatasetResources {
         use rayon::prelude::*;
 
         let table = &self.signatures;
-        let (batches, _stats) = table.read_batches(Some(keep_ids))?;
-        let Some(first) = batches.first() else {
-            return Ok(Some(Vec::new()));
-        };
-        if arrow_optional_column_index(first, "author_orcid").is_none() {
-            return Ok(None);
-        }
-        let per_batch: Vec<Vec<(String, Option<String>)>> =
+        // Batch decoding runs on the current pool, so the read stays inside it.
+        let per_batch: Option<Vec<Vec<(String, Option<String>)>>> =
             install_with_optional_rayon_pool(num_threads, || {
+                let (batches, _stats) = table.read_batches(Some(keep_ids))?;
+                let Some(first) = batches.first() else {
+                    return Ok(Some(Vec::new()));
+                };
+                if arrow_optional_column_index(first, "author_orcid").is_none() {
+                    return Ok(None);
+                }
                 batches
                     .par_iter()
                     .map(|batch| -> PyResult<Vec<(String, Option<String>)>> {
@@ -331,7 +332,11 @@ impl ArrowDatasetResources {
                         Ok(rows)
                     })
                     .collect::<PyResult<_>>()
+                    .map(Some)
             })?;
+        let Some(per_batch) = per_batch else {
+            return Ok(None);
+        };
         let mut seen = HashSet::<&str>::default();
         for (signature_id, _) in per_batch.iter().flatten() {
             if !seen.insert(signature_id) {

@@ -34,8 +34,9 @@ keys = canonical_name_count_keys(parts)
 Use the Rust extension's matching helpers from Python:
 
 ```python
-import s2and_rust
+from s2and.runtime import load_s2and_rust_extension
 
+s2and_rust = load_s2and_rust_extension()
 rust_parts = s2and_rust.canonicalize_name_parts("Anne-Marie Claire", None, "Ou-Yang")
 assert rust_parts == tuple(parts)
 assert s2and_rust.canonical_name_count_keys(rust_parts) == keys

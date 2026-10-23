@@ -29,7 +29,8 @@ The user-facing recovery commands are in
 explains why they are sometimes needed.
 
 Syncing `uv run` decides whether to rebuild `s2and` from the `cache-keys`
-list in the root `pyproject.toml`. Files outside that list, such as editor
+list in the root `pyproject.toml`. Packaged license and notice edits also
+invalidate the cached distribution. Files outside that list, such as editor
 swap files and build outputs, do not invalidate uv's cached wheel. Cargo still
 watches source directories to detect new modules when a native build runs.
 

@@ -103,9 +103,7 @@ def _rust_extension_identity(require_release: bool) -> dict[str, Any]:
     build_info = dict(extension.get_build_info())
     debug_assertions = build_info.get("debug_assertions")
     if require_release and debug_assertions is not False:
-        raise RuntimeError(
-            "Rust release build required; rebuild with `uv sync --extra dev --reinstall-package s2and-rust`"
-        )
+        raise RuntimeError("Rust release build required; rebuild with `uv sync --extra dev --reinstall-package s2and`")
     return {
         "available": True,
         "module_name": str(extension.__name__),

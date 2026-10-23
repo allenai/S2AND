@@ -99,6 +99,12 @@ cache-keys = [
   { file = "s2and_rust/src/**/*.rs" },
   { file = "s2and_rust/vendor/cld2/Cargo.toml" },
   { file = "s2and_rust/vendor/cld2/src/**/*.rs" },
+  # Include packaged licenses so notice-only edits refresh cached distributions.
+  { file = "LICENSE" },
+  { file = "LICENSE-DATA" },
+  { file = "s2and_rust/THIRD_PARTY_NOTICES.md" },
+  { file = "s2and_rust/vendor/cld2/LICENSE-APACHE.txt" },
+  { file = "s2and_rust/vendor/cld2/UNLICENSE.txt" },
 ]
 
 # ---- Tooling config ----

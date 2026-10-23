@@ -281,6 +281,23 @@ def test_uv_cache_and_digest_track_only_native_inputs(tmp_path: Path) -> None:
     assert _sync_uv_cache_project(project, recovery=True) == 6, "recovery must rebuild a cached package"
 
 
+def test_uv_cache_tracks_packaged_licenses(tmp_path: Path) -> None:
+    """Rebuild cached distributions after each packaged license or notice changes."""
+    source, project = _uv_cache_project(tmp_path)
+    manifest = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    license_files = tomllib.loads(manifest.read_text(encoding="utf-8"))["project"]["license-files"]
+    paths = [source / relative.removeprefix("s2and_rust/") for relative in license_files]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Original notice\n", encoding="utf-8")
+
+    assert _sync_uv_cache_project(project) == 1, "initial build"
+    for expected_builds, path in enumerate(paths, start=2):
+        path.write_text("Updated notice\n", encoding="utf-8")
+        assert _sync_uv_cache_project(project) == expected_builds, f"{path.name}: edit must rebuild once"
+        assert _sync_uv_cache_project(project) == expected_builds, "unchanged fixture must stay cached"
+
+
 def _session_project(root: Path) -> tuple[Path, Path]:
     """Copy the real session hook into a small independent pytest project.
 

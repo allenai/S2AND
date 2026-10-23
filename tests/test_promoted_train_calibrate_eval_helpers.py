@@ -39,7 +39,6 @@ from s2and.incremental_linking_training.classic import (
     _summarize_training_gate_buckets,
     _summary_key_for_eval_dataset,
     _validate_stratified_base_identity_split_disjointness,
-    format_classic_selected_gate_tables,
 )
 from s2and.incremental_linking_training.classic import (
     _read_csv as _read_official_table,
@@ -600,68 +599,6 @@ def test_extra_eval_paths_support_dynamic_dataset_mapping() -> None:
         ("a_silva", "test/a_silva_eval_rows.csv.gz"),
     )
     assert _summary_key_for_eval_dataset("a_silva") == "overall_a_silva_eval"
-
-
-def test_format_classic_selected_gate_tables_includes_requested_breakdowns() -> None:
-    """Official table rendering should expose dataset and requested factor metrics."""
-
-    metric = {
-        "n_queries": 2,
-        "n_positive_queries": 1,
-        "n_negative_queries": 1,
-        "balanced_accuracy": 0.75,
-        "error_rate": 0.25,
-        "false_abstain": 1,
-        "false_link": 0,
-        "wrong_candidate_link": 0,
-    }
-    all_negative_metric = {
-        "n_queries": 5,
-        "n_positive_queries": 0,
-        "n_negative_queries": 5,
-        "balanced_accuracy": 0.5,
-        "error_rate": 0.0,
-        "false_abstain": 0,
-        "false_link": 0,
-        "wrong_candidate_link": 0,
-    }
-    summary = {
-        "stratified_eval_test_split": {
-            "test_breakdowns": {
-                "source_key": {"all_negative_eval": all_negative_metric, "demo_eval": metric},
-                "has_positive_candidate": {"True": metric},
-                "positive_rank_bucket": {"positive_first": metric},
-                "first_name_bucket": {"multi_letter_first": metric},
-                "multiple_candidates": {"True": metric},
-            }
-        }
-    }
-
-    tables = format_classic_selected_gate_tables(summary)
-
-    assert "## By Dataset Slice, Selected Gate" in tables
-    assert (
-        "| slice | queries | positive queries | negative queries | BA | error rate | "
-        "false abstain | false link | wrong link |"
-    ) in tables
-    assert "| demo_eval | 2 | 1 | 1 | 0.7500 | 0.2500 | 1 | 0 | 0 |" in tables
-    assert "| all_negative_eval | 5 | 0 | 5 | n/a | 0.0000 | 0 | 0 | 0 |" in tables
-    assert "BA is n/a for single-class slices." in tables
-    assert "| has_positive_candidate | True | 2 | 1 | 1 | 0.2500 | 1 | 0 | 0 |" in tables
-
-
-def test_format_classic_selected_gate_tables_rejects_malformed_metrics() -> None:
-    summary = {
-        "stratified_eval_test_split": {
-            "test_breakdowns": {
-                "source_key": {},
-                "has_positive_candidate": {"True": 42},
-            }
-        }
-    }
-
-    with pytest.raises(TypeError, match=r"has_positive_candidate\['True'\] metrics must be a dict, got int"):
-        format_classic_selected_gate_tables(summary)
 
 
 def test_summarize_training_gate_buckets_counts_queries_and_rows() -> None:

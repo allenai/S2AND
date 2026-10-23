@@ -259,6 +259,62 @@ def test_planner_reload_matches_a_fresh_build_for_a_seed_superset(tmp_path: Path
         assert fresh.reload_seed_sidecars(str(sidecars["later"]), str(disallows)) is False
 
 
+def test_planner_reload_that_fails_keeps_the_rows_for_a_retry(tmp_path: Path) -> None:
+    # A seed without a signature row fails the reload. The planner must keep its
+    # rows, so the next reload and plan work as before.
+    from s2and.feature_port import _require_rust_runtime
+    from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
+
+    paths = write_minimal_arrow_prediction_bundle(tmp_path / "data", include_specter=True)
+    initial = tmp_path / "initial_seeds.arrow"
+    bad = tmp_path / "bad_seeds.arrow"
+    write_cluster_seeds_arrow(initial, {"0": "a", "1": "b"})
+    write_cluster_seeds_arrow(bad, {"0": "a", "1": "b", "missing": "c"})
+    planner_class = _require_rust_runtime().RawBlockQueryCandidatePlanner
+    with ArrowDataset.open_trusted(paths, require_specter=True) as dataset:
+        planner = planner_class.from_auto_queries(
+            dataset.native, str(initial), top_k=2, retain_seed_rows=True, num_threads=1
+        )
+        expected = planner.plan(["q1"])
+        with pytest.raises(KeyError, match="missing"):
+            planner.reload_seed_sidecars(str(bad))
+        assert planner.build_telemetry()["signature_count"] == 2
+        assert planner.reload_seed_sidecars(str(initial)) is True
+        assert _same_plan(planner.plan(["q1"]), expected)
+
+
+def test_released_planner_and_featurizer_refuse_further_work(tmp_path: Path) -> None:
+    # A request releases its native handles on exit; they must not serve work afterwards,
+    # and a released view must not touch the featurizer it shares data with.
+    from s2and.feature_port import _require_rust_runtime, build_rust_featurizer_from_arrow_dataset
+    from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
+
+    paths = write_minimal_arrow_prediction_bundle(tmp_path / "data", include_specter=True)
+    seeds = tmp_path / "seeds.arrow"
+    write_cluster_seeds_arrow(seeds, {"0": "a", "1": "b"})
+    planner_class = _require_rust_runtime().RawBlockQueryCandidatePlanner
+    with ArrowDataset.open_trusted(paths, require_specter=True) as dataset:
+        planner = planner_class.from_auto_queries(dataset.native, str(seeds), top_k=2, num_threads=1)
+        planner.release()
+        with pytest.raises(RuntimeError, match="released"):
+            planner.plan(["q1"])
+        featurizer = build_rust_featurizer_from_arrow_dataset(
+            dataset, signature_ids=["0", "1", "q1"], name_tuples=None, preprocess=True, num_threads=1
+        )
+        view = featurizer.view_with_cluster_seed_sidecars(["0"], None, None)
+        view.release()
+        assert view.signature_ids() == []
+        assert featurizer.signature_ids() == ["0", "1", "q1"]
+        surviving_view = featurizer.view_with_cluster_seed_sidecars(["0", "1"], None, None)
+        expected_features = np.asarray(surviving_view.featurize_pairs_matrix_indexed([(0, 1)], None, 1, np.nan))
+        featurizer.release()
+        assert featurizer.signature_ids() == []
+        np.testing.assert_equal(
+            surviving_view.featurize_pairs_matrix_indexed([(0, 1)], None, 1, np.nan), expected_features
+        )
+        surviving_view.release()
+
+
 def test_planner_reload_reuses_unchanged_state_and_plans_like_a_fresh_build(tmp_path: Path) -> None:
     # A reload keeps the features of current seeds and moves over the summary of each
     # component whose ordered members are unchanged, under the component's new label.

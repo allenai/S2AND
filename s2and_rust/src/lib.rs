@@ -1,4 +1,4 @@
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyIterator, PyModule};
 use pyo3::Bound;
@@ -62,7 +62,7 @@ use features::*;
 pub(crate) use ingest_dataset::*;
 use language_detection::detect_language_compat;
 use name_counts::{NameCountsData, NameCountsIndex, RawNameCountKind, RawNameCountMaps};
-use orcid::{normalize_orcid_compact_owned, normalize_orcid_owned};
+use orcid::normalize_orcid_compact_owned;
 use pair_indexing::{
     upper_triangle_pair_at, upper_triangle_pairs_for_range, upper_triangle_range_len,
 };
@@ -201,6 +201,9 @@ struct SignatureData {
     name_counts: Option<NameCountsData>,
     // Same canonical first-name field used by Python name_text_features.
     adv_name: Option<String>,
+    /// Counts of the middle name's initials, sorted by initial; pair features
+    /// merge two of these instead of counting both names per pair.
+    middle_initial_counts: Vec<(char, u32)>,
 }
 
 impl SignatureData {
@@ -224,7 +227,7 @@ struct PaperData {
     language_reliability: f64,
     journal_ngrams: Option<CounterData>,
     coauthors: PaperCoauthors,
-    specter: Option<Vec<f32>>,
+    specter: Option<arrow::buffer::ScalarBuffer<f32>>,
     specter_norm: Option<f64>,
 }
 
@@ -934,7 +937,6 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustFeaturizer>()?;
     m.add_class::<ArrowDataset>()?;
     m.add_class::<NameCountsIndex>()?;
-    m.add_class::<RustHybridCentroidRetriever>()?;
     m.add_class::<RawBlockQueryCandidatePlanner>()?;
     Ok(())
 }

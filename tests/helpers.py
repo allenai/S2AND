@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from s2and.data import ANDData
-from s2and.incremental_linking.query_adapter import QueryFeatures
 from s2and.model import _IncrementalSeedSetup
 from s2and.name_counts_index import NameCountsIndex
 
@@ -329,62 +328,4 @@ def build_dummy_dataset(
         name_counts_index=resolved_name_counts_index,
         preprocess=True,
         n_jobs=n_jobs,
-    )
-
-
-def build_query_features(
-    *,
-    first: str = "a",
-    middle_initials: frozenset[str] = frozenset(),
-    year: int | None = None,
-    orcid: str | None = None,
-    specter: Any | None = None,
-    coauthor_blocks: frozenset[str] | None = None,
-    affiliation_terms: frozenset[str] | None = None,
-    venue_terms: frozenset[str] | None = None,
-    has_coauthors: bool = False,
-    has_affiliations: bool = False,
-    has_full_first: bool = False,
-    has_middle: bool = False,
-    title_terms: frozenset[str] = frozenset(),
-    name_counts: Any | None = None,
-    paper_author_count: int = 0,
-    paper_author_names: frozenset[str] = frozenset(),
-    author_position: int | None = None,
-    local10_author_names: frozenset[str] = frozenset(),
-    signature_id: str = "",
-) -> QueryFeatures:
-    """Build a compact `QueryFeatures` fixture for retrieval tests."""
-
-    return QueryFeatures(
-        first=first,
-        middle="",
-        first_initial=first[:1] if first else "",
-        middle_initials=middle_initials,
-        coauthor_blocks=(
-            coauthor_blocks
-            if coauthor_blocks is not None
-            else (frozenset({"a smith"}) if has_coauthors else frozenset())
-        ),
-        affiliation_terms=(
-            affiliation_terms
-            if affiliation_terms is not None
-            else (frozenset({"lab"}) if has_affiliations else frozenset())
-        ),
-        venue_terms=venue_terms if venue_terms is not None else frozenset(),
-        year=year,
-        orcid=orcid,
-        specter=specter,
-        has_specter=specter is not None,
-        has_coauthors=has_coauthors,
-        has_affiliations=has_affiliations,
-        has_full_first=has_full_first,
-        has_middle=has_middle,
-        title_terms=title_terms,
-        name_counts=name_counts,
-        paper_author_count=paper_author_count,
-        paper_author_names=paper_author_names,
-        author_position=author_position,
-        local10_author_names=local10_author_names,
-        signature_id=signature_id,
     )

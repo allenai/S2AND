@@ -22,6 +22,7 @@ license = "Unlicense"
 repository = "https://github.com/emk/rust-cld2"
 [dependencies.cld2-sys]
 version = "1.0.2"
+path = "../cld2-sys"
 
 [dependencies.libc]
 version = "0.2.2"

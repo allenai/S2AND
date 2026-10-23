@@ -283,6 +283,71 @@ impl ArrowDatasetResources {
         })
     }
 
+    /// The raw `author_orcid` of each requested signature, in Arrow row order:
+    /// None for a null, the string otherwise, as pyarrow reads the column.
+    /// Returns None when the table has no `author_orcid` column.
+    ///
+    /// Incremental requests load the ORCIDs of every seed through pyarrow,
+    /// which took 2 s of Python on a half-million seeds. Rows outside
+    /// `keep_ids` are skipped; a requested id on two rows is an error.
+    pub(crate) fn read_signature_orcids(
+        &self,
+        keep_ids: &HashSet<String>,
+        num_threads: Option<usize>,
+    ) -> PyResult<Option<Vec<(String, Option<String>)>>> {
+        use crate::raw_arrow::arrow_io::{
+            arrow_column_index, arrow_optional_column_index, ArrowStringColumn,
+        };
+        use rayon::prelude::*;
+
+        let table = &self.signatures;
+        // Batch decoding runs on the current pool, so the read stays inside it.
+        let per_batch: Option<Vec<Vec<(String, Option<String>)>>> =
+            install_with_optional_rayon_pool(num_threads, || {
+                let (batches, _stats) = table.read_batches(Some(keep_ids))?;
+                let Some(first) = batches.first() else {
+                    return Ok(Some(Vec::new()));
+                };
+                if arrow_optional_column_index(first, "author_orcid").is_none() {
+                    return Ok(None);
+                }
+                batches
+                    .par_iter()
+                    .map(|batch| -> PyResult<Vec<(String, Option<String>)>> {
+                        let label = table.label();
+                        let ids = batch.column(arrow_column_index(batch, "signature_id", label)?);
+                        let ids =
+                            ArrowStringColumn::from_string_array(ids.as_ref(), "signature_id")?;
+                        let orcids =
+                            batch.column(arrow_column_index(batch, "author_orcid", label)?);
+                        let orcids =
+                            ArrowStringColumn::from_string_array(orcids.as_ref(), "author_orcid")?;
+                        let mut rows = Vec::new();
+                        for row in 0..batch.num_rows() {
+                            let signature_id = ids.required_value(row, "signature_id")?;
+                            if keep_ids.contains(signature_id) {
+                                rows.push((signature_id.to_owned(), orcids.optional_owned(row)));
+                            }
+                        }
+                        Ok(rows)
+                    })
+                    .collect::<PyResult<_>>()
+                    .map(Some)
+            })?;
+        let Some(per_batch) = per_batch else {
+            return Ok(None);
+        };
+        let mut seen = HashSet::<&str>::default();
+        for (signature_id, _) in per_batch.iter().flatten() {
+            if !seen.insert(signature_id) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "signatures Arrow contains duplicate signature_id: {signature_id:?}"
+                )));
+            }
+        }
+        Ok(Some(per_batch.into_iter().flatten().collect()))
+    }
+
     pub(crate) fn read_papers(
         &self,
         keep_ids: &HashSet<String>,
@@ -317,7 +382,10 @@ impl ArrowDatasetResources {
         &self,
         keep_ids: &HashSet<String>,
         num_threads: Option<usize>,
-    ) -> PyResult<(HashMap<String, Vec<f32>>, IndexedArrowReadStats)> {
+    ) -> PyResult<(
+        HashMap<String, arrow::buffer::ScalarBuffer<f32>>,
+        IndexedArrowReadStats,
+    )> {
         let table = self.table("specter")?;
         install_with_optional_rayon_pool(num_threads, || {
             let (batches, stats) = table.read_batches(Some(keep_ids))?;
@@ -422,6 +490,20 @@ impl ArrowDataset {
 
     fn has_specter(&self) -> bool {
         self.resources.has_specter()
+    }
+
+    /// Raw `author_orcid` values of the requested signatures as
+    /// `(signature_id, orcid)` pairs in Arrow row order, or None when the
+    /// table has no `author_orcid` column.
+    #[pyo3(signature = (signature_ids, num_threads = None))]
+    fn signature_orcids(
+        &self,
+        py: Python<'_>,
+        signature_ids: Vec<String>,
+        num_threads: Option<usize>,
+    ) -> PyResult<Option<Vec<(String, Option<String>)>>> {
+        let keep_ids: HashSet<String> = signature_ids.into_iter().collect();
+        py.allow_threads(|| self.resources.read_signature_orcids(&keep_ids, num_threads))
     }
 }
 

@@ -138,6 +138,23 @@ def predict_pairwise_class0(classifier: Any, features: np.ndarray) -> np.ndarray
     return np.asarray(probabilities, dtype=np.float64)[:, 0]
 
 
+def native_pairwise_scorers(classifier: Any, nameless_classifier: Any | None) -> tuple[Any, Any | None] | None:
+    """Return the Rust boosters of native classifiers, for fused featurize-and-score passes.
+
+    Fused scoring reproduces `predict_pairwise_class0` for native boosters only;
+    other classifiers keep the feature-matrix path. Returns None when either
+    classifier is not native.
+    """
+
+    if str(getattr(classifier, "prediction_backend", "python")) != "rust_lightgbm":
+        return None
+    if nameless_classifier is None:
+        return classifier._rust_scorer, None
+    if str(getattr(nameless_classifier, "prediction_backend", "python")) != "rust_lightgbm":
+        return None
+    return classifier._rust_scorer, nameless_classifier._rust_scorer
+
+
 class PairwiseModeler:
     """
     Wrapper to learn the pairwise model + hyperparameter optimization

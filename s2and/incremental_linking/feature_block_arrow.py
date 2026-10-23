@@ -225,6 +225,25 @@ def read_cluster_seeds_arrow(path: Path) -> dict[str, str]:
     with pa.memory_map(str(path), "r") as source:
         table = pa.ipc.open_file(source).read_all()
     validate_arrow_schema(table.schema, table_name="cluster_seeds")
+    signature_column = table["signature_id"]
+    cluster_column = table["cluster_id"]
+    # Whole-column conversion: a per-row as_py loop took seconds for 500K seeds.
+    signature_ids = signature_column.to_pylist()
+    cluster_ids = cluster_column.to_pylist()
+    rows = dict(zip(signature_ids, cluster_ids, strict=True))
+    if (
+        not signature_column.null_count
+        and not cluster_column.null_count
+        and len(rows) == len(signature_ids)
+        and "" not in rows
+        and all(cluster_ids)
+    ):
+        return rows
+    # The row walk reports the first bad row, as before.
+    return _cluster_seeds_rows_checked(table)
+
+
+def _cluster_seeds_rows_checked(table: Any) -> dict[str, str]:
     rows: dict[str, str] = {}
     for index in range(table.num_rows):
         signature_value = table["signature_id"][index].as_py()
@@ -570,28 +589,6 @@ def read_arrow_batch_lookup_index_batch_indices(
         key_column=key_column,
         values=values,
         context="reading batch lookup index",
-    )
-
-
-def read_arrow_batch_lookup_index_batch_indices_for_request(
-    arrow_path: str | Path,
-    index_path: str | Path,
-    *,
-    key_column: str,
-    values: Iterable[Any],
-) -> set[int]:
-    """Return Arrow record-batch indices for request-time filtered reads.
-
-    The caller must provide an immutable, matching table/index pair. Checks and
-    lookup behavior are the same as ``read_arrow_batch_lookup_index_batch_indices``.
-    """
-
-    return _read_arrow_batch_lookup_index_batch_indices(
-        arrow_path,
-        index_path,
-        key_column=key_column,
-        values=values,
-        context="reading request-time batch lookup index",
     )
 
 
@@ -1162,13 +1159,6 @@ def _fnv64_utf8_batch(values: Sequence[str]) -> list[int]:
     from s2and.runtime import load_s2and_rust_extension
 
     return [int(value) for value in load_s2and_rust_extension().fnv64_utf8_batch(list(values))]
-
-
-def _name_counts_index_hashes(kind: str, name_bytes: bytes) -> tuple[int, int]:
-    return (
-        _fnv64_bytes(name_bytes),
-        _fnv64_update(_name_counts_index_kind_hash_seed(kind), name_bytes),
-    )
 
 
 def _name_counts_index_kind_hash_seed(kind: str) -> int:

@@ -43,3 +43,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+The vendored cld2-sys 1.0.2 source makes detection debug state thread-local.
+See vendor/cld2-sys/S2AND_PATCHES.md for the patch and supported detection settings.

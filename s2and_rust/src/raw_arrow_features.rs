@@ -24,7 +24,7 @@ pub(crate) fn build_raw_arrow_feature(
     signature: &RawArrowSignature,
     paper: Option<&RawArrowPaper>,
     coauthor_blocks: Option<&PaperCoauthorBlocks>,
-    specter_by_paper_id: Option<&HashMap<String, Arc<Vec<f32>>>>,
+    specter_by_paper_id: Option<&HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
     raw_name_counts: &RawNameCountMaps,
     name_prefixes: &HashSet<String>,
     affiliation_stopwords: &HashSet<String>,
@@ -115,7 +115,7 @@ pub(crate) fn build_raw_arrow_feature(
     //      as used by offline benchmark/training data prep.
     // When `orcid_enabled=false`, the kernel suppresses ORCID at hash time so the
     // signature.orcid value is irrelevant. When `orcid_enabled=true`, the kernel honors
-    // whatever the ingest layer produced — a None signature.orcid is "no ORCID for this
+    // whatever the ingest layer produced â€” a None signature.orcid is "no ORCID for this
     // signature", not an error.
     let orcid_hash = if orcid_enabled {
         signature
@@ -369,7 +369,7 @@ pub(crate) fn build_raw_arrow_summary<S: AsRef<str>>(
             orcid_hashes.push(orcid_hash);
         }
         if let Some(specter) = feature.query.specter.as_ref() {
-            specter_vectors.push(specter.as_slice());
+            specter_vectors.push(&specter[..]);
         }
         max_paper_author_count = max_paper_author_count.max(feature.paper_author_count);
     }

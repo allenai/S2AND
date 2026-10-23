@@ -270,7 +270,7 @@ pub(crate) fn arrow_optional_f32_vector(
     array: &dyn Array,
     row: usize,
     context: &str,
-) -> PyResult<Option<Vec<f32>>> {
+) -> PyResult<Option<arrow::buffer::ScalarBuffer<f32>>> {
     if array.is_null(row) {
         return Ok(None);
     }
@@ -284,8 +284,8 @@ pub(crate) fn arrow_optional_f32_vector(
                         "{context} is not a FixedSizeList array"
                     ))
                 })?;
-            let item_values = values.value(row);
-            let floats = item_values
+            let floats = values
+                .values()
                 .as_any()
                 .downcast_ref::<Float32Array>()
                 .ok_or_else(|| {
@@ -293,19 +293,54 @@ pub(crate) fn arrow_optional_f32_vector(
                         "{context} FixedSizeList values must be float32"
                     ))
                 })?;
-            let mut out = Vec::with_capacity(floats.len());
-            for idx in 0..floats.len() {
-                if floats.is_null(idx) {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "{context} has null float value at row {row}, offset {idx}"
-                    )));
+            let start = values.value_offset(row) as usize;
+            let length = values.value_length() as usize;
+            // Retain the decoded buffer so each vector needs no separate allocation.
+            if floats.null_count() != 0 {
+                for idx in 0..length {
+                    if floats.is_null(start + idx) {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "{context} has null float value at row {row}, offset {idx}"
+                        )));
+                    }
                 }
-                out.push(floats.value(idx));
             }
-            Ok(Some(out))
+            Ok(Some(floats.values().slice(start, length)))
         }
         other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
             "{context} must be a fixed_size_list<float32> column, got {other:?}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod vector_tests {
+    use super::*;
+    use arrow::array::types::Float32Type;
+
+    #[test]
+    fn read_vectors_preserves_slices_bits_and_nulls() {
+        let nan = f32::from_bits(0x7fc0_0042);
+        let values = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            vec![
+                Some(vec![Some(1.0), Some(2.0)]),
+                Some(vec![Some(-0.0), Some(nan)]),
+                None,
+                Some(vec![Some(3.0), None]),
+            ],
+            2,
+        );
+        let sliced = values.slice(1, 3);
+        let vector = arrow_optional_f32_vector(&sliced, 0, "embedding")
+            .unwrap()
+            .unwrap();
+        assert_eq!(vector[0].to_bits(), (-0.0f32).to_bits());
+        assert_eq!(vector[1].to_bits(), nan.to_bits());
+        assert!(arrow_optional_f32_vector(&sliced, 1, "embedding")
+            .unwrap()
+            .is_none());
+        pyo3::prepare_freethreaded_python();
+        let error = arrow_optional_f32_vector(&sliced, 2, "embedding").unwrap_err();
+        assert!(error.to_string().contains("row 2, offset 1"));
     }
 }

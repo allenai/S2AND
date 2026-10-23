@@ -633,6 +633,22 @@ impl RustLightGBMBooster {
         Ok(Self { model, fast_plan })
     }
 
+    pub(crate) fn feature_width(&self) -> usize {
+        self.model.num_features
+    }
+
+    /// Probabilities of a small batch of rows, scored on the calling thread.
+    ///
+    /// Fused block scoring featurizes and scores one tile per pool task, so
+    /// the batch scorer's parallelism and input copy are not needed. Each
+    /// row's probability equals the batch scorer's.
+    pub(crate) fn probabilities_serial(&self, rows: &[f64], column_count: usize) -> Vec<f64> {
+        match self.fast_plan.as_ref() {
+            Some(plan) => plan.predict_rows_tiled(&self.model, rows, 1, true, fast::TILE_ROWS),
+            None => predict_rows(&self.model, rows, column_count, 1, true),
+        }
+    }
+
     fn validate_feature_width(&self, column_count: usize) -> PyResult<()> {
         if column_count != self.model.num_features {
             return Err(model_error(format!(

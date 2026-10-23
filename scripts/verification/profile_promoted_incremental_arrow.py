@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from s2and._atomic_io import write_fresh_json  # noqa: E402
 from s2and._sha256 import sha256_file as _sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset, read_arrow_collection_root  # noqa: E402
 
@@ -136,18 +137,6 @@ def _run_metadata() -> dict[str, Any]:
         "platform": platform.platform(),
         "git_commit": git("rev-parse", "HEAD"),
     }
-
-
-def _write_fresh_json(path: Path, payload: dict[str, Any]) -> None:
-    if path.exists():
-        raise FileExistsError(f"Report output already exists: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    staging = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    try:
-        staging.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.link(staging, path)
-    finally:
-        staging.unlink(missing_ok=True)
 
 
 def _resolve_dataset_root(arrow_root: Path, dataset: str) -> Path:
@@ -403,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.write_json.exists():
         raise FileExistsError(f"Report output already exists: {args.write_json}")
     payload = run(args)
-    _write_fresh_json(args.write_json, payload)
+    write_fresh_json(args.write_json, payload)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

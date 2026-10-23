@@ -87,6 +87,7 @@ include = [
   { path = "s2and/data/path_config.json", format = ["sdist", "wheel"] },
   { path = "s2and/data/s2and_name_tuples_canonical.txt", format = ["sdist", "wheel"] },
   { path = "s2and_rust/vendor/cld2/**/*", format = "sdist" },
+  { path = "s2and_rust/vendor/cld2-sys/**/*", format = "sdist" },
 ]
 exclude = ["s2and/data/s2and_name_tuples_filtered.txt", "s2and/data/s2and_unnormalized_filtered_name_tuples.txt"]
 
@@ -99,6 +100,7 @@ cache-keys = [
   { file = "s2and_rust/src/**/*.rs" },
   { file = "s2and_rust/vendor/cld2/Cargo.toml" },
   { file = "s2and_rust/vendor/cld2/src/**/*.rs" },
+  { file = "s2and_rust/vendor/cld2-sys/**/*" },
   # Include packaged licenses so notice-only edits refresh cached distributions.
   { file = "LICENSE" },
   { file = "LICENSE-DATA" },

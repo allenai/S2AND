@@ -175,28 +175,6 @@ def _rebind_dataset_manifests(root: Path, *, name_counts_index: Path) -> None:
     )
 
 
-def _rebind_portable_dataset_manifests(root: Path, *, name_counts_index: Path) -> None:
-    """Preserve public collection fields and replay references after export."""
-
-    main, replays, _release_version = read_arrow_collection_root(root / "manifest.json")
-    collections = {root / "manifest.json": main}
-    for manifest_path in replays.values():
-        datasets, nested_replays, release_version = read_arrow_collection_root(manifest_path)
-        if nested_replays or release_version is not None:
-            raise ValueError(f"Replay manifest must contain a generic Arrow collection: {manifest_path}")
-        collections[manifest_path] = datasets
-    for manifest_path in {path for entries in collections.values() for path in entries.values()}:
-        _rebind_dataset_manifest(manifest_path, name_counts_index=name_counts_index)
-    for collection_path, entries in reversed(list(collections.items())):
-        payload = _read_json(collection_path)
-        for name, manifest_path in entries.items():
-            payload["dataset_manifests"][name]["sha256"] = sha256_file(manifest_path)
-        if collection_path == root / "manifest.json":
-            for name, manifest_path in replays.items():
-                payload["replay_bundles"][name]["sha256"] = sha256_file(manifest_path)
-        collection_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
 def _validate_support_root(source_root: Path) -> None:
     conflicts = sorted(child.name for child in source_root.iterdir() if child.name in _RESERVED_SUPPORT_ROOT_NAMES)
     if conflicts:
@@ -286,45 +264,6 @@ def validate_portable_source_bundle(root: Path) -> dict[str, Any]:
         "selected_source_rows": selected_rows,
         "source_bundle": str(root),
     }
-
-
-def export_portable_source_bundle(*, source_bundle: Path, output_source_bundle: Path) -> dict[str, Any]:
-    """Copy an assembled source bundle and its count index into a fresh root."""
-
-    source_bundle = source_bundle.resolve()
-    output_source_bundle = output_source_bundle.resolve()
-    if output_source_bundle.exists():
-        raise FileExistsError("portable source bundle output directory must not exist")
-    if output_source_bundle.is_relative_to(source_bundle) or source_bundle.is_relative_to(output_source_bundle):
-        raise ValueError("portable source bundle input and output directories must not overlap")
-    _reject_filesystem_links(source_bundle, context="source bundle")
-    _validate_bundle_paths(source_bundle)
-    entries = _portable_dataset_manifests(source_bundle)
-    indexes = []
-    for manifest_path in entries.values():
-        manifest = _read_json(manifest_path)
-        indexes.append(
-            _resolved_manifest_artifact_path(
-                manifest_path, manifest["paths"].get("name_counts_index"), key="name_counts_index"
-            )
-        )
-    index = indexes[0]
-    if output_source_bundle.is_relative_to(index):
-        raise ValueError("portable source bundle output must not be inside the count index")
-    require_name_counts_index_artifact(
-        index, context="portable source bundle export", producer_hint="bind a valid shared count index", verify=True
-    )
-    _validate_root_name_counts_binding(
-        source_bundle,
-        authoritative_manifest_sha256=sha256_file(index / "manifest.json"),
-        dataset_manifests=entries,
-    )
-    _copy_arrow_root_without_name_counts(source_bundle, output_source_bundle)
-    shutil.copytree(index, output_source_bundle / "name_counts_index")
-    _rebind_portable_dataset_manifests(
-        output_source_bundle, name_counts_index=output_source_bundle / "name_counts_index"
-    )
-    return validate_portable_source_bundle(output_source_bundle)
 
 
 def assemble_source_bundle(

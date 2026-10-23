@@ -4,10 +4,6 @@ from collections import defaultdict
 from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 
-PRODUCTION_AUGMENTED_SOURCES = frozenset(
-    {"aminer", "arnetminer", "inspire", "kisti", "medline", "pubmed", "qian", "zbmath"}
-)
-
 
 def split_members_from_sources(name: str, files: Mapping[str, Path], *, random_seed: int) -> tuple[set[str], set[str]]:
     """Resolve the actual fit and validation populations without access to held-out inputs.
@@ -54,12 +50,6 @@ def split_members_from_sources(name: str, files: Mapping[str, Path], *, random_s
         {signature_id for members in train.values() for signature_id in members},
         {signature_id for members in validation.values() for signature_id in members},
     )
-
-
-def training_members_from_sources(name: str, files: Mapping[str, Path], *, random_seed: int) -> set[str]:
-    """Resolve the actual fit population without access to held-out inputs."""
-
-    return split_members_from_sources(name, files, random_seed=random_seed)[0]
 
 
 def source_members(pairs: Iterable[tuple[str, str]]) -> dict[str, set[str]]:

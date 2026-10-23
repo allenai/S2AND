@@ -11,19 +11,6 @@ from s2and.subblocking import make_subblocks
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, equalish, tiny_name_counts_index
 
 
-def _signature_scalar_fields(signature) -> dict[str, object]:
-    return {
-        "author_info_first_normalized": signature.author_info_first_normalized,
-        "author_info_middle_normalized": signature.author_info_middle_normalized,
-        "author_info_last_normalized": signature.author_info_last_normalized,
-        "author_info_coauthors": signature.author_info_coauthors,
-        "author_info_coauthor_blocks": signature.author_info_coauthor_blocks,
-        "author_info_affiliations": signature.author_info_affiliations,
-        "author_info_name_counts": signature.author_info_name_counts,
-        "author_info_orcid": signature.author_info_orcid,
-    }
-
-
 def _sample_pairs(signature_ids: list[str], limit: int = 8) -> list[tuple[str, str]]:
     pairs = []
     for s1, s2 in combinations(signature_ids, 2):

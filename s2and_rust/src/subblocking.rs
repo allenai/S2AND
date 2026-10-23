@@ -1594,7 +1594,10 @@ pub(crate) fn build_native_graph_evidence_store(
         }
     }
 
-    let dimension = specter_by_paper_id.values().next().map_or(0usize, Vec::len);
+    let dimension = specter_by_paper_id
+        .values()
+        .next()
+        .map_or(0usize, |values| values.len());
     let mut signatures =
         HashMap::with_capacity_and_hasher(fallback_signature_ids.len(), Default::default());
     for signature_id in fallback_signature_ids {
@@ -1603,7 +1606,7 @@ pub(crate) fn build_native_graph_evidence_store(
             .expect("fallback signature row exists after validation");
         let embedding = specter_by_paper_id
             .get(&row.paper_id)
-            .cloned()
+            .map(|values| values.to_vec())
             .unwrap_or_else(|| vec![0.0; dimension]);
         let position = row
             .position
@@ -2591,7 +2594,9 @@ pub(crate) fn apply_orcid_subblocking(
             continue;
         };
         let root = find_orcid_subblock_root(&mut parent, unique_subblock_indices[0]);
-        let total_orcid_sig_count = orcid_to_sig_ids.get(orcid).map_or(0usize, Vec::len);
+        let total_orcid_sig_count = orcid_to_sig_ids
+            .get(orcid)
+            .map_or(0usize, |values| values.len());
         skipped_orcid_counts_by_root
             .entry(root)
             .or_default()

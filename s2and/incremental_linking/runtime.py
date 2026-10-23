@@ -26,6 +26,7 @@ from s2and.incremental_linking.linker_pairwise import (
     compute_candidate_batch_pairwise_aggregate_stats_rust,
     compute_linker_pair_chunk_plan,
     iter_candidate_batch_pair_feature_chunks_rust,
+    iter_candidate_batch_scored_chunks_rust,
     resolve_linker_pairwise_featurizer,
 )
 from s2and.incremental_linking.logistic_gate import (
@@ -43,7 +44,7 @@ from s2and.incremental_linking.retrieval import (
     build_linker_retrieval_batch_from_raw_plan_bundle,
 )
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features_with_telemetry
-from s2and.model_pairwise import predict_pairwise_class0
+from s2and.model_pairwise import native_pairwise_scorers, predict_pairwise_class0
 from s2and.runtime import build_runtime_context
 from s2and.rust_calls import take_feature_columns_rust
 from s2and.thread_config import resolve_n_jobs
@@ -54,6 +55,9 @@ LinkAction = Literal["link", "abstain"]
 # NaNs internally; only the exported pw_* aggregate features are zero-filled.
 _PAIRWISE_MODEL_NAN_VALUE: float = float("nan")
 _PAIRWISE_AGGREGATE_NAN_VALUE: float = 0.0
+# Native boosters score candidate pairs inside the Rust feature pass. Off, the
+# pair-feature matrix is built and scored from Python; both give the same bits.
+_FUSED_LINKER_SCORING = True
 
 
 @dataclass(frozen=True)
@@ -848,14 +852,9 @@ def _predict_pairwise_model_distances(
     classifier: Any,
     features: np.ndarray,
     labels: np.ndarray,
-    num_threads: int,
     nameless_classifier: Any | None = None,
     nameless_features: np.ndarray | None = None,
 ) -> np.ndarray:
-    # Estimator threading is configured through propagated n_jobs; predict_proba(num_threads=...)
-    # is LightGBM-specific and breaks sklearn-compatible wrappers.
-    del num_threads
-
     predictions = np.zeros(len(labels), dtype=np.float64)
     predict = np.isnan(labels)
     if np.any(predict):
@@ -977,7 +976,8 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
 
     Production defaults reproduce the dense production 1.2 matrix by preserving
     NaNs for pairwise distance model inputs and zero-filling the exported
-    promoted pairwise aggregate values.
+    promoted pairwise aggregate values. With native boosters the pairs are
+    scored inside the feature pass, and that time counts as feature seconds.
     """
 
     start_seconds = time.perf_counter()
@@ -1024,22 +1024,46 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
     hard_disallow_distance_pair_count = 0
     featurizer = resolve_linker_pairwise_featurizer(dataset, featurizer, runtime_context=runtime_context)
 
+    native_scorers = (
+        native_pairwise_scorers(classifier, nameless_classifier if nameless_indices else None)
+        if _FUSED_LINKER_SCORING
+        else None
+    )
+    if native_scorers is not None:
+        main_booster, nameless_booster = native_scorers
+        chunks = iter_candidate_batch_scored_chunks_rust(
+            candidate_batch,
+            featurizer=featurizer,
+            chunk_plan=plan,
+            main_indices=main_indices,
+            main_booster=main_booster,
+            nameless_indices=nameless_indices if nameless_booster is not None else None,
+            nameless_booster=nameless_booster,
+            aggregate_indices=aggregate_indices,
+            pair_labels=labels,
+            n_jobs=n_jobs,
+            nan_value=float(pairwise_model_nan_value),
+            aggregate_nan_value=float(pairwise_aggregate_nan_value),
+        )
+    else:
+        chunks = iter_candidate_batch_pair_feature_chunks_rust(
+            dataset,
+            candidate_batch,
+            matrix_indices=matrix_indices,
+            aggregate_indices=aggregate_indices,
+            n_jobs=n_jobs,
+            total_ram_bytes=total_ram_bytes,
+            nan_value=float(pairwise_model_nan_value),
+            aggregate_nan_value=float(pairwise_aggregate_nan_value),
+            runtime_context=runtime_context,
+            featurizer=featurizer,
+            chunk_plan=plan,
+        )
+
     chunk_count = 0
     feature_seconds = 0.0
     predict_seconds = 0.0
-    for chunk in iter_candidate_batch_pair_feature_chunks_rust(
-        dataset,
-        candidate_batch,
-        matrix_indices=matrix_indices,
-        aggregate_indices=aggregate_indices,
-        n_jobs=n_jobs,
-        total_ram_bytes=total_ram_bytes,
-        nan_value=float(pairwise_model_nan_value),
-        aggregate_nan_value=float(pairwise_aggregate_nan_value),
-        runtime_context=runtime_context,
-        featurizer=featurizer,
-        chunk_plan=plan,
-    ):
+    for chunk in chunks:
         pair_features = chunk.pair_features
         feature_seconds += float(chunk.feature_seconds)
         chunk_count += 1
@@ -1057,22 +1081,24 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
 
         predict_start = time.perf_counter()
         labels_chunk = labels[chunk.start : chunk.stop]
-        model_pair_features = pair_features
-        if not np.isnan(float(pairwise_model_nan_value)):
-            model_pair_features = pair_features.copy()
-            model_pair_features[np.isnan(model_pair_features)] = float(pairwise_model_nan_value)
-        model_distances = _predict_pairwise_model_distances(
-            classifier=classifier,
-            features=take_feature_columns_rust(model_pair_features, main_positions, num_threads=n_jobs),
-            labels=labels_chunk,
-            num_threads=resolve_n_jobs(n_jobs),
-            nameless_classifier=nameless_classifier,
-            nameless_features=(
-                take_feature_columns_rust(model_pair_features, nameless_positions, num_threads=n_jobs)
-                if nameless_positions
-                else None
-            ),
-        )
+        if chunk.model_distances is not None:
+            model_distances = chunk.model_distances
+        else:
+            model_pair_features = pair_features
+            if not np.isnan(float(pairwise_model_nan_value)):
+                model_pair_features = pair_features.copy()
+                model_pair_features[np.isnan(model_pair_features)] = float(pairwise_model_nan_value)
+            model_distances = _predict_pairwise_model_distances(
+                classifier=classifier,
+                features=take_feature_columns_rust(model_pair_features, main_positions, num_threads=n_jobs),
+                labels=labels_chunk,
+                nameless_classifier=nameless_classifier,
+                nameless_features=(
+                    take_feature_columns_rust(model_pair_features, nameless_positions, num_threads=n_jobs)
+                    if nameless_positions
+                    else None
+                ),
+            )
         predict_seconds += time.perf_counter() - predict_start
         distance_accumulators = _accumulate_pairwise_distance_chunk(
             row_indices=chunk.local_row_indices,
@@ -1255,34 +1281,6 @@ def _featureize_linker_candidates_with_telemetry(
     )
 
 
-def _featureize_linker_candidates(
-    *,
-    dataset: ANDData | None,
-    candidate_batch: LinkerCandidateBatch,
-    row_signals: Mapping[str, Any],
-    feature_columns: Sequence[str],
-    pairwise_stats: PairwiseAggregateStats | None = None,
-    n_jobs: int = 1,
-    total_ram_bytes: int | None = None,
-    nan_value: float = _PAIRWISE_AGGREGATE_NAN_VALUE,
-    runtime_context: Any | None = None,
-    featurizer: Any | None = None,
-) -> LinkerFeatureMatrix:
-    feature_matrix, _row_feature_telemetry = _featureize_linker_candidates_with_telemetry(
-        dataset=dataset,
-        candidate_batch=candidate_batch,
-        row_signals=row_signals,
-        feature_columns=feature_columns,
-        pairwise_stats=pairwise_stats,
-        n_jobs=n_jobs,
-        total_ram_bytes=total_ram_bytes,
-        nan_value=nan_value,
-        runtime_context=runtime_context,
-        featurizer=featurizer,
-    )
-    return feature_matrix
-
-
 def _no_candidate_abstain_decisions(
     query_signature_indices: Sequence[int] | np.ndarray,
 ) -> tuple[LinkOrAbstainDecision, ...]:
@@ -1305,36 +1303,6 @@ def _signature_id_to_index(signature_id_to_index: Mapping[str, int], signature_i
     if key not in signature_id_to_index:
         raise KeyError(f"signature_id not present in linker runtime signature_ids: {key!r}")
     return int(signature_id_to_index[key])
-
-
-def _build_component_member_indices_by_key(
-    cluster_seeds_require: Mapping[Any, Any],
-    signature_id_to_index: Mapping[str, int],
-) -> dict[str, np.ndarray]:
-    component_member_indices: dict[str, list[int]] = {}
-    for signature_id, component_key in cluster_seeds_require.items():
-        component_member_indices.setdefault(str(component_key), []).append(
-            _signature_id_to_index(signature_id_to_index, signature_id)
-        )
-    return {
-        component_key: np.asarray(member_indices, dtype=np.uint32)
-        for component_key, member_indices in component_member_indices.items()
-        if member_indices
-    }
-
-
-def _empty_retrieval_batch() -> LinkerRetrievalBatch:
-    candidate_batch = LinkerCandidateBatch(
-        row_count=0,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
-        row_query_signature_indices=np.zeros(0, dtype=np.uint32),
-        row_component_keys=(),
-        retrieval_scores=np.zeros(0, dtype=np.float32),
-        retrieval_ranks=np.zeros(0, dtype=np.uint16),
-    )
-    return LinkerRetrievalBatch(candidate_batch=candidate_batch, row_signals={})
 
 
 def _string_keyed_supervision(
@@ -2123,15 +2091,3 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         linked_signature_clusters=result.linked_signature_clusters,
         decision_row_signals=result.decision_row_signals,
     )
-
-
-def naturalize_incremental_clusters(
-    predicted_clusters: Mapping[str, Any],
-    split_cluster_to_natural_cluster: Mapping[Any, Any],
-) -> dict[str, Any]:
-    """Naturalize split incremental cluster IDs back to caller-visible IDs."""
-
-    return {
-        str(signature_id): split_cluster_to_natural_cluster.get(cluster_id, cluster_id)
-        for signature_id, cluster_id in predicted_clusters.items()
-    }

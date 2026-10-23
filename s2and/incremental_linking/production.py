@@ -227,6 +227,8 @@ class _QueryDisallowFeaturizerCache:
     def clear(self) -> None:
         """Release every retained native featurizer before residual Phase B."""
 
+        for _covered, featurizer in self.entries:
+            feature_port.release_rust_handle(featurizer)
         self.entries.clear()
 
 
@@ -740,11 +742,18 @@ def promoted_incremental_orcid_fanout_by_query(
     resolved_component_sizes = component_sizes
     if resolved_component_sizes is None:
         resolved_component_sizes = promoted_incremental_component_sizes(cluster_seeds_require)
+    # Inlined `_signature_orcid`: this loop visits every seed of the request.
+    signatures = dataset.signatures
     for seed_signature_id, component in cluster_seeds_require.items():
-        component_key = str(component)
-        seed_orcid = _signature_orcid(dataset, str(seed_signature_id))
+        signature = signatures.get(str(seed_signature_id))
+        if signature is None:
+            continue
+        value = getattr(signature, "author_info_orcid", None)
+        if value is None:
+            continue
+        seed_orcid = normalize_orcid(value)
         if seed_orcid in query_orcids:
-            component_orcids.setdefault(component_key, set()).add(str(seed_orcid))
+            component_orcids.setdefault(str(component), set()).add(str(seed_orcid))
 
     if not component_orcids:
         return {}
@@ -1467,6 +1476,11 @@ def predict_incremental_promoted_linker_from_arrow(
         raw_arrow_reusable_planner_enabled = int(raw_request_planner is not None)
         rescore_featurizer_cache.clear()
         del rescore_featurizer_cache
+        if raw_request_planner is not None and (
+            attachment_state is None or attachment_state.planner is not raw_request_planner
+        ):
+            # The next pass of a subblocked block reuses its planner; a request's own planner is done.
+            feature_port.release_rust_handle(raw_request_planner)
         del raw_request_planner
         finish_start = time.perf_counter()
         if name_check_exempt_signature_ids is not None and bool(

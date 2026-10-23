@@ -902,7 +902,7 @@ def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:
         arrow_dataset.close()
 
 
-def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_telemetry(tmp_path):
+def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_telemetry(tmp_path, monkeypatch):
     load_s2and_rust_extension()
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
@@ -999,4 +999,34 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_tel
     assert telemetry["graph_fallback_invocation_count"] == 1
     assert telemetry["graph_fallback_load_metrics"]["paper_authors_rows_loaded"] == 12
     assert telemetry["graph_fallback_stats"][0]["packed_component_count"] == 2
+    from s2and.featurizer import FeaturizationInfo
+    from s2and.model import Clusterer
+    from scripts.eps_sweep.sweep_eps_on_linking_gold import _build_arrow_subblocked_block_dict
+
+    monkeypatch.setattr(subblocking, "_resolved_orcid_prefix_counts", lambda counts: {})
+    clusterer = Clusterer(FeaturizationInfo(["year_diff"]), None, n_jobs=1, random_state=7)
+    clusterer.subblocking_graph_config = subblocking.GraphSubblockingConfig(
+        neighbor_mode="exact",
+        neighbors=1,
+        min_edge_score=0.8,
+    )
+    blocks = {"hui wang": ["s1", "s2", "s3", "s4"]}
+    production, _ = clusterer._build_arrow_subblocked_block_dict(
+        blocks,
+        arrow_dataset,
+        batching_threshold=2,
+        cluster_seeds_require={},
+    )
+    for orcid in (False, True):
+        swept, sweep_telemetry = _build_arrow_subblocked_block_dict(
+            args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=orcid),
+            clusterer=clusterer,
+            planning_state=None,
+            block_dict=blocks,
+            target_signature_ids={"s1"},
+            arrow_dataset=arrow_dataset,
+        )
+        assert swept == production
+        assert sweep_telemetry[0]["subblocking_telemetry"]["graph_fallback_native"] is True
+        assert sweep_telemetry[0]["subblocking_telemetry"]["graph_fallback_invocation_count"] == 1
     arrow_dataset.close()

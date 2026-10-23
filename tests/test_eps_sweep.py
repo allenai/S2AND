@@ -225,44 +225,65 @@ def test_validate_args_requires_limit_or_full_run_for_compute_missing() -> None:
     sweep_eps_on_linking_gold._validate_args(full_run_args)  # noqa: SLF001
 
 
-def test_eps_sweep_uses_strict_shared_graph_config_resolver(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
+@pytest.mark.parametrize(
+    "raw_config,neighbors", [(None, 16), ({"neighbors": 7}, 7), (subblocking.GraphSubblockingConfig(neighbors=5), 5)]
+)
+@pytest.mark.parametrize("orcid", [False, True])
+def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neighbors, orcid):
+    calls = []
+    dataset = object()
 
-    def fake_factory(
-        arrow_dataset: object,
-        *,
-        config: subblocking.GraphSubblockingConfig,
-        random_seed: int,
-    ) -> object:
-        del arrow_dataset, random_seed
-        captured["config"] = config
-        return object()
+    def native(arrow_dataset, signature_ids, **kwargs):
+        assert arrow_dataset is dataset
+        calls.append((signature_ids, kwargs))
+        return {"a": ["1", "2"], "b": ["3"]}, {"graph_fallback_native": True}, {}
 
-    monkeypatch.setattr(subblocking, "make_arrow_graph_subblocking_cluster_fn", fake_factory)
-    cases = (
-        ("default", None, 16, False),
-        ("mapping", {"neighbors": 7}, 7, False),
-        ("instance", subblocking.GraphSubblockingConfig(neighbors=5), 5, True),
+    def reject_python(*args, **kwargs):
+        raise AssertionError("EPS selection must not use the Python graph fallback")
+
+    monkeypatch.setattr(subblocking, "_make_subblocks_with_telemetry_arrow_rust", native)
+    monkeypatch.setattr(subblocking, "make_subblocks_with_telemetry", reject_python)
+    blocks, telemetry = sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
+        args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=orcid),
+        clusterer=SimpleNamespace(subblocking_graph_config=raw_config, random_state=7),
+        planning_state=None,
+        block_dict={"large": ["1", "2", "3"], "small": ["4"], "irrelevant": ["5", "6", "7"]},
+        target_signature_ids={"1", "4"},
+        arrow_dataset=dataset,
     )
-    for case_id, raw_config, expected_neighbors, expect_same_instance in cases:
-        clusterer = SimpleNamespace(subblocking_graph_config=raw_config, random_state=3)
+    assert blocks == {"large|subblock=a": ["1", "2"], "large|subblock=b": ["3"], "small": ["4"]}
+    assert len(calls) == 1
+    assert calls[0][0] == ["1", "2", "3"]
+    assert calls[0][1]["graph_subblocking_config"].neighbors == neighbors
+    assert calls[0][1]["graph_subblocking_random_seed"] == 7
+    assert calls[0][1]["use_orcid_subblocking"] is orcid
+    assert telemetry[0]["subblocking_telemetry"]["graph_fallback_native"] is True
 
-        sweep_eps_on_linking_gold._make_arrow_specter_cluster_fn(
-            clusterer,
-            object(),
+
+@pytest.mark.parametrize(
+    "result",
+    [{"a": ["1", "2"]}, {"a": ["1", "2"], "b": ["2", "3"]}, {"a": ["1", "2"], "b": ["other"]}, {"a": ["1", "2", "3"]}],
+)
+def test_eps_sweep_rejects_invalid_native_partition(monkeypatch, result):
+    monkeypatch.setattr(subblocking, "_make_subblocks_with_telemetry_arrow_rust", lambda *a, **k: (result, {}, {}))
+    with pytest.raises(ValueError, match="every input signature exactly once|oversized subblock"):
+        sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
+            args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=False),
+            clusterer=SimpleNamespace(),
+            planning_state=None,
+            block_dict={"block": ["1", "2", "3"]},
+            target_signature_ids={"1"},
+            arrow_dataset=object(),
         )
 
-        config = captured["config"]
-        assert config.neighbors == expected_neighbors, case_id
-        if expect_same_instance:
-            assert config is raw_config, case_id
 
-
-def test_eps_sweep_rejects_invalid_graph_config_type() -> None:
-    clusterer = SimpleNamespace(subblocking_graph_config="invalid")
-
+def test_eps_sweep_rejects_invalid_graph_config_type():
     with pytest.raises(ValueError, match="GraphSubblockingConfig, mapping, or None"):
-        sweep_eps_on_linking_gold._make_arrow_specter_cluster_fn(
-            clusterer,
-            object(),
+        sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
+            args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=False),
+            clusterer=SimpleNamespace(subblocking_graph_config="invalid"),
+            planning_state=None,
+            block_dict={},
+            target_signature_ids=set(),
+            arrow_dataset=object(),
         )

@@ -279,3 +279,7 @@ meaning: it caps the number of unassigned query signatures per linker batch.
 The Python `Clusterer.predict_incremental` API takes no batching parameter. See
 [production_inference.md](production_inference.md#incremental-decision-semantics)
 for the incremental contract.
+
+The EPS sweep uses the same native graph planner as production. ORCID-B3 evaluation
+keeps ORCID evidence hidden in subblocking and distance constraints to prevent label leakage.
+Historical Python-graph sweep partitions must not be treated as native production partitions.

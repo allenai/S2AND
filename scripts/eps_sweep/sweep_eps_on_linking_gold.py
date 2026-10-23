@@ -375,25 +375,6 @@ def _select_subblock_rows(
     return ordered[:max_subblocks]
 
 
-def _make_arrow_specter_cluster_fn(
-    clusterer: Any,
-    arrow_dataset: ArrowDataset,
-) -> Any:
-    """Return the Arrow-backed graph fallback used by S2AND subblocking."""
-
-    from s2and.subblocking import (
-        _resolve_graph_subblocking_config,
-        make_arrow_graph_subblocking_cluster_fn,
-    )
-
-    config = _resolve_graph_subblocking_config(getattr(clusterer, "subblocking_graph_config", None))
-    return make_arrow_graph_subblocking_cluster_fn(
-        arrow_dataset,
-        config=config,
-        random_seed=int(getattr(clusterer, "random_state", 0) or 0),
-    )
-
-
 def _build_arrow_subblocked_block_dict(
     *,
     args: argparse.Namespace,
@@ -403,10 +384,12 @@ def _build_arrow_subblocked_block_dict(
     target_signature_ids: set[str],
     arrow_dataset: ArrowDataset,
 ) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
-    """Subblock only target-bearing base blocks using Arrow-backed fallback."""
+    """Subblock target-bearing blocks with the production native planner."""
 
-    from s2and.subblocking import make_subblocks_with_telemetry
+    from s2and.subblocking import _make_subblocks_with_telemetry_arrow_rust, _resolve_graph_subblocking_config
 
+    del planning_state
+    config = _resolve_graph_subblocking_config(getattr(clusterer, "subblocking_graph_config", None))
     threshold = int(args.batching_threshold)
     subblocked: dict[str, list[str]] = {}
     telemetry_rows: list[dict[str, Any]] = []
@@ -419,15 +402,18 @@ def _build_arrow_subblocked_block_dict(
             continue
 
         started = time.perf_counter()
-        specter_cluster_fn = _make_arrow_specter_cluster_fn(clusterer, arrow_dataset)
-        subblocks, telemetry = make_subblocks_with_telemetry(
+        subblocks, telemetry, _ = _make_subblocks_with_telemetry_arrow_rust(
+            arrow_dataset,
             signature_ids,
-            planning_state,
             maximum_size=threshold,
-            specter_cluster_fn=specter_cluster_fn,
+            graph_subblocking_config=config,
+            graph_subblocking_random_seed=int(getattr(clusterer, "random_state", 0) or 0),
             use_orcid_subblocking=bool(args.use_orcid_subblocking),
         )
         seconds = time.perf_counter() - started
+        output_ids = [signature_id for members in subblocks.values() for signature_id in members]
+        if len(output_ids) != len(set(output_ids)) or sorted(output_ids) != sorted(signature_ids):
+            raise ValueError(f"Native subblocking must return every input signature exactly once: {block_key}")
         for subblock_key in sorted(subblocks):
             subblock_signatures = [str(signature_id) for signature_id in subblocks[subblock_key]]
             if len(subblock_signatures) > threshold:
@@ -443,8 +429,6 @@ def _build_arrow_subblocked_block_dict(
                 "input_signature_count": len(signature_ids),
                 "output_subblock_count": len(subblocks),
                 "seconds": round(seconds, 3),
-                "arrow_graph_load_seconds": round(float(getattr(specter_cluster_fn, "load_seconds", 0.0)), 3),
-                "arrow_graph_stats": getattr(specter_cluster_fn, "stats", []),
                 "subblocking_telemetry": telemetry,
             }
         )
@@ -533,7 +517,7 @@ def _plan_subblocks(
         "selected_signature_count": int(sum(len(ids) for ids in selected.values())),
         "selected_pair_count": int(sum(row["pair_count"] for row in selected_rows)),
         "subblock_selection": args.subblock_selection,
-        "subblocking_backend": "arrow-graph",
+        "subblocking_backend": "arrow-rust-native-graph",
         "subblocking_telemetry": subblocking_telemetry,
         "subblocks": selected_rows,
     }
@@ -1186,7 +1170,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         plan["arrow_manifest"] = str(dataset_root / "manifest.json")
         plan["arrow_generation_id"] = arrow_dataset.generation_id
         plan["distance_source"] = "arrow-rust"
-        plan["planning_source"] = "Arrow signatures with Arrow graph subblocking"
+        plan["planning_source"] = "Arrow signatures with production native graph subblocking"
         write_json(output_dir / "plan.json", plan)
         pd.DataFrame(plan["subblocks"]).to_csv(output_dir / "target_subblocks.tsv", sep="\t", index=False)
 

@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import random
 import sys
 import time
@@ -29,6 +28,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from s2and._atomic_io import write_fresh_json  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.subblocking import (  # noqa: E402
     GraphSubblockingConfig,
@@ -40,18 +40,6 @@ from s2and.subblocking import (  # noqa: E402
 from s2and.text import compute_block, normalize_text  # noqa: E402
 
 _DEFAULT_GRAPH_CONFIG = GraphSubblockingConfig()
-
-
-def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
-    if path.exists():
-        raise FileExistsError(f"Report output already exists: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    staging = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    try:
-        staging.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.link(staging, path)
-    finally:
-        staging.unlink(missing_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -774,7 +762,7 @@ def main() -> None:
         },
     }
     summary["baseline_deltas"] = _baseline_deltas(summary, args.baseline_summary)
-    _write_fresh_json(report_path, summary)
+    write_fresh_json(report_path, summary)
     print(json.dumps(summary, indent=2), flush=True)
 
 

@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import math
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Never
+from typing import Any, Never
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,29 @@ def _raise_lock_timeout(
     )
     logger.error(message)
     raise TimeoutError(message) from cause
+
+
+def write_fresh_json(path: str | Path, payload: Mapping[str, Any]) -> None:
+    """Publish one new JSON report; refuse an existing output and leave no staging file behind.
+
+    The staging file is linked into place, so the output appears whole or not
+    at all, and a concurrent writer of the same path fails instead of
+    replacing it.
+
+    Raises:
+        FileExistsError: The output path already exists.
+    """
+
+    path = Path(path)
+    if path.exists():
+        raise FileExistsError(f"Report output already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        staging.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.link(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def fsync_directory(path: str | Path) -> None:

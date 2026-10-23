@@ -246,7 +246,6 @@ def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neigh
     blocks, telemetry = sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
         args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=orcid),
         clusterer=SimpleNamespace(subblocking_graph_config=raw_config, random_state=7),
-        planning_state=None,
         block_dict={"large": ["1", "2", "3"], "small": ["4"], "irrelevant": ["5", "6", "7"]},
         target_signature_ids={"1", "4"},
         arrow_dataset=dataset,
@@ -270,7 +269,6 @@ def test_eps_sweep_rejects_invalid_native_partition(monkeypatch, result):
         sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
             args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=False),
             clusterer=SimpleNamespace(),
-            planning_state=None,
             block_dict={"block": ["1", "2", "3"]},
             target_signature_ids={"1"},
             arrow_dataset=object(),
@@ -282,7 +280,6 @@ def test_eps_sweep_rejects_invalid_graph_config_type():
         sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
             args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=False),
             clusterer=SimpleNamespace(subblocking_graph_config="invalid"),
-            planning_state=None,
             block_dict={},
             target_signature_ids=set(),
             arrow_dataset=object(),

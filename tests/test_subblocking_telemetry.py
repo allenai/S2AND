@@ -1,6 +1,8 @@
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -902,18 +904,21 @@ def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:
         arrow_dataset.close()
 
 
-def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_telemetry(tmp_path, monkeypatch):
-    load_s2and_rust_extension()
+def _hui_wang_graph_arrow_dataset(
+    tmp_path: Path,
+    *,
+    first_names: Sequence[str] = ("hui",) * 4,
+    orcids: Sequence[str | None] = (None,) * 4,
+) -> ArrowDataset:
+    """Open four "h wang" records whose embeddings pair s1 with s2 and s3 with s4."""
     signatures_path = tmp_path / "signatures.arrow"
     paper_authors_path = tmp_path / "paper_authors.arrow"
     specter_path = tmp_path / "specter.arrow"
     _write_signatures_arrow(
         signatures_path,
         [
-            ("s1", "hui", "", None),
-            ("s2", "hui", "", None),
-            ("s3", "hui", "", None),
-            ("s4", "hui", "", None),
+            (f"s{index}", first, "", orcid)
+            for index, (first, orcid) in enumerate(zip(first_names, orcids, strict=True), start=1)
         ],
     )
     _write_ipc(
@@ -977,8 +982,47 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_tel
             table_name="specter",
         ),
     }
+    return _open_subblocking_arrow_dataset(paths, tmp_path)
 
-    arrow_dataset = _open_subblocking_arrow_dataset(paths, tmp_path)
+
+def _eps_sweep_and_production_subblocks(
+    arrow_dataset: ArrowDataset, monkeypatch, *, batching_threshold: int = 2
+) -> tuple[dict[str, list[str]], dict[bool, dict[str, list[str]]], dict[bool, list[dict[str, Any]]]]:
+    """Subblock one block through production and through the sweep with ORCID subblocking off and on."""
+    from s2and.featurizer import FeaturizationInfo
+    from s2and.model import Clusterer
+    from scripts.eps_sweep.sweep_eps_on_linking_gold import _build_arrow_subblocked_block_dict
+
+    monkeypatch.setattr(subblocking, "_resolved_orcid_prefix_counts", lambda counts: {})
+    clusterer = Clusterer(FeaturizationInfo(["year_diff"]), None, n_jobs=1, random_state=7)
+    clusterer.subblocking_graph_config = subblocking.GraphSubblockingConfig(
+        neighbor_mode="exact",
+        neighbors=1,
+        min_edge_score=0.8,
+    )
+    blocks = {"hui wang": ["s1", "s2", "s3", "s4"]}
+    production, _ = clusterer._build_arrow_subblocked_block_dict(
+        blocks,
+        arrow_dataset,
+        batching_threshold=batching_threshold,
+        cluster_seeds_require={},
+    )
+    swept: dict[bool, dict[str, list[str]]] = {}
+    telemetry: dict[bool, list[dict[str, Any]]] = {}
+    for orcid in (False, True):
+        swept[orcid], telemetry[orcid] = _build_arrow_subblocked_block_dict(
+            args=SimpleNamespace(batching_threshold=batching_threshold, use_orcid_subblocking=orcid),
+            clusterer=clusterer,
+            block_dict=blocks,
+            target_signature_ids={"s1"},
+            arrow_dataset=arrow_dataset,
+        )
+    return production, swept, telemetry
+
+
+def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_telemetry(tmp_path, monkeypatch):
+    load_s2and_rust_extension()
+    arrow_dataset = _hui_wang_graph_arrow_dataset(tmp_path)
     subblocks, telemetry, no_middle_dead_ends = subblocking._make_subblocks_with_telemetry_arrow_rust(
         arrow_dataset,
         ["s1", "s2", "s3", "s4"],
@@ -999,34 +1043,32 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_tel
     assert telemetry["graph_fallback_invocation_count"] == 1
     assert telemetry["graph_fallback_load_metrics"]["paper_authors_rows_loaded"] == 12
     assert telemetry["graph_fallback_stats"][0]["packed_component_count"] == 2
-    from s2and.featurizer import FeaturizationInfo
-    from s2and.model import Clusterer
-    from scripts.eps_sweep.sweep_eps_on_linking_gold import _build_arrow_subblocked_block_dict
-
-    monkeypatch.setattr(subblocking, "_resolved_orcid_prefix_counts", lambda counts: {})
-    clusterer = Clusterer(FeaturizationInfo(["year_diff"]), None, n_jobs=1, random_state=7)
-    clusterer.subblocking_graph_config = subblocking.GraphSubblockingConfig(
-        neighbor_mode="exact",
-        neighbors=1,
-        min_edge_score=0.8,
-    )
-    blocks = {"hui wang": ["s1", "s2", "s3", "s4"]}
-    production, _ = clusterer._build_arrow_subblocked_block_dict(
-        blocks,
-        arrow_dataset,
-        batching_threshold=2,
-        cluster_seeds_require={},
-    )
-    for orcid in (False, True):
-        swept, sweep_telemetry = _build_arrow_subblocked_block_dict(
-            args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=orcid),
-            clusterer=clusterer,
-            planning_state=None,
-            block_dict=blocks,
-            target_signature_ids={"s1"},
-            arrow_dataset=arrow_dataset,
-        )
-        assert swept == production
-        assert sweep_telemetry[0]["subblocking_telemetry"]["graph_fallback_native"] is True
-        assert sweep_telemetry[0]["subblocking_telemetry"]["graph_fallback_invocation_count"] == 1
+    production, swept, sweep_telemetry = _eps_sweep_and_production_subblocks(arrow_dataset, monkeypatch)
     arrow_dataset.close()
+    # Without ORCIDs the flag cannot matter, so both sweep settings match production.
+    for orcid in (False, True):
+        assert swept[orcid] == production
+        assert sweep_telemetry[orcid][0]["subblocking_telemetry"]["graph_fallback_native"] is True
+        assert sweep_telemetry[orcid][0]["subblocking_telemetry"]["graph_fallback_invocation_count"] == 1
+
+
+def test_eps_sweep_orcid_subblocking_flag_matches_production_only_when_enabled(tmp_path, monkeypatch):
+    """A shared ORCID changes the partition, so the sweep's ORCID flag must reach the native planner."""
+    load_s2and_rust_extension()
+    shared_orcid = "0000-0002-1825-0097"
+    # Name splitting leaves s1 apart from s3 and s4. The ORCID repair merges whole subblocks only within the cap.
+    arrow_dataset = _hui_wang_graph_arrow_dataset(
+        tmp_path,
+        first_names=("hui", "hao", "hong", "hong"),
+        orcids=(shared_orcid, None, shared_orcid, None),
+    )
+    production, swept, _telemetry = _eps_sweep_and_production_subblocks(
+        arrow_dataset, monkeypatch, batching_threshold=3
+    )
+    arrow_dataset.close()
+
+    partitions = {orcid: {frozenset(members) for members in subblocks.values()} for orcid, subblocks in swept.items()}
+    assert not any({"s1", "s3"} <= members for members in partitions[False]), partitions
+    assert frozenset({"s1", "s3", "s4"}) in partitions[True], partitions
+    assert swept[True] == production
+    assert swept[False] != production

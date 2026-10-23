@@ -12,6 +12,8 @@
   Bundle export now writes their historical defaults instead of reading them from the clusterer.
 - Remove the Python Arrow graph-subblocking fallback, `make_arrow_graph_subblocking_cluster_fn`.
   Arrow callers use native subblocking; the `ANDData` reference implementation remains.
+- `analyze_giant_block_subblocking.py` reads an Arrow dataset (`--arrow-dataset`, optional `--block`)
+  and runs native subblocking instead of loading JSON through `ANDData`.
 - The prediction tutorial rejects `--batching-threshold` with `--json-dir`, because that route clusters full blocks.
 - The release workflow stops when PyPI already has the version and imports each Linux wheel on its own platform.
   The distribution verifier now requires an exact `s2and` package inventory in every wheel and sdist.

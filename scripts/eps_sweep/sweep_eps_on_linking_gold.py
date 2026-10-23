@@ -24,7 +24,6 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -55,21 +54,6 @@ WEIGHT_COLUMNS = [
     "weight_query_label_balanced",
     "weight_query_class_balanced",
 ]
-
-
-@dataclass
-class ArrowPlanningState:
-    """Minimal Arrow-derived state needed for target-block subblocking."""
-
-    name: str
-    signatures: dict[str, Any]
-    block_dict: dict[str, list[str]]
-    random_seed: int = 42
-
-    def get_blocks(self) -> dict[str, list[str]]:
-        """Return a copy of the raw S2 block mapping."""
-
-        return {str(block_key): list(signature_ids) for block_key, signature_ids in self.block_dict.items()}
 
 
 @dataclass(frozen=True)
@@ -274,32 +258,24 @@ def _optional_str(value: Any) -> str | None:
     return str(value)
 
 
-def _read_arrow_signatures_for_planning(
+def _read_target_blocks(
     args: argparse.Namespace,
     arrow_dataset: ArrowDataset,
     target_signature_ids: set[str],
-) -> ArrowPlanningState:
-    """Read Arrow signature metadata needed for target-bearing base blocks."""
+) -> dict[str, list[str]]:
+    """Return every signature of each Arrow block that holds a target signature.
+
+    Native subblocking reads signature metadata from Arrow itself, so planning needs only block membership.
+    """
 
     with arrow_dataset.use() as lease, lease.open_file("signatures") as infile:
         with pa.PythonFile(infile, mode="r") as source:
             table = ipc.open_file(source).read_all()
-    required = {
-        "signature_id",
-        "paper_id",
-        "author_first",
-        "author_middle",
-        "author_last",
-        "author_suffix",
-        "author_position",
-        "author_block",
-    }
-    missing = sorted(required - set(table.column_names))
+    missing = sorted({"signature_id", "author_block"} - set(table.column_names))
     if missing:
         raise ValueError(f"Arrow signatures table is missing planning columns: {missing}")
 
-    selected_columns = required.union({"author_orcid"}.intersection(table.column_names))
-    table = table.select(sorted(selected_columns))
+    table = table.select(["signature_id", "author_block"])
     pc_any = cast(Any, pc)
     excluded = getattr(args, "_excluded_signature_ids", frozenset())
     if excluded:
@@ -316,34 +292,10 @@ def _read_arrow_signatures_for_planning(
     block_column = pc.fill_null(table["author_block"], "")
     block_values = pa.array(target_blocks, type=block_column.type)
     data = table.filter(pc_any.is_in(block_column, value_set=block_values)).to_pydict()
-    signatures: dict[str, Any] = {}
     block_dict: dict[str, list[str]] = defaultdict(list)
-    row_count = len(data["signature_id"])
-    for index in range(row_count):
-        signature_id = str(data["signature_id"][index])
-        block_key = _optional_str(data["author_block"][index]) or ""
-        block_dict[block_key].append(signature_id)
-        signatures[signature_id] = SimpleNamespace(
-            signature_id=signature_id,
-            paper_id=_optional_str(data["paper_id"][index]),
-            author_info_first=_optional_str(data["author_first"][index]),
-            author_info_first_normalized=None,
-            author_info_middle=_optional_str(data["author_middle"][index]),
-            author_info_middle_normalized=None,
-            author_info_last=_optional_str(data["author_last"][index]),
-            author_info_last_normalized=None,
-            author_info_suffix=_optional_str(data["author_suffix"][index]),
-            author_info_suffix_normalized=None,
-            author_info_orcid=_optional_str(data["author_orcid"][index]) if "author_orcid" in data else None,
-            author_info_position=data["author_position"][index],
-        )
-
-    return ArrowPlanningState(
-        name=f"{args.dataset}_linking_eps_arrow_plan",
-        signatures=signatures,
-        block_dict=dict(block_dict),
-        random_seed=42,
-    )
+    for signature_id, block_key in zip(data["signature_id"], data["author_block"], strict=True):
+        block_dict[_optional_str(block_key) or ""].append(str(signature_id))
+    return dict(block_dict)
 
 
 def _select_subblock_rows(
@@ -379,7 +331,6 @@ def _build_arrow_subblocked_block_dict(
     *,
     args: argparse.Namespace,
     clusterer: Any,
-    planning_state: ArrowPlanningState,
     block_dict: Mapping[str, list[str]],
     target_signature_ids: set[str],
     arrow_dataset: ArrowDataset,
@@ -388,7 +339,6 @@ def _build_arrow_subblocked_block_dict(
 
     from s2and.subblocking import _make_subblocks_with_telemetry_arrow_rust, _resolve_graph_subblocking_config
 
-    del planning_state
     config = _resolve_graph_subblocking_config(getattr(clusterer, "subblocking_graph_config", None))
     threshold = int(args.batching_threshold)
     subblocked: dict[str, list[str]] = {}
@@ -438,18 +388,16 @@ def _build_arrow_subblocked_block_dict(
 def _plan_subblocks(
     args: argparse.Namespace,
     clusterer: Any,
-    planning_state: ArrowPlanningState,
+    block_dict: dict[str, list[str]],
     gold: pd.DataFrame,
     arrow_dataset: ArrowDataset,
 ) -> tuple[dict[str, list[str]], dict[str, Any]]:
     """Plan target subblocks from Arrow metadata and Arrow-backed subblocking."""
 
     target_signature_ids = set(gold["query_signature_id"].astype(str)) | set(gold["member_signature_id"].astype(str))
-    block_dict = planning_state.get_blocks()
     subblocked, subblocking_telemetry = _build_arrow_subblocked_block_dict(
         args=args,
         clusterer=clusterer,
-        planning_state=planning_state,
         block_dict=block_dict,
         target_signature_ids=target_signature_ids,
         arrow_dataset=arrow_dataset,
@@ -1146,8 +1094,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         target_signature_ids = set(gold["query_signature_id"].astype(str)) | set(
             gold["member_signature_id"].astype(str)
         )
-        planning_state = _read_arrow_signatures_for_planning(args, arrow_dataset, target_signature_ids)
-        selected_subblocks, plan = _plan_subblocks(args, clusterer, planning_state, gold, arrow_dataset)
+        block_dict = _read_target_blocks(args, arrow_dataset, target_signature_ids)
+        selected_subblocks, plan = _plan_subblocks(args, clusterer, block_dict, gold, arrow_dataset)
         plan["model_eps"] = model_eps
         plan["model_manifest_sha256"] = _hash_file(args.model_path / "manifest.json")
         plan["score_mode"] = args.score_mode

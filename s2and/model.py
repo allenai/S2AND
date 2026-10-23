@@ -16,7 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial, wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 import numpy as np
 from tqdm import tqdm
@@ -35,12 +35,7 @@ from s2and.feature_port import (
     build_rust_featurizer_from_arrow_dataset,
 )
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
-from s2and.incremental_linking.completion import ResidualClusterer, complete_incremental_prediction
-from s2and.incremental_linking.completion_metadata import (
-    SignatureFirstNames,
-    SignatureOrcids,
-    log_rejected_links,
-)
+from s2and.incremental_linking.completion import ResidualClusterer
 from s2and.incremental_linking.completion_metadata import (
     name_tuples_for_incremental_rules as _name_tuples_for_incremental_rules,
 )
@@ -65,7 +60,6 @@ from s2and.incremental_linking.production import (
     _DirectArrowIncrementalDataset,
     predict_incremental_promoted_linker_from_arrow,
 )
-from s2and.incremental_linking.seed_assignment import apply_seed_links
 from s2and.metrics import b3_precision_recall_fscore
 from s2and.model_pairwise import FastCluster, clone_cluster_model, intify, predict_pairwise_class0
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
@@ -111,7 +105,6 @@ if TYPE_CHECKING:
     from hyperopt import Trials
 
 logger = logging.getLogger("s2and")
-IncrementalPhaseBMode = Literal["exact"]
 _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES = 128
 _ALTERED_PRESPLIT_CACHE_INIT_LOCK = threading.Lock()
 _PREDICT_FEATURE_COPY_MAX_BYTES = 128 * (1 << 20)
@@ -226,25 +219,6 @@ class _ArrowIncrementalSignatureInfo:
     author_info_first_normalized: str | None
     author_info_orcid: str | None
     author_info_middle: str | None = None
-
-
-def _build_incremental_result(
-    clusters: dict[str, list[str]],
-    *,
-    phase_b_mode: IncrementalPhaseBMode,
-    phase_b_budget_bytes: int,
-    phase_b_required_bytes: int,
-    phase_b_residual_count: int | None = None,
-) -> dict[str, Any]:
-    result = {
-        "clusters": clusters,
-        "phase_b_mode": phase_b_mode,
-        "phase_b_budget_bytes": int(phase_b_budget_bytes),
-        "phase_b_required_bytes": int(phase_b_required_bytes),
-    }
-    if phase_b_residual_count is not None:
-        result["phase_b_residual_count"] = int(phase_b_residual_count)
-    return result
 
 
 def _cacheable_value(value: Any) -> Any:
@@ -4320,10 +4294,7 @@ class Clusterer:
         if batching_threshold is not None:
             raise ValueError("Classic subblocked prediction is retired; use predict_from_arrow with batching_threshold")
         partial_supervision = normalize_partial_supervision(partial_supervision)
-        if not use_s2_clusters and (
-            any(len(signatures) > 1 for signatures in block_dict.values())
-            or (batching_threshold is not None and sum(map(len, block_dict.values())) > 1)
-        ):
+        if not use_s2_clusters and any(len(signatures) > 1 for signatures in block_dict.values()):
             self = _clusterer_with_prediction_params(self, cluster_model_params)
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict", backend="python")
@@ -5011,63 +4982,6 @@ class Clusterer:
             recluster_map=recluster_map,
             original_members=cluster_seeds_require_inverse,
             split_members=split_cluster_seeds_require_inverse,
-        )
-
-    def _finish_incremental_with_seed_links(
-        self,
-        unassigned_signature_ids: list[str],
-        dataset: ANDData,
-        linked_signature_to_cluster: Mapping[str, int | str],
-        recluster_map: dict[int | str, int | str],
-        cluster_seeds_require_inverse: dict[int | str, list[str]],
-        prevent_new_incompatibilities: bool,
-        partial_supervision: dict[tuple[str, str], int | float],
-        runtime_context: RuntimeContext,
-        total_ram_bytes: int | None = None,
-        arrow_dataset: ArrowDataset | None = None,
-        split_cluster_seeds_require_inverse: Mapping[int | str, Sequence[str]] | None = None,
-        cluster_seed_disallows: set[tuple[str, str]] | None = None,
-        prediction_state: PredictionState | None = None,
-    ) -> dict[str, list[str]]:
-        """Apply supplied seed-link decisions, then recluster abstained signatures."""
-
-        seed_state = prediction_state
-        if prediction_state is None:
-            prediction_state = PredictionState()
-        logger.info("Assigning unassigned signatures for incremental clustering")
-        check_names = prevent_new_incompatibilities and bool(recluster_map)
-        assignment = apply_seed_links(
-            unassigned_signature_ids=unassigned_signature_ids,
-            linked_signature_to_cluster=linked_signature_to_cluster,
-            recluster_map=recluster_map,
-            cluster_seeds_require_inverse=cluster_seeds_require_inverse,
-            prevent_new_incompatibilities=prevent_new_incompatibilities,
-            first_names=SignatureFirstNames(dataset.signatures) if check_names else {},
-            name_tuples=_name_tuples_for_incremental_rules(dataset.name_tuples) if check_names else frozenset(),
-            split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
-        )
-        signatures = getattr(dataset, "signatures", None)
-        signature_metadata = signatures if isinstance(signatures, Mapping) else {}
-        log_rejected_links(assignment.rejected_signature_ids, signature_metadata)
-        return complete_incremental_prediction(
-            assignment,
-            first_names=SignatureFirstNames(signature_metadata),
-            orcids=SignatureOrcids(signature_metadata),
-            partial_supervision=partial_supervision,
-            use_default_constraints_as_supervision=bool(getattr(self, "use_default_constraints_as_supervision", True)),
-            suppress_orcid=bool(getattr(self, "suppress_orcid", False)),
-            start_cluster_id=int(getattr(dataset, "max_seed_cluster_id", 0) or 0),
-            prediction_state=prediction_state,
-            cluster_residuals=Clusterer._make_residual_clusterer(
-                self,
-                dataset,
-                partial_supervision=partial_supervision,
-                runtime_context=runtime_context,
-                total_ram_bytes=total_ram_bytes,
-                arrow_dataset=arrow_dataset,
-                cluster_seed_disallows=cluster_seed_disallows,
-                prediction_state=seed_state,
-            ),
         )
 
     def _make_residual_clusterer(

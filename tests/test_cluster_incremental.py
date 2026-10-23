@@ -195,22 +195,23 @@ def test_finish_incremental_lazily_resolves_default_name_tuples_for_direct_arrow
         name_tuples=None,
         max_seed_cluster_id=0,
     )
-    clusterer = SimpleNamespace(
-        use_default_constraints_as_supervision=True,
-        suppress_orcid=False,
-    )
 
-    clusters = Clusterer._finish_incremental_with_seed_links(
-        cast(Any, clusterer),
-        ["new_zelda"],
-        cast(Any, dataset),
-        {"new_zelda": "0_0"},
-        {"0_0": "0"},
-        {"0": ["seed_xavier"]},
+    def no_residual_clustering(_signature_ids: list[str]) -> dict[str, list[str]]:
+        raise AssertionError("a single rejected signature becomes its own cluster")
+
+    clusters = production_module.finish_with_seed_links(
+        dataset,
+        unassigned_signature_ids=["new_zelda"],
+        linked_signature_clusters={"new_zelda": "0_0"},
+        recluster_map={"0_0": "0"},
+        cluster_seeds_require_inverse={"0": ["seed_xavier"]},
+        split_cluster_seeds_require_inverse={"0_0": ["seed_xavier"]},
         prevent_new_incompatibilities=True,
         partial_supervision={},
-        runtime_context=cast(Any, SimpleNamespace()),
-        split_cluster_seeds_require_inverse={"0_0": ["seed_xavier"]},
+        use_default_constraints_as_supervision=True,
+        suppress_orcid=False,
+        prediction_state=PredictionState(),
+        cluster_residuals=no_residual_clustering,
     )
 
     assert clusters == {"0": ["seed_xavier"], "1": ["new_zelda"]}
@@ -1542,33 +1543,58 @@ def test_arrow_subblocked_custom_incremental_override_carries_prior_assignments(
     ]
 
 
-def test_finish_incremental_with_seed_links_uses_seed_setup_when_dataset_seed_map_is_empty():
-    clusterer = _build_minimal_incremental_clusterer()
-    dataset = cast(
-        ANDData,
-        SimpleNamespace(
-            cluster_seeds_require={},
-            signatures={},
-            max_seed_cluster_id=0,
-            name_tuples=None,
+def _finish_with_seed_links(
+    clusterer: Clusterer,
+    dataset: Any,
+    unassigned_signature_ids: list[str],
+    linked_signature_clusters: dict[str, int | str],
+    recluster_map: dict[int | str, int | str],
+    cluster_seeds_require_inverse: dict[int | str, list[str]],
+    *,
+    prediction_state: PredictionState | None = None,
+    total_ram_bytes: int | None = None,
+    arrow_dataset: ArrowDataset | None = None,
+    runtime_context: Any = None,
+) -> dict[str, list[str]]:
+    """Finish one request the way ``predict_incremental_from_arrow`` wires it."""
+    return production_module.finish_with_seed_links(
+        dataset,
+        unassigned_signature_ids=unassigned_signature_ids,
+        linked_signature_clusters=linked_signature_clusters,
+        recluster_map=recluster_map,
+        cluster_seeds_require_inverse=cluster_seeds_require_inverse,
+        split_cluster_seeds_require_inverse=None,
+        prevent_new_incompatibilities=False,
+        partial_supervision={},
+        use_default_constraints_as_supervision=clusterer.use_default_constraints_as_supervision,
+        suppress_orcid=clusterer.suppress_orcid,
+        prediction_state=prediction_state or PredictionState(),
+        cluster_residuals=clusterer._make_residual_clusterer(
+            cast(ANDData, dataset),
+            partial_supervision={},
+            runtime_context=runtime_context or object(),
+            total_ram_bytes=total_ram_bytes,
+            arrow_dataset=arrow_dataset,
         ),
     )
 
-    result = clusterer._finish_incremental_with_seed_links(
-        ["q1"],
-        dataset,
-        {"q1": "c1"},
-        {},
-        {"c1": ["s1", "s2"]},
-        prevent_new_incompatibilities=False,
-        partial_supervision={},
-        runtime_context=cast(Any, object()),
+
+def test_finish_with_seed_links_uses_explicit_seed_maps_when_dataset_seed_map_is_empty():
+    clusterer = _build_minimal_incremental_clusterer()
+    dataset = SimpleNamespace(
+        cluster_seeds_require={},
+        cluster_seeds_disallow=set(),
+        signatures={},
+        max_seed_cluster_id=0,
+        name_tuples=None,
     )
+
+    result = _finish_with_seed_links(clusterer, dataset, ["q1"], {"q1": "c1"}, {}, {"c1": ["s1", "s2"]})
 
     assert result == {"c1": ["s1", "s2", "q1"]}
 
 
-def test_finish_incremental_with_seed_links_reclusters_abstains_from_arrow(tmp_path: Path):
+def test_finish_with_seed_links_reclusters_abstains_from_arrow(tmp_path: Path):
     clusterer = _build_minimal_incremental_clusterer()
     arrow_dataset = _minimal_arrow_dataset(tmp_path)
     captured: dict[str, Any] = {}
@@ -1599,17 +1625,16 @@ def test_finish_incremental_with_seed_links_reclusters_abstains_from_arrow(tmp_p
     )
     runtime_context = cast(Any, object())
 
-    result = clusterer._finish_incremental_with_seed_links(
-        ["u1", "u2", "u3"],
+    result = _finish_with_seed_links(
+        clusterer,
         dataset,
+        ["u1", "u2", "u3"],
         {"u1": "7_0"},
         {"7_0": "7"},
         {"7": ["seed0"], "8": ["seed1"]},
-        False,
-        {},
-        runtime_context=runtime_context,
         total_ram_bytes=123_456,
         arrow_dataset=arrow_dataset,
+        runtime_context=runtime_context,
     )
 
     assert result == {"7": ["seed0", "u1"], "8": ["seed1"], "9": ["u2", "u3"]}
@@ -1650,17 +1675,8 @@ def test_arrow_completion_forwards_first_names_and_orcid_bridges(tmp_path: Path)
             for key, name in names.items()
         },
     )
-    result = clusterer._finish_incremental_with_seed_links(
-        list(names),
-        dataset,
-        {},
-        {},
-        {"7": ["seed"]},
-        False,
-        {},
-        runtime_context=object(),
-        arrow_dataset=arrow,
-        prediction_state=state,
+    result = _finish_with_seed_links(
+        clusterer, dataset, list(names), {}, {}, {"7": ["seed"]}, arrow_dataset=arrow, prediction_state=state
     )
     assert result == {"7": ["seed"], "8": ["a1", "b1", "a2", "b2"], "9": ["c"]}
     assert groups == [["a1", "b1", "a2", "b2"]]

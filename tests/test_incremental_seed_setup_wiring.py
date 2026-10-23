@@ -1,4 +1,4 @@
-"""Regression coverage for distinct original and split seed maps at both routes."""
+"""Regression coverage for distinct original and split seed maps in promoted incremental prediction."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,7 +8,6 @@ import pytest
 
 import s2and.incremental_linking.production as production_module
 from s2and.featurizer import FeaturizationInfo
-from s2and.model import Clusterer
 from tests.helpers import incremental_seed_setup
 from tests.promoted_orchestration_helpers import (
     _minimal_arrow_dataset,
@@ -21,16 +20,14 @@ def _unexpected_residual_clustering(signature_ids: list[str]) -> dict[str, list[
     pytest.fail(f"Unexpected residual clustering: {signature_ids}")
 
 
-@pytest.mark.parametrize("route", ["python", "promoted"])
 @pytest.mark.parametrize(
     ("linked_seed_name", "query_name", "accepted"),
     [("D", "Donald", True), ("Donald", "David", False)],
     ids=["initial_split_accepts_new_full_name", "full_name_split_rejects_original_profile_match"],
 )
-def test_incremental_routes_use_split_members_for_names_and_original_members_for_output(
+def test_incremental_route_uses_split_members_for_names_and_original_members_for_output(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    route: str,
     linked_seed_name: str,
     query_name: str,
     accepted: bool,
@@ -82,51 +79,37 @@ def test_incremental_routes_use_split_members_for_names_and_original_members_for
         ),
     )
     runtime_context = cast(Any, SimpleNamespace(run_id="seed-inverse-wiring"))
-    if route == "python":
-        clusters = Clusterer._finish_incremental_with_seed_links(
-            cast(Any, clusterer),
-            ["query"],
-            cast(Any, dataset),
-            {"query": "split_linked"},
-            recluster_map,
-            original_inverse,
-            prevent_new_incompatibilities=True,
-            partial_supervision={},
-            runtime_context=runtime_context,
-            split_cluster_seeds_require_inverse=split_inverse,
-        )
-    else:
-        _patch_fake_raw_arrow_planner(monkeypatch)
-        monkeypatch.setattr(
-            production_module,
-            "compute_promoted_incremental_limits",
-            lambda **_kwargs: _mock_promoted_limits(),
-        )
-        monkeypatch.setattr(
-            production_module.runtime_module,
-            "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
-            lambda *_args, **_kwargs: SimpleNamespace(
-                linked_signature_clusters={"query": "split_linked"},
-                telemetry={"query_count": 1, "candidate_row_count": 1, "pair_count": 1},
-            ),
-        )
-        payload = production_module.predict_incremental_promoted_linker_from_arrow(
-            clusterer,
-            list(signatures),
-            dataset,
-            cluster_residuals=_unexpected_residual_clustering,
-            arrow_dataset=_minimal_arrow_dataset(tmp_path),
-            artifact=cast(
-                Any,
-                SimpleNamespace(artifact_dir=tmp_path, retrieval_top_k=25, feature_columns=("test_link_probability",)),
-            ),
-            prevent_new_incompatibilities=True,
-            partial_supervision={},
-            runtime_context=runtime_context,
-            total_ram_bytes=None,
-            batching_threshold=None,
-        )
-        clusters = payload["clusters"]
+    _patch_fake_raw_arrow_planner(monkeypatch)
+    monkeypatch.setattr(
+        production_module,
+        "compute_promoted_incremental_limits",
+        lambda **_kwargs: _mock_promoted_limits(),
+    )
+    monkeypatch.setattr(
+        production_module.runtime_module,
+        "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            linked_signature_clusters={"query": "split_linked"},
+            telemetry={"query_count": 1, "candidate_row_count": 1, "pair_count": 1},
+        ),
+    )
+    payload = production_module.predict_incremental_promoted_linker_from_arrow(
+        clusterer,
+        list(signatures),
+        dataset,
+        cluster_residuals=_unexpected_residual_clustering,
+        arrow_dataset=_minimal_arrow_dataset(tmp_path),
+        artifact=cast(
+            Any,
+            SimpleNamespace(artifact_dir=tmp_path, retrieval_top_k=25, feature_columns=("test_link_probability",)),
+        ),
+        prevent_new_incompatibilities=True,
+        partial_supervision={},
+        runtime_context=runtime_context,
+        total_ram_bytes=None,
+        batching_threshold=None,
+    )
+    clusters = payload["clusters"]
 
     expected = (
         {"claimed": ["seed_original", "seed_linked", "query"]}

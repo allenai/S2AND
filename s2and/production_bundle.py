@@ -127,11 +127,11 @@ def _clusterer_config_payload(
         "dont_merge_cluster_seeds": bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
         "feature_contract": feature_contract,
         "featurizer_info": _featurization_info_payload(clusterer.featurizer_info),
-        "incremental_mean_min_hybrid_weight": float(getattr(clusterer, "incremental_mean_min_hybrid_weight", 0.5)),
-        "incremental_precluster_broadcast_mode": str(
-            getattr(clusterer, "incremental_precluster_broadcast_mode", "always")
-        ),
-        "incremental_seed_score_mode": str(getattr(clusterer, "incremental_seed_score_mode", "mean")),
+        # Format 1 still requires these retired settings, which no longer affect prediction.
+        # Write their historical defaults so an old pickled clusterer cannot record other values.
+        "incremental_mean_min_hybrid_weight": 0.5,
+        "incremental_precluster_broadcast_mode": "always",
+        "incremental_seed_score_mode": "mean",
         "n_jobs": 1,
         "nameless_featurizer_info": _featurization_info_payload(nameless_featurizer_info),
         "random_state": int(getattr(clusterer, "random_state", 42)),

@@ -958,6 +958,66 @@ def merge_promoted_incremental_batch_telemetry(
     return merged
 
 
+def finish_with_seed_links(
+    dataset: Any,
+    *,
+    unassigned_signature_ids: Sequence[str],
+    linked_signature_clusters: Mapping[str, int | str],
+    recluster_map: Mapping[int | str, int | str],
+    cluster_seeds_require_inverse: Mapping[int | str, Sequence[str]],
+    split_cluster_seeds_require_inverse: Mapping[int | str, Sequence[str]] | None,
+    prevent_new_incompatibilities: bool,
+    partial_supervision: Mapping[tuple[str, str], int | float],
+    use_default_constraints_as_supervision: bool,
+    suppress_orcid: bool,
+    prediction_state: PredictionState,
+    cluster_residuals: ResidualClusterer,
+) -> dict[str, list[str]]:
+    """Apply accepted seed links, then cluster the signatures that no link placed.
+
+    Args:
+        dataset: Request metadata with ``signatures``, ``name_tuples`` and ``max_seed_cluster_id``.
+        unassigned_signature_ids: Query signatures in assignment order.
+        linked_signature_clusters: Accepted linker decisions, before restoring altered profiles.
+        recluster_map: Split-cluster IDs mapped to their original profile IDs.
+        cluster_seeds_require_inverse: Original seed members in output order.
+        split_cluster_seeds_require_inverse: Split seed members used for name checks.
+        prevent_new_incompatibilities: Whether restored profiles require compatible names.
+        partial_supervision: Pair distances that can prevent residual splitting.
+        use_default_constraints_as_supervision: Whether first-initial rules apply.
+        suppress_orcid: Whether shared ORCIDs stop keeping residual signatures together.
+        prediction_state: Request state that receives completion telemetry.
+        cluster_residuals: Clusters each residual group.
+
+    Returns:
+        Predicted clusters keyed by seed or newly allocated cluster ID.
+    """
+    logger.info("Assigning unassigned signatures for incremental clustering")
+    check_names = prevent_new_incompatibilities and bool(recluster_map)
+    assignment = apply_seed_links(
+        unassigned_signature_ids=unassigned_signature_ids,
+        linked_signature_to_cluster=linked_signature_clusters,
+        recluster_map=recluster_map,
+        cluster_seeds_require_inverse=cluster_seeds_require_inverse,
+        prevent_new_incompatibilities=prevent_new_incompatibilities,
+        first_names=SignatureFirstNames(dataset.signatures) if check_names else {},
+        name_tuples=name_tuples_for_incremental_rules(dataset.name_tuples) if check_names else frozenset(),
+        split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
+    )
+    log_rejected_links(assignment.rejected_signature_ids, dataset.signatures)
+    return complete_incremental_prediction(
+        assignment,
+        first_names=SignatureFirstNames(dataset.signatures),
+        orcids=SignatureOrcids(dataset.signatures),
+        partial_supervision=partial_supervision,
+        use_default_constraints_as_supervision=use_default_constraints_as_supervision,
+        suppress_orcid=suppress_orcid,
+        start_cluster_id=int(dataset.max_seed_cluster_id or 0),
+        prediction_state=prediction_state,
+        cluster_residuals=cluster_residuals,
+    )
+
+
 def predict_incremental_promoted_linker_from_arrow(
     clusterer: Any,
     block_signatures: list[str],
@@ -1424,29 +1484,19 @@ def predict_incremental_promoted_linker_from_arrow(
             )
             merged_telemetry["name_check_rejected_link_count"] = len(name_check_rejected)
             logger.info("Attach name check rejected %d new links that conflict in one pass", len(name_check_rejected))
-        logger.info("Assigning unassigned signatures for incremental clustering")
-        check_names = prevent_new_incompatibilities and bool(recluster_map)
-        assignment = apply_seed_links(
+        predicted_clusters = finish_with_seed_links(
+            dataset,
             unassigned_signature_ids=unassigned_signature_ids,
-            linked_signature_to_cluster=linked_signature_clusters,
+            linked_signature_clusters=linked_signature_clusters,
             recluster_map=recluster_map,
             cluster_seeds_require_inverse=cluster_seeds_require_inverse,
-            prevent_new_incompatibilities=prevent_new_incompatibilities,
-            first_names=SignatureFirstNames(dataset.signatures) if check_names else {},
-            name_tuples=name_tuples_for_incremental_rules(dataset.name_tuples) if check_names else frozenset(),
             split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
-        )
-        log_rejected_links(assignment.rejected_signature_ids, dataset.signatures)
-        predicted_clusters = complete_incremental_prediction(
-            assignment,
-            first_names=SignatureFirstNames(dataset.signatures),
-            orcids=SignatureOrcids(dataset.signatures),
+            prevent_new_incompatibilities=prevent_new_incompatibilities,
             partial_supervision=partial_supervision,
             use_default_constraints_as_supervision=bool(
                 getattr(clusterer, "use_default_constraints_as_supervision", True)
             ),
             suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False)),
-            start_cluster_id=int(dataset.max_seed_cluster_id or 0),
             prediction_state=prediction_state,
             cluster_residuals=cluster_residuals,
         )

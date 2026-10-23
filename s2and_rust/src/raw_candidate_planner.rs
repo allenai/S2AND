@@ -1655,8 +1655,12 @@ impl RawBlockQueryCandidatePlanner {
             stats
         };
         let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
-        signatures.retain(|signature_id, _| layout.seed_signature_id_set.contains(signature_id));
         layout.require_signature_rows(&signatures, self.num_threads)?;
+        // Seeds only grow between passes, so the rows are usually exactly the seeds.
+        if signatures.len() != layout.seed_signature_id_set.len() {
+            signatures
+                .retain(|signature_id, _| layout.seed_signature_id_set.contains(signature_id));
+        }
 
         let needed_paper_ids = layout.needed_paper_ids(&signatures);
         let mut missing_paper_ids: HashSet<String> = needed_paper_ids
@@ -1705,12 +1709,14 @@ impl RawBlockQueryCandidatePlanner {
                 ))
             }
         }
-        papers.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
+        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, self.num_threads)?;
+        if papers.len() != needed_paper_ids.len() {
+            papers.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
+        }
         paper_authors.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
         if let Some(specter) = specter_by_paper_id.as_mut() {
             specter.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
         }
-        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, self.num_threads)?;
         let read_telemetry = RawArrowSeedReadTelemetry {
             read_cluster_seeds_secs: layout.read_cluster_seeds_secs,
             read_signatures_secs,

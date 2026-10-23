@@ -26,6 +26,9 @@ is single-threaded.
 - **Python preprocessing**: `ANDData(n_jobs=...)` controls the limited (and platform-dependent) pooling used in some
   preprocessing phases (see “Python preprocessing parallelism” below).
 
+`Clusterer.n_jobs` updates estimators that expose an `n_jobs` parameter.
+Serial estimators, including decision trees inside fitted random forests, stay serial.
+
 ## Python preprocessing parallelism
 
 S2AND has two main Python preprocessing phases that can dominate end-to-end runtime:

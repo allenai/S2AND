@@ -1083,7 +1083,9 @@ def _propagate_n_jobs(estimator: Any, n_jobs: int) -> None:
 
     resolved_n_jobs = resolve_n_jobs(n_jobs)
     set_params = getattr(estimator, "set_params", None)
-    if callable(set_params):
+    get_params = getattr(estimator, "get_params", None)
+    # Serial estimators expose set_params but reject n_jobs, including fitted forest trees.
+    if callable(set_params) and (not callable(get_params) or "n_jobs" in get_params(deep=False)):
         try:
             set_params(n_jobs=resolved_n_jobs)
         except TypeError as exc:

@@ -16,6 +16,9 @@ ORCID_MANIFEST_PATH = "s2and/data/first_k_letter_counts_from_orcid.manifest.json
 DEFAULT_MODEL_PATH = "s2and/data/default_production_model.json"
 MODEL_MEMBER_PATH = "s2and/data/production_model_v8.8/manifest.json"
 GENERIC_MEMBER_PATH = "s2and/arrow_schema_contract.json"
+MODULE_PATH = "s2and/__init__.py"
+NATIVE_PATH = "s2and/_s2and_rust.cp311-win_amd64.pyd"
+METADATA_PATH = "s2and-0.0.0.dist-info/METADATA"
 REQUIRED_RUNTIME_PATHS = (TUPLE_DATA_PATH, ORCID_DATA_PATH, ORCID_MANIFEST_PATH)
 RELEASE_MEMBERS = {
     TUPLE_DATA_PATH: b"alice\talicia\n",
@@ -23,6 +26,8 @@ RELEASE_MEMBERS = {
     ORCID_MANIFEST_PATH: b"{}\n",
     GENERIC_MEMBER_PATH: b"{}\n",
 }
+SOURCE_MEMBERS = {**RELEASE_MEMBERS, MODULE_PATH: b""}
+WHEEL_MEMBERS = {**SOURCE_MEMBERS, NATIVE_PATH: b"native", METADATA_PATH: b"Name: s2and\n"}
 
 
 def _write_package_data_config(root: Path, declared_paths: set[str]) -> None:
@@ -34,9 +39,10 @@ def _write_package_data_config(root: Path, declared_paths: set[str]) -> None:
 
 
 def _with_overrides(
+    base: dict[str, bytes],
     overrides: dict[str, bytes | None] | None,
 ) -> dict[str, bytes]:
-    members = dict(RELEASE_MEMBERS)
+    members = dict(base)
     for path, content in (overrides or {}).items():
         if content is None:
             members.pop(path, None)
@@ -51,7 +57,7 @@ def _write_distribution_fixture(
     wheel_overrides: dict[str, bytes | None] | None = None,
     sdist_overrides: dict[str, bytes | None] | None = None,
 ) -> tuple[Path, Path]:
-    for path, content in RELEASE_MEMBERS.items():
+    for path, content in SOURCE_MEMBERS.items():
         source = root / path
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_bytes(content)
@@ -59,14 +65,14 @@ def _write_distribution_fixture(
 
     dist_dir = root / "dist"
     dist_dir.mkdir()
-    wheel_path = dist_dir / "s2and-0.0.0-py3-none-any.whl"
+    wheel_path = dist_dir / "s2and-0.0.0-cp311-cp311-win_amd64.whl"
     with zipfile.ZipFile(wheel_path, "w") as wheel:
-        for path, content in _with_overrides(wheel_overrides).items():
+        for path, content in _with_overrides(WHEEL_MEMBERS, wheel_overrides).items():
             wheel.writestr(path, content)
 
     sdist_path = dist_dir / "s2and-0.0.0.tar.gz"
     with tarfile.open(sdist_path, "w:gz") as sdist:
-        for path, content in _with_overrides(sdist_overrides).items():
+        for path, content in _with_overrides(SOURCE_MEMBERS, sdist_overrides).items():
             member = tarfile.TarInfo(f"s2and-0.0.0/{path}")
             member.size = len(content)
             sdist.addfile(member, io.BytesIO(content))
@@ -139,9 +145,50 @@ def test_verify_separate_platform_build_artifacts(tmp_path, keep):
 
 def test_verify_every_platform_wheel(tmp_path):
     dist_dir, root = _write_distribution_fixture(tmp_path)
-    with zipfile.ZipFile(dist_dir / "s2and-0.0.0-cp311-cp311-win_amd64.whl", "w") as wheel:
-        for path, payload in RELEASE_MEMBERS.items():
+    with zipfile.ZipFile(dist_dir / "s2and-0.0.0-cp312-cp312-win_amd64.whl", "w") as wheel:
+        for path, payload in WHEEL_MEMBERS.items():
             if path != GENERIC_MEMBER_PATH:
                 wheel.writestr(path, payload)
     with pytest.raises(ValueError, match="missing required distribution files"):
         verify_production_model_distributions(dist_dir=dist_dir, source_root=root)
+
+
+@pytest.mark.parametrize(
+    ("archive_kind", "overrides", "message"),
+    (
+        # Maturin packs any file Git does not ignore, so stray files must fail the inventory.
+        ("wheel", {"s2and/data/extra.json": b"{}\n"}, "unexpected package files"),
+        ("sdist", {"s2and/data/extra.json": b"{}\n"}, "unexpected package files"),
+        ("wheel", {"s2and/__pycache__/model.cpython-311.pyc": b""}, "unexpected package files"),
+        ("wheel", {"scripts/extra.py": b""}, "unexpected package files"),
+        ("wheel", {MODULE_PATH: None}, "missing source modules"),
+        ("sdist", {MODULE_PATH: None}, "missing source modules"),
+        ("wheel", {NATIVE_PATH: None}, "must contain 1 native extension"),
+        ("wheel", {"s2and/_s2and_rust.cp312-win_amd64.pyd": b"native"}, "must contain 1 native extension"),
+        ("sdist", {NATIVE_PATH: b"native"}, "unexpected package files"),
+    ),
+)
+def test_distribution_verifier_requires_exact_package_inventory(tmp_path, archive_kind, overrides, message) -> None:
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        wheel_overrides=overrides if archive_kind == "wheel" else None,
+        sdist_overrides=overrides if archive_kind == "sdist" else None,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+
+
+def test_distribution_verifier_accepts_real_maturin_wheel_layout(tmp_path: Path) -> None:
+    dist_dir, source_root = _write_distribution_fixture(tmp_path)
+    licensed = {
+        "s2and-0.0.0.dist-info/licenses/LICENSE": b"license\n",
+        "s2and-0.0.0.dist-info/sboms/s2and_rust.cyclonedx.json": b"{}\n",
+    }
+    with zipfile.ZipFile(dist_dir / "s2and-0.0.0-cp313-cp313-musllinux_1_2_x86_64.whl", "w") as wheel:
+        for path, payload in {**WHEEL_MEMBERS, **licensed}.items():
+            if path != NATIVE_PATH:
+                wheel.writestr(path, payload)
+        wheel.writestr("s2and/_s2and_rust.cpython-313-x86_64-linux-musl.so", b"native")
+
+    verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)

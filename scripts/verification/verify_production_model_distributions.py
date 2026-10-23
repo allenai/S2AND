@@ -4,12 +4,17 @@ Every declared package-data file must appear byte-for-byte in both the wheel and
 sdist. Canonical tuple and ORCID assets are always required. Packaged default
 model declarations and ``production_model_v*`` paths are always forbidden
 because the production model is an external release artifact.
+
+The ``s2and`` package inventory must be exact. Maturin packs every file under
+``s2and/`` that Git does not ignore, so each archive may hold only the source
+modules, the declared data files, and, in a wheel, one native extension.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import tarfile
 import tomllib
 import zipfile
@@ -29,6 +34,8 @@ CANONICAL_ORCID_PATHS = frozenset(
 )
 DEFAULT_PRODUCTION_MODEL_PATH = "s2and/data/default_production_model.json"
 REQUIRED_RUNTIME_PATHS = CANONICAL_TUPLE_PATHS | CANONICAL_ORCID_PATHS
+# Maturin names the module with a platform tag, e.g. _s2and_rust.cp313-win_amd64.pyd.
+NATIVE_EXTENSION_PATTERN = re.compile(r"s2and/_s2and_rust\.[^/]+\.(?:pyd|so)")
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -64,6 +71,32 @@ def _load_expected_paths(source_root: Path) -> set[str]:
             f"Release distributions require these paths in package-data and the source tree: {missing_runtime}"
         )
     return expected
+
+
+def _source_module_paths(source_root: Path) -> set[str]:
+    package_root = source_root / "s2and"
+    return {path.relative_to(source_root).as_posix() for path in package_root.rglob("*.py") if path.is_file()}
+
+
+def _inventory_errors(
+    *,
+    archive_name: str,
+    package_paths: set[str],
+    allowed: set[str],
+    native_extensions: int,
+) -> list[str]:
+    """Describe unexpected package files and a wrong native extension count."""
+    errors: list[str] = []
+    unexpected = sorted(package_paths - allowed)
+    if unexpected:
+        errors.append(f"{archive_name} contains unexpected package files: {unexpected}")
+    missing_modules = sorted(path for path in allowed - package_paths if path.endswith(".py"))
+    if missing_modules:
+        errors.append(f"{archive_name} is missing source modules: {missing_modules}")
+    native = sorted(path for path in package_paths if NATIVE_EXTENSION_PATTERN.fullmatch(path))
+    if len(native) != native_extensions:
+        errors.append(f"{archive_name} must contain {native_extensions} native extension(s); found {native}")
+    return errors
 
 
 def _forbidden_model_paths(paths: Iterable[str]) -> set[str]:
@@ -122,6 +155,7 @@ def verify_production_model_distributions(*, dist_dir: Path, source_root: Path) 
 
     source_root = Path(source_root)
     expected = _load_expected_paths(source_root)
+    package_files = expected | _source_module_paths(source_root)
     wheels = sorted(Path(dist_dir).glob("s2and-*.whl"))
     if not wheels and not list(Path(dist_dir).glob("s2and-*.tar.gz")):
         raise ValueError("expected at least one s2and distribution")
@@ -138,6 +172,16 @@ def verify_production_model_distributions(*, dist_dir: Path, source_root: Path) 
                 expected=expected,
                 source_root=source_root,
             )
+            dist_info = {path for path in wheel_paths if path.split("/", 1)[0].endswith(".dist-info")}
+            native = {path for path in wheel_paths if NATIVE_EXTENSION_PATTERN.fullmatch(path)}
+            errors = _inventory_errors(
+                archive_name=wheel_path.name,
+                package_paths=wheel_paths - dist_info,
+                allowed=package_files | native,
+                native_extensions=1,
+            )
+            if errors:
+                raise ValueError("; ".join(errors))
 
     sdists = sorted(Path(dist_dir).glob("s2and-*.tar.gz"))
     for sdist_path in sdists:
@@ -171,6 +215,14 @@ def verify_production_model_distributions(*, dist_dir: Path, source_root: Path) 
                 expected=expected,
                 source_root=source_root,
             )
+            errors = _inventory_errors(
+                archive_name=sdist_path.name,
+                package_paths=set(package_members),
+                allowed=package_files,
+                native_extensions=0,
+            )
+            if errors:
+                raise ValueError("; ".join(errors))
 
 
 def main() -> None:

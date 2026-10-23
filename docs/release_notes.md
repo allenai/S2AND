@@ -10,6 +10,7 @@
   Keep ORCID labels hidden for ORCID-B3 selection. Revalidate historical giant-block conclusions before publication.
 - Preserve format-1 model fields for retired experiment settings; they no longer affect runtime behavior.
 - The release workflow stops when PyPI already has the version and imports each Linux wheel on its own platform.
+  The distribution verifier now requires an exact `s2and` package inventory in every wheel and sdist.
 
 
 ## Unreleased 1.0.0 simplification

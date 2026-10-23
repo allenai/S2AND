@@ -2927,7 +2927,7 @@ class Clusterer:
                     # Rust featurizes and scores each tile of pairs in one pass,
                     # so no chunk-sized feature matrix exists.
                     main_booster, nameless_booster = block_scorers
-                    scored_probabilities = rust_featurizer.score_block_upper_triangle_rows_indexed(
+                    scored_probabilities = cast(Any, rust_featurizer).score_block_upper_triangle_rows_indexed(
                         block_signature_indices,
                         offset,
                         chunk_pair_count,

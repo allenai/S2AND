@@ -1,6 +1,6 @@
 # Third-party notices
 
-The s2and-rust extension includes Compact Language Detector 2 (CLD2), through
+The s2and native extension (`s2and._s2and_rust`) includes Compact Language Detector 2 (CLD2), through
 the `cld2` and `cld2-sys` Rust crates.
 
 The original CLD2 library is Copyright 2013 Google Inc. and is distributed under
@@ -15,7 +15,7 @@ to expose the language results used by its featurizer. Its upstream project is
 <https://github.com/emk/rust-cld2>; CLD2's upstream project is
 <https://github.com/CLD2Owners/cld2>.
 
-The s2and-rust wheels for x86_64 Linux (glibc), macOS and Windows include mimalloc,
+The s2and wheels for x86_64 Linux (glibc), macOS and Windows include mimalloc,
 through the `mimalloc` and `libmimalloc-sys` Rust crates, as their memory
 allocator. Its upstream project is <https://github.com/microsoft/mimalloc>.
 mimalloc is distributed under the MIT License:
@@ -46,3 +46,9 @@ SOFTWARE.
 
 The vendored cld2-sys 1.0.2 source makes detection debug state thread-local.
 See vendor/cld2-sys/S2AND_PATCHES.md for the patch and supported detection settings.
+
+The s2and musllinux wheels bundle the GCC C++ runtime, `libstdc++` and `libgcc_s`,
+in `s2and.libs/`, because CLD2 is C++ and musllinux does not provide that runtime.
+These libraries are part of GCC <https://gcc.gnu.org/> and are distributed under the
+GNU General Public License version 3 with the GCC Runtime Library Exception, which
+permits this redistribution.

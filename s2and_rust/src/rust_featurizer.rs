@@ -88,6 +88,7 @@ mod constraint_key_tests {
             position: 0,
             paper_id: "p".to_string(),
             name_counts: None,
+            middle_initial_counts: Vec::new(),
             adv_name: Some(first),
         }
     }
@@ -541,7 +542,8 @@ impl RustFeaturizer {
         let middle2 = s2.middle.as_deref();
 
         feats[columns::FIRST_NAMES_EQUAL] = first_names_equal(first1, first2);
-        feats[columns::MIDDLE_INITIALS_OVERLAP] = middle_initials_overlap(middle1, middle2);
+        feats[columns::MIDDLE_INITIALS_OVERLAP] =
+            middle_initials_overlap_counts(&s1.middle_initial_counts, &s2.middle_initial_counts);
         feats[columns::MIDDLE_NAMES_EQUAL] = middle_names_equal(middle1, middle2);
         feats[columns::MIDDLE_ONE_MISSING] = middle_one_missing(middle1, middle2);
         feats[columns::SINGLE_CHAR_FIRST] = single_char_first(first1, first2);

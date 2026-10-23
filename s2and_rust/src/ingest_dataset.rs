@@ -408,6 +408,7 @@ pub(crate) fn preprocess_stage_signatures(
                 &canonical_first,
                 &canonical_last,
             );
+            let middle_initial_counts = middle_initial_counts(&canonical_middle);
             (
                 entry.sig_id.clone(),
                 SignatureData {
@@ -421,6 +422,7 @@ pub(crate) fn preprocess_stage_signatures(
                     position: entry.position,
                     paper_id: entry.paper_id.clone(),
                     name_counts,
+                    middle_initial_counts,
                     adv_name: Some(canonical_first),
                 },
             )

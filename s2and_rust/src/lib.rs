@@ -201,6 +201,9 @@ struct SignatureData {
     name_counts: Option<NameCountsData>,
     // Same canonical first-name field used by Python name_text_features.
     adv_name: Option<String>,
+    /// Counts of the middle name's initials, sorted by initial; pair features
+    /// merge two of these instead of counting both names per pair.
+    middle_initial_counts: Vec<(char, u32)>,
 }
 
 impl SignatureData {

@@ -305,8 +305,14 @@ def test_released_planner_and_featurizer_refuse_further_work(tmp_path: Path) -> 
         view.release()
         assert view.signature_ids() == []
         assert featurizer.signature_ids() == ["0", "1", "q1"]
+        surviving_view = featurizer.view_with_cluster_seed_sidecars(["0", "1"], None, None)
+        expected_features = np.asarray(surviving_view.featurize_pairs_matrix_indexed([(0, 1)], None, 1, np.nan))
         featurizer.release()
         assert featurizer.signature_ids() == []
+        np.testing.assert_equal(
+            surviving_view.featurize_pairs_matrix_indexed([(0, 1)], None, 1, np.nan), expected_features
+        )
+        surviving_view.release()
 
 
 def test_planner_reload_reuses_unchanged_state_and_plans_like_a_fresh_build(tmp_path: Path) -> None:

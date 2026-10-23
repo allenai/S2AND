@@ -220,7 +220,7 @@ class _AttachmentBlockState:
         return {signature_id: info for signature_id, info in self._orcid_info.items() if signature_id in requested}
 
     def release(self) -> None:
-        """Drop the block's native state on a background thread."""
+        """Release paper buffers, then drop remaining native state in the background."""
 
         for handle in (self._featurizer, self.planner):
             if handle is not None:

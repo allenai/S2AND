@@ -2348,15 +2348,19 @@ impl RustFeaturizer {
         Ok(numpy::ndarray::Array1::from_vec(labels).into_pyarray(py))
     }
 
-    /// Drop this handle's share of the block data on a background thread.
+    /// Free paper buffers before dropping remaining metadata in the background.
     ///
     /// Views and other handles keep their shares; the data is freed with the
     /// last one. This handle has no signatures afterwards.
     fn release(&mut self) {
+        // Free paper buffers before residual scoring allocates its feature matrix.
+        drop(std::mem::replace(
+            &mut self.papers,
+            Arc::new(HashMap::default()),
+        ));
         let dropped = (
             std::mem::replace(&mut self.signatures, Arc::new(HashMap::default())),
             std::mem::replace(&mut self.signature_ids, Arc::new(Vec::new())),
-            std::mem::replace(&mut self.papers, Arc::new(HashMap::default())),
             std::mem::replace(&mut self.name_grams, Arc::new(NameGrams::default())),
             std::mem::replace(&mut self.name_tuples, Arc::new(HashMap::default())),
             std::mem::take(&mut self.cluster_seeds_disallow),

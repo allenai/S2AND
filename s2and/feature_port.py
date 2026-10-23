@@ -428,10 +428,11 @@ def _get_rust_feature_data(dataset: ANDData) -> Any:
 
 
 def release_rust_handle(handle: Any) -> None:
-    """Drop a native planner's or featurizer's data on a background thread.
+    """Release native state, freeing paper buffers before background cleanup.
 
-    Freeing a block's rows takes seconds on one thread; a request returns
-    before that. A handle without `release` is left to the garbage collector.
+    Featurizers free paper buffers before residual scoring can allocate its matrix.
+    Remaining metadata can finish in the background. Handles without `release`
+    are left to the garbage collector.
     """
 
     release = getattr(handle, "release", None)

@@ -16,7 +16,6 @@ PUBLIC_METHODS = (
     "predict_from_rust_featurizer",
     "make_distance_matrices_from_rust_featurizer",
     "predict_from_arrow",
-    "predict_incremental",
     "predict_incremental_from_arrow",
 )
 
@@ -126,7 +125,7 @@ def test_arrow_incremental_boundary_rejects_id_collisions_before_loading_data():
     assert list(partial.items()) == original
 
 
-@pytest.mark.parametrize("route", ["helper", "full", "subblocked"])
+@pytest.mark.parametrize("route", ["helper", "full"])
 def test_python_prediction_normalizes_supervision_once_per_request(route: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Nested blocks reuse validated overrides without caching later requests."""
     import s2and.model as model_module
@@ -168,7 +167,7 @@ def test_python_prediction_normalizes_supervision_once_per_request(route: str, m
 
 
 @pytest.mark.parametrize("override", ["subclass", "instance"])
-@pytest.mark.parametrize("threshold", [None, 3])
+@pytest.mark.parametrize("threshold", [None])
 def test_bulk_prediction_preserves_predict_helper_overrides(override, threshold, monkeypatch):
     """The validation fast path must preserve existing custom helper dispatch."""
     from types import MethodType

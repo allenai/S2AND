@@ -44,7 +44,7 @@ def _clusterer(distance):
 
 
 @pytest.mark.parametrize("case", CASES)
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 def test_bulk_zero_overrides_do_not_require_incremental_links(tmp_path, case, route):
     names, supervision, threshold, _ = CASES[case]
     dataset = _dataset(names, {})
@@ -130,12 +130,12 @@ def test_arrow_bulk_rejects_supervision_conflicts_after_id_normalization():
         )
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 def test_all_initial_blocks_use_bulk_and_keep_zero_overrides(tmp_path, monkeypatch, route):
     def reject_incremental(*_args, **_kwargs):
         pytest.fail("All-initial bulk blocks must not enter incremental attachment")
 
-    monkeypatch.setattr(Clusterer, "_predict_incremental_python", reject_incremental)
+    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", reject_incremental)
     monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", reject_incremental)
     dataset = _dataset([("A", "", "Smith")] * 4, {})
     clusters = _predict(

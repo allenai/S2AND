@@ -8,9 +8,8 @@ from s2and.model import _ARROW_ATTACH_NAME_CHECK_EXEMPT, _ARROW_BULK_DISTANCE_OV
 from tests.incremental_test_helpers import _dataset, _predict
 from tests.incremental_test_helpers import empty_orcid_priors as empty_orcid_priors
 
-ROUTES = ["python", "arrow"]
+ROUTES = ["arrow"]
 ATTACH_METHODS = {
-    "python": "_predict_subblocked_single_letter_incremental_groups",
     "arrow": "_predict_subblocked_single_letter_groups_from_arrow",
 }
 WEI = ("Wei", "", "Wang")
@@ -78,19 +77,6 @@ def _record_incremental_seeds(monkeypatch, route):
             return original(self, block_signatures, arrow_dataset, **kwargs)
 
         monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", record_arrow)
-    else:
-        original_python = Clusterer._predict_incremental_python
-
-        def record_python(self, block_signatures, dataset, **kwargs):
-            seen.append(
-                {
-                    "queries": [str(signature_id) for signature_id in block_signatures],
-                    "seeds": set(kwargs["prediction_state"].cluster_seeds_require),
-                }
-            )
-            return original_python(self, block_signatures, dataset, **kwargs)
-
-        monkeypatch.setattr(Clusterer, "_predict_incremental_python", record_python)
     return seen
 
 
@@ -318,14 +304,11 @@ def test_reunite_is_a_no_op_without_marked_clusters_in_two_pieces(tmp_path, monk
         pytest.param({"0": "claimed", "6": "claimed"}, NO_MIDDLE - {"0", "1", "6"}, id="required-group-across-pieces"),
     ],
 )
-def test_reunite_gives_identical_clusters_on_both_routes_and_repeats(tmp_path, seeds, reunited):
+def test_reunite_gives_identical_clusters_on_repeated_native_calls(tmp_path, seeds, reunited):
     dataset = _dataset(NAMES, seeds)
     blocks = {"w wang": list(dataset.signatures)}
 
-    python = _predict(tmp_path / "python", dataset, blocks, "python")
     arrow = _predict(tmp_path / "arrow", dataset, blocks, "arrow")
 
-    assert _partition(python) == _partition(arrow)
     assert frozenset(reunited) in _partition(arrow)
-    assert json.dumps(_predict(tmp_path / "python_again", dataset, blocks, "python")) == json.dumps(python)
     assert json.dumps(_predict(tmp_path / "arrow_again", dataset, blocks, "arrow")) == json.dumps(arrow)

@@ -1,11 +1,10 @@
 # Subblocking
 
 Subblocking keeps pairwise distance construction bounded for large blocks. It is
-used by `Clusterer.predict(..., batching_threshold=N)` on the Python/`ANDData`
-route and by `Clusterer.predict_from_arrow(..., batching_threshold=N)` on the
+used by `Clusterer.predict_from_arrow(..., batching_threshold=N)` on the
 Rust Arrow route (see [Python and Rust routing](#python-and-rust-routing)). The
-Python boundary is `make_subblocks_with_telemetry(...)`; `make_subblocks(...)`
-returns only the final subblock dictionary.
+Python reference boundary is `make_subblocks_with_telemetry(...)`; `make_subblocks(...)`
+returns only the reference subblock dictionary. Production and EPS sweeps use the native planner.
 
 `N` becomes the maximum subblock size. Every emitted subblock is expected to
 have at most `N` signatures.
@@ -217,17 +216,13 @@ that do not supply a cluster function retain the explicitly selected legacy
 
 The public routes are method-based:
 
-- **Python subblocking.** Call
-  `Clusterer.predict(blocks, dataset, batching_threshold=N)`. This method takes
-  `ANDData`, has no `backend` keyword, and rejects a Rust runtime context.
-  Oversized fallback groups call the Python graph fallback.
 - **Rust Arrow prediction.** Call
   `Clusterer.predict_from_arrow(blocks, arrow_dataset,
   batching_threshold=N, total_ram_bytes=...)`. This validates the indexed Arrow
   handle, partitions oversized blocks with the native Rust graph
   subblocker, and reuses one Rust featurizer across the emitted subblocks.
 
-The two graph routes have a quality-equivalence contract, not an identical-partition
+The retained Python reference and native graph implementations have a quality-equivalence contract, not an identical-partition
 contract. In the default projection mode, Python and Rust use separate deterministic
 random-number generators and seed derivations, so the projection edges and resulting
 subblocks may differ for the same signatures. Verification requires both routes to
@@ -276,7 +271,7 @@ pairs whose other endpoint is processed later. Ignoring required seeds with
 Subblocking applies to full-block prediction. On
 `Clusterer.predict_incremental_from_arrow`, `batching_threshold` has a different
 meaning: it caps the number of unassigned query signatures per linker batch.
-The Python `Clusterer.predict_incremental` API takes no batching parameter. See
+The classic `Clusterer.predict_incremental` API is retired. See
 [production_inference.md](production_inference.md#incremental-decision-semantics)
 for the incremental contract.
 

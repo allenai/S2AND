@@ -17,7 +17,7 @@ def _partition(clusters: Mapping[object, list[str]]) -> list[list[str]]:
     return sorted(sorted(members) for members in clusters.values())
 
 
-def _incremental_predictions(tmp_path, dataset, *, enabled, partial_supervision, broadcast="always"):
+def _incremental_predictions(tmp_path, dataset, *, enabled, partial_supervision):
     """Use real retrieval and scoring with deterministic pair and linker models."""
     clusterer = Clusterer(
         FeaturizationInfo(["year_diff"]),
@@ -26,14 +26,7 @@ def _incremental_predictions(tmp_path, dataset, *, enabled, partial_supervision,
         n_jobs=1,
         use_default_constraints_as_supervision=enabled,
     )
-    clusterer.incremental_precluster_broadcast_mode = broadcast
     signatures = list(dataset.signatures)
-    yield (
-        "python",
-        _partition(
-            clusterer.predict_incremental(signatures, dataset, partial_supervision=partial_supervision)["clusters"]
-        ),
-    )
     prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
     attach_tiny_incremental_linker(clusterer, tmp_path / "linker")
     with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
@@ -77,7 +70,7 @@ def test_bulk_uses_effective_constraints_before_real_subblocking(tmp_path, enabl
     # The cap cuts the no-middle "ada" records into the pieces 0-1 and 2. The reunite-only pass
     # then attaches record 2, so the subblocked result equals the full-block result.
     expected = [["0", "2"], ["1"]] if disallowed else [["0", "1", "2"]]
-    for route in ["python", "arrow"]:
+    for route in ["arrow"]:
         clusters = _predict(
             tmp_path / route,
             dataset,
@@ -129,36 +122,9 @@ def test_incremental_override_precedes_retrieval(tmp_path, override):
 def test_incremental_override_preserves_independent_dataset_negatives(tmp_path, enabled):
     dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "claimed"})
     dataset.cluster_seeds_disallow = {("0", "1"), ("0", "2")}
-    # Disable classic precluster score broadcasting to isolate each query's
-    # constraints; the promoted linker already scores query attachments separately.
     expected = [["0", "1"], ["2"]] if enabled else [["0", "1", "2"]]
     for route, clusters in _incremental_predictions(
-        tmp_path, dataset, enabled=enabled, partial_supervision={("1", "0"): 0.3}, broadcast="never"
+        tmp_path, dataset, enabled=enabled, partial_supervision={("1", "0"): 0.3}
     ):
         assert clusters == expected, route
     assert dataset.cluster_seeds_disallow == {("0", "1"), ("0", "2")}
-
-
-@pytest.mark.parametrize("dataset_disallows", [set(), {("0", "1")}])
-def test_disabled_dataset_disallow_cannot_split_altered_profile_during_seed_setup(dataset_disallows):
-    dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "claimed", "1": "claimed"})
-    dataset.altered_cluster_signatures = ["0"]
-    dataset.cluster_seeds_disallow = dataset_disallows.copy()
-    clusterer = Clusterer(
-        FeaturizationInfo(["year_diff"]),
-        ConstantDistanceClassifier(0.1),
-        cluster_model=FastCluster(eps=0.4),
-        n_jobs=1,
-        use_default_constraints_as_supervision=False,
-    )
-    # The mean distance to the intact claimed profile is .5, above eps. An
-    # inactive negative must not create temporary pieces that admit this query
-    # through the .1-scoring piece before restoring the original membership.
-    result = clusterer.predict_incremental(
-        ["0", "1", "2"],
-        dataset,
-        partial_supervision={("0", "2"): 0.1, ("1", "2"): 0.9},
-    )
-    assert _partition(result["clusters"]) == [["0", "1"], ["2"]]
-    assert dataset.cluster_seeds_require == {"0": "claimed", "1": "claimed"}
-    assert dataset.cluster_seeds_disallow == dataset_disallows

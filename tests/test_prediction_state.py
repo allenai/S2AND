@@ -1,7 +1,6 @@
 """Regression coverage for prediction-owned synthetic seeds on shared objects."""
 
 from collections.abc import Callable
-from typing import Any
 
 import numpy as np
 import pytest
@@ -54,92 +53,6 @@ def _assert_dataset_unchanged(dataset: ANDData) -> Callable[[], None]:
         assert dataset.altered_cluster_signatures == altered_contents
 
     return check
-
-
-def _run_subblocks(
-    clusterer: Clusterer, dataset: ANDData, *, seed: str, queries: list[str], cluster: str
-) -> dict[str, list[str]]:
-    """Run real incremental inference with one synthetic seed component."""
-    return clusterer._predict_subblocked_single_letter_incremental_groups(
-        {f"subblock_{index}": [query] for index, query in enumerate(queries)},
-        pred_clusters={cluster: [seed]},
-        dataset=dataset,
-        original_blocks={"block": [seed, *queries]},
-        partial_supervision={},
-        runtime_context=build_runtime_context("prediction_state_test", backend="python"),
-    )
-
-
-def test_subblock_predictions_interleave_without_sharing_seeds(
-    shared_prediction_objects: tuple[Clusterer, ANDData], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A nested request must not see or replace the outer synthetic seeds."""
-    clusterer, dataset = shared_prediction_objects
-    check = _assert_dataset_unchanged(dataset)
-    original = clusterer._predict_incremental_python
-    nested = False
-    observed: list[dict[str, int | str]] = []
-    scored_rows: list[int] = []
-    score = clusterer.classifier.predict_proba
-
-    def checked_score(features: np.ndarray) -> np.ndarray:
-        check()
-        scored_rows.append(len(features))
-        return score(features)
-
-    monkeypatch.setattr(clusterer.classifier, "predict_proba", checked_score)
-
-    def interleaved(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        nonlocal nested
-        check()
-        state = kwargs["prediction_state"]
-        observed.append(dict(state.cluster_seeds_require))
-        assert state.altered_cluster_signatures == []
-        if not nested:
-            nested = True
-            assert _run_subblocks(clusterer, dataset, seed="6", queries=["7"], cluster="inner") == {"inner": ["6", "7"]}
-            check()
-            assert state.cluster_seeds_require == {"3": "outer"}
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(clusterer, "_predict_incremental_python", interleaved)
-    expected = {"outer": ["3", "4", "5"]}
-    assert _run_subblocks(clusterer, dataset, seed="3", queries=["4", "5"], cluster="outer") == expected
-    check()
-    assert observed == [{"3": "outer"}, {"6": "inner"}, {"3": "outer", "4": "outer"}]
-    assert scored_rows == [1, 1, 2]
-    monkeypatch.setattr(clusterer, "_predict_incremental_python", original)
-    assert _run_subblocks(clusterer, dataset, seed="3", queries=["4", "5"], cluster="outer") == expected
-    check()
-
-
-def test_failed_subblock_prediction_leaves_shared_seeds_untouched(
-    shared_prediction_objects: tuple[Clusterer, ANDData], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Failure after one completed subblock must not leak its accumulated seeds."""
-    clusterer, dataset = shared_prediction_objects
-    check = _assert_dataset_unchanged(dataset)
-    original = clusterer._predict_incremental_python
-    calls = 0
-
-    def fail_second(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        nonlocal calls
-        calls += 1
-        check()
-        if calls == 2:
-            assert kwargs["prediction_state"].cluster_seeds_require == {"3": "outer", "4": "outer"}
-            raise RuntimeError("injected second-subblock failure")
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(clusterer, "_predict_incremental_python", fail_second)
-    with pytest.raises(RuntimeError, match="injected second-subblock failure"):
-        _run_subblocks(clusterer, dataset, seed="3", queries=["4", "5"], cluster="outer")
-    check()
-    monkeypatch.setattr(clusterer, "_predict_incremental_python", original)
-    assert _run_subblocks(clusterer, dataset, seed="6", queries=["7"], cluster="after_failure") == {
-        "after_failure": ["6", "7"]
-    }
-    check()
 
 
 @pytest.mark.parametrize("request_disallow", [False, True])

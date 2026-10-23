@@ -26,8 +26,6 @@ from s2and.incremental_linking.policy import (
 from s2and.model import (
     Clusterer,
     FastCluster,
-    IncrementalBroadcastMode,
-    IncrementalSeedScoreMode,
     _selected_feature_indices,
 )
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
@@ -717,23 +715,9 @@ def _load_bundle_clusterer(
         if manifest["eps_calibration"] == CALIBRATED_EPS_CALIBRATION
         else None
     )
-    clusterer.incremental_precluster_broadcast_mode = cast(
-        IncrementalBroadcastMode,
-        _config_choice(
-            clusterer_config,
-            "incremental_precluster_broadcast_mode",
-            allowed=_INCREMENTAL_BROADCAST_MODES,
-        ),
-    )
-    clusterer.incremental_seed_score_mode = cast(
-        IncrementalSeedScoreMode,
-        _config_choice(
-            clusterer_config,
-            "incremental_seed_score_mode",
-            allowed=_INCREMENTAL_SEED_SCORE_MODES,
-        ),
-    )
-    clusterer.incremental_mean_min_hybrid_weight = float(clusterer_config["incremental_mean_min_hybrid_weight"])
+    # Validate retired fields because published format-1 bundles still contain them.
+    _config_choice(clusterer_config, "incremental_precluster_broadcast_mode", allowed=_INCREMENTAL_BROADCAST_MODES)
+    _config_choice(clusterer_config, "incremental_seed_score_mode", allowed=_INCREMENTAL_SEED_SCORE_MODES)
     if bundle_kind == COMPLETE_BUNDLE_KIND:
         incremental_linker_dir = bundle_dir / "incremental_linker"
         incremental_booster_relpath = COMPLETE_MANIFEST_FILES["incremental_linker_booster"]

@@ -6,7 +6,7 @@ from tests.incremental_test_helpers import _dataset, _predict
 from tests.incremental_test_helpers import empty_orcid_priors as empty_orcid_priors
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 @pytest.mark.parametrize("threshold", [None, 2], ids=["unbatched", "subblocked"])
 @pytest.mark.parametrize("case", ["claimed", "seed_disallow", "query_disallow", "cross_block", "ignored_seeds"])
 def test_bulk_altered_markers_preserve_ordinary_seed_policy(tmp_path, route, threshold, case):
@@ -47,7 +47,7 @@ def test_bulk_altered_markers_preserve_ordinary_seed_policy(tmp_path, route, thr
     assert dataset.altered_cluster_signatures == ["0"]
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 @pytest.mark.parametrize("threshold", [None, 2], ids=["unbatched", "subblocked"])
 def test_bulk_altered_marker_does_not_bypass_required_component_size_limit(tmp_path, route, threshold):
     dataset = _dataset([("Ada", "", "Smith")] * 4, dict.fromkeys(["0", "1", "2"], "claimed"))

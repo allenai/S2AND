@@ -81,35 +81,6 @@ def test_full_prediction_override_matches_configured_model(route: str, tmp_path:
             arrow_training.arrow_dataset.close()
 
 
-def test_subblocked_override_reaches_initial_attachment_and_residuals(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Initial-only passes must share bulk EPS, including their residual fits."""
-    dataset = build_dummy_dataset("prediction_params_initial")
-    monkeypatch.setattr(
-        Clusterer,
-        "_build_subblocked_block_dict",
-        lambda *args, **kwargs: {"full": ["0", "1"], "initial": ["2", "3"]},
-    )
-    monkeypatch.setattr(
-        Clusterer,
-        "_partition_subblocked_first_name_groups",
-        lambda *args, **kwargs: ({"full": ["0", "1"]}, {"initial": ["2", "3"]}, False),
-    )
-    blocks = {"block": ["0", "1", "2", "3"]}
-    model = clusterer()
-    result, _ = model.predict(blocks, dataset, batching_threshold=2, cluster_model_params={"eps": 0.8})
-    reference, _ = clusterer(0.8).predict(blocks, dataset, batching_threshold=2)
-    assert partition(result) == partition(reference) == {frozenset({"0", "1", "2", "3"})}
-
-    # Force every attachment into the real residual-clustering callback.
-    monkeypatch.setattr(
-        Clusterer, "_best_incremental_cluster", lambda *args, **kwargs: (None, float("inf"), float("inf"))
-    )
-    residual, _ = model.predict(blocks, dataset, batching_threshold=2, cluster_model_params={"eps": 0.8})
-    reference, _ = clusterer(0.8).predict(blocks, dataset, batching_threshold=2)
-    assert partition(residual) == partition(reference) == {frozenset({"0", "1"}), frozenset({"2", "3"})}
-    assert model.cluster_model.eps == 0.5
-
-
 def test_request_cache_is_owned_by_original_and_separates_effective_params() -> None:
     """The first overridden request must not discard its lazy presplit cache."""
     model = clusterer()
@@ -122,23 +93,6 @@ def test_request_cache_is_owned_by_original_and_separates_effective_params() -> 
     assert _get_altered_presplit_cache_entry(different, _model_presplit_cache_fingerprint(different)) is None
     assert first.classifier is model.classifier
     assert first.subblocking_graph_config is model.subblocking_graph_config
-
-
-def test_singleton_subblocks_still_use_request_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Singleton subblocks of one input block interact in initial attachment."""
-    dataset = build_dummy_dataset("prediction_params_singletons")
-    dataset.signatures["1"] = dataset.signatures["1"]._replace(
-        author_info_first="a",
-        author_info_first_normalized="a",
-    )
-    blocks = {"one": ["0", "1"]}
-    monkeypatch.setattr("s2and.model.make_subblocks", lambda *args, **kwargs: {"full": ["0"], "initial": ["1"]})
-    model = clusterer(0.8)
-    actual, _ = model.predict(blocks, dataset, batching_threshold=1, cluster_model_params={"eps": 0.1})
-    expected, _ = clusterer(0.1).predict(blocks, dataset, batching_threshold=1)
-    assert partition(actual) == partition(expected) == {frozenset({"0"}), frozenset({"1"})}
-    baseline, _ = model.predict(blocks, dataset, batching_threshold=1)
-    assert partition(baseline) == {frozenset({"0", "1"})}
 
 
 def test_arrow_subblocked_override_reaches_nested_residual_prediction(

@@ -91,17 +91,15 @@ def test_classic_predict_rejects_rust_context() -> None:
         )
 
 
-def test_classic_incremental_rejects_rust_context() -> None:
+def test_classic_incremental_is_retired():
     clusterer = _year_diff_clusterer()
-    runtime_context = runtime.RuntimeContext(
-        operation="cluster_predict_incremental",
-        backend="rust",
-        run_id="test-explicit-routing",
-    )
-
-    with pytest.raises(ValueError, match="predict_incremental_from_arrow"):
-        clusterer.predict_incremental(
-            ["s1"],
-            SimpleNamespace(name="json_dataset"),  # type: ignore[arg-type]
-            runtime_context=runtime_context,
-        )
+    assert not hasattr(clusterer, "predict_incremental")
+    assert not hasattr(clusterer, "_predict_incremental_python")
+    for name in (
+        "incremental_precluster_broadcast_mode",
+        "incremental_seed_score_mode",
+        "incremental_mean_min_hybrid_weight",
+    ):
+        assert not hasattr(clusterer, name)
+    with pytest.raises(ValueError, match="retired; use predict_from_arrow"):
+        clusterer.predict({}, None, batching_threshold=10)

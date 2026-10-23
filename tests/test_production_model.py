@@ -401,7 +401,7 @@ def test_synthetic_native_clusterer_predict_matches_source_python(
     monkeypatch.setattr(subblocking_module._LazyCanonicalOrcidPrefixCounts, "load", lambda _self: {})  # noqa: SLF001
     bundle_dir, source_clusterer = synthetic_pairwise_bundle
 
-    for batching_threshold in (None, 7):
+    for batching_threshold in (None,):
         native_clusterer = _prepare_prediction_clusterer(_load_pairwise_staging_model(bundle_dir))
         expected_clusterer = _prepare_prediction_clusterer(copy.deepcopy(source_clusterer))
         expected = _predict_dummy_block(
@@ -438,7 +438,6 @@ def test_synthetic_native_clusterer_runtime_config_round_trips(
     assert native_clusterer.random_state == source_clusterer.random_state
 
     assert getattr(native_clusterer, "suppress_orcid", False) == getattr(source_clusterer, "suppress_orcid", False)
-    assert native_clusterer._incremental_experiment_config() == source_clusterer._incremental_experiment_config()
 
 
 def test_canonical_artifact_hash_contract_rejects_missing_malformed_or_mismatched_values(

@@ -115,7 +115,9 @@ def test_seed_restoration_accepts_equal_reverse_supervision(tmp_path: Path, back
 
 
 @pytest.mark.parametrize("override", ["none", "ignore_seeds", "partial_disallow", "dataset_disallow"])
-def test_batched_prediction_preserves_initial_only_seed_member(monkeypatch: pytest.MonkeyPatch, override: str) -> None:
+def test_batched_prediction_preserves_initial_only_seed_member(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
     """Subblocking honors original seeds and explicit separation in combination."""
     monkeypatch.setattr("s2and.subblocking._resolved_orcid_prefix_counts", lambda counts: {})
     raw = json.loads(Path("tests/dummy/signatures.json").read_text())
@@ -146,14 +148,21 @@ def test_batched_prediction_preserves_initial_only_seed_member(monkeypatch: pyte
         incremental_dont_use_cluster_seeds=override == "ignore_seeds",
         partial_supervision=partial,
     )
-    batched, _ = clusterer.predict(
-        blocks,
-        dataset,
-        batching_threshold=2,
-        runtime_context=runtime,
-        incremental_dont_use_cluster_seeds=override == "ignore_seeds",
-        partial_supervision=partial,
-    )
+    from s2and.arrow_inputs import ArrowDataset
+    from tests.incremental_test_helpers import attach_tiny_incremental_linker, prepare_seed_arrow_bundle
+
+    prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+    attach_tiny_incremental_linker(clusterer, tmp_path / "linker", link=False)
+    with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+        batched, _ = clusterer.predict_from_arrow(
+            blocks,
+            arrow_dataset,
+            batching_threshold=2,
+            cluster_seeds_require=dataset.cluster_seeds_require,
+            cluster_seeds_disallow=dataset.cluster_seeds_disallow,
+            incremental_dont_use_cluster_seeds=override == "ignore_seeds",
+            partial_supervision=partial,
+        )
     assert any({"0", "1"} <= set(members) for members in normal.values()) == (override == "none")
     assert any({"0", "1"} <= set(members) for members in batched.values()) == (override == "none")
     assert sorted(sig for members in batched.values() for sig in members) == ["0", "1", "2"]
@@ -242,49 +251,6 @@ def test_directional_precedence_is_scoped_to_evaluated_blocks() -> None:
     assert seed_disallow_adjacency(set(), partial, blocks=[["a"], ["b"]]) == hard
     assert seed_disallow_adjacency(set(), partial) == hard
     assert seed_disallow_adjacency(set(), {("b", "a"): 10000.0}, blocks=[["a", "b"]]) == hard
-
-
-@pytest.mark.parametrize("reverse_clusters", [False, True])
-@pytest.mark.parametrize("distance", [0.0, 10000.0])
-def test_subblocked_restoration_uses_normalized_supervision_independent_of_cluster_order(
-    monkeypatch: pytest.MonkeyPatch, reverse_clusters: bool, distance: float
-) -> None:
-    """Normalized caller overrides need no previous matrix-order metadata."""
-    from s2and.prediction_state import PredictionState
-
-    dataset = ANDData(
-        "tests/dummy/signatures.json",
-        "tests/dummy/papers.json",
-        name="subblock_normalized_supervision",
-        mode="inference",
-        cluster_seeds={"0": {"1": "require"}},
-        name_counts_index=tiny_name_counts_index(),
-    )
-    dataset.cluster_seeds_disallow = {("1", "0")}
-    clusterer = Clusterer(FeaturizationInfo(features_to_use=["year_diff"]), classifier=None, n_jobs=1)
-    observed_seeds: list[dict[str, int | str]] = []
-
-    def incremental(
-        _signatures: list[str], _dataset: ANDData, *, prediction_state: PredictionState, **_kwargs: object
-    ) -> dict[str, object]:
-        observed_seeds.append(prediction_state.cluster_seeds_require)
-        return {"clusters": {"done": ["0", "1", "2", "3"]}}
-
-    monkeypatch.setattr(clusterer, "_predict_incremental_python", incremental)
-    # Seed 1 appears before seed 0 within the original cluster iteration order.
-    clusters = {"first": ["1"], "second": ["2", "0"]}
-    if reverse_clusters:
-        clusters = dict(reversed(list(clusters.items())))
-    clusterer._predict_subblocked_single_letter_incremental_groups(
-        {"initial": ["3"]},
-        pred_clusters=clusters,
-        dataset=dataset,
-        original_blocks={"block": ["0", "1", "2", "3"]},
-        partial_supervision={("0", "1"): distance},
-        runtime_context=build_runtime_context("subblock_normalized_supervision", backend="python"),
-    )
-    assert len(observed_seeds) == 1
-    assert (observed_seeds[0]["0"] == observed_seeds[0]["1"]) is (distance == 0.0)
 
 
 def test_initial_only_seed_partitions_receive_distinct_synthetic_ids():

@@ -211,8 +211,7 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         fake_predict_incremental,
     )
     monkeypatch.setattr(
-        model_module,
-        "make_subblocks",
+        "s2and.subblocking.make_subblocks",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python subblocking must not run")),
     )
     clusterer = _clusterer()

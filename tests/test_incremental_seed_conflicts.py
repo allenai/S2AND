@@ -26,22 +26,19 @@ def _predict(tmp_path, dataset, route, *, enabled=True, partial=None, threshold=
         use_default_constraints_as_supervision=enabled,
     )
     requested = list(dataset.signatures) if signatures is None else signatures
-    if route == "python":
-        result = clusterer.predict_incremental(requested, dataset, partial_supervision=partial)
-    else:
-        prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
-        attach_tiny_incremental_linker(clusterer, tmp_path / "linker")
-        with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
-            result = clusterer.predict_incremental_from_arrow(
-                requested,
-                arrow_dataset,
-                cluster_seeds_require=dataset.cluster_seeds_require,
-                cluster_seeds_disallow=dataset.cluster_seeds_disallow,
-                altered_cluster_signatures=dataset.altered_cluster_signatures,
-                partial_supervision=partial,
-                batching_threshold=threshold,
-                name_tuples=frozenset(),
-            )
+    prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+    attach_tiny_incremental_linker(clusterer, tmp_path / "linker")
+    with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+        result = clusterer.predict_incremental_from_arrow(
+            requested,
+            arrow_dataset,
+            cluster_seeds_require=dataset.cluster_seeds_require,
+            cluster_seeds_disallow=dataset.cluster_seeds_disallow,
+            altered_cluster_signatures=dataset.altered_cluster_signatures,
+            partial_supervision=partial,
+            batching_threshold=threshold,
+            name_tuples=frozenset(),
+        )
     return sorted(sorted(members) for members in result["clusters"].values())
 
 
@@ -79,7 +76,7 @@ def test_incremental_seed_conflict_policy_matches_routes(
             reject_promoted_scoring,
         )
     errors = []
-    for route in ["python", "arrow"]:
+    for route in ["arrow"]:
         if reject:
             try:
                 _predict(
@@ -105,7 +102,7 @@ def test_incremental_seed_conflict_policy_matches_routes(
                 threshold=threshold,
             ) == [["0", "1", "2", "3"]]
     if reject:
-        assert errors == [CONFLICT_MESSAGE, CONFLICT_MESSAGE]
+        assert errors == [CONFLICT_MESSAGE]
     assert dataset.cluster_seeds_require == {"0": "claimed", "1": "claimed"}
     assert dataset.cluster_seeds_disallow == ({("0", "1")} if source == "dataset" else set())
 
@@ -117,14 +114,14 @@ def test_incremental_seed_conflicts_rejected_before_query_early_returns(tmp_path
     dataset.altered_cluster_signatures = ["0"] if altered else []
     dataset.cluster_seeds_disallow = {("0", "1")}
     errors = []
-    for route in ["python", "arrow"]:
+    for route in ["arrow"]:
         try:
             _predict(tmp_path / route, dataset, route, signatures=signatures)
         except ValueError as error:
             errors.append(str(error))
         else:
             errors.append(None)
-    assert errors == [CONFLICT_MESSAGE, CONFLICT_MESSAGE]
+    assert errors == [CONFLICT_MESSAGE]
 
 
 @pytest.mark.parametrize("altered", [False, True])
@@ -140,7 +137,7 @@ def test_negatives_outside_an_original_seed_group_remain_valid(tmp_path, altered
     dataset.cluster_seeds_disallow = {pair}
     partial = {("0", "2"): 0.0, ("2", "3"): LARGE_DISTANCE} if case == "between_profiles" else {}
     expected = [["0", "1"], ["2"]] if case == "query_seed" else [["0", "1", "2"], ["3"]]
-    for route in ["python", "arrow"]:
+    for route in ["arrow"]:
         assert _predict(tmp_path / route, dataset, route, partial=partial) == expected, route
 
 
@@ -157,7 +154,7 @@ def test_seed_conflict_error_is_independent_of_supervision_and_seed_order(tmp_pa
         seeds.reverse()
         pairs.reverse()
     dataset = _dataset([("Ada", "", "Smith")] * 4, dict(seeds))
-    for route in ["python", "arrow"]:
+    for route in ["arrow"]:
         with pytest.raises(ValueError, match=re.escape(CONFLICT_MESSAGE)):
             _predict(tmp_path / route, dataset, route, partial=dict(pairs))
 
@@ -166,5 +163,5 @@ def test_seed_conflict_error_is_independent_of_supervision_and_seed_order(tmp_pa
 def test_name_incompatibility_does_not_reject_original_claimed_membership(tmp_path, altered):
     dataset = _dataset([("Ada", "", "Smith"), ("Amy", "", "Jones")], {"0": "claimed", "1": "claimed"})
     dataset.altered_cluster_signatures = ["0"] if altered else []
-    for route in ["python", "arrow"]:
+    for route in ["arrow"]:
         assert _predict(tmp_path / route, dataset, route) == [["0", "1"]]

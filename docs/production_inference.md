@@ -33,7 +33,6 @@ backends:
 | `ANDData(...)` | classic data inputs | Python | initialized `ANDData` |
 | `build_training_anddata_from_arrow(...)` | open `ArrowDataset` | Rust | train-mode `ANDData` retaining the handle |
 | `Clusterer.predict` | `ANDData` | Python | `(clusters, distance_matrices)`; matrices may be `None` |
-| `Clusterer.predict_incremental` | `ANDData` | Python | structured mapping |
 | `Clusterer.predict_from_arrow` | open `ArrowDataset` | Rust | `(clusters, distance_matrices)`; matrices may be `None` |
 | `Clusterer.predict_incremental_from_arrow` | open `ArrowDataset` | Rust | structured mapping |
 
@@ -41,6 +40,8 @@ Passing a Rust runtime context to an `ANDData` API, or a Python context to an
 Arrow API, is an error. Rust entry points import the exact `s2and-rust` version
 pinned by the project metadata and fail on a missing or different version. That
 dependency is part of the normal S2AND install.
+Classic `predict_incremental` is retired. Use `predict_incremental_from_arrow`.
+Classic `predict` rejects `batching_threshold`; use `predict_from_arrow` for subblocking.
 
 Lower-level callers of `s2and.runtime.build_runtime_context(...)` get Python
 when they omit `backend`. No environment variable changes these routes.
@@ -51,14 +52,11 @@ sole grouping authority; keep any other partition, such as original benchmark
 blocks, outside `ANDData`.
 
 ```python
-# dataset is an ANDData; block_signatures is a list of signature IDs to link.
+# dataset is an ANDData.
 pred_clusters, pred_distance_matrices = clusterer.predict(
     dataset.get_blocks(),
     dataset,
 )
-
-result = clusterer.predict_incremental(block_signatures, dataset)
-clusters = result["clusters"]
 ```
 
 Incremental APIs always return their structured result.

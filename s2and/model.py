@@ -94,10 +94,6 @@ from s2and.subblocking import (
     GraphSubblockingConfig,
     _make_subblocks_with_telemetry_arrow_rust,
     _resolve_graph_subblocking_config,
-    make_dataset_graph_subblocking_cluster_fn,
-    make_subblocks,
-    no_middle_dead_end_buckets,
-    signature_name_parts_for_subblocking,
     subblocking_name_parts,
 )
 from s2and.supervision import (
@@ -116,9 +112,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("s2and")
 IncrementalPhaseBMode = Literal["exact"]
-IncrementalBroadcastMode = Literal["always", "never", "top1_consensus"]
-IncrementalSeedScoreMode = Literal["mean", "min", "mean_min_hybrid"]
-IncrementalDistStats = tuple[float, int, float]
 _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES = 128
 _ALTERED_PRESPLIT_CACHE_INIT_LOCK = threading.Lock()
 _PREDICT_FEATURE_COPY_MAX_BYTES = 128 * (1 << 20)
@@ -1692,33 +1685,6 @@ def _upper_triangle_indices_for_range(
     return left.astype(np.intp, copy=False), right.astype(np.intp, copy=False)
 
 
-@dataclass(frozen=True)
-class _IncrementalExperimentConfig:
-    """Experiment-only controls for incremental single-letter assignment."""
-
-    precluster_broadcast_mode: IncrementalBroadcastMode
-    seed_score_mode: IncrementalSeedScoreMode
-    mean_min_hybrid_weight: float
-
-
-def _incremental_cluster_score(
-    stats: IncrementalDistStats,
-    *,
-    config: _IncrementalExperimentConfig,
-) -> float:
-    """Return the assignment score for one query/seed cluster pair."""
-
-    mean_dist, _count, min_dist = stats
-    if config.seed_score_mode == "mean":
-        return float(mean_dist)
-    if config.seed_score_mode == "min":
-        return float(min_dist)
-    return float(
-        (1.0 - float(config.mean_min_hybrid_weight)) * float(mean_dist)
-        + float(config.mean_min_hybrid_weight) * float(min_dist)
-    )
-
-
 def _allocate_subblock_key(
     base_key: str,
     *,
@@ -1860,9 +1826,6 @@ class Clusterer:
         self.hyperopt_trials_store: Trials | list[Trials] | None = None
         self.best_params: dict[Any, Any] | None = None
         self.batch_size = batch_size
-        self.incremental_precluster_broadcast_mode: IncrementalBroadcastMode = "always"
-        self.incremental_seed_score_mode: IncrementalSeedScoreMode = "mean"
-        self.incremental_mean_min_hybrid_weight: float = 0.5
         self.incremental_linker_artifact_dir: Path | None = None
         self.incremental_linker_artifact: Any | None = None
         self.production_model_bundle_dir: Path | None = None
@@ -1905,54 +1868,6 @@ class Clusterer:
                 if num_to_keep is not None and count == num_to_keep:
                     return out_dict
         return out_dict
-
-    def _incremental_experiment_config(self) -> _IncrementalExperimentConfig:
-        """Return validated experiment controls for incremental assignment."""
-
-        raw_broadcast_mode = str(getattr(self, "incremental_precluster_broadcast_mode", "always"))
-        raw_seed_score_mode = str(getattr(self, "incremental_seed_score_mode", "mean"))
-        raw_hybrid_weight = float(getattr(self, "incremental_mean_min_hybrid_weight", 0.5))
-
-        valid_broadcast_modes: set[str] = {"always", "never", "top1_consensus"}
-        if raw_broadcast_mode not in valid_broadcast_modes:
-            raise ValueError(
-                "Unsupported incremental_precluster_broadcast_mode="
-                f"{raw_broadcast_mode!r}; expected one of {sorted(valid_broadcast_modes)}"
-            )
-        valid_seed_score_modes: set[str] = {"mean", "min", "mean_min_hybrid"}
-        if raw_seed_score_mode not in valid_seed_score_modes:
-            raise ValueError(
-                "Unsupported incremental_seed_score_mode="
-                f"{raw_seed_score_mode!r}; expected one of {sorted(valid_seed_score_modes)}"
-            )
-        if not 0.0 <= raw_hybrid_weight <= 1.0:
-            raise ValueError(f"incremental_mean_min_hybrid_weight must be in [0, 1]; got {raw_hybrid_weight!r}")
-        return _IncrementalExperimentConfig(
-            precluster_broadcast_mode=cast(IncrementalBroadcastMode, raw_broadcast_mode),
-            seed_score_mode=cast(IncrementalSeedScoreMode, raw_seed_score_mode),
-            mean_min_hybrid_weight=float(raw_hybrid_weight),
-        )
-
-    def _best_incremental_cluster(
-        self,
-        cluster_dists: Mapping[int | str, IncrementalDistStats],
-        *,
-        config: _IncrementalExperimentConfig,
-    ) -> tuple[int | str | None, float, float]:
-        """Return the best and second-best seed-cluster scores for one query."""
-
-        best_cluster_id: int | str | None = None
-        best_score = float("inf")
-        second_best_score = float("inf")
-        for cluster_id, stats in cluster_dists.items():
-            score = _incremental_cluster_score(stats, config=config)
-            if score < best_score:
-                second_best_score = best_score
-                best_score = score
-                best_cluster_id = cluster_id
-            elif score < second_best_score:
-                second_best_score = score
-        return best_cluster_id, float(best_score), float(second_best_score)
 
     def _resolve_constraint_batch(
         self,
@@ -4120,83 +4035,8 @@ class Clusterer:
         else:
             self.cluster_model.set_params(**params)
 
-    def _build_subblocked_block_dict(
-        self,
-        block_dict: dict[str, list[str]],
-        dataset: ANDData,
-        *,
-        batching_threshold: int,
-        specter_cluster_fn: Callable[..., dict[str, list[str]]] | None = None,
-        cluster_seeds_require: Mapping[str, int | str] | None = None,
-    ) -> dict[str, list[str]]:
-        seed_map = dataset.cluster_seeds_require if cluster_seeds_require is None else cluster_seeds_require
-        components_by_block: dict[str, dict[int | str, list[str]]] = {}
-        for block_key, signatures in block_dict.items():
-            if len(set(signatures)) != len(signatures):
-                raise ValueError(
-                    f"Subblocking requires unique signature IDs within each input block (block={block_key})"
-                )
-            components: dict[int | str, list[str]] = {}
-            for signature_id in signatures:
-                if signature_id in seed_map:
-                    components.setdefault(seed_map[signature_id], []).append(signature_id)
-            for component_id, members in components.items():
-                if len(members) > batching_threshold:
-                    raise ValueError(
-                        "cluster_seeds_require component exceeds batching_threshold before subblocking "
-                        f"(block={block_key} component={component_id} "
-                        f"size={len(members)} threshold={batching_threshold})"
-                    )
-            components_by_block[block_key] = components
-        block_dict_subblocked: dict[str, list[str]] = {}
-        for block_key in sorted(block_dict):
-            block_signatures = block_dict[block_key]
-            if len(block_signatures) > batching_threshold:
-                kwargs: dict[str, Any] = {"maximum_size": batching_threshold}
-                if specter_cluster_fn is not None:
-                    kwargs["specter_cluster_fn"] = specter_cluster_fn
-                subblocks = make_subblocks(block_signatures, dataset, **kwargs)
-                output_ids = [sid for members in subblocks.values() for sid in members]
-                if len(output_ids) != len(set(output_ids)) or set(output_ids) != set(block_signatures):
-                    raise RuntimeError(
-                        f"Subblocking must return every input signature exactly once (block={block_key})"
-                    )
-                if any(len(members) > batching_threshold for members in subblocks.values()):
-                    raise RuntimeError(f"Subblocking exceeded batching_threshold (block={block_key})")
-                full_name_subblocks = set()
-                if components_by_block[block_key]:
-                    firsts = _subblocking_firsts(
-                        block_signatures,
-                        [signature_name_parts_for_subblocking(dataset.signatures[s]) for s in block_signatures],
-                        batching_threshold,
-                    )
-                    full_name_subblocks = {
-                        key for key, members in subblocks.items() if members and len(firsts[members[0]]) > 1
-                    }
-                repaired = pack_seed_components(
-                    {key: subblocks[key] for key in sorted(subblocks)},
-                    components_by_block[block_key],
-                    batching_threshold,
-                    full_name_subblocks=full_name_subblocks,
-                )
-                for subblock_key, parts in repaired.items():
-                    for part_index, members in enumerate(parts):
-                        key = f"{block_key}|subblock={subblock_key}"
-                        if len(parts) > 1:
-                            key += f"|repair_part={part_index:04d}"
-                        generated_key = _allocate_subblock_key(
-                            key, original_block_keys=block_dict.keys(), emitted_block_keys=block_dict_subblocked.keys()
-                        )
-                        block_dict_subblocked[generated_key] = members
-            else:
-                block_dict_subblocked[block_key] = block_signatures
-        return block_dict_subblocked
-
     def _subblocking_graph_config(self) -> GraphSubblockingConfig:
         return _resolve_graph_subblocking_config(getattr(self, "subblocking_graph_config", None))
-
-    def _subblocking_graph_cluster_fn(self) -> Callable[..., dict[str, list[str]]]:
-        return make_dataset_graph_subblocking_cluster_fn(config=self._subblocking_graph_config())
 
     def _partition_subblocked_first_name_groups(
         self,
@@ -4431,184 +4271,6 @@ class Clusterer:
         kept = {cluster_id: members for cluster_id, members in pred_clusters.items() if cluster_id not in detached}
         return _combine_subblocked_predictions({"kept": kept, **reunited})
 
-    def _predict_subblocked_single_letter_incremental_groups(
-        self,
-        block_dict_single_letter: dict[str, list[str]],
-        *,
-        pred_clusters: dict[str, list[str]],
-        dataset: ANDData,
-        partial_supervision: dict[tuple[str, str], int | float],
-        runtime_context: RuntimeContext,
-        total_ram_bytes: int | None = None,
-        incremental_dont_use_cluster_seeds: bool = False,
-        original_blocks: Mapping[str, Sequence[str]],
-    ) -> dict[str, list[str]]:
-        """Attach initial-only groups using already normalized caller supervision."""
-        if len(block_dict_single_letter) == 0:
-            return pred_clusters
-
-        logger.info("Running predict incremental on subblocks with single letter first names")
-        origins, scoped_clusters = _subblocked_prediction_scopes(pred_clusters, original_blocks)
-        predict_times: dict[str, float] = {}
-        request_signature_ids = {
-            signature_id
-            for signatures in (*pred_clusters.values(), *block_dict_single_letter.values())
-            for signature_id in signatures
-        }
-        original_seeds = (
-            {
-                signature_id: component_id
-                for signature_id, component_id in dataset.cluster_seeds_require.items()
-                if signature_id in request_signature_ids
-            }
-            if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds
-            else {}
-        )
-        scoped_seeds: dict[str, dict[str, int | str]] = defaultdict(dict)
-        for sid, component in original_seeds.items():
-            scoped_seeds[origins[sid]][sid] = component
-        disallow_adjacency = seed_disallow_adjacency(dataset.cluster_seeds_disallow, partial_supervision)
-        for block_key in sorted(block_dict_single_letter):
-            origin = origins[block_dict_single_letter[block_key][0]]
-            synthetic_seeds = restore_seed_membership(scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency)
-            current_disallows, current_supervision = filter_generated_seed_negatives(
-                synthetic_seeds, dataset.cluster_seeds_disallow, partial_supervision
-            )
-            # Synthetic seeds belong to this pass, not to claimed dataset profiles.
-            prediction_state = PredictionState(
-                cluster_seeds_require=synthetic_seeds,
-                cluster_seeds_disallow=current_disallows,
-            )
-            start_predict_time = time.time()
-            incremental_result = self._predict_incremental_python(
-                block_dict_single_letter[block_key],
-                dataset,
-                prevent_new_incompatibilities=True,
-                partial_supervision=current_supervision,
-                runtime_context=runtime_context,
-                total_ram_bytes=total_ram_bytes,
-                prediction_state=prediction_state,
-            )
-            clusters_payload = incremental_result.get("clusters")
-            if not isinstance(clusters_payload, dict):
-                raise RuntimeError(
-                    "predict_incremental returned invalid clusters payload; expected dict "
-                    f"got {type(clusters_payload).__name__}"
-                )
-            pred_clusters_intermediate: dict[str, list[str]] = {}
-            for cluster_id, signatures in clusters_payload.items():
-                if not isinstance(signatures, list):
-                    raise RuntimeError(
-                        "predict_incremental returned invalid cluster member payload; expected list "
-                        f"for cluster_id={cluster_id!r}, got {type(signatures).__name__}"
-                    )
-                pred_clusters_intermediate[str(cluster_id)] = [str(signature) for signature in signatures]
-            scoped_clusters[origin] = pred_clusters_intermediate
-            predict_times[block_key] = time.time() - start_predict_time
-
-        logger.info(f"Finished subblocked predict incremental. Here's how long each subblock took: {predict_times}")
-        return _combine_subblocked_predictions(scoped_clusters)
-
-    def _predict_subblocked(
-        self,
-        block_dict: dict[str, list[str]],
-        dataset: ANDData,
-        *,
-        cluster_model_params: dict[str, Any] | None,
-        partial_supervision: dict[tuple[str, str], int | float],
-        use_s2_clusters: bool,
-        incremental_dont_use_cluster_seeds: bool,
-        batching_threshold: int,
-        runtime_context: RuntimeContext,
-        dists: dict[str, np.ndarray] | None,
-        total_ram_bytes: int | None,
-        prediction_state: PredictionState | None = None,
-    ) -> tuple[dict[str, list[str]], None]:
-        if stage_uses_rust(runtime_context):
-            raise ValueError("Classic subblocked prediction requires a Python runtime context")
-        assert batching_threshold > 0, "Batching threshold must be positive"
-        assert dists is None, "If batching_threshold is not None, then can't use precomputed dists"
-        if prediction_state is None:
-            prediction_state = _prediction_state_from_dataset(dataset)
-        graph_cluster_fn = self._subblocking_graph_cluster_fn()
-        block_dict_subblocked = self._build_subblocked_block_dict(
-            block_dict,
-            dataset,
-            batching_threshold=batching_threshold,
-            specter_cluster_fn=graph_cluster_fn,
-            cluster_seeds_require=(
-                prediction_state.cluster_seeds_require
-                if self.use_default_constraints_as_supervision
-                and not incremental_dont_use_cluster_seeds
-                and not use_s2_clusters
-                else {}
-            ),
-        )
-        subblocking_firsts = _group_subblocking_firsts(
-            block_dict_subblocked,
-            block_dict,
-            batching_threshold,
-            lambda signature_ids: [signature_name_parts_for_subblocking(dataset.signatures[s]) for s in signature_ids],
-        )
-        (
-            block_dict_multiple_letter_first_names,
-            block_dict_single_letter_first_names,
-            alert_flag,
-        ) = self._partition_subblocked_first_name_groups(
-            block_dict_subblocked, subblocking_firsts, original_blocks=block_dict
-        )
-        pred_clusters = self._predict_subblocked_multiple_letter_groups(
-            block_dict_multiple_letter_first_names,
-            alert_flag=alert_flag,
-            dataset=dataset,
-            cluster_model_params=cluster_model_params,
-            partial_supervision=partial_supervision,
-            use_s2_clusters=use_s2_clusters,
-            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-            runtime_context=runtime_context,
-            total_ram_bytes=total_ram_bytes,
-            rust_featurizer=None,
-            cluster_seeds_disallow=set(),
-            explicit_cluster_seeds_require=None,
-            prediction_state=prediction_state,
-        )
-        attach_python = partial(
-            self._predict_subblocked_single_letter_incremental_groups,
-            dataset=dataset,
-            partial_supervision=partial_supervision,
-            runtime_context=runtime_context,
-            total_ram_bytes=total_ram_bytes,
-            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-            original_blocks=block_dict,
-        )
-        # Legacy S2 clusters are given as they are, so the step does not take them apart.
-        no_middle_dead_ends = {
-            signature_id: first
-            for block_signatures in block_dict.values()
-            if len(block_signatures) > batching_threshold and not use_s2_clusters
-            for first, bucket in no_middle_dead_end_buckets(
-                block_signatures,
-                [signature_name_parts_for_subblocking(dataset.signatures[s]) for s in block_signatures],
-                batching_threshold,
-            ).items()
-            for signature_id in bucket
-        }
-        pred_clusters = self._reunite_no_middle_dead_ends(
-            pred_clusters,
-            no_middle_dead_ends=no_middle_dead_ends,
-            required_seed_ids=(
-                dataset.cluster_seeds_require.keys()
-                if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds
-                else ()
-            ),
-            bulk_groups=block_dict_multiple_letter_first_names,
-            original_blocks=block_dict,
-            attach=lambda queries, seeds: attach_python(queries, pred_clusters=seeds),
-            prediction_state=prediction_state,
-        )
-        pred_clusters = attach_python(block_dict_single_letter_first_names, pred_clusters=pred_clusters)
-        return dict(pred_clusters), None
-
     def predict(
         self,
         block_dict: dict[str, list[str]],
@@ -4642,15 +4304,11 @@ class Clusterer:
         incremental_dont_use_cluster_seeds: bool
             whether to ignore dataset cluster seeds while resolving constraints in incremental flows
         batching_threshold: int | None
-            If the number of signatures in a block is above this number, we will use subblocking on the block.
-            This means that the single-letter first names will be sent through via predict_incremental.
-            Defaults to None, which means no batching occurs
+            Retired for ANDData. Use predict_from_arrow for subblocked prediction.
         total_ram_bytes: Optional[int]
             Optional explicit RAM budget for exact/non-incremental predict paths. When set, predict_helper
             uses it for pair-batch sizing and fails fast before allocating a block distance matrix that
             would exceed the usable budget.
-        Note: batching_threshold is a hack to get around OOM issues. We will assume that it implies
-        that we don't want to ever take up more memory than (batching_threshold ** 2)
 
         Returns
         -------
@@ -4659,6 +4317,8 @@ class Clusterer:
         distances are built and clustered in the fused one-block-at-a-time path.
         """
 
+        if batching_threshold is not None:
+            raise ValueError("Classic subblocked prediction is retired; use predict_from_arrow with batching_threshold")
         partial_supervision = normalize_partial_supervision(partial_supervision)
         if not use_s2_clusters and (
             any(len(signatures) > 1 for signatures in block_dict.values())
@@ -4672,50 +4332,27 @@ class Clusterer:
 
         prediction_state = _prediction_state_from_dataset(dataset)
 
-        if dists is None and not use_s2_clusters and batching_threshold is not None:
-            require_dataset_name_counts_binding_for_clusterer(
-                self,
-                dataset,
-                context="Clusterer.predict",
-            )
-
-        if batching_threshold is not None:
-            pred_clusters, dists = self._predict_subblocked(
-                block_dict,
-                dataset,
-                cluster_model_params=cluster_model_params,
-                partial_supervision=partial_supervision,
-                use_s2_clusters=use_s2_clusters,
-                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                batching_threshold=int(batching_threshold),
-                runtime_context=runtime_context,
-                dists=dists,
-                total_ram_bytes=total_ram_bytes,
-                prediction_state=prediction_state,
-            )
-
-        else:
-            # normal mode - everything goes through full block clustering
-            logger.info("Running predict on full blocks - no subblocking")
-            start = time.time()
-            predict_helper = self.predict_helper
-            if getattr(predict_helper, "__func__", None) is Clusterer._default_predict_helper:
-                predict_helper = self._predict_with_normalized_supervision
-            pred_clusters, dists = predict_helper(
-                block_dict,
-                dataset,
-                dists=dists,
-                cluster_model_params=cluster_model_params,
-                partial_supervision=partial_supervision,
-                use_s2_clusters=use_s2_clusters,
-                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                runtime_context=runtime_context,
-                total_ram_bytes=total_ram_bytes,
-                prediction_state=prediction_state,
-            )
-            end = time.time()
-            total_predict_time = end - start
-            logger.info(f"Finished predict on full blocks. Time taken: {total_predict_time}")
+        # normal mode - everything goes through full block clustering
+        logger.info("Running predict on full blocks - no subblocking")
+        start = time.time()
+        predict_helper = self.predict_helper
+        if getattr(predict_helper, "__func__", None) is Clusterer._default_predict_helper:
+            predict_helper = self._predict_with_normalized_supervision
+        pred_clusters, dists = predict_helper(
+            block_dict,
+            dataset,
+            dists=dists,
+            cluster_model_params=cluster_model_params,
+            partial_supervision=partial_supervision,
+            use_s2_clusters=use_s2_clusters,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+            total_ram_bytes=total_ram_bytes,
+            prediction_state=prediction_state,
+        )
+        end = time.time()
+        total_predict_time = end - start
+        logger.info(f"Finished predict on full blocks. Time taken: {total_predict_time}")
 
         return dict(pred_clusters), dists
 
@@ -5376,24 +5013,6 @@ class Clusterer:
             split_members=split_cluster_seeds_require_inverse,
         )
 
-    def _convert_sum_count_to_average_distances(
-        self,
-        signature_to_cluster_sum_count: dict[str, dict[int | str, list[float | int]]],
-    ) -> dict[str, dict[int | str, IncrementalDistStats]]:
-        signature_to_cluster_to_average_dist: dict[str, dict[int | str, IncrementalDistStats]] = defaultdict(dict)
-        for signature_id, cluster_sum_count in signature_to_cluster_sum_count.items():
-            for cluster_id, sum_count in cluster_sum_count.items():
-                total = float(sum_count[0])
-                count = int(sum_count[1])
-                if count <= 0:
-                    continue
-                signature_to_cluster_to_average_dist[signature_id][cluster_id] = (
-                    total / float(count),
-                    count,
-                    float(sum_count[2]),
-                )
-        return signature_to_cluster_to_average_dist
-
     def _finish_incremental_with_seed_links(
         self,
         unassigned_signature_ids: list[str],
@@ -5504,269 +5123,6 @@ class Clusterer:
             return clusters
 
         return cluster_residuals
-
-    def _filter_classic_incremental_links(
-        self,
-        dataset: ANDData,
-        proposed_links: Mapping[str, int | str],
-        scores: Mapping[str, float],
-        *,
-        cluster_seeds_require: Mapping[str, int | str],
-        recluster_map: Mapping[int | str, int | str],
-        partial_supervision: dict[tuple[str, str], int | float],
-        runtime_context: RuntimeContext,
-        prediction_state: PredictionState | None,
-    ) -> dict[str, int | str]:
-        """Reject conflicting classic attachments without selecting another seed.
-
-        Explicit negatives apply to restored profiles, including historical
-        members. Default constraints are checked only between new attachments;
-        historical names retain the altered-profile split policy in completion.
-        Checks use the original request state, never synthetic must-link labels
-        for the proposed attachments. Required accepted links win before ordinary
-        links, followed by effective distance and signature ID.
-        """
-        if not proposed_links:
-            return {}
-
-        def restored(component_id: int | str) -> str:
-            return str(recluster_map.get(component_id, component_id))
-
-        def supervision_distance(query: str, partner: str) -> int | float | None:
-            return partial_supervision.get((query, partner), partial_supervision.get((partner, query)))
-
-        dataset_disallows = (
-            (dataset.cluster_seeds_disallow if prediction_state is None else prediction_state.cluster_seeds_disallow)
-            if self.use_default_constraints_as_supervision
-            else set()
-        )
-        explicit_disallows = seed_disallow_adjacency(dataset_disallows, partial_supervision)
-        required: set[str] = set()
-        require_parent = {query: query for query in proposed_links}
-
-        def require_root(query: str) -> str:
-            while require_parent[query] != query:
-                require_parent[query] = require_parent[require_parent[query]]
-                query = require_parent[query]
-            return query
-
-        for left, right in partial_supervision:
-            for query, seed in ((left, right), (right, left)):
-                if query not in proposed_links or seed not in cluster_seeds_require:
-                    continue
-                value = supervision_distance(query, seed)
-                if value == 0 and restored(proposed_links[query]) == restored(cluster_seeds_require[seed]):
-                    required.add(query)
-
-        def query_priority(query: str) -> tuple[bool, float, str]:
-            return query not in required, scores[query], query
-
-        for left, right in partial_supervision:
-            if (
-                left in proposed_links
-                and right in proposed_links
-                and restored(proposed_links[left]) == restored(proposed_links[right])
-            ):
-                member, query = sorted((left, right), key=query_priority)
-                # Within an atomic group, attachment checks use this same
-                # priority order: the later query's direct entry takes precedence.
-                if supervision_distance(query, member) == 0:
-                    require_parent[require_root(left)] = require_root(right)
-
-        require_groups: dict[str, list[str]] = defaultdict(list)
-        for query in proposed_links:
-            require_groups[require_root(query)].append(query)
-
-        def group_priority(group: list[str]) -> tuple[bool, float, str]:
-            return (
-                not any(query in required for query in group),
-                min(scores[query] for query in group),
-                min(group),
-            )
-
-        accepted: dict[str, int | str] = {}
-        new_members: dict[str, list[str]] = defaultdict(list)
-        backend = None
-        rejected_count = 0
-        for group in sorted(require_groups.values(), key=group_priority):
-            profile_id = restored(proposed_links[group[0]])
-            members = new_members[profile_id]
-            previous_count = len(members)
-            pending: set[str] = set()
-            conflict = False
-            for query in sorted(group, key=query_priority):
-                # Sparse explicit edges avoid scanning every historical seed
-                # for every proposed link, including restored claimed profiles.
-                conflict = any(
-                    (
-                        (partner in cluster_seeds_require and restored(cluster_seeds_require[partner]) == profile_id)
-                        or (partner in accepted and restored(accepted[partner]) == profile_id)
-                        or partner in pending
-                    )
-                    and supervision_distance(query, partner) in (None, LARGE_DISTANCE)
-                    for partner in explicit_disallows.get(query, ())
-                )
-                if not conflict and members and self.use_default_constraints_as_supervision:
-                    if backend is None:
-                        backend = _build_incremental_constraint_backend(
-                            dataset,
-                            use_default_constraints_as_supervision=True,
-                            runtime_context=runtime_context,
-                            suppress_orcid=self.suppress_orcid,
-                            prediction_state=prediction_state,
-                        )
-                    chunk_size = max(1, int(self.batch_size))
-                    for start in range(0, len(members), chunk_size):
-                        labels, _ = self._resolve_constraint_batch(
-                            dataset,
-                            [(query, member) for member in members[start : start + chunk_size]],
-                            partial_supervision=partial_supervision,
-                            runtime_context=runtime_context,
-                            incremental_dont_use_cluster_seeds=False,
-                            constraint_backend=backend,
-                        )
-                        if any(label + LARGE_INTEGER >= LARGE_DISTANCE for label in labels):
-                            conflict = True
-                            break
-                if conflict:
-                    break
-                pending.add(query)
-                members.append(query)
-            if conflict:
-                del members[previous_count:]
-                if any(query in required for query in group):
-                    raise ValueError(
-                        "Conflicting required classic incremental attachments: "
-                        f"signature_ids={sorted(group)!r} restored_cluster_id={profile_id!r}"
-                    )
-                rejected_count += len(group)
-                continue
-            accepted.update((query, proposed_links[query]) for query in group)
-        logger.info(
-            "Classic incremental attachment constraints: proposed=%d accepted=%d rejected=%d",
-            len(proposed_links),
-            len(accepted),
-            rejected_count,
-        )
-        return accepted
-
-    def _run_incremental_phases_bcd(
-        self,
-        unassigned_signature_ids: list[str],
-        dataset: ANDData,
-        signature_to_cluster_to_average_dist: dict[str, dict[int | str, IncrementalDistStats]],
-        cluster_seeds_require: dict[str, int | str],
-        recluster_map: dict[int | str, int | str],
-        cluster_seeds_require_inverse: dict[int | str, list[str]],
-        prevent_new_incompatibilities: bool,
-        partial_supervision: dict[tuple[str, str], int | float],
-        runtime_context: RuntimeContext,
-        total_ram_bytes: int | None = None,
-        split_cluster_seeds_require_inverse: dict[int | str, list[str]] | None = None,
-        prediction_state: PredictionState | None = None,
-    ) -> dict[str, list[str]]:
-        config = self._incremental_experiment_config()
-        # First cluster the unassigned signatures, then decide which resulting unassigned
-        # clusters should merge with existing seeded clusters.
-        logger.info("Batch clustering the unassigned signatures")
-        incremental_only_clusters, _ = self.predict_helper(
-            {"incremental_unassigned": unassigned_signature_ids},
-            dataset,
-            partial_supervision=partial_supervision,
-            runtime_context=runtime_context,
-            total_ram_bytes=total_ram_bytes,
-            prediction_state=prediction_state,
-        )
-
-        logger.info(
-            "Made %d clusters out of %d unassigned signatures",
-            len(incremental_only_clusters),
-            len(unassigned_signature_ids),
-        )
-
-        if config.precluster_broadcast_mode != "never":
-            # Average over Phase A signature-to-seed distances at the pre-cluster level.
-            # This is equivalent to computing average distance between each unassigned cluster
-            # and each assigned cluster, then broadcasting that score back to member signatures.
-            cluster_ids = sorted(set(cluster_seeds_require.values()), key=lambda cluster_id: str(cluster_id))
-            for incremental_cluster_signature_ids in incremental_only_clusters.values():
-                if config.precluster_broadcast_mode == "top1_consensus":
-                    top1_cluster_id: int | str | None = None
-                    should_broadcast = True
-                    for signature in incremental_cluster_signature_ids:
-                        best_cluster_id, best_score, _second_best_score = self._best_incremental_cluster(
-                            signature_to_cluster_to_average_dist.get(signature, {}),
-                            config=config,
-                        )
-                        if best_cluster_id is None or not math.isfinite(best_score):
-                            should_broadcast = False
-                            break
-                        if top1_cluster_id is None:
-                            top1_cluster_id = best_cluster_id
-                        elif top1_cluster_id != best_cluster_id:
-                            should_broadcast = False
-                            break
-                    if not should_broadcast:
-                        continue
-                for cluster_id in cluster_ids:
-                    mean_dists = []
-                    min_dists = []
-                    support_count = 0
-                    for signature in incremental_cluster_signature_ids:
-                        cluster_entry = signature_to_cluster_to_average_dist.get(signature, {}).get(cluster_id)
-                        if cluster_entry is None:
-                            continue
-                        if int(cluster_entry[1]) <= 0:
-                            continue
-                        mean_dists.append(float(cluster_entry[0]))
-                        min_dists.append(float(cluster_entry[2]))
-                        support_count += int(cluster_entry[1])
-                    if len(mean_dists) == 0:
-                        continue
-                    out = (
-                        float(np.mean(mean_dists)),
-                        int(support_count),
-                        float(min(min_dists)),
-                    )
-                    for signature in incremental_cluster_signature_ids:
-                        signature_to_cluster_to_average_dist.setdefault(signature, {})[cluster_id] = out
-
-        linked_signature_to_cluster: dict[str, int | str] = {}
-        linked_signature_scores: dict[str, float] = {}
-        for unassigned_signature in unassigned_signature_ids:
-            cluster_dists = signature_to_cluster_to_average_dist.get(unassigned_signature, {})
-            best_cluster_id, best_dist, _second_best_dist = self._best_incremental_cluster(
-                cluster_dists,
-                config=config,
-            )
-            if best_cluster_id is not None and best_dist <= self.cluster_model.eps:
-                linked_signature_to_cluster[unassigned_signature] = best_cluster_id
-                linked_signature_scores[unassigned_signature] = best_dist
-
-        linked_signature_to_cluster = self._filter_classic_incremental_links(
-            dataset,
-            linked_signature_to_cluster,
-            linked_signature_scores,
-            cluster_seeds_require=cluster_seeds_require,
-            recluster_map=recluster_map,
-            partial_supervision=partial_supervision,
-            runtime_context=runtime_context,
-            prediction_state=prediction_state,
-        )
-
-        return self._finish_incremental_with_seed_links(
-            unassigned_signature_ids,
-            dataset,
-            linked_signature_to_cluster,
-            recluster_map,
-            cluster_seeds_require_inverse,
-            prevent_new_incompatibilities,
-            partial_supervision,
-            runtime_context,
-            total_ram_bytes=total_ram_bytes,
-            split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
-            prediction_state=prediction_state,
-        )
 
     @_gc_paused
     def predict_incremental_from_arrow(
@@ -5897,238 +5253,3 @@ class Clusterer:
                 batching_threshold=batching_threshold,
                 attachment_state=_ARROW_ATTACH_BLOCK_STATE.get(),
             )
-
-    def predict_incremental(
-        self,
-        block_signatures: list[str],
-        dataset: ANDData,
-        prevent_new_incompatibilities: bool = True,
-        partial_supervision: dict[tuple[str, str], int | float] | None = None,
-        runtime_context: RuntimeContext | None = None,
-        total_ram_bytes: int | None = None,
-    ) -> dict[str, Any]:
-        """
-        Predict clustering in incremental mode. This assumes that the majority of the labels are passed
-        in using the cluster_seeds_require parameter of the dataset class, and skips work by simply assigning each
-        unassigned signature to the closest cluster if distance is less than eps, and then separately clusters all
-        the unassigned signatures that are not within eps of any existing cluster.
-
-        Corrected, claimed profiles should be noted via the altered_cluster_signatures parameter (in ANDData).
-        Then predict_incremental performs a pre-clustering step on each altered cluster to determine how
-        S2AND would divide it into clusters. Mentions are incrementally added to these new subclusters,
-        then reassembled to restore the complete claimed profile when S2AND returns results.
-
-        Currently this would be useful in the following situation. We have a massive block, for which we want
-        to cluster a small number of new signatures into (block size * number of new signatures should be less
-        than the normal batch size).
-
-        Note: this function was designed to work on a single block at a time.
-
-        Parameters
-        ----------
-        block_signatures: List[str]
-            the signature ids in the block to predict from
-        dataset: ANDData
-            the dataset
-        prevent_new_incompatibilities: bool
-            if True, prevents the addition to a cluster of new first names that are not prefix match
-            or in the name pairs list, for at least one existing name in the cluster. This can happen
-            if a claimed cluster has D Jones and David Jones, s2and would have split that cluster into two,
-            and then s2and might add Donald Jones to the D Jones cluster, and once remerged, the resulting
-            final cluster would have D Jones, David Jones, and Donald Jones.
-        partial_supervision: Dict
-            the dictionary of partial supervision provided with this dataset/these blocks
-        total_ram_bytes: Optional[int]
-            Optional explicit RAM budget for promoted incremental query batching.
-        Returns
-        -------
-        Dict: incremental clustering payload.
-        """
-        partial_supervision = normalize_partial_supervision(partial_supervision)
-        if runtime_context is None:
-            runtime_context = build_runtime_context("cluster_predict_incremental", backend="python")
-        elif stage_uses_rust(runtime_context):
-            raise ValueError(
-                "Clusterer.predict_incremental operates on ANDData through Python; "
-                "use predict_incremental_from_arrow for Rust"
-            )
-        require_dataset_name_counts_binding_for_clusterer(
-            self,
-            dataset,
-            context="Clusterer.predict_incremental",
-        )
-        return self._predict_incremental_python(
-            block_signatures,
-            dataset,
-            prevent_new_incompatibilities=prevent_new_incompatibilities,
-            partial_supervision=partial_supervision,
-            runtime_context=runtime_context,
-            total_ram_bytes=total_ram_bytes,
-        )
-
-    def _predict_incremental_python(
-        self,
-        block_signatures: list[str],
-        dataset: ANDData,
-        *,
-        prevent_new_incompatibilities: bool,
-        partial_supervision: dict[tuple[str, str], int | float],
-        runtime_context: RuntimeContext,
-        total_ram_bytes: int | None,
-        prediction_state: PredictionState | None = None,
-    ) -> dict[str, Any]:
-        """Run classic incremental prediction through Python.
-
-        This is not an external compatibility API. For behavior/parameters,
-        refer to `predict_incremental`.
-        """
-        if prediction_state is None:
-            prediction_state = _prediction_state_from_dataset(dataset)
-        logger.info(f"Beginning incremental clustering for {len(block_signatures)} signatures...")
-        seed_setup = self._build_incremental_seed_setup(
-            dataset,
-            partial_supervision,
-            runtime_context,
-            total_ram_bytes=total_ram_bytes,
-            prediction_state=prediction_state,
-        )
-        cluster_seeds_require = seed_setup.required_assignments
-
-        logger.info("Getting name constraints")
-        all_pairs: list[tuple[str, str, float]] = []
-        unassigned_signature_ids: list[str] = []
-        constraint_backend = _build_incremental_constraint_backend(
-            dataset,
-            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
-            runtime_context=runtime_context,
-            suppress_orcid=getattr(self, "suppress_orcid", False),
-            prediction_state=prediction_state,
-        )
-        signature_to_cluster_to_average_dist: dict[str, dict[int | str, IncrementalDistStats]] = defaultdict(
-            lambda: defaultdict(lambda: (0.0, 0, float("inf")))
-        )
-        assigned_signature_ids: list[str] = list(cluster_seeds_require.keys())
-        pair_chunk_size = max(1, int(self.batch_size))
-        constraint_telemetry = _ConstraintTelemetryAccumulator()
-
-        def _update_signature_cluster_average(unassigned_signature: str, cluster_id: int | str, dist: float) -> None:
-            previous_average, previous_count, previous_min = signature_to_cluster_to_average_dist[unassigned_signature][
-                cluster_id
-            ]
-            signature_to_cluster_to_average_dist[unassigned_signature][cluster_id] = (
-                (previous_average * previous_count + float(dist)) / (previous_count + 1),
-                previous_count + 1,
-                min(float(previous_min), float(dist)),
-            )
-
-        for possibly_unassigned_signature in block_signatures:
-            if possibly_unassigned_signature in cluster_seeds_require:
-                continue
-            unassigned_signature_ids.append(possibly_unassigned_signature)
-
-        pair_id_batch: list[tuple[str, str]] = []
-        for unassigned_signature in unassigned_signature_ids:
-            for assigned_signature in assigned_signature_ids:
-                pair_id_batch.append((unassigned_signature, assigned_signature))
-                if len(pair_id_batch) >= pair_chunk_size:
-                    labels, batch_telemetry = self._resolve_constraint_batch(
-                        dataset,
-                        pair_id_batch,
-                        partial_supervision=partial_supervision,
-                        runtime_context=runtime_context,
-                        incremental_dont_use_cluster_seeds=False,
-                        constraint_backend=constraint_backend,
-                    )
-                    _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
-                    all_pairs.extend(
-                        (sig_id_1, sig_id_2, label)
-                        for (sig_id_1, sig_id_2), label in zip(pair_id_batch, labels, strict=True)
-                    )
-                    pair_id_batch = []
-
-        if pair_id_batch:
-            labels, batch_telemetry = self._resolve_constraint_batch(
-                dataset,
-                pair_id_batch,
-                partial_supervision=partial_supervision,
-                runtime_context=runtime_context,
-                incremental_dont_use_cluster_seeds=False,
-                constraint_backend=constraint_backend,
-            )
-            _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
-            all_pairs.extend(
-                (sig_id_1, sig_id_2, label) for (sig_id_1, sig_id_2), label in zip(pair_id_batch, labels, strict=True)
-            )
-
-        logger.info(
-            "Telemetry: constraint_batch stage=predict_incremental_python total_pairs=%d "
-            "partial_supervision_hits=%d "
-            "unresolved_pairs=%d rust_batch_calls=%d api_mode=%s seconds=%.3f run_id=%s",
-            constraint_telemetry.total_pairs,
-            constraint_telemetry.partial_supervision_hits,
-            constraint_telemetry.unresolved_pairs,
-            constraint_telemetry.rust_batch_call_count,
-            constraint_telemetry.api_mode_summary,
-            constraint_telemetry.elapsed_seconds,
-            runtime_context.run_id,
-        )
-
-        logger.info("Featurizing pairs")
-        batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
-            all_pairs,
-            dataset,
-            self.featurizer_info,
-            n_jobs=self.n_jobs,
-            chunk_size=DEFAULT_CHUNK_SIZE,
-            nameless_featurizer_info=self.nameless_featurizer_info,
-            runtime_context=runtime_context,
-            total_ram_bytes=total_ram_bytes,
-        )
-
-        logger.info("Performing pairwise classification")
-        _ensure_lightgbm_fitted(self.classifier)
-        _ensure_lightgbm_fitted(self.nameless_classifier)
-        # Get predictions where there isn't partial supervision,
-        # and fill the rest from partial supervision labels.
-        batch_predictions, model_predict_seconds = _predict_and_combine(
-            self.classifier,
-            self.nameless_classifier,
-            batch_features,
-            batch_labels,
-            batch_nameless_features,
-            "incremental",
-            num_threads=self.n_jobs,
-            runtime_context=runtime_context,
-            total_ram_bytes=total_ram_bytes,
-        )
-        logger.info("Telemetry: model_predict_total seconds=%.3f blocks=1", model_predict_seconds)
-
-        logger.info("Computing average distances for unassigned signatures")
-        for signature_pair, dist in zip(all_pairs, batch_predictions, strict=True):
-            unassigned_signature, assigned_signature, _ = signature_pair
-            if assigned_signature not in cluster_seeds_require:
-                continue
-            cluster_id = cluster_seeds_require[assigned_signature]
-            _update_signature_cluster_average(unassigned_signature, cluster_id, float(dist))
-
-        predicted_clusters = self._run_incremental_phases_bcd(
-            unassigned_signature_ids,
-            dataset,
-            signature_to_cluster_to_average_dist,
-            cluster_seeds_require,
-            seed_setup.recluster_map,
-            seed_setup.original_members,
-            prevent_new_incompatibilities,
-            partial_supervision,
-            runtime_context,
-            total_ram_bytes=total_ram_bytes,
-            split_cluster_seeds_require_inverse=seed_setup.split_members,
-            prediction_state=prediction_state,
-        )
-        phase_b_required_bytes = len(unassigned_signature_ids) * (len(unassigned_signature_ids) - 1) // 2 * 8
-        return _build_incremental_result(
-            predicted_clusters,
-            phase_b_mode="exact",
-            phase_b_budget_bytes=phase_b_required_bytes,
-            phase_b_required_bytes=phase_b_required_bytes,
-        )

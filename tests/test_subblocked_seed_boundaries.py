@@ -13,7 +13,7 @@ def _assert_partition(clusters, blocks):
     assert all(any(set(members) <= set(block) for block in blocks.values()) for members in clusters.values())
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 @pytest.mark.parametrize("claimed", [False, True])
 @pytest.mark.parametrize(("count", "threshold"), [(20, 45), (2, 3)])
 def test_mixed_initial_claim_keeps_compatible_full_name_neighbors(tmp_path, route, claimed, count, threshold):
@@ -30,7 +30,7 @@ def test_mixed_initial_claim_keeps_compatible_full_name_neighbors(tmp_path, rout
     }
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 def test_mixed_initial_claim_at_capacity_preserves_membership_and_name_constraints(tmp_path, route):
     names = [("A", "", "Smith")] * 2 + [("Ada", "", "Smith")] * 2 + [("Bob", "", "Smith")] * 2
     dataset = _dataset(names, {"0": "claimed", "2": "claimed"})
@@ -59,7 +59,7 @@ def test_arrow_subblocking_normalizes_integer_signature_ids(tmp_path, initials):
     _assert_partition(actual, string_blocks)
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 @pytest.mark.parametrize("same_last", [False, True])
 def test_claimed_profile_and_initial_attachment_stay_in_original_block(tmp_path, route, same_last):
     names = [("Ada", "", "Smith")] * 3 + [("Ada", "", "Smith" if same_last else "Jones")] * 3
@@ -72,7 +72,7 @@ def test_claimed_profile_and_initial_attachment_stay_in_original_block(tmp_path,
     assert any({"3", "4", "5"} <= set(members) for members in clusters.values())
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 def test_claimed_component_is_atomic_across_first_name_subblocks(tmp_path, route):
     dataset = _dataset([("Abdul", "", "Smith"), ("Ahmed", "", "Smith")] * 2, {"0": "claimed", "1": "claimed"})
     clusters = _predict(tmp_path, dataset, {"one": list(dataset.signatures)}, route, threshold=2, distance=0.9)
@@ -83,7 +83,7 @@ def test_claimed_component_is_atomic_across_first_name_subblocks(tmp_path, route
     }
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 def test_claimed_component_does_not_absorb_incompatible_names(tmp_path, route):
     dataset = _dataset(
         [("Ada", "", "Smith")] * 3 + [("Amy", "", "Smith")] * 3 + [("A", "", "Smith")], {"0": "claimed", "3": "claimed"}
@@ -95,7 +95,7 @@ def test_claimed_component_does_not_absorb_incompatible_names(tmp_path, route):
     assert not any({"1", "4"} <= set(members) for members in clusters.values())
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 def test_initial_only_block_uses_bulk_even_beside_full_name_block(tmp_path, route):
     dataset = _dataset([("Ada", "", "Smith")] + [("A", "", "Smith")] * 4, {})
     blocks = {"full": ["0"], "initial": ["1", "2", "3", "4"]}
@@ -103,7 +103,7 @@ def test_initial_only_block_uses_bulk_even_beside_full_name_block(tmp_path, rout
     _assert_partition(clusters, blocks)
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 def test_profile_size_limit_applies_to_each_original_block(tmp_path, route):
     dataset = _dataset(
         [("Ada", "", "Smith"), ("Ada", "", "Smith"), ("A", "", "Smith")] * 2,
@@ -116,7 +116,7 @@ def test_profile_size_limit_applies_to_each_original_block(tmp_path, route):
     assert any({"3", "4"} <= set(members) for members in clusters.values())
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 def test_residual_cluster_ids_from_independent_blocks_preserve_all_outputs(tmp_path, route):
     dataset = _dataset([("Ada", "", "Smith"), ("Ada", "", "Smith"), ("A", "", "Smith")] * 2, {})
     dataset.cluster_seeds_disallow = {("0", "2"), ("1", "2"), ("3", "5"), ("4", "5")}
@@ -131,7 +131,7 @@ def test_residual_cluster_ids_from_independent_blocks_preserve_all_outputs(tmp_p
     }
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 @pytest.mark.parametrize("constraint_source", ["explicit_disallow", "partial_supervision", "ignored_seeds"])
 @pytest.mark.parametrize("disallow", [("1", "3"), ("1", "2")])
 def test_query_disallows_survive_subblocked_attachment(tmp_path, route, constraint_source, disallow):
@@ -163,7 +163,7 @@ def test_query_disallows_survive_subblocked_attachment(tmp_path, route, constrai
     assert not any(set(disallow) <= set(members) for members in clusters.values())
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 def test_query_must_link_survives_subblocked_attachment(tmp_path, route):
     """A must-link whose partner is attached in a later initial-only group."""
     dataset = _dataset(
@@ -184,7 +184,7 @@ def test_query_must_link_survives_subblocked_attachment(tmp_path, route):
     assert any({"1", "3"} <= set(members) for members in clusters.values())
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 @pytest.mark.parametrize(
     "flags", [{}, {"incremental_dont_use_cluster_seeds": True}, {"use_default_constraints_as_supervision": False}]
 )
@@ -211,7 +211,9 @@ def test_legacy_author_id_prediction_does_not_pack_unused_seeds(tmp_path):
     dataset = _dataset([("Ada", "", "Smith")] * 3, dict.fromkeys(["0", "1", "2"], "claimed"))
     for sid, signature in dataset.signatures.items():
         dataset.signatures[sid] = signature._replace(author_id=f"legacy-{sid}")
-    result = _predict(tmp_path, dataset, {"one": list(dataset.signatures)}, "python", threshold=2, use_s2_clusters=True)
+    result = _predict(
+        tmp_path, dataset, {"one": list(dataset.signatures)}, "python", threshold=None, use_s2_clusters=True
+    )
     assert result == {f"legacy-{sid}": [sid] for sid in dataset.signatures}
 
 
@@ -223,7 +225,7 @@ class _YearDistanceClassifier:
         return np.column_stack([distances, 1.0 - distances])
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 @pytest.mark.parametrize("source", ["dataset", "caller"])
 @pytest.mark.parametrize("exclude_query", [False, True])
 def test_generated_bulk_seed_negatives_do_not_reject_initial_attachment(tmp_path, route, source, exclude_query):
@@ -260,7 +262,7 @@ def test_generated_bulk_seed_negatives_do_not_reject_initial_attachment(tmp_path
     assert partial_supervision == original_supervision
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 def test_average_linkage_keeps_bulk_negative_apart_in_large_merge(tmp_path, route):
     """A negative stays hard when a large average-linkage merge would dilute it."""
     dataset = _dataset([("Ada", "", "Smith")] * 400 + [("A", "", "Smith")], {})
@@ -296,7 +298,7 @@ def test_average_linkage_keeps_bulk_negative_apart_in_large_merge(tmp_path, rout
     assert partial_supervision == original_supervision
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 @pytest.mark.parametrize("claimed", [False, True])
 def test_dash_initial_compound_subblock_is_classified_by_its_key_first(tmp_path, monkeypatch, route, claimed):
     """A "J.-D." record keys as "j", so its subblock attaches like initials and never homes a profile."""
@@ -329,7 +331,7 @@ def test_dash_initial_compound_subblock_is_classified_by_its_key_first(tmp_path,
         assert observed["attach"] == {"one|subblock=j": ["0"]}
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
+@pytest.mark.parametrize("route", ["arrow"])
 @pytest.mark.parametrize(("neighbour", "attaches"), [("Jean-Daniel", True), ("Jean-Marc", False)])
 def test_dash_initial_compound_attaches_under_cluster_name_checks(tmp_path, route, neighbour, attaches):
     """The key rule routes "J.-D." to initial-only attachment; the attach name checks then decide the link."""

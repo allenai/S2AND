@@ -8,9 +8,9 @@ production model and public-data version is `1.3`, on a separate version axis.
 ### Status
 
 - **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles are on S3 (see [data](data.md)).
-  PyPI has the `1.0.0b4` beta for integration testing; the final `1.0.0` release is pending.
+  PyPI has the `1.0.0b5` beta for integration testing; the final `1.0.0` release is pending.
   uv installs the beta's `s2and-rust` dependency only when it is pinned too
-  (`s2and==1.0.0b4 s2and-rust==1.0.0b4`) or with `--prerelease=allow`; pip needs neither.
+  (`s2and==1.0.0b5 s2and-rust==1.0.0b5`) or with `--prerelease=allow`; pip needs neither.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
@@ -570,6 +570,48 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   s_gupta, and 82 s instead of 91 s on a_silva. One new signature into s_lee's
   512,686 seeds takes 15.8 s instead of 28.4 s. Peak RSS of the s_lee full block is
   15.2 GB instead of 17.7 GB; the smallest requests use about 0.1 GB more.
+- Hard constraints split each signature's names once per call and compare
+  precomputed keys, instead of splitting both names again for every pair. With
+  identical clusters, the a_silva full block takes 80 s instead of 87 s and the
+  j_smith full block 346 s instead of 359 s.
+- Request window featurizers stage signatures and papers on the request's thread
+  pool. The vendored CLD2 wrapper serializes language detection behind a global
+  lock, so one thread detects titles while the others stage signatures. Title,
+  venue and affiliation n-grams are counted by hashing each gram's bytes, without
+  a string per gram. On the s_lee incremental request the window featurizer takes
+  about 9 s instead of about 15 s.
+- Large arrays are no longer copied on one thread. Featurizer outputs move into
+  NumPy without a copy, the scorer copies its input batch in parallel, compact
+  batches reach the native scorer as views, and model columns are gathered by a
+  parallel Rust function instead of `np.take`. Linker distance summaries use array
+  operations instead of per-row Python loops, and summed values keep their order.
+  Upper-triangle pairs are computed from their offsets in parallel. With identical
+  clusters, the j_smith full block takes 279 s instead of 317 s and the a_silva
+  full block 66 s instead of 72 s.
+- fastcluster linkage of one block runs on a worker thread while the next block's
+  distance matrix builds; two matrices are alive only while the clustering one is
+  below a tenth of the RAM budget. Peak RSS of the a_silva full block is 3.5 GB
+  instead of 3.1 GB.
+- Arrow prediction pauses Python's cyclic garbage collector, ORCID rows load once
+  per attachment block instead of once per pass, and retrieval scores up to four
+  queries per SPECTER vector chunk with bit-identical sums.
+- Extension maps and sets hash with aHash instead of SipHash. With identical
+  clusters, the s_lee incremental request takes 43 s instead of 50 s, one new
+  signature into s_lee 13.3 s instead of 15.6 s, and the a_silva full block 58 s
+  instead of 61 s.
+- The incremental planner returns each plan's distinct pair signatures once, with
+  per-pair positions into that list, instead of two id strings per pair. This is
+  the internal `RawBlockQueryCandidatePlanner.plan` payload; the j_smith full
+  block is 1-2% faster.
+- Together, on the same 13 requests with identical clusters, run right after a
+  rerun of the published `1.0.0b4`, `1.0.0b5` incremental prediction takes 39.5 s
+  instead of 51.5 s on s_lee, 10.0 s instead of 14.7 s on j_smith, 6.8 s instead of
+  8.8 s on a_khan, and 6.3 s instead of 8.0 s on s_gupta. Full-block prediction takes
+  1,535 s instead of 2,062 s on s_lee, 240 s instead of 335 s on j_smith, 103 s
+  instead of 148 s on a_khan, 109 s instead of 147 s on s_gupta, and 57 s instead of
+  82 s on a_silva. One new signature into s_lee's 512,686 seeds takes 13.3 s instead
+  of 15.6 s. Peak RSS of the a_silva full block is 3.6 GB instead of 3.1 GB; other
+  requests change by at most 0.1 GB.
 - `NameCountsIndex.open` no longer hashes the index files or checks every record on
   each open. It checks the manifest, file sizes, file headers, and section bounds,
   so lookups stay memory-safe. For the 2.3 GB `1.3` index an open takes 0.04 s and

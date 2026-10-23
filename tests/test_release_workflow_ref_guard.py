@@ -57,13 +57,11 @@ def test_release_publication_requires_successful_validation_and_smoke(release_wo
                 pending.extend(jobs[dependency].get("needs", []))
         return found
 
-    for name in ("publish-rust", "publish-s2and"):
+    for name in ("publish-s2and",):
         assert {"release-smoke", "validate"} <= prerequisites(name)
         assert jobs[name]["environment"] == {"name": "pypi"}
     # Only main publishes, and publication still requires every prerequisite to succeed.
-    assert jobs["publish-rust"]["if"] == "success() && github.ref == 'refs/heads/main'"
-    assert "if" not in jobs["publish-s2and"], "Publication must retain GitHub's default success dependency condition"
-    assert "publish-rust" in prerequisites("publish-s2and")
+    assert jobs["publish-s2and"]["if"] == "success() && github.ref == 'refs/heads/main'"
     for name in ("source-distributions", "wheels-windows", "wheels-macos", "wheels-linux"):
         assert "validate" in prerequisites(name)
         assert name in prerequisites("release-smoke")

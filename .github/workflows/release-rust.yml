@@ -48,7 +48,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Build s2and distributions
-        run: uv build --sdist --wheel --out-dir dist --clear
+        run: uv build --sdist --out-dir dist --clear
 
       - name: Verify built release asset contract
         run: >-
@@ -56,27 +56,22 @@ jobs:
           scripts/verification/verify_production_model_distributions.py
           --dist-dir dist --source-root .
 
-      - name: Build s2and-rust sdist
-        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
-        with:
-          maturin-version: v1.14.1
-          command: sdist
-          args: --out dist
-          working-directory: s2and_rust
+      - name: Verify package data inventory
+        run: uv run --no-project python scripts/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
 
       - name: Verify Rust distribution license notices
-        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir s2and_rust/dist
+        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir dist
 
       # Building from sdist compiles the extension, which is a distinct path from
       # installing a wheel. Exercise it on every supported interpreter.
-      - name: Install and exercise s2and-rust sdist
+      - name: Install and exercise s2and sdist
         shell: bash
         run: |
-          sdist="$(find s2and_rust/dist -type f -name '*.tar.gz' -print -quit)"
+          sdist="$(find dist -type f -name '*.tar.gz' -print -quit)"
           test -n "$sdist"
           for py in 3.11 3.12 3.13; do
-            echo "::group::s2and-rust sdist smoke (py${py})"
-            smoke_venv="$RUNNER_TEMP/s2and-rust-sdist-smoke-${py}"
+            echo "::group::s2and sdist smoke (py${py})"
+            smoke_venv="$RUNNER_TEMP/s2and-sdist-smoke-${py}"
             uv venv --python "$py" "$smoke_venv"
             uv pip install --python "$smoke_venv/bin/python" "$sdist"
             uv run --no-project --python "$smoke_venv/bin/python" python \
@@ -86,13 +81,8 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: dist-s2and
+          name: dist-s2and-source
           path: dist/*
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: dist-s2and-rust-sdist
-          path: s2and_rust/dist/*
 
   wheels-windows:
     name: wheels (windows, py${{ matrix.py }})
@@ -119,16 +109,18 @@ jobs:
           maturin-version: v1.14.1
           command: build
           args: --release --locked --compatibility pypi --out dist
-          working-directory: s2and_rust
+
+      - name: Verify package data inventory
+        run: uv run --no-project python scripts/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
 
       - name: Verify Rust distribution license notices
-        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir s2and_rust/dist
+        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir dist
 
       - name: Install and exercise Windows wheel
         shell: pwsh
         run: |
-          $smokeVenv = Join-Path $env:RUNNER_TEMP "s2and-rust-wheel-smoke"
-          $wheel = (Get-ChildItem s2and_rust/dist/*.whl | Select-Object -First 1).FullName
+          $smokeVenv = Join-Path $env:RUNNER_TEMP "s2and-wheel-smoke"
+          $wheel = (Get-ChildItem dist/*.whl | Select-Object -First 1).FullName
           uv venv --python "${{ matrix.py }}" $smokeVenv
           $python = Join-Path $smokeVenv "Scripts/python.exe"
           uv pip install --python $python $wheel
@@ -136,8 +128,8 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: dist-s2and-rust-windows-py${{ matrix.py }}
-          path: s2and_rust/dist/*
+          name: dist-s2and-windows-py${{ matrix.py }}
+          path: dist/*
 
   wheels-macos:
     name: wheels (macos universal2, py${{ matrix.py }})
@@ -169,16 +161,18 @@ jobs:
           maturin-version: v1.14.1
           command: build
           args: --release --locked --compatibility pypi --out dist
-          working-directory: s2and_rust
+
+      - name: Verify package data inventory
+        run: uv run --no-project python scripts/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
 
       - name: Verify Rust distribution license notices
-        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir s2and_rust/dist
+        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir dist
 
       - name: Install and exercise macOS wheel
         shell: bash
         run: |
-          smoke_venv="$RUNNER_TEMP/s2and-rust-wheel-smoke"
-          wheel="$(find s2and_rust/dist -type f -name '*.whl' -print -quit)"
+          smoke_venv="$RUNNER_TEMP/s2and-wheel-smoke"
+          wheel="$(find dist -type f -name '*.whl' -print -quit)"
           test -n "$wheel"
           uv venv --python "${{ matrix.py }}" "$smoke_venv"
           uv pip install --python "$smoke_venv/bin/python" "$wheel"
@@ -187,8 +181,8 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: dist-s2and-rust-macos-universal2-py${{ matrix.py }}
-          path: s2and_rust/dist/*
+          name: dist-s2and-macos-universal2-py${{ matrix.py }}
+          path: dist/*
 
   wheels-linux:
     name: wheels (linux ${{ matrix.platform.name }})
@@ -224,15 +218,17 @@ jobs:
           args: >
             --release --locked --compatibility pypi --out dist
             -i python3.11 -i python3.12 -i python3.13
-          working-directory: s2and_rust
+
+      - name: Verify package data inventory
+        run: uv run --no-project python scripts/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
 
       - name: Verify Rust distribution license notices
-        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir s2and_rust/dist
+        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir dist
 
       - uses: actions/upload-artifact@v6
         with:
-          name: dist-s2and-rust-linux-${{ matrix.platform.name }}
-          path: s2and_rust/dist/*
+          name: dist-s2and-linux-${{ matrix.platform.name }}
+          path: dist/*
 
   release-smoke:
     name: clean installed-artifact smoke (py${{ matrix.py }})
@@ -251,26 +247,18 @@ jobs:
       - name: Download s2and distributions
         uses: actions/download-artifact@v7
         with:
-          name: dist-s2and
-          path: release/s2and
-
-      - name: Download s2and-rust distributions
-        uses: actions/download-artifact@v7
-        with:
-          pattern: dist-s2and-rust-*
+          pattern: dist-s2and-*
           merge-multiple: true
-          path: release/s2and-rust
+          path: release/s2and
 
       - name: Clean-install release artifacts
         run: |
           SMOKE_VENV="$RUNNER_TEMP/s2and-release-smoke"
           PY_TAG="cp$(echo '${{ matrix.py }}' | tr -d .)"
-          RUST_WHEEL="$(find release/s2and-rust -type f -name "*${PY_TAG}*manylinux*x86_64.whl" -print -quit)"
-          PY_WHEEL="$(find release/s2and -type f -name 's2and-*.whl' -print -quit)"
-          test -n "$RUST_WHEEL"
-          test -n "$PY_WHEEL"
+          WHEEL="$(find release/s2and -type f -name "*${PY_TAG}*manylinux*x86_64.whl" -print -quit)"
+          test -n "$WHEEL"
           uv venv --python '${{ matrix.py }}' "$SMOKE_VENV"
-          uv pip install --python "$SMOKE_VENV/bin/python" "$RUST_WHEEL" "$PY_WHEEL"
+          uv pip install --python "$SMOKE_VENV/bin/python" "$WHEEL"
 
       - name: Exercise installed synthetic bulk and incremental Arrow paths
         run: |
@@ -288,72 +276,21 @@ jobs:
           name: release-distributions
           path: release
 
-  publish-rust:
-    name: publish s2and-rust to PyPI
+  publish-s2and:
+    name: publish s2and to PyPI
     needs: [release-smoke]
-    # publish-s2and needs this job, so a branch run publishes nothing.
     if: success() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: pypi
     permissions:
       id-token: write
-
     steps:
       - name: Download tested release artifacts
         uses: actions/download-artifact@v7
         with:
           name: release-distributions
           path: release
-
-      - name: Publish s2and-rust
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: release/s2and-rust
-
-  publish-s2and:
-    name: publish s2and to PyPI
-    needs: [publish-rust]
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-    permissions:
-      id-token: write
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: Download tested release artifacts
-        uses: actions/download-artifact@v7
-        with:
-          name: release-distributions
-          path: release
-
-      - name: Wait for exact Rust dependency
-        run: |
-          RUST_VERSION="$(uv run --no-project python - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          payload = tomllib.loads(Path('s2and_rust/pyproject.toml').read_text(encoding='utf-8'))
-          print(payload['project']['version'])
-          PY
-          )"
-          for attempt in $(seq 1 10); do
-            echo "Rust install probe attempt $attempt/10 for s2and-rust==$RUST_VERSION"
-            if uv run --no-project --isolated --with "s2and-rust==$RUST_VERSION" python -c "import s2and_rust"; then
-              exit 0
-            fi
-            if [ "$attempt" -lt 10 ]; then
-              sleep 15
-            fi
-          done
-          echo "s2and-rust==$RUST_VERSION was not installable after 10 attempts" >&2
-          exit 1
-
       - name: Publish s2and
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

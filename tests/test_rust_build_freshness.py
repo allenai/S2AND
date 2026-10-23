@@ -51,12 +51,10 @@ def _unsupported_source_path(root: Path) -> Path:
 
 
 def _install_native_stub(monkeypatch: pytest.MonkeyPatch, native_path: Path, build_info: dict[str, str]) -> None:
-    package = ModuleType("s2and_rust")
-    monkeypatch.setattr(package, "get_build_info", lambda: build_info, raising=False)
-    native = ModuleType("s2and_rust._s2and_rust")
+    native = ModuleType("s2and._s2and_rust")
     native.__file__ = str(native_path)
-    monkeypatch.setitem(sys.modules, "s2and_rust", package)
-    monkeypatch.setitem(sys.modules, "s2and_rust._s2and_rust", native)
+    monkeypatch.setattr(native, "get_build_info", lambda: build_info, raising=False)
+    monkeypatch.setitem(sys.modules, "s2and._s2and_rust", native)
 
 
 def test_digest_is_independent_of_file_creation_order(tmp_path: Path) -> None:
@@ -173,11 +171,11 @@ def test_digest_rejects_unsupported_source_names_with_clear_error(
 def _uv_cache_project(root: Path) -> tuple[Path, Path]:
     """Use the native package's real cache keys with an offline wheel builder."""
     source = _write_tree(root / "package", _TREE)
-    native_manifest = Path(__file__).resolve().parents[1] / "s2and_rust/pyproject.toml"
+    native_manifest = Path(__file__).resolve().parents[1] / "pyproject.toml"
     keys = tomllib.loads(native_manifest.read_text(encoding="utf-8"))["tool"]["uv"]["cache-keys"]
-    cache_keys = ", ".join("{ file = " + json.dumps(key["file"]) + " }" for key in keys)
+    cache_keys = ", ".join("{ file = " + json.dumps(key["file"].removeprefix("s2and_rust/")) + " }" for key in keys)
     (source / "pyproject.toml").write_text(
-        '[project]\nname = "s2and-rust"\nversion = "0.0.0"\nrequires-python = ">=3.11"\n'
+        '[project]\nname = "s2and"\nversion = "0.0.0"\nrequires-python = ">=3.11"\n'
         '[build-system]\nrequires = []\nbuild-backend = "backend"\nbackend-path = ["."]\n'
         f"[tool.uv]\ncache-keys = [{cache_keys}]\n",
         encoding="utf-8",
@@ -190,12 +188,12 @@ def _uv_cache_project(root: Path) -> tuple[Path, Path]:
         "    counter = Path(__file__).resolve().parent / 'build_count.txt'\n"
         "    count = int(counter.read_text()) + 1 if counter.exists() else 1\n"
         "    counter.write_text(str(count))\n"
-        "    name = 's2and_rust-0.0.0-py3-none-any.whl'\n"
-        "    dist = 's2and_rust-0.0.0.dist-info'\n"
+        "    name = 's2and-0.0.0-py3-none-any.whl'\n"
+        "    dist = 's2and-0.0.0.dist-info'\n"
         "    with ZipFile(Path(wheel_directory) / name, 'w') as wheel:\n"
         "        wheel.writestr('freshness_probe.py', f'BUILD_COUNT = {count}\\n')\n"
         "        wheel.writestr(dist + '/METADATA', "
-        "'Metadata-Version: 2.1\\nName: s2and-rust\\nVersion: 0.0.0\\n')\n"
+        "'Metadata-Version: 2.1\\nName: s2and\\nVersion: 0.0.0\\n')\n"
         "        wheel.writestr(dist + '/WHEEL', "
         "'Wheel-Version: 1.0\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n')\n"
         "        wheel.writestr(dist + '/RECORD', '')\n"
@@ -206,8 +204,8 @@ def _uv_cache_project(root: Path) -> tuple[Path, Path]:
     project.mkdir()
     (project / "pyproject.toml").write_text(
         '[project]\nname = "freshness-probe-host"\nversion = "0.0.0"\nrequires-python = ">=3.11"\n'
-        'dependencies = ["s2and-rust"]\n[project.optional-dependencies]\ndev = []\n'
-        '[tool.uv.sources]\ns2and-rust = { path = "../package" }\n',
+        'dependencies = ["s2and"]\n[project.optional-dependencies]\ndev = []\n'
+        '[tool.uv.sources]\ns2and = { path = "../package" }\n',
         encoding="utf-8",
     )
     return source, project
@@ -300,7 +298,7 @@ def _session_project(root: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     (root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-    package = root / "installed" / "s2and_rust"
+    package = root / "installed" / "s2and"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("from ._s2and_rust import *\n", encoding="utf-8")
     return source_root, package / "_s2and_rust.py"
@@ -363,7 +361,7 @@ def test_missing_source_digest_reports_loaded_path_and_recovery(
 
 
 def test_missing_native_module_reports_rebuild_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "s2and_rust", None)
+    monkeypatch.setitem(sys.modules, "s2and._s2and_rust", None)
 
     message = stale_rust_extension_message(tmp_path)
 
@@ -377,7 +375,7 @@ def test_uninstalled_extension_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_
     source_root = _write_tree(tmp_path / "s2and_rust", _TREE)
     spec = importlib.machinery.PathFinder.find_spec("s2and_rust", [str(tmp_path)])
     assert spec is not None and spec.loader is None
-    monkeypatch.setitem(sys.modules, "s2and_rust", importlib.util.module_from_spec(spec))
+    monkeypatch.setitem(sys.modules, "s2and._s2and_rust", importlib.util.module_from_spec(spec))
 
     message = stale_rust_extension_message(source_root)
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import s2and_rust
+from s2and import _s2and_rust as s2and_rust
 
 
 def main() -> None:

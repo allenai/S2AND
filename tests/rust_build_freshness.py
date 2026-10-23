@@ -10,13 +10,14 @@ local crates before rebuilding.
 """
 
 import hashlib
+import importlib
 import stat
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
 RUST_PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "s2and_rust"
-REBUILD_COMMAND = "uv sync --extra dev --reinstall-package s2and-rust"
+REBUILD_COMMAND = "uv sync --extra dev --reinstall-package s2and"
 CLEAN_COMMAND = "uv run --no-sync cargo clean -p s2and_rust -p cld2 --manifest-path s2and_rust/Cargo.toml --release"
 
 # Mirrors SOURCE_DIGEST_FILES and SOURCE_DIGEST_DIRS in s2and_rust/build.rs.
@@ -77,7 +78,7 @@ def stale_rust_extension_message(root: Path = RUST_PACKAGE_ROOT) -> str | None:
         message naming the loaded file and the rebuild command.
     """
     try:
-        import s2and_rust
+        s2and_rust = importlib.import_module("s2and._s2and_rust")
     except ImportError as exc:
         return f"Cannot import the s2and_rust extension ({exc}). Rebuild it with: {REBUILD_COMMAND}"
     loaded_paths = sorted(

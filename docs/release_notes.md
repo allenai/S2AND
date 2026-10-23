@@ -1,5 +1,15 @@
 # Release Notes
 
+## Unreleased runtime changes
+
+- Bundle the native extension in the `s2and` wheel as `s2and._s2and_rust`.
+- Retire `Clusterer.predict_incremental` and classic `predict(batching_threshold=...)`.
+  Use the corresponding Arrow APIs. Full-block classic prediction and training remain available.
+- Run EPS sweep subblocking through the production native graph planner.
+  Keep ORCID labels hidden for ORCID-B3 selection. Revalidate historical giant-block conclusions before publication.
+- Preserve format-1 model fields for retired experiment settings; they no longer affect runtime behavior.
+
+
 ## Unreleased 1.0.0 simplification
 
 The coordinated `s2and` and `s2and-rust` package version is `1.0.0`. The

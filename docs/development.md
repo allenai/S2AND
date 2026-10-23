@@ -28,8 +28,8 @@ The user-facing recovery commands are in
 [install.md](install.md#build-the-rust-extension-from-source). This section
 explains why they are sometimes needed.
 
-Syncing `uv run` decides whether to rebuild `s2and-rust` from the `cache-keys`
-list in `s2and_rust/pyproject.toml`. Files outside that list, such as editor
+Syncing `uv run` decides whether to rebuild `s2and` from the `cache-keys`
+list in the root `pyproject.toml`. Files outside that list, such as editor
 swap files and build outputs, do not invalidate uv's cached wheel. Cargo still
 watches source directories to detect new modules when a native build runs.
 
@@ -65,7 +65,7 @@ uv run --no-project python scripts/run_ci_locally.py
 - lint (`scripts/sync_version.py --check`, `scripts/sync_feature_schema.py --check`,
   `ruff check`, and `ruff format --check`)
 - one required-runtime `typecheck-and-test` job, which in order:
-  - syncs the locked environment, building `s2and-rust` from source;
+  - syncs the locked environment, building `s2and` from source;
   - runs native `cargo fmt`, correctness/suspicious `clippy`, and Rust
     library-test gates;
   - runs the installed-Rust API smoke and `ty`; and
@@ -92,7 +92,7 @@ uv run --no-project python scripts/run_ci_locally.py typecheck-and-test
 ```
 
 The current runtime requires the Rust-backed name-count index even when Python orchestration is selected. The runner builds
-the exactly pinned `s2and-rust` dependency once, requires it to import, and then runs full-suite coverage of the Python
+the bundled native extension once, requires it to import, and then runs full-suite coverage of the Python
 route.
 
 The CI runner's `ty` checks use Python 3.11 and the `linux` platform to match
@@ -105,7 +105,7 @@ If you want to skip Rust extension compilation while iterating, run only the sta
 
 ```bash
 uv run --no-project python scripts/run_ci_locally.py lint
-uv sync --active --extra dev --frozen --no-install-package s2and-rust
+uv sync --active --extra dev --frozen --no-install-package s2and
 uv run --active --no-project ty check s2and
 uv run --active --no-project ty check scripts --ignore unresolved-reference --ignore unresolved-attribute
 ```
@@ -236,12 +236,10 @@ checkout while jobs use its files or environment.
 
 Versioning is centralized in `VERSION`.
 
-This synchronizes Python/Rust package manifests mechanically. The release fixes
-both package versions at `1.0.0`; the production model and public
-data remain release version `1.3`, and the Arrow/name-count representation uses
-public format `1`. At runtime the installed Python and Rust package versions
-must match exactly. The release policy and publication gates are in
-[release.md](release.md).
+This synchronizes the root Python version, Cargo version, and both lockfiles.
+The single `s2and` distribution contains Python and native code.
+The loader rejects a native binary whose version differs from the installed package.
+Model/data release `1.3` and public format `1` remain unchanged.
 
 Recommended one-time hook setup:
 
@@ -266,7 +264,7 @@ Notes:
 - The pre-commit hook only runs when `VERSION` is staged; it runs steps 2 and 3
   and stages the updated files.
 - `scripts/sync_version.py` rewrites the version in `pyproject.toml`,
-  `s2and_rust/pyproject.toml`, `s2and_rust/Cargo.toml`, and the package entries
+  the root `pyproject.toml`, `s2and_rust/Cargo.toml`, and the package entries
   in `s2and_rust/Cargo.lock` and `uv.lock`. The result passes
   `cargo metadata --locked` and `uv lock --check`, so a bump does not re-resolve
   other dependencies.

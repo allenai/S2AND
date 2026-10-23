@@ -1,11 +1,11 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.14"
 resolution-markers = [
     "(python_full_version >= '3.12' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine != 'AMD64' and sys_platform == 'win32') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "(python_full_version < '3.12' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine != 'AMD64' and sys_platform == 'win32') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
     "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "(python_full_version >= '3.12' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32')",
+    "(python_full_version < '3.12' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine != 'AMD64' and sys_platform == 'win32') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
     "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "(python_full_version < '3.12' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32')",
 ]
@@ -325,11 +325,11 @@ resolution-markers = [
     "(python_full_version < '3.12' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32')",
 ]
 dependencies = [
-    { name = "cython", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or sys_platform == 'darwin'" },
-    { name = "matplotlib", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or sys_platform == 'darwin'" },
-    { name = "numpy", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or sys_platform == 'darwin'" },
-    { name = "scikit-learn", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or sys_platform == 'darwin'" },
-    { name = "scipy", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or sys_platform == 'darwin'" },
+    { name = "cython" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/68/7c/d465bab9f98b75c5c1f5e80165dd82847a504ced655d162b585df08a717b/genieclust-1.1.6.tar.gz", hash = "sha256:4c159f507b84b6d6d171883223648d837c520a9bcce650944a6ee0cb320e2151", size = 95893, upload-time = "2024-08-22T10:42:22.227Z" }
 wheels = [
@@ -359,11 +359,11 @@ resolution-markers = [
     "(python_full_version < '3.12' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine != 'AMD64' and sys_platform == 'win32') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
 ]
 dependencies = [
-    { name = "cython", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (platform_machine != 'AMD64' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')" },
-    { name = "matplotlib", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (platform_machine != 'AMD64' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')" },
-    { name = "numpy", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (platform_machine != 'AMD64' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')" },
-    { name = "quitefastmst", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (platform_machine != 'AMD64' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')" },
-    { name = "scikit-learn", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (platform_machine != 'AMD64' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "cython" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "quitefastmst" },
+    { name = "scikit-learn" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/53/5d/adfaa2502f3fd3a813b224eedaa496054b0e755bdefff8239e1a41ded3e1/genieclust-1.2.0.tar.gz", hash = "sha256:d00f9220393788be695ad6fe999e0b852e96d3b4b053bd7989db8ed0d52251ce", size = 97870, upload-time = "2025-07-25T13:04:54.083Z" }
 wheels = [
@@ -1182,8 +1182,8 @@ name = "quitefastmst"
 version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cython", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (platform_machine != 'AMD64' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')" },
-    { name = "numpy", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (platform_machine != 'AMD64' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "cython" },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/36/c3/a0568dd78dd6346a1fc52b0167420ee3a5dbdced1d5950698894530f4e51/quitefastmst-0.9.0.tar.gz", hash = "sha256:c8afbfdbf81ea765b49ccd8c629222d03aa5be90a0c3109974768f7611f44766", size = 47765, upload-time = "2025-07-23T08:47:01.46Z" }
 wheels = [
@@ -1235,6 +1235,7 @@ wheels = [
 
 [[package]]
 name = "s2and"
+version = "1.0.0b5"
 source = { editable = "." }
 dependencies = [
     { name = "fastcluster" },
@@ -1251,7 +1252,6 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pycld2" },
     { name = "quitefastmst", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (platform_machine != 'AMD64' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')" },
-    { name = "s2and-rust" },
     { name = "scikit-learn" },
     { name = "seaborn" },
     { name = "setuptools" },
@@ -1312,7 +1312,6 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.3,<7" },
     { name = "quitefastmst", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (platform_machine != 'AMD64' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')", specifier = "==0.9.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.22" },
-    { name = "s2and-rust", directory = "s2and_rust" },
     { name = "scikit-learn", specifier = "==1.9.0" },
     { name = "seaborn", specifier = ">=0.12,<0.14" },
     { name = "setuptools", specifier = ">=78.1.1,<82" },
@@ -1323,11 +1322,6 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'", specifier = "==0.0.61" },
 ]
 provides-extras = ["author-counts", "orcid-counts", "dev"]
-
-[[package]]
-name = "s2and-rust"
-version = "1.0.0b5"
-source = { directory = "s2and_rust" }
 
 [[package]]
 name = "s3transfer"

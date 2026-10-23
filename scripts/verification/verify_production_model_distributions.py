@@ -38,7 +38,11 @@ def _sha256_bytes(payload: bytes) -> str:
 def _declared_package_data_paths(source_root: Path) -> set[str]:
     config_path = source_root / "pyproject.toml"
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    patterns = config["tool"]["setuptools"]["package-data"]["s2and"]
+    patterns = [
+        entry["path"].removeprefix("s2and/")
+        for entry in config["tool"]["maturin"]["include"]
+        if entry["path"].startswith("s2and/")
+    ]
     package_root = source_root / "s2and"
     expected: set[str] = set()
     missing: list[str] = []
@@ -114,55 +118,59 @@ def _sdist_package_path(member_name: str, *, archive_root: str) -> str | None:
 
 
 def verify_production_model_distributions(*, dist_dir: Path, source_root: Path) -> None:
-    """Validate the single release wheel and sdist under ``dist_dir``."""
+    """Validate every release wheel and source archive under ``dist_dir``."""
 
     source_root = Path(source_root)
     expected = _load_expected_paths(source_root)
     wheels = sorted(Path(dist_dir).glob("s2and-*.whl"))
-    if len(wheels) != 1:
-        raise ValueError(f"expected exactly one s2and wheel, found {len(wheels)}")
-    with zipfile.ZipFile(wheels[0]) as wheel:
-        wheel_file_names = [name for name in wheel.namelist() if not name.endswith("/")]
-        wheel_paths = set(wheel_file_names)
-        if len(wheel_paths) != len(wheel_file_names):
-            raise ValueError(f"{wheels[0].name} contains duplicate package file paths")
-        _verify_archive(
-            archive_name=wheels[0].name,
-            paths=wheel_paths,
-            read_bytes=wheel.read,
-            expected=expected,
-            source_root=source_root,
-        )
+    if not wheels and not list(Path(dist_dir).glob("s2and-*.tar.gz")):
+        raise ValueError("expected at least one s2and distribution")
+    for wheel_path in wheels:
+        with zipfile.ZipFile(wheel_path) as wheel:
+            wheel_file_names = [name for name in wheel.namelist() if not name.endswith("/")]
+            wheel_paths = set(wheel_file_names)
+            if len(wheel_paths) != len(wheel_file_names):
+                raise ValueError(f"{wheel_path.name} contains duplicate package file paths")
+            _verify_archive(
+                archive_name=wheel_path.name,
+                paths=wheel_paths,
+                read_bytes=wheel.read,
+                expected=expected,
+                source_root=source_root,
+            )
 
     sdists = sorted(Path(dist_dir).glob("s2and-*.tar.gz"))
-    if len(sdists) != 1:
-        raise ValueError(f"expected exactly one s2and sdist, found {len(sdists)}")
-    with tarfile.open(sdists[0], "r:gz") as sdist:
-        archive_root = sdists[0].name.removesuffix(".tar.gz")
-        package_members: dict[str, tarfile.TarInfo] = {}
-        for member in sdist.getmembers():
-            if not member.isfile():
-                continue
-            package_path = _sdist_package_path(member.name, archive_root=archive_root)
-            if package_path is None:
-                continue
-            if package_path in package_members:
-                raise ValueError(f"{sdists[0].name} contains duplicate package path: {package_path}")
-            package_members[package_path] = member
+    for sdist_path in sdists:
+        with tarfile.open(sdist_path, "r:gz") as sdist:
+            archive_root = sdist_path.name.removesuffix(".tar.gz")
+            package_members: dict[str, tarfile.TarInfo] = {}
+            for member in sdist.getmembers():
+                if not member.isfile():
+                    continue
+                package_path = _sdist_package_path(member.name, archive_root=archive_root)
+                if package_path is None:
+                    continue
+                if package_path in package_members:
+                    raise ValueError(f"{sdist_path.name} contains duplicate package path: {package_path}")
+                package_members[package_path] = member
 
-        def read_sdist_bytes(path: str) -> bytes:
-            extracted = sdist.extractfile(package_members[path])
-            if extracted is None:
-                raise ValueError(f"{sdists[0].name} package file is not readable: {path}")
-            return extracted.read()
+            def read_sdist_bytes(
+                path: str,
+                members: dict[str, tarfile.TarInfo] = package_members,
+                archive_name: str = sdist_path.name,
+            ) -> bytes:
+                extracted = sdist.extractfile(members[path])
+                if extracted is None:
+                    raise ValueError(f"{archive_name} package file is not readable: {path}")
+                return extracted.read()
 
-        _verify_archive(
-            archive_name=sdists[0].name,
-            paths=set(package_members),
-            read_bytes=read_sdist_bytes,
-            expected=expected,
-            source_root=source_root,
-        )
+            _verify_archive(
+                archive_name=sdist_path.name,
+                paths=set(package_members),
+                read_bytes=read_sdist_bytes,
+                expected=expected,
+                source_root=source_root,
+            )
 
 
 def main() -> None:
@@ -171,7 +179,7 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, default=Path("."))
     args = parser.parse_args()
     verify_production_model_distributions(dist_dir=args.dist_dir, source_root=args.source_root)
-    print("Verified release inventory and content digests in the wheel and sdist.")
+    print("Verified release inventory and content digests in the distributions.")
 
 
 if __name__ == "__main__":

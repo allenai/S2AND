@@ -51,13 +51,8 @@ def cargo_version(version: str) -> str:
 def version_targets() -> tuple[VersionTarget, ...]:
     return (
         VersionTarget(
-            name="pyproject_rust_extra",
+            name="pyproject",
             relative_path=Path("pyproject.toml"),
-            pattern=rf'(?m)^(?P<indent>\s*)"s2and-rust(?:==|>=)(?P<version>{PEP440_PATTERN})(?P<suffix>",\s*)$',
-        ),
-        VersionTarget(
-            name="rust_pyproject",
-            relative_path=Path("s2and_rust") / "pyproject.toml",
             pattern=rf'(?m)^(?P<prefix>version = ")(?P<version>{PEP440_PATTERN})(?P<suffix>"\s*)$',
         ),
         VersionTarget(
@@ -79,7 +74,7 @@ def version_targets() -> tuple[VersionTarget, ...]:
             name="uv_lock",
             relative_path=Path("uv.lock"),
             pattern=(
-                rf'(?m)^(?P<prefix>\[\[package\]\]\r?\nname = "s2and-rust"\r?\nversion = ")'
+                rf'(?m)^(?P<prefix>\[\[package\]\]\r?\nname = "s2and"\r?\nversion = ")'
                 rf'(?P<version>{PEP440_PATTERN})(?P<suffix>")'
             ),
         ),
@@ -124,8 +119,6 @@ def _version_from_match(match: re.Match[str]) -> str:
 
 def _replacement_from_match(match: re.Match[str], version: str) -> str:
     groups = match.groupdict()
-    if groups.get("indent") is not None:
-        return f'{groups["indent"]}"s2and-rust=={version}{groups["suffix"]}'
     return f"{groups['prefix']}{version}{groups['suffix']}"
 
 

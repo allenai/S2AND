@@ -9,9 +9,10 @@ from pathlib import Path
 
 LICENSE_PATHS = (
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md",
-    "vendor/cld2/LICENSE-APACHE.txt",
-    "vendor/cld2/UNLICENSE.txt",
+    "LICENSE-DATA",
+    "s2and_rust/THIRD_PARTY_NOTICES.md",
+    "s2and_rust/vendor/cld2/LICENSE-APACHE.txt",
+    "s2and_rust/vendor/cld2/UNLICENSE.txt",
 )
 
 
@@ -40,7 +41,7 @@ def verify_archive(archive: Path, source_root: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dist-dir", type=Path, required=True)
-    parser.add_argument("--source-root", type=Path, default=Path("s2and_rust"))
+    parser.add_argument("--source-root", type=Path, default=Path("."))
     args = parser.parse_args()
     archives = sorted([*args.dist_dir.glob("*.whl"), *args.dist_dir.glob("*.tar.gz")])
     if not archives:

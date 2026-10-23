@@ -40,16 +40,16 @@ def load_s2and_rust_extension(*, import_module: Callable[[str], Any] | None = No
 
     importer = import_module or importlib.import_module
     try:
-        module = importer("s2and_rust")
+        module = importer("s2and._s2and_rust")
     except ModuleNotFoundError as exc:
-        if not (exc.name or "").startswith("s2and_rust"):
+        if not (exc.name or "").startswith("s2and._s2and_rust"):
             raise
-        raise RuntimeError(f"Rust was requested, but s2and-rust=={__version__} is not importable") from exc
+        raise RuntimeError(f"Rust was requested, but s2and=={__version__} native extension is not importable") from exc
 
     found_version = getattr(module, "__version__", None)
     if _python_version_from_cargo(found_version) != __version__:
         raise RuntimeError(
-            "Rust was requested, but the installed extension version does not match the pinned dependency: "
+            "Rust was requested, but the installed extension version does not match the Python package: "
             f"required={__version__!r} found={found_version!r}"
         )
     return module

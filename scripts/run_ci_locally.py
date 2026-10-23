@@ -208,7 +208,7 @@ def run_ty_checks() -> None:
 
 def run_typecheck_and_test_job(*, lock_present: bool, pytest_workers: str) -> None:
     print("\n=== typecheck-and-test ===")
-    # The locked environment builds s2and-rust from source, so cargo comes first.
+    # The locked environment builds s2and from source, so cargo comes first.
     ensure_rust_on_path()
     sync_deps(lock_present=lock_present)
     run_native_rust_checks()

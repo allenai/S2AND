@@ -203,7 +203,7 @@ A changed selection policy requires untouched test data for confirmation.
 ## Stage 6: publish packages
 
 Run required project checks from the final source commit.
-Build both distributions from that commit.
+Build the unified source archive and platform wheels from that commit.
 Verify wheel and source archive contents.
 Install the candidate distributions in an empty environment outside the checkout.
 Run bulk and incremental prediction with the real complete model and combined data root.
@@ -213,8 +213,8 @@ See [installed release smoke](../scripts/production/README.md#installed-release-
 Publish through `.github/workflows/release-rust.yml` from the reviewed `main` commit.
 Its validate job runs `scripts/run_ci_locally.py`, the same checks as pull-request CI.
 Verify the workflow commit before approval of its protected PyPI environment.
-Confirm both package versions are absent before the first irreversible publish.
-The workflow publishes Rust first and then the matching Python package.
+Confirm the `s2and` version is absent before the first irreversible publish.
+The workflow publishes one source archive and 15 platform/interpreter wheels.
 Do not dispatch publication before model and data acceptance are complete.
 
 ### Beta pre-releases
@@ -227,7 +227,7 @@ A beta lets integrators test before acceptance. It never replaces Stage 6.
    A pre-release builds and smoke-tests on any branch; the publish jobs run only on `main`.
 3. Download the run's `release-distributions` artifact.
    Confirm every file carries the beta version.
-4. Upload `s2and-rust` first, then `s2and`, with `uv publish` and an API token.
+4. Upload the unified `s2and` distributions with `uv publish` and an API token.
 5. Install `s2and==<beta version>` in an empty environment and run one real prediction.
 
 Installers skip pre-releases unless the requirement names one, so `pip install s2and` stays on the last final release.

@@ -26,9 +26,9 @@ RELEASE_MEMBERS = {
 
 
 def _write_package_data_config(root: Path, declared_paths: set[str]) -> None:
-    declared = sorted(path.removeprefix("s2and/") for path in declared_paths)
+    declared = ", ".join("{ path = " + json.dumps(path) + " }" for path in sorted(declared_paths))
     (root / "pyproject.toml").write_text(
-        f"[tool.setuptools.package-data]\ns2and = {json.dumps(declared)}\n",
+        f"[tool.maturin]\ninclude = [{declared}]\n",
         encoding="utf-8",
     )
 
@@ -126,3 +126,22 @@ def test_distribution_verifier_rejects_model_path(tmp_path, archive_kind, forbid
 
     with pytest.raises(ValueError, match="forbidden production model paths"):
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+
+
+@pytest.mark.parametrize("keep", ["wheel", "sdist"])
+def test_verify_separate_platform_build_artifacts(tmp_path, keep):
+    dist_dir, root = _write_distribution_fixture(tmp_path)
+    suffix = "*.tar.gz" if keep == "wheel" else "*.whl"
+    for path in dist_dir.glob(suffix):
+        path.unlink()
+    verify_production_model_distributions(dist_dir=dist_dir, source_root=root)
+
+
+def test_verify_every_platform_wheel(tmp_path):
+    dist_dir, root = _write_distribution_fixture(tmp_path)
+    with zipfile.ZipFile(dist_dir / "s2and-0.0.0-cp311-cp311-win_amd64.whl", "w") as wheel:
+        for path, payload in RELEASE_MEMBERS.items():
+            if path != GENERIC_MEMBER_PATH:
+                wheel.writestr(path, payload)
+    with pytest.raises(ValueError, match="missing required distribution files"):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=root)

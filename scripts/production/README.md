@@ -436,8 +436,7 @@ $PathConfigJson = @{ main_data_dir = (Resolve-Path $PublicDataRoot).Path } | Con
 
 uv venv --python 3.11 $SmokeVenv
 uv pip install --python $SmokePython `
-  (Get-ChildItem "$DistRoot\rust\*.whl").FullName `
-  (Get-ChildItem "$DistRoot\python\*.whl").FullName
+  (Get-ChildItem "$DistRoot\*.whl").FullName
 
 $env:S2AND_PATH_CONFIG = $PathConfig
 Push-Location $RunRoot
@@ -464,8 +463,7 @@ uv venv --python 3.11 $PublicSmokeVenv
 uv pip install --python $PublicSmokePython `
   --refresh `
   --default-index https://pypi.org/simple `
-  "s2and==$Version" `
-  "s2and-rust==$Version"
+  "s2and==$Version"
 ```
 
 Use `$PublicSmokePython` in the `uv run --no-project --python ...` invocation

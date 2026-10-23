@@ -79,29 +79,7 @@ uv() {
 def _write_version_fixture(root: Path) -> None:
     (root / "s2and_rust").mkdir()
     (root / "VERSION").write_text("0.50.0\n", encoding="utf-8")
-    (root / "pyproject.toml").write_text(
-        "\n".join(
-            [
-                "[project.optional-dependencies]",
-                "rust = [",
-                '  "s2and-rust==0.49.0",',
-                "]",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (root / "s2and_rust" / "pyproject.toml").write_text(
-        "\n".join(
-            [
-                "[project]",
-                'name = "s2and-rust"',
-                'version = "0.49.0"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    (root / "pyproject.toml").write_text('[project]\nname = "s2and"\nversion = "0.49.0"\n', encoding="utf-8")
     (root / "s2and_rust" / "Cargo.toml").write_text(
         "\n".join(
             [
@@ -128,7 +106,7 @@ def _write_version_fixture(root: Path) -> None:
         "\n".join(
             [
                 "[[package]]",
-                'name = "s2and-rust"',
+                'name = "s2and"',
                 'version = "0.49.0"',
                 "",
             ]
@@ -146,8 +124,7 @@ def test_sync_version_updates_rust_manifests_and_lockfiles(tmp_path: Path) -> No
     sync_version.sync_version("0.50.0", root=tmp_path)
     sync_version.verify_version("0.50.0", root=tmp_path)
 
-    assert '"s2and-rust==0.50.0"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.50.0"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "Cargo.toml").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "Cargo.lock").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "uv.lock").read_text(encoding="utf-8")
@@ -159,8 +136,7 @@ def test_sync_version_spells_prereleases_for_python_and_cargo(tmp_path: Path) ->
     sync_version.sync_version("0.50.0b1", root=tmp_path)
     sync_version.verify_version("0.50.0b1", root=tmp_path)
 
-    assert '"s2and-rust==0.50.0b1"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.50.0b1"' in (tmp_path / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.50.0b1"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.50.0-beta.1"' in (tmp_path / "s2and_rust" / "Cargo.toml").read_text(encoding="utf-8")
     assert 'version = "0.50.0-beta.1"' in (tmp_path / "s2and_rust" / "Cargo.lock").read_text(encoding="utf-8")
     assert 'version = "0.50.0b1"' in (tmp_path / "uv.lock").read_text(encoding="utf-8")

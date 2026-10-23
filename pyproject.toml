@@ -1,15 +1,16 @@
 [build-system]
-requires = ["setuptools>=83,<84"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.14.1,<2"]
+build-backend = "maturin"
 
 [project]
 name = "s2and"
-dynamic = ["version"]
+version = "1.0.0b5"
 description = "S2AND"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 # Code is MIT (LICENSE); packaged data files are CC-BY-4.0 (LICENSE-DATA).
 license = "MIT AND CC-BY-4.0"
+license-files = ["LICENSE", "LICENSE-DATA", "s2and_rust/THIRD_PARTY_NOTICES.md", "s2and_rust/vendor/cld2/LICENSE-APACHE.txt", "s2and_rust/vendor/cld2/UNLICENSE.txt"]
 authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 
 # --- Runtime dependencies ---
@@ -42,7 +43,6 @@ dependencies = [
   "pyarrow>=20,<21",
   # Memory budgets read total RAM and process RSS from psutil.
   "psutil>=7,<8",
-  "s2and-rust==1.0.0b5",
 ]
 
 [project.optional-dependencies]
@@ -73,24 +73,33 @@ dev = [
   "boto3>=1.40,<2",
 ]
 
-[tool.setuptools]
-include-package-data = false
-
-[tool.setuptools.packages.find]
-include = ["s2and*"]
-exclude = ["s2and_rust*"]
-
-[tool.setuptools.package-data]
-s2and = [
-  "arrow_schema_contract.json",
-  "data/first_k_letter_counts_from_orcid.json",
-  "data/first_k_letter_counts_from_orcid.manifest.json",
-  "data/path_config.json",
-  "data/s2and_name_tuples_canonical.txt",
+[tool.maturin]
+manifest-path = "s2and_rust/Cargo.toml"
+bindings = "pyo3"
+python-source = "."
+module-name = "s2and._s2and_rust"
+include = [
+  { path = "VERSION", format = "sdist" },
+  { path = "tests/fixtures/canonical_name_examples.json", format = "sdist" },
+  { path = "s2and/arrow_schema_contract.json", format = ["sdist", "wheel"] },
+  { path = "s2and/data/first_k_letter_counts_from_orcid.json", format = ["sdist", "wheel"] },
+  { path = "s2and/data/first_k_letter_counts_from_orcid.manifest.json", format = ["sdist", "wheel"] },
+  { path = "s2and/data/path_config.json", format = ["sdist", "wheel"] },
+  { path = "s2and/data/s2and_name_tuples_canonical.txt", format = ["sdist", "wheel"] },
+  { path = "s2and_rust/vendor/cld2/**/*", format = "sdist" },
 ]
+exclude = ["s2and/data/s2and_name_tuples_filtered.txt", "s2and/data/s2and_unnormalized_filtered_name_tuples.txt"]
 
-[tool.setuptools.dynamic]
-version = { file = "VERSION" }
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "s2and_rust/Cargo.toml" },
+  { file = "s2and_rust/Cargo.lock" },
+  { file = "s2and_rust/build.rs" },
+  { file = "s2and_rust/src/**/*.rs" },
+  { file = "s2and_rust/vendor/cld2/Cargo.toml" },
+  { file = "s2and_rust/vendor/cld2/src/**/*.rs" },
+]
 
 # ---- Tooling config ----
 
@@ -128,6 +137,3 @@ unresolved-import = "ignore"
 unused-type-ignore-comment = "ignore"
 possibly-missing-attribute = "ignore"
 unresolved-global = "ignore"
-
-[tool.uv.sources]
-s2and-rust = { path = "s2and_rust" }

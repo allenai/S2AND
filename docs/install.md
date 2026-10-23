@@ -9,9 +9,8 @@ This document covers the fuller install and setup options for S2AND.
 - Rust, if you are working from a source checkout or building the native extension from source:
   [`rustup`](https://www.rust-lang.org/tools/install)
 
-As of this version, `s2and-rust` is a required runtime dependency. Package
-installs get the matching wheel when one is available; source checkouts should
-build the local extension.
+The `s2and` wheel includes `s2and._s2and_rust`. Installing a supported wheel needs no Rust compiler.
+Source installations compile the extension from the same source archive.
 
 If you are building the Rust extension from source, install OS prerequisites first.
 
@@ -45,8 +44,7 @@ Runtime install:
 uv pip install "s2and==1.0.0"
 ```
 
-The `1.0.0` packages are coordinated `s2and==1.0.0` and `s2and-rust==1.0.0`
-with model/public-data version `1.3`.
+The `s2and==1.0.0` distribution supports model/public-data version `1.3`.
 
 ## Repo checkout
 
@@ -84,7 +82,7 @@ The `dev` extra includes everything the tests need. Outside it, the
 
 ## Build the Rust extension from source
 
-`uv sync --extra dev` builds `s2and-rust` from `s2and_rust/` and installs it
+`uv sync --extra dev` builds the unified `s2and` package and installs it
 into the project environment, and syncing `uv run` commands rebuild it after
 ordinary Rust edits. The test suite stops before collection if the installed
 extension was built from different Rust sources than the checkout.
@@ -92,7 +90,7 @@ extension was built from different Rust sources than the checkout.
 If a rebuild is missed, force a refresh:
 
 ```bash
-uv sync --extra dev --reinstall-package s2and-rust
+uv sync --extra dev --reinstall-package s2and
 ```
 
 If a forced reinstall still reports a mismatch (for example after edits that
@@ -107,8 +105,8 @@ uv run --no-sync cargo clean -p s2and_rust -p cld2 --manifest-path s2and_rust/Ca
 Notes:
 
 - If you just installed Rust with `rustup` in the current shell, load its environment first if needed.
-- Keep the Python and Rust packages from the same checkout. Do not rely on a
-  public `s2and-rust` wheel for unreleased source behavior.
+- Keep the Python code and native extension from the same checkout.
+- Editable builds place the extension inside `s2and/`. After switching revisions, force a reinstall.
 
 How rebuild detection and the source digest work is described in
 [native build troubleshooting](development.md#native-build-troubleshooting).

@@ -30,7 +30,7 @@ The `source` bundle holds the full corrected records, the starting point for fut
 ## Install
 
 S2AND supports Python 3.11, 3.12, and 3.13.
-The `1.0.0` package requires the exactly matched `s2and-rust` package.
+The `1.0.0` package includes its native extension in the same wheel.
 Until publication, use a source checkout:
 
 ```bash
@@ -122,7 +122,7 @@ These examples do not replace the release test policy.
 
 ## Runtime and scaling
 
-- `ANDData` prediction uses Python; Arrow prediction uses Rust.
+- Full-block `ANDData` prediction uses Python; subblocked and incremental prediction use Arrow/Rust.
 - `batching_threshold` enables subblocks for full prediction and caps incremental query batches.
 - `total_ram_bytes` controls the major memory allocation bounds.
 - `n_jobs` controls concurrency; model load defaults to one job unless you specify another value.

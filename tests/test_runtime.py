@@ -58,11 +58,11 @@ def test_load_rust_extension_validates_package_and_version() -> None:
     assert runtime.load_s2and_rust_extension(import_module=lambda _name: exact) is exact
 
     mismatched = SimpleNamespace(__version__="1.0.1")
-    with pytest.raises(RuntimeError, match="does not match the pinned dependency"):
+    with pytest.raises(RuntimeError, match="does not match the Python package"):
         runtime.load_s2and_rust_extension(import_module=lambda _name: mismatched)
 
     def missing(_name: str) -> object:
-        raise ModuleNotFoundError("missing", name="s2and_rust")
+        raise ModuleNotFoundError("missing", name="s2and._s2and_rust")
 
     with pytest.raises(RuntimeError, match="not importable"):
         runtime.load_s2and_rust_extension(import_module=missing)
@@ -81,7 +81,7 @@ def test_load_rust_extension_matches_cargo_prerelease_spelling(monkeypatch: pyte
     assert runtime.load_s2and_rust_extension(import_module=lambda _name: beta) is beta
 
     other_beta = SimpleNamespace(__version__="1.0.0-beta.2")
-    with pytest.raises(RuntimeError, match="does not match the pinned dependency"):
+    with pytest.raises(RuntimeError, match="does not match the Python package"):
         runtime.load_s2and_rust_extension(import_module=lambda _name: other_beta)
 
 

@@ -37,9 +37,8 @@ backends:
 | `Clusterer.predict_incremental_from_arrow` | open `ArrowDataset` | Rust | structured mapping |
 
 Passing a Rust runtime context to an `ANDData` API, or a Python context to an
-Arrow API, is an error. Rust entry points import the exact `s2and-rust` version
-pinned by the project metadata and fail on a missing or different version. That
-dependency is part of the normal S2AND install.
+Arrow API, is an error. Rust entry points load the bundled `s2and._s2and_rust`
+extension and reject a missing binary or a version mismatch.
 Classic `predict_incremental` is retired. Use `predict_incremental_from_arrow`.
 Classic `predict` rejects `batching_threshold`; use `predict_from_arrow` for subblocking.
 

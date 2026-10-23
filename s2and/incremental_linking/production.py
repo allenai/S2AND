@@ -227,6 +227,8 @@ class _QueryDisallowFeaturizerCache:
     def clear(self) -> None:
         """Release every retained native featurizer before residual Phase B."""
 
+        for _covered, featurizer in self.entries:
+            feature_port.release_rust_handle(featurizer)
         self.entries.clear()
 
 
@@ -1414,6 +1416,11 @@ def predict_incremental_promoted_linker_from_arrow(
         raw_arrow_reusable_planner_enabled = int(raw_request_planner is not None)
         rescore_featurizer_cache.clear()
         del rescore_featurizer_cache
+        if raw_request_planner is not None and (
+            attachment_state is None or attachment_state.planner is not raw_request_planner
+        ):
+            # The next pass of a subblocked block reuses its planner; a request's own planner is done.
+            feature_port.release_rust_handle(raw_request_planner)
         del raw_request_planner
         finish_start = time.perf_counter()
         if name_check_exempt_signature_ids is not None and bool(

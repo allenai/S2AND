@@ -771,6 +771,8 @@ pub(crate) struct RawBlockQueryCandidatePlanner {
     orcid_enabled: bool,
     num_threads: Option<usize>,
     max_exemplars: usize,
+    /// Set by `release`; the planner then refuses to plan or reload.
+    released: bool,
 }
 
 /// Seed components and exclusions read from one request's sidecars.
@@ -1103,6 +1105,15 @@ struct RawArrowSeedReadTelemetry {
 }
 
 impl RawBlockQueryCandidatePlanner {
+    fn ensure_not_released(&self) -> PyResult<()> {
+        if self.released {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "planner was released; build a new one",
+            ));
+        }
+        Ok(())
+    }
+
     /// Rows of exactly `signature_ids` and their papers from the seed state, the
     /// latest plan's queries, and prefetched rows; None if any is not held.
     ///
@@ -1538,6 +1549,7 @@ impl RawBlockQueryCandidatePlanner {
             orcid_enabled,
             num_threads,
             max_exemplars,
+            released: false,
         })
     }
 
@@ -1858,11 +1870,44 @@ impl RawBlockQueryCandidatePlanner {
         cluster_seeds_path: String,
         cluster_seed_disallows_path: Option<String>,
     ) -> PyResult<bool> {
+        self.ensure_not_released()?;
         self.reload_seed_rows(
             py,
             &cluster_seeds_path,
             cluster_seed_disallows_path.as_deref(),
         )
+    }
+
+    /// Drop the planner's rows on a background thread.
+    ///
+    /// Freeing a block's rows takes seconds on one thread, so a request
+    /// returns before that. The planner then refuses to plan or reload.
+    fn release(&mut self) {
+        self.released = true;
+        let state = &mut self.state;
+        let dropped = (
+            std::mem::take(&mut state.features_by_signature_id),
+            std::mem::take(&mut state.signatures),
+            std::mem::take(&mut state.paper_authors),
+            std::mem::take(&mut state.seed_author_index),
+            std::mem::take(&mut state.raw_name_counts),
+            std::mem::take(&mut state.members_by_component),
+            std::mem::take(&mut state.component_keys_by_member),
+            std::mem::take(&mut state.summary_signals_by_component),
+            state.retriever.take_contents(),
+            std::mem::take(&mut state.component_order),
+            std::mem::take(&mut state.seed_signature_ids),
+            std::mem::take(&mut state.seed_signature_id_set),
+            std::mem::take(&mut state.cluster_seed_disallows),
+            std::mem::take(&mut state.unidecode_char_map),
+            state.retained_seed_rows.take(),
+            state.prefetched_rows.take(),
+            state.last_query_inputs.take(),
+            std::mem::take(&mut self.planner_query_signature_ids),
+            std::mem::take(&mut self.planner_query_signature_id_set),
+            std::mem::take(&mut self.planner_query_requests_by_signature_id),
+        );
+        std::thread::spawn(move || drop(dropped));
     }
 
     fn build_telemetry(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
@@ -1977,6 +2022,7 @@ impl RawBlockQueryCandidatePlanner {
         num_threads: Option<usize>,
         use_orcid_id: bool,
     ) -> PyResult<Option<RustFeaturizer>> {
+        self.ensure_not_released()?;
         // Same de-duplication as `from_arrow_dataset`: first occurrence wins.
         let mut seen = HashSet::with_capacity_and_hasher(signature_ids.len(), Default::default());
         let signature_ids: Vec<String> = signature_ids
@@ -2018,6 +2064,7 @@ impl RawBlockQueryCandidatePlanner {
     }
 
     fn plan_query_signatures(&mut self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        self.ensure_not_released()?;
         if matches!(self.query_mode, RawPlannerQueryMode::Auto) {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "RawBlockQueryCandidatePlanner.from_auto_queries requires explicit plan(query_signature_ids)",
@@ -2040,6 +2087,7 @@ impl RawBlockQueryCandidatePlanner {
         query_signature_ids: Vec<String>,
         additional_cluster_seed_disallows: Option<Vec<(String, String)>>,
     ) -> PyResult<Py<PyDict>> {
+        self.ensure_not_released()?;
         validate_raw_arrow_query_signature_ids(&query_signature_ids)?;
         let additional_cluster_seed_disallows = additional_cluster_seed_disallows
             .map(validate_additional_cluster_seed_disallows)

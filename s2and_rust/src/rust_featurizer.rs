@@ -2350,6 +2350,24 @@ impl RustFeaturizer {
         Ok(numpy::ndarray::Array1::from_vec(labels).into_pyarray(py))
     }
 
+    /// Drop this handle's share of the block data on a background thread.
+    ///
+    /// Views and other handles keep their shares; the data is freed with the
+    /// last one. This handle has no signatures afterwards.
+    fn release(&mut self) {
+        let dropped = (
+            std::mem::replace(&mut self.signatures, Arc::new(HashMap::default())),
+            std::mem::replace(&mut self.signature_ids, Arc::new(Vec::new())),
+            std::mem::replace(&mut self.papers, Arc::new(HashMap::default())),
+            std::mem::replace(&mut self.name_grams, Arc::new(NameGrams::default())),
+            std::mem::replace(&mut self.name_tuples, Arc::new(HashMap::default())),
+            std::mem::take(&mut self.cluster_seeds_disallow),
+            std::mem::take(&mut self.cluster_seeds_require),
+            self.cluster_seeds_disallow_index.take(),
+        );
+        std::thread::spawn(move || drop(dropped));
+    }
+
     fn signature_ids(&self) -> Vec<String> {
         self.signature_id_order().to_vec()
     }

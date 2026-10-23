@@ -33,6 +33,7 @@ from s2and.feature_port import (
     _get_rust_feature_data,
     _get_rust_featurizer,
     build_rust_featurizer_from_arrow_dataset,
+    release_rust_handle,
 )
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from s2and.incremental_linking.completion import ResidualClusterer, complete_incremental_prediction
@@ -217,6 +218,15 @@ class _AttachmentBlockState:
             )
         requested = set(signature_ids)
         return {signature_id: info for signature_id, info in self._orcid_info.items() if signature_id in requested}
+
+    def release(self) -> None:
+        """Drop the block's native state on a background thread."""
+
+        for handle in (self._featurizer, self.planner):
+            if handle is not None:
+                release_rust_handle(handle)
+        self._featurizer = None
+        self.planner = None
 
     def featurizer(self) -> Any:
         if self._featurizer is None:
@@ -3508,6 +3518,8 @@ class Clusterer:
             origin = origins[group_signature_ids[0]]
             if block_state is None or block_state[0] != origin:
                 # Keep one block's native state at a time; release the previous one first.
+                if block_state is not None:
+                    block_state[1].release()
                 block_state = None
                 block_state = (
                     origin,
@@ -3574,6 +3586,8 @@ class Clusterer:
                 normalized_signatures = [str(signature_id) for signature_id in signatures]
                 pred_clusters_intermediate[cluster_key] = normalized_signatures
             scoped_clusters[origin] = pred_clusters_intermediate
+        if block_state is not None:
+            block_state[1].release()
         return _combine_subblocked_predictions(scoped_clusters)
 
     def _predict_from_arrow(

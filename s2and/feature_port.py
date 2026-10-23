@@ -427,6 +427,18 @@ def _get_rust_feature_data(dataset: ANDData) -> Any:
         return featurizer
 
 
+def release_rust_handle(handle: Any) -> None:
+    """Drop a native planner's or featurizer's data on a background thread.
+
+    Freeing a block's rows takes seconds on one thread; a request returns
+    before that. A handle without `release` is left to the garbage collector.
+    """
+
+    release = getattr(handle, "release", None)
+    if callable(release):
+        release()
+
+
 def evict_rust_featurizer(dataset: ANDData) -> bool:
     """Evict a single dataset's Rust featurizer from the in-memory cache."""
     state = _rust_featurizer_state(dataset)
@@ -460,6 +472,7 @@ __all__ = [
     "get_constraint_labels_index_arrays_rust",
     "get_constraints_block_upper_triangle_indexed_rust",
     "get_constraints_matrix_indexed_rust",
+    "release_rust_handle",
     "score_linker_pair_features_and_aggregate_stats_rust",
     "s2and_rust",
     "warm_rust_featurizer",

@@ -250,6 +250,21 @@ pub(crate) struct RetrievalCandidateSelection {
 }
 
 impl RustHybridCentroidRetriever {
+    /// Move the summaries and indexes out, leaving an empty retriever.
+    pub(crate) fn take_contents(&mut self) -> Self {
+        std::mem::replace(
+            self,
+            Self {
+                summaries: Vec::new(),
+                component_index_by_key: HashMap::default(),
+                coauthor_cluster_df: HashMap::default(),
+                non_mega_coauthor_cluster_df: HashMap::default(),
+                affiliation_cluster_df: HashMap::default(),
+                overlap_index: None,
+            },
+        )
+    }
+
     /// Index `summaries`: component keys, per-term cluster document frequencies
     /// and, when the retriever ranks candidates, the inverted overlap counters.
     pub(crate) fn from_summaries(

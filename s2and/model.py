@@ -193,7 +193,7 @@ class _AttachmentBlockState:
         return self._build_args[0]
 
     def orcid_signature_info(
-        self, arrow_lease: Any, signature_ids: Sequence[str]
+        self, arrow_lease: Any, signature_ids: Sequence[str], *, num_threads: int | None = None
     ) -> dict[str, _ArrowIncrementalSignatureInfo]:
         """Return `_load_arrow_incremental_orcid_signature_info` for ``signature_ids``.
 
@@ -204,9 +204,11 @@ class _AttachmentBlockState:
         if any(signature_id not in self.signature_ids for signature_id in signature_ids):
             # Rows outside the block can sit anywhere in the table, so read all
             # requested ids together to keep the loader's order.
-            return _load_arrow_incremental_orcid_signature_info(arrow_lease, signature_ids)
+            return _load_arrow_incremental_orcid_signature_info(arrow_lease, signature_ids, num_threads=num_threads)
         if self._orcid_info is None:
-            self._orcid_info = _load_arrow_incremental_orcid_signature_info(arrow_lease, self._build_args[1])
+            self._orcid_info = _load_arrow_incremental_orcid_signature_info(
+                arrow_lease, self._build_args[1], num_threads=num_threads
+            )
         requested = set(signature_ids)
         return {signature_id: info for signature_id, info in self._orcid_info.items() if signature_id in requested}
 
@@ -660,52 +662,36 @@ def _group_subblocking_firsts(
 def _load_arrow_incremental_orcid_signature_info(
     arrow_dataset: Any,
     signature_ids: Iterable[Any],
+    *,
+    num_threads: int | None = None,
 ) -> dict[str, _ArrowIncrementalSignatureInfo]:
     """Load ORCID-only seed metadata for promoted incremental budget sizing.
 
     Missing seed signatures are skipped to match ANDData's missing-signature
-    ORCID behavior.
+    ORCID behavior. Entries follow Arrow row order.
     """
 
     requested_signature_ids = tuple(dict.fromkeys(str(signature_id) for signature_id in signature_ids))
     if not requested_signature_ids:
         return {}
-    requested_signature_id_set = set(requested_signature_ids)
-    required_columns = {"signature_id"}
-    import pyarrow as pa
-
-    signatures: dict[str, _ArrowIncrementalSignatureInfo] = {}
-    with arrow_dataset.open_file("signatures") as source_file, pa.PythonFile(source_file, mode="r") as source:
-        reader = pa.ipc.open_file(source)
-        missing_columns = sorted(required_columns.difference(reader.schema.names))
-        if missing_columns:
-            raise ValueError(
-                f"signatures Arrow is missing required columns for incremental ORCID metadata: {missing_columns}"
-            )
-        if "author_orcid" not in reader.schema.names:
-            return {}
-        signature_id_column_index = reader.schema.get_field_index("signature_id")
-        orcid_column_index = reader.schema.get_field_index("author_orcid")
-        for batch_index in _signature_batch_indices_for_request(arrow_dataset, requested_signature_ids):
-            batch = reader.get_batch(batch_index)
-            # A set lookup per row: pyarrow's is_in rehashes the whole request's ids
-            # on every batch, which took seconds on large blocks.
-            orcid_values: list[Any] | None = None
-            for row, signature_id in enumerate(batch.column(signature_id_column_index).to_pylist()):
-                if signature_id not in requested_signature_id_set:
-                    continue
-                if signature_id in signatures:
-                    raise ValueError(f"signatures Arrow contains duplicate signature_id: {signature_id!r}")
-                if orcid_values is None:
-                    orcid_values = batch.column(orcid_column_index).to_pylist()
-                signatures[signature_id] = _ArrowIncrementalSignatureInfo(
-                    paper_id=None,
-                    author_info_first=None,
-                    author_info_last=None,
-                    author_info_first_normalized=None,
-                    author_info_orcid=_optional_arrow_string(orcid_values[row]),
-                )
-    return signatures
+    # Rust decodes only the id and ORCID columns of the indexed batches; a
+    # pyarrow loop over them took 2 s per large incremental request.
+    rows = arrow_dataset.native.signature_orcids(
+        list(requested_signature_ids),
+        None if num_threads is None else resolve_n_jobs(num_threads),
+    )
+    if rows is None:
+        return {}
+    return {
+        signature_id: _ArrowIncrementalSignatureInfo(
+            paper_id=None,
+            author_info_first=None,
+            author_info_last=None,
+            author_info_first_normalized=None,
+            author_info_orcid=orcid,
+        )
+        for signature_id, orcid in rows
+    }
 
 
 def _has_incremental_seed_source(dataset: Any) -> bool:
@@ -5863,11 +5849,14 @@ class Clusterer:
                 ]
                 attachment_state = _ARROW_ATTACH_BLOCK_STATE.get()
                 signatures.update(
-                    attachment_state.orcid_signature_info(arrow_lease, seed_orcid_signature_ids)
+                    attachment_state.orcid_signature_info(
+                        arrow_lease, seed_orcid_signature_ids, num_threads=self.n_jobs
+                    )
                     if attachment_state is not None
                     else _load_arrow_incremental_orcid_signature_info(
                         arrow_lease,
                         seed_orcid_signature_ids,
+                        num_threads=self.n_jobs,
                     )
                 )
             request_dataset = _DirectArrowIncrementalDataset(

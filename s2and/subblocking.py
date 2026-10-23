@@ -258,28 +258,6 @@ def _prune_edge_scores(edge_scores: dict[tuple[int, int], float], max_candidate_
     edge_scores.update(strongest)
 
 
-def _score_candidate_edge(
-    edge_scores: dict[tuple[int, int], float],
-    *,
-    left_index: int,
-    right_index: int,
-    matrix: np.ndarray,
-    evidences: Sequence[_SignatureEvidence],
-    config: GraphSubblockingConfig,
-) -> None:
-    if left_index == right_index:
-        return
-    left = min(left_index, right_index)
-    right = max(left_index, right_index)
-    cosine_similarity = max(0.0, float(np.dot(matrix[left], matrix[right])))
-    score = _weighted_edge_score(cosine_similarity, evidences[left], evidences[right], config)
-    if score < config.min_edge_score:
-        return
-    current = edge_scores.get((left, right))
-    if current is None or score > current:
-        edge_scores[(left, right)] = score
-
-
 def _score_candidate_edge_from_cosine(
     edge_scores: dict[tuple[int, int], float],
     *,

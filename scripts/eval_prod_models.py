@@ -485,10 +485,6 @@ def resolve_arrow_dataset(
     )
 
 
-def arrow_datasets_available(arrow_root: str | None, datasets: list[str], specter_suffixes: list[str]) -> bool:
-    return first_missing_arrow_dataset_error(arrow_root, datasets, specter_suffixes) is None
-
-
 def first_missing_arrow_dataset_error(
     arrow_root: str | None,
     datasets: list[str],

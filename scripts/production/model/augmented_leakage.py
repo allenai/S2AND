@@ -52,12 +52,6 @@ def split_members_from_sources(name: str, files: Mapping[str, Path], *, random_s
     )
 
 
-def training_members_from_sources(name: str, files: Mapping[str, Path], *, random_seed: int) -> set[str]:
-    """Resolve the actual fit population without access to held-out inputs."""
-
-    return split_members_from_sources(name, files, random_seed=random_seed)[0]
-
-
 def source_members(pairs: Iterable[tuple[str, str]]) -> dict[str, set[str]]:
     """Return source signature IDs grouped by the augmentation's dataset prefix."""
     members: dict[str, set[str]] = defaultdict(set)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -13,8 +14,8 @@ from s2and.subblocking import (
     _pack_component_ids_greedy,
     _projection_neighbor_edge_scores,
     _prune_edge_scores,
-    _score_candidate_edge,
     _sorted_subblock_merge_candidates,
+    _weighted_edge_score,
     cluster_with_graph_fallback,
     make_arrow_graph_subblocking_cluster_fn,
     make_dataset_graph_subblocking_cluster_fn,
@@ -202,6 +203,29 @@ def test_sorted_subblock_merge_candidates_keeps_exact_maximum_size_pair() -> Non
     assert _sorted_subblock_merge_candidates(output, maximum_size=5, first_k_letter_counts_sorted={}) == [
         (("alex|middle=a", "alex|middle=b"), 1e10)
     ]
+
+
+def _score_candidate_edge(
+    edge_scores: dict[tuple[int, int], float],
+    *,
+    left_index: int,
+    right_index: int,
+    matrix: np.ndarray,
+    evidences: Sequence[Any],
+    config: GraphSubblockingConfig,
+) -> None:
+    """Slow reference: score one candidate edge from the full cosine of its rows."""
+    if left_index == right_index:
+        return
+    left = min(left_index, right_index)
+    right = max(left_index, right_index)
+    cosine_similarity = max(0.0, float(np.dot(matrix[left], matrix[right])))
+    score = _weighted_edge_score(cosine_similarity, evidences[left], evidences[right], config)
+    if score < config.min_edge_score:
+        return
+    current = edge_scores.get((left, right))
+    if current is None or score > current:
+        edge_scores[(left, right)] = score
 
 
 @pytest.mark.parametrize("row_count", [1, 6], ids=["singleton-no-self-edges", "overlapping-neighborhoods"])

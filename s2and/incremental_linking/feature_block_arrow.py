@@ -1164,13 +1164,6 @@ def _fnv64_utf8_batch(values: Sequence[str]) -> list[int]:
     return [int(value) for value in load_s2and_rust_extension().fnv64_utf8_batch(list(values))]
 
 
-def _name_counts_index_hashes(kind: str, name_bytes: bytes) -> tuple[int, int]:
-    return (
-        _fnv64_bytes(name_bytes),
-        _fnv64_update(_name_counts_index_kind_hash_seed(kind), name_bytes),
-    )
-
-
 def _name_counts_index_kind_hash_seed(kind: str) -> int:
     """Return the reusable second-hash seed for one index kind."""
 

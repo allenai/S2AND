@@ -12,7 +12,6 @@ import pytest
 from scripts.production.model.initial_query_sources import derived_query_id, load_initial_query_sources
 from scripts.production.model.train_linker_and_finalize import (
     _copy_bundle_support_files,
-    _load_initial_query_sources,
     load_bundle,
 )
 from tests.raw_arrow_helpers import write_ipc
@@ -52,7 +51,7 @@ def test_derived_queries_require_complete_origins(tmp_path: Path, missing: str) 
     if missing == "entry":
         _write(path, [])
     with pytest.raises(ValueError, match="[Mm]ap|origin"):
-        _load_initial_query_sources(tmp_path)
+        load_initial_query_sources(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -70,7 +69,7 @@ def test_origin_must_match_source_and_derived_records(tmp_path: Path, field: str
     rows[0][field] = value
     _write(path, rows)
     with pytest.raises(ValueError, match="[Mm]ap|origin|[Ss]ource|[Dd]erived"):
-        _load_initial_query_sources(tmp_path)
+        load_initial_query_sources(tmp_path)
 
 
 def test_declared_map_digest_is_enforced(tmp_path: Path) -> None:
@@ -78,7 +77,7 @@ def test_declared_map_digest_is_enforced(tmp_path: Path) -> None:
     _write(path, rows)
     (tmp_path / "bundle.json").write_text(json.dumps({"initial_query_sources_sha256": "0" * 64}), encoding="utf-8")
     with pytest.raises(ValueError, match="digest|SHA-256"):
-        _load_initial_query_sources(tmp_path)
+        load_initial_query_sources(tmp_path)
 
 
 def test_valid_map_and_plain_source_preserve_origins(tmp_path: Path) -> None:
@@ -86,10 +85,10 @@ def test_valid_map_and_plain_source_preserve_origins(tmp_path: Path) -> None:
     _write(path, rows)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     (tmp_path / "bundle.json").write_text(json.dumps({"initial_query_sources_sha256": digest}), encoding="utf-8")
-    assert _load_initial_query_sources(tmp_path) == {"unit": {rows[0]["initial_query_signature_id"]: "q"}}
+    assert load_initial_query_sources(tmp_path).origins == {"unit": {rows[0]["initial_query_signature_id"]: "q"}}
     plain = tmp_path / "plain"
     _snapshot(plain, clones=False)
-    assert _load_initial_query_sources(plain) == {}
+    assert load_initial_query_sources(plain).origins == {}
 
 
 def test_supplied_digest_requires_exact_bytes_and_agrees_with_declaration(tmp_path: Path) -> None:

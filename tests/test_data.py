@@ -10,6 +10,7 @@ import pytest
 
 import s2and.data as data_module
 from s2and.data import ANDData
+from s2and.name_tuple_artifact import load_name_tuple_artifact
 from tests.helpers import build_dummy_dataset, tiny_name_counts_index
 
 
@@ -283,12 +284,11 @@ def test_custom_name_tuples_are_stored_as_unordered_pairs() -> None:
     assert dataset.name_tuples == {("bill", "william")}
 
 
-def test_name_tuple_loader_rejects_invalid_rows(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    monkeypatch.setattr(data_module, "_PACKAGE_DATA_DIR", str(tmp_path))
+def test_name_tuple_loader_rejects_invalid_rows(tmp_path) -> None:
     (tmp_path / "invalid.txt").write_bytes(b"alice,bob,carol\n")
 
     with pytest.raises(ValueError, match="invalid.txt:1"):
-        data_module._load_name_tuples_from_file("invalid.txt")
+        load_name_tuple_artifact(tmp_path / "invalid.txt")
 
 
 def test_signature_full_name_uses_only_canonical_fields() -> None:

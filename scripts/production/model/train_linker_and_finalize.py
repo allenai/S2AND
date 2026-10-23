@@ -407,11 +407,6 @@ def _component_member_ids_by_key(path: Path) -> dict[str, tuple[str, ...]]:
     return out
 
 
-def _load_initial_query_sources(root: Path) -> dict[str, dict[str, str]]:
-    """Load complete source identities against the snapshot's signature tables."""
-    return load_initial_query_sources(root).origins
-
-
 def _load_arrow_seed_constraints(
     bundle: OfficialBundle,
     dataset_name: str,

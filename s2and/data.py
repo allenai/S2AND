@@ -11,7 +11,6 @@ from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from functools import cached_property, partial
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
 import numpy as np
@@ -19,7 +18,6 @@ from tqdm import tqdm
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import (
-    _PACKAGE_DATA_DIR,
     CLUSTER_SEEDS_LOOKUP,
     LARGE_DISTANCE,
     NAME_COUNTS_INDEX_PATH,
@@ -27,7 +25,7 @@ from s2and.consts import (
 )
 from s2and.mp import UniversalPool
 from s2and.name_counts_index import NameCountsIndex
-from s2and.name_tuple_artifact import load_name_tuple_artifact, load_packaged_name_tuple_artifact
+from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.runtime import (
     RuntimeContext,
     build_runtime_context,
@@ -359,14 +357,6 @@ def _sample_within_block_random_pairs(
         max_block_size,
     )
     return sampled_pairs
-
-
-def _load_name_tuples_from_file(filename: str) -> set[tuple[str, str]]:
-    """Load one canonical artifact under the strict adjacent-sidecar contract."""
-
-    if filename == "s2and_name_tuples_canonical.txt":
-        return set(load_packaged_name_tuple_artifact().pairs)
-    return set(load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / filename).pairs)
 
 
 def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> bool:

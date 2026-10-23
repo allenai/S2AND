@@ -296,7 +296,7 @@ def resolve_linker_pairwise_featurizer(
         return featurizer
     if dataset is None:
         raise ValueError("dataset is required when featurizer is not provided")
-    return feature_port._get_rust_featurizer(dataset, runtime_context=runtime_context)  # noqa: SLF001
+    return feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
 
 
 def iter_candidate_batch_pair_feature_chunks_rust(

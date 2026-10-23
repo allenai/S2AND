@@ -409,7 +409,6 @@ def _fit_pairwise_model(
 
 
 def _publish_result(
-    args: argparse.Namespace,
     plan: PairwisePreflightPlan,
     clusterer: Clusterer,
     training_config: Mapping[str, Any],
@@ -628,7 +627,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         }
         logger.info("pairwise training completed in %.3f seconds", time.perf_counter() - started)
     result = _publish_result(
-        args,
         plan,
         union_clusterer,
         training_config,

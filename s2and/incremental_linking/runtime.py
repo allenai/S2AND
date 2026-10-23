@@ -852,14 +852,9 @@ def _predict_pairwise_model_distances(
     classifier: Any,
     features: np.ndarray,
     labels: np.ndarray,
-    num_threads: int,
     nameless_classifier: Any | None = None,
     nameless_features: np.ndarray | None = None,
 ) -> np.ndarray:
-    # Estimator threading is configured through propagated n_jobs; predict_proba(num_threads=...)
-    # is LightGBM-specific and breaks sklearn-compatible wrappers.
-    del num_threads
-
     predictions = np.zeros(len(labels), dtype=np.float64)
     predict = np.isnan(labels)
     if np.any(predict):
@@ -1097,7 +1092,6 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
                 classifier=classifier,
                 features=take_feature_columns_rust(model_pair_features, main_positions, num_threads=n_jobs),
                 labels=labels_chunk,
-                num_threads=resolve_n_jobs(n_jobs),
                 nameless_classifier=nameless_classifier,
                 nameless_features=(
                     take_feature_columns_rust(model_pair_features, nameless_positions, num_threads=n_jobs)

@@ -244,7 +244,6 @@ def test_compact_scoring_preserves_batches_and_owned_inputs(
             labels,
             nl_features,
             "test",
-            num_threads=10,
             compact_rows=indices if compact else None,
         )
         observed.append((result, main.calls, None if nameless is None else nameless.calls))

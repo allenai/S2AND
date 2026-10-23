@@ -384,7 +384,6 @@ def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
 
 def _get_rust_featurizer(
     dataset: ANDData,
-    runtime_context: Any | None = None,
     *,
     prediction_state: PredictionState | None = None,
 ) -> Any:

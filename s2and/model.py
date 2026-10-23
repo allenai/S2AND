@@ -1133,7 +1133,6 @@ def _predict_class0_with_runtime(
     classifier: Any,
     features: np.ndarray,
     *,
-    num_threads: int | None = None,
     total_ram_bytes: int | None = None,
 ) -> tuple[np.ndarray, float, str]:
     raw_features = np.asarray(features)
@@ -1174,9 +1173,6 @@ def _predict_class0_with_runtime(
         backend = "rust_lightgbm_chunked" if scorer_plan.chunk_count > 1 else "rust_lightgbm"
         return 1.0 - np.asarray(positive, dtype=np.float64), time.perf_counter() - started, backend
 
-    # Estimator threading is configured through propagated n_jobs; predict_proba(num_threads=...)
-    # is LightGBM-specific and breaks sklearn-compatible wrappers.
-    del num_threads
     python_start = time.perf_counter()
     predictions = predict_pairwise_class0(classifier, features_2d)
     backend = str(getattr(classifier, "prediction_backend", "python"))
@@ -1191,8 +1187,6 @@ def _predict_and_combine(
     nameless_features: np.ndarray | None,
     batch_label: int | str,
     *,
-    num_threads: int | None = None,
-    runtime_context: RuntimeContext | None = None,
     total_ram_bytes: int | None = None,
     compact_rows: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
@@ -1216,7 +1210,6 @@ def _predict_and_combine(
         main_pred, main_sec, main_backend = _predict_class0_with_runtime(
             classifier,
             main_matrix,
-            num_threads=num_threads,
             total_ram_bytes=total_ram_bytes,
         )
         if nameless_classifier is not None:
@@ -1225,7 +1218,6 @@ def _predict_and_combine(
             nl_pred, nl_sec, nl_backend = _predict_class0_with_runtime(
                 nameless_classifier,
                 nameless_matrix,
-                num_threads=num_threads,
                 total_ram_bytes=total_ram_bytes,
             )
             logger.info(
@@ -1385,7 +1377,7 @@ def _initialize_incremental_constraint_backend(
     if not use_rust_constraints:
         return None, False
 
-    return _get_rust_featurizer(dataset, runtime_context=runtime_context, prediction_state=prediction_state), True
+    return _get_rust_featurizer(dataset, prediction_state=prediction_state), True
 
 
 def _resolve_constraint_api_mode(
@@ -2349,8 +2341,6 @@ class Clusterer:
             batch_labels,
             batch_nameless_features,
             batch_label,
-            num_threads=self.n_jobs,
-            runtime_context=runtime_context,
             total_ram_bytes=total_ram_bytes,
         )
         if int(batch_predictions.shape[0]) != expected_rows:
@@ -2467,8 +2457,6 @@ class Clusterer:
                 batch_labels,
                 batch_nameless_features,
                 batch_num,
-                num_threads=self.n_jobs,
-                runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
             )
             yield _PredictedDistanceMatrixBatch(
@@ -2965,8 +2953,6 @@ class Clusterer:
                     labels,
                     batch_nameless_features,
                     f"{block_key}:{offset}",
-                    num_threads=self.n_jobs,
-                    runtime_context=runtime_context,
                     total_ram_bytes=total_ram_bytes,
                     compact_rows=scored_rows,
                 )
@@ -3592,7 +3578,6 @@ class Clusterer:
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None,
         batching_threshold: int | None,
-        resolved_load_name_counts: bool,
         name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None,
         cluster_seed_disallows: set[tuple[str, str]],
         signature_ids: list[str],
@@ -3872,7 +3857,6 @@ class Clusterer:
             name_tuples=name_tuples,
             cluster_seeds_require=cluster_seeds_require,
             cluster_seeds_disallow=cluster_seeds_disallow,
-            altered_cluster_signatures=altered_cluster_signatures,
         )
 
     def _predict_from_arrow_request(
@@ -3890,7 +3874,6 @@ class Clusterer:
         name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
         cluster_seeds_require: Mapping[Any, Any] | None = None,
         cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None = None,
-        altered_cluster_signatures: Sequence[Any] | None = None,
         prediction_state: PredictionState | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """Predict blocks through one open Arrow dataset with optional request-local prediction state."""
@@ -3964,7 +3947,6 @@ class Clusterer:
                     runtime_context=runtime_context,
                     total_ram_bytes=total_ram_bytes,
                     batching_threshold=batching_threshold,
-                    resolved_load_name_counts=resolved_load_name_counts,
                     name_tuples=name_tuples,
                     cluster_seed_disallows=cluster_seed_disallows,
                     signature_ids=signature_ids,
@@ -3989,7 +3971,6 @@ class Clusterer:
                     runtime_context=runtime_context,
                     total_ram_bytes=total_ram_bytes,
                     batching_threshold=batching_threshold,
-                    resolved_load_name_counts=resolved_load_name_counts,
                     name_tuples=name_tuples,
                     cluster_seed_disallows=cluster_seed_disallows,
                     signature_ids=signature_ids,
@@ -6115,8 +6096,6 @@ class Clusterer:
             batch_labels,
             batch_nameless_features,
             "incremental",
-            num_threads=self.n_jobs,
-            runtime_context=runtime_context,
             total_ram_bytes=total_ram_bytes,
         )
         logger.info("Telemetry: model_predict_total seconds=%.3f blocks=1", model_predict_seconds)

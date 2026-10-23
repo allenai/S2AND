@@ -213,7 +213,7 @@ See [installed release smoke](../scripts/production/README.md#installed-release-
 Publish through `.github/workflows/release-rust.yml` from the reviewed `main` commit.
 Its validate job runs `scripts/run_ci_locally.py`, the same checks as pull-request CI.
 Verify the workflow commit before approval of its protected PyPI environment.
-Confirm the `s2and` version is absent before the first irreversible publish.
+The validate job fails when PyPI already has the `s2and` version.
 The workflow publishes one source archive and 15 platform/interpreter wheels.
 Do not dispatch publication before model and data acceptance are complete.
 
@@ -225,9 +225,12 @@ A beta lets integrators test before acceptance. It never replaces Stage 6.
    Run `uv run python scripts/sync_version.py`; Cargo files receive `1.0.0-beta.1`.
 2. Push the branch and dispatch `release-rust.yml` on it.
    A pre-release builds and smoke-tests on any branch; the publish jobs run only on `main`.
+   The validate job fails when PyPI already has the version.
 3. Download the run's `release-distributions` artifact.
    Confirm every file carries the beta version.
-4. Upload the unified `s2and` distributions with `uv publish` and an API token.
+4. Confirm that `https://pypi.org/pypi/s2and/<beta version>/json` still returns 404.
+   PyPI adds new files to an existing release, so a reused version would mix two builds.
+   Upload the unified `s2and` distributions with `uv publish` and an API token.
 5. Install `s2and==<beta version>` in an empty environment and run one real prediction.
 
 Installers skip pre-releases unless the requirement names one, so `pip install s2and` stays on the last final release.

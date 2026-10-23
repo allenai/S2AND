@@ -43,6 +43,24 @@ def test_release_ref_gate_rejects_unapproved_refs(
     assert (result.returncode == 0) is allowed, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize(("status", "allowed"), [("404", True), ("200", False), ("503", False)])
+def test_release_requires_an_unpublished_pypi_version(
+    release_workflow, tmp_path: Path, status: str, allowed: bool
+) -> None:
+    steps = release_workflow["jobs"]["validate"]["steps"]
+    names = [step.get("name") for step in steps]
+    guard = steps[names.index("Require an unpublished PyPI version")]
+    # Every build job needs validate, so the guard stops reused versions before any build starts.
+    assert names.index("Require an unpublished PyPI version") < names.index("Run the full CI policy")
+    (tmp_path / "VERSION").write_text("1.0.0b6\n", encoding="utf-8")
+    # A shell function stands in for curl so the test never contacts PyPI.
+    fake_curl = 'curl() { printf "%s\\n" "$*" > curl_args; printf "%s" "$FAKE_HTTP_STATUS"; }\n'
+    script = "set -euo pipefail\n" + fake_curl + guard["run"]
+    result = run_bash(script, cwd=tmp_path, env={"FAKE_HTTP_STATUS": status})
+    assert (result.returncode == 0) is allowed, result.stdout + result.stderr
+    assert "https://pypi.org/pypi/s2and/1.0.0b6/json" in (tmp_path / "curl_args").read_text(encoding="utf-8")
+
+
 def test_release_publication_requires_successful_validation_and_smoke(release_workflow) -> None:
     assert set(release_workflow["on"]) == {"workflow_dispatch"}
     jobs = release_workflow["jobs"]

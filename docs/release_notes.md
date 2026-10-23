@@ -3,16 +3,18 @@
 ## Unreleased runtime changes
 
 - Bundle the native extension in the `s2and` wheel as `s2and._s2and_rust`.
+  Installs upgraded from the split `1.0.0b5` packages can uninstall `s2and-rust`; nothing imports it.
 - Retire `Clusterer.predict_incremental` and classic `predict(batching_threshold=...)`.
   Use the corresponding Arrow APIs. Full-block classic prediction and training remain available.
 - Run EPS sweep subblocking through the production native graph planner.
   Keep ORCID labels hidden for ORCID-B3 selection. Revalidate historical giant-block conclusions before publication.
 - Preserve format-1 model fields for retired experiment settings; they no longer affect runtime behavior.
+- The release workflow stops when PyPI already has the version and imports each Linux wheel on its own platform.
 
 
 ## Unreleased 1.0.0 simplification
 
-The coordinated `s2and` and `s2and-rust` package version is `1.0.0`. The
+The `s2and` package version is `1.0.0`; its wheel bundles the native extension. The
 production model and public-data version is `1.3`, on a separate version axis.
 
 ### Status
@@ -33,7 +35,8 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 Services that sent Arrow tables to S2AND 0.51 need these changes:
 
-- Pin `s2and==1.0.0`. `s2and-rust` is now a plain dependency, and the `rust` extra is gone.
+- Pin `s2and==1.0.0`. The `s2and` wheel includes the native extension, so drop any `s2and-rust`
+  pin and the `rust` extra.
 - The wheel no longer contains a model or a name-count pickle. Download the model and the
   name-count index from the `inference` S3 bundle (see [data](data.md)), and load the model with
   `load_production_model(path, n_jobs=N)`. `production_model_bundle_version` is now

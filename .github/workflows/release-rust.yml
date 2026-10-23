@@ -17,6 +17,17 @@ jobs:
           if grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+$' VERSION; then exit 0; fi
           test "$GITHUB_REF" = "refs/heads/main"
 
+      # PyPI adds new files to an existing release, so reusing a version would mix two builds.
+      # The beta upload in docs/release.md repeats this check.
+      - name: Require an unpublished PyPI version
+        run: |
+          version="$(cat VERSION)"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/s2and/${version}/json")"
+          if [ "$status" != "404" ]; then
+            echo "::error::PyPI returned HTTP ${status} for s2and ${version}; set a new VERSION first"
+            exit 1
+          fi
+
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
@@ -49,12 +60,6 @@ jobs:
 
       - name: Build s2and distributions
         run: uv build --sdist --out-dir dist --clear
-
-      - name: Verify built release asset contract
-        run: >-
-          uv run --no-project python
-          scripts/verification/verify_production_model_distributions.py
-          --dist-dir dist --source-root .
 
       - name: Verify package data inventory
         run: uv run --no-project python scripts/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
@@ -195,12 +200,18 @@ jobs:
           - name: manylinux2014-x86_64
             target: x86_64-unknown-linux-gnu
             manylinux: "2_17"
+            docker-platform: linux/amd64
+            python-image: slim
           - name: manylinux2014-aarch64
             target: aarch64-unknown-linux-gnu
             manylinux: "2_17"
+            docker-platform: linux/arm64
+            python-image: slim
           - name: musllinux-x86_64
             target: x86_64-unknown-linux-musl
             manylinux: "musllinux_1_2"
+            docker-platform: linux/amd64
+            python-image: alpine
 
     steps:
       - uses: actions/checkout@v5
@@ -224,6 +235,27 @@ jobs:
 
       - name: Verify Rust distribution license notices
         run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir dist
+
+      - name: Set up QEMU for the arm64 wheel import
+        if: matrix.platform.docker-platform == 'linux/arm64'
+        uses: docker/setup-qemu-action@v3
+
+      # The x86_64 runner cannot load aarch64 or musl wheels, so import each one in a matching container.
+      # Dependencies are skipped because the import check needs only the native module.
+      - name: Import each wheel on its target platform
+        shell: bash
+        run: |
+          for py in 3.11 3.12 3.13; do
+            wheel="$(find dist -type f -name "*-cp${py/./}-*.whl" -print -quit)"
+            test -n "$wheel"
+            echo "::group::${wheel} (python:${py}-${{ matrix.platform.python-image }})"
+            docker run --rm --platform '${{ matrix.platform.docker-platform }}' \
+              -v "$GITHUB_WORKSPACE:/work:ro" -w /tmp \
+              "python:${py}-${{ matrix.platform.python-image }}" \
+              sh -c "pip install --quiet --no-deps --root-user-action=ignore '/work/${wheel}' \
+                && python /work/scripts/verification/smoke_installed_rust_api.py"
+            echo "::endgroup::"
+          done
 
       - uses: actions/upload-artifact@v6
         with:

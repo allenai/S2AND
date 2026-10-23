@@ -365,6 +365,8 @@ impl RustHybridCentroidRetriever {
             }
         }
         let mut dots = vec![[0.0f64; 5]; queries.len()];
+        // A vector is widened once per block of queries, not once per group.
+        let mut widened: Vec<f64> = Vec::new();
         for (index, summary) in self.summaries.iter().enumerate() {
             let centroid = match (
                 summary.specter_centroid.as_ref(),
@@ -407,6 +409,8 @@ impl RustHybridCentroidRetriever {
                 else {
                     continue;
                 };
+                widened.clear();
+                widened.extend(vector.iter().map(|value| f64::from(*value)));
                 for chunk in members.chunks(QUERY_GROUP) {
                     let mut query_values: [&[f64]; QUERY_GROUP] = [&[]; QUERY_GROUP];
                     for (position, query_index) in chunk.iter().enumerate() {
@@ -414,7 +418,7 @@ impl RustHybridCentroidRetriever {
                             query_values[position] = values.as_slice();
                         }
                     }
-                    let sums = grouped_dot_products(&query_values[..chunk.len()], vector);
+                    let sums = grouped_dot_products(&query_values[..chunk.len()], &widened);
                     for (position, query_index) in chunk.iter().enumerate() {
                         dots[*query_index][slot] = sums[position];
                     }
@@ -1232,13 +1236,15 @@ fn fold_lanes(partial: &[f64; DOT_LANES], query: &[f32], vector: &[f32], body: u
 /// Queries scored together against one vector by `grouped_dot_products`.
 const QUERY_GROUP: usize = 4;
 
-/// Dot products of up to `QUERY_GROUP` f64 queries with one f32 vector.
+/// Dot products of up to `QUERY_GROUP` f64 queries with one vector widened
+/// from f32.
 ///
 /// Each product is summed exactly as `fused_dot_products` sums it: the same
 /// `DOT_LANES` partial sums, each a separate multiply then add, folded by
-/// `fold_lanes`. The queries are the f32 values converted once, so the
-/// results match bit for bit. Every query has the vector's length.
-fn grouped_dot_products(queries: &[&[f64]], vector: &[f32]) -> [f64; QUERY_GROUP] {
+/// `fold_lanes`. Widening f32 to f64 is exact, so the queries and the vector
+/// are widened once and the results match bit for bit. Every query has the
+/// vector's length.
+fn grouped_dot_products(queries: &[&[f64]], vector: &[f64]) -> [f64; QUERY_GROUP] {
     fn pad<const N: usize>(values: [f64; N]) -> [f64; QUERY_GROUP] {
         let mut padded = [0.0f64; QUERY_GROUP];
         padded[..N].copy_from_slice(&values);
@@ -1256,7 +1262,7 @@ fn grouped_dot_products(queries: &[&[f64]], vector: &[f32]) -> [f64; QUERY_GROUP
     }
 }
 
-fn grouped_dots<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q] {
+fn grouped_dots<const Q: usize>(queries: [&[f64]; Q], vector: &[f64]) -> [f64; Q] {
     #[cfg(target_arch = "x86_64")]
     {
         if std::arch::is_x86_feature_detected!("avx2") {
@@ -1271,10 +1277,9 @@ fn grouped_dots<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q
 /// take the same separate multiply and add, so results equal the portable code.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn grouped_dots_avx2<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q] {
+unsafe fn grouped_dots_avx2<const Q: usize>(queries: [&[f64]; Q], vector: &[f64]) -> [f64; Q] {
     use std::arch::x86_64::{
-        _mm256_add_pd, _mm256_castps256_ps128, _mm256_cvtps_pd, _mm256_extractf128_ps,
-        _mm256_loadu_pd, _mm256_loadu_ps, _mm256_mul_pd, _mm256_setzero_pd, _mm256_storeu_pd,
+        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_setzero_pd, _mm256_storeu_pd,
     };
     let len = vector.len();
     let queries = queries.map(|query| &query[..len]);
@@ -1283,9 +1288,8 @@ unsafe fn grouped_dots_avx2<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]
     let mut high = [_mm256_setzero_pd(); Q];
     let mut start = 0;
     while start < body {
-        let v = _mm256_loadu_ps(vector.as_ptr().add(start));
-        let v_low = _mm256_cvtps_pd(_mm256_castps256_ps128(v));
-        let v_high = _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(v));
+        let v_low = _mm256_loadu_pd(vector.as_ptr().add(start));
+        let v_high = _mm256_loadu_pd(vector.as_ptr().add(start + 4));
         for q in 0..Q {
             let q_low = _mm256_loadu_pd(queries[q].as_ptr().add(start));
             let q_high = _mm256_loadu_pd(queries[q].as_ptr().add(start + 4));
@@ -1305,20 +1309,16 @@ unsafe fn grouped_dots_avx2<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]
 }
 
 #[inline(always)]
-fn grouped_dots_portable<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q] {
+fn grouped_dots_portable<const Q: usize>(queries: [&[f64]; Q], vector: &[f64]) -> [f64; Q] {
     let len = vector.len();
     let queries = queries.map(|query| &query[..len]);
     let body = len - len % DOT_LANES;
     let mut lanes = [[0.0f64; DOT_LANES]; Q];
     for (chunk_index, vector_chunk) in vector[..body].chunks_exact(DOT_LANES).enumerate() {
         let start = chunk_index * DOT_LANES;
-        let mut v = [0.0f64; DOT_LANES];
-        for (lane, value) in v.iter_mut().zip(vector_chunk) {
-            *lane = f64::from(*value);
-        }
         for q in 0..Q {
             for lane in 0..DOT_LANES {
-                lanes[q][lane] += queries[q][start + lane] * v[lane];
+                lanes[q][lane] += queries[q][start + lane] * vector_chunk[lane];
             }
         }
     }
@@ -1329,13 +1329,13 @@ fn grouped_dots_portable<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -
     sums
 }
 
-/// `fold_lanes` for a query already converted to f64.
+/// `fold_lanes` for a query and a vector already widened to f64.
 #[inline(always)]
-fn fold_lanes_f64(partial: &[f64; DOT_LANES], query: &[f64], vector: &[f32], body: usize) -> f64 {
+fn fold_lanes_f64(partial: &[f64; DOT_LANES], query: &[f64], vector: &[f64], body: usize) -> f64 {
     let mut sum = ((partial[0] + partial[1]) + (partial[2] + partial[3]))
         + ((partial[4] + partial[5]) + (partial[6] + partial[7]));
     for i in body..vector.len() {
-        sum += query[i] * f64::from(vector[i]);
+        sum += query[i] * vector[i];
     }
     sum
 }

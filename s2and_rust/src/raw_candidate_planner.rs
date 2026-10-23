@@ -2308,10 +2308,15 @@ impl RawBlockQueryCandidatePlanner {
         let mut pair_row_indices = Vec::<u32>::new();
         let mut filtered_summary_signals_by_component =
             HashMap::<String, RawArrowSummarySignalData>::default();
+        // Each retrieved component expands once, in first-appearance order: a
+        // large cluster retrieved by thousands of queries expanded that many
+        // times, and the index skips repeated papers anyway.
+        let mut seen_component_keys = HashSet::<&str>::default();
         let retrieved_member_paper_ids: Vec<&str> = query_results
             .iter()
             .flatten()
             .flat_map(|result| result.row_component_keys.iter())
+            .filter(|component_key| seen_component_keys.insert(component_key.as_str()))
             .filter_map(|component_key| members_by_component.get(component_key))
             .flatten()
             .filter_map(|signature_id| self.state.signatures.get(signature_id))

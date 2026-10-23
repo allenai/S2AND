@@ -207,7 +207,7 @@ enum
   Runemax       = 0x10FFFF,     // maximum rune value
 };
 
-// Debugging. Not thread safe.
+// Debugging only. Thread-local so concurrent detections do not share the buffer.
 #if defined(_MSC_VER)
 static __declspec(thread) char gDisplayPiece[32];
 #else

@@ -29,14 +29,16 @@ index eafbdfc..8037b24 100644
    prior_unreliable = false;
  
 diff --git a/cld2/internal/getonescriptspan.cc b/cld2/internal/getonescriptspan.cc
-index 73b9ee4..acc46aa 100644
+index 73b9ee4..62bd14d 100644
 --- a/cld2/internal/getonescriptspan.cc
 +++ b/cld2/internal/getonescriptspan.cc
-@@ -208,7 +208,11 @@ enum
+@@ -207,8 +207,12 @@ enum
+   Runemax       = 0x10FFFF,     // maximum rune value
  };
  
- // Debugging. Not thread safe.
+-// Debugging. Not thread safe.
 -static char gDisplayPiece[32];
++// Debugging only. Thread-local so concurrent detections do not share the buffer.
 +#if defined(_MSC_VER)
 +static __declspec(thread) char gDisplayPiece[32];
 +#else

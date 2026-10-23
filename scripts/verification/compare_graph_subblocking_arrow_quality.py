@@ -444,27 +444,6 @@ def _graph_config(args: argparse.Namespace) -> GraphSubblockingConfig:
     )
 
 
-def load_signature_ids_from_arrow(
-    arrow_dataset: ArrowDataset,
-    *,
-    limit: int | None,
-    sample_mode: str,
-    seed: int,
-) -> list[str]:
-    with arrow_dataset.use() as lease, lease.open_file("signatures") as source_file:
-        all_signature_ids = [
-            str(signature_id)
-            for signature_id in _read_arrow_column_values(source_file, "signature_id")
-            if signature_id is not None
-        ]
-    return _select_signature_ids(
-        all_signature_ids,
-        limit=limit,
-        sample_mode=sample_mode,
-        seed=seed,
-    )
-
-
 def _signature_to_subblock(subblocks: Mapping[str, Iterable[str]]) -> dict[str, str]:
     out: dict[str, str] = {}
     for subblock_key, signature_ids in subblocks.items():

@@ -237,54 +237,6 @@ def _as_uint32_1d(name: str, values: Sequence[Any] | np.ndarray) -> np.ndarray:
     return as_uint32_1d(name, values)
 
 
-def build_candidate_batch_from_members(
-    query_signature_indices: Sequence[int] | np.ndarray,
-    candidate_member_signature_indices: Sequence[Sequence[int] | np.ndarray],
-    *,
-    row_component_keys: Sequence[Any] | None = None,
-    labels: Sequence[Any] | np.ndarray | None = None,
-    retrieval_scores: Sequence[float] | np.ndarray | None = None,
-    retrieval_ranks: Sequence[int] | np.ndarray | None = None,
-) -> LinkerCandidateBatch:
-    """Build a `LinkerCandidateBatch` from per-candidate member signature indices."""
-
-    row_query_indices = _as_uint32_1d("query_signature_indices", query_signature_indices)
-    row_count = int(len(row_query_indices))
-    if len(candidate_member_signature_indices) != row_count:
-        raise ValueError(
-            "candidate_member_signature_indices must have one member-list per row: "
-            f"{len(candidate_member_signature_indices)} != {row_count}"
-        )
-    member_arrays = [
-        _as_uint32_1d(f"candidate_member_signature_indices[{row_index}]", members)
-        for row_index, members in enumerate(candidate_member_signature_indices)
-    ]
-    pair_count = sum(len(members) for members in member_arrays)
-    left = np.empty(pair_count, dtype=np.uint32)
-    right = np.empty(pair_count, dtype=np.uint32)
-    rows = np.empty(pair_count, dtype=np.uint32)
-    offset = 0
-    for row_index, members in enumerate(member_arrays):
-        stop = offset + len(members)
-        left[offset:stop] = row_query_indices[row_index]
-        right[offset:stop] = members
-        rows[offset:stop] = row_index
-        offset = stop
-    return LinkerCandidateBatch(
-        row_count=row_count,
-        left_signature_indices=left,
-        right_signature_indices=right,
-        pair_row_indices=rows,
-        row_query_signature_indices=row_query_indices,
-        row_component_keys=None if row_component_keys is None else tuple(row_component_keys),
-        labels=None if labels is None else np.asarray(labels),
-        retrieval_scores=None if retrieval_scores is None else np.asarray(retrieval_scores, dtype=np.float32),
-        retrieval_ranks=None
-        if retrieval_ranks is None
-        else as_retrieval_rank_uint16_1d("retrieval_ranks", retrieval_ranks),
-    )
-
-
 def _ordered_union(left: Sequence[int], right: Sequence[int]) -> tuple[int, ...]:
     return tuple(dict.fromkeys([int(value) for value in (*left, *right)]))
 

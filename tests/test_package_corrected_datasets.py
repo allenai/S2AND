@@ -20,7 +20,7 @@ from scripts.production.data.package_corrected_datasets import (
     validate_corrected_datasets,
 )
 from scripts.production.data.package_pairwise_inputs import package_pairwise_inputs
-from scripts.production.model.linker_source_bundle import export_portable_source_bundle, validate_portable_source_bundle
+from scripts.production.model.linker_source_bundle import validate_portable_source_bundle
 from scripts.production.model.unknown_signatures import load_unknown_signatures
 from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import write_pairwise_dataset
@@ -145,21 +145,6 @@ def test_complete_snapshot_preserves_current_sources_and_uses_one_index(
         assert data.name_counts_index is not None
         counts = data.name_counts_index.lookup_many(["alex"], [None], [None], [None])
         assert counts[0][0] == 20
-
-
-def test_portable_export_preserves_public_and_replay_manifests(package_inputs: dict[str, Path], tmp_path: Path) -> None:
-    _package(package_inputs)
-    root = package_inputs["output_root"]
-    exported = tmp_path / "exported"
-    export_portable_source_bundle(source_bundle=root, output_source_bundle=exported)
-    assert validate_corrected_datasets(exported)["public_dataset_count"] == 1
-    assert validate_portable_source_bundle(exported)["dataset_count"] == 2
-    before = json.loads((root / "manifest.json").read_text())
-    after = json.loads((exported / "manifest.json").read_text())
-    assert after == before
-    assert json.loads((exported / "replay_manifest.json").read_text()) == json.loads(
-        (root / "replay_manifest.json").read_text()
-    )
 
 
 def test_complete_snapshot_rejects_changed_pairwise_source(package_inputs: dict[str, Path]) -> None:

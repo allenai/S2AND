@@ -573,28 +573,6 @@ def read_arrow_batch_lookup_index_batch_indices(
     )
 
 
-def read_arrow_batch_lookup_index_batch_indices_for_request(
-    arrow_path: str | Path,
-    index_path: str | Path,
-    *,
-    key_column: str,
-    values: Iterable[Any],
-) -> set[int]:
-    """Return Arrow record-batch indices for request-time filtered reads.
-
-    The caller must provide an immutable, matching table/index pair. Checks and
-    lookup behavior are the same as ``read_arrow_batch_lookup_index_batch_indices``.
-    """
-
-    return _read_arrow_batch_lookup_index_batch_indices(
-        arrow_path,
-        index_path,
-        key_column=key_column,
-        values=values,
-        context="reading request-time batch lookup index",
-    )
-
-
 def validate_arrow_batch_lookup_index(
     arrow_path: str | Path,
     index_path: str | Path,

@@ -98,20 +98,6 @@ def test_pairwise_aggregate_feature_matrix_handles_missing_values(sums, valid_co
     assert np.isnan(matrix[1]).all()
 
 
-def test_candidate_batch_expands_members_and_preserves_row_metadata():
-    batch = linker_pairwise.build_candidate_batch_from_members(
-        [0, 1],
-        [np.asarray([1, 2], dtype=np.uint32), np.asarray([3], dtype=np.uint32)],
-        row_component_keys=("c0", "c1"),
-        labels=np.asarray([1, 0], dtype=np.int8),
-    )
-    np.testing.assert_array_equal(batch.left_signature_indices, [0, 0, 1])
-    np.testing.assert_array_equal(batch.right_signature_indices, [1, 2, 3])
-    np.testing.assert_array_equal(batch.pair_row_indices, [0, 0, 1])
-    np.testing.assert_array_equal(batch.labels, [1, 0])
-    assert batch.row_component_keys == ("c0", "c1")
-
-
 def test_localize_row_indices_handles_grouped_sparse_and_ungrouped_chunks() -> None:
     cases = [
         ([5, 5, 6, 8, 8], [5, 6, 8], [0, 0, 1, 2, 2]),

@@ -2512,13 +2512,27 @@ impl RustFeaturizer {
                     },
                     |(main_tile, nameless_tile), (tile_index, out_tile)| {
                         let rows = out_tile.len();
+                        // Contiguous rows step from the tile's first pair; chosen
+                        // rows take each pair from its offset.
+                        let mut next_pair = scored_rows.is_none().then(|| {
+                            upper_triangle_pair_at(block_size, start_offset + tile_index * tile)
+                        });
                         for row in 0..rows {
-                            let position = tile_index * tile + row;
-                            let offset = match scored_rows {
-                                Some(scored) => start_offset + scored[position] as usize,
-                                None => start_offset + position,
+                            let (left, right) = match scored_rows {
+                                Some(scored) => upper_triangle_pair_at(
+                                    block_size,
+                                    start_offset + scored[tile_index * tile + row] as usize,
+                                ),
+                                None => {
+                                    let current = next_pair.expect("stepping holds a pair");
+                                    next_pair = Some(if current.1 + 1 < block_size {
+                                        (current.0, current.1 + 1)
+                                    } else {
+                                        (current.0 + 1, current.0 + 2)
+                                    });
+                                    current
+                                }
                             };
-                            let (left, right) = upper_triangle_pair_at(block_size, offset);
                             let (s1, p1) = block_lookup[left];
                             let (s2, p2) = block_lookup[right];
                             let features = self.featurize_pair_data(s1, s2, p1, p2);

@@ -31,9 +31,8 @@ production model and public-data version is `1.3`, on a separate version axis.
 ### Status
 
 - **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles are on S3 (see [data](data.md)).
-  PyPI has the `1.0.0b5` beta for integration testing; the final `1.0.0` release is pending.
-  uv installs the beta's `s2and-rust` dependency only when it is pinned too
-  (`s2and==1.0.0b5 s2and-rust==1.0.0b5`) or with `--prerelease=allow`; pip needs neither.
+  PyPI has the `1.0.0b6` beta for integration testing; the final `1.0.0` release is pending.
+  Pin `s2and==1.0.0b6`; its wheel bundles the native extension, so no `s2and-rust` pin is needed.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
@@ -636,6 +635,43 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   82 s on a_silva. One new signature into s_lee's 512,686 seeds takes 13.3 s instead
   of 15.6 s. Peak RSS of the a_silva full block is 3.6 GB instead of 3.1 GB; other
   requests change by at most 0.1 GB.
+- Block pairs are featurized and scored tile by tile in Rust, so a block's full
+  feature matrix is never materialized. Native LightGBM boosters only; a differential
+  test checks the tiles against the matrix path. SPECTER vectors are widened once per
+  block, and each component is expanded once.
+- Linker candidate pairs are scored inside the Rust feature pass.
+- Constraint checks build middle-name summaries and middle-initial counts once per
+  signature instead of once per pair.
+- Blocks cluster largest first. Each block's linkage overlaps the next block's
+  distance build, so the longest linkages now overlap the most work.
+- Seed ORCIDs are read and decoded by the native Arrow reader inside the request's
+  thread pool.
+- The request path does less Python work per seed, and a seed reload skips its
+  retains when the rows already match.
+- SPECTER buffers are shared instead of copied. Language detection runs in parallel
+  through a vendored `cld2-sys` 1.0.2 whose detection debug state is thread-local
+  (see `s2and_rust/vendor/cld2-sys/S2AND_PATCHES.md`).
+- Native request state is released on a background thread after the result returns.
+  Featurizer paper buffers are freed first, and each background release ends by asking
+  every pool thread to return freed memory to the OS. Memory held 15 s after three
+  incremental s_lee requests is 1.9 GiB instead of 8.8 GiB with background release
+  alone, and 2.5 GiB instead of 13.3 GiB after a full s_lee request; peaks and clusters
+  are unchanged.
+- Together, on the same 13 requests with identical clusters, run right after a rerun
+  of the published `1.0.0b5`, `1.0.0b6` incremental prediction takes 39.2 s instead
+  of 46.0 s on s_lee, 9.3 s instead of 11.0 s on j_smith, 6.2 s instead of 7.2 s on
+  a_khan, and 5.3 s instead of 6.7 s on s_gupta. Full-block prediction takes 1,226 s
+  instead of 1,669 s on s_lee, 228 s instead of 274 s on j_smith, 92 s instead of
+  119 s on a_khan, 85 s instead of 117 s on s_gupta, and 47 s instead of 66 s on
+  a_silva. One new signature into s_lee's 512,686 seeds takes 10.9 s instead of
+  13.8 s. Peak RSS of the s_lee full block is 14.7 GB instead of 15.0 GB, and no
+  request's peak rises by more than 0.1 GB. That `1.0.0b5` rerun took 4-17% longer than the
+  10-22 `1.0.0b5` sweep on the same requests, so compare the pairs above, not these
+  numbers with the `1.0.0b5` entry.
+- On the s_feldman block (Windows, 8 threads, median of 3), `1.0.0b6` full-block
+  prediction takes 11.2 s instead of `1.0.0b1`'s 18.0 s, the as-exported incremental
+  request 11.7 s instead of 18.6 s, and the 200-signature steady-state request 0.82 s
+  instead of 1.97 s, with identical clusters.
 - `NameCountsIndex.open` no longer hashes the index files or checks every record on
   each open. It checks the manifest, file sizes, file headers, and section bounds,
   so lookups stay memory-safe. For the 2.3 GB `1.3` index an open takes 0.04 s and
@@ -727,6 +763,15 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
 
 ### Removed and simplified
 
+- The Python query adapter (`s2and.incremental_linking.query_adapter`) and the native
+  retriever's Python-object surface are removed; production builds retrieval queries
+  from Arrow through the raw planner. Test-only APIs go too:
+  `build_candidate_batch_from_members`, `load_signature_ids_from_arrow`, the request
+  variant of the batch-lookup reader, the portable source bundle export and its
+  rebind helper, and the selected-gate table formatter. The native `RustFeaturizer`
+  loses `update_cluster_seeds`, `signature_rule_metadata`, and
+  `update_signature_name_counts`; seed overlays use `with_cluster_seeds`. No public
+  prediction signature changes.
 - Release policy now has one runbook, two prepared plans, one
   final run binding, and one reusable `ArrowDataset` handle. Completed Rust migration comparisons,
   stress tools, memory calibrators, duplicated artifact protocols, their

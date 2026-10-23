@@ -59,7 +59,7 @@ const MAX_KEY_THRESHOLDS: usize = 255;
 const MAX_QUICKSCORER_LEAVES: usize = 32;
 const MAX_LOCKSTEP_LEAVES: usize = 256;
 /// Rows per parallel work item, for both kernels.
-const TILE_ROWS: usize = 256;
+pub(super) const TILE_ROWS: usize = 256;
 /// Rows traversed together by the lockstep kernel.
 const LOCKSTEP_LANES: usize = 8;
 /// Rows scored per pass over the QuickScorer node lists.

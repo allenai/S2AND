@@ -1,5 +1,6 @@
 use super::*;
 use crate::feature_schema as columns;
+use crate::lightgbm_booster::RustLightGBMBooster;
 
 #[pyclass]
 #[derive(Clone)]
@@ -88,6 +89,7 @@ mod constraint_key_tests {
             position: 0,
             paper_id: "p".to_string(),
             name_counts: None,
+            middle_initial_counts: Vec::new(),
             adv_name: Some(first),
         }
     }
@@ -209,6 +211,17 @@ mod constraint_key_tests {
             }
         }
     }
+
+    #[test]
+    fn views_keep_a_subset_of_the_shared_signature_map() {
+        let mut rng = XorShift(0x5eed_0000_0000_0007);
+        let full = featurizer(&mut rng, 2);
+        let view = full
+            .view_with_cluster_seed_sidecars(vec!["s1".to_string()], None, None)
+            .expect("view over one signature");
+        assert_eq!(view.signature_id_order(), ["s1".to_string()]);
+        assert_eq!(view.signatures.len(), 2);
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +292,39 @@ struct ConstraintKeys<'a> {
     first_ids: Vec<u32>,
     /// Sorted ids of the first names each interned first name aliases.
     first_aliases: Vec<Vec<u32>>,
+}
+
+/// Pairs featurized and scored per pool task in fused scoring. Tiles of 64
+/// to 256 pairs measured alike; 4,096 cost 15% and 16,384 cost 70% more, as
+/// the scorer's tables and the tile buffers left the caches.
+const FUSED_SCORING_TILE: usize = 256;
+
+/// A feature value as the pairwise model reads it: `nan_value` for a missing
+/// value, unless `nan_value` is itself NaN.
+#[inline]
+fn model_input(value: f64, nan_value: f64) -> f64 {
+    if value.is_nan() && !nan_value.is_nan() {
+        nan_value
+    } else {
+        value
+    }
+}
+
+/// A row-major `(rows, cols)` NumPy matrix from a flat vector.
+fn rows_matrix<'py, T: numpy::Element>(
+    py: Python<'py>,
+    rows: usize,
+    cols: usize,
+    values: Vec<T>,
+    name: &str,
+) -> PyResult<Bound<'py, PyArray2<T>>> {
+    numpy::ndarray::Array2::from_shape_vec((rows, cols), values)
+        .map(|array| array.into_pyarray(py))
+        .map_err(|err| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to build {name} matrix: {err}"
+            ))
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -541,7 +587,8 @@ impl RustFeaturizer {
         let middle2 = s2.middle.as_deref();
 
         feats[columns::FIRST_NAMES_EQUAL] = first_names_equal(first1, first2);
-        feats[columns::MIDDLE_INITIALS_OVERLAP] = middle_initials_overlap(middle1, middle2);
+        feats[columns::MIDDLE_INITIALS_OVERLAP] =
+            middle_initials_overlap_counts(&s1.middle_initial_counts, &s2.middle_initial_counts);
         feats[columns::MIDDLE_NAMES_EQUAL] = middle_names_equal(middle1, middle2);
         feats[columns::MIDDLE_ONE_MISSING] = middle_one_missing(middle1, middle2);
         feats[columns::SINGLE_CHAR_FIRST] = single_char_first(first1, first2);
@@ -899,7 +946,8 @@ impl RustFeaturizer {
     }
 
     fn signature_id_order(&self) -> &[String] {
-        debug_assert_eq!(self.signature_ids.len(), self.signatures.len());
+        // A view keeps a subset of the ids over the shared signature map.
+        debug_assert!(self.signature_ids.len() <= self.signatures.len());
         self.signature_ids.as_slice()
     }
 
@@ -1141,6 +1189,110 @@ impl RustFeaturizer {
         }
     }
 
+    /// Featurize index-array pairs tile by tile, score the unlabeled ones, and
+    /// keep every pair's aggregate feature values.
+    ///
+    /// Returns the model distances, `0.0` for labeled pairs, and the raw
+    /// aggregate values laid out `aggregate_stride` per pair. Scoring equals
+    /// `_predict_pairwise_model_distances`: the main booster's class-0
+    /// probability, averaged with the nameless booster's when one is given.
+    #[allow(clippy::too_many_arguments)]
+    fn score_linker_pairs_tiled<'data, Lookup>(
+        &'data self,
+        left_indices: &[u32],
+        right_indices: &[u32],
+        labels: Option<&[f64]>,
+        main_indices: &[usize],
+        main: &RustLightGBMBooster,
+        nameless: Option<(&[usize], &RustLightGBMBooster)>,
+        aggregate_indices: &[usize],
+        aggregate_stride: usize,
+        nan_value: f64,
+        lookup: &Lookup,
+    ) -> (Vec<f64>, Vec<f64>)
+    where
+        Lookup: Fn(u32) -> (&'data SignatureData, &'data PaperData) + Sync,
+    {
+        let pair_count = left_indices.len();
+        let tile = FUSED_SCORING_TILE;
+        let main_cols = main_indices.len();
+        let nameless_cols = nameless.map_or(0, |(indices, _)| indices.len());
+        let aggregate_cols = aggregate_indices.len();
+        let mut distances = vec![0.0f64; pair_count];
+        let mut aggregate_values = vec![0.0f64; pair_count * aggregate_stride];
+        distances
+            .par_chunks_mut(tile)
+            .zip(aggregate_values.par_chunks_mut(tile * aggregate_stride))
+            .enumerate()
+            .for_each_init(
+                || {
+                    (
+                        vec![0.0f64; tile * main_cols],
+                        vec![0.0f64; tile * nameless_cols],
+                        Vec::<usize>::with_capacity(tile),
+                    )
+                },
+                |(main_tile, nameless_tile, scored_rows),
+                 (tile_index, (distance_tile, aggregate_tile))| {
+                    scored_rows.clear();
+                    for row in 0..distance_tile.len() {
+                        let pair_offset = tile_index * tile + row;
+                        let (s1, p1) = lookup(left_indices[pair_offset]);
+                        let (s2, p2) = lookup(right_indices[pair_offset]);
+                        let features = self.featurize_pair_data(s1, s2, p1, p2);
+                        let aggregate_row = &mut aggregate_tile
+                            [row * aggregate_stride..row * aggregate_stride + aggregate_cols];
+                        for (dest, index) in aggregate_row.iter_mut().zip(aggregate_indices.iter())
+                        {
+                            *dest = features[*index];
+                        }
+                        // A labeled pair takes its label as the distance downstream.
+                        if labels.is_some_and(|values| !values[pair_offset].is_nan()) {
+                            continue;
+                        }
+                        let scored = scored_rows.len();
+                        scored_rows.push(row);
+                        let main_row = &mut main_tile[scored * main_cols..(scored + 1) * main_cols];
+                        for (dest, index) in main_row.iter_mut().zip(main_indices.iter()) {
+                            *dest = model_input(features[*index], nan_value);
+                        }
+                        if let Some((indices, _)) = nameless {
+                            let nameless_row = &mut nameless_tile
+                                [scored * nameless_cols..(scored + 1) * nameless_cols];
+                            for (dest, index) in nameless_row.iter_mut().zip(indices.iter()) {
+                                *dest = model_input(features[*index], nan_value);
+                            }
+                        }
+                    }
+                    let scored = scored_rows.len();
+                    if scored == 0 {
+                        return;
+                    }
+                    let main_positive =
+                        main.probabilities_serial(&main_tile[..scored * main_cols], main_cols);
+                    match nameless {
+                        Some((_, booster)) => {
+                            let nameless_positive = booster.probabilities_serial(
+                                &nameless_tile[..scored * nameless_cols],
+                                nameless_cols,
+                            );
+                            for (position, row) in scored_rows.iter().enumerate() {
+                                distance_tile[*row] = ((1.0 - main_positive[position])
+                                    + (1.0 - nameless_positive[position]))
+                                    / 2.0;
+                            }
+                        }
+                        None => {
+                            for (position, row) in scored_rows.iter().enumerate() {
+                                distance_tile[*row] = 1.0 - main_positive[position];
+                            }
+                        }
+                    }
+                },
+            );
+        (distances, aggregate_values)
+    }
+
     fn pair_aggregate_row_ranges(owner_row_indices: &[u32]) -> Option<Vec<PairAggregateRowRange>> {
         if owner_row_indices.is_empty() {
             return Some(Vec::new());
@@ -1340,7 +1492,7 @@ pub(crate) struct RawFeaturizerRows {
     pub(crate) signatures: HashMap<String, RawArrowSignature>,
     pub(crate) papers: HashMap<String, RawArrowPaper>,
     pub(crate) authors_by_paper: HashMap<String, Vec<(i64, String)>>,
-    pub(crate) specter_by_paper: HashMap<String, Vec<f32>>,
+    pub(crate) specter_by_paper: HashMap<String, arrow::buffer::ScalarBuffer<f32>>,
 }
 
 impl RustFeaturizer {
@@ -1411,13 +1563,11 @@ impl RustFeaturizer {
         let (signatures, papers, name_grams) = py.allow_threads(|| {
             install_with_optional_rayon_pool(num_threads, || -> PyResult<_> {
                 let needed_paper_ids: Vec<&String> = needed_paper_ids.iter().collect();
-                // The CLD2 wrapper serializes detection behind a global lock, and
-                // parallel callers only convoy on it. One thread detects the titles
-                // while the others build the unidecode map and stage signatures.
+                // Patched CLD2 uses thread-local detection state, so titles share the request pool.
                 let (detected_languages, (unidecode_char_map, signature_inputs)) = rayon::join(
                     || {
                         needed_paper_ids
-                            .iter()
+                            .par_iter()
                             .map(|paper_id| {
                                 raw_papers
                                     .get(*paper_id)
@@ -1817,17 +1967,6 @@ impl RustFeaturizer {
         })
     }
 
-    fn update_cluster_seeds(
-        &mut self,
-        cluster_seeds_require: &Bound<'_, PyAny>,
-        cluster_seeds_disallow: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        self.cluster_seeds_require = extract_cluster_seeds_require(cluster_seeds_require)?;
-        self.cluster_seeds_disallow = extract_pair_set(cluster_seeds_disallow)?;
-        self.cluster_seeds_disallow_index = OnceLock::new();
-        Ok(())
-    }
-
     #[pyo3(
         signature = (
             pairs,
@@ -2209,23 +2348,33 @@ impl RustFeaturizer {
         Ok(numpy::ndarray::Array1::from_vec(labels).into_pyarray(py))
     }
 
-    fn signature_ids(&self) -> Vec<String> {
-        self.signature_id_order().to_vec()
+    /// Free paper buffers before dropping remaining metadata in the background.
+    ///
+    /// Views and other handles keep their shares; the data is freed with the
+    /// last one. This handle has no signatures afterwards.
+    fn release(&mut self) {
+        // Free paper buffers before residual scoring allocates its feature matrix.
+        drop(std::mem::replace(
+            &mut self.papers,
+            Arc::new(HashMap::default()),
+        ));
+        let dropped = (
+            std::mem::replace(&mut self.signatures, Arc::new(HashMap::default())),
+            std::mem::replace(&mut self.signature_ids, Arc::new(Vec::new())),
+            std::mem::replace(&mut self.name_grams, Arc::new(NameGrams::default())),
+            std::mem::replace(&mut self.name_tuples, Arc::new(HashMap::default())),
+            std::mem::take(&mut self.cluster_seeds_disallow),
+            std::mem::take(&mut self.cluster_seeds_require),
+            self.cluster_seeds_disallow_index.take(),
+        );
+        std::thread::spawn(move || {
+            drop(dropped);
+            crate::rayon_pool::collect_freed_memory_on_pool_workers();
+        });
     }
 
-    fn signature_rule_metadata(&self) -> Vec<(String, Option<String>, Option<String>)> {
-        self.signature_id_order()
-            .iter()
-            .filter_map(|signature_id| {
-                self.signatures.get(signature_id).map(|signature| {
-                    (
-                        signature_id.clone(),
-                        signature.first_normalized().map(str::to_owned),
-                        signature.orcid.clone(),
-                    )
-                })
-            })
-            .collect()
+    fn signature_ids(&self) -> Vec<String> {
+        self.signature_id_order().to_vec()
     }
 
     fn signature_name_counts_present(&self) -> Vec<(String, bool)> {
@@ -2249,24 +2398,6 @@ impl RustFeaturizer {
             .collect();
         pairs.sort_by(|left, right| left.0.cmp(&right.0));
         pairs
-    }
-
-    fn update_signature_name_counts(&mut self, signatures: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let signatures_dict = signatures.downcast::<PyDict>()?;
-        let mut updated = 0usize;
-        for (sig_id_obj, sig_obj) in signatures_dict.iter() {
-            let sig_id: String = sig_id_obj.extract()?;
-            let Some(signature) = Arc::make_mut(&mut self.signatures).get_mut(&sig_id) else {
-                continue;
-            };
-            let counts_obj = sig_obj.getattr("author_info_name_counts")?;
-            let counts = extract_name_counts_data(&counts_obj)?;
-            if counts.is_some() {
-                signature.name_counts = counts;
-                updated += 1;
-            }
-        }
-        Ok(updated)
     }
 
     #[pyo3(signature = (pairs, selected_indices = None, num_threads = None, nan_value = f64::NAN))]
@@ -2377,6 +2508,196 @@ impl RustFeaturizer {
             })
             .collect::<PyResult<Vec<(u32, u32)>>>()?;
         self.featurize_pairs_matrix_indexed(py, pairs, selected_indices, num_threads, nan_value)
+    }
+
+    /// Class-0 probabilities of chosen rows of one chunk of a block's upper
+    /// triangle, featurized and scored tile by tile on the pool.
+    ///
+    /// Equals featurizing the rows with `main_indices` and `nameless_indices`,
+    /// scoring each matrix with its booster, and averaging the class-0
+    /// probabilities as `((1 - p_main) + (1 - p_nameless)) / 2`, or taking
+    /// `1 - p_main` without a nameless booster. No feature matrix is built,
+    /// so the batch path's copies, column gathers and page faults are gone.
+    /// `scored_rows` are offsets into the chunk; None scores every row.
+    #[pyo3(signature = (
+        block_signature_indices,
+        start_offset,
+        max_pairs,
+        scored_rows,
+        main_indices,
+        main_booster,
+        nameless_indices = None,
+        nameless_booster = None,
+        num_threads = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn score_block_upper_triangle_rows_indexed<'py>(
+        &self,
+        py: Python<'py>,
+        block_signature_indices: Vec<u32>,
+        start_offset: usize,
+        max_pairs: Option<usize>,
+        scored_rows: Option<PyReadonlyArray1<'py, i64>>,
+        main_indices: Vec<usize>,
+        main_booster: PyRef<'py, RustLightGBMBooster>,
+        nameless_indices: Option<Vec<usize>>,
+        nameless_booster: Option<PyRef<'py, RustLightGBMBooster>>,
+        num_threads: Option<usize>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let tile = FUSED_SCORING_TILE;
+
+        let signature_ids = self.signature_id_order();
+        let signature_count = signature_ids.len();
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            if global_idx >= signature_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "block signature index out of range: index={} signature_count={}",
+                    global_idx, signature_count
+                )));
+            }
+        }
+        let full_cols = self.full_feature_count();
+        let main_indices = resolve_feature_indices("main_indices", Some(main_indices), full_cols)?;
+        let nameless_indices = match nameless_indices {
+            Some(indices) => Some(resolve_feature_indices(
+                "nameless_indices",
+                Some(indices),
+                full_cols,
+            )?),
+            None => None,
+        };
+        if nameless_indices.is_some() != nameless_booster.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "nameless_indices and nameless_booster must be given together",
+            ));
+        }
+        let main: &RustLightGBMBooster = &main_booster;
+        let nameless: Option<&RustLightGBMBooster> = nameless_booster.as_deref();
+        if main.feature_width() != main_indices.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "main booster expects {} features, got {} main_indices",
+                main.feature_width(),
+                main_indices.len()
+            )));
+        }
+        let nameless_cols = nameless_indices.as_ref().map_or(0, Vec::len);
+        if let Some(booster) = nameless {
+            if booster.feature_width() != nameless_cols {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "nameless booster expects {} features, got {} nameless_indices",
+                    booster.feature_width(),
+                    nameless_cols
+                )));
+            }
+        }
+
+        let mut block_lookup: Vec<(&SignatureData, &PaperData)> =
+            Vec::with_capacity(block_signature_indices.len());
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            let signature_id = &signature_ids[global_idx];
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+            })?;
+            block_lookup.push((signature, paper));
+        }
+        let block_size = block_lookup.len();
+        let chunk_pair_count = upper_triangle_range_len(block_size, start_offset, max_pairs)?;
+        let scored_rows: Option<&[i64]> = match scored_rows.as_ref() {
+            Some(rows) => Some(rows.as_slice()?),
+            None => None,
+        };
+        if let Some(rows) = scored_rows {
+            if let Some(row) = rows
+                .iter()
+                .find(|row| usize::try_from(**row).map_or(true, |row| row >= chunk_pair_count))
+            {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "scored row {} is outside the chunk of {} pairs",
+                    row, chunk_pair_count
+                )));
+            }
+        }
+        let row_count = scored_rows.map_or(chunk_pair_count, <[i64]>::len);
+        let main_cols = main_indices.len();
+        let mut out = vec![0.0f64; row_count];
+        py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || {
+                out.par_chunks_mut(tile).enumerate().for_each_init(
+                    || {
+                        (
+                            vec![0.0f64; tile * main_cols],
+                            vec![0.0f64; tile * nameless_cols],
+                        )
+                    },
+                    |(main_tile, nameless_tile), (tile_index, out_tile)| {
+                        let rows = out_tile.len();
+                        // Contiguous rows step from the tile's first pair; chosen
+                        // rows take each pair from its offset.
+                        let mut next_pair = scored_rows.is_none().then(|| {
+                            upper_triangle_pair_at(block_size, start_offset + tile_index * tile)
+                        });
+                        for row in 0..rows {
+                            let (left, right) = match scored_rows {
+                                Some(scored) => upper_triangle_pair_at(
+                                    block_size,
+                                    start_offset + scored[tile_index * tile + row] as usize,
+                                ),
+                                None => {
+                                    let current = next_pair.expect("stepping holds a pair");
+                                    next_pair = Some(if current.1 + 1 < block_size {
+                                        (current.0, current.1 + 1)
+                                    } else {
+                                        (current.0 + 1, current.0 + 2)
+                                    });
+                                    current
+                                }
+                            };
+                            let (s1, p1) = block_lookup[left];
+                            let (s2, p2) = block_lookup[right];
+                            let features = self.featurize_pair_data(s1, s2, p1, p2);
+                            let main_row = &mut main_tile[row * main_cols..(row + 1) * main_cols];
+                            for (dest, index) in main_row.iter_mut().zip(main_indices.iter()) {
+                                *dest = features[*index];
+                            }
+                            if let Some(indices) = nameless_indices.as_ref() {
+                                let nameless_row = &mut nameless_tile
+                                    [row * nameless_cols..(row + 1) * nameless_cols];
+                                for (dest, index) in nameless_row.iter_mut().zip(indices.iter()) {
+                                    *dest = features[*index];
+                                }
+                            }
+                        }
+                        let main_positive =
+                            main.probabilities_serial(&main_tile[..rows * main_cols], main_cols);
+                        match nameless {
+                            Some(booster) => {
+                                let nameless_positive = booster.probabilities_serial(
+                                    &nameless_tile[..rows * nameless_cols],
+                                    nameless_cols,
+                                );
+                                for row in 0..rows {
+                                    out_tile[row] = ((1.0 - main_positive[row])
+                                        + (1.0 - nameless_positive[row]))
+                                        / 2.0;
+                                }
+                            }
+                            None => {
+                                for row in 0..rows {
+                                    out_tile[row] = 1.0 - main_positive[row];
+                                }
+                            }
+                        }
+                    },
+                );
+            })
+        });
+        Ok(out.into_pyarray(py))
     }
 
     #[pyo3(
@@ -2659,6 +2980,226 @@ impl RustFeaturizer {
             sums_array.into_pyarray(py),
             mins_array.into_pyarray(py),
             maxs_array.into_pyarray(py),
+        ))
+    }
+
+    /// Score index-array pairs with native boosters and build row aggregates
+    /// in one fused pass.
+    ///
+    /// Returns `(distances, counts, valid_counts, sums, mins, maxs)`. The
+    /// distances equal `_predict_pairwise_model_distances` over the matrix
+    /// that `linker_pair_index_arrays_and_aggregate_stats` returns for the
+    /// model columns with `nan_value` applied; a pair with a label is not
+    /// scored and reads `0.0`. The aggregates equal that call's: the raw
+    /// feature values walked in pair order under `aggregate_nan_value`.
+    #[pyo3(signature = (
+        left_signature_indices,
+        right_signature_indices,
+        row_indices,
+        row_count,
+        main_indices,
+        main_booster,
+        nameless_indices = None,
+        nameless_booster = None,
+        aggregate_indices = None,
+        pair_labels = None,
+        num_threads = None,
+        nan_value = f64::NAN,
+        aggregate_nan_value = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn score_linker_pair_index_arrays_and_aggregate_stats<'py>(
+        &self,
+        py: Python<'py>,
+        left_signature_indices: PyReadonlyArray1<'py, u32>,
+        right_signature_indices: PyReadonlyArray1<'py, u32>,
+        row_indices: PyReadonlyArray1<'py, u32>,
+        row_count: usize,
+        main_indices: Vec<usize>,
+        main_booster: PyRef<'py, RustLightGBMBooster>,
+        nameless_indices: Option<Vec<usize>>,
+        nameless_booster: Option<PyRef<'py, RustLightGBMBooster>>,
+        aggregate_indices: Option<Vec<usize>>,
+        pair_labels: Option<PyReadonlyArray1<'py, f64>>,
+        num_threads: Option<usize>,
+        nan_value: f64,
+        aggregate_nan_value: Option<f64>,
+    ) -> PyResult<(
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray1<u32>>,
+        Bound<'py, PyArray2<u64>>,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray2<f64>>,
+    )> {
+        let left_indices = left_signature_indices.as_slice()?;
+        let right_indices = right_signature_indices.as_slice()?;
+        let owner_row_indices = row_indices.as_slice()?;
+        let pair_count = left_indices.len();
+        if right_indices.len() != pair_count || owner_row_indices.len() != pair_count {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "left_signature_indices, right_signature_indices, and row_indices must have equal length: left={} right={} rows={}",
+                left_indices.len(),
+                right_indices.len(),
+                owner_row_indices.len()
+            )));
+        }
+        let labels = match pair_labels.as_ref() {
+            Some(values) => {
+                let slice = values.as_slice()?;
+                if slice.len() != pair_count {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "pair_labels length must match the pair count: labels={} pairs={}",
+                        slice.len(),
+                        pair_count
+                    )));
+                }
+                Some(slice)
+            }
+            None => None,
+        };
+        for row_index in owner_row_indices.iter() {
+            let bounded = *row_index as usize;
+            if bounded >= row_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "row index out of range: row_index={} row_count={}",
+                    bounded, row_count
+                )));
+            }
+        }
+        let full_cols = self.full_feature_count();
+        let main_indices = resolve_feature_indices("main_indices", Some(main_indices), full_cols)?;
+        let nameless_indices = match nameless_indices {
+            Some(indices) => Some(resolve_feature_indices(
+                "nameless_indices",
+                Some(indices),
+                full_cols,
+            )?),
+            None => None,
+        };
+        if nameless_indices.is_some() != nameless_booster.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "nameless_indices and nameless_booster must be given together",
+            ));
+        }
+        let main: &RustLightGBMBooster = &main_booster;
+        if main.feature_width() != main_indices.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "main booster expects {} features, got {} main_indices",
+                main.feature_width(),
+                main_indices.len()
+            )));
+        }
+        let nameless = nameless_indices.as_deref().zip(nameless_booster.as_deref());
+        if let Some((indices, booster)) = nameless {
+            if booster.feature_width() != indices.len() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "nameless booster expects {} features, got {} nameless_indices",
+                    booster.feature_width(),
+                    indices.len()
+                )));
+            }
+        }
+        let aggregate_indices =
+            resolve_feature_indices("aggregate_indices", aggregate_indices, full_cols)?;
+        let aggregate_cols = aggregate_indices.len();
+        // The pool splits the aggregate buffer by tile, so it keeps one value
+        // per pair even when no aggregates are asked for.
+        let aggregate_stride = aggregate_cols.max(1);
+        let resolved_aggregate_nan_value = aggregate_nan_value.unwrap_or(nan_value);
+
+        let lookup = py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || {
+                self.adaptive_signature_paper_lookup_for_indices(left_indices, right_indices)
+            })
+        })?;
+        let (distances, aggregates) = py.allow_threads(|| {
+            let score = || match &lookup {
+                BorrowedSignaturePaperLookup::Dense(dense_lookup) => self.score_linker_pairs_tiled(
+                    left_indices,
+                    right_indices,
+                    labels,
+                    &main_indices,
+                    main,
+                    nameless,
+                    &aggregate_indices,
+                    aggregate_stride,
+                    nan_value,
+                    &|index| {
+                        dense_lookup[index as usize]
+                            .expect("dense signature index was validated before scoring")
+                    },
+                ),
+                BorrowedSignaturePaperLookup::Compact {
+                    lookup: compact_lookup,
+                    left_indices: compact_left,
+                    right_indices: compact_right,
+                } => self.score_linker_pairs_tiled(
+                    compact_left,
+                    compact_right,
+                    labels,
+                    &main_indices,
+                    main,
+                    nameless,
+                    &aggregate_indices,
+                    aggregate_stride,
+                    nan_value,
+                    &|index| compact_lookup[index as usize],
+                ),
+            };
+            let (distances, aggregate_values) =
+                install_with_optional_rayon_pool(num_threads, score);
+            // The aggregates walk the pairs in order, as the matrix path does.
+            let mut out = Self::empty_pair_aggregate_buffers(row_count, aggregate_cols);
+            for (pair_offset, row_index) in owner_row_indices.iter().enumerate() {
+                let row_offset = *row_index as usize;
+                out.counts[row_offset] = out.counts[row_offset].saturating_add(1);
+                let value_start = pair_offset * aggregate_stride;
+                let stats_start = row_offset * aggregate_cols;
+                for position in 0..aggregate_cols {
+                    Self::update_pair_aggregate_cell(
+                        &mut out.valid_counts[stats_start + position],
+                        &mut out.sums[stats_start + position],
+                        &mut out.mins[stats_start + position],
+                        &mut out.maxs[stats_start + position],
+                        aggregate_values[value_start + position],
+                        resolved_aggregate_nan_value,
+                    );
+                }
+            }
+            (distances, out)
+        });
+        Ok((
+            distances.into_pyarray(py),
+            aggregates.counts.into_pyarray(py),
+            rows_matrix(
+                py,
+                row_count,
+                aggregate_cols,
+                aggregates.valid_counts,
+                "aggregate valid counts",
+            )?,
+            rows_matrix(
+                py,
+                row_count,
+                aggregate_cols,
+                aggregates.sums,
+                "aggregate sums",
+            )?,
+            rows_matrix(
+                py,
+                row_count,
+                aggregate_cols,
+                aggregates.mins,
+                "aggregate mins",
+            )?,
+            rows_matrix(
+                py,
+                row_count,
+                aggregate_cols,
+                aggregates.maxs,
+                "aggregate maxs",
+            )?,
         ))
     }
 

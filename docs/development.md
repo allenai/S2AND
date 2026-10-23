@@ -38,8 +38,8 @@ uv's file-glob keys track the newest matching timestamp, not file contents or
 the complete file inventory. Deleting an older file, adding a backdated file,
 or changing content while preserving timestamps can therefore miss a rebuild.
 
-The extension embeds a content digest of its Rust build inputs (the Cargo
-manifests, root lockfile, build script and Rust sources; not the Python
+The extension embeds a content digest of its native build inputs (the Cargo
+manifests, root lockfile, build scripts, and Rust/C++ sources; not the Python
 wrapper or `README.md`). `tests/conftest.py` recomputes it from the checkout
 and stops before collection when they differ, for example after
 `uv run --no-sync` or a direct interpreter call following a Rust change. The

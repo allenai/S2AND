@@ -297,8 +297,6 @@ dependencies = [
 [[package]]
 name = "cld2-sys"
 version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfbb85e425a2c4287874ade9656bd7114f28978e7165dc600ae233467c0b808f"
 dependencies = [
  "gcc",
  "libc",

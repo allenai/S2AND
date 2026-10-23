@@ -43,7 +43,7 @@ pub(crate) struct RetrievalQueryData {
     pub(crate) title_hashes: Vec<u64>,
     pub(crate) year: Option<i64>,
     pub(crate) orcid_hash: Option<u64>,
-    pub(crate) specter: Option<Arc<Vec<f32>>>,
+    pub(crate) specter: Option<Arc<arrow::buffer::ScalarBuffer<f32>>>,
     pub(crate) specter_norm: Option<f64>,
 }
 
@@ -128,7 +128,6 @@ pub(crate) struct RetrievalOverlapConfig {
     pub(crate) multi_token_weight: f64,
 }
 
-#[pyclass]
 pub(crate) struct RustHybridCentroidRetriever {
     pub(crate) summaries: Vec<RetrievalSummaryData>,
     pub(crate) component_index_by_key: HashMap<String, usize>,
@@ -251,6 +250,21 @@ pub(crate) struct RetrievalCandidateSelection {
 }
 
 impl RustHybridCentroidRetriever {
+    /// Move the summaries and indexes out, leaving an empty retriever.
+    pub(crate) fn take_contents(&mut self) -> Self {
+        std::mem::replace(
+            self,
+            Self {
+                summaries: Vec::new(),
+                component_index_by_key: HashMap::default(),
+                coauthor_cluster_df: HashMap::default(),
+                non_mega_coauthor_cluster_df: HashMap::default(),
+                affiliation_cluster_df: HashMap::default(),
+                overlap_index: None,
+            },
+        )
+    }
+
     /// Index `summaries`: component keys, per-term cluster document frequencies
     /// and, when the retriever ranks candidates, the inverted overlap counters.
     pub(crate) fn from_summaries(
@@ -365,12 +379,14 @@ impl RustHybridCentroidRetriever {
             }
         }
         let mut dots = vec![[0.0f64; 5]; queries.len()];
+        // A vector is widened once per block of queries, not once per group.
+        let mut widened: Vec<f64> = Vec::new();
         for (index, summary) in self.summaries.iter().enumerate() {
             let centroid = match (
                 summary.specter_centroid.as_ref(),
                 summary.specter_centroid_norm,
             ) {
-                (Some(vector), Some(norm)) => Some((vector.as_slice(), norm)),
+                (Some(vector), Some(norm)) => Some((&vector[..], norm)),
                 _ => None,
             };
             let centroid_slots = usize::from(centroid.is_some());
@@ -396,7 +412,7 @@ impl RustHybridCentroidRetriever {
                 .iter()
                 .zip(summary.exemplar_norms.iter())
             {
-                vectors[count] = vector.as_slice();
+                vectors[count] = &vector[..];
                 norms[count] = *norm;
                 count += 1;
             }
@@ -407,14 +423,16 @@ impl RustHybridCentroidRetriever {
                 else {
                     continue;
                 };
+                widened.clear();
+                widened.extend(vector.iter().map(|value| f64::from(*value)));
                 for chunk in members.chunks(QUERY_GROUP) {
                     let mut query_values: [&[f64]; QUERY_GROUP] = [&[]; QUERY_GROUP];
                     for (position, query_index) in chunk.iter().enumerate() {
                         if let Some((values, _)) = &prepared[*query_index] {
-                            query_values[position] = values.as_slice();
+                            query_values[position] = &values[..];
                         }
                     }
-                    let sums = grouped_dot_products(&query_values[..chunk.len()], vector);
+                    let sums = grouped_dot_products(&query_values[..chunk.len()], &widened);
                     for (position, query_index) in chunk.iter().enumerate() {
                         dots[*query_index][slot] = sums[position];
                     }
@@ -536,24 +554,6 @@ impl RustHybridCentroidRetriever {
             override_summary,
         );
         scored
-    }
-
-    fn scored_candidates_to_keys_scores(
-        &self,
-        scored: Vec<(usize, f32)>,
-        override_index: Option<usize>,
-        override_summary: Option<&RetrievalSummaryData>,
-    ) -> (Vec<String>, Vec<f32>) {
-        let component_keys = scored
-            .iter()
-            .map(|(idx, _)| {
-                self.summary_for_candidate_index(*idx, override_index, override_summary)
-                    .component_key
-                    .clone()
-            })
-            .collect();
-        let scores = scored.iter().map(|(_, score)| *score).collect();
-        (component_keys, scores)
     }
 
     fn hard_filtered_candidate_indices_for_query(
@@ -758,112 +758,6 @@ impl RustHybridCentroidRetriever {
         }
         Ok(result)
     }
-
-    fn score_top_k_candidate_indices_default(
-        &self,
-        py: Python<'_>,
-        query_data: &RetrievalQueryData,
-        candidate_indices: &[usize],
-        top_k: usize,
-        num_threads: Option<usize>,
-        override_index: Option<usize>,
-        override_summary: Option<&RetrievalSummaryData>,
-    ) -> PyResult<(Vec<String>, Vec<f32>)> {
-        if candidate_indices.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
-        }
-
-        let prepared = self.prepare_query(query_data);
-        let mut scored: Vec<(usize, f32)> = py.allow_threads(|| {
-            let compute = || {
-                let overlaps = self.overlap_index().component_overlaps(
-                    query_data,
-                    &prepared,
-                    self.summaries.len(),
-                );
-                candidate_indices
-                    .par_iter()
-                    .map(|idx| {
-                        (
-                            *idx,
-                            self.score_candidate(
-                                query_data,
-                                &prepared,
-                                &overlaps,
-                                *idx,
-                                override_index,
-                                override_summary,
-                                None,
-                            ),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            };
-            install_with_optional_rayon_pool(num_threads, compute)
-        });
-        self.keep_sorted_top_k_scored_candidates(
-            &mut scored,
-            top_k,
-            override_index,
-            override_summary,
-        );
-        Ok(self.scored_candidates_to_keys_scores(scored, override_index, override_summary))
-    }
-}
-
-pub(crate) fn extract_string_hashes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
-    if obj.is_none() {
-        return Ok(Vec::new());
-    }
-    let mut hashes = Vec::new();
-    for item in PyIterator::from_object(obj)? {
-        let value: String = item?.extract()?;
-        hashes.push(fnv64(value.as_bytes()));
-    }
-    hashes.sort_unstable();
-    hashes.dedup();
-    Ok(hashes)
-}
-
-pub(crate) fn extract_orcid_hashes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
-    if obj.is_none() {
-        return Ok(Vec::new());
-    }
-    let mut hashes = Vec::new();
-    for item in PyIterator::from_object(obj)? {
-        let value: String = item?.extract()?;
-        if let Some(orcid) = normalize_orcid_owned(&value) {
-            hashes.push(fnv64(orcid.as_bytes()));
-        }
-    }
-    hashes.sort_unstable();
-    hashes.dedup();
-    Ok(hashes)
-}
-
-pub(crate) fn extract_query_terms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<RetrievalQueryTerm>> {
-    if obj.is_none() {
-        return Ok(Vec::new());
-    }
-    let mut terms = Vec::new();
-    for item in PyIterator::from_object(obj)? {
-        let value: String = item?.extract()?;
-        terms.push(RetrievalQueryTerm {
-            hash: fnv64(value.as_bytes()),
-            token_count: term_token_count(&value),
-        });
-    }
-    terms.sort_unstable_by_key(|term| term.hash);
-    terms.dedup_by_key(|term| term.hash);
-    Ok(terms)
-}
-
-pub(crate) fn extract_optional_orcid_hash(obj: &Bound<'_, PyAny>) -> PyResult<Option<u64>> {
-    if obj.is_none() {
-        return Ok(None);
-    }
-    let value: String = obj.extract()?;
-    Ok(normalize_orcid_owned(&value).map(|orcid| fnv64(orcid.as_bytes())))
 }
 
 pub(crate) fn exact_name_match_compat(a: &str, b: &str) -> bool {
@@ -1045,96 +939,6 @@ pub(crate) fn has_impossible_year_conflict(
         || query_year_value > year_max.saturating_add(max_year_gap)
 }
 
-pub(crate) fn extract_retrieval_summary(
-    obj: &Bound<'_, PyAny>,
-    include_exemplars: bool,
-) -> PyResult<RetrievalSummaryData> {
-    let component_key: String = obj.getattr("component_key")?.extract()?;
-    let size: usize = obj.getattr("size")?.extract()?;
-    let first_name_counts = extract_string_count_pairs(&obj.getattr("first_name_counts")?)?;
-    let middle_initial_counts = extract_counter(&obj.getattr("middle_initial_counts")?)?;
-    let coauthor_counts = extract_counter(&obj.getattr("coauthor_counts")?)?;
-    let non_mega_coauthor_counts = extract_counter(&obj.getattr("non_mega_coauthor_counts")?)?;
-    let affiliation_counts = extract_counter(&obj.getattr("affiliation_counts")?)?;
-    let venue_counts = extract_counter(&obj.getattr("venue_counts")?)?;
-    let title_counts = extract_counter(&obj.getattr("title_counts")?)?;
-    let max_paper_author_count: usize = obj.getattr("max_paper_author_count")?.extract()?;
-    let year_min: Option<i64> = obj.getattr("year_min")?.extract()?;
-    let year_max: Option<i64> = obj.getattr("year_max")?.extract()?;
-    let year_mean: Option<f64> = obj.getattr("year_mean")?.extract()?;
-    let orcid_hashes = extract_orcid_hashes(&obj.getattr("orcid_values")?)?;
-    let specter_centroid = extract_specter_vec(&obj.getattr("specter_centroid")?)?;
-    let specter_centroid_norm = specter_centroid
-        .as_ref()
-        .map(|values| vector_norm_f32(values));
-    let exemplar_vectors = if include_exemplars {
-        extract_specter_vec_list(&obj.getattr("exemplar_vectors")?)?
-    } else {
-        Vec::new()
-    };
-    let exemplar_norms = exemplar_vectors
-        .iter()
-        .map(|values| vector_norm_f32(values))
-        .collect();
-
-    Ok(RetrievalSummaryData {
-        component_key,
-        size,
-        first_name_counts,
-        middle_initial_counts,
-        coauthor_counts,
-        non_mega_coauthor_counts,
-        affiliation_counts,
-        venue_counts,
-        title_counts,
-        max_paper_author_count,
-        year_min,
-        year_max,
-        year_mean,
-        orcid_hashes,
-        specter_centroid,
-        specter_centroid_norm,
-        exemplar_vectors,
-        exemplar_norms,
-    })
-}
-
-pub(crate) fn extract_retrieval_query(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalQueryData> {
-    let first: String = obj.getattr("first")?.extract()?;
-    let has_full_first = match obj.getattr("has_full_first") {
-        Ok(value) => value.extract()?,
-        Err(_) => first.chars().count() > 1,
-    };
-    let middle_initial_hashes = extract_string_hashes(&obj.getattr("middle_initials")?)?;
-    let coauthor_terms = extract_query_terms(&obj.getattr("coauthor_blocks")?)?;
-    let coauthor_hashes = coauthor_terms.iter().map(|term| term.hash).collect();
-    let affiliation_terms = extract_query_terms(&obj.getattr("affiliation_terms")?)?;
-    let affiliation_hashes = affiliation_terms.iter().map(|term| term.hash).collect();
-    let venue_hashes = extract_string_hashes(&obj.getattr("venue_terms")?)?;
-    let title_hashes = extract_string_hashes(&obj.getattr("title_terms")?)?;
-    let year: Option<i64> = obj.getattr("year")?.extract()?;
-    let orcid_hash = extract_optional_orcid_hash(&obj.getattr("orcid")?)?;
-    let specter = extract_specter_vec(&obj.getattr("specter")?)?;
-    let specter_norm = specter.as_ref().map(|values| vector_norm_f32(values));
-    let specter = specter.map(Arc::new);
-
-    Ok(RetrievalQueryData {
-        first,
-        has_full_first,
-        middle_initial_hashes,
-        coauthor_hashes,
-        coauthor_terms,
-        affiliation_hashes,
-        affiliation_terms,
-        venue_hashes,
-        title_hashes,
-        year,
-        orcid_hash,
-        specter,
-        specter_norm,
-    })
-}
-
 pub(crate) const COAUTHOR_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalOverlapConfig {
     use_idf: true,
     per_term_cap: Some(0.35),
@@ -1232,13 +1036,15 @@ fn fold_lanes(partial: &[f64; DOT_LANES], query: &[f32], vector: &[f32], body: u
 /// Queries scored together against one vector by `grouped_dot_products`.
 const QUERY_GROUP: usize = 4;
 
-/// Dot products of up to `QUERY_GROUP` f64 queries with one f32 vector.
+/// Dot products of up to `QUERY_GROUP` f64 queries with one vector widened
+/// from f32.
 ///
 /// Each product is summed exactly as `fused_dot_products` sums it: the same
 /// `DOT_LANES` partial sums, each a separate multiply then add, folded by
-/// `fold_lanes`. The queries are the f32 values converted once, so the
-/// results match bit for bit. Every query has the vector's length.
-fn grouped_dot_products(queries: &[&[f64]], vector: &[f32]) -> [f64; QUERY_GROUP] {
+/// `fold_lanes`. Widening f32 to f64 is exact, so the queries and the vector
+/// are widened once and the results match bit for bit. Every query has the
+/// vector's length.
+fn grouped_dot_products(queries: &[&[f64]], vector: &[f64]) -> [f64; QUERY_GROUP] {
     fn pad<const N: usize>(values: [f64; N]) -> [f64; QUERY_GROUP] {
         let mut padded = [0.0f64; QUERY_GROUP];
         padded[..N].copy_from_slice(&values);
@@ -1256,7 +1062,7 @@ fn grouped_dot_products(queries: &[&[f64]], vector: &[f32]) -> [f64; QUERY_GROUP
     }
 }
 
-fn grouped_dots<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q] {
+fn grouped_dots<const Q: usize>(queries: [&[f64]; Q], vector: &[f64]) -> [f64; Q] {
     #[cfg(target_arch = "x86_64")]
     {
         if std::arch::is_x86_feature_detected!("avx2") {
@@ -1271,10 +1077,9 @@ fn grouped_dots<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q
 /// take the same separate multiply and add, so results equal the portable code.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn grouped_dots_avx2<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q] {
+unsafe fn grouped_dots_avx2<const Q: usize>(queries: [&[f64]; Q], vector: &[f64]) -> [f64; Q] {
     use std::arch::x86_64::{
-        _mm256_add_pd, _mm256_castps256_ps128, _mm256_cvtps_pd, _mm256_extractf128_ps,
-        _mm256_loadu_pd, _mm256_loadu_ps, _mm256_mul_pd, _mm256_setzero_pd, _mm256_storeu_pd,
+        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_setzero_pd, _mm256_storeu_pd,
     };
     let len = vector.len();
     let queries = queries.map(|query| &query[..len]);
@@ -1283,9 +1088,8 @@ unsafe fn grouped_dots_avx2<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]
     let mut high = [_mm256_setzero_pd(); Q];
     let mut start = 0;
     while start < body {
-        let v = _mm256_loadu_ps(vector.as_ptr().add(start));
-        let v_low = _mm256_cvtps_pd(_mm256_castps256_ps128(v));
-        let v_high = _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(v));
+        let v_low = _mm256_loadu_pd(vector.as_ptr().add(start));
+        let v_high = _mm256_loadu_pd(vector.as_ptr().add(start + 4));
         for q in 0..Q {
             let q_low = _mm256_loadu_pd(queries[q].as_ptr().add(start));
             let q_high = _mm256_loadu_pd(queries[q].as_ptr().add(start + 4));
@@ -1305,20 +1109,16 @@ unsafe fn grouped_dots_avx2<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]
 }
 
 #[inline(always)]
-fn grouped_dots_portable<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -> [f64; Q] {
+fn grouped_dots_portable<const Q: usize>(queries: [&[f64]; Q], vector: &[f64]) -> [f64; Q] {
     let len = vector.len();
     let queries = queries.map(|query| &query[..len]);
     let body = len - len % DOT_LANES;
     let mut lanes = [[0.0f64; DOT_LANES]; Q];
     for (chunk_index, vector_chunk) in vector[..body].chunks_exact(DOT_LANES).enumerate() {
         let start = chunk_index * DOT_LANES;
-        let mut v = [0.0f64; DOT_LANES];
-        for (lane, value) in v.iter_mut().zip(vector_chunk) {
-            *lane = f64::from(*value);
-        }
         for q in 0..Q {
             for lane in 0..DOT_LANES {
-                lanes[q][lane] += queries[q][start + lane] * v[lane];
+                lanes[q][lane] += queries[q][start + lane] * vector_chunk[lane];
             }
         }
     }
@@ -1329,13 +1129,13 @@ fn grouped_dots_portable<const Q: usize>(queries: [&[f64]; Q], vector: &[f32]) -
     sums
 }
 
-/// `fold_lanes` for a query already converted to f64.
+/// `fold_lanes` for a query and a vector already widened to f64.
 #[inline(always)]
-fn fold_lanes_f64(partial: &[f64; DOT_LANES], query: &[f64], vector: &[f32], body: usize) -> f64 {
+fn fold_lanes_f64(partial: &[f64; DOT_LANES], query: &[f64], vector: &[f64], body: usize) -> f64 {
     let mut sum = ((partial[0] + partial[1]) + (partial[2] + partial[3]))
         + ((partial[4] + partial[5]) + (partial[6] + partial[7]));
     for i in body..vector.len() {
-        sum += query[i] * f64::from(vector[i]);
+        sum += query[i] * vector[i];
     }
     sum
 }
@@ -1378,12 +1178,12 @@ fn fused_specter_score(query: &RetrievalQueryData, summary: &RetrievalSummaryDat
     else {
         return 0.0;
     };
-    let query_specter = query_specter.as_slice();
+    let query_specter = &query_specter[..];
     let centroid = match (
         summary.specter_centroid.as_ref(),
         summary.specter_centroid_norm,
     ) {
-        (Some(vector), Some(norm)) => Some((vector.as_slice(), norm)),
+        (Some(vector), Some(norm)) => Some((&vector[..], norm)),
         _ => None,
     };
     let centroid_slots = usize::from(centroid.is_some());
@@ -1409,7 +1209,7 @@ fn fused_specter_score(query: &RetrievalQueryData, summary: &RetrievalSummaryDat
         .iter()
         .zip(summary.exemplar_norms.iter())
     {
-        vectors[count] = vector.as_slice();
+        vectors[count] = &vector[..];
         norms[count] = *norm;
         count += 1;
     }
@@ -1584,78 +1384,6 @@ pub(crate) fn chooser_summary_features(
         specter_centroid_score,
         specter_exemplar_score,
     ]
-}
-
-#[pymethods]
-impl RustHybridCentroidRetriever {
-    #[new]
-    #[pyo3(signature = (summaries, include_exemplars = false))]
-    fn new(summaries: &Bound<'_, PyAny>, include_exemplars: bool) -> PyResult<Self> {
-        let mut packed_summaries = Vec::new();
-        for item in PyIterator::from_object(summaries)? {
-            packed_summaries.push(extract_retrieval_summary(&item?, include_exemplars)?);
-        }
-        Self::from_summaries(packed_summaries, true).map_err(retrieval_error_to_py)
-    }
-
-    #[pyo3(signature = (query, component_keys, top_k, num_threads = None, override_summary = None))]
-    fn top_k_hybrid_centroid_subset(
-        &self,
-        py: Python<'_>,
-        query: &Bound<'_, PyAny>,
-        component_keys: &Bound<'_, PyAny>,
-        top_k: usize,
-        num_threads: Option<usize>,
-        override_summary: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<(Vec<String>, Vec<f32>)> {
-        validate_positive_top_k(top_k)?;
-
-        let query_data = extract_retrieval_query(query)?;
-        let mut candidate_indices = Vec::new();
-        for item in PyIterator::from_object(component_keys)? {
-            let component_key: String = item?.extract()?;
-            let Some(candidate_index) = self.component_index_by_key.get(&component_key) else {
-                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                    "Unknown component_key for RustHybridCentroidRetriever: {component_key}"
-                )));
-            };
-            candidate_indices.push(*candidate_index);
-        }
-
-        let override_data = override_summary
-            .map(|value| extract_retrieval_summary(value, true))
-            .transpose()?;
-        let override_index = if let Some(override_summary_data) = override_data.as_ref() {
-            let Some(candidate_index) = self
-                .component_index_by_key
-                .get(&override_summary_data.component_key)
-            else {
-                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                    "Unknown override component_key for RustHybridCentroidRetriever: {}",
-                    override_summary_data.component_key
-                )));
-            };
-            if !candidate_indices.contains(candidate_index) {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "override_summary component_key {} was not present in component_keys",
-                    override_summary_data.component_key
-                )));
-            }
-            Some(*candidate_index)
-        } else {
-            None
-        };
-
-        self.score_top_k_candidate_indices_default(
-            py,
-            &query_data,
-            &candidate_indices,
-            top_k,
-            num_threads,
-            override_index,
-            override_data.as_ref(),
-        )
-    }
 }
 
 pub(crate) fn checked_retrieved_row_index(
@@ -2002,7 +1730,7 @@ mod overlap_index_tests {
             year: None,
             orcid_hash: None,
             specter_norm: specter.as_ref().map(|values| vector_norm_f32(values)),
-            specter: specter.map(Arc::new),
+            specter: specter.map(|values| Arc::new(values.into())),
         }
     }
 
@@ -2286,7 +2014,7 @@ mod overlap_index_tests {
             if length != 8 {
                 let values = long_vector(&mut rng);
                 query.specter_norm = Some(vector_norm_f32(&values));
-                query.specter = Some(std::sync::Arc::new(values));
+                query.specter = Some(std::sync::Arc::new(values.into()));
                 if summary.specter_centroid.is_some() {
                     let centroid = long_vector(&mut rng);
                     summary.specter_centroid_norm = Some(vector_norm_f32(&centroid));
@@ -2391,7 +2119,7 @@ mod overlap_index_tests {
                         1 => {
                             let values = long_vector(&mut rng, length + 1);
                             query.specter_norm = Some(vector_norm_f32(&values));
-                            query.specter = Some(std::sync::Arc::new(values));
+                            query.specter = Some(std::sync::Arc::new(values.into()));
                         }
                         _ => {
                             let values = long_vector(&mut rng, length);
@@ -2400,7 +2128,7 @@ mod overlap_index_tests {
                             } else {
                                 vector_norm_f32(&values)
                             });
-                            query.specter = Some(std::sync::Arc::new(values));
+                            query.specter = Some(std::sync::Arc::new(values.into()));
                         }
                     }
                     query
@@ -2474,7 +2202,7 @@ mod overlap_index_tests {
         let query_vector = random_vector(&mut rng);
         let query = RetrievalQueryData {
             specter_norm: Some(vector_norm_f32(&query_vector)),
-            specter: Some(std::sync::Arc::new(query_vector)),
+            specter: Some(std::sync::Arc::new(query_vector.into())),
             ..query(&mut rng, Vec::new())
         };
         let component_count: usize = std::env::var("BENCH_COMPONENTS")

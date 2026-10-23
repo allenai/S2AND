@@ -33,6 +33,7 @@ from s2and.feature_port import (
     _get_rust_feature_data,
     _get_rust_featurizer,
     build_rust_featurizer_from_arrow_dataset,
+    release_rust_handle,
 )
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from s2and.incremental_linking.completion import ResidualClusterer
@@ -61,7 +62,13 @@ from s2and.incremental_linking.production import (
     predict_incremental_promoted_linker_from_arrow,
 )
 from s2and.metrics import b3_precision_recall_fscore
-from s2and.model_pairwise import FastCluster, clone_cluster_model, intify, predict_pairwise_class0
+from s2and.model_pairwise import (
+    FastCluster,
+    clone_cluster_model,
+    intify,
+    native_pairwise_scorers,
+    predict_pairwise_class0,
+)
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.prediction_state import PredictionState
 from s2and.runtime import (
@@ -179,7 +186,7 @@ class _AttachmentBlockState:
         return self._build_args[0]
 
     def orcid_signature_info(
-        self, arrow_lease: Any, signature_ids: Sequence[str]
+        self, arrow_lease: Any, signature_ids: Sequence[str], *, num_threads: int | None = None
     ) -> dict[str, _ArrowIncrementalSignatureInfo]:
         """Return `_load_arrow_incremental_orcid_signature_info` for ``signature_ids``.
 
@@ -190,11 +197,22 @@ class _AttachmentBlockState:
         if any(signature_id not in self.signature_ids for signature_id in signature_ids):
             # Rows outside the block can sit anywhere in the table, so read all
             # requested ids together to keep the loader's order.
-            return _load_arrow_incremental_orcid_signature_info(arrow_lease, signature_ids)
+            return _load_arrow_incremental_orcid_signature_info(arrow_lease, signature_ids, num_threads=num_threads)
         if self._orcid_info is None:
-            self._orcid_info = _load_arrow_incremental_orcid_signature_info(arrow_lease, self._build_args[1])
+            self._orcid_info = _load_arrow_incremental_orcid_signature_info(
+                arrow_lease, self._build_args[1], num_threads=num_threads
+            )
         requested = set(signature_ids)
         return {signature_id: info for signature_id, info in self._orcid_info.items() if signature_id in requested}
+
+    def release(self) -> None:
+        """Release paper buffers, then drop remaining native state in the background."""
+
+        for handle in (self._featurizer, self.planner):
+            if handle is not None:
+                release_rust_handle(handle)
+        self._featurizer = None
+        self.planner = None
 
     def featurizer(self) -> Any:
         if self._featurizer is None:
@@ -624,69 +642,55 @@ def _group_subblocking_firsts(
     return firsts
 
 
+_NO_ORCID_SIGNATURE_INFO = _ArrowIncrementalSignatureInfo(
+    paper_id=None,
+    author_info_first=None,
+    author_info_last=None,
+    author_info_first_normalized=None,
+    author_info_orcid=None,
+)
+
+
 def _load_arrow_incremental_orcid_signature_info(
     arrow_dataset: Any,
     signature_ids: Iterable[Any],
+    *,
+    num_threads: int | None = None,
 ) -> dict[str, _ArrowIncrementalSignatureInfo]:
     """Load ORCID-only seed metadata for promoted incremental budget sizing.
 
     Missing seed signatures are skipped to match ANDData's missing-signature
-    ORCID behavior.
+    ORCID behavior. Entries follow Arrow row order.
     """
 
     requested_signature_ids = tuple(dict.fromkeys(str(signature_id) for signature_id in signature_ids))
     if not requested_signature_ids:
         return {}
-    requested_signature_id_set = set(requested_signature_ids)
-    required_columns = {"signature_id"}
-    import pyarrow as pa
-
-    signatures: dict[str, _ArrowIncrementalSignatureInfo] = {}
-    with arrow_dataset.open_file("signatures") as source_file, pa.PythonFile(source_file, mode="r") as source:
-        reader = pa.ipc.open_file(source)
-        missing_columns = sorted(required_columns.difference(reader.schema.names))
-        if missing_columns:
-            raise ValueError(
-                f"signatures Arrow is missing required columns for incremental ORCID metadata: {missing_columns}"
-            )
-        if "author_orcid" not in reader.schema.names:
-            return {}
-        signature_id_column_index = reader.schema.get_field_index("signature_id")
-        orcid_column_index = reader.schema.get_field_index("author_orcid")
-        for batch_index in _signature_batch_indices_for_request(arrow_dataset, requested_signature_ids):
-            batch = reader.get_batch(batch_index)
-            # A set lookup per row: pyarrow's is_in rehashes the whole request's ids
-            # on every batch, which took seconds on large blocks.
-            orcid_values: list[Any] | None = None
-            for row, signature_id in enumerate(batch.column(signature_id_column_index).to_pylist()):
-                if signature_id not in requested_signature_id_set:
-                    continue
-                if signature_id in signatures:
-                    raise ValueError(f"signatures Arrow contains duplicate signature_id: {signature_id!r}")
-                if orcid_values is None:
-                    orcid_values = batch.column(orcid_column_index).to_pylist()
-                signatures[signature_id] = _ArrowIncrementalSignatureInfo(
-                    paper_id=None,
-                    author_info_first=None,
-                    author_info_last=None,
-                    author_info_first_normalized=None,
-                    author_info_orcid=_optional_arrow_string(orcid_values[row]),
-                )
-    return signatures
+    # Rust decodes only the id and ORCID columns of the indexed batches; a
+    # pyarrow loop over them took 2 s per large incremental request.
+    rows = arrow_dataset.native.signature_orcids(
+        list(requested_signature_ids),
+        None if num_threads is None else resolve_n_jobs(num_threads),
+    )
+    if rows is None:
+        return {}
+    # Most seeds carry no ORCID; they share one record, which is never mutated.
+    return {
+        signature_id: _NO_ORCID_SIGNATURE_INFO
+        if orcid is None
+        else _ArrowIncrementalSignatureInfo(
+            paper_id=None,
+            author_info_first=None,
+            author_info_last=None,
+            author_info_first_normalized=None,
+            author_info_orcid=orcid,
+        )
+        for signature_id, orcid in rows
+    }
 
 
 def _has_incremental_seed_source(dataset: Any) -> bool:
     return bool(getattr(dataset, "cluster_seeds_require", {}) or {})
-
-
-def _require_incremental_seed_source(
-    dataset: Any,
-    *,
-    context: str,
-) -> None:
-    if _has_incremental_seed_source(dataset):
-        return
-    raise ValueError(f"{context} requires explicit cluster_seeds_require")
 
 
 def _normalize_cluster_seeds_require(cluster_seeds_require: Mapping[Any, Any]) -> dict[str, int | str]:
@@ -1118,7 +1122,6 @@ def _predict_class0_with_runtime(
     classifier: Any,
     features: np.ndarray,
     *,
-    num_threads: int | None = None,
     total_ram_bytes: int | None = None,
 ) -> tuple[np.ndarray, float, str]:
     raw_features = np.asarray(features)
@@ -1159,9 +1162,6 @@ def _predict_class0_with_runtime(
         backend = "rust_lightgbm_chunked" if scorer_plan.chunk_count > 1 else "rust_lightgbm"
         return 1.0 - np.asarray(positive, dtype=np.float64), time.perf_counter() - started, backend
 
-    # Estimator threading is configured through propagated n_jobs; predict_proba(num_threads=...)
-    # is LightGBM-specific and breaks sklearn-compatible wrappers.
-    del num_threads
     python_start = time.perf_counter()
     predictions = predict_pairwise_class0(classifier, features_2d)
     backend = str(getattr(classifier, "prediction_backend", "python"))
@@ -1176,8 +1176,6 @@ def _predict_and_combine(
     nameless_features: np.ndarray | None,
     batch_label: int | str,
     *,
-    num_threads: int | None = None,
-    runtime_context: RuntimeContext | None = None,
     total_ram_bytes: int | None = None,
     compact_rows: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
@@ -1201,7 +1199,6 @@ def _predict_and_combine(
         main_pred, main_sec, main_backend = _predict_class0_with_runtime(
             classifier,
             main_matrix,
-            num_threads=num_threads,
             total_ram_bytes=total_ram_bytes,
         )
         if nameless_classifier is not None:
@@ -1210,7 +1207,6 @@ def _predict_and_combine(
             nl_pred, nl_sec, nl_backend = _predict_class0_with_runtime(
                 nameless_classifier,
                 nameless_matrix,
-                num_threads=num_threads,
                 total_ram_bytes=total_ram_bytes,
             )
             logger.info(
@@ -1310,6 +1306,23 @@ def _predict_and_combine(
     return predictions, seconds
 
 
+def _native_block_scorers(classifier: Any, nameless_classifier: Any | None) -> tuple[Any, Any | None] | None:
+    """Return the Rust boosters of native classifiers, for fused block scoring.
+
+    Fused scoring reproduces `_predict_and_combine` for native boosters only;
+    other classifiers keep the feature-matrix path. Returns None when either
+    classifier is not native, or when fused scoring is switched off.
+    """
+
+    if not _FUSED_BLOCK_SCORING:
+        return None
+    return native_pairwise_scorers(classifier, nameless_classifier)
+
+
+# Tests compare the fused block scorer against the feature-matrix path.
+_FUSED_BLOCK_SCORING = True
+
+
 def _use_rust_constraints(
     runtime_context: RuntimeContext | None = None,
     dataset: ANDData | None = None,
@@ -1353,7 +1366,7 @@ def _initialize_incremental_constraint_backend(
     if not use_rust_constraints:
         return None, False
 
-    return _get_rust_featurizer(dataset, runtime_context=runtime_context, prediction_state=prediction_state), True
+    return _get_rust_featurizer(dataset, prediction_state=prediction_state), True
 
 
 def _resolve_constraint_api_mode(
@@ -2239,8 +2252,6 @@ class Clusterer:
             batch_labels,
             batch_nameless_features,
             batch_label,
-            num_threads=self.n_jobs,
-            runtime_context=runtime_context,
             total_ram_bytes=total_ram_bytes,
         )
         if int(batch_predictions.shape[0]) != expected_rows:
@@ -2357,8 +2368,6 @@ class Clusterer:
                 batch_labels,
                 batch_nameless_features,
                 batch_num,
-                num_threads=self.n_jobs,
-                runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
             )
             yield _PredictedDistanceMatrixBatch(
@@ -2695,6 +2704,7 @@ class Clusterer:
 
         uses_fastcluster = isinstance(self.cluster_model, FastCluster)
         fastcluster_dtype = np.float64 if uses_fastcluster else np.float16
+        block_scorers = _native_block_scorers(self.classifier, self.nameless_classifier) if uses_fastcluster else None
         pairwise_probas: dict[str, np.ndarray] = {}
         model_predict_seconds = 0.0
         constraint_seconds = 0.0
@@ -2802,6 +2812,35 @@ class Clusterer:
 
                 stage_start = time.perf_counter()
                 scored_rows = np.flatnonzero(np.isnan(labels))
+                if block_scorers is not None:
+                    # Rust featurizes and scores each tile of pairs in one pass,
+                    # so no chunk-sized feature matrix exists.
+                    main_booster, nameless_booster = block_scorers
+                    scored_probabilities = cast(Any, rust_featurizer).score_block_upper_triangle_rows_indexed(
+                        block_signature_indices,
+                        offset,
+                        chunk_pair_count,
+                        None if len(scored_rows) == label_count else scored_rows.astype(np.int64, copy=False),
+                        selected_indices,
+                        main_booster,
+                        nameless_selected_indices,
+                        nameless_booster,
+                        resolve_n_jobs(self.n_jobs),
+                    )
+                    batch_predictions = np.zeros(label_count, dtype=np.float64)
+                    batch_predictions[scored_rows] = scored_probabilities
+                    not_scored = ~np.isnan(labels)
+                    # The LARGE_INTEGER offset of staged labels is undone, as in
+                    # _predict_and_combine.
+                    batch_predictions[not_scored] = labels[not_scored] + LARGE_INTEGER
+                    model_predict_seconds += time.perf_counter() - stage_start
+                    stage_start = time.perf_counter()
+                    end = offset + int(len(batch_predictions))
+                    pairwise_proba[offset:end] = batch_predictions
+                    matrix_write_seconds += time.perf_counter() - stage_start
+                    offset += chunk_pair_count
+                    del batch_predictions, scored_probabilities, not_scored, constraint_labels, labels, scored_rows
+                    continue
                 # Use indexed pairs only when supervision resolves a majority;
                 # otherwise retain the cheaper contiguous triangle traversal.
                 if len(scored_rows) * 2 >= label_count:
@@ -2825,8 +2864,6 @@ class Clusterer:
                     labels,
                     batch_nameless_features,
                     f"{block_key}:{offset}",
-                    num_threads=self.n_jobs,
-                    runtime_context=runtime_context,
                     total_ram_bytes=total_ram_bytes,
                     compact_rows=scored_rows,
                 )
@@ -3057,9 +3094,12 @@ class Clusterer:
             # Linkage releases the GIL, so one block clusters on a worker while the
             # next block's distances build. At most two matrices are alive, and two
             # only while the clustering one is under a tenth of the RAM budget.
-            # Results are collected in block order.
+            # Larger blocks go first, so the longest linkages overlap the most
+            # work and the last, exposed linkage is the smallest. Blocks cluster
+            # independently, and results are collected in block order.
             overlap_limit_bytes = memory_budget.resolve_total_ram_bytes(total_ram_bytes)[0] // 10
-            block_results: list[tuple[str, list[str], Future[tuple[list, float]] | None]] = []
+            block_results: dict[str, Future[tuple[list, float]] | None] = {}
+            blocks_largest_first = sorted(block_dict.items(), key=lambda item: len(item[1]), reverse=True)
             pending: Future[tuple[list, float]] | None = None
             pending_bytes = 0
 
@@ -3079,9 +3119,9 @@ class Clusterer:
                 return labels, time.perf_counter() - start
 
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="s2and-cluster") as cluster_pool:
-                for block_key, signatures in block_dict.items():
+                for block_key, signatures in blocks_largest_first:
                     if len(signatures) <= 1:
-                        block_results.append((block_key, signatures, None))
+                        block_results[block_key] = None
                         continue
                     if pending is not None and pending_bytes > overlap_limit_bytes:
                         pending.result()
@@ -3123,9 +3163,10 @@ class Clusterer:
                         pending.result()
                     pending = cluster_pool.submit(timed_cluster, block_key, signatures, dist_matrix)
                     pending_bytes = 0 if dist_matrix is None else int(dist_matrix.nbytes)
-                    block_results.append((block_key, signatures, pending))
+                    block_results[block_key] = pending
                     del dist_matrix
-            for block_key, signatures, outcome in block_results:
+            for block_key, signatures in block_dict.items():
+                outcome = block_results[block_key]
                 if outcome is None:
                     if signatures:
                         pred_clusters[block_key + "_0"].append(signatures[0])
@@ -3366,6 +3407,8 @@ class Clusterer:
             origin = origins[group_signature_ids[0]]
             if block_state is None or block_state[0] != origin:
                 # Keep one block's native state at a time; release the previous one first.
+                if block_state is not None:
+                    block_state[1].release()
                 block_state = None
                 block_state = (
                     origin,
@@ -3432,6 +3475,8 @@ class Clusterer:
                 normalized_signatures = [str(signature_id) for signature_id in signatures]
                 pred_clusters_intermediate[cluster_key] = normalized_signatures
             scoped_clusters[origin] = pred_clusters_intermediate
+        if block_state is not None:
+            block_state[1].release()
         return _combine_subblocked_predictions(scoped_clusters)
 
     def _predict_from_arrow(
@@ -3448,7 +3493,6 @@ class Clusterer:
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None,
         batching_threshold: int | None,
-        resolved_load_name_counts: bool,
         name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None,
         cluster_seed_disallows: set[tuple[str, str]],
         signature_ids: list[str],
@@ -3742,7 +3786,6 @@ class Clusterer:
             name_tuples=name_tuples,
             cluster_seeds_require=cluster_seeds_require,
             cluster_seeds_disallow=cluster_seeds_disallow,
-            altered_cluster_signatures=altered_cluster_signatures,
         )
 
     def _predict_from_arrow_request(
@@ -3760,7 +3803,6 @@ class Clusterer:
         name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
         cluster_seeds_require: Mapping[Any, Any] | None = None,
         cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None = None,
-        altered_cluster_signatures: Sequence[Any] | None = None,
         prediction_state: PredictionState | None = None,
         bulk_clusters: Callable[[Mapping[str, list[str]]], dict[str, list[str]]] | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
@@ -3841,7 +3883,6 @@ class Clusterer:
                     runtime_context=runtime_context,
                     total_ram_bytes=total_ram_bytes,
                     batching_threshold=batching_threshold,
-                    resolved_load_name_counts=resolved_load_name_counts,
                     name_tuples=name_tuples,
                     cluster_seed_disallows=cluster_seed_disallows,
                     signature_ids=signature_ids,
@@ -3867,7 +3908,6 @@ class Clusterer:
                     runtime_context=runtime_context,
                     total_ram_bytes=total_ram_bytes,
                     batching_threshold=batching_threshold,
-                    resolved_load_name_counts=resolved_load_name_counts,
                     name_tuples=name_tuples,
                     cluster_seed_disallows=cluster_seed_disallows,
                     signature_ids=signature_ids,
@@ -5152,11 +5192,14 @@ class Clusterer:
                 ]
                 attachment_state = _ARROW_ATTACH_BLOCK_STATE.get()
                 signatures.update(
-                    attachment_state.orcid_signature_info(arrow_lease, seed_orcid_signature_ids)
+                    attachment_state.orcid_signature_info(
+                        arrow_lease, seed_orcid_signature_ids, num_threads=self.n_jobs
+                    )
                     if attachment_state is not None
                     else _load_arrow_incremental_orcid_signature_info(
                         arrow_lease,
                         seed_orcid_signature_ids,
+                        num_threads=self.n_jobs,
                     )
                 )
             request_dataset = _DirectArrowIncrementalDataset(

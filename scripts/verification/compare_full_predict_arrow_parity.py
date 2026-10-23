@@ -25,17 +25,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-
-def _write_fresh_json(path: Path, payload: Mapping[str, Any]) -> None:
-    if path.exists():
-        raise FileExistsError(f"Report output already exists: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    staging = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    try:
-        staging.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.link(staging, path)
-    finally:
-        staging.unlink(missing_ok=True)
+from s2and._atomic_io import write_fresh_json  # noqa: E402
 
 
 def _load_json(path: str | Path) -> Any:
@@ -666,7 +656,7 @@ def main() -> None:
 
     report = run(args)
     _assert_exact(report)
-    _write_fresh_json(args.output_json, report)
+    write_fresh_json(args.output_json, report)
     print(json.dumps({k: v for k, v in report.items() if k not in {"incumbent_clusters", "arrow_clusters"}}, indent=2))
 
 

@@ -359,6 +359,49 @@ mod char_ngram_tests {
     }
 }
 
+#[cfg(test)]
+mod middle_initial_tests {
+    use super::{middle_initial_counts, middle_initials_overlap, middle_initials_overlap_counts};
+
+    #[test]
+    fn counts_overlap_matches_the_per_pair_form() {
+        let parts = ["a", "b", "ab", "anne", "", " ", "é", "b c", "a a", "de"];
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound as u64) as usize
+        };
+        let mut names: Vec<String> = vec![String::new(), " ".into(), "a".into()];
+        for _ in 0..300 {
+            let count = next(5);
+            names.push(
+                (0..count)
+                    .map(|_| parts[next(parts.len())])
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        let (mut nan, mut finite) = (0, 0);
+        for name1 in &names {
+            let counts1 = middle_initial_counts(name1);
+            for name2 in &names {
+                let counts2 = middle_initial_counts(name2);
+                let expected = middle_initials_overlap(Some(name1), Some(name2));
+                let actual = middle_initials_overlap_counts(&counts1, &counts2);
+                assert_eq!(actual.to_bits(), expected.to_bits(), "{name1:?} {name2:?}");
+                if actual.is_nan() {
+                    nan += 1;
+                } else {
+                    finite += 1;
+                }
+            }
+        }
+        assert!(nan > 0 && finite > 0);
+    }
+}
+
 pub(crate) fn counter_jaccard_data(
     counter1: &Option<CounterData>,
     counter2: &Option<CounterData>,
@@ -478,6 +521,54 @@ pub(crate) fn first_names_equal(name1: Option<&str>, name2: Option<&str>) -> f64
     }
 }
 
+/// Counts of a middle name's initials, sorted by initial.
+pub(crate) fn middle_initial_counts(middle: &str) -> Vec<(char, u32)> {
+    let mut counts: Vec<(char, u32)> = count_initials(middle)
+        .into_iter()
+        .map(|(initial, count)| (initial, count as u32))
+        .collect();
+    counts.sort_unstable();
+    counts
+}
+
+/// `middle_initials_overlap` on two signatures' sorted initial counts.
+///
+/// Building two hash maps per pair took 2.6% of a full block's CPU. The sums
+/// are integers, so the merge order does not change the value.
+pub(crate) fn middle_initials_overlap_counts(
+    counts1: &[(char, u32)],
+    counts2: &[(char, u32)],
+) -> f64 {
+    if counts1.is_empty() || counts2.is_empty() {
+        return f64::NAN;
+    }
+    let mut intersection_sum = 0u64;
+    let (mut i, mut j) = (0, 0);
+    while i < counts1.len() && j < counts2.len() {
+        let (initial1, value1) = counts1[i];
+        let (initial2, value2) = counts2[j];
+        if initial1 == initial2 {
+            intersection_sum += u64::from(value1.min(value2));
+        }
+        i += usize::from(initial1 <= initial2);
+        j += usize::from(initial2 <= initial1);
+    }
+    let sum1: u64 = counts1.iter().map(|(_, value)| u64::from(*value)).sum();
+    let sum2: u64 = counts2.iter().map(|(_, value)| u64::from(*value)).sum();
+    let union_sum = sum1 + sum2 - intersection_sum;
+    if union_sum == 0 {
+        return f64::NAN;
+    }
+    let score = (intersection_sum as f64) / (union_sum as f64);
+    if score > 1.0 {
+        1.0
+    } else {
+        score
+    }
+}
+
+/// The per-pair form of `middle_initials_overlap_counts`; its reference in tests.
+#[cfg(test)]
 pub(crate) fn middle_initials_overlap(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let s1 = name1.unwrap_or("");
     let s2 = name2.unwrap_or("");

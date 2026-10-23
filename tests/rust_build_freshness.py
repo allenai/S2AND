@@ -19,15 +19,24 @@ from pathlib import Path
 
 RUST_PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "s2and_rust"
 REBUILD_COMMAND = "uv sync --extra dev --reinstall-package s2and"
-CLEAN_COMMAND = "uv run --no-sync cargo clean -p s2and_rust -p cld2 --manifest-path s2and_rust/Cargo.toml --release"
+CLEAN_COMMAND = (
+    "uv run --no-sync cargo clean -p s2and_rust -p cld2 -p cld2-sys --manifest-path s2and_rust/Cargo.toml --release"
+)
 
 # Mirrors SOURCE_DIGEST_FILES and SOURCE_DIGEST_DIRS in s2and_rust/build.rs.
-_SOURCE_DIGEST_FILES = ("Cargo.toml", "Cargo.lock", "build.rs", "vendor/cld2/Cargo.toml")
-_SOURCE_DIGEST_DIRS = ("src", "vendor/cld2/src")
+_SOURCE_DIGEST_FILES = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "vendor/cld2/Cargo.toml",
+    "vendor/cld2-sys/Cargo.toml",
+    "vendor/cld2-sys/build.rs",
+)
+_SOURCE_DIGEST_DIRS = ("src", "vendor/cld2/src", "vendor/cld2-sys/src", "vendor/cld2-sys/cld2")
 
 
 def _rust_source_files(directory: Path) -> list[Path]:
-    """List Rust sources, rejecting directory links on every supported OS."""
+    """List native sources, rejecting directory links on every supported OS."""
     metadata = directory.lstat()
     if stat.S_ISLNK(metadata.st_mode) or (
         getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
@@ -37,7 +46,7 @@ def _rust_source_files(directory: Path) -> list[Path]:
     for path in directory.iterdir():
         if path.is_dir():
             files.extend(_rust_source_files(path))
-        elif path.is_file() and path.suffix == ".rs":
+        elif path.is_file() and path.suffix in {".rs", ".cc", ".cpp", ".h"}:
             files.append(path)
     return files
 

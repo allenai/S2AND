@@ -82,7 +82,7 @@ def test_arrow_availability_reads_only_manifests_and_opens_once_for_evaluation(
         return real_open(root, **kwargs)
 
     monkeypatch.setattr(ArrowDataset, "open", track_open)
-    assert eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
     assert opened == []
     with eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl") as dataset:
         assert dataset.root == dataset_root.resolve()
@@ -91,7 +91,7 @@ def test_arrow_availability_reads_only_manifests_and_opens_once_for_evaluation(
 
 def test_arrow_availability_requires_name_counts_declaration(tmp_path: Path) -> None:
     _write_eval_arrow_root(tmp_path, include_name_counts_index=False)
-    assert not eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is not None
     error = eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
     assert isinstance(error, FileNotFoundError)
     assert "name_counts_index" in str(error)
@@ -110,7 +110,7 @@ def test_arrow_availability_uses_declared_specter_name_on_case_insensitive_files
 
     with ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True):
         pass
-    assert eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
     with eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl") as dataset:
         assert dataset.root == dataset_root.resolve()
 
@@ -126,7 +126,7 @@ def test_arrow_availability_accepts_utf8_bom_dataset_manifest(tmp_path: Path) ->
 
     with ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True):
         pass
-    assert eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
     with eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl") as dataset:
         assert dataset.root == dataset_root.resolve()
 
@@ -146,7 +146,7 @@ def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path, 
         payload.write_bytes(bytes([content[0] ^ 1]) + content[1:])
     else:
         payload.unlink()
-    assert eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
     with pytest.raises(
         ValueError if corruption == "checksum" else FileNotFoundError,
         match="checksum mismatch" if corruption == "checksum" else None,
@@ -170,12 +170,14 @@ def test_arrow_availability_rejects_missing_base_artifact(tmp_path: Path) -> Non
 
 
 def test_arrow_availability_distinguishes_absence_and_embedding_generation(tmp_path: Path) -> None:
-    assert not eval_prod_models.arrow_datasets_available(None, ["pubmed"], ["_specter2.pkl"])
-    assert not eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    assert eval_prod_models.first_missing_arrow_dataset_error(None, ["pubmed"], ["_specter2.pkl"]) is not None
+    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is not None
     _write_eval_arrow_root(tmp_path)
-    assert not eval_prod_models.arrow_datasets_available(str(tmp_path), ["absent"], ["_specter2.pkl"])
-    assert not eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter.pickle"])
-    assert eval_prod_models.arrow_datasets_available(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
+    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["absent"], ["_specter2.pkl"]) is not None
+    assert (
+        eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter.pickle"]) is not None
+    )
+    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
 
 
 def test_train_mode_validation_rejects_conflicting_request_or_wrong_dataset() -> None:
@@ -637,7 +639,9 @@ def test_eval_main_surfaces_arrow_corruption_with_json_fallback_configured(
         message = "checksum mismatch"
         # Availability reads manifests only; the real open must reject the
         # damaged payload even when JSON fallback is configured.
-        assert eval_prod_models.arrow_datasets_available(str(arrow_root), ["pubmed"], ["_specter2.pkl"])
+        assert (
+            eval_prod_models.first_missing_arrow_dataset_error(str(arrow_root), ["pubmed"], ["_specter2.pkl"]) is None
+        )
     else:
         (arrow_root / "manifest.json").write_text("{", encoding="utf-8")
         message = "invalid JSON"

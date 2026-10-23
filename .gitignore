@@ -158,3 +158,4 @@ foo-*
 *.dat
 *.png
 *.cpp
+!s2and_rust/vendor/cld2-sys/src/wrapper.cpp

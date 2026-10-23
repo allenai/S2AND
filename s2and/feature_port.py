@@ -24,6 +24,7 @@ from s2and.rust_calls import (
     get_constraint_labels_index_arrays_rust,
     get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
+    score_linker_pair_features_and_aggregate_stats_rust,
 )
 from s2and.thread_config import resolve_n_jobs
 
@@ -383,7 +384,6 @@ def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
 
 def _get_rust_featurizer(
     dataset: ANDData,
-    runtime_context: Any | None = None,
     *,
     prediction_state: PredictionState | None = None,
 ) -> Any:
@@ -427,6 +427,19 @@ def _get_rust_feature_data(dataset: ANDData) -> Any:
         return featurizer
 
 
+def release_rust_handle(handle: Any) -> None:
+    """Release native state, freeing paper buffers before background cleanup.
+
+    Featurizers free paper buffers before residual scoring can allocate its matrix.
+    Remaining metadata can finish in the background. Handles without `release`
+    are left to the garbage collector.
+    """
+
+    release = getattr(handle, "release", None)
+    if callable(release):
+        release()
+
+
 def evict_rust_featurizer(dataset: ANDData) -> bool:
     """Evict a single dataset's Rust featurizer from the in-memory cache."""
     state = _rust_featurizer_state(dataset)
@@ -460,6 +473,8 @@ __all__ = [
     "get_constraint_labels_index_arrays_rust",
     "get_constraints_block_upper_triangle_indexed_rust",
     "get_constraints_matrix_indexed_rust",
+    "release_rust_handle",
+    "score_linker_pair_features_and_aggregate_stats_rust",
     "s2and_rust",
     "warm_rust_featurizer",
 ]

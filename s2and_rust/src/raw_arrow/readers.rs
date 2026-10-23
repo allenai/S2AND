@@ -826,7 +826,7 @@ pub(crate) fn read_raw_arrow_specter_from_batches(
     path: &str,
     batches: Vec<RecordBatch>,
     keep_paper_ids: Option<&HashSet<String>>,
-) -> PyResult<HashMap<String, Vec<f32>>> {
+) -> PyResult<HashMap<String, arrow::buffer::ScalarBuffer<f32>>> {
     let parallel =
         read_keyed_batches_in_parallel(path, &batches, keep_paper_ids, "paper_id", |batch| {
             read_specter_batches(path, std::slice::from_ref(batch), keep_paper_ids)
@@ -841,7 +841,7 @@ fn read_specter_batches(
     path: &str,
     batches: &[RecordBatch],
     keep_paper_ids: Option<&HashSet<String>>,
-) -> PyResult<HashMap<String, Vec<f32>>> {
+) -> PyResult<HashMap<String, arrow::buffer::ScalarBuffer<f32>>> {
     let mut out = HashMap::default();
     let mut seen_filtered_scan_ids = keep_paper_ids.map(|_| HashSet::<&str>::default());
     for batch in batches {

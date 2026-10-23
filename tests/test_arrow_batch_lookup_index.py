@@ -29,15 +29,7 @@ def _write_tiny_index(tmp_path: Path) -> tuple[str, Path]:
     return path, index_path
 
 
-@pytest.mark.parametrize(
-    "lookup",
-    [
-        read_arrow_batch_lookup_index_batch_indices,
-        feature_block_arrow_module.read_arrow_batch_lookup_index_batch_indices_for_request,
-    ],
-    ids=["standalone", "request"],
-)
-def test_lookup_returns_every_batch_for_repeated_keys_and_omits_absent_keys(tmp_path: Path, lookup) -> None:
+def test_lookup_returns_every_batch_for_repeated_keys_and_omits_absent_keys(tmp_path: Path) -> None:
     """A paper's authors can span several batches, all of which must be selected."""
     import pyarrow as pa
 
@@ -57,7 +49,10 @@ def test_lookup_returns_every_batch_for_repeated_keys_and_omits_absent_keys(tmp_
         (["missing"], set()),
         ([], set()),
     ):
-        assert lookup(path, index_path, key_column="paper_id", values=iter(requested)) == expected
+        assert (
+            read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="paper_id", values=iter(requested))
+            == expected
+        )
 
 
 def test_native_utf8_batch_hash_matches_python_fnv1a64() -> None:

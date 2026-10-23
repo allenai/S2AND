@@ -559,7 +559,7 @@ def test_predict_incremental_from_arrow_loads_seed_orcids_for_budget_floor(
 
     fake_load_signature_info = _signature_info_loader(captured, orcid_signature_id="5")
 
-    def fake_load_orcid_info(_lease: Any, signature_ids: Any) -> dict[str, Any]:
+    def fake_load_orcid_info(_lease: Any, signature_ids: Any, **_kwargs: Any) -> dict[str, Any]:
         captured["orcid_signature_ids"] = tuple(signature_ids)
         return {
             str(signature_id): model_module._ArrowIncrementalSignatureInfo(
@@ -683,13 +683,12 @@ def test_load_arrow_incremental_signature_info_uses_signature_batch_index(
         assert signatures["s3"].paper_id is None
         assert read_batch_indices == [1]
 
-        read_batch_indices.clear()
+        # The ORCID loader reads its batches through the native index, not pyarrow.
         orcid_signatures = model_module._load_arrow_incremental_orcid_signature_info(lease, ["s2"])
         assert set(orcid_signatures) == {"s2"}
         assert orcid_signatures["s2"].paper_id is None
         assert orcid_signatures["s2"].author_info_first is None
         assert orcid_signatures["s2"].author_info_orcid == "0000-0002"
-        assert read_batch_indices == [1]
 
 
 def test_load_arrow_incremental_orcid_signature_info_skips_missing_seed_ids(tmp_path: Path) -> None:
@@ -742,6 +741,39 @@ def test_load_arrow_incremental_orcid_signature_info_accepts_missing_orcid_colum
     arrow_dataset = ArrowDataset.open(tmp_path)
     with arrow_dataset.use() as lease:
         assert model_module._load_arrow_incremental_orcid_signature_info(lease, ["query"]) == {}
+
+
+def test_load_arrow_incremental_orcid_signature_info_keeps_null_and_empty_values(tmp_path: Path) -> None:
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path)
+    signatures_path = Path(arrow_paths["signatures"])
+    write_arrow_ipc_table(
+        _signature_table(
+            [
+                {"signature_id": "s_null", "paper_id": "p1", "author_orcid": None},
+                {"signature_id": "s_empty", "paper_id": "p1", "author_orcid": ""},
+                {"signature_id": "s_value", "paper_id": "p1", "author_orcid": "0000-0003"},
+                {"signature_id": "s_other", "paper_id": "p1", "author_orcid": "0000-0004"},
+            ]
+        ),
+        signatures_path,
+    )
+    index_path = Path(arrow_paths["signatures_batch_index"])
+    write_arrow_batch_lookup_index(
+        signatures_path,
+        index_path,
+        key_column="signature_id",
+        table_name="signatures",
+    )
+
+    write_test_arrow_artifact_manifest(tmp_path, arrow_paths)
+    arrow_dataset = ArrowDataset.open(tmp_path)
+    with arrow_dataset.use() as lease:
+        loaded = model_module._load_arrow_incremental_orcid_signature_info(
+            lease, ["s_value", "missing", "s_null", "s_empty"], num_threads=2
+        )
+    # Arrow row order, nulls as None, empty strings kept, missing ids skipped.
+    assert list(loaded) == ["s_null", "s_empty", "s_value"]
+    assert [info.author_info_orcid for info in loaded.values()] == [None, "", "0000-0003"]
 
 
 def test_direct_arrow_incremental_requires_loaded_artifact() -> None:
@@ -1847,7 +1879,6 @@ def test_native_prediction_ignores_seed_requires_with_precomputed_distances():
     clusterer = Clusterer(FeaturizationInfo(features_to_use=["year_diff"]), object(), n_jobs=1)
     native = SimpleNamespace(
         cluster_seeds_require=lambda: [("s1", "seeded"), ("s2", "seeded")],
-        signature_rule_metadata=lambda: [],
     )
     clusters, _ = clusterer.predict_from_rust_featurizer(
         {"block": ["s1", "s2"]},

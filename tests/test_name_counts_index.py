@@ -416,14 +416,13 @@ def test_reused_kind_hash_seed_preserves_binary_index_hashes() -> None:
         ("first-last-spaces", "first_last", "anne marie o connor"),
     ):
         name_bytes = name.encode("utf-8")
-        expected = (
-            feature_block_arrow._fnv64_bytes(name_bytes),
-            feature_block_arrow._fnv64_bytes(
-                feature_block_arrow._NAME_COUNTS_INDEX_HASH_DOMAIN + kind.encode("utf-8") + b"\x00" + name_bytes
-            ),
+        expected = feature_block_arrow._fnv64_bytes(
+            feature_block_arrow._NAME_COUNTS_INDEX_HASH_DOMAIN + kind.encode("utf-8") + b"\x00" + name_bytes
         )
 
-        assert feature_block_arrow._name_counts_index_hashes(kind, name_bytes) == expected, case_id
+        # The writer hashes each name from the kind's seed instead of the full prefix.
+        seed = feature_block_arrow._name_counts_index_kind_hash_seed(kind)
+        assert feature_block_arrow._fnv64_update(seed, name_bytes) == expected, case_id
 
 
 def _temporary_indexes(root: Path) -> list[Path]:

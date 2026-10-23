@@ -76,6 +76,47 @@ mod alpha_gate_tests {
     };
 
     #[test]
+    fn parallel_detection_matches_serial_results() {
+        use rayon::prelude::*;
+        let texts = [
+            "A detailed study of neural networks and scientific discovery.",
+            "Une étude détaillée des réseaux neuronaux et de la découverte scientifique.",
+            "Eine ausführliche Untersuchung neuronaler Netze und wissenschaftlicher Entdeckungen.",
+            "Un estudio detallado de redes neuronales y descubrimientos científicos.",
+            "神经网络与科学发现的详细研究。 这是一个研究标题。",
+            "Исследование нейронных сетей и научных открытий.",
+            "دراسة مفصلة للشبكات العصبية والاكتشافات العلمية.",
+            "",
+            "123 456",
+            "one",
+            "bad\0 control",
+            "<b>Scientific evidence and neural networks</b>",
+        ];
+        let expected: Vec<_> = texts
+            .iter()
+            .map(|text| detect_language_compat(text))
+            .collect();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            (0..8192).into_par_iter().for_each(|index| {
+                let position = index % texts.len();
+                let actual = detect_language_compat(texts[position]);
+                assert_eq!(
+                    actual.predicted_language,
+                    expected[position].predicted_language
+                );
+                assert_eq!(
+                    actual.language_reliability,
+                    expected[position].language_reliability
+                );
+            });
+        });
+    }
+
+    #[test]
     fn letter_categories_are_python_alpha() {
         for ch in ['a', 'Z', '\u{00E9}', '\u{6C49}', '\u{02B0}', '\u{01C5}'] {
             assert!(is_python_alpha(ch), "{ch:?}");

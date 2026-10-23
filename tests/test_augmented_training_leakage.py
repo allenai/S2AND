@@ -11,7 +11,7 @@ from scripts.production.model.augmented_leakage import (
     require_declared_sources,
     require_training_members,
     source_members,
-    training_members_from_sources,
+    split_members_from_sources,
 )
 from tests.incremental_test_helpers import _dataset
 from tests.pairwise_release_helpers import write_pairwise_dataset
@@ -66,7 +66,7 @@ def test_augmented_sources_follow_the_declared_dataset_population() -> None:
 def test_augmented_copies_of_a_declared_fixed_pair_source_use_only_fit_members(tmp_path: Path) -> None:
     pair_path = tmp_path / "medline_train_pairs.csv"
     pair_path.write_text("signature_id_1,signature_id_2,label\nm1,m2,YES\n", encoding="utf-8")
-    training = training_members_from_sources("medline", {"train_pairs": pair_path}, random_seed=1111)
+    training = split_members_from_sources("medline", {"train_pairs": pair_path}, random_seed=1111)[0]
     require_training_members(source_members([("medline___m1", "medline___m2")]), "medline", training)
     with pytest.raises(ValueError, match="outside its training split"):
         require_training_members(source_members([("medline___m1", "medline___validation")]), "medline", training)
@@ -86,7 +86,7 @@ def test_inventor_fit_members_preserve_signature_ids_above_int64(tmp_path: Path)
         cluster["signature_ids"] = [remap[signature_id] for signature_id in cluster["signature_ids"]]
     files["clusters"].write_text(json.dumps(clusters), encoding="utf-8")
 
-    training = training_members_from_sources("inventors_s2and", files, random_seed=1111)
+    training = split_members_from_sources("inventors_s2and", files, random_seed=1111)[0]
     assert training
     assert training <= signatures.keys()
     assert all(isinstance(signature_id, str) and int(signature_id) > 2**63 for signature_id in training)
@@ -119,4 +119,4 @@ def test_random_block_fit_members_use_the_real_split_without_packaged_artifacts(
 
     monkeypatch.setattr("s2and.data.load_packaged_name_tuple_artifact", forbid_artifact)
     expected = {sid for members in train.values() for sid in members}
-    assert training_members_from_sources("qian", model_files, random_seed=1111) == expected
+    assert split_members_from_sources("qian", model_files, random_seed=1111)[0] == expected

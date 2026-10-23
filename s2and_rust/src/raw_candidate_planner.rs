@@ -171,7 +171,7 @@ struct RawArrowQueryInputReadResult {
     signatures: HashMap<String, RawArrowSignature>,
     papers: HashMap<String, RawArrowPaper>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
-    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
     signature_index_stats: IndexedArrowReadStats,
     paper_index_stats: IndexedArrowReadStats,
     paper_author_index_stats: IndexedArrowReadStats,
@@ -700,7 +700,7 @@ fn read_reusable_raw_arrow_query_inputs(
                         )
                     },
                     || -> PyResult<(
-                        Option<HashMap<String, Vec<f32>>>,
+                        Option<HashMap<String, arrow::buffer::ScalarBuffer<f32>>>,
                         IndexedArrowReadStats,
                         f64,
                     )> {
@@ -771,6 +771,8 @@ pub(crate) struct RawBlockQueryCandidatePlanner {
     orcid_enabled: bool,
     num_threads: Option<usize>,
     max_exemplars: usize,
+    /// Set by `release`; the planner then refuses to plan or reload.
+    released: bool,
 }
 
 /// Seed components and exclusions read from one request's sidecars.
@@ -857,7 +859,7 @@ impl RawArrowSeedLayout {
 struct RawArrowPaperRows {
     papers: HashMap<String, RawArrowPaper>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
-    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
     raw_name_counts: RawNameCountMaps,
     paper_index_stats: IndexedArrowReadStats,
     paper_author_index_stats: IndexedArrowReadStats,
@@ -914,7 +916,7 @@ fn read_raw_arrow_paper_rows(
                 || {
                     rayon::join(
                         || -> PyResult<(
-                            Option<HashMap<String, Vec<f32>>>,
+                            Option<HashMap<String, arrow::buffer::ScalarBuffer<f32>>>,
                             IndexedArrowReadStats,
                             f64,
                         )> {
@@ -975,7 +977,16 @@ fn read_raw_arrow_paper_rows(
 /// `retain_seed_rows`; the signature and author rows stay in the plan state.
 struct RetainedRawArrowSeedRows {
     papers: HashMap<String, RawArrowPaper>,
-    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
+}
+
+/// Rows moved out of the planner while a reload reads the new seeds.
+struct ReloadParts {
+    signatures: HashMap<String, RawArrowSignature>,
+    paper_authors: HashMap<String, Vec<(i64, String)>>,
+    papers: HashMap<String, RawArrowPaper>,
+    specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
+    prefetched: Option<PrefetchedRawArrowRows>,
 }
 
 /// Rows of block signatures that are not seeds yet, read with the seeds at build.
@@ -989,7 +1000,7 @@ struct PrefetchedRawArrowRows {
     signatures: HashMap<String, RawArrowSignature>,
     papers: HashMap<String, RawArrowPaper>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
-    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
 }
 
 impl PrefetchedRawArrowRows {
@@ -1094,6 +1105,15 @@ struct RawArrowSeedReadTelemetry {
 }
 
 impl RawBlockQueryCandidatePlanner {
+    fn ensure_not_released(&self) -> PyResult<()> {
+        if self.released {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "planner was released; build a new one",
+            ));
+        }
+        Ok(())
+    }
+
     /// Rows of exactly `signature_ids` and their papers from the seed state, the
     /// latest plan's queries, and prefetched rows; None if any is not held.
     ///
@@ -1319,7 +1339,7 @@ impl RawBlockQueryCandidatePlanner {
         signatures: HashMap<String, RawArrowSignature>,
         papers: HashMap<String, RawArrowPaper>,
         paper_authors: HashMap<String, Vec<(i64, String)>>,
-        specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+        specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
         raw_name_counts: RawNameCountMaps,
         seed_paper_count: usize,
         read_telemetry: RawArrowSeedReadTelemetry,
@@ -1529,6 +1549,7 @@ impl RawBlockQueryCandidatePlanner {
             orcid_enabled,
             num_threads,
             max_exemplars,
+            released: false,
         })
     }
 
@@ -1562,11 +1583,47 @@ impl RawBlockQueryCandidatePlanner {
             .retained_seed_rows
             .take()
             .expect("checked above that seed rows are retained");
-        let mut signatures = std::mem::take(&mut self.state.signatures);
-        let mut paper_authors = std::mem::take(&mut self.state.paper_authors);
-        let mut papers = retained.papers;
-        let mut specter_by_paper_id = retained.specter_by_paper_id;
-        let mut prefetched = self.state.prefetched_rows.take();
+        let mut parts = ReloadParts {
+            signatures: std::mem::take(&mut self.state.signatures),
+            paper_authors: std::mem::take(&mut self.state.paper_authors),
+            papers: retained.papers,
+            specter_by_paper_id: retained.specter_by_paper_id,
+            prefetched: self.state.prefetched_rows.take(),
+        };
+        match self.reload_seed_rows_from_parts(py, layout, &mut parts) {
+            Ok(planner) => {
+                *self = planner;
+                Ok(true)
+            }
+            Err(error) => {
+                // The rows go back, so a later reload or plan still has them.
+                self.state.signatures = parts.signatures;
+                self.state.paper_authors = parts.paper_authors;
+                self.state.retained_seed_rows = Some(RetainedRawArrowSeedRows {
+                    papers: parts.papers,
+                    specter_by_paper_id: parts.specter_by_paper_id,
+                });
+                self.state.prefetched_rows = parts.prefetched;
+                Err(error)
+            }
+        }
+    }
+
+    /// The reload's reads and assembly over rows moved out of the planner.
+    ///
+    /// Every read fails before planner state is replaced; only `assemble`,
+    /// which runs last, consumes the previous state.
+    fn reload_seed_rows_from_parts(
+        &mut self,
+        py: Python<'_>,
+        layout: RawArrowSeedLayout,
+        parts: &mut ReloadParts,
+    ) -> PyResult<Self> {
+        let signatures = &mut parts.signatures;
+        let paper_authors = &mut parts.paper_authors;
+        let papers = &mut parts.papers;
+        let specter_by_paper_id = &mut parts.specter_by_paper_id;
+        let prefetched = &mut parts.prefetched;
 
         let read_signatures_start = Instant::now();
         let mut missing_signature_ids: HashSet<String> = layout
@@ -1598,8 +1655,12 @@ impl RawBlockQueryCandidatePlanner {
             stats
         };
         let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
-        signatures.retain(|signature_id, _| layout.seed_signature_id_set.contains(signature_id));
         layout.require_signature_rows(&signatures, self.num_threads)?;
+        // Seeds only grow between passes, so the rows are usually exactly the seeds.
+        if signatures.len() != layout.seed_signature_id_set.len() {
+            signatures
+                .retain(|signature_id, _| layout.seed_signature_id_set.contains(signature_id));
+        }
 
         let needed_paper_ids = layout.needed_paper_ids(&signatures);
         let mut missing_paper_ids: HashSet<String> = needed_paper_ids
@@ -1648,12 +1709,14 @@ impl RawBlockQueryCandidatePlanner {
                 ))
             }
         }
-        papers.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
+        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, self.num_threads)?;
+        if papers.len() != needed_paper_ids.len() {
+            papers.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
+        }
         paper_authors.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
         if let Some(specter) = specter_by_paper_id.as_mut() {
             specter.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
         }
-        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, self.num_threads)?;
         let read_telemetry = RawArrowSeedReadTelemetry {
             read_cluster_seeds_secs: layout.read_cluster_seeds_secs,
             read_signatures_secs,
@@ -1682,10 +1745,10 @@ impl RawBlockQueryCandidatePlanner {
             py,
             self.dataset.clone(),
             layout,
-            signatures,
-            papers,
-            paper_authors,
-            specter_by_paper_id,
+            std::mem::take(signatures),
+            std::mem::take(papers),
+            std::mem::take(paper_authors),
+            specter_by_paper_id.take(),
             raw_name_counts,
             needed_paper_ids.len(),
             read_telemetry,
@@ -1699,9 +1762,8 @@ impl RawBlockQueryCandidatePlanner {
             Some(previous),
         )?;
         planner.query_mode = query_mode;
-        planner.state.prefetched_rows = prefetched;
-        *self = planner;
-        Ok(true)
+        planner.state.prefetched_rows = prefetched.take();
+        Ok(planner)
     }
 }
 
@@ -1814,11 +1876,47 @@ impl RawBlockQueryCandidatePlanner {
         cluster_seeds_path: String,
         cluster_seed_disallows_path: Option<String>,
     ) -> PyResult<bool> {
+        self.ensure_not_released()?;
         self.reload_seed_rows(
             py,
             &cluster_seeds_path,
             cluster_seed_disallows_path.as_deref(),
         )
+    }
+
+    /// Drop the planner's rows on a background thread.
+    ///
+    /// Freeing a block's rows takes seconds on one thread, so a request
+    /// returns before that. The planner then refuses to plan or reload.
+    fn release(&mut self) {
+        self.released = true;
+        let state = &mut self.state;
+        let dropped = (
+            std::mem::take(&mut state.features_by_signature_id),
+            std::mem::take(&mut state.signatures),
+            std::mem::take(&mut state.paper_authors),
+            std::mem::take(&mut state.seed_author_index),
+            std::mem::take(&mut state.raw_name_counts),
+            std::mem::take(&mut state.members_by_component),
+            std::mem::take(&mut state.component_keys_by_member),
+            std::mem::take(&mut state.summary_signals_by_component),
+            state.retriever.take_contents(),
+            std::mem::take(&mut state.component_order),
+            std::mem::take(&mut state.seed_signature_ids),
+            std::mem::take(&mut state.seed_signature_id_set),
+            std::mem::take(&mut state.cluster_seed_disallows),
+            std::mem::take(&mut state.unidecode_char_map),
+            state.retained_seed_rows.take(),
+            state.prefetched_rows.take(),
+            state.last_query_inputs.take(),
+            std::mem::take(&mut self.planner_query_signature_ids),
+            std::mem::take(&mut self.planner_query_signature_id_set),
+            std::mem::take(&mut self.planner_query_requests_by_signature_id),
+        );
+        std::thread::spawn(move || {
+            drop(dropped);
+            crate::rayon_pool::collect_freed_memory_on_pool_workers();
+        });
     }
 
     fn build_telemetry(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
@@ -1933,6 +2031,7 @@ impl RawBlockQueryCandidatePlanner {
         num_threads: Option<usize>,
         use_orcid_id: bool,
     ) -> PyResult<Option<RustFeaturizer>> {
+        self.ensure_not_released()?;
         // Same de-duplication as `from_arrow_dataset`: first occurrence wins.
         let mut seen = HashSet::with_capacity_and_hasher(signature_ids.len(), Default::default());
         let signature_ids: Vec<String> = signature_ids
@@ -1974,6 +2073,7 @@ impl RawBlockQueryCandidatePlanner {
     }
 
     fn plan_query_signatures(&mut self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        self.ensure_not_released()?;
         if matches!(self.query_mode, RawPlannerQueryMode::Auto) {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "RawBlockQueryCandidatePlanner.from_auto_queries requires explicit plan(query_signature_ids)",
@@ -1996,6 +2096,7 @@ impl RawBlockQueryCandidatePlanner {
         query_signature_ids: Vec<String>,
         additional_cluster_seed_disallows: Option<Vec<(String, String)>>,
     ) -> PyResult<Py<PyDict>> {
+        self.ensure_not_released()?;
         validate_raw_arrow_query_signature_ids(&query_signature_ids)?;
         let additional_cluster_seed_disallows = additional_cluster_seed_disallows
             .map(validate_additional_cluster_seed_disallows)
@@ -2308,10 +2409,15 @@ impl RawBlockQueryCandidatePlanner {
         let mut pair_row_indices = Vec::<u32>::new();
         let mut filtered_summary_signals_by_component =
             HashMap::<String, RawArrowSummarySignalData>::default();
+        // Each retrieved component expands once, in first-appearance order: a
+        // large cluster retrieved by thousands of queries expanded that many
+        // times, and the index skips repeated papers anyway.
+        let mut seen_component_keys = HashSet::<&str>::default();
         let retrieved_member_paper_ids: Vec<&str> = query_results
             .iter()
             .flatten()
             .flat_map(|result| result.row_component_keys.iter())
+            .filter(|component_key| seen_component_keys.insert(component_key.as_str()))
             .filter_map(|component_key| members_by_component.get(component_key))
             .flatten()
             .filter_map(|signature_id| self.state.signatures.get(signature_id))

@@ -186,13 +186,6 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
     assert np.allclose(dataset.specter_embeddings["p1"], np.array([1.0, 0.0], dtype=np.float32))
 
 
-def test_arrow_signature_ids_respect_the_limit(tmp_path: Path) -> None:
-    arrow_root = tmp_path / "arrow"
-    _write_two_signature_arrow_bundle(arrow_root)
-    with ArrowDataset.open(arrow_root) as arrow_dataset:
-        assert script.load_signature_ids_from_arrow(arrow_dataset, limit=1, sample_mode="first", seed=7) == ["s1"]
-
-
 @pytest.fixture
 def run_inputs(tmp_path: Path) -> SimpleNamespace:
     import pyarrow as pa

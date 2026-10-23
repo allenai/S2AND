@@ -1,26 +1,5 @@
 use super::*;
 
-pub(crate) fn extract_counter(obj: &Bound<'_, PyAny>) -> PyResult<Option<CounterData>> {
-    if obj.is_none() {
-        return Ok(None);
-    }
-    let dict = obj.downcast::<PyDict>()?;
-    if dict.len() == 0 {
-        return Ok(None);
-    }
-    let mut entries: Vec<(u64, f32)> = Vec::with_capacity(dict.len());
-    let mut sum = 0.0f32;
-    for (k, v) in dict.iter() {
-        let key: String = k.extract()?;
-        let val: f64 = v.extract()?;
-        let val32 = val as f32;
-        sum += val32;
-        entries.push((fnv64(key.as_bytes()), val32));
-    }
-    entries.sort_unstable_by_key(|e| e.0);
-    Ok(Some(CounterData { entries, sum }))
-}
-
 pub(crate) fn canonical_signature_pair_ref<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
     if a <= b {
         (a, b)
@@ -430,28 +409,6 @@ pub(crate) fn preprocess_stage_signatures(
         .collect::<Vec<_>>()
 }
 
-pub(crate) fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f32>>> {
-    if obj.is_none() {
-        return Ok(None);
-    }
-    // All-zero vectors are kept as present (real vectors), matching the Arrow
-    // ingest path. The missing-vector treatment for all-zero rows lives at
-    // feature time in the featurizer, so both ingest modes share the same
-    // semantics here.
-    if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
-        let readonly = arr.readonly();
-        return Ok(Some(readonly.as_slice()?.to_vec()));
-    }
-    if let Ok(arr) = obj.downcast::<PyArray1<f64>>() {
-        let readonly = arr.readonly();
-        return Ok(Some(
-            readonly.as_slice()?.iter().map(|v| *v as f32).collect(),
-        ));
-    }
-    let vec_f64: Vec<f64> = obj.extract()?;
-    Ok(Some(vec_f64.into_iter().map(|v| v as f32).collect()))
-}
-
 pub(crate) fn extract_name_tuples_argument(
     name_tuples: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<HashMap<String, HashSet<String>>> {
@@ -461,54 +418,6 @@ pub(crate) fn extract_name_tuples_argument(
         )
     })?;
     extract_name_tuples_map(obj)
-}
-
-pub(crate) fn extract_specter_vec_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<f32>>> {
-    if obj.is_none() {
-        return Ok(Vec::new());
-    }
-    let mut vectors = Vec::new();
-    for item in PyIterator::from_object(obj)? {
-        if let Some(vector) = extract_specter_vec(&item?)? {
-            vectors.push(vector);
-        }
-    }
-    Ok(vectors)
-}
-
-pub(crate) fn extract_integer_count(obj: &Bound<'_, PyAny>, field_name: &str) -> PyResult<u64> {
-    if let Ok(value) = obj.extract::<u64>() {
-        return Ok(value);
-    }
-    let value: f64 = obj.extract().map_err(|_| {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "{field_name} values must be integer counts"
-        ))
-    })?;
-    const MAX_EXACT_F64_INTEGER: f64 = 9_007_199_254_740_992.0;
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > MAX_EXACT_F64_INTEGER {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "{field_name} values must be non-negative integer counts representable without f64 precision loss"
-        )));
-    }
-    Ok(value as u64)
-}
-
-pub(crate) fn extract_string_count_pairs(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, u64)>> {
-    if obj.is_none() {
-        return Ok(Vec::new());
-    }
-    let dict = obj.downcast::<PyDict>()?;
-    if dict.len() == 0 {
-        return Ok(Vec::new());
-    }
-    let mut entries = Vec::with_capacity(dict.len());
-    for (k, v) in dict.iter() {
-        let key: String = k.extract()?;
-        let val = extract_integer_count(&v, "first_name_counts")?;
-        entries.push((key, val));
-    }
-    Ok(entries)
 }
 
 pub(crate) fn term_token_count(value: &str) -> u8 {

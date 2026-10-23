@@ -2,3 +2,9 @@
 
 # Keep the LightGBM test fixtures byte-exact; production_main.lgb contains CR bytes.
 tests/fixtures/rust_lightgbm/*.lgb -text
+
+# Collapse upstream tables while keeping local detection changes visible.
+s2and_rust/vendor/cld2-sys/cld2/internal/cld2_generated_*.cc linguist-generated=true
+s2and_rust/vendor/cld2-sys/cld2/internal/cld_generated_*.cc linguist-generated=true
+s2and_rust/vendor/cld2-sys/cld2/internal/generated_*.cc linguist-generated=true
+s2and_rust/vendor/cld2-sys/cld2/internal/generated_*.h linguist-generated=true

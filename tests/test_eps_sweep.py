@@ -218,7 +218,9 @@ def test_validate_args_requires_limit_or_full_run_for_compute_missing() -> None:
     with pytest.raises(ValueError, match="--max-subblocks"):
         sweep_eps_on_linking_gold._validate_args(args)  # noqa: SLF001
 
-    limited_args = sweep_eps_on_linking_gold.parse_args(_cli("--compute-missing-dists", "--max-subblocks", "1"))
+    limited_args = sweep_eps_on_linking_gold.parse_args(
+        _cli("--compute-missing-dists", "--max-subblocks", "1", "--route", "bulk")
+    )
     sweep_eps_on_linking_gold._validate_args(limited_args)  # noqa: SLF001
 
     full_run_args = sweep_eps_on_linking_gold.parse_args(_cli("--compute-missing-dists", "--allow-full-run"))
@@ -283,4 +285,91 @@ def test_eps_sweep_rejects_invalid_graph_config_type():
             block_dict={},
             target_signature_ids=set(),
             arrow_dataset=object(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (("--max-subblocks", "1"), "--route bulk"),
+        (("--use-orcid-subblocking",), "--use-orcid-subblocking exactly"),
+        (("--use-orcid-constraints",), "--use-orcid-subblocking exactly"),
+    ],
+)
+def test_production_route_rejects_partial_blocks_and_mismatched_orcid_repair(extra, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        sweep_eps_on_linking_gold._validate_args(sweep_eps_on_linking_gold.parse_args(_cli(*extra)))  # noqa: SLF001
+    sweep_eps_on_linking_gold._validate_args(  # noqa: SLF001
+        sweep_eps_on_linking_gold.parse_args(_cli("--use-orcid-subblocking", "--use-orcid-constraints"))
+    )
+    sweep_eps_on_linking_gold._validate_args(  # noqa: SLF001
+        sweep_eps_on_linking_gold.parse_args(_cli("--route", "bulk", "--max-subblocks", "1"))
+    )
+
+
+def test_cache_order_appends_non_target_subblocks_after_target_subblocks() -> None:
+    selected = {"b|subblock=z": ["3"], "b|subblock=a": ["1"]}
+    every = {**selected, "b|subblock=m": ["2"], "b|subblock=0": ["4"]}
+
+    # Bulk runs and production runs give target subblocks the same cache indexes.
+    assert list(sweep_eps_on_linking_gold._cache_order(selected, None)) == ["b|subblock=a", "b|subblock=z"]  # noqa: SLF001
+    assert list(sweep_eps_on_linking_gold._cache_order(selected, every)) == [  # noqa: SLF001
+        "b|subblock=a",
+        "b|subblock=z",
+        "b|subblock=0",
+        "b|subblock=m",
+    ]
+
+
+def test_production_assignments_cut_cached_trees_for_the_bulk_step() -> None:
+    from scipy.cluster.hierarchy import linkage
+
+    tree = linkage([0.1, 0.9, 0.9], method="average")
+    linkage_blocks = {
+        "b|subblock=full": sweep_eps_on_linking_gold.CachedLinkageBlock("b|subblock=full", ["1", "2", "3"], tree),
+        "b|subblock=solo": sweep_eps_on_linking_gold.CachedLinkageBlock("b|subblock=solo", ["4"], None),
+    }
+    calls: list[dict[str, Any]] = []
+
+    class Model:
+        cluster_model = SimpleNamespace(set_params=lambda **params: calls.append(params))
+
+        def _predict_from_arrow_request(self, block_dict, arrow_dataset, **options):
+            calls.append({"blocks": block_dict, "threshold": options["batching_threshold"]})
+            bulk = options["bulk_clusters"]({"b|subblock=full": ["1", "2", "3"], "b|subblock=solo": ["4"]})
+            # The later production steps attach "5" to the bulk cluster that holds "1".
+            return {**bulk, "b|subblock=full_1": [*bulk["b|subblock=full_1"], "5"]}, None
+
+    args = SimpleNamespace(batching_threshold=3, total_ram_bytes=1)
+    assignments = sweep_eps_on_linking_gold._production_assignments_for_eps(  # noqa: SLF001
+        eps=0.5,
+        clusterer=Model(),
+        block_dict={"b": ["1", "2", "3", "4", "5"]},
+        linkage_blocks=linkage_blocks,
+        arrow_dataset=cast(Any, None),
+        args=args,
+    )
+
+    assert calls[0] == {"eps": 0.5}
+    assert calls[1]["threshold"] == 3
+    assert assignments == {
+        "1": "b|subblock=full_1",
+        "2": "b|subblock=full_1",
+        "5": "b|subblock=full_1",
+        "3": "b|subblock=full_2",
+        "4": "b|subblock=solo_0",
+    }
+
+    class ReorderedPlan(Model):
+        def _predict_from_arrow_request(self, block_dict, arrow_dataset, **options):
+            return options["bulk_clusters"]({"b|subblock=full": ["2", "1", "3"]}), None
+
+    with pytest.raises(ValueError, match="No cached linkage matches"):
+        sweep_eps_on_linking_gold._production_assignments_for_eps(  # noqa: SLF001
+            eps=0.5,
+            clusterer=ReorderedPlan(),
+            block_dict={"b": ["1", "2", "3"]},
+            linkage_blocks=linkage_blocks,
+            arrow_dataset=cast(Any, None),
+            args=args,
         )

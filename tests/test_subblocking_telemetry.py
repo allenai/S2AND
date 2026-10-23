@@ -1072,3 +1072,35 @@ def test_eps_sweep_orcid_subblocking_flag_matches_production_only_when_enabled(t
     assert frozenset({"s1", "s3", "s4"}) in partitions[True], partitions
     assert swept[True] == production
     assert swept[False] != production
+
+
+def test_eps_sweep_orcid_free_copy_plans_like_hidden_orcid_sweep(tmp_path, monkeypatch):
+    """Production always repairs by ORCID; on the ORCID-free copy that equals the sweep's hidden-ORCID plan."""
+    from scripts.eps_sweep.sweep_eps_on_linking_gold import _write_orcid_free_dataset
+
+    load_s2and_rust_extension()
+    shared_orcid = "0000-0002-1825-0097"
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = _hui_wang_graph_arrow_dataset(
+        source_root,
+        first_names=("hui", "hao", "hong", "hong"),
+        orcids=(shared_orcid, None, shared_orcid, None),
+    )
+    _production, swept, _telemetry = _eps_sweep_and_production_subblocks(source, monkeypatch, batching_threshold=3)
+    source.close()
+
+    copy_root = _write_orcid_free_dataset(source_root, tmp_path / "copy")
+    with (
+        pa.memory_map(str(copy_root / "signatures.arrow"), "r") as copied,
+        pa.memory_map(str(source_root / "signatures.arrow"), "r") as original,
+    ):
+        copied_table = pa.ipc.open_file(copied).read_all()
+        original_table = pa.ipc.open_file(original).read_all()
+    assert copied_table["author_orcid"].null_count == copied_table.num_rows == 4
+    assert copied_table.drop_columns(["author_orcid"]).equals(original_table.drop_columns(["author_orcid"]))
+    assert (copy_root / "specter.arrow").samefile(source_root / "specter.arrow")
+    copy = ArrowDataset.open(copy_root, require_specter=True)
+    production_on_copy, _, _ = _eps_sweep_and_production_subblocks(copy, monkeypatch, batching_threshold=3)
+    copy.close()
+    assert production_on_copy == swept[False]

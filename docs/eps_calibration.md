@@ -48,7 +48,14 @@ Those records cannot lose recall, but a wrong merge lowers their precision.
 That curve is diagnostic; the repeated view selects EPS.
 ORCID IDs remain hidden from native features, constraints, and subblocking repair.
 Unknown identities remain in inference context; B3 scores only known references.
-Full curves retain cross-subblock split errors.
+
+The default `--route production` scores what `predict_from_arrow` returns at each EPS.
+It cuts cached distance trees for the full-name subblocks, as production's bulk step does.
+Production code then reunites no-middle records that the size cap split, and attaches initial-only groups through the linker.
+Those steps run on `orcid_free_arrow/` in the output directory, a dataset copy without ORCIDs.
+`eps_b3_bulk_only.tsv` keeps the curve before the linker steps as a diagnostic.
+`--route bulk` scores only bulk clustering of the target subblocks and keeps cross-subblock split errors.
+Use it for `--max-subblocks` smoke runs; it does not select EPS.
 ORCID references do not establish complete or error-free identity gold.
 
 The diagnostic view uses active `calibration_fit` and `calibration_check` task assignments.
@@ -70,7 +77,7 @@ $Grid = @('0.40', '0.45', '0.50', '0.55', '0.60', '0.62', '0.64', '0.65', '0.66'
 
 uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
   --dataset j_smith --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
-  --score-mode orcid-b3 --output-dir "$EpsRun/smoke/j_smith" `
+  --score-mode orcid-b3 --output-dir "$EpsRun/smoke/j_smith" --route bulk `
   --max-subblocks 1 --subblock-selection smallest --compute-missing-dists `
   --eps-values $Grid --n-jobs 12 --total-ram-bytes 137438953472
 ```
@@ -82,6 +89,8 @@ Use fresh output paths for plans and measured runs.
 Review the runtime estimate and approved resource limits before the full run.
 Keep stdout, stderr, and a process ID for long jobs.
 Distance caches permit recovery after an interrupted run.
+The production route caches every subblock of each target block and runs the linker steps once per EPS value.
+Time one EPS value on the largest giant before choosing the grid.
 
 ## Produce both views
 

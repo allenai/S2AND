@@ -319,3 +319,72 @@ def test_nested_residual_prediction_views_the_attachment_block_featurizer(
         assert viewed == built == {frozenset({"0", "1"}), frozenset({"2", "3"})}
     finally:
         arrow.close()
+
+
+def test_bulk_clusters_hook_replaces_only_bulk_clustering(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Supplied bulk clusters skip bulk distances; planning and attachment run unchanged."""
+    import s2and.model as model_module
+
+    dataset = build_dummy_dataset("prediction_params_bulk_hook")
+    dataset.specter_embeddings = {str(paper_id): np.ones(768, dtype=np.float32) for paper_id in dataset.papers}
+    training = build_arrow_training_dataset(dataset, tmp_path / "arrow")
+    arrow = training.arrow_dataset
+    assert arrow is not None
+    monkeypatch.setattr(
+        Clusterer,
+        "_build_arrow_subblocked_block_dict",
+        lambda *args, **kwargs: ({"full": ["0", "1"], "initial": ["2", "3"]}, {}),
+    )
+    monkeypatch.setattr(
+        Clusterer,
+        "_partition_subblocked_first_name_groups",
+        lambda *args, **kwargs: ({"full": ["0", "1"]}, {"initial": ["2", "3"]}, False),
+    )
+    bulk_builds: list[list[str]] = []
+    original_build = model_module.build_rust_featurizer_from_arrow_dataset
+
+    def recording_build(arrow_dataset: Any, **kwargs: Any) -> Any:
+        bulk_builds.append([str(signature_id) for signature_id in kwargs["signature_ids"]])
+        return original_build(arrow_dataset, **kwargs)
+
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", recording_build)
+    computed_bulk: list[dict[str, list[str]]] = []
+    original_bulk = Clusterer._predict_subblocked_multiple_letter_groups
+
+    def recording_bulk(self: Clusterer, *args: Any, **kwargs: Any) -> dict[str, list[str]]:
+        computed_bulk.append(original_bulk(self, *args, **kwargs))
+        return computed_bulk[-1]
+
+    monkeypatch.setattr(Clusterer, "_predict_subblocked_multiple_letter_groups", recording_bulk)
+    attach_seeds: list[dict[str, Any]] = []
+
+    def attach(self: Clusterer, signatures: list[str], arrow_dataset: Any, **kwargs: Any):
+        attach_seeds.append(dict(kwargs["cluster_seeds_require"]))
+        return {"clusters": {"attached": [*kwargs["cluster_seeds_require"], *signatures]}}
+
+    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", attach)
+    options: dict[str, Any] = {"batching_threshold": 2, "name_tuples": frozenset()}
+    try:
+        expected, _ = clusterer().predict_from_arrow({"block": ["0", "1", "2", "3"]}, arrow, **options)
+        assert [build for build in bulk_builds if build == ["0", "1"]] == [["0", "1"]]
+        bulk_builds.clear()
+        supplied: list[dict[str, list[str]]] = []
+
+        def supply(groups: Any) -> dict[str, list[str]]:
+            supplied.append({key: list(members) for key, members in groups.items()})
+            return computed_bulk[0]
+
+        actual, _ = clusterer()._predict_from_arrow_request(
+            {"block": ["0", "1", "2", "3"]}, arrow, bulk_clusters=supply, **options
+        )
+        assert actual == expected
+        assert supplied == [{"full": ["0", "1"]}]
+        assert ["0", "1"] not in bulk_builds
+        assert len(computed_bulk) == 1
+        assert attach_seeds[0] == attach_seeds[1]
+        with pytest.raises(ValueError, match="only to subblocked"):
+            clusterer()._predict_from_arrow_request(
+                {"block": ["0", "1"]}, arrow, bulk_clusters=supply, name_tuples=frozenset()
+            )
+    finally:
+        arrow.close()

@@ -8,6 +8,10 @@
   Use the corresponding Arrow APIs. Full-block classic prediction and training remain available.
 - Run EPS sweep subblocking through the production native graph planner.
   Keep ORCID labels hidden for ORCID-B3 selection. Revalidate historical giant-block conclusions before publication.
+- EPS sweeps now score production output by default (`--route production`): cached bulk clusters, then the
+  no-middle reunite step and initial-only attachment through the linker. On four giants at EPS 0.53 this
+  raises ORCID-B3 F1 by 0.6 to 1.0 points over the earlier bulk-only curve. `--route bulk` keeps that curve
+  for `--max-subblocks` smoke runs, and `eps_b3_bulk_only.tsv` reports it beside production runs.
 - Preserve format-1 model fields for retired experiment settings; they no longer affect runtime behavior.
   Bundle export now writes their historical defaults instead of reading them from the clusterer.
 - Remove the Python Arrow graph-subblocking fallback, `make_arrow_graph_subblocking_cluster_fn`.

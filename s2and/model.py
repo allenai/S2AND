@@ -3455,11 +3455,18 @@ class Clusterer:
         needs_subblocking: bool,
         prediction_cluster_seeds_require: dict[str, int | str] | None,
         prediction_state: PredictionState | None = None,
+        bulk_clusters: Callable[[Mapping[str, list[str]]], dict[str, list[str]]] | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
-        """Run native subblocking and prediction from one request-bound Arrow view."""
+        """Run native subblocking and prediction from one request-bound Arrow view.
+
+        ``bulk_clusters`` replaces only the bulk clustering of full-name subblocks; see
+        ``_predict_from_arrow_request``.
+        """
 
         if prediction_state is None:
             prediction_state = PredictionState()
+        if bulk_clusters is not None and not needs_subblocking:
+            raise ValueError("bulk_clusters applies only to subblocked Arrow prediction")
 
         arrow_subblocking_seconds = 0.0
         block_dict_multiple_letter: dict[str, list[str]] | None = None
@@ -3548,7 +3555,10 @@ class Clusterer:
             else None
         )
         attachment_state = _ARROW_ATTACH_BLOCK_STATE.get()
-        if (
+        if bulk_clusters is not None:
+            # The caller supplies the bulk clusters, so no bulk distances are computed.
+            rust_featurizer = None
+        elif (
             attachment_state is not None
             and attachment_state.arrow_dataset is arrow_dataset
             and attachment_state.name_tuples == prediction_name_tuples
@@ -3580,30 +3590,34 @@ class Clusterer:
             assert block_dict_single_letter is not None
             assert subblocking_alert_flag is not None
             assert isinstance(prediction_name_tuples, frozenset)
-            proxy_dataset = _RustFeaturizerPredictDataset(
-                cluster_seeds_require=effective_cluster_seeds_require,
-                cluster_seeds_disallow=cluster_seed_disallows,
-                signatures={},
-            )
-            pred_clusters = self._predict_subblocked_multiple_letter_groups(
-                block_dict_multiple_letter,
-                alert_flag=subblocking_alert_flag,
-                dataset=cast(ANDData, proxy_dataset),
-                cluster_model_params=cluster_model_params,
-                partial_supervision=effective_partial_supervision,
-                use_s2_clusters=False,
-                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                runtime_context=runtime_context,
-                total_ram_bytes=total_ram_bytes,
-                rust_featurizer=rust_featurizer,
-                cluster_seeds_disallow=cluster_seed_disallows,
-                explicit_cluster_seeds_require=None,
-                prediction_state=prediction_state,
-            )
+            if bulk_clusters is None:
+                proxy_dataset = _RustFeaturizerPredictDataset(
+                    cluster_seeds_require=effective_cluster_seeds_require,
+                    cluster_seeds_disallow=cluster_seed_disallows,
+                    signatures={},
+                )
+                pred_clusters = self._predict_subblocked_multiple_letter_groups(
+                    block_dict_multiple_letter,
+                    alert_flag=subblocking_alert_flag,
+                    dataset=cast(ANDData, proxy_dataset),
+                    cluster_model_params=cluster_model_params,
+                    partial_supervision=effective_partial_supervision,
+                    use_s2_clusters=False,
+                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                    runtime_context=runtime_context,
+                    total_ram_bytes=total_ram_bytes,
+                    rust_featurizer=rust_featurizer,
+                    cluster_seeds_disallow=cluster_seed_disallows,
+                    explicit_cluster_seeds_require=None,
+                    prediction_state=prediction_state,
+                )
+                del proxy_dataset
+            else:
+                pred_clusters = bulk_clusters(block_dict_multiple_letter)
             # The sequential attachment path constructs a request-local planner
             # for each initial-only group. Release the bulk native state first so
             # the two large representations never overlap in memory.
-            del rust_featurizer, proxy_dataset
+            del rust_featurizer
             attach_from_arrow = partial(
                 self._predict_subblocked_single_letter_groups_from_arrow,
                 arrow_dataset=arrow_dataset,
@@ -3748,8 +3762,15 @@ class Clusterer:
         cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None = None,
         altered_cluster_signatures: Sequence[Any] | None = None,
         prediction_state: PredictionState | None = None,
+        bulk_clusters: Callable[[Mapping[str, list[str]]], dict[str, list[str]]] | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
-        """Predict blocks through one open Arrow dataset with optional request-local prediction state."""
+        """Predict blocks through one open Arrow dataset with optional request-local prediction state.
+
+        ``bulk_clusters`` lets an experiment supply the bulk clusters of the full-name subblocks,
+        keyed like ``_predict_subblocked_multiple_letter_groups`` output. Subblocking, the
+        no-middle reunite step, and initial-only attachment still run unchanged. The EPS sweep
+        uses it to cut cached linkage trees instead of recomputing distances for each EPS.
+        """
 
         if any(len(signatures) > 1 for signatures in block_dict.values()):
             self = _clusterer_with_prediction_params(self, cluster_model_params)
@@ -3827,6 +3848,7 @@ class Clusterer:
                     needs_subblocking=needs_subblocking,
                     prediction_cluster_seeds_require=prediction_cluster_seeds_require,
                     prediction_state=prediction_state,
+                    bulk_clusters=bulk_clusters,
                 )
             with temporary_cluster_seed_sidecars(
                 prediction_cluster_seeds_require or {},
@@ -3852,6 +3874,7 @@ class Clusterer:
                     needs_subblocking=needs_subblocking,
                     prediction_cluster_seeds_require=prediction_cluster_seeds_require,
                     prediction_state=prediction_state,
+                    bulk_clusters=bulk_clusters,
                 )
 
     def fit(

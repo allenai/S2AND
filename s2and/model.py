@@ -3168,9 +3168,12 @@ class Clusterer:
             # Linkage releases the GIL, so one block clusters on a worker while the
             # next block's distances build. At most two matrices are alive, and two
             # only while the clustering one is under a tenth of the RAM budget.
-            # Results are collected in block order.
+            # Larger blocks go first, so the longest linkages overlap the most
+            # work and the last, exposed linkage is the smallest. Blocks cluster
+            # independently, and results are collected in block order.
             overlap_limit_bytes = memory_budget.resolve_total_ram_bytes(total_ram_bytes)[0] // 10
-            block_results: list[tuple[str, list[str], Future[tuple[list, float]] | None]] = []
+            block_results: dict[str, Future[tuple[list, float]] | None] = {}
+            blocks_largest_first = sorted(block_dict.items(), key=lambda item: len(item[1]), reverse=True)
             pending: Future[tuple[list, float]] | None = None
             pending_bytes = 0
 
@@ -3190,9 +3193,9 @@ class Clusterer:
                 return labels, time.perf_counter() - start
 
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="s2and-cluster") as cluster_pool:
-                for block_key, signatures in block_dict.items():
+                for block_key, signatures in blocks_largest_first:
                     if len(signatures) <= 1:
-                        block_results.append((block_key, signatures, None))
+                        block_results[block_key] = None
                         continue
                     if pending is not None and pending_bytes > overlap_limit_bytes:
                         pending.result()
@@ -3234,9 +3237,10 @@ class Clusterer:
                         pending.result()
                     pending = cluster_pool.submit(timed_cluster, block_key, signatures, dist_matrix)
                     pending_bytes = 0 if dist_matrix is None else int(dist_matrix.nbytes)
-                    block_results.append((block_key, signatures, pending))
+                    block_results[block_key] = pending
                     del dist_matrix
-            for block_key, signatures, outcome in block_results:
+            for block_key, signatures in block_dict.items():
+                outcome = block_results[block_key]
                 if outcome is None:
                     if signatures:
                         pred_clusters[block_key + "_0"].append(signatures[0])

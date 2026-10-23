@@ -1,5 +1,6 @@
 use super::*;
 use crate::feature_schema as columns;
+use crate::lightgbm_booster::RustLightGBMBooster;
 
 #[pyclass]
 #[derive(Clone)]
@@ -2379,6 +2380,185 @@ impl RustFeaturizer {
             })
             .collect::<PyResult<Vec<(u32, u32)>>>()?;
         self.featurize_pairs_matrix_indexed(py, pairs, selected_indices, num_threads, nan_value)
+    }
+
+    /// Class-0 probabilities of chosen rows of one chunk of a block's upper
+    /// triangle, featurized and scored tile by tile on the pool.
+    ///
+    /// Equals featurizing the rows with `main_indices` and `nameless_indices`,
+    /// scoring each matrix with its booster, and averaging the class-0
+    /// probabilities as `((1 - p_main) + (1 - p_nameless)) / 2`, or taking
+    /// `1 - p_main` without a nameless booster. No feature matrix is built,
+    /// so the batch path's copies, column gathers and page faults are gone.
+    /// `scored_rows` are offsets into the chunk; None scores every row.
+    #[pyo3(signature = (
+        block_signature_indices,
+        start_offset,
+        max_pairs,
+        scored_rows,
+        main_indices,
+        main_booster,
+        nameless_indices = None,
+        nameless_booster = None,
+        num_threads = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn score_block_upper_triangle_rows_indexed<'py>(
+        &self,
+        py: Python<'py>,
+        block_signature_indices: Vec<u32>,
+        start_offset: usize,
+        max_pairs: Option<usize>,
+        scored_rows: Option<PyReadonlyArray1<'py, i64>>,
+        main_indices: Vec<usize>,
+        main_booster: PyRef<'py, RustLightGBMBooster>,
+        nameless_indices: Option<Vec<usize>>,
+        nameless_booster: Option<PyRef<'py, RustLightGBMBooster>>,
+        num_threads: Option<usize>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        // Pairs featurized and scored per pool task. Tiles of 64 to 256 pairs
+        // measured alike; 4,096 cost 15% and 16,384 cost 70% more, as the
+        // scorer's tables and the tile buffers left the caches.
+        let tile: usize = 256;
+
+        let signature_ids = self.signature_id_order();
+        let signature_count = signature_ids.len();
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            if global_idx >= signature_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "block signature index out of range: index={} signature_count={}",
+                    global_idx, signature_count
+                )));
+            }
+        }
+        let full_cols = self.full_feature_count();
+        let main_indices = resolve_feature_indices("main_indices", Some(main_indices), full_cols)?;
+        let nameless_indices = match nameless_indices {
+            Some(indices) => Some(resolve_feature_indices(
+                "nameless_indices",
+                Some(indices),
+                full_cols,
+            )?),
+            None => None,
+        };
+        if nameless_indices.is_some() != nameless_booster.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "nameless_indices and nameless_booster must be given together",
+            ));
+        }
+        let main: &RustLightGBMBooster = &main_booster;
+        let nameless: Option<&RustLightGBMBooster> = nameless_booster.as_deref();
+        if main.feature_width() != main_indices.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "main booster expects {} features, got {} main_indices",
+                main.feature_width(),
+                main_indices.len()
+            )));
+        }
+        let nameless_cols = nameless_indices.as_ref().map_or(0, Vec::len);
+        if let Some(booster) = nameless {
+            if booster.feature_width() != nameless_cols {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "nameless booster expects {} features, got {} nameless_indices",
+                    booster.feature_width(),
+                    nameless_cols
+                )));
+            }
+        }
+
+        let mut block_lookup: Vec<(&SignatureData, &PaperData)> =
+            Vec::with_capacity(block_signature_indices.len());
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            let signature_id = &signature_ids[global_idx];
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+            })?;
+            block_lookup.push((signature, paper));
+        }
+        let block_size = block_lookup.len();
+        let chunk_pair_count = upper_triangle_range_len(block_size, start_offset, max_pairs)?;
+        let scored_rows: Option<&[i64]> = match scored_rows.as_ref() {
+            Some(rows) => Some(rows.as_slice()?),
+            None => None,
+        };
+        if let Some(rows) = scored_rows {
+            if let Some(row) = rows
+                .iter()
+                .find(|row| usize::try_from(**row).map_or(true, |row| row >= chunk_pair_count))
+            {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "scored row {} is outside the chunk of {} pairs",
+                    row, chunk_pair_count
+                )));
+            }
+        }
+        let row_count = scored_rows.map_or(chunk_pair_count, <[i64]>::len);
+        let main_cols = main_indices.len();
+        let mut out = vec![0.0f64; row_count];
+        py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || {
+                out.par_chunks_mut(tile).enumerate().for_each_init(
+                    || {
+                        (
+                            vec![0.0f64; tile * main_cols],
+                            vec![0.0f64; tile * nameless_cols],
+                        )
+                    },
+                    |(main_tile, nameless_tile), (tile_index, out_tile)| {
+                        let rows = out_tile.len();
+                        for row in 0..rows {
+                            let position = tile_index * tile + row;
+                            let offset = match scored_rows {
+                                Some(scored) => start_offset + scored[position] as usize,
+                                None => start_offset + position,
+                            };
+                            let (left, right) = upper_triangle_pair_at(block_size, offset);
+                            let (s1, p1) = block_lookup[left];
+                            let (s2, p2) = block_lookup[right];
+                            let features = self.featurize_pair_data(s1, s2, p1, p2);
+                            let main_row = &mut main_tile[row * main_cols..(row + 1) * main_cols];
+                            for (dest, index) in main_row.iter_mut().zip(main_indices.iter()) {
+                                *dest = features[*index];
+                            }
+                            if let Some(indices) = nameless_indices.as_ref() {
+                                let nameless_row = &mut nameless_tile
+                                    [row * nameless_cols..(row + 1) * nameless_cols];
+                                for (dest, index) in nameless_row.iter_mut().zip(indices.iter()) {
+                                    *dest = features[*index];
+                                }
+                            }
+                        }
+                        let main_positive =
+                            main.probabilities_serial(&main_tile[..rows * main_cols], main_cols);
+                        match nameless {
+                            Some(booster) => {
+                                let nameless_positive = booster.probabilities_serial(
+                                    &nameless_tile[..rows * nameless_cols],
+                                    nameless_cols,
+                                );
+                                for row in 0..rows {
+                                    out_tile[row] = ((1.0 - main_positive[row])
+                                        + (1.0 - nameless_positive[row]))
+                                        / 2.0;
+                                }
+                            }
+                            None => {
+                                for row in 0..rows {
+                                    out_tile[row] = 1.0 - main_positive[row];
+                                }
+                            }
+                        }
+                    },
+                );
+            })
+        });
+        Ok(out.into_pyarray(py))
     }
 
     #[pyo3(

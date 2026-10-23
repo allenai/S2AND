@@ -1329,6 +1329,29 @@ def _predict_and_combine(
     return predictions, seconds
 
 
+def _native_block_scorers(classifier: Any, nameless_classifier: Any | None) -> tuple[Any, Any | None] | None:
+    """Return the Rust boosters of native classifiers, for fused block scoring.
+
+    Fused scoring reproduces `_predict_and_combine` for native boosters only;
+    other classifiers keep the feature-matrix path. Returns None when either
+    classifier is not native, or when fused scoring is switched off.
+    """
+
+    if not _FUSED_BLOCK_SCORING:
+        return None
+    if str(getattr(classifier, "prediction_backend", "python")) != "rust_lightgbm":
+        return None
+    if nameless_classifier is None:
+        return classifier._rust_scorer, None
+    if str(getattr(nameless_classifier, "prediction_backend", "python")) != "rust_lightgbm":
+        return None
+    return classifier._rust_scorer, nameless_classifier._rust_scorer
+
+
+# Tests compare the fused block scorer against the feature-matrix path.
+_FUSED_BLOCK_SCORING = True
+
+
 def _use_rust_constraints(
     runtime_context: RuntimeContext | None = None,
     dataset: ANDData | None = None,
@@ -2792,6 +2815,7 @@ class Clusterer:
 
         uses_fastcluster = isinstance(self.cluster_model, FastCluster)
         fastcluster_dtype = np.float64 if uses_fastcluster else np.float16
+        block_scorers = _native_block_scorers(self.classifier, self.nameless_classifier) if uses_fastcluster else None
         pairwise_probas: dict[str, np.ndarray] = {}
         model_predict_seconds = 0.0
         constraint_seconds = 0.0
@@ -2899,6 +2923,35 @@ class Clusterer:
 
                 stage_start = time.perf_counter()
                 scored_rows = np.flatnonzero(np.isnan(labels))
+                if block_scorers is not None:
+                    # Rust featurizes and scores each tile of pairs in one pass,
+                    # so no chunk-sized feature matrix exists.
+                    main_booster, nameless_booster = block_scorers
+                    scored_probabilities = rust_featurizer.score_block_upper_triangle_rows_indexed(
+                        block_signature_indices,
+                        offset,
+                        chunk_pair_count,
+                        None if len(scored_rows) == label_count else scored_rows.astype(np.int64, copy=False),
+                        selected_indices,
+                        main_booster,
+                        nameless_selected_indices,
+                        nameless_booster,
+                        resolve_n_jobs(self.n_jobs),
+                    )
+                    batch_predictions = np.zeros(label_count, dtype=np.float64)
+                    batch_predictions[scored_rows] = scored_probabilities
+                    not_scored = ~np.isnan(labels)
+                    # The LARGE_INTEGER offset of staged labels is undone, as in
+                    # _predict_and_combine.
+                    batch_predictions[not_scored] = labels[not_scored] + LARGE_INTEGER
+                    model_predict_seconds += time.perf_counter() - stage_start
+                    stage_start = time.perf_counter()
+                    end = offset + int(len(batch_predictions))
+                    pairwise_proba[offset:end] = batch_predictions
+                    matrix_write_seconds += time.perf_counter() - stage_start
+                    offset += chunk_pair_count
+                    del batch_predictions, scored_probabilities, not_scored, constraint_labels, labels, scored_rows
+                    continue
                 # Use indexed pairs only when supervision resolves a majority;
                 # otherwise retain the cheaper contiguous triangle traversal.
                 if len(scored_rows) * 2 >= label_count:

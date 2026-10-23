@@ -2367,7 +2367,10 @@ impl RustFeaturizer {
             std::mem::take(&mut self.cluster_seeds_require),
             self.cluster_seeds_disallow_index.take(),
         );
-        std::thread::spawn(move || drop(dropped));
+        std::thread::spawn(move || {
+            drop(dropped);
+            crate::rayon_pool::collect_freed_memory_on_pool_workers();
+        });
     }
 
     fn signature_ids(&self) -> Vec<String> {

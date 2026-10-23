@@ -1913,7 +1913,10 @@ impl RawBlockQueryCandidatePlanner {
             std::mem::take(&mut self.planner_query_signature_id_set),
             std::mem::take(&mut self.planner_query_requests_by_signature_id),
         );
-        std::thread::spawn(move || drop(dropped));
+        std::thread::spawn(move || {
+            drop(dropped);
+            crate::rayon_pool::collect_freed_memory_on_pool_workers();
+        });
     }
 
     fn build_telemetry(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {

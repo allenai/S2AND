@@ -8,6 +8,7 @@ because the production model is an external release artifact.
 The ``s2and`` package inventory must be exact. Maturin packs every file under
 ``s2and/`` that Git does not ignore, so each archive may hold only the source
 modules, the declared data files, and, in a wheel, one native extension.
+Musllinux wheels may also bundle hashed GCC runtime libraries under ``s2and.libs/``.
 """
 
 from __future__ import annotations
@@ -36,6 +37,8 @@ DEFAULT_PRODUCTION_MODEL_PATH = "s2and/data/default_production_model.json"
 REQUIRED_RUNTIME_PATHS = CANONICAL_TUPLE_PATHS | CANONICAL_ORCID_PATHS
 # Maturin names the module with a platform tag, e.g. _s2and_rust.cp313-win_amd64.pyd.
 NATIVE_EXTENSION_PATTERN = re.compile(r"s2and/_s2and_rust\.[^/]+\.(?:pyd|so)")
+# Maturin bundles these compiler runtimes when repairing musllinux wheels.
+BUNDLED_RUNTIME_PATTERN = re.compile(r"s2and\.libs/(?:libgcc_s-[0-9a-f]+\.so\.1|libstdc\+\+-[0-9a-f]+\.so\.6)")
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -174,10 +177,15 @@ def verify_production_model_distributions(*, dist_dir: Path, source_root: Path) 
             )
             dist_info = {path for path in wheel_paths if path.split("/", 1)[0].endswith(".dist-info")}
             native = {path for path in wheel_paths if NATIVE_EXTENSION_PATTERN.fullmatch(path)}
+            bundled_runtime = {
+                path
+                for path in wheel_paths
+                if "musllinux_" in wheel_path.name and BUNDLED_RUNTIME_PATTERN.fullmatch(path)
+            }
             errors = _inventory_errors(
                 archive_name=wheel_path.name,
                 package_paths=wheel_paths - dist_info,
-                allowed=package_files | native,
+                allowed=package_files | native | bundled_runtime,
                 native_extensions=1,
             )
             if errors:

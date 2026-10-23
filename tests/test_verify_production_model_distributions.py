@@ -105,6 +105,24 @@ def test_distribution_verifier_accepts_valid_archives(tmp_path: Path) -> None:
     verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
 
 
+@pytest.mark.parametrize(
+    ("platform", "path"),
+    [
+        ("musllinux_1_2_x86_64", "s2and.libs/extra.py"),
+        ("musllinux_1_2_x86_64", "s2and.libs/libunexpected-123abc.so.1"),
+        ("musllinux_1_2_x86_64", "s2and.libs/libgcc_s.so.1"),
+        ("win_amd64", "s2and.libs/libgcc_s-f685abf1.so.1"),
+    ],
+)
+def test_distribution_verifier_rejects_unexpected_bundled_files(tmp_path: Path, platform: str, path: str) -> None:
+    dist_dir, source_root = _write_distribution_fixture(tmp_path, wheel_overrides={path: b"unexpected"})
+    wheel = next(dist_dir.glob("*.whl"))
+    wheel.rename(dist_dir / f"s2and-0.0.0-cp311-cp311-{platform}.whl")
+
+    with pytest.raises(ValueError, match="unexpected package files"):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+
+
 @pytest.mark.parametrize("missing_path", sorted(REQUIRED_RUNTIME_PATHS))
 def test_distribution_verifier_requires_runtime_artifact(tmp_path: Path, missing_path: str) -> None:
     dist_dir, source_root = _write_distribution_fixture(tmp_path)
@@ -123,7 +141,7 @@ def test_distribution_verifier_requires_runtime_artifact(tmp_path: Path, missing
     ),
 )
 def test_distribution_verifier_rejects_model_path(tmp_path, archive_kind, forbidden_path) -> None:
-    overrides = {forbidden_path: b"{}\n"}
+    overrides: dict[str, bytes | None] = {forbidden_path: b"{}\n"}
     dist_dir, source_root = _write_distribution_fixture(
         tmp_path,
         wheel_overrides=overrides if archive_kind == "wheel" else None,
@@ -190,5 +208,7 @@ def test_distribution_verifier_accepts_real_maturin_wheel_layout(tmp_path: Path)
             if path != NATIVE_PATH:
                 wheel.writestr(path, payload)
         wheel.writestr("s2and/_s2and_rust.cpython-313-x86_64-linux-musl.so", b"native")
+        wheel.writestr("s2and.libs/libgcc_s-f685abf1.so.1", b"runtime")
+        wheel.writestr("s2and.libs/libstdc++-1b2c0963.so.6", b"runtime")
 
     verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)

@@ -167,9 +167,8 @@ def predict_json(
     specter_pickle: Path,
     name_counts_index: Path,
     n_jobs: int,
-    batching_threshold: int | None,
 ) -> dict[str, list[str]]:
-    """Cluster every block of one S2AND JSON dataset through the Python route."""
+    """Cluster every full block of one S2AND JSON dataset through the Python route."""
     from s2and.data import ANDData
 
     dataset = ANDData(
@@ -181,7 +180,7 @@ def predict_json(
         name_counts_index=str(name_counts_index),
         n_jobs=n_jobs,
     )
-    clusters, _distances = clusterer.predict(dataset.get_blocks(), dataset, batching_threshold=batching_threshold)
+    clusters, _distances = clusterer.predict(dataset.get_blocks(), dataset)
     return clusters
 
 
@@ -198,7 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--batching-threshold",
         type=int,
         default=None,
-        help="Optional maximum subblock size; larger blocks use the route's subblocking.",
+        help="Optional maximum subblock size for --arrow-dataset; larger blocks use native subblocking.",
     )
     parser.add_argument("--total-ram-bytes", type=int, default=None, help="Memory budget for the Arrow route.")
     parser.add_argument(
@@ -227,6 +226,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.json_dir is not None and (args.specter_pickle is None or args.name_counts_index is None):
         parser.error("--json-dir requires --specter-pickle and --name-counts-index")
+    # The Python route clusters full blocks only; reject subblocking before slow preprocessing starts.
+    if args.json_dir is not None and args.batching_threshold is not None:
+        parser.error("--batching-threshold requires --arrow-dataset; the --json-dir route clusters full blocks")
     if args.incremental_block is not None and (args.arrow_dataset is None or args.seed_clusters is None):
         parser.error("--incremental-block requires --arrow-dataset and --seed-clusters")
     if args.output_json is not None and args.output_json.exists():
@@ -271,7 +273,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             specter_pickle=args.specter_pickle,
             name_counts_index=args.name_counts_index,
             n_jobs=args.n_jobs,
-            batching_threshold=args.batching_threshold,
         )
 
     sizes = sorted((len(members) for members in clusters.values()), reverse=True)

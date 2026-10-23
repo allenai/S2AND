@@ -102,9 +102,8 @@ def test_json_route_builds_inference_data_and_predicts_its_blocks(
         def get_blocks(self) -> dict[str, list[str]]:
             return {"a lovelace": ["s1"]}
 
-    def predict(block_dict, dataset, *, batching_threshold):
+    def predict(block_dict, dataset):
         assert block_dict == {"a lovelace": ["s1"]} and isinstance(dataset, Dataset)
-        assert batching_threshold is None
         return {"c1": ["s1"]}, None
 
     _load(monkeypatch, SimpleNamespace(predict=predict))
@@ -150,6 +149,20 @@ def test_json_route_requires_embeddings_and_index(missing: str) -> None:
 
     with pytest.raises(SystemExit):
         tutorial.main(arguments)
+
+
+def test_json_route_rejects_batching_threshold_before_loading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    loads = _load(monkeypatch, SimpleNamespace())
+    arguments = ["--model-path", "model", "--json-dir", "records", "--specter-pickle", "specter2.pkl"]
+    arguments += ["--name-counts-index", "index", "--batching-threshold", "17"]
+
+    with pytest.raises(SystemExit):
+        tutorial.main(arguments)
+
+    assert loads == []
+    assert "--batching-threshold requires --arrow-dataset" in capsys.readouterr().err
 
 
 def test_seed_profiles_use_labeled_signatures_on_earlier_papers(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -63,7 +63,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             s2and_rust/target
-          key: cargo-${{ runner.os }}-py${{ matrix.py }}-${{ hashFiles('s2and_rust/**', '!s2and_rust/target/**', '!s2and_rust/dist/**') }}
+          # Hash only native build inputs; walking s2and_rust/target after a build exceeded the 120 s hashFiles limit on Windows.
+          key: cargo-${{ runner.os }}-py${{ matrix.py }}-${{ hashFiles('s2and_rust/Cargo.toml', 's2and_rust/Cargo.lock', 's2and_rust/build.rs', 's2and_rust/src/**', 's2and_rust/vendor/**') }}
           restore-keys: |
             cargo-${{ runner.os }}-py${{ matrix.py }}-
 
@@ -73,7 +74,7 @@ jobs:
           path: |
             ~/.cache/uv
             .venv
-          key: uv-venv-${{ runner.os }}-py${{ matrix.py }}-${{ hashFiles('pyproject.toml', 'uv.lock', 's2and_rust/**', '!s2and_rust/target/**', '!s2and_rust/dist/**') }}
+          key: uv-venv-${{ runner.os }}-py${{ matrix.py }}-${{ hashFiles('pyproject.toml', 'uv.lock', 's2and_rust/Cargo.toml', 's2and_rust/Cargo.lock', 's2and_rust/build.rs', 's2and_rust/src/**', 's2and_rust/vendor/**') }}
 
       - name: Run shared typecheck-and-test policy
         run: uv run --no-project python scripts/run_ci_locally.py typecheck-and-test

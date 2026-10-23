@@ -14,12 +14,12 @@ from collections.abc import Iterator  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest
 
-from tests.rust_build_freshness import stale_rust_extension_message
+from tests.rust_build_freshness import duplicate_package_metadata_message, stale_rust_extension_message
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Stop before collection when the loaded native extension is stale."""
-    message = stale_rust_extension_message()
+    """Stop before collection when package metadata or the native extension is stale."""
+    message = duplicate_package_metadata_message() or stale_rust_extension_message()
     if message is not None:
         pytest.exit(message, returncode=pytest.ExitCode.USAGE_ERROR)
 

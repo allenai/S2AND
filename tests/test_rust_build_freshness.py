@@ -14,7 +14,13 @@ from types import ModuleType
 
 import pytest
 
-from tests.rust_build_freshness import CLEAN_COMMAND, REBUILD_COMMAND, rust_source_digest, stale_rust_extension_message
+from tests.rust_build_freshness import (
+    CLEAN_COMMAND,
+    REBUILD_COMMAND,
+    duplicate_package_metadata_message,
+    rust_source_digest,
+    stale_rust_extension_message,
+)
 
 _TREE = {
     "Cargo.toml": b"[package]\n",
@@ -501,3 +507,23 @@ def test_real_build_script_tracks_directories_and_current_package_root(tmp_path:
     )
     assert linked.returncode != 0
     assert "linked native source directories are unsupported" in linked.stderr
+
+
+def _write_metadata(root: Path, directory: str, version: str) -> Path:
+    metadata = root / directory
+    metadata.mkdir(parents=True)
+    name = "PKG-INFO" if directory.endswith(".egg-info") else "METADATA"
+    (metadata / name).write_text(f"Metadata-Version: 2.1\nName: s2and\nVersion: {version}\n", encoding="utf-8")
+    return root
+
+
+def test_duplicate_metadata_names_stale_egg_info(tmp_path: Path) -> None:
+    site_packages = _write_metadata(tmp_path / "site-packages", "s2and-1.0.0b6.dist-info", "1.0.0b6")
+    checkout = _write_metadata(tmp_path / "checkout", "s2and.egg-info", "1.0.0b4")
+
+    assert duplicate_package_metadata_message([str(site_packages)]) is None
+    # The editable install can list the checkout twice, as "." and as an absolute path.
+    assert duplicate_package_metadata_message([str(site_packages), str(site_packages / ".")]) is None
+    message = duplicate_package_metadata_message([str(checkout), str(site_packages)])
+    assert message is not None
+    assert "1.0.0b4 in" in message and "1.0.0b6 in" in message and "s2and.egg-info" in message

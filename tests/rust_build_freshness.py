@@ -11,6 +11,7 @@ local crates before rebuilding.
 
 import hashlib
 import importlib
+import importlib.metadata
 import stat
 import sys
 from collections.abc import Callable
@@ -65,6 +66,34 @@ def rust_source_digest(root: Path = RUST_PACKAGE_ROOT) -> str:
         hasher.update(len(content).to_bytes(8, "little"))
         hasher.update(content)
     return f"v1:{hasher.hexdigest()}"
+
+
+def duplicate_package_metadata_message(path: list[str] | None = None) -> str | None:
+    """Explain extra ``s2and`` metadata that can set the wrong package version.
+
+    Old setuptools builds left ``s2and.egg-info`` in the checkout root, and maturin
+    never refreshes it. The editable install puts that root on ``sys.path``, so the
+    stale copy can supply ``s2and.__version__`` and fail the native version check.
+
+    Args:
+        path: Directories to search; ``None`` searches ``sys.path``.
+
+    Returns:
+        None when one metadata copy names ``s2and``; otherwise a message listing them.
+    """
+    # importlib.metadata searches sys.path only when the path option is absent.
+    search = {"name": "s2and"} if path is None else {"name": "s2and", "path": path}
+    found = {
+        (str(Path(str(dist.locate_file(""))).resolve()), dist.version)
+        for dist in importlib.metadata.distributions(**search)
+    }
+    if len(found) <= 1:
+        return None
+    copies = ", ".join(f"{version} in {location}" for location, version in sorted(found))
+    return (
+        f"Found several s2and metadata copies ({copies}). The first one on sys.path sets s2and.__version__. "
+        "Delete the stale copy, such as s2and.egg-info in the checkout root."
+    )
 
 
 def stale_rust_extension_message(root: Path = RUST_PACKAGE_ROOT) -> str | None:

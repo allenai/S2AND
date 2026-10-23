@@ -30,7 +30,7 @@ full CI matrix and the coverage floor.
 | Module | Responsibility |
 | --- | --- |
 | `conftest.py` | Session-start stop when the installed native extension is stale; restoration of global Python/NumPy RNG state after each test |
-| `rust_build_freshness.py` | Source digest comparison behind the stale-extension check |
+| `rust_build_freshness.py` | Source digest and duplicate package metadata checks that stop stale test sessions |
 | `helpers.py` | Tiny datasets, name counts, Arrow conversion, query/cluster values, and pairwise CLI arguments |
 | `pairwise_release_helpers.py` | Canonical artifact fixtures, frozen model plans, and release Arrow conversions |
 | `raw_arrow_helpers.py` | Tiny raw Arrow bundles, retained readers, and native planner construction |

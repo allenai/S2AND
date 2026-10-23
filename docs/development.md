@@ -53,6 +53,10 @@ instead of producing different Python and Rust digests.
 installs an editable build; the next syncing `uv sync` or `uv run` replaces it
 with the locked build.
 
+Delete any `s2and.egg-info` left in the checkout root by older setuptools builds.
+Maturin never refreshes it, and code run from the root reads its stale version.
+The native version check then fails. `tests/conftest.py` stops when it finds that copy.
+
 ## Local CI mirror
 
 Run the full local CI wrapper:

@@ -475,15 +475,6 @@ def current_rss_bytes_best_effort(total_ram_bytes: int) -> tuple[int, str]:
     return int(0.5 * total_ram_bytes), "fallback_half_total"
 
 
-def gc_collect_and_log(stage_name: str) -> None:
-    """Hint the garbage collector between stages to reduce stale RSS inflation."""
-    import gc
-
-    collected = gc.collect()
-    if collected > 0:
-        logger.info("Inter-stage GC after %s: collected %d objects", stage_name, collected)
-
-
 def resolve_total_ram_bytes(
     total_ram_bytes: int | None = None,
     *,

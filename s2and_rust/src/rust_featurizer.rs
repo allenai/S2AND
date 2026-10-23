@@ -1957,17 +1957,6 @@ impl RustFeaturizer {
         })
     }
 
-    fn update_cluster_seeds(
-        &mut self,
-        cluster_seeds_require: &Bound<'_, PyAny>,
-        cluster_seeds_disallow: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        self.cluster_seeds_require = extract_cluster_seeds_require(cluster_seeds_require)?;
-        self.cluster_seeds_disallow = extract_pair_set(cluster_seeds_disallow)?;
-        self.cluster_seeds_disallow_index = OnceLock::new();
-        Ok(())
-    }
-
     #[pyo3(
         signature = (
             pairs,
@@ -2353,21 +2342,6 @@ impl RustFeaturizer {
         self.signature_id_order().to_vec()
     }
 
-    fn signature_rule_metadata(&self) -> Vec<(String, Option<String>, Option<String>)> {
-        self.signature_id_order()
-            .iter()
-            .filter_map(|signature_id| {
-                self.signatures.get(signature_id).map(|signature| {
-                    (
-                        signature_id.clone(),
-                        signature.first_normalized().map(str::to_owned),
-                        signature.orcid.clone(),
-                    )
-                })
-            })
-            .collect()
-    }
-
     fn signature_name_counts_present(&self) -> Vec<(String, bool)> {
         self.signature_id_order()
             .iter()
@@ -2389,24 +2363,6 @@ impl RustFeaturizer {
             .collect();
         pairs.sort_by(|left, right| left.0.cmp(&right.0));
         pairs
-    }
-
-    fn update_signature_name_counts(&mut self, signatures: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let signatures_dict = signatures.downcast::<PyDict>()?;
-        let mut updated = 0usize;
-        for (sig_id_obj, sig_obj) in signatures_dict.iter() {
-            let sig_id: String = sig_id_obj.extract()?;
-            let Some(signature) = Arc::make_mut(&mut self.signatures).get_mut(&sig_id) else {
-                continue;
-            };
-            let counts_obj = sig_obj.getattr("author_info_name_counts")?;
-            let counts = extract_name_counts_data(&counts_obj)?;
-            if counts.is_some() {
-                signature.name_counts = counts;
-                updated += 1;
-            }
-        }
-        Ok(updated)
     }
 
     #[pyo3(signature = (pairs, selected_indices = None, num_threads = None, nan_value = f64::NAN))]

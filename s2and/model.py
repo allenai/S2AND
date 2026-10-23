@@ -704,16 +704,6 @@ def _has_incremental_seed_source(dataset: Any) -> bool:
     return bool(getattr(dataset, "cluster_seeds_require", {}) or {})
 
 
-def _require_incremental_seed_source(
-    dataset: Any,
-    *,
-    context: str,
-) -> None:
-    if _has_incremental_seed_source(dataset):
-        return
-    raise ValueError(f"{context} requires explicit cluster_seeds_require")
-
-
 def _normalize_cluster_seeds_require(cluster_seeds_require: Mapping[Any, Any]) -> dict[str, int | str]:
     """Return the seed map with the same string policy used by Arrow sidecars."""
 
@@ -5418,24 +5408,6 @@ class Clusterer:
             original_members=cluster_seeds_require_inverse,
             split_members=split_cluster_seeds_require_inverse,
         )
-
-    def _convert_sum_count_to_average_distances(
-        self,
-        signature_to_cluster_sum_count: dict[str, dict[int | str, list[float | int]]],
-    ) -> dict[str, dict[int | str, IncrementalDistStats]]:
-        signature_to_cluster_to_average_dist: dict[str, dict[int | str, IncrementalDistStats]] = defaultdict(dict)
-        for signature_id, cluster_sum_count in signature_to_cluster_sum_count.items():
-            for cluster_id, sum_count in cluster_sum_count.items():
-                total = float(sum_count[0])
-                count = int(sum_count[1])
-                if count <= 0:
-                    continue
-                signature_to_cluster_to_average_dist[signature_id][cluster_id] = (
-                    total / float(count),
-                    count,
-                    float(sum_count[2]),
-                )
-        return signature_to_cluster_to_average_dist
 
     def _finish_incremental_with_seed_links(
         self,

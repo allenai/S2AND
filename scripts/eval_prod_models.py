@@ -725,22 +725,6 @@ def build_eval_anddata(
     )
 
 
-def pair_splits_from_anddata(anddata: Any) -> PairwiseTrainingSplits:
-    train_block_dict, val_block_dict, test_block_dict = anddata.split_cluster_signatures()
-    train_pairs, val_pairs, test_pairs = anddata.split_pairs(train_block_dict, val_block_dict, test_block_dict)
-    return PairwiseTrainingSplits(
-        train_pairs=train_pairs,
-        val_pairs=val_pairs,
-        test_pairs=test_pairs,
-        train_block_dict=train_block_dict,
-        val_block_dict=val_block_dict,
-        test_block_dict=test_block_dict,
-        signature_to_cluster_id={
-            str(key): str(value) for key, value in (anddata.signature_to_cluster_id or {}).items()
-        },
-    )
-
-
 def _sample_within_block_random_pairs(
     blocks: Mapping[str, Sequence[str]],
     signature_to_cluster_id: Mapping[str, str],

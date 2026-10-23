@@ -2339,5 +2339,3 @@ WEIGHTED_ERROR_WEIGHTS = {
     "false_link_error_rate": float(LOGISTIC_GATE_ERROR_WEIGHTS["false_link"]),
     "wrong_link_error_rate": float(LOGISTIC_GATE_ERROR_WEIGHTS["wrong_candidate_link"]),
 }
-NAN_POLICY_CHOICES = ("preserve", "zero")
-ROW_NAN_POLICY_CHOICES = ("finite", "semantic")

@@ -2098,7 +2098,6 @@ def test_native_prediction_ignores_seed_requires_with_precomputed_distances():
     clusterer = Clusterer(FeaturizationInfo(features_to_use=["year_diff"]), object(), n_jobs=1)
     native = SimpleNamespace(
         cluster_seeds_require=lambda: [("s1", "seeded"), ("s2", "seeded")],
-        signature_rule_metadata=lambda: [],
     )
     clusters, _ = clusterer.predict_from_rust_featurizer(
         {"block": ["s1", "s2"]},

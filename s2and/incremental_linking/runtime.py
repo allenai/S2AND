@@ -1287,34 +1287,6 @@ def _featureize_linker_candidates_with_telemetry(
     )
 
 
-def _featureize_linker_candidates(
-    *,
-    dataset: ANDData | None,
-    candidate_batch: LinkerCandidateBatch,
-    row_signals: Mapping[str, Any],
-    feature_columns: Sequence[str],
-    pairwise_stats: PairwiseAggregateStats | None = None,
-    n_jobs: int = 1,
-    total_ram_bytes: int | None = None,
-    nan_value: float = _PAIRWISE_AGGREGATE_NAN_VALUE,
-    runtime_context: Any | None = None,
-    featurizer: Any | None = None,
-) -> LinkerFeatureMatrix:
-    feature_matrix, _row_feature_telemetry = _featureize_linker_candidates_with_telemetry(
-        dataset=dataset,
-        candidate_batch=candidate_batch,
-        row_signals=row_signals,
-        feature_columns=feature_columns,
-        pairwise_stats=pairwise_stats,
-        n_jobs=n_jobs,
-        total_ram_bytes=total_ram_bytes,
-        nan_value=nan_value,
-        runtime_context=runtime_context,
-        featurizer=featurizer,
-    )
-    return feature_matrix
-
-
 def _no_candidate_abstain_decisions(
     query_signature_indices: Sequence[int] | np.ndarray,
 ) -> tuple[LinkOrAbstainDecision, ...]:
@@ -1337,36 +1309,6 @@ def _signature_id_to_index(signature_id_to_index: Mapping[str, int], signature_i
     if key not in signature_id_to_index:
         raise KeyError(f"signature_id not present in linker runtime signature_ids: {key!r}")
     return int(signature_id_to_index[key])
-
-
-def _build_component_member_indices_by_key(
-    cluster_seeds_require: Mapping[Any, Any],
-    signature_id_to_index: Mapping[str, int],
-) -> dict[str, np.ndarray]:
-    component_member_indices: dict[str, list[int]] = {}
-    for signature_id, component_key in cluster_seeds_require.items():
-        component_member_indices.setdefault(str(component_key), []).append(
-            _signature_id_to_index(signature_id_to_index, signature_id)
-        )
-    return {
-        component_key: np.asarray(member_indices, dtype=np.uint32)
-        for component_key, member_indices in component_member_indices.items()
-        if member_indices
-    }
-
-
-def _empty_retrieval_batch() -> LinkerRetrievalBatch:
-    candidate_batch = LinkerCandidateBatch(
-        row_count=0,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
-        row_query_signature_indices=np.zeros(0, dtype=np.uint32),
-        row_component_keys=(),
-        retrieval_scores=np.zeros(0, dtype=np.float32),
-        retrieval_ranks=np.zeros(0, dtype=np.uint16),
-    )
-    return LinkerRetrievalBatch(candidate_batch=candidate_batch, row_signals={})
 
 
 def _string_keyed_supervision(
@@ -2155,15 +2097,3 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         linked_signature_clusters=result.linked_signature_clusters,
         decision_row_signals=result.decision_row_signals,
     )
-
-
-def naturalize_incremental_clusters(
-    predicted_clusters: Mapping[str, Any],
-    split_cluster_to_natural_cluster: Mapping[Any, Any],
-) -> dict[str, Any]:
-    """Naturalize split incremental cluster IDs back to caller-visible IDs."""
-
-    return {
-        str(signature_id): split_cluster_to_natural_cluster.get(cluster_id, cluster_id)
-        for signature_id, cluster_id in predicted_clusters.items()
-    }

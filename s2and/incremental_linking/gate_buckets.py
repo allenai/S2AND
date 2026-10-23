@@ -12,12 +12,6 @@ FirstNameBucket = Literal["single_letter_first", "multi_letter_first"]
 QueryView = Literal["full", "initial_only"]
 
 _LETTERS_RE = re.compile(r"[A-Za-z]+")
-_VALID_FIRST_NAME_BUCKETS: frozenset[str] = frozenset(
-    {
-        "single_letter_first",
-        "multi_letter_first",
-    }
-)
 _VALID_QUERY_VIEWS: frozenset[str] = frozenset({"full", "initial_only"})
 
 
@@ -53,15 +47,6 @@ def first_name_bucket_array(
         [first_name_bucket_from_token_view(token, view) for token, view in zip(tokens, views, strict=True)],
         dtype=object,
     )
-
-
-def validate_first_name_bucket(value: Any) -> FirstNameBucket:
-    """Validate a materialized first-name bucket value."""
-
-    bucket = str(value)
-    if bucket not in _VALID_FIRST_NAME_BUCKETS:
-        raise ValueError(f"Unknown promoted gate first_name_bucket: {bucket!r}")
-    return cast(FirstNameBucket, bucket)
 
 
 def validate_query_view(value: Any) -> QueryView:

@@ -394,12 +394,6 @@ def normalize_orcid_compact(value: Any) -> str | None:
     return None if normalized is None else normalized.replace("-", "")
 
 
-def has_name_dash(value: str | None) -> bool:
-    """Return whether a raw name contains a dash-like character."""
-
-    return any(character in NAME_DASH_CHARS for character in value or "")
-
-
 # ------------------------ canonical_v2 name canonicalization ------------------------
 # These functions are the live canonical normalization surface used by ingestion,
 # feature extraction, subblocking, and query adaptation. The durable contract is in

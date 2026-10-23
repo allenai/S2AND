@@ -430,22 +430,6 @@ pub(crate) fn preprocess_stage_signatures(
         .collect::<Vec<_>>()
 }
 
-pub(crate) fn extract_name_counts_data(obj: &Bound<'_, PyAny>) -> PyResult<Option<NameCountsData>> {
-    if obj.is_none() {
-        return Ok(None);
-    }
-    let first: Option<f64> = obj.getattr("first")?.extract()?;
-    let first_last: Option<f64> = obj.getattr("first_last")?.extract()?;
-    let last: Option<f64> = obj.getattr("last")?.extract()?;
-    let last_first_initial: Option<f64> = obj.getattr("last_first_initial")?.extract()?;
-    Ok(Some(NameCountsData {
-        first: first.unwrap_or(f64::NAN),
-        first_last: first_last.unwrap_or(f64::NAN),
-        last: last.unwrap_or(f64::NAN),
-        last_first_initial: last_first_initial.unwrap_or(f64::NAN),
-    }))
-}
-
 pub(crate) fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f32>>> {
     if obj.is_none() {
         return Ok(None);

@@ -12,44 +12,18 @@ import numpy as np
 
 from s2and.data import ANDData
 from s2and.incremental_linking.gate_buckets import QueryView, normalize_query_views
-from s2and.incremental_linking.retrieval import LinkerRetrievalBatch
 from s2and.subblocking import signature_affiliation_feature_keys, signature_name_parts_for_subblocking
 from s2and.text import (
     canonicalize_name_parts,
     compute_block,
     normalize_text,
     normalize_title,
-    same_prefix_tokens,
-)
-from s2and.text import (
-    name_counts as pairwise_name_counts,
 )
 from s2and.text import (
     normalize_orcid as normalize_orcid_text,
 )
 
 EMPTY_STRING_SET: frozenset[str] = frozenset()
-PAIRWISE_NAME_COUNT_FEATURE_NAMES: tuple[str, ...] = (
-    "first_name_count_min",
-    "last_first_name_count_min",
-    "last_name_count_min",
-    "last_first_initial_count_min",
-    "first_name_count_max",
-    "last_first_name_count_max",
-)
-NAME_COUNT_RARITY_FEATURE_COLUMNS: tuple[str, ...] = (
-    "first_name_count_min_rarity",
-    "last_first_name_count_min_rarity",
-    "last_name_count_min_rarity",
-    "last_first_initial_count_min_rarity",
-    "first_name_count_max_rarity",
-    "last_first_name_count_max_rarity",
-    "first_prefix_x_last_first_name_count_min_rarity",
-    "candidate_first_name_count_min_rarity",
-    "candidate_last_first_name_count_min_rarity",
-    "candidate_last_name_count_min_rarity",
-    "candidate_last_first_initial_count_min_rarity",
-)
 
 
 def normalize_orcid(value: Any) -> str | None:
@@ -723,149 +697,3 @@ def build_incremental_linker_inputs(
         retriever=retriever,
         summary_by_component=retriever.summary_by_component,
     )
-
-
-def _name_count_rarity(value: Any) -> float:
-    if value is None:
-        return 0.0
-    try:
-        count = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(count) or count <= 0.0:
-        return 0.0
-    return float(1.0 / math.sqrt(count))
-
-
-def _name_count_attr(value: Any, field_name: str) -> float | None:
-    raw_value = getattr(value, field_name, None)
-    if raw_value is None:
-        return None
-    try:
-        numeric = float(raw_value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric) or numeric <= 0.0:
-        return None
-    return numeric
-
-
-def _candidate_name_count_rarity_features(summary: ClusterSummary) -> dict[str, float]:
-    minima: dict[str, float] = {}
-    for candidate_name_counts in tuple(getattr(summary, "name_counts_values", ()) or ()):
-        for field_name in ("first", "first_last", "last", "last_first_initial"):
-            value = _name_count_attr(candidate_name_counts, field_name)
-            if value is None:
-                continue
-            minima[field_name] = min(value, minima.get(field_name, value))
-
-    return {
-        "candidate_first_name_count_min_rarity": round(_name_count_rarity(minima.get("first")), 6),
-        "candidate_last_first_name_count_min_rarity": round(_name_count_rarity(minima.get("first_last")), 6),
-        "candidate_last_name_count_min_rarity": round(_name_count_rarity(minima.get("last")), 6),
-        "candidate_last_first_initial_count_min_rarity": round(
-            _name_count_rarity(minima.get("last_first_initial")),
-            6,
-        ),
-    }
-
-
-def name_count_rarity_features(query: QueryFeatures, summary: ClusterSummary) -> dict[str, float]:
-    candidate_features = _candidate_name_count_rarity_features(summary)
-    query_name_counts = getattr(query, "name_counts", None)
-    candidate_name_counts_values = tuple(getattr(summary, "name_counts_values", ()) or ())
-    if query_name_counts is None or not candidate_name_counts_values:
-        return {
-            **{column: 0.0 for column in NAME_COUNT_RARITY_FEATURE_COLUMNS if column not in candidate_features},
-            **candidate_features,
-        }
-
-    observed_minima: dict[str, float] = {}
-    for candidate_name_counts in candidate_name_counts_values:
-        if candidate_name_counts is None:
-            continue
-        values = pairwise_name_counts(query_name_counts, candidate_name_counts)
-        for feature_name, raw_value in zip(PAIRWISE_NAME_COUNT_FEATURE_NAMES, values, strict=True):
-            try:
-                value = float(raw_value)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(value) or value <= 0.0:
-                continue
-            observed_minima[feature_name] = min(value, observed_minima.get(feature_name, value))
-
-    features = {
-        f"{feature_name}_rarity": round(_name_count_rarity(observed_minima.get(feature_name)), 6)
-        for feature_name in PAIRWISE_NAME_COUNT_FEATURE_NAMES
-    }
-    if not bool(query.has_full_first):
-        for column in (
-            "first_name_count_min_rarity",
-            "last_first_name_count_min_rarity",
-            "last_first_initial_count_min_rarity",
-            "first_name_count_max_rarity",
-            "last_first_name_count_max_rarity",
-        ):
-            features[column] = 0.0
-    first_prefix_match = 0.0
-    query_first = str(query.first or "")
-    if len(query_first) > 1 and int(summary.size) > 0:
-        for candidate_first, count in summary.first_name_counts.items():
-            if len(candidate_first) > 1 and same_prefix_tokens(query_first, candidate_first):
-                first_prefix_match = max(first_prefix_match, float(count) / float(summary.size))
-    features["first_prefix_x_last_first_name_count_min_rarity"] = round(
-        float(first_prefix_match) * float(features["last_first_name_count_min_rarity"]),
-        6,
-    )
-    return {**features, **candidate_features}
-
-
-def build_name_count_rarity_row_signals(
-    retrieval_batch: LinkerRetrievalBatch,
-    *,
-    query_signature_id_by_index: Mapping[int, str],
-    query_by_signature_id: Mapping[str, QueryFeatures],
-    summary_by_component: Mapping[str, ClusterSummary],
-) -> dict[str, np.ndarray]:
-    """Build name-count rarity row signals for retrieved candidate rows."""
-
-    candidate_batch = retrieval_batch.candidate_batch
-    row_count = int(candidate_batch.row_count)
-    query_indices = candidate_batch.row_query_signature_indices
-    component_keys = candidate_batch.row_component_keys
-    if query_indices is None or component_keys is None:
-        raise ValueError("retrieval batch must include row query indices and component keys")
-
-    signals = {
-        "last_name_count_min_rarity": np.zeros(row_count, dtype=np.float32),
-        "candidate_last_name_count_min_rarity": np.zeros(row_count, dtype=np.float32),
-        "candidate_last_first_name_count_min_rarity": np.zeros(row_count, dtype=np.float32),
-        "last_first_name_count_min_rarity": np.zeros(row_count, dtype=np.float32),
-        "first_prefix_x_last_first_name_count_min_rarity": np.zeros(row_count, dtype=np.float32),
-        "candidate_cluster_max_paper_author_count": np.zeros(row_count, dtype=np.float32),
-        "paper_author_list_max_jaccard": np.zeros(row_count, dtype=np.float32),
-        "paper_author_list_max_containment": np.zeros(row_count, dtype=np.float32),
-        "paper_author_list_max_overlap_count": np.zeros(row_count, dtype=np.float32),
-        "local_author_window10_jaccard_max": np.zeros(row_count, dtype=np.float32),
-        "local_author_window10_overlap_count_max": np.zeros(row_count, dtype=np.float32),
-        "best_author_count_log_absdiff": np.zeros(row_count, dtype=np.float32),
-    }
-    for row_index, (query_index, component_key) in enumerate(zip(query_indices, component_keys, strict=True)):
-        query_signature_id = query_signature_id_by_index.get(int(query_index))
-        if query_signature_id is None:
-            raise KeyError(f"Missing query signature id for index {int(query_index)}")
-        query = query_by_signature_id[str(query_signature_id)]
-        summary = summary_by_component[str(component_key)]
-        rarity = name_count_rarity_features(query, summary)
-        for signal_name in (
-            "last_name_count_min_rarity",
-            "candidate_last_name_count_min_rarity",
-            "candidate_last_first_name_count_min_rarity",
-            "last_first_name_count_min_rarity",
-            "first_prefix_x_last_first_name_count_min_rarity",
-        ):
-            signals[signal_name][row_index] = float(rarity.get(signal_name, 0.0) or 0.0)
-        signals["candidate_cluster_max_paper_author_count"][row_index] = float(summary.max_paper_author_count)
-        for signal_name, value in raw_paper_evidence_features(query, summary).items():
-            signals[signal_name][row_index] = float(value)
-    return signals

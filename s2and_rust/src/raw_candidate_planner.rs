@@ -978,6 +978,15 @@ struct RetainedRawArrowSeedRows {
     specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
 }
 
+/// Rows moved out of the planner while a reload reads the new seeds.
+struct ReloadParts {
+    signatures: HashMap<String, RawArrowSignature>,
+    paper_authors: HashMap<String, Vec<(i64, String)>>,
+    papers: HashMap<String, RawArrowPaper>,
+    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    prefetched: Option<PrefetchedRawArrowRows>,
+}
+
 /// Rows of block signatures that are not seeds yet, read with the seeds at build.
 ///
 /// Subblocked attachment passes plan each initial-only group as queries, then
@@ -1562,11 +1571,47 @@ impl RawBlockQueryCandidatePlanner {
             .retained_seed_rows
             .take()
             .expect("checked above that seed rows are retained");
-        let mut signatures = std::mem::take(&mut self.state.signatures);
-        let mut paper_authors = std::mem::take(&mut self.state.paper_authors);
-        let mut papers = retained.papers;
-        let mut specter_by_paper_id = retained.specter_by_paper_id;
-        let mut prefetched = self.state.prefetched_rows.take();
+        let mut parts = ReloadParts {
+            signatures: std::mem::take(&mut self.state.signatures),
+            paper_authors: std::mem::take(&mut self.state.paper_authors),
+            papers: retained.papers,
+            specter_by_paper_id: retained.specter_by_paper_id,
+            prefetched: self.state.prefetched_rows.take(),
+        };
+        match self.reload_seed_rows_from_parts(py, layout, &mut parts) {
+            Ok(planner) => {
+                *self = planner;
+                Ok(true)
+            }
+            Err(error) => {
+                // The rows go back, so a later reload or plan still has them.
+                self.state.signatures = parts.signatures;
+                self.state.paper_authors = parts.paper_authors;
+                self.state.retained_seed_rows = Some(RetainedRawArrowSeedRows {
+                    papers: parts.papers,
+                    specter_by_paper_id: parts.specter_by_paper_id,
+                });
+                self.state.prefetched_rows = parts.prefetched;
+                Err(error)
+            }
+        }
+    }
+
+    /// The reload's reads and assembly over rows moved out of the planner.
+    ///
+    /// Every read fails before planner state is replaced; only `assemble`,
+    /// which runs last, consumes the previous state.
+    fn reload_seed_rows_from_parts(
+        &mut self,
+        py: Python<'_>,
+        layout: RawArrowSeedLayout,
+        parts: &mut ReloadParts,
+    ) -> PyResult<Self> {
+        let signatures = &mut parts.signatures;
+        let paper_authors = &mut parts.paper_authors;
+        let papers = &mut parts.papers;
+        let specter_by_paper_id = &mut parts.specter_by_paper_id;
+        let prefetched = &mut parts.prefetched;
 
         let read_signatures_start = Instant::now();
         let mut missing_signature_ids: HashSet<String> = layout
@@ -1682,10 +1727,10 @@ impl RawBlockQueryCandidatePlanner {
             py,
             self.dataset.clone(),
             layout,
-            signatures,
-            papers,
-            paper_authors,
-            specter_by_paper_id,
+            std::mem::take(signatures),
+            std::mem::take(papers),
+            std::mem::take(paper_authors),
+            specter_by_paper_id.take(),
             raw_name_counts,
             needed_paper_ids.len(),
             read_telemetry,
@@ -1699,9 +1744,8 @@ impl RawBlockQueryCandidatePlanner {
             Some(previous),
         )?;
         planner.query_mode = query_mode;
-        planner.state.prefetched_rows = prefetched;
-        *self = planner;
-        Ok(true)
+        planner.state.prefetched_rows = prefetched.take();
+        Ok(planner)
     }
 }
 

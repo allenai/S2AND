@@ -211,6 +211,17 @@ mod constraint_key_tests {
             }
         }
     }
+
+    #[test]
+    fn views_keep_a_subset_of_the_shared_signature_map() {
+        let mut rng = XorShift(0x5eed_0000_0000_0007);
+        let full = featurizer(&mut rng, 2);
+        let view = full
+            .view_with_cluster_seed_sidecars(vec!["s1".to_string()], None, None)
+            .expect("view over one signature");
+        assert_eq!(view.signature_id_order(), ["s1".to_string()]);
+        assert_eq!(view.signatures.len(), 2);
+    }
 }
 
 #[cfg(test)]
@@ -935,7 +946,8 @@ impl RustFeaturizer {
     }
 
     fn signature_id_order(&self) -> &[String] {
-        debug_assert_eq!(self.signature_ids.len(), self.signatures.len());
+        // A view keeps a subset of the ids over the shared signature map.
+        debug_assert!(self.signature_ids.len() <= self.signatures.len());
         self.signature_ids.as_slice()
     }
 

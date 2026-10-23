@@ -143,6 +143,63 @@ def build_linker_pair_distance_accumulators_rust(
     )
 
 
+def score_linker_pair_features_and_aggregate_stats_rust(
+    left_signature_indices: np.ndarray,
+    right_signature_indices: np.ndarray,
+    row_indices: np.ndarray,
+    row_count: int,
+    *,
+    featurizer: Any,
+    main_indices: Sequence[int],
+    main_booster: Any,
+    nameless_indices: Sequence[int] | None = None,
+    nameless_booster: Any | None = None,
+    aggregate_indices: Sequence[int] | None = None,
+    pair_labels: np.ndarray | None = None,
+    num_threads: int | None = None,
+    nan_value: float = np.nan,
+    aggregate_nan_value: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Score index-array pairs with native boosters and build row aggregates in one Rust pass.
+
+    Returns the model distances, ``0.0`` for labeled pairs, followed by the
+    counts, valid counts, sums, mins and maxs that
+    :func:`build_linker_pair_features_and_aggregate_stats_arrays_rust` returns.
+    No pair-feature matrix is built.
+    """
+
+    resolved_num_threads = None if num_threads is None else resolve_n_jobs(num_threads)
+    resolved_aggregate_nan_value = nan_value if aggregate_nan_value is None else float(aggregate_nan_value)
+    labels_arg = None if pair_labels is None else np.ascontiguousarray(pair_labels, dtype=np.float64)
+    result = featurizer.score_linker_pair_index_arrays_and_aggregate_stats(
+        as_uint32_1d("left_signature_indices", left_signature_indices),
+        as_uint32_1d("right_signature_indices", right_signature_indices),
+        as_uint32_1d("row_indices", row_indices),
+        int(row_count),
+        [int(index) for index in main_indices],
+        main_booster,
+        None if nameless_indices is None else [int(index) for index in nameless_indices],
+        nameless_booster,
+        None if aggregate_indices is None else [int(index) for index in aggregate_indices],
+        labels_arg,
+        resolved_num_threads,
+        float(nan_value),
+        resolved_aggregate_nan_value,
+    )
+    distances, counts, valid_counts, sums, mins, maxs = _six_array_result(
+        result,
+        "score_linker_pair_index_arrays_and_aggregate_stats",
+    )
+    return (
+        np.asarray(distances, dtype=np.float64),
+        np.asarray(counts, dtype=np.uint32),
+        np.asarray(valid_counts, dtype=np.uint64),
+        np.asarray(sums, dtype=np.float64),
+        np.asarray(mins, dtype=np.float64),
+        np.asarray(maxs, dtype=np.float64),
+    )
+
+
 def get_constraints_block_upper_triangle_indexed_rust(
     block_signature_indices: list[int],
     *,

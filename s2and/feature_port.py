@@ -24,6 +24,7 @@ from s2and.rust_calls import (
     get_constraint_labels_index_arrays_rust,
     get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
+    score_linker_pair_features_and_aggregate_stats_rust,
 )
 from s2and.thread_config import resolve_n_jobs
 
@@ -460,6 +461,7 @@ __all__ = [
     "get_constraint_labels_index_arrays_rust",
     "get_constraints_block_upper_triangle_indexed_rust",
     "get_constraints_matrix_indexed_rust",
+    "score_linker_pair_features_and_aggregate_stats_rust",
     "s2and_rust",
     "warm_rust_featurizer",
 ]

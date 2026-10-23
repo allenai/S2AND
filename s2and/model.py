@@ -67,7 +67,13 @@ from s2and.incremental_linking.production import (
 )
 from s2and.incremental_linking.seed_assignment import apply_seed_links
 from s2and.metrics import b3_precision_recall_fscore
-from s2and.model_pairwise import FastCluster, clone_cluster_model, intify, predict_pairwise_class0
+from s2and.model_pairwise import (
+    FastCluster,
+    clone_cluster_model,
+    intify,
+    native_pairwise_scorers,
+    predict_pairwise_class0,
+)
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.prediction_state import PredictionState
 from s2and.runtime import (
@@ -1339,13 +1345,7 @@ def _native_block_scorers(classifier: Any, nameless_classifier: Any | None) -> t
 
     if not _FUSED_BLOCK_SCORING:
         return None
-    if str(getattr(classifier, "prediction_backend", "python")) != "rust_lightgbm":
-        return None
-    if nameless_classifier is None:
-        return classifier._rust_scorer, None
-    if str(getattr(nameless_classifier, "prediction_backend", "python")) != "rust_lightgbm":
-        return None
-    return classifier._rust_scorer, nameless_classifier._rust_scorer
+    return native_pairwise_scorers(classifier, nameless_classifier)
 
 
 # Tests compare the fused block scorer against the feature-matrix path.

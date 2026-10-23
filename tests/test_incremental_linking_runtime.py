@@ -759,6 +759,109 @@ def test_fused_native_aggregates_across_chunks_match_dense_reference(
     assert result.telemetry["hard_disallow_distance_pair_count"] == 2
 
 
+def _native_scorer_on_pairs(native: Any, pairs: list[tuple[int, int]], info: FeaturizationInfo, path: Path, seed: int):
+    """A tiny native LightGBM scorer trained on the pairs' own rows, so scores vary across pairs."""
+    from lightgbm import LGBMClassifier
+
+    from s2and.production_model import NativeLightGBMBinaryClassifier
+
+    indices = list(runtime_module._pairwise_model_feature_indices(info))
+    rows = np.asarray(native.featurize_pairs_matrix_indexed(pairs, indices, 1, np.nan))
+    rng = np.random.default_rng(seed)
+    labels = rng.integers(0, 2, size=len(rows))
+    labels[0], labels[1] = 0, 1
+    model = LGBMClassifier(
+        n_estimators=8, num_leaves=4, min_child_samples=2, random_state=seed, n_jobs=1, verbosity=-1
+    ).fit(rows, labels)
+    model.booster_.save_model(str(path))
+    return NativeLightGBMBinaryClassifier(path, n_jobs=1)
+
+
+@pytest.mark.parametrize(
+    ("with_labels", "model_nan", "aggregate_nan", "n_jobs", "with_nameless"),
+    [
+        (True, np.nan, 0.0, 3, True),
+        (False, np.nan, 0.0, 1, True),
+        (True, 0.0, np.nan, 2, False),
+        (False, 0.0, 0.0, 3, False),
+    ],
+)
+def test_fused_native_linker_scoring_matches_matrix_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_labels: bool,
+    model_nan: float,
+    aggregate_nan: float,
+    n_jobs: int,
+    with_nameless: bool,
+) -> None:
+    """Native boosters scored inside the feature pass must match the matrix path bit for bit."""
+    monkeypatch.setattr(memory_budget, "RUST_BATCH_MAX_CHUNK_PAIRS", 700)
+    dataset = build_arrow_training_dataset(build_dummy_dataset("fused-native-linker", name_counts_index=True), tmp_path)
+    native = runtime_module.feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
+    signature_count = len(native.signature_ids())
+    pair_count, row_count = 2000, 131
+    offsets = np.arange(pair_count, dtype=np.uint32)
+    left = offsets % np.uint32(signature_count)
+    right = (left + (offsets % np.uint32(max(1, signature_count - 1))) + np.uint32(1)) % np.uint32(signature_count)
+    rows = ((offsets * np.uint32(37)) % np.uint32(row_count)).astype(np.uint32)
+    candidate_batch = LinkerCandidateBatch(
+        row_count=row_count,
+        left_signature_indices=left,
+        right_signature_indices=right,
+        pair_row_indices=rows,
+    )
+    labels = None
+    if with_labels:
+        labels = np.full(pair_count, np.nan, dtype=np.float64)
+        labels[::31] = -float(LARGE_INTEGER)
+        labels[::43] = float(LARGE_DISTANCE - LARGE_INTEGER)
+    pairs = list(zip(left.tolist(), right.tolist(), strict=True))
+    main_info = FeaturizationInfo(features_to_use=["name_similarity", "affiliation_similarity"])
+    nameless_info = FeaturizationInfo(features_to_use=["affiliation_similarity", "year_diff"])
+    main = _native_scorer_on_pairs(native, pairs, main_info, tmp_path / "main.txt", 1)
+    nameless = _native_scorer_on_pairs(native, pairs, nameless_info, tmp_path / "nameless.txt", 2)
+    kwargs = {
+        "classifier": main,
+        "featurizer_info": main_info,
+        "nameless_classifier": nameless if with_nameless else None,
+        "nameless_featurizer_info": nameless_info if with_nameless else None,
+        "pair_labels": labels,
+        "n_jobs": n_jobs,
+        "featurizer": native,
+        "pairwise_model_nan_value": model_nan,
+        "pairwise_aggregate_nan_value": aggregate_nan,
+    }
+    fused_calls: list[int | None] = []
+    original = runtime_module.feature_port.score_linker_pair_features_and_aggregate_stats_rust
+
+    def record(*args, **call_kwargs):
+        fused_calls.append(call_kwargs["num_threads"])
+        return original(*args, **call_kwargs)
+
+    monkeypatch.setattr(runtime_module.feature_port, "score_linker_pair_features_and_aggregate_stats_rust", record)
+    fused = compute_candidate_batch_pairwise_model_and_aggregate_stats(dataset, candidate_batch, **kwargs)
+    assert len(fused_calls) == 3
+    monkeypatch.setattr(runtime_module, "_FUSED_LINKER_SCORING", False)
+    matrix = compute_candidate_batch_pairwise_model_and_aggregate_stats(dataset, candidate_batch, **kwargs)
+    assert len(fused_calls) == 3
+
+    assert fused.telemetry["chunk_count"] == matrix.telemetry["chunk_count"] == 3
+    assert fused.telemetry["hard_disallow_distance_pair_count"] == matrix.telemetry["hard_disallow_distance_pair_count"]
+    for name, expected in matrix.row_signals.items():
+        assert expected.dtype == np.float32
+        np.testing.assert_array_equal(fused.row_signals[name].view(np.uint32), expected.view(np.uint32))
+    np.testing.assert_array_equal(fused.pairwise_stats.counts, matrix.pairwise_stats.counts)
+    np.testing.assert_array_equal(fused.pairwise_stats.valid_counts, matrix.pairwise_stats.valid_counts)
+    for name in ("sums", "mins", "maxs"):
+        np.testing.assert_array_equal(
+            getattr(fused.pairwise_stats, name).view(np.uint64),
+            getattr(matrix.pairwise_stats, name).view(np.uint64),
+        )
+    # The distances vary across rows, so the comparison is not of constants.
+    assert len(np.unique(matrix.row_signals["mean_distance"])) > 10
+
+
 def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

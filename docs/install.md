@@ -87,7 +87,7 @@ The `dev` extra includes everything the tests need. Outside it, the
 `uv sync --extra dev` builds `s2and-rust` from `s2and_rust/` and installs it
 into the project environment, and syncing `uv run` commands rebuild it after
 ordinary Rust edits. The test suite stops before collection if the installed
-extension was built from different Rust sources than the checkout.
+extension was built from different native sources than the checkout.
 
 If a rebuild is missed, force a refresh:
 
@@ -101,7 +101,7 @@ preserve timestamps, or after switching checkouts that share
 repeat the forced refresh:
 
 ```bash
-uv run --no-sync cargo clean -p s2and_rust -p cld2 --manifest-path s2and_rust/Cargo.toml --release
+uv run --no-sync cargo clean -p s2and_rust -p cld2 -p cld2-sys --manifest-path s2and_rust/Cargo.toml --release
 ```
 
 Notes:

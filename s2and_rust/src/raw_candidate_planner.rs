@@ -171,7 +171,7 @@ struct RawArrowQueryInputReadResult {
     signatures: HashMap<String, RawArrowSignature>,
     papers: HashMap<String, RawArrowPaper>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
-    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
     signature_index_stats: IndexedArrowReadStats,
     paper_index_stats: IndexedArrowReadStats,
     paper_author_index_stats: IndexedArrowReadStats,
@@ -700,7 +700,7 @@ fn read_reusable_raw_arrow_query_inputs(
                         )
                     },
                     || -> PyResult<(
-                        Option<HashMap<String, Vec<f32>>>,
+                        Option<HashMap<String, arrow::buffer::ScalarBuffer<f32>>>,
                         IndexedArrowReadStats,
                         f64,
                     )> {
@@ -859,7 +859,7 @@ impl RawArrowSeedLayout {
 struct RawArrowPaperRows {
     papers: HashMap<String, RawArrowPaper>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
-    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
     raw_name_counts: RawNameCountMaps,
     paper_index_stats: IndexedArrowReadStats,
     paper_author_index_stats: IndexedArrowReadStats,
@@ -916,7 +916,7 @@ fn read_raw_arrow_paper_rows(
                 || {
                     rayon::join(
                         || -> PyResult<(
-                            Option<HashMap<String, Vec<f32>>>,
+                            Option<HashMap<String, arrow::buffer::ScalarBuffer<f32>>>,
                             IndexedArrowReadStats,
                             f64,
                         )> {
@@ -977,7 +977,7 @@ fn read_raw_arrow_paper_rows(
 /// `retain_seed_rows`; the signature and author rows stay in the plan state.
 struct RetainedRawArrowSeedRows {
     papers: HashMap<String, RawArrowPaper>,
-    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
 }
 
 /// Rows moved out of the planner while a reload reads the new seeds.
@@ -985,7 +985,7 @@ struct ReloadParts {
     signatures: HashMap<String, RawArrowSignature>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
     papers: HashMap<String, RawArrowPaper>,
-    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
     prefetched: Option<PrefetchedRawArrowRows>,
 }
 
@@ -1000,7 +1000,7 @@ struct PrefetchedRawArrowRows {
     signatures: HashMap<String, RawArrowSignature>,
     papers: HashMap<String, RawArrowPaper>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
-    specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+    specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
 }
 
 impl PrefetchedRawArrowRows {
@@ -1339,7 +1339,7 @@ impl RawBlockQueryCandidatePlanner {
         signatures: HashMap<String, RawArrowSignature>,
         papers: HashMap<String, RawArrowPaper>,
         paper_authors: HashMap<String, Vec<(i64, String)>>,
-        specter_by_paper_id: Option<HashMap<String, Arc<Vec<f32>>>>,
+        specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
         raw_name_counts: RawNameCountMaps,
         seed_paper_count: usize,
         read_telemetry: RawArrowSeedReadTelemetry,

@@ -5,13 +5,20 @@ use std::path::{Path, PathBuf};
 /// Native build inputs covered by the embedded source digest.
 ///
 /// `tests/rust_build_freshness.py` mirrors these lists and the hashing below.
-const SOURCE_DIGEST_FILES: [&str; 4] = [
+const SOURCE_DIGEST_FILES: [&str; 6] = [
     "Cargo.toml",
     "Cargo.lock",
     "build.rs",
     "vendor/cld2/Cargo.toml",
+    "vendor/cld2-sys/Cargo.toml",
+    "vendor/cld2-sys/build.rs",
 ];
-const SOURCE_DIGEST_DIRS: [&str; 2] = ["src", "vendor/cld2/src"];
+const SOURCE_DIGEST_DIRS: [&str; 4] = [
+    "src",
+    "vendor/cld2/src",
+    "vendor/cld2-sys/src",
+    "vendor/cld2-sys/cld2",
+];
 
 fn main() {
     emit_source_digest();
@@ -22,9 +29,8 @@ fn main() {
 /// Embed a digest of every native build input so tests can reject stale builds.
 ///
 /// Emitting any `rerun-if-changed` limits Cargo's change detection to the
-/// listed paths, so the manifests and both Rust source trees are listed on
-/// every platform. Directory watches include new modules; the digest includes
-/// only `.rs` files, not editor files or a vendored crate's build outputs.
+/// listed paths, so manifests and native source trees are listed on every platform.
+/// Directory watches include new modules; the digest includes Rust and C++ sources.
 /// Cargo's timestamp checks are a heuristic, not content-based invalidation.
 fn emit_source_digest() {
     // A shared target directory can reuse a compiled build script across
@@ -77,7 +83,11 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) {
             .path();
         if path.is_dir() {
             collect_files(root, &path, files);
-        } else if path.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
+        } else if path.is_file()
+            && path.extension().is_some_and(|extension| {
+                matches!(extension.to_str(), Some("rs" | "cc" | "cpp" | "h"))
+            })
+        {
             let relative = path
                 .strip_prefix(root)
                 .expect("build input is under the manifest directory")

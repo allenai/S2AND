@@ -43,7 +43,7 @@ pub(crate) struct RetrievalQueryData {
     pub(crate) title_hashes: Vec<u64>,
     pub(crate) year: Option<i64>,
     pub(crate) orcid_hash: Option<u64>,
-    pub(crate) specter: Option<Arc<Vec<f32>>>,
+    pub(crate) specter: Option<Arc<arrow::buffer::ScalarBuffer<f32>>>,
     pub(crate) specter_norm: Option<f64>,
 }
 
@@ -386,7 +386,7 @@ impl RustHybridCentroidRetriever {
                 summary.specter_centroid.as_ref(),
                 summary.specter_centroid_norm,
             ) {
-                (Some(vector), Some(norm)) => Some((vector.as_slice(), norm)),
+                (Some(vector), Some(norm)) => Some((&vector[..], norm)),
                 _ => None,
             };
             let centroid_slots = usize::from(centroid.is_some());
@@ -412,7 +412,7 @@ impl RustHybridCentroidRetriever {
                 .iter()
                 .zip(summary.exemplar_norms.iter())
             {
-                vectors[count] = vector.as_slice();
+                vectors[count] = &vector[..];
                 norms[count] = *norm;
                 count += 1;
             }
@@ -429,7 +429,7 @@ impl RustHybridCentroidRetriever {
                     let mut query_values: [&[f64]; QUERY_GROUP] = [&[]; QUERY_GROUP];
                     for (position, query_index) in chunk.iter().enumerate() {
                         if let Some((values, _)) = &prepared[*query_index] {
-                            query_values[position] = values.as_slice();
+                            query_values[position] = &values[..];
                         }
                     }
                     let sums = grouped_dot_products(&query_values[..chunk.len()], &widened);
@@ -1178,12 +1178,12 @@ fn fused_specter_score(query: &RetrievalQueryData, summary: &RetrievalSummaryDat
     else {
         return 0.0;
     };
-    let query_specter = query_specter.as_slice();
+    let query_specter = &query_specter[..];
     let centroid = match (
         summary.specter_centroid.as_ref(),
         summary.specter_centroid_norm,
     ) {
-        (Some(vector), Some(norm)) => Some((vector.as_slice(), norm)),
+        (Some(vector), Some(norm)) => Some((&vector[..], norm)),
         _ => None,
     };
     let centroid_slots = usize::from(centroid.is_some());
@@ -1209,7 +1209,7 @@ fn fused_specter_score(query: &RetrievalQueryData, summary: &RetrievalSummaryDat
         .iter()
         .zip(summary.exemplar_norms.iter())
     {
-        vectors[count] = vector.as_slice();
+        vectors[count] = &vector[..];
         norms[count] = *norm;
         count += 1;
     }
@@ -1730,7 +1730,7 @@ mod overlap_index_tests {
             year: None,
             orcid_hash: None,
             specter_norm: specter.as_ref().map(|values| vector_norm_f32(values)),
-            specter: specter.map(Arc::new),
+            specter: specter.map(|values| Arc::new(values.into())),
         }
     }
 
@@ -2014,7 +2014,7 @@ mod overlap_index_tests {
             if length != 8 {
                 let values = long_vector(&mut rng);
                 query.specter_norm = Some(vector_norm_f32(&values));
-                query.specter = Some(std::sync::Arc::new(values));
+                query.specter = Some(std::sync::Arc::new(values.into()));
                 if summary.specter_centroid.is_some() {
                     let centroid = long_vector(&mut rng);
                     summary.specter_centroid_norm = Some(vector_norm_f32(&centroid));
@@ -2119,7 +2119,7 @@ mod overlap_index_tests {
                         1 => {
                             let values = long_vector(&mut rng, length + 1);
                             query.specter_norm = Some(vector_norm_f32(&values));
-                            query.specter = Some(std::sync::Arc::new(values));
+                            query.specter = Some(std::sync::Arc::new(values.into()));
                         }
                         _ => {
                             let values = long_vector(&mut rng, length);
@@ -2128,7 +2128,7 @@ mod overlap_index_tests {
                             } else {
                                 vector_norm_f32(&values)
                             });
-                            query.specter = Some(std::sync::Arc::new(values));
+                            query.specter = Some(std::sync::Arc::new(values.into()));
                         }
                     }
                     query
@@ -2202,7 +2202,7 @@ mod overlap_index_tests {
         let query_vector = random_vector(&mut rng);
         let query = RetrievalQueryData {
             specter_norm: Some(vector_norm_f32(&query_vector)),
-            specter: Some(std::sync::Arc::new(query_vector)),
+            specter: Some(std::sync::Arc::new(query_vector.into())),
             ..query(&mut rng, Vec::new())
         };
         let component_count: usize = std::env::var("BENCH_COMPONENTS")

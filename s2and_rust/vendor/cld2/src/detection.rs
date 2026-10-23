@@ -15,7 +15,8 @@ use types::*;
 
 // CLD2 uses an internal buffer for its version text.
 static CLD2_VERSION_LOCK: Mutex<u8> = Mutex::new(0);
-static CLD2_DETECT_LOCK: Mutex<u8> = Mutex::new(0);
+// The local cld2-sys makes per-request debug state thread-local.
+// This wrapper passes flags=0; debug buffers and dynamic tables stay unused.
 
 /// Get the version of cld2 and its embedded data files as a string.
 ///
@@ -95,9 +96,6 @@ pub fn detect_language_ext(text: &str, format: Format, hints: &Hints) -> Detecti
     guarded_text.extend_from_slice(&[0, 0, 0, 0]);
 
     unsafe {
-        let _detect_guard = CLD2_DETECT_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         hints.with_c_rep(|hints_ptr| {
             let lang = CLD2_ExtDetectLanguageSummary4(
                 guarded_text.as_ptr() as *const c_char,

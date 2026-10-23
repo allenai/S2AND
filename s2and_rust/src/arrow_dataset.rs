@@ -382,7 +382,10 @@ impl ArrowDatasetResources {
         &self,
         keep_ids: &HashSet<String>,
         num_threads: Option<usize>,
-    ) -> PyResult<(HashMap<String, Vec<f32>>, IndexedArrowReadStats)> {
+    ) -> PyResult<(
+        HashMap<String, arrow::buffer::ScalarBuffer<f32>>,
+        IndexedArrowReadStats,
+    )> {
         let table = self.table("specter")?;
         install_with_optional_rayon_pool(num_threads, || {
             let (batches, stats) = table.read_batches(Some(keep_ids))?;

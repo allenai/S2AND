@@ -24,6 +24,10 @@ _TREE = {
     "src/nested/mod.rs": b"pub fn g() {}\n",
     "vendor/cld2/Cargo.toml": b"[package]\n",
     "vendor/cld2/src/lib.rs": b"pub fn h() {}\n",
+    "vendor/cld2-sys/Cargo.toml": b"[package]\n",
+    "vendor/cld2-sys/build.rs": b"fn main() {}\n",
+    "vendor/cld2-sys/src/lib.rs": b"pub fn ffi() {}\n",
+    "vendor/cld2-sys/cld2/internal/detect.cc": b"int detect() { return 0; }\n",
 }
 
 
@@ -79,6 +83,8 @@ def test_digest_is_independent_of_file_creation_order(tmp_path: Path) -> None:
         "rename_source",
         "modify_vendor",
         "modify_vendor_manifest",
+        "modify_vendor_cpp",
+        "modify_vendor_build",
     ],
 )
 def test_digest_changes_for_every_build_input_change(tmp_path: Path, change: str) -> None:
@@ -111,6 +117,10 @@ def test_digest_changes_for_every_build_input_change(tmp_path: Path, change: str
         (root / "src/nested/mod.rs").rename(root / "src/nested/other.rs")
     elif change == "modify_vendor":
         (root / "vendor/cld2/src/lib.rs").write_bytes(b"pub fn h() { }\n")
+    elif change == "modify_vendor_cpp":
+        (root / "vendor/cld2-sys/cld2/internal/detect.cc").write_bytes(b"int detect() { return 1; }\n")
+    elif change == "modify_vendor_build":
+        (root / "vendor/cld2-sys/build.rs").write_bytes(b"fn main() { }\n")
     else:
         (root / "vendor/cld2/Cargo.toml").write_bytes(b"[package]\nname = 'cld2'\n")
 
@@ -395,14 +405,17 @@ def test_real_build_script_tracks_directories_and_current_package_root(tmp_path:
     source = _write_tree(
         tmp_path / "crate",
         {
+            **{key: value for key, value in _TREE.items() if key.startswith("vendor/cld2-sys/")},
             "Cargo.toml": (
                 b'[package]\nname = "s2and_freshness_probe"\nversion = "0.0.0"\nedition = "2021"\n'
                 b'[dependencies]\ncld2 = { path = "vendor/cld2" }\n'
+                b'cld2-sys = { path = "vendor/cld2-sys" }\n'
                 b'[build-dependencies]\nsha2 = "0.10"\n'
             ),
             "src/main.rs": b'fn main() { println!("{} {}", env!("S2AND_RUST_SOURCE_DIGEST"), cld2::value()); }\n',
             "vendor/cld2/Cargo.toml": b'[package]\nname = "cld2"\nversion = "0.0.0"\nedition = "2021"\n',
             "vendor/cld2/src/lib.rs": b"pub fn value() -> u8 { 1 }\n",
+            "vendor/cld2-sys/Cargo.toml": b'[package]\nname = "cld2-sys"\nversion = "0.0.0"\nedition = "2021"\n',
         },
     )
     shutil.copyfile(Path(__file__).resolve().parents[1] / "s2and_rust/build.rs", source / "build.rs")

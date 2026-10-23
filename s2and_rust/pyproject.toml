@@ -16,7 +16,7 @@ authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 bindings = "pyo3"
 python-source = "."
 module-name = "s2and_rust._s2and_rust"
-include = [{ path = "vendor/cld2/**/*", format = "sdist" }]
+include = [{ path = "vendor/cld2/**/*", format = "sdist" }, { path = "vendor/cld2-sys/**/*", format = "sdist" }]
 
 [tool.uv]
 # Custom keys replace uv's defaults. Keep package metadata and every local
@@ -31,6 +31,7 @@ cache-keys = [
     { file = "src/**/*.rs" },
     { file = "vendor/cld2/Cargo.toml" },
     { file = "vendor/cld2/src/**/*.rs" },
+    { file = "vendor/cld2-sys/**/*" },
     { file = "s2and_rust/**/*.py" },
     { file = "README.md" },
     { file = "LICENSE" },

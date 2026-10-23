@@ -1492,7 +1492,7 @@ pub(crate) struct RawFeaturizerRows {
     pub(crate) signatures: HashMap<String, RawArrowSignature>,
     pub(crate) papers: HashMap<String, RawArrowPaper>,
     pub(crate) authors_by_paper: HashMap<String, Vec<(i64, String)>>,
-    pub(crate) specter_by_paper: HashMap<String, Vec<f32>>,
+    pub(crate) specter_by_paper: HashMap<String, arrow::buffer::ScalarBuffer<f32>>,
 }
 
 impl RustFeaturizer {
@@ -1563,13 +1563,11 @@ impl RustFeaturizer {
         let (signatures, papers, name_grams) = py.allow_threads(|| {
             install_with_optional_rayon_pool(num_threads, || -> PyResult<_> {
                 let needed_paper_ids: Vec<&String> = needed_paper_ids.iter().collect();
-                // The CLD2 wrapper serializes detection behind a global lock, and
-                // parallel callers only convoy on it. One thread detects the titles
-                // while the others build the unidecode map and stage signatures.
+                // Patched CLD2 uses thread-local detection state, so titles share the request pool.
                 let (detected_languages, (unidecode_char_map, signature_inputs)) = rayon::join(
                     || {
                         needed_paper_ids
-                            .iter()
+                            .par_iter()
                             .map(|paper_id| {
                                 raw_papers
                                     .get(*paper_id)

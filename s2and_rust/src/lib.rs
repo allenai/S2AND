@@ -227,7 +227,7 @@ struct PaperData {
     language_reliability: f64,
     journal_ngrams: Option<CounterData>,
     coauthors: PaperCoauthors,
-    specter: Option<Vec<f32>>,
+    specter: Option<arrow::buffer::ScalarBuffer<f32>>,
     specter_norm: Option<f64>,
 }
 

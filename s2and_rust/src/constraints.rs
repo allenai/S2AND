@@ -39,6 +39,9 @@ pub(crate) struct ConstraintNameKey<'a> {
     first_initial: Option<char>,
     first_tokens: Vec<&'a str>,
     middle_tokens: Vec<&'a str>,
+    /// The summary `middle_names_conflict_small` would build from
+    /// `middle_tokens`, when it depends on this signature alone.
+    middle_summary: Option<MiddleSummary<'a>>,
 }
 
 impl<'a> ConstraintNameKey<'a> {
@@ -48,6 +51,8 @@ impl<'a> ConstraintNameKey<'a> {
         } else {
             std::borrow::Cow::Borrowed(last)
         };
+        let middle_tokens: Vec<&'a str> = middle.split_whitespace().collect();
+        let middle_summary = MiddleSummary::new(&middle_tokens);
         Self {
             last,
             last_compact,
@@ -57,9 +62,83 @@ impl<'a> ConstraintNameKey<'a> {
                 first.chars().next()
             },
             first_tokens: first.split_whitespace().collect(),
-            middle_tokens: middle.split_whitespace().collect(),
+            middle_tokens,
+            middle_summary,
         }
     }
+}
+
+/// The sorted, deduplicated middle-name summary of one signature.
+///
+/// Pairs built two `SmallMiddleSummary` values each; most of the constraint's
+/// remaining time went there. A summary depends on the other signature only
+/// through dropped affixes, so keys with an affix token keep the per-pair path.
+struct MiddleSummary<'a> {
+    words: Vec<&'a str>,
+    initials: Vec<char>,
+    chars: Vec<char>,
+}
+
+impl<'a> MiddleSummary<'a> {
+    /// The summary of `tokens`, or None when `middle_names_conflict_small`
+    /// would skip a token or use the hash-set version for these tokens.
+    fn new(tokens: &[&'a str]) -> Option<Self> {
+        if tokens.len() > SMALL_MIDDLE_TOKENS
+            || tokens
+                .iter()
+                .any(|token| token.is_empty() || crate::is_dropped_affix(token))
+        {
+            return None;
+        }
+        let mut summary = Self {
+            words: Vec::new(),
+            initials: Vec::new(),
+            chars: Vec::new(),
+        };
+        for token in tokens.iter().copied() {
+            let mut chars = token.chars();
+            if let Some(initial) = chars.next() {
+                summary.initials.push(initial);
+            }
+            if chars.next().is_some() {
+                summary.words.push(token);
+                summary.chars.extend(token.chars());
+                if summary.chars.len() > SMALL_MIDDLE_CHARS {
+                    return None;
+                }
+            }
+        }
+        for values in [&mut summary.words] {
+            let count = sort_dedup(values);
+            values.truncate(count);
+        }
+        for values in [&mut summary.initials, &mut summary.chars] {
+            let count = sort_dedup(values);
+            values.truncate(count);
+        }
+        Some(summary)
+    }
+}
+
+/// `middle_names_conflict_small` on the signatures' precomputed summaries.
+fn middle_summaries_conflict(
+    summary_1: &MiddleSummary<'_>,
+    summary_2: &MiddleSummary<'_>,
+    middle_1: &[&str],
+    middle_2: &[&str],
+) -> bool {
+    if middle_1.is_empty() || middle_2.is_empty() {
+        return false;
+    }
+    let conflicting_initials = !summary_1.initials.is_empty()
+        && !summary_2.initials.is_empty()
+        && sorted_disjoint(&summary_1.initials, &summary_2.initials);
+    let conflicting_full_names = !summary_1.words.is_empty()
+        && !summary_2.words.is_empty()
+        && sorted_disjoint(&summary_1.words, &summary_2.words)
+        && summary_1.chars != summary_2.chars
+        && !same_prefix_token_iters(middle_1.iter().copied(), middle_2.iter().copied());
+    conflicting_initials || conflicting_full_names
 }
 
 /// Return whether two signatures' names violate the hard constraint.
@@ -103,6 +182,14 @@ pub(crate) fn constraint_names_conflict(
         tokens_1.extend_from_slice(&key_1.middle_tokens);
         tokens_2.extend_from_slice(&key_2.middle_tokens);
         return middle_names_conflict_small(&tokens_1, &tokens_2);
+    }
+    if let (Some(summary_1), Some(summary_2)) = (&key_1.middle_summary, &key_2.middle_summary) {
+        return middle_summaries_conflict(
+            summary_1,
+            summary_2,
+            &key_1.middle_tokens,
+            &key_2.middle_tokens,
+        );
     }
     middle_names_conflict_small(&key_1.middle_tokens, &key_2.middle_tokens)
 }

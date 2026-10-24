@@ -31,8 +31,8 @@ production model and public-data version is `1.3`, on a separate version axis.
 ### Status
 
 - **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles are on S3 (see [data](data.md)).
-  PyPI has the `1.0.0b6` beta for integration testing; the final `1.0.0` release is pending.
-  Pin `s2and==1.0.0b6`; its wheel bundles the native extension, so no `s2and-rust` pin is needed.
+  PyPI has the `1.0.0b7` beta for integration testing; the final `1.0.0` release is pending.
+  Pin `s2and==1.0.0b7`; its wheel bundles the native extension, so no `s2and-rust` pin is needed.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
@@ -668,6 +668,38 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   request's peak rises by more than 0.1 GB. That `1.0.0b5` rerun took 4-17% longer than the
   10-22 `1.0.0b5` sweep on the same requests, so compare the pairs above, not these
   numbers with the `1.0.0b5` entry.
+- Bulk prediction fills each block's distance matrix in one native pass. Tiles of
+  pairs, in block order, apply constraints and seed overrides, score, and write the
+  matrix, instead of returning million-pair chunks to Python. The pairwise models
+  skip the tree nodes that a pair's name features or missing values already decide.
+- Counter and coauthor set intersections and retrieval dot products use AVX2 on
+  x86_64 CPUs that have it. Other CPUs use the scalar code, with the same results.
+- Retrieval bounds each component's score with float32 upper bounds and scores
+  exactly only the components that can enter the top k. Seeds are indexed by first
+  name, middle-name terms are cached, and components without shared terms are
+  skipped. Planning the s_lee incremental request takes 6.0 s instead of 9.7 s.
+- The capped coauthor n-gram similarity stops its merge once the result is exactly
+  1.0. Builds with many papers of thousands of authors rank n-grams by frequency, so
+  that merges reach the cap early. Clustering a 909-signature physics presplit block
+  takes 0.54 s instead of 1.82 s.
+- Featurizer and planner builds intern names, assemble papers, and read seed
+  sidecars and constraints in parallel. Builds under 20,000 papers free their rows
+  in place, and short inputs stay on one worker, where the pool costs more than the work.
+- The planner build prefetches query rows, and the residual featurizer reuses the
+  planner's build. Requests of 20,000 to 200,000 signatures whose queries cover most
+  of the block build one block featurizer in the background for their query windows.
+  Small presplit blocks cluster concurrently, and labeled linker pairs skip the
+  features only the pairwise models read.
+- Together, on the same 13 requests with identical clusters, run right after a
+  rerun of the published `1.0.0b6`, `1.0.0b7` incremental prediction takes 20.7 s
+  instead of 31.8 s on s_lee, 5.7 s instead of 8.0 s on j_smith, 4.3 s instead of
+  5.4 s on a_khan, and 3.4 s instead of 4.7 s on s_gupta. Full-block prediction
+  takes 777 s instead of 1,165 s on s_lee, 132 s instead of 195 s on j_smith, 49 s
+  instead of 79 s on a_khan, 53 s instead of 78 s on s_gupta, and 28 s instead of
+  43 s on a_silva. Peak RSS of the s_lee full block is 13.5 GB instead of 14.6 GB,
+  and of the s_lee incremental request 10.3 GB instead of 12.6 GB. Smaller full-block
+  requests peak higher: a_silva 3.9 GB instead of 3.6 GB, and s_feldman 0.82 GB
+  instead of 0.68 GB.
 - On the s_feldman block (Windows, 8 threads, median of 3), `1.0.0b6` full-block
   prediction takes 11.2 s instead of `1.0.0b1`'s 18.0 s, the as-exported incremental
   request 11.7 s instead of 18.6 s, and the 200-signature steady-state request 0.82 s

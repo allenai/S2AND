@@ -416,25 +416,44 @@ impl RustHybridCentroidRetriever {
                 norms[count] = *norm;
                 count += 1;
             }
-            for slot in 0..count {
-                let vector = vectors[slot];
-                // Only equal-length queries take a dot product; others score NaN.
-                let Some((_, members)) = by_length.iter().find(|(len, _)| *len == vector.len())
-                else {
-                    continue;
-                };
-                widened.clear();
+            // Widen each vector once; then each query takes all its dot products
+            // in one pass, so the query streams from cache once per summary.
+            widened.clear();
+            for vector in &vectors[..count] {
                 widened.extend(vector.iter().map(|value| f64::from(*value)));
-                for chunk in members.chunks(QUERY_GROUP) {
-                    let mut query_values: [&[f64]; QUERY_GROUP] = [&[]; QUERY_GROUP];
-                    for (position, query_index) in chunk.iter().enumerate() {
-                        if let Some((values, _)) = &prepared[*query_index] {
-                            query_values[position] = &values[..];
-                        }
+            }
+            let mut slot_starts = [0usize; 5];
+            for slot in 1..count {
+                slot_starts[slot] = slot_starts[slot - 1] + vectors[slot - 1].len();
+            }
+            for (length, members) in &by_length {
+                // Only equal-length queries take a dot product; others score NaN.
+                let mut slots = [0usize; 5];
+                let mut slot_count = 0;
+                for slot in 0..count {
+                    if vectors[slot].len() == *length {
+                        slots[slot_count] = slot;
+                        slot_count += 1;
                     }
-                    let sums = grouped_dot_products(&query_values[..chunk.len()], &widened);
-                    for (position, query_index) in chunk.iter().enumerate() {
-                        dots[*query_index][slot] = sums[position];
+                }
+                if slot_count == 0 {
+                    continue;
+                }
+                let slot_values: [&[f64]; 5] = std::array::from_fn(|position| {
+                    if position < slot_count {
+                        let slot = slots[position];
+                        &widened[slot_starts[slot]..slot_starts[slot] + length]
+                    } else {
+                        &[]
+                    }
+                });
+                for query_index in members {
+                    let Some((values, _)) = &prepared[*query_index] else {
+                        continue;
+                    };
+                    let sums = vector_group_dot_products(values, &slot_values[..slot_count]);
+                    for position in 0..slot_count {
+                        dots[*query_index][slots[position]] = sums[position];
                     }
                 }
             }
@@ -772,16 +791,15 @@ pub(crate) fn counter_query_overlap_hashes(
     let Some(counter_data) = counter.as_ref() else {
         return 0.0;
     };
-    if size == 0 || query_hashes.is_empty() || counter_data.entries.is_empty() {
+    if size == 0 || query_hashes.is_empty() || counter_data.is_empty() {
         return 0.0;
     }
     let mut overlap = 0.0f64;
     for query_hash in query_hashes {
         if let Ok(index) = counter_data
-            .entries
-            .binary_search_by_key(query_hash, |entry| entry.0)
+            .keys.binary_search(query_hash)
         {
-            overlap += (counter_data.entries[index].1 as f64) / (size as f64);
+            overlap += (counter_data.values[index] as f64) / (size as f64);
         }
     }
     overlap / (query_hashes.len() as f64)
@@ -824,17 +842,16 @@ pub(crate) fn middle_initial_score_hashes(
     let Some(counter_data) = counter.as_ref() else {
         return 0.0;
     };
-    if size == 0 || query_hashes.is_empty() || counter_data.entries.is_empty() {
+    if size == 0 || query_hashes.is_empty() || counter_data.is_empty() {
         return 0.0;
     }
     let mut overlap = 0.0f64;
     let mut overlap_found = false;
     for query_hash in query_hashes {
         if let Ok(index) = counter_data
-            .entries
-            .binary_search_by_key(query_hash, |entry| entry.0)
+            .keys.binary_search(query_hash)
         {
-            overlap += (counter_data.entries[index].1 as f64) / (size as f64);
+            overlap += (counter_data.values[index] as f64) / (size as f64);
             overlap_found = true;
         }
     }
@@ -913,13 +930,12 @@ pub(crate) fn has_middle_initial_conflict(
     let Some(counter_data) = counter.as_ref() else {
         return false;
     };
-    if query_hashes.is_empty() || counter_data.entries.is_empty() {
+    if query_hashes.is_empty() || counter_data.is_empty() {
         return false;
     }
     !query_hashes.iter().any(|query_hash| {
         counter_data
-            .entries
-            .binary_search_by_key(query_hash, |entry| entry.0)
+            .keys.binary_search(query_hash)
             .is_ok()
     })
 }
@@ -1033,77 +1049,78 @@ fn fold_lanes(partial: &[f64; DOT_LANES], query: &[f32], vector: &[f32], body: u
     sum
 }
 
-/// Queries scored together against one vector by `grouped_dot_products`.
-const QUERY_GROUP: usize = 4;
-
-/// Dot products of up to `QUERY_GROUP` f64 queries with one vector widened
-/// from f32.
+/// Dot products of one f64 query with up to five f64 vectors.
 ///
 /// Each product is summed exactly as `fused_dot_products` sums it: the same
-/// `DOT_LANES` partial sums, each a separate multiply then add, folded by
-/// `fold_lanes`. Widening f32 to f64 is exact, so the queries and the vector
-/// are widened once and the results match bit for bit. Every query has the
-/// vector's length.
-fn grouped_dot_products(queries: &[&[f64]], vector: &[f64]) -> [f64; QUERY_GROUP] {
-    fn pad<const N: usize>(values: [f64; N]) -> [f64; QUERY_GROUP] {
-        let mut padded = [0.0f64; QUERY_GROUP];
+/// `DOT_LANES` partial sums, each a separate multiply then add, folded in the
+/// same order. Widening f32 to f64 is exact, so the query and the vectors are
+/// widened once and the results match bit for bit. Every vector has the
+/// query's length.
+fn vector_group_dot_products(query: &[f64], vectors: &[&[f64]]) -> [f64; 5] {
+    fn pad<const N: usize>(values: [f64; N]) -> [f64; 5] {
+        let mut padded = [0.0f64; 5];
         padded[..N].copy_from_slice(&values);
         padded
     }
-    match queries.len() {
-        0 => [0.0; QUERY_GROUP],
-        1 => pad(grouped_dots::<1>([queries[0]], vector)),
-        2 => pad(grouped_dots::<2>([queries[0], queries[1]], vector)),
-        3 => pad(grouped_dots::<3>(
-            [queries[0], queries[1], queries[2]],
-            vector,
+    match vectors.len() {
+        0 => [0.0; 5],
+        1 => pad(vector_group_dots::<1>(query, [vectors[0]])),
+        2 => pad(vector_group_dots::<2>(query, [vectors[0], vectors[1]])),
+        3 => pad(vector_group_dots::<3>(query, [vectors[0], vectors[1], vectors[2]])),
+        4 => pad(vector_group_dots::<4>(
+            query,
+            [vectors[0], vectors[1], vectors[2], vectors[3]],
         )),
-        _ => grouped_dots::<4>([queries[0], queries[1], queries[2], queries[3]], vector),
+        _ => vector_group_dots::<5>(
+            query,
+            [vectors[0], vectors[1], vectors[2], vectors[3], vectors[4]],
+        ),
     }
 }
 
-fn grouped_dots<const Q: usize>(queries: [&[f64]; Q], vector: &[f64]) -> [f64; Q] {
+fn vector_group_dots<const V: usize>(query: &[f64], vectors: [&[f64]; V]) -> [f64; V] {
     #[cfg(target_arch = "x86_64")]
     {
         if std::arch::is_x86_feature_detected!("avx2") {
             // SAFETY: the running CPU supports AVX2.
-            return unsafe { grouped_dots_avx2(queries, vector) };
+            return unsafe { vector_group_dots_avx2(query, vectors) };
         }
     }
-    grouped_dots_portable(queries, vector)
+    vectors.map(|vector| grouped_dots_portable::<1>([query], vector)[0])
 }
 
-/// `grouped_dots_portable` with AVX2 intrinsics; lanes 0-3 and 4-7 of each sum
-/// take the same separate multiply and add, so results equal the portable code.
+/// `vector_group_dots` with AVX2 intrinsics: the query chunk is loaded once
+/// for all vectors, and each vector's lanes 0-3 and 4-7 take the same separate
+/// multiply and add as the portable code.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn grouped_dots_avx2<const Q: usize>(queries: [&[f64]; Q], vector: &[f64]) -> [f64; Q] {
+unsafe fn vector_group_dots_avx2<const V: usize>(query: &[f64], vectors: [&[f64]; V]) -> [f64; V] {
     use std::arch::x86_64::{
         _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_setzero_pd, _mm256_storeu_pd,
     };
-    let len = vector.len();
-    let queries = queries.map(|query| &query[..len]);
+    let len = query.len();
+    let vectors = vectors.map(|vector| &vector[..len]);
     let body = len - len % DOT_LANES;
-    let mut low = [_mm256_setzero_pd(); Q];
-    let mut high = [_mm256_setzero_pd(); Q];
+    let mut low = [_mm256_setzero_pd(); V];
+    let mut high = [_mm256_setzero_pd(); V];
     let mut start = 0;
     while start < body {
-        let v_low = _mm256_loadu_pd(vector.as_ptr().add(start));
-        let v_high = _mm256_loadu_pd(vector.as_ptr().add(start + 4));
-        for q in 0..Q {
-            let q_low = _mm256_loadu_pd(queries[q].as_ptr().add(start));
-            let q_high = _mm256_loadu_pd(queries[q].as_ptr().add(start + 4));
-            low[q] = _mm256_add_pd(low[q], _mm256_mul_pd(q_low, v_low));
-            high[q] = _mm256_add_pd(high[q], _mm256_mul_pd(q_high, v_high));
+        let q_low = _mm256_loadu_pd(query.as_ptr().add(start));
+        let q_high = _mm256_loadu_pd(query.as_ptr().add(start + 4));
+        for v in 0..V {
+            let v_low = _mm256_loadu_pd(vectors[v].as_ptr().add(start));
+            let v_high = _mm256_loadu_pd(vectors[v].as_ptr().add(start + 4));
+            low[v] = _mm256_add_pd(low[v], _mm256_mul_pd(q_low, v_low));
+            high[v] = _mm256_add_pd(high[v], _mm256_mul_pd(q_high, v_high));
         }
         start += DOT_LANES;
     }
-    let mut sums = [0.0f64; Q];
-    for q in 0..Q {
+    let mut sums = [0.0f64; V];
+    for v in 0..V {
         let mut partial = [0.0f64; DOT_LANES];
-        _mm256_storeu_pd(partial.as_mut_ptr(), low[q]);
-        _mm256_storeu_pd(partial.as_mut_ptr().add(4), high[q]);
-        sums[q] = fold_lanes_f64(&partial, queries[q], vector, body);
+        _mm256_storeu_pd(partial.as_mut_ptr(), low[v]);
+        _mm256_storeu_pd(partial.as_mut_ptr().add(4), high[v]);
+        sums[v] = fold_lanes_f64(&partial, query, vectors[v], body);
     }
     sums
 }
@@ -1453,7 +1470,7 @@ mod overlap_index_tests {
         let Some(counter_data) = counter.as_ref() else {
             return 0.0;
         };
-        if size == 0 || query_terms.is_empty() || counter_data.entries.is_empty() {
+        if size == 0 || query_terms.is_empty() || counter_data.is_empty() {
             return 0.0;
         }
         let mut numerator = 0.0f64;
@@ -1465,10 +1482,9 @@ mod overlap_index_tests {
             }
             denominator += query_weight;
             if let Ok(index) = counter_data
-                .entries
-                .binary_search_by_key(&term.hash, |entry| entry.0)
+                .keys.binary_search(&term.hash)
             {
-                let mut contribution = (counter_data.entries[index].1 as f64) / (size as f64);
+                let mut contribution = (counter_data.values[index] as f64) / (size as f64);
                 if let Some(cap) = config.per_term_cap {
                     contribution = contribution.min(cap);
                 }
@@ -1496,8 +1512,7 @@ mod overlap_index_tests {
             .iter()
             .filter(|term| {
                 counter_data
-                    .entries
-                    .binary_search_by_key(&term.hash, |entry| entry.0)
+                    .keys.binary_search(&term.hash)
                     .is_ok()
             })
             .count()
@@ -1620,7 +1635,7 @@ mod overlap_index_tests {
         entries.sort_unstable_by_key(|entry| entry.0);
         entries.dedup_by_key(|entry| entry.0);
         let sum = entries.iter().map(|entry| entry.1).sum();
-        Some(CounterData { entries, sum })
+        Some(CounterData::new(entries, sum))
     }
 
     fn random_counter(
@@ -1631,10 +1646,7 @@ mod overlap_index_tests {
     ) -> Option<CounterData> {
         match rng.below(10) {
             0 => None,
-            1 => Some(CounterData {
-                entries: Vec::new(),
-                sum: 0.0,
-            }),
+            1 => Some(CounterData::new(Vec::new(), 0.0)),
             _ => counter(
                 (0..1 + rng.below(max_terms))
                     .map(|_| {
@@ -1660,9 +1672,8 @@ mod overlap_index_tests {
         // Non-mega counters keep a subset of the full counter's terms, as built.
         let non_mega_coauthor_counts = coauthor_counts.as_ref().and_then(|full| {
             let kept: Vec<(u64, f32)> = full
-                .entries
                 .iter()
-                .copied()
+                .map(|(key, value)| (*key, *value))
                 .filter(|_| rng.below(3) != 0)
                 .collect();
             if kept.is_empty() {
@@ -1983,10 +1994,7 @@ mod overlap_index_tests {
     fn counters_with_repeated_hashes_are_rejected() {
         let mut rng = Lcg(1);
         let mut bad = summary(&mut rng, "bad".to_string());
-        bad.affiliation_counts = Some(CounterData {
-            entries: vec![(4, 1.0), (4, 2.0)],
-            sum: 3.0,
-        });
+        bad.affiliation_counts = Some(CounterData::new(vec![(4, 1.0), (4, 2.0)], 3.0));
         assert!(RustHybridCentroidRetriever::from_summaries(vec![bad.clone()], true).is_err());
         assert!(RustHybridCentroidRetriever::from_summaries(vec![bad], false).is_ok());
     }
@@ -2149,6 +2157,31 @@ mod overlap_index_tests {
 
     /// The AVX2 kernel must equal the portable one bit for bit, so scores do not
     /// depend on the CPU.
+    #[test]
+    fn vector_group_dots_match_fused_dot_products_bits() {
+        let mut rng = Lcg(77);
+        for len in [0usize, 1, 7, 8, 9, 64, 767, 768, 769] {
+            let make = |rng: &mut Lcg| -> Vec<f64> {
+                (0..len).map(|_| f64::from(rng.below(1000) as f32 / 500.0 - 1.0)).collect()
+            };
+            let query = make(&mut rng);
+            let vectors: Vec<Vec<f64>> = (0..5).map(|_| make(&mut rng)).collect();
+            for count in 0..=5 {
+                let slices: Vec<&[f64]> = vectors[..count].iter().map(Vec::as_slice).collect();
+                let observed = vector_group_dot_products(&query, &slices);
+                for (position, vector) in slices.iter().enumerate() {
+                    // The f32 kernel widens the same values in its loop.
+                    let query_f32: Vec<f32> = query.iter().map(|value| *value as f32).collect();
+                    let vector_f32: Vec<f32> = vector.iter().map(|value| *value as f32).collect();
+                    let expected = fused_dot_products::<1>(&query_f32, [&vector_f32])[0];
+                    let portable = grouped_dots_portable::<1>([&query], vector)[0];
+                    assert_eq!(observed[position].to_bits(), expected.to_bits(), "len={len} count={count}");
+                    assert_eq!(portable.to_bits(), expected.to_bits(), "len={len} count={count}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn avx2_dot_products_match_portable_bits() {
         #[cfg(target_arch = "x86_64")]

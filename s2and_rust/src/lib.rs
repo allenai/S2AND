@@ -122,13 +122,49 @@ fn is_dropped_affix(token: &str) -> bool {
 
 #[derive(Clone)]
 struct CounterData {
-    // FNV-1a 64-bit hashes of original string keys, sorted ascending.
-    // Values are f32 counts. Binary search replaces HashMap lookup.
+    // FNV-1a 64-bit hashes of original string keys, sorted ascending, and their
+    // f32 counts at the same positions. Binary search replaces HashMap lookup;
+    // separate arrays let intersections load keys four at a time.
     // Hashes cannot distinguish colliding string keys. The retrieval overlap
     // index rejects duplicate hashes in its three counter families; other
     // consumers do not provide a general collision check.
-    entries: Vec<(u64, f32)>,
+    keys: Box<[u64]>,
+    values: Box<[f32]>,
     sum: f32,
+    /// Keys strictly increase, every value is an integer in [0, 2^24), and the
+    /// sum is below 2^30, so an intersection's min-sum is an exact integer in
+    /// any order.
+    simd: bool,
+}
+
+impl CounterData {
+    fn new(entries: Vec<(u64, f32)>, sum: f32) -> Self {
+        let simd = sum < 1_073_741_824.0
+            && entries.windows(2).all(|pair| pair[0].0 < pair[1].0)
+            && entries
+                .iter()
+                .all(|entry| entry.1 >= 0.0 && entry.1 < 16_777_216.0 && entry.1.fract() == 0.0);
+        let (keys, values): (Vec<u64>, Vec<f32>) = entries.into_iter().unzip();
+        Self {
+            keys: keys.into_boxed_slice(),
+            values: values.into_boxed_slice(),
+            sum,
+            simd,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// `(key, value)` pairs in key order.
+    fn iter(&self) -> impl Iterator<Item = (&u64, &f32)> + '_ {
+        self.keys.iter().zip(self.values.iter())
+    }
 }
 
 #[inline(always)]
@@ -793,7 +829,6 @@ mod tests {
             .title_words
             .as_ref()
             .expect("title words")
-            .entries
             .iter()
             .any(|(hash, _count)| *hash == fnv64(b"1")));
         assert!(paper.title_chars.is_none());

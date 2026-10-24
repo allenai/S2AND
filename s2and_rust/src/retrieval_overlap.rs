@@ -140,12 +140,11 @@ fn counter_hits_and_numerator(
     let (mut hits, mut numerator) = (0u32, 0.0f64);
     for (term, weight) in terms.iter().zip(weights) {
         if let Ok(index) = counter
-            .entries
-            .binary_search_by_key(&term.hash, |entry| entry.0)
+            .keys.binary_search(&term.hash)
         {
             hits += 1;
             if *weight > 0.0 {
-                numerator += weight * term_share(counter.entries[index].1, size, config);
+                numerator += weight * term_share(counter.values[index], size, config);
             }
         }
     }
@@ -216,7 +215,7 @@ fn scored_overlap(
     let Some(counter) = counter.as_ref() else {
         return 0.0;
     };
-    if size == 0 || terms.is_empty() || counter.entries.is_empty() {
+    if size == 0 || terms.is_empty() || counter.is_empty() {
         return 0.0;
     }
     prepared.finish(numerator, config)
@@ -299,17 +298,13 @@ fn validate_overlap_counters(summaries: &[RetrievalSummaryData]) -> Result<(), R
             let Some(counter) = counter_of(summary).as_ref() else {
                 continue;
             };
-            if let Some(pair) = counter
-                .entries
-                .windows(2)
-                .find(|pair| pair[0].0 >= pair[1].0)
-            {
+            if let Some(pair) = counter.keys.windows(2).find(|pair| pair[0] >= pair[1]) {
                 return Err(RetrievalError::InvalidValue(format!(
                     "component_key {:?} counter hashes must be strictly increasing, got {} then {}; duplicate FNV hashes may indicate a collision",
-                    summary.component_key, pair[0].0, pair[1].0
+                    summary.component_key, pair[0], pair[1]
                 )));
             }
-            postings += counter.entries.len();
+            postings += counter.len();
         }
         if u32::try_from(postings).is_err() {
             return Err(RetrievalError::Overflow(
@@ -332,7 +327,7 @@ impl CounterPostings {
             let Some(counter) = counter_of(summary).as_ref() else {
                 continue;
             };
-            postings.extend(counter.entries.iter().map(|(hash, count)| {
+            postings.extend(counter.iter().map(|(hash, count)| {
                 (
                     *hash,
                     component as u32,

@@ -135,7 +135,7 @@ pub(crate) fn counter_data_from_usize_map(
         .collect();
     entries.sort_unstable_by_key(|e| e.0);
     let sum: f32 = entries.iter().map(|e| e.1).sum();
-    Some(CounterData { entries, sum })
+    Some(CounterData::new(entries, sum))
 }
 
 pub(crate) fn counter_data_from_hash_count_map(
@@ -150,7 +150,7 @@ pub(crate) fn counter_data_from_hash_count_map(
         .collect();
     entries.sort_unstable_by_key(|entry| entry.0);
     let sum: f32 = entries.iter().map(|entry| entry.1).sum();
-    Some(CounterData { entries, sum })
+    Some(CounterData::new(entries, sum))
 }
 
 pub(crate) fn increment_df_from_counter(
@@ -158,7 +158,7 @@ pub(crate) fn increment_df_from_counter(
     df_map: &mut HashMap<u64, usize>,
 ) {
     if let Some(counter_data) = counter.as_ref() {
-        for (hash, _count) in counter_data.entries.iter() {
+        for (hash, _count) in counter_data.iter() {
             *df_map.entry(*hash).or_insert(0) += 1;
         }
     }

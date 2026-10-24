@@ -3123,7 +3123,7 @@ fn raw_arrow_component_summary_for_members<S: AsRef<str>>(
 fn raw_arrow_counter_present(counter: &Option<CounterData>) -> bool {
     counter
         .as_ref()
-        .is_some_and(|values| !values.entries.is_empty())
+        .is_some_and(|values| !values.is_empty())
 }
 
 #[pyfunction]

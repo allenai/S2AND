@@ -460,6 +460,87 @@ fn for_each_common<T>(
     }
 }
 
+/// Gram entries compared per side per step by `for_each_common_gram_avx2`.
+const GRAM_BLOCK: usize = 8;
+
+/// Call `on_common(key, count1, count2)` for every gram key two sorted,
+/// key-distinct gram lists share, in increasing key order, as
+/// `for_each_common` does.
+///
+/// Eight keys per side are compared all against all per step. A step with no
+/// equal keys only advances; matches are reported lane by lane in key order,
+/// so callers that read other sorted lists by key see the same sequence.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn for_each_common_gram_avx2(
+    grams1: &[(u32, u32)],
+    grams2: &[(u32, u32)],
+    on_common: &mut impl FnMut(u32, u32, u32),
+) {
+    use std::arch::x86_64::*;
+    debug_assert!(grams1.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    debug_assert!(grams2.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    // (key, count) pairs are 8 bytes; gather keys into lanes 0..4 and counts into 4..8.
+    let split = _mm256_setr_epi32(0, 2, 4, 6, 1, 3, 5, 7);
+    let load = |grams: &[(u32, u32)], at: usize| -> (__m256i, __m256i) {
+        let low = _mm256_permutevar8x32_epi32(
+            _mm256_loadu_si256(grams.as_ptr().add(at) as *const __m256i),
+            split,
+        );
+        let high = _mm256_permutevar8x32_epi32(
+            _mm256_loadu_si256(grams.as_ptr().add(at + 4) as *const __m256i),
+            split,
+        );
+        (
+            _mm256_permute2x128_si256::<0x20>(low, high),
+            _mm256_permute2x128_si256::<0x31>(low, high),
+        )
+    };
+    let lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    let (n1, n2) = (grams1.len(), grams2.len());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i + GRAM_BLOCK <= n1 && j + GRAM_BLOCK <= n2 {
+        let (keys1, _) = load(grams1, i);
+        let (keys2, _) = load(grams2, j);
+        // masks[r] bit l: key1 lane l equals key2 lane (l + r) % 8.
+        let mut masks = [0u32; GRAM_BLOCK];
+        let mut any = 0u32;
+        for (rotation, mask) in masks.iter_mut().enumerate() {
+            let index = _mm256_and_si256(
+                _mm256_add_epi32(lanes, _mm256_set1_epi32(rotation as i32)),
+                _mm256_set1_epi32(7),
+            );
+            let rotated = _mm256_permutevar8x32_epi32(keys2, index);
+            *mask = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(keys1, rotated))) as u32;
+            any |= *mask;
+        }
+        while any != 0 {
+            let lane = any.trailing_zeros() as usize;
+            any &= any - 1;
+            let rotation = masks
+                .iter()
+                .position(|mask| mask & (1 << lane) != 0)
+                .expect("a set lane has a rotation");
+            let (key, count1) = *grams1.get_unchecked(i + lane);
+            let (_, count2) = *grams2.get_unchecked(j + (lane + rotation) % GRAM_BLOCK);
+            on_common(key, count1, count2);
+        }
+        let last1 = grams1.get_unchecked(i + GRAM_BLOCK - 1).0;
+        let last2 = grams2.get_unchecked(j + GRAM_BLOCK - 1).0;
+        i += GRAM_BLOCK * usize::from(last1 <= last2);
+        j += GRAM_BLOCK * usize::from(last2 <= last1);
+    }
+    while i < n1 && j < n2 {
+        let (key1, count1) = *grams1.get_unchecked(i);
+        let (key2, count2) = *grams2.get_unchecked(j);
+        if key1 == key2 {
+            on_common(key1, count1, count2);
+        }
+        i += usize::from(key1 <= key2);
+        j += usize::from(key2 <= key1);
+    }
+}
+
 /// Counts of a sorted gram list, looked up with nondecreasing keys.
 struct OwnGramCursor<'a> {
     grams: &'a [(u32, u32)],
@@ -503,16 +584,36 @@ fn removed_gram_jaccard(
         next: 0,
     };
     let mut intersection = 0u64;
-    for_each_common(
-        &paper1.grams,
-        &paper2.grams,
-        |(key, _)| *key,
-        |(key, count1), (_, count2)| {
-            let count1 = count1 - own1.count(*key);
-            let count2 = count2 - own2.count(*key);
-            intersection += u64::from(count1.min(count2));
-        },
-    );
+    let mut add = |key: u32, count1: u32, count2: u32| {
+        let count1 = count1 - own1.count(key);
+        let count2 = count2 - own2.count(key);
+        intersection += u64::from(count1.min(count2));
+    };
+    let (shorter, longer) = if paper1.grams.len() <= paper2.grams.len() {
+        (paper1.grams.len(), paper2.grams.len())
+    } else {
+        (paper2.grams.len(), paper1.grams.len())
+    };
+    #[cfg(target_arch = "x86_64")]
+    let use_simd = shorter >= GRAM_BLOCK
+        && longer < shorter.saturating_mul(4)
+        && std::arch::is_x86_feature_detected!("avx2");
+    #[cfg(not(target_arch = "x86_64"))]
+    let use_simd = false;
+    if use_simd {
+        // SAFETY: AVX2 was detected above.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            for_each_common_gram_avx2(&paper1.grams, &paper2.grams, &mut add)
+        };
+    } else {
+        for_each_common(
+            &paper1.grams,
+            &paper2.grams,
+            |(key, _)| *key,
+            |(key, count1), (_, count2)| add(*key, *count1, *count2),
+        );
+    }
     let intersection = intersection as f64;
     let union = f64::from(sum1) + f64::from(sum2) - intersection;
     let score = intersection / union.min(GRAM_SIMILARITY_DENOMINATOR_MAX);
@@ -567,7 +668,7 @@ mod tests {
             .collect();
         entries.sort_unstable_by_key(|entry| entry.0);
         let sum: f32 = entries.iter().map(|entry| entry.1).sum();
-        Some(CounterData { entries, sum })
+        Some(CounterData::new(entries, sum))
     }
 
     fn reference_coauthors(
@@ -778,6 +879,41 @@ mod tests {
         assert!(missing.iter().all(|count| *count > 0), "{missing:?}");
         assert!(fractional[0] > 100 && fractional[2] > 100, "{fractional:?}");
         assert_eq!(fractional[1] > 100, grams_expected == 1, "{fractional:?}");
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn avx2_gram_matches_equal_the_merge_in_order() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut rng = Lcg(23);
+        for _ in 0..5_000 {
+            let universe = 1 + rng.below(3_000) as u32;
+            let mut make = |rng: &mut Lcg| {
+                let len = rng.below(700);
+                let mut keys: Vec<u32> = (0..len).map(|_| rng.below(universe as usize) as u32).collect();
+                keys.sort_unstable();
+                keys.dedup();
+                keys.into_iter()
+                    .map(|key| (key, 1 + rng.below(9) as u32))
+                    .collect::<Vec<_>>()
+            };
+            let first = make(&mut rng);
+            let second = make(&mut rng);
+            let mut expected = Vec::new();
+            for_each_common(&first, &second, |(key, _)| *key, |(key, count1), (_, count2)| {
+                expected.push((*key, *count1, *count2));
+            });
+            let mut observed = Vec::new();
+            // SAFETY: AVX2 was detected above.
+            unsafe {
+                for_each_common_gram_avx2(&first, &second, &mut |key, count1, count2| {
+                    observed.push((key, count1, count2));
+                });
+            }
+            assert_eq!(observed, expected);
+        }
     }
 
     #[test]

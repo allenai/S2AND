@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 from collections.abc import Iterable, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -162,6 +164,27 @@ def build_rust_featurizer_from_planner(
         preprocess=bool(preprocess),
         num_threads=None if num_threads is None else resolve_n_jobs(num_threads),
     )
+
+
+@dataclass(frozen=True)
+class HeldRowFeaturizer:
+    """A featurizer over some signatures of an Arrow dataset, built without seed sidecars.
+
+    A view with a call's seed sidecars (``view_with_cluster_seed_sidecars``)
+    equals ``build_rust_featurizer_from_arrow_dataset`` over a subset of
+    ``signature_ids`` with ``name_tuples`` and those sidecars.
+    """
+
+    arrow_dataset: ArrowDataset
+    name_tuples: Any
+    signature_ids: frozenset[str]
+    featurizer: Any
+
+
+# Set by the incremental step around residual clustering. Residuals are a few
+# of the request's queries, whose rows the planner held, while an Arrow build
+# rescans the block's tables to find them.
+RESIDUAL_FEATURIZER: ContextVar[HeldRowFeaturizer | None] = ContextVar("s2and_residual_featurizer", default=None)
 
 
 def _arrow_signature_ids(arrow_dataset: ArrowDataset) -> set[str]:
@@ -427,17 +450,20 @@ def _get_rust_feature_data(dataset: ANDData) -> Any:
         return featurizer
 
 
-def release_rust_handle(handle: Any) -> None:
+def release_rust_handle(handle: Any, *, num_threads: int | None = None) -> None:
     """Release native state, freeing paper buffers before background cleanup.
 
-    Featurizers free paper buffers before residual scoring can allocate its matrix.
-    Remaining metadata can finish in the background. Handles without `release`
-    are left to the garbage collector.
+    Featurizers free paper buffers before residual scoring can allocate its matrix,
+    on a pool of ``num_threads`` when given. Remaining metadata can finish in the
+    background. Handles without `release` are left to the garbage collector.
     """
 
     release = getattr(handle, "release", None)
     if callable(release):
-        release()
+        if num_threads is None:
+            release()
+        else:
+            release(num_threads=num_threads)
 
 
 def evict_rust_featurizer(dataset: ANDData) -> bool:

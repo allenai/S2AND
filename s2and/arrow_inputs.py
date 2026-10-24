@@ -385,15 +385,24 @@ def arrow_string_array(values: Sequence[str]) -> Any:
     """
     import pyarrow as pa
 
-    encoded = [value.encode("utf-8") for value in values]
-    offsets = np.zeros(len(encoded) + 1, dtype=np.int64)
-    np.cumsum([len(value) for value in encoded], out=offsets[1:])
+    # ASCII strings, the usual ids, have one byte per character, so one join
+    # and one encode give the buffers that per-string encoding would.
+    joined = "".join(values)
+    if joined.isascii():
+        data = joined.encode("ascii")
+        lengths = np.fromiter(map(len, values), dtype=np.int64, count=len(values))
+    else:
+        encoded = [value.encode("utf-8") for value in values]
+        data = b"".join(encoded)
+        lengths = np.fromiter(map(len, encoded), dtype=np.int64, count=len(encoded))
+    offsets = np.zeros(len(values) + 1, dtype=np.int64)
+    np.cumsum(lengths, out=offsets[1:])
     if offsets[-1] > np.iinfo(np.int32).max:
         raise ValueError(f"Arrow string array needs {int(offsets[-1])} bytes, more than 32-bit offsets allow")
     return pa.StringArray.from_buffers(
-        len(encoded),
+        len(values),
         pa.py_buffer(offsets.astype(np.int32)),
-        pa.py_buffer(b"".join(encoded)),
+        pa.py_buffer(data),
     )
 
 

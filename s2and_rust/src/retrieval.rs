@@ -357,6 +357,369 @@ impl RustHybridCentroidRetriever {
     /// block of queries. Queries are converted to f64 once, and each vector
     /// chunk is converted once for a group of up to four queries; the old
     /// per-pair calls repeated both conversions for every summary.
+    /// Upper bounds of each query's SPECTER score against every summary.
+    ///
+    /// The exact score (`specter_score_rows`) is the largest of 0.0 and the
+    /// cosines of the summary's vectors, NaN cosines ignored. Here each cosine
+    /// comes from an f32 lane dot product plus `f32_dot_relative_error_bound`,
+    /// so every bound is at or above the exact score. Summaries with more
+    /// vectors than the fused kernel holds get an infinite bound.
+    pub(crate) fn specter_score_upper_bounds(
+        &self,
+        queries: &[RetrievalQueryData],
+    ) -> Vec<Vec<f32>> {
+        let mut rows = vec![vec![0.0f32; self.summaries.len()]; queries.len()];
+        for (index, summary) in self.summaries.iter().enumerate() {
+            let centroid = match (
+                summary.specter_centroid.as_ref(),
+                summary.specter_centroid_norm,
+            ) {
+                (Some(vector), Some(norm)) => Some((&vector[..], norm)),
+                _ => None,
+            };
+            if summary.exemplar_vectors.len() + usize::from(centroid.is_some()) > 5 {
+                for row in rows.iter_mut() {
+                    row[index] = f32::INFINITY;
+                }
+                continue;
+            }
+            let mut vectors: [&[f32]; 5] = [&[]; 5];
+            let mut norms = [0.0f64; 5];
+            let mut count = 0;
+            if let Some((vector, norm)) = centroid {
+                vectors[0] = vector;
+                norms[0] = norm;
+                count = 1;
+            }
+            for (vector, norm) in summary
+                .exemplar_vectors
+                .iter()
+                .zip(summary.exemplar_norms.iter())
+            {
+                vectors[count] = &vector[..];
+                norms[count] = *norm;
+                count += 1;
+            }
+            // Queries with a vector of the summary vectors' common length go two
+            // at a time; any other query takes its own pass.
+            let common_length = (count > 0
+                && vectors[..count].iter().all(|v| v.len() == vectors[0].len()))
+            .then(|| vectors[0].len());
+            let bound_of = |dots: &[f32; 5], slots: &[usize], query_norm: f64, len: usize| -> f32 {
+                let error = f32_dot_relative_error_bound(len);
+                let mut bound = 0.0f64;
+                for (position, slot) in slots.iter().enumerate() {
+                    let norm = norms[*slot];
+                    let cosine = if query_norm == 0.0 || norm == 0.0 {
+                        0.0
+                    } else {
+                        f64::from(dots[position]) / (query_norm * norm) + error
+                    };
+                    bound = bound.max(cosine);
+                }
+                f32_at_or_above(bound)
+            };
+            let all_slots = [0usize, 1, 2, 3, 4];
+            let mut pending: Option<(usize, &[f32], f64)> = None;
+            for (row_index, query) in queries.iter().enumerate() {
+                let (Some(values), Some(query_norm)) = (query.specter.as_ref(), query.specter_norm)
+                else {
+                    // The exact score is 0.0 without a query vector.
+                    continue;
+                };
+                let values: &[f32] = values;
+                if common_length == Some(values.len()) {
+                    match pending.take() {
+                        Some((first_row, first_values, first_norm)) => {
+                            let (first_dots, second_dots) =
+                                f32_lane_dots_pair(first_values, values, &vectors[..count]);
+                            rows[first_row][index] = bound_of(
+                                &first_dots,
+                                &all_slots[..count],
+                                first_norm,
+                                values.len(),
+                            );
+                            rows[row_index][index] = bound_of(
+                                &second_dots,
+                                &all_slots[..count],
+                                query_norm,
+                                values.len(),
+                            );
+                        }
+                        None => pending = Some((row_index, values, query_norm)),
+                    }
+                    continue;
+                }
+                let len = values.len();
+                let mut same_length: [&[f32]; 5] = [&[]; 5];
+                let mut slots = [0usize; 5];
+                let mut matched = 0;
+                for slot in 0..count {
+                    if vectors[slot].len() == len {
+                        same_length[matched] = vectors[slot];
+                        slots[matched] = slot;
+                        matched += 1;
+                    }
+                }
+                let dots = f32_lane_dots(values, &same_length[..matched]);
+                rows[row_index][index] = bound_of(&dots, &slots[..matched], query_norm, len);
+            }
+            if let Some((row_index, values, query_norm)) = pending {
+                let dots = f32_lane_dots(values, &vectors[..count]);
+                rows[row_index][index] =
+                    bound_of(&dots, &all_slots[..count], query_norm, values.len());
+            }
+        }
+        rows
+    }
+
+    /// Every summary's first names, interned.
+    pub(crate) fn first_name_index(&self) -> FirstNameIndex {
+        let mut ids: HashMap<&str, u32> = HashMap::default();
+        let mut names: Vec<String> = Vec::new();
+        let summary_names = self
+            .summaries
+            .iter()
+            .map(|summary| {
+                summary
+                    .first_name_counts
+                    .iter()
+                    .filter(|(first_name, _)| py_len_above_one(first_name))
+                    .map(|(first_name, count)| {
+                        let id = *ids.entry(first_name.as_str()).or_insert_with(|| {
+                            names.push(first_name.clone());
+                            (names.len() - 1) as u32
+                        });
+                        (id, (*count as f64) / (summary.size.max(1) as f64))
+                    })
+                    .collect()
+            })
+            .collect();
+        FirstNameIndex {
+            names,
+            summary_names,
+        }
+    }
+
+    /// The middle-initial and first-name part of the hybrid score of every
+    /// summary for `query`: weight times score, as `hybrid_centroid_score`
+    /// adds them. First names come from `index` (`first_name_index`).
+    #[cfg(test)]
+    pub(crate) fn name_score_terms_indexed(
+        &self,
+        query: &RetrievalQueryData,
+        index: &FirstNameIndex,
+    ) -> Vec<f64> {
+        self.name_score_terms_with_middle(query, index, &self.middle_terms(query))
+    }
+
+    /// `name_score_terms_indexed`, with middle-initial terms from `cache`.
+    pub(crate) fn name_score_terms_cached(
+        &self,
+        query: &RetrievalQueryData,
+        index: &FirstNameIndex,
+        cache: &mut MiddleTermCache,
+    ) -> Vec<f64> {
+        let position = cache
+            .entries
+            .iter()
+            .position(|(has_full_first, hashes, _)| {
+                *has_full_first == query.has_full_first && *hashes == query.middle_initial_hashes
+            })
+            .unwrap_or_else(|| {
+                if cache.entries.len() == MIDDLE_TERM_CACHE_ENTRIES {
+                    cache.entries.remove(0);
+                }
+                cache.entries.push((
+                    query.has_full_first,
+                    query.middle_initial_hashes.clone(),
+                    self.middle_terms(query),
+                ));
+                cache.entries.len() - 1
+            });
+        self.name_score_terms_with_middle(query, index, &cache.entries[position].2)
+    }
+
+    /// Weight times middle-initial score of every summary for `query`.
+    fn middle_terms(&self, query: &RetrievalQueryData) -> Vec<f64> {
+        let weights = if query.has_full_first {
+            DEFAULT_HYBRID_CENTROID_WEIGHTS
+        } else {
+            DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS
+        };
+        self.summaries
+            .iter()
+            .map(|summary| {
+                weights.middle
+                    * middle_initial_score_hashes(
+                        &query.middle_initial_hashes,
+                        &summary.middle_initial_counts,
+                        summary.size,
+                    )
+            })
+            .collect()
+    }
+
+    /// Name terms from each summary's precomputed middle-initial term.
+    fn name_score_terms_with_middle(
+        &self,
+        query: &RetrievalQueryData,
+        index: &FirstNameIndex,
+        middle_terms: &[f64],
+    ) -> Vec<f64> {
+        let weights = if query.has_full_first {
+            DEFAULT_HYBRID_CENTROID_WEIGHTS
+        } else {
+            DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS
+        };
+        let mode = if query.has_full_first {
+            RetrievalFirstNameMode::ExactThenPrefixHalf
+        } else {
+            RetrievalFirstNameMode::Prefix
+        };
+        let factors = if py_len_above_one(&query.first) && weights.first_name != 0.0 {
+            Some(index.factors(&query.first, mode))
+        } else {
+            None
+        };
+        self.summaries
+            .iter()
+            .zip(&index.summary_names)
+            .zip(middle_terms)
+            .map(|((summary, names), middle_term)| {
+                let first_name_score = match factors.as_ref() {
+                    Some(factors) if summary.size > 0 => names
+                        .iter()
+                        .map(|(id, share)| share * factors[*id as usize])
+                        .fold(0.0f64, f64::max),
+                    _ => 0.0,
+                };
+                middle_term + weights.first_name * first_name_score
+            })
+            .collect()
+    }
+
+    /// `name_score_terms_indexed` without a shared index; tests compare them.
+    #[cfg(test)]
+    pub(crate) fn name_score_terms(&self, query: &RetrievalQueryData) -> Vec<f64> {
+        let weights = if query.has_full_first {
+            DEFAULT_HYBRID_CENTROID_WEIGHTS
+        } else {
+            DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS
+        };
+        let mode = if query.has_full_first {
+            RetrievalFirstNameMode::ExactThenPrefixHalf
+        } else {
+            RetrievalFirstNameMode::Prefix
+        };
+        self.summaries
+            .iter()
+            .map(|summary| {
+                weights.middle
+                    * middle_initial_score_hashes(
+                        &query.middle_initial_hashes,
+                        &summary.middle_initial_counts,
+                        summary.size,
+                    )
+                    + weights.first_name
+                        * first_name_score_mode(
+                            &query.first,
+                            &summary.first_name_counts,
+                            summary.size,
+                            mode,
+                        )
+            })
+            .collect()
+    }
+
+    /// The top `top_k` candidates by exact score, scoring exactly only those
+    /// whose upper bound can reach the k-th exact score.
+    ///
+    /// A candidate's bound adds its exact overlap terms, its name terms and
+    /// the weighted SPECTER bound, plus slack for summation order. The first
+    /// exact pass scores the candidates with the highest bounds and takes
+    /// their k-th f32 score `t`. Any candidate in the final top k has an f32
+    /// score at or above `t`, so an exact score above `t` minus one f32 ulp,
+    /// so a bound at least that high; every such candidate is scored exactly.
+    /// The ranking then matches `score_top_k_candidate_indices_default_inner`.
+    fn score_top_k_bounded(
+        &self,
+        query_data: &RetrievalQueryData,
+        candidate_indices: &[usize],
+        top_k: usize,
+        specter_upper_bounds: &[f32],
+        name_terms: &[f64],
+    ) -> Vec<(usize, f32)> {
+        if top_k == 0 || candidate_indices.is_empty() {
+            return Vec::new();
+        }
+        let prepared = self.prepare_query(query_data);
+        let overlaps =
+            self.overlap_index()
+                .component_overlaps(query_data, &prepared, self.summaries.len());
+        let weights = if query_data.has_full_first {
+            DEFAULT_HYBRID_CENTROID_WEIGHTS
+        } else {
+            DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS
+        };
+        let exact = |idx: usize| {
+            (
+                idx,
+                self.score_candidate(query_data, &prepared, &overlaps, idx, None, None, None),
+            )
+        };
+        if candidate_indices.len() <= top_k {
+            let mut scored: Vec<(usize, f32)> =
+                candidate_indices.iter().map(|idx| exact(*idx)).collect();
+            self.keep_sorted_top_k_scored_candidates(&mut scored, top_k, None, None);
+            return scored;
+        }
+        // Most components share no term with the query. Their overlap scores
+        // are exactly zero, so the bound skips reading their summaries.
+        let zero_overlaps_score_zero = prepared.zero_numerators_score_zero();
+        let mut bounds: Vec<(f64, usize)> = candidate_indices
+            .iter()
+            .map(|&idx| {
+                let overlap = &overlaps[idx];
+                let (coauthor, affiliation) =
+                    if zero_overlaps_score_zero && overlap.has_zero_numerators() {
+                        (0.0, 0.0)
+                    } else {
+                        overlap_scores(query_data, &prepared, &self.summaries[idx], overlap)
+                    };
+                let bound = weights.centroid * f64::from(specter_upper_bounds[idx])
+                    + weights.coauthor * coauthor
+                    + weights.affiliation * affiliation
+                    + name_terms[idx];
+                // Slack for summing in a different order than the exact score.
+                (bound + 1e-9 * (1.0 + bound.abs()), idx)
+            })
+            .collect();
+        let first_pass = (4 * top_k).max(top_k + 16).min(bounds.len());
+        bounds.select_nth_unstable_by(first_pass - 1, |left, right| right.0.total_cmp(&left.0));
+        let mut scored: Vec<(usize, f32)> = bounds[..first_pass]
+            .iter()
+            .map(|(_, idx)| exact(*idx))
+            .collect();
+        let mut kth = scored.clone();
+        self.keep_sorted_top_k_scored_candidates(&mut kth, top_k, None, None);
+        if let Some(&(_, threshold)) = kth.last().filter(|_| kth.len() == top_k) {
+            let spacing = f64::from(threshold.abs().next_up() - threshold.abs());
+            let cutoff = f64::from(threshold) - 2.0 * spacing;
+            scored.extend(
+                bounds[first_pass..]
+                    .iter()
+                    .filter(|(bound, _)| *bound >= cutoff || bound.is_nan())
+                    .map(|(_, idx)| exact(*idx)),
+            );
+        } else {
+            scored.extend(bounds[first_pass..].iter().map(|(_, idx)| exact(*idx)));
+        }
+        self.keep_sorted_top_k_scored_candidates(&mut scored, top_k, None, None);
+        scored
+    }
+
+    #[cfg(test)]
     pub(crate) fn specter_score_rows(&self, queries: &[RetrievalQueryData]) -> Vec<Vec<f64>> {
         let mut rows = vec![vec![0.0f64; self.summaries.len()]; queries.len()];
         let prepared: Vec<Option<(Vec<f64>, f64)>> = queries
@@ -667,7 +1030,7 @@ impl RustHybridCentroidRetriever {
         excluded_candidate_indices: Option<&HashSet<usize>>,
         component_member_indices: &HashMap<String, Vec<u32>>,
         top_k: usize,
-        specter_scores: Option<&[f64]>,
+        scoring: PlanScoring<'_>,
     ) -> Result<RetrievalPairPlanQueryResult, RetrievalError> {
         let selection =
             self.candidate_indices_for_pair_plan_query(current_query, excluded_candidate_indices);
@@ -679,14 +1042,35 @@ impl RustHybridCentroidRetriever {
         } else {
             top_k
         };
-        let scored = self.score_top_k_candidate_indices_default_inner(
-            current_query,
-            &selection.indices,
-            effective_top_k,
-            None,
-            None,
-            specter_scores,
-        );
+        let scored = match scoring {
+            PlanScoring::Bounded {
+                specter_upper_bounds,
+                name_terms,
+            } if !selection.return_all => self.score_top_k_bounded(
+                current_query,
+                &selection.indices,
+                effective_top_k,
+                specter_upper_bounds,
+                name_terms,
+            ),
+            PlanScoring::Bounded { .. } => self.score_top_k_candidate_indices_default_inner(
+                current_query,
+                &selection.indices,
+                effective_top_k,
+                None,
+                None,
+                None,
+            ),
+            #[cfg(test)]
+            PlanScoring::Exact(specter_scores) => self.score_top_k_candidate_indices_default_inner(
+                current_query,
+                &selection.indices,
+                effective_top_k,
+                None,
+                None,
+                specter_scores,
+            ),
+        };
 
         let mut result = RetrievalPairPlanQueryResult::default();
         let (query_year, query_year_missing) = year_signal_value(current_query.year, "query year")?;
@@ -967,6 +1351,223 @@ pub(crate) const AFFILIATION_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalO
     multi_token_weight: 1.0,
 };
 
+/// The summaries' first names, interned, for computing first-name terms of
+/// many summaries with one string comparison per distinct name.
+pub(crate) struct FirstNameIndex {
+    names: Vec<String>,
+    /// Per summary: `(name id, share of the summary)` for names longer than
+    /// one character, as `first_name_score_mode` counts them.
+    summary_names: Vec<Vec<(u32, f64)>>,
+}
+
+impl FirstNameIndex {
+    /// Per name id, the factor `first_name_score_mode` applies to its share
+    /// for `query_first` in `mode`: 1.0, 0.5 or 0.0.
+    fn factors(&self, query_first: &str, mode: RetrievalFirstNameMode) -> Vec<f64> {
+        self.names
+            .iter()
+            .map(|first_name| match mode {
+                RetrievalFirstNameMode::Prefix => {
+                    if same_prefix_tokens(query_first, first_name) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                RetrievalFirstNameMode::ExactThenPrefixHalf => {
+                    if exact_name_match_compat(query_first, first_name) {
+                        1.0
+                    } else if same_prefix_tokens(query_first, first_name) {
+                        0.5
+                    } else {
+                        0.0
+                    }
+                }
+            })
+            .collect()
+    }
+}
+
+/// Middle-initial terms most recently computed for one block of queries.
+/// Queries sorted by name key change first names often and middle initials
+/// rarely, so a few entries serve most of a block.
+#[derive(Default)]
+pub(crate) struct MiddleTermCache {
+    entries: Vec<(bool, Vec<u64>, Vec<f64>)>,
+}
+
+/// Entries a `MiddleTermCache` keeps; each holds one value per summary.
+const MIDDLE_TERM_CACHE_ENTRIES: usize = 4;
+
+/// How a pair-plan query scores its candidates.
+pub(crate) enum PlanScoring<'a> {
+    /// Every candidate's exact score; `Some` holds the query's precomputed
+    /// SPECTER scores of every summary (`specter_score_rows`). Tests compare
+    /// the bounded scoring against it.
+    #[cfg(test)]
+    Exact(Option<&'a [f64]>),
+    /// Exact scores of the candidates whose upper bound can reach the top k:
+    /// `specter_upper_bounds` from `specter_score_upper_bounds`, and
+    /// `name_terms` from `name_score_terms` for the query's name key.
+    Bounded {
+        specter_upper_bounds: &'a [f32],
+        name_terms: &'a [f64],
+    },
+}
+
+/// The query fields the middle-initial and first-name retrieval terms read.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct QueryNameKey {
+    first: String,
+    has_full_first: bool,
+    middle_initial_hashes: Vec<u64>,
+}
+
+impl QueryNameKey {
+    pub(crate) fn of(query: &RetrievalQueryData) -> Self {
+        Self {
+            first: query.first.clone(),
+            has_full_first: query.has_full_first,
+            middle_initial_hashes: query.middle_initial_hashes.clone(),
+        }
+    }
+}
+
+/// Bound of `|lane f32 dot - exact dot| / (|q| |v|)` for vectors of `len`.
+///
+/// Each of the `DOT_LANES` lanes sums `len / DOT_LANES` products, and three
+/// pairwise steps fold the lanes, so the classic bound is `gamma_m` with
+/// `m = len / DOT_LANES + 4` and `gamma_m ~ m * 2^-24`, times the sum of
+/// absolute products, which is at most `|q| |v|`. This returns four times that.
+fn f32_dot_relative_error_bound(len: usize) -> f64 {
+    let m = len.div_ceil(DOT_LANES) + 4;
+    2.0 * m as f64 * f64::from(f32::EPSILON)
+}
+
+/// Lane f32 dot products of one query with up to five vectors of its length.
+fn f32_lane_dots(query: &[f32], vectors: &[&[f32]]) -> [f32; 5] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            // SAFETY: the running CPU supports AVX2 and FMA.
+            return unsafe { f32_lane_dots_avx2(query, vectors) };
+        }
+    }
+    let mut sums = [0.0f32; 5];
+    let len = query.len();
+    for (slot, vector) in vectors.iter().enumerate() {
+        let mut lanes = [0.0f32; DOT_LANES];
+        for (index, (q, v)) in query.iter().zip(&vector[..len]).enumerate() {
+            lanes[index % DOT_LANES] += q * v;
+        }
+        sums[slot] = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
+            + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
+    }
+    sums
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn f32_lane_dots_avx2(query: &[f32], vectors: &[&[f32]]) -> [f32; 5] {
+    use std::arch::x86_64::{
+        _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_setzero_ps, _mm256_storeu_ps,
+    };
+    let len = query.len();
+    let body = len - len % DOT_LANES;
+    let count = vectors.len().min(5);
+    let mut acc = [_mm256_setzero_ps(); 5];
+    let mut start = 0;
+    while start < body {
+        let q = _mm256_loadu_ps(query.as_ptr().add(start));
+        for slot in 0..count {
+            let v = _mm256_loadu_ps(vectors[slot].as_ptr().add(start));
+            acc[slot] = _mm256_fmadd_ps(q, v, acc[slot]);
+        }
+        start += DOT_LANES;
+    }
+    let mut sums = [0.0f32; 5];
+    for slot in 0..count {
+        let mut lanes = [0.0f32; DOT_LANES];
+        _mm256_storeu_ps(lanes.as_mut_ptr(), acc[slot]);
+        for index in body..len {
+            lanes[index % DOT_LANES] += query[index] * vectors[slot][index];
+        }
+        sums[slot] = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
+            + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
+    }
+    sums
+}
+
+/// `f32_lane_dots` of two queries of one length against the same vectors,
+/// sharing each vector load.
+fn f32_lane_dots_pair(first: &[f32], second: &[f32], vectors: &[&[f32]]) -> ([f32; 5], [f32; 5]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            // SAFETY: the running CPU supports AVX2 and FMA.
+            return unsafe { f32_lane_dots_pair_avx2(first, second, vectors) };
+        }
+    }
+    (
+        f32_lane_dots(first, vectors),
+        f32_lane_dots(second, vectors),
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn f32_lane_dots_pair_avx2(
+    first: &[f32],
+    second: &[f32],
+    vectors: &[&[f32]],
+) -> ([f32; 5], [f32; 5]) {
+    use std::arch::x86_64::{
+        _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_setzero_ps, _mm256_storeu_ps,
+    };
+    let len = first.len();
+    let body = len - len % DOT_LANES;
+    let count = vectors.len().min(5);
+    let mut acc_first = [_mm256_setzero_ps(); 5];
+    let mut acc_second = [_mm256_setzero_ps(); 5];
+    let mut start = 0;
+    while start < body {
+        let q1 = _mm256_loadu_ps(first.as_ptr().add(start));
+        let q2 = _mm256_loadu_ps(second.as_ptr().add(start));
+        for slot in 0..count {
+            let v = _mm256_loadu_ps(vectors[slot].as_ptr().add(start));
+            acc_first[slot] = _mm256_fmadd_ps(q1, v, acc_first[slot]);
+            acc_second[slot] = _mm256_fmadd_ps(q2, v, acc_second[slot]);
+        }
+        start += DOT_LANES;
+    }
+    let fold = |acc: &[std::arch::x86_64::__m256; 5], query: &[f32]| {
+        let mut sums = [0.0f32; 5];
+        for slot in 0..count {
+            let mut lanes = [0.0f32; DOT_LANES];
+            _mm256_storeu_ps(lanes.as_mut_ptr(), acc[slot]);
+            for index in body..len {
+                lanes[index % DOT_LANES] += query[index] * vectors[slot][index];
+            }
+            sums[slot] = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
+                + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
+        }
+        sums
+    };
+    (fold(&acc_first, first), fold(&acc_second, second))
+}
+
+/// The smallest f32 at or above `value`.
+fn f32_at_or_above(value: f64) -> f32 {
+    let rounded = value as f32;
+    if f64::from(rounded) < value {
+        rounded.next_up()
+    } else {
+        rounded
+    }
+}
+
 /// Independent partial sums per dot product; a multiple of every SIMD width.
 const DOT_LANES: usize = 8;
 
@@ -1050,6 +1651,7 @@ fn fold_lanes(partial: &[f64; DOT_LANES], query: &[f32], vector: &[f32], body: u
 /// same order. Widening f32 to f64 is exact, so the query and the vectors are
 /// widened once and the results match bit for bit. Every vector has the
 /// query's length.
+#[cfg(test)]
 fn vector_group_dot_products(query: &[f64], vectors: &[&[f64]]) -> [f64; 5] {
     fn pad<const N: usize>(values: [f64; N]) -> [f64; 5] {
         let mut padded = [0.0f64; 5];
@@ -1075,6 +1677,7 @@ fn vector_group_dot_products(query: &[f64], vectors: &[&[f64]]) -> [f64; 5] {
     }
 }
 
+#[cfg(test)]
 fn vector_group_dots<const V: usize>(query: &[f64], vectors: [&[f64]; V]) -> [f64; V] {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1089,6 +1692,7 @@ fn vector_group_dots<const V: usize>(query: &[f64], vectors: [&[f64]; V]) -> [f6
 /// `vector_group_dots` with AVX2 intrinsics: the query chunk is loaded once
 /// for all vectors, and each vector's lanes 0-3 and 4-7 take the same separate
 /// multiply and add as the portable code.
+#[cfg(test)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn vector_group_dots_avx2<const V: usize>(query: &[f64], vectors: [&[f64]; V]) -> [f64; V] {
@@ -1122,6 +1726,7 @@ unsafe fn vector_group_dots_avx2<const V: usize>(query: &[f64], vectors: [&[f64]
     sums
 }
 
+#[cfg(test)]
 #[inline(always)]
 fn grouped_dots_portable<const Q: usize>(queries: [&[f64]; Q], vector: &[f64]) -> [f64; Q] {
     let len = vector.len();
@@ -1144,6 +1749,7 @@ fn grouped_dots_portable<const Q: usize>(queries: [&[f64]; Q], vector: &[f64]) -
 }
 
 /// `fold_lanes` for a query and a vector already widened to f64.
+#[cfg(test)]
 #[inline(always)]
 fn fold_lanes_f64(partial: &[f64; DOT_LANES], query: &[f64], vector: &[f64], body: usize) -> f64 {
     let mut sum = ((partial[0] + partial[1]) + (partial[2] + partial[3]))
@@ -1946,6 +2552,30 @@ mod overlap_index_tests {
             .map(|summary| (summary.component_key.clone(), Vec::new()))
             .collect();
         let mut ties = 0;
+        // One cache across queries with varied middle initials (keys of the
+        // summaries' middle-initial counters) exercises its lookups and evictions.
+        let first_names = retriever.first_name_index();
+        let mut middle_terms = MiddleTermCache::default();
+        let mut rng = Lcg(31);
+        for mut query in synthetic_queries().into_iter().cycle().take(60) {
+            let mut hashes: Vec<u64> = (0..rng.below(3)).map(|_| rng.below(4)).collect();
+            hashes.sort_unstable();
+            hashes.dedup();
+            query.middle_initial_hashes = hashes;
+            let cached_terms =
+                retriever.name_score_terms_cached(&query, &first_names, &mut middle_terms);
+            assert_eq!(
+                cached_terms
+                    .iter()
+                    .map(|term| term.to_bits())
+                    .collect::<Vec<_>>(),
+                retriever
+                    .name_score_terms(&query)
+                    .iter()
+                    .map(|term| term.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
         for query in synthetic_queries() {
             let expected = reference_ranking(&retriever, &query);
             ties += expected
@@ -1954,8 +2584,57 @@ mod overlap_index_tests {
                 .count();
             for top_k in [1usize, 25, expected.len()] {
                 let result = retriever
-                    .build_pair_plan_query_result(&query, "anna", 0, None, &members, top_k, None)
+                    .build_pair_plan_query_result(
+                        &query,
+                        "anna",
+                        0,
+                        None,
+                        &members,
+                        top_k,
+                        PlanScoring::Exact(None),
+                    )
                     .expect("plan row");
+                let bounds = retriever.specter_score_upper_bounds(std::slice::from_ref(&query));
+                let name_terms = retriever.name_score_terms(&query);
+                let indexed_terms =
+                    retriever.name_score_terms_indexed(&query, &retriever.first_name_index());
+                assert_eq!(
+                    indexed_terms
+                        .iter()
+                        .map(|term| term.to_bits())
+                        .collect::<Vec<_>>(),
+                    name_terms
+                        .iter()
+                        .map(|term| term.to_bits())
+                        .collect::<Vec<_>>()
+                );
+                let bounded = retriever
+                    .build_pair_plan_query_result(
+                        &query,
+                        "anna",
+                        0,
+                        None,
+                        &members,
+                        top_k,
+                        PlanScoring::Bounded {
+                            specter_upper_bounds: &bounds[0],
+                            name_terms: &name_terms,
+                        },
+                    )
+                    .expect("bounded plan row");
+                assert_eq!(bounded.row_component_keys, result.row_component_keys);
+                assert_eq!(
+                    bounded
+                        .row_retrieval_scores
+                        .iter()
+                        .map(|score| score.to_bits())
+                        .collect::<Vec<_>>(),
+                    result
+                        .row_retrieval_scores
+                        .iter()
+                        .map(|score| score.to_bits())
+                        .collect::<Vec<_>>()
+                );
                 let observed: Vec<(String, u32)> = result
                     .row_component_keys
                     .into_iter()
@@ -1970,6 +2649,37 @@ mod overlap_index_tests {
             }
         }
         assert!(ties > 20, "{ties}");
+    }
+
+    #[test]
+    fn specter_upper_bounds_cover_exact_scores_in_pairs_and_alone() {
+        let retriever = RustHybridCentroidRetriever::from_summaries(synthetic_summaries(), true)
+            .expect("retriever");
+        let queries = synthetic_queries();
+        let together = retriever.specter_score_upper_bounds(&queries);
+        let exact = retriever.specter_score_rows(&queries);
+        let mut checked = 0;
+        for (query_index, query) in queries.iter().enumerate() {
+            let alone = retriever.specter_score_upper_bounds(std::slice::from_ref(query));
+            assert_eq!(
+                alone[0]
+                    .iter()
+                    .map(|bound| bound.to_bits())
+                    .collect::<Vec<_>>(),
+                together[query_index]
+                    .iter()
+                    .map(|bound| bound.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            for (bound, score) in together[query_index].iter().zip(&exact[query_index]) {
+                assert!(
+                    f64::from(*bound) >= *score,
+                    "bound {bound} below exact {score}"
+                );
+                checked += usize::from(*score > 0.0);
+            }
+        }
+        assert!(checked > 100, "{checked}");
     }
 
     #[test]

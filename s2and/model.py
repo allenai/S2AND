@@ -30,6 +30,7 @@ from s2and.consts import (
 )
 from s2and.data import ANDData, _resolve_signature_splits
 from s2and.feature_port import (
+    RESIDUAL_FEATURIZER,
     _get_rust_feature_data,
     _get_rust_featurizer,
     build_rust_featurizer_from_arrow_dataset,
@@ -155,6 +156,12 @@ def _gc_paused(method: Callable[_P, _R]) -> Callable[_P, _R]:
             gc.enable()
 
     return paused
+
+
+# Blocks up to this size fill their distance matrices concurrently; larger
+# ones have enough tiles to use the pool alone.
+_CONCURRENT_DISTANCE_BLOCK_MAX_SIZE = 512
+_CONCURRENT_DISTANCE_BLOCKS = 8
 
 
 class _AttachmentBlockState:
@@ -674,19 +681,19 @@ def _load_arrow_incremental_orcid_signature_info(
     )
     if rows is None:
         return {}
+    found_signature_ids, orcid_positions, orcids = rows
     # Most seeds carry no ORCID; they share one record, which is never mutated.
-    return {
-        signature_id: _NO_ORCID_SIGNATURE_INFO
-        if orcid is None
-        else _ArrowIncrementalSignatureInfo(
+    # Replacing a value keeps its key's place, so entries stay in row order.
+    info = dict.fromkeys(found_signature_ids, _NO_ORCID_SIGNATURE_INFO)
+    for position, orcid in zip(orcid_positions, orcids, strict=True):
+        info[found_signature_ids[position]] = _ArrowIncrementalSignatureInfo(
             paper_id=None,
             author_info_first=None,
             author_info_last=None,
             author_info_first_normalized=None,
             author_info_orcid=orcid,
         )
-        for signature_id, orcid in rows
-    }
+    return info
 
 
 def _has_incremental_seed_source(dataset: Any) -> bool:
@@ -3151,38 +3158,79 @@ class Clusterer:
                 )
                 return labels, time.perf_counter() - start
 
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="s2and-cluster") as cluster_pool:
+            def block_distances(
+                block_key: str, signatures: list[str], block_state: PredictionState
+            ) -> tuple[dict[str, np.ndarray], float]:
+                assert signature_index_by_id is not None
+                start = time.perf_counter()
+                block_partial_supervision = _partial_supervision_with_cluster_seed_overrides(
+                    signatures,
+                    partial_supervision,
+                    cluster_seeds_require=explicit_cluster_seeds_require,
+                    cluster_seeds_disallow=resolved_cluster_seeds_disallow,
+                    dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                )
+                block_dists = self._make_distance_matrices_from_verified_rust_featurizer(
+                    {block_key: signatures},
+                    rust_featurizer,
+                    partial_supervision=block_partial_supervision,
+                    incremental_dont_use_cluster_seeds=(
+                        incremental_dont_use_cluster_seeds or explicit_cluster_seeds_require is not None
+                    ),
+                    runtime_context=runtime_context,
+                    total_ram_bytes=total_ram_bytes,
+                    signature_index_by_id=signature_index_by_id,
+                    prediction_state=block_state,
+                )
+                return block_dists, time.perf_counter() - start
+
+            # A small block fills a few tiles, too few for the pool. Fill those
+            # blocks together: each call joins the same native pool, so the
+            # request keeps its thread count, and each block gets its own
+            # telemetry, merged below in block order. Only a few blocks ahead
+            # of the loop are in flight, so their matrices add little memory.
+            small_block_states: dict[str, PredictionState] = {}
+            small_block_futures: dict[str, Future[tuple[dict[str, np.ndarray], float]]] = {}
+            small_blocks = [
+                (block_key, signatures)
+                for block_key, signatures in blocks_largest_first
+                if 1 < len(signatures) <= _CONCURRENT_DISTANCE_BLOCK_MAX_SIZE
+            ]
+            small_block_positions = {block_key: position for position, (block_key, _) in enumerate(small_blocks)}
+            distance_workers = min(len(small_blocks), _CONCURRENT_DISTANCE_BLOCKS)
+            submitted_small_blocks = 0
+            with (
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="s2and-cluster") as cluster_pool,
+                ThreadPoolExecutor(
+                    max_workers=max(1, distance_workers), thread_name_prefix="s2and-block-distances"
+                ) as distance_pool,
+            ):
                 for block_key, signatures in blocks_largest_first:
                     if len(signatures) <= 1:
                         block_results[block_key] = None
                         continue
                     if pending is not None and pending_bytes > overlap_limit_bytes:
                         pending.result()
-                    assert signature_index_by_id is not None
-                    make_block_start = time.perf_counter()
-                    block_partial_supervision = _partial_supervision_with_cluster_seed_overrides(
-                        signatures,
-                        partial_supervision,
-                        cluster_seeds_require=explicit_cluster_seeds_require,
-                        cluster_seeds_disallow=resolved_cluster_seeds_disallow,
-                        dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                    )
-                    make_dists_incremental_dont_use_cluster_seeds = (
-                        incremental_dont_use_cluster_seeds or explicit_cluster_seeds_require is not None
-                    )
-                    block_dists = self._make_distance_matrices_from_verified_rust_featurizer(
-                        {block_key: signatures},
-                        rust_featurizer,
-                        partial_supervision=block_partial_supervision,
-                        incremental_dont_use_cluster_seeds=make_dists_incremental_dont_use_cluster_seeds,
-                        runtime_context=runtime_context,
-                        total_ram_bytes=total_ram_bytes,
-                        signature_index_by_id=signature_index_by_id,
-                        prediction_state=prediction_state,
-                    )
-                    make_dists_seconds += time.perf_counter() - make_block_start
-                    block_make_dists_telemetry = dict(prediction_state.telemetry.get("rust_featurizer_make_dists", {}))
+                    small_position = small_block_positions.get(block_key)
+                    if distance_workers > 1 and small_position is not None:
+                        end = min(len(small_blocks), small_position + 2 * distance_workers)
+                        while submitted_small_blocks < end:
+                            small_key, small_signatures = small_blocks[submitted_small_blocks]
+                            small_block_states[small_key] = PredictionState()
+                            small_block_futures[small_key] = distance_pool.submit(
+                                block_distances, small_key, small_signatures, small_block_states[small_key]
+                            )
+                            submitted_small_blocks += 1
+                        block_dists, block_seconds = small_block_futures.pop(block_key).result()
+                        block_state = small_block_states.pop(block_key)
+                    else:
+                        block_dists, block_seconds = block_distances(block_key, signatures, prediction_state)
+                        block_state = prediction_state
+                    make_dists_seconds += block_seconds
+                    block_make_dists_telemetry = dict(block_state.telemetry.get("rust_featurizer_make_dists", {}))
+                    if block_state is not prediction_state:
+                        prediction_state.telemetry["rust_featurizer_make_dists"] = block_make_dists_telemetry
                     for key, value in block_make_dists_telemetry.items():
                         if isinstance(value, int | float) and not isinstance(value, bool):
                             make_dists_telemetry[key] = float(make_dists_telemetry.get(key, 0.0)) + float(value)
@@ -3645,6 +3693,19 @@ class Clusterer:
             # signatures, but a fresh build rescans the block's Arrow tables to find
             # them. A view of the block featurizer equals that build exactly.
             rust_featurizer = attachment_state.featurizer().view_with_cluster_seed_sidecars(
+                [str(signature_id) for signature_id in featurizer_signature_ids],
+                None if cluster_seeds_path is None else str(cluster_seeds_path),
+                None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),
+            )
+        elif (
+            (held := RESIDUAL_FEATURIZER.get()) is not None
+            and held.arrow_dataset is arrow_dataset
+            and held.name_tuples == prediction_name_tuples
+            and held.signature_ids.issuperset(featurizer_signature_ids)
+        ):
+            # Residual clustering of an incremental request: the view equals an
+            # Arrow build over these signatures with these sidecars.
+            rust_featurizer = held.featurizer.view_with_cluster_seed_sidecars(
                 [str(signature_id) for signature_id in featurizer_signature_ids],
                 None if cluster_seeds_path is None else str(cluster_seeds_path),
                 None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),

@@ -72,7 +72,8 @@ class CandidateBatchPairwiseModelResult:
 def signature_id_to_index_map(featurizer: Any) -> dict[str, int]:
     """Return the Rust signature index map for candidate-batch construction."""
 
-    return {str(signature_id): index for index, signature_id in enumerate(featurizer.signature_ids())}
+    signature_ids = featurizer.signature_ids()
+    return dict(zip(map(str, signature_ids), range(len(signature_ids)), strict=True))
 
 
 @dataclass(frozen=True)

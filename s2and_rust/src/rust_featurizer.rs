@@ -372,6 +372,25 @@ fn pair_scoring_specializations(
     (main_spec, nameless_spec)
 }
 
+/// Pair features that only the pairwise models read, and that cost most to
+/// compute: a pair that is not scored can leave them missing.
+const MODEL_ONLY_FEATURE_COLUMNS: [usize; 2] =
+    [columns::COAUTHOR_SIMILARITY, columns::TITLE_OVERLAP_CHARS];
+
+/// Papers from which a featurizer frees its rows on the pool. Smaller ones
+/// free them in place: there, cross-thread frees and the forced collect that
+/// follows them cost more than the frees they spread.
+const PARALLEL_FREE_MIN_PAPERS: usize = 20_000;
+
+/// Drop `rows` on the current pool when `parallel`, else on this thread.
+fn drop_rows<T: Send>(rows: Vec<T>, parallel: bool) {
+    if parallel {
+        rows.into_par_iter().for_each(drop);
+    } else {
+        drop(rows);
+    }
+}
+
 /// A raw output pointer shared by pool tasks that write disjoint offsets.
 struct SharedOutput(*mut f64);
 
@@ -668,6 +687,20 @@ impl RustFeaturizer {
         p1: &PaperData,
         p2: &PaperData,
     ) -> [f64; FULL_FEATURE_COUNT] {
+        self.featurize_pair_data_with(s1, s2, p1, p2, true)
+    }
+
+    /// `featurize_pair_data`; without `model_only_features` the columns in
+    /// `MODEL_ONLY_FEATURE_COLUMNS` stay NaN.
+    #[inline(always)]
+    fn featurize_pair_data_with(
+        &self,
+        s1: &SignatureData,
+        s2: &SignatureData,
+        p1: &PaperData,
+        p2: &PaperData,
+        model_only_features: bool,
+    ) -> [f64; FULL_FEATURE_COUNT] {
         let mut feats = [f64::NAN; FULL_FEATURE_COUNT];
 
         let first1 = s1.first_normalized();
@@ -703,6 +736,7 @@ impl RustFeaturizer {
             &p2.coauthors,
             &s2.coauthors,
             &self.name_grams,
+            model_only_features,
         );
         feats[columns::COAUTHOR_OVERLAP] = coauthors.block_overlap;
         feats[columns::COAUTHOR_SIMILARITY] = coauthors.gram_similarity;
@@ -714,8 +748,10 @@ impl RustFeaturizer {
 
         feats[columns::TITLE_OVERLAP_WORDS] =
             counter_jaccard_data(&p1.title_words, &p2.title_words, f64::INFINITY);
-        feats[columns::TITLE_OVERLAP_CHARS] =
-            counter_jaccard_data(&p1.title_chars, &p2.title_chars, f64::INFINITY);
+        if model_only_features {
+            feats[columns::TITLE_OVERLAP_CHARS] =
+                counter_jaccard_data(&p1.title_chars, &p2.title_chars, f64::INFINITY);
+        }
 
         let english_or_unknown_count = {
             let mut count = 0i64;
@@ -1308,6 +1344,11 @@ impl RustFeaturizer {
         let nameless_cols = nameless.map_or(0, |(indices, _)| indices.len());
         let (main_spec, nameless_spec) = pair_scoring_specializations(main_indices, main, nameless);
         let aggregate_cols = aggregate_indices.len();
+        // A labeled pair needs only its aggregate columns; skip the costly
+        // columns only the models read, unless an aggregate reads them.
+        let labeled_pairs_skip_model_only = !aggregate_indices
+            .iter()
+            .any(|index| MODEL_ONLY_FEATURE_COLUMNS.contains(index));
         let mut distances = vec![0.0f64; pair_count];
         let mut aggregate_values = vec![0.0f64; pair_count * aggregate_stride];
         distances
@@ -1329,15 +1370,22 @@ impl RustFeaturizer {
                         let pair_offset = tile_index * tile + row;
                         let (s1, p1) = lookup(left_indices[pair_offset]);
                         let (s2, p2) = lookup(right_indices[pair_offset]);
-                        let features = self.featurize_pair_data(s1, s2, p1, p2);
+                        // A labeled pair takes its label as the distance downstream.
+                        let labeled = labels.is_some_and(|values| !values[pair_offset].is_nan());
+                        let features = self.featurize_pair_data_with(
+                            s1,
+                            s2,
+                            p1,
+                            p2,
+                            !(labeled && labeled_pairs_skip_model_only),
+                        );
                         let aggregate_row = &mut aggregate_tile
                             [row * aggregate_stride..row * aggregate_stride + aggregate_cols];
                         for (dest, index) in aggregate_row.iter_mut().zip(aggregate_indices.iter())
                         {
                             *dest = features[*index];
                         }
-                        // A labeled pair takes its label as the distance downstream.
-                        if labels.is_some_and(|values| !values[pair_offset].is_nan()) {
+                        if labeled {
                             continue;
                         }
                         let scored = scored_rows.len();
@@ -1595,18 +1643,31 @@ impl RustFeaturizer {
         cluster_seeds_path: Option<&str>,
         cluster_seed_disallows_path: Option<&str>,
         selected_signature_id_set: &HashSet<String>,
+        num_threads: Option<usize>,
     ) -> PyResult<(HashMap<String, ClusterId>, HashSet<(String, String)>)> {
         let mut cluster_seeds_require = HashMap::<String, ClusterId>::default();
         if let Some(path) = cluster_seeds_path {
             let (_component_order, members_by_component) = read_raw_arrow_cluster_seeds(path)?;
-            for (component_key, members) in members_by_component {
-                for signature_id in members {
-                    if selected_signature_id_set.contains(&signature_id) {
-                        cluster_seeds_require
-                            .insert(signature_id, ClusterId::Str(component_key.clone()));
-                    }
-                }
-            }
+            // A request's sidecar lists every seed of its block; select on the pool.
+            // Each signature has one component, so insertion order does not matter.
+            let selected: Vec<(String, ClusterId)> =
+                install_with_optional_rayon_pool(num_threads, || {
+                    members_by_component
+                        .into_par_iter()
+                        .flat_map_iter(|(component_key, members)| {
+                            members
+                                .into_iter()
+                                .filter(|signature_id| {
+                                    selected_signature_id_set.contains(signature_id)
+                                })
+                                .map(move |signature_id| {
+                                    (signature_id, ClusterId::Str(component_key.clone()))
+                                })
+                        })
+                        .collect()
+                });
+            cluster_seeds_require.reserve(selected.len());
+            cluster_seeds_require.extend(selected);
         }
         let mut cluster_seeds_disallow = HashSet::<(String, String)>::default();
         if let Some(path) = cluster_seed_disallows_path {
@@ -1644,7 +1705,7 @@ impl RustFeaturizer {
             signatures: raw_signatures,
             papers: raw_papers,
             authors_by_paper: mut raw_authors_by_paper,
-            mut specter_by_paper,
+            specter_by_paper,
         } = rows;
         let text_module = py.import("s2and.text")?;
         let stop_words = extract_required_string_set(&text_module.getattr("STOPWORDS")?)?;
@@ -1652,6 +1713,7 @@ impl RustFeaturizer {
             extract_required_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
         let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
         let affiliation_stopwords = extract_affiliation_stopwords(py)?;
+        let parallel_free = raw_papers.len() >= PARALLEL_FREE_MIN_PAPERS;
         // Staging, language detection and assembly run on the request's pool:
         // they were serial loops over every signature and paper of the window.
         let (signatures, papers, name_grams) = py.allow_threads(|| {
@@ -1766,7 +1828,9 @@ impl RustFeaturizer {
                     &stop_words,
                     &venue_stop_words,
                 );
-                drop(paper_inputs);
+                // Hundreds of thousands of rows hold many small allocations;
+                // freeing them on the pool keeps the build from waiting on one thread.
+                drop_rows(paper_inputs, parallel_free);
                 // Paper order does not change the tables: this used to iterate a
                 // HashMap, whose order differs between runs.
                 let coauthor_tables = CoauthorTables::build(
@@ -1784,23 +1848,25 @@ impl RustFeaturizer {
                     &unidecode_char_map,
                     preprocess,
                 );
-                drop(signature_inputs);
-                let signatures: HashMap<String, SignatureData> =
-                    computed_signatures.into_iter().collect();
-                let (mut paper_coauthors, name_grams) = coauthor_tables.into_parts();
-                let paper_parts: Vec<_> = computed_papers
-                    .into_iter()
-                    .map(|(paper_id, paper)| {
-                        let coauthors = paper_coauthors
-                            .remove(&paper_id)
-                            .expect("every preprocessed paper has coauthor aggregates");
-                        let specter = specter_by_paper.remove(&paper_id);
-                        (paper_id, paper, coauthors, specter)
-                    })
-                    .collect();
-                let papers: HashMap<PaperId, PaperData> = paper_parts
+                drop_rows(signature_inputs, parallel_free);
+                let (paper_coauthors, name_grams) = coauthor_tables.into_paper_list();
+                assert_eq!(
+                    computed_papers.len(),
+                    paper_coauthors.len(),
+                    "every preprocessed paper has coauthor aggregates"
+                );
+                // Fill the signature map before assembling papers: building both at
+                // once held both sets of transient rows and raised the build's peak.
+                let mut signatures: HashMap<String, SignatureData> =
+                    HashMap::with_capacity_and_hasher(computed_signatures.len(), Default::default());
+                signatures.extend(computed_signatures);
+                // Coauthor aggregates come in `computed_papers` order, and SPECTER
+                // rows are shared buffers, so nothing is removed from a map.
+                let paper_rows: Vec<(PaperId, PaperData)> = computed_papers
                     .into_par_iter()
-                    .map(|(paper_id, paper, coauthors, specter)| {
+                    .zip(paper_coauthors.into_par_iter())
+                    .map(|((paper_id, paper), coauthors)| {
+                        let specter = specter_by_paper.get(&paper_id).cloned();
                         let specter_norm = specter.as_ref().map(|values| vector_norm_f32(values));
                         (
                             paper_id,
@@ -1819,12 +1885,34 @@ impl RustFeaturizer {
                             },
                         )
                     })
-                    .collect::<Vec<_>>()
-                    .into_iter()
                     .collect();
+                let mut papers: HashMap<PaperId, PaperData> =
+                    HashMap::with_capacity_and_hasher(paper_rows.len(), Default::default());
+                papers.extend(paper_rows);
                 Ok((signatures, papers, name_grams))
             })
         })?;
+        if parallel_free {
+            // The raw rows hold many small allocations; free them on the pool,
+            // then return the pages those workers hold, so the scoring that
+            // follows does not add to them.
+            py.allow_threads(|| {
+                install_with_optional_rayon_pool(num_threads, || {
+                    rayon::join(
+                        || raw_signatures.into_par_iter().for_each(drop),
+                        || {
+                            rayon::join(
+                                || raw_papers.into_par_iter().for_each(drop),
+                                || specter_by_paper.into_par_iter().for_each(drop),
+                            )
+                        },
+                    );
+                });
+                crate::rayon_pool::collect_freed_memory_on_pool_workers();
+            });
+        } else {
+            drop((raw_signatures, raw_papers, specter_by_paper));
+        }
         let name_tuples = extract_name_tuples_argument(name_tuples)?;
 
         Ok(RustFeaturizer {
@@ -1946,6 +2034,7 @@ impl RustFeaturizer {
             cluster_seeds_path.as_deref(),
             cluster_seed_disallows_path.as_deref(),
             &selected_signature_id_set,
+            num_threads,
         )?;
         Self::from_raw_rows(
             py,
@@ -2445,13 +2534,23 @@ impl RustFeaturizer {
     /// Free paper buffers before dropping remaining metadata in the background.
     ///
     /// Views and other handles keep their shares; the data is freed with the
-    /// last one. This handle has no signatures afterwards.
-    fn release(&mut self) {
+    /// last one. This handle has no signatures afterwards. With `num_threads`
+    /// the papers are freed on a pool of that size.
+    #[pyo3(signature = (num_threads = None))]
+    fn release(&mut self, py: Python<'_>, num_threads: Option<usize>) {
         // Free paper buffers before residual scoring allocates its feature matrix.
-        drop(std::mem::replace(
-            &mut self.papers,
-            Arc::new(HashMap::default()),
-        ));
+        let papers = std::mem::replace(&mut self.papers, Arc::new(HashMap::default()));
+        match (Arc::try_unwrap(papers), num_threads) {
+            // Freeing hundreds of thousands of papers on one thread took most of a second.
+            (Ok(papers), Some(_)) if papers.len() >= PARALLEL_FREE_MIN_PAPERS => {
+                py.allow_threads(|| {
+                    install_with_optional_rayon_pool(num_threads, || {
+                        papers.into_par_iter().for_each(drop)
+                    })
+                })
+            }
+            (papers, _) => drop(papers),
+        }
         let dropped = (
             std::mem::replace(&mut self.signatures, Arc::new(HashMap::default())),
             std::mem::replace(&mut self.signature_ids, Arc::new(Vec::new())),

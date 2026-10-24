@@ -193,23 +193,24 @@ def write_cluster_seeds_arrow(path: Path, cluster_seeds_require: Mapping[Any, An
     import pyarrow as pa
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    items: list[tuple[str, str]] = []
-    seen_signature_ids: set[str] = set()
-    for signature_id, cluster_id in cluster_seeds_require.items():
-        signature_key = str(signature_id)
-        cluster_key = str(cluster_id)
-        if not signature_key:
-            raise ValueError("cluster seeds Arrow cannot contain empty signature_id values")
-        if not cluster_key:
-            raise ValueError(f"cluster seeds Arrow cannot contain empty cluster_id values: {signature_key!r}")
-        if signature_key in seen_signature_ids:
-            raise ValueError(f"cluster seeds Arrow contains duplicate signature_id: {signature_key!r}")
-        seen_signature_ids.add(signature_key)
-        items.append((signature_key, cluster_key))
+    signature_keys = list(map(str, cluster_seeds_require))
+    cluster_keys = list(map(str, cluster_seeds_require.values()))
+    # Requests carry half a million seeds; check them as sets, and walk them
+    # in order only to report the first problem.
+    if "" in signature_keys or "" in cluster_keys or len(set(signature_keys)) != len(signature_keys):
+        seen_signature_ids: set[str] = set()
+        for signature_key, cluster_key in zip(signature_keys, cluster_keys, strict=True):
+            if not signature_key:
+                raise ValueError("cluster seeds Arrow cannot contain empty signature_id values")
+            if not cluster_key:
+                raise ValueError(f"cluster seeds Arrow cannot contain empty cluster_id values: {signature_key!r}")
+            if signature_key in seen_signature_ids:
+                raise ValueError(f"cluster seeds Arrow contains duplicate signature_id: {signature_key!r}")
+            seen_signature_ids.add(signature_key)
     table = pa.table(
         {
-            "signature_id": arrow_string_array([signature_id for signature_id, _cluster_id in items]),
-            "cluster_id": arrow_string_array([cluster_id for _signature_id, cluster_id in items]),
+            "signature_id": arrow_string_array(signature_keys),
+            "cluster_id": arrow_string_array(cluster_keys),
         }
     )
     with pa.OSFile(str(path), "wb") as sink:

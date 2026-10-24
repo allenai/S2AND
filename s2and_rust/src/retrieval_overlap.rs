@@ -103,6 +103,16 @@ impl PreparedQuery {
             ),
         }
     }
+
+    /// Whether `overlap_scores` gives exactly `(0.0, 0.0)` for every component
+    /// with zero numerators: zero over a number is zero, and no cap applies.
+    pub(crate) fn zero_numerators_score_zero(&self) -> bool {
+        COAUTHOR_OVERLAP_CONFIG.total_cap.is_none()
+            && AFFILIATION_OVERLAP_CONFIG.total_cap.is_none()
+            && [&self.coauthor, &self.non_mega_coauthor, &self.affiliation]
+                .iter()
+                .all(|prepared| !prepared.denominator.is_nan())
+    }
 }
 
 /// One query term's share of a component: `count / size`, capped per term.
@@ -125,6 +135,13 @@ pub(crate) struct ComponentOverlap {
     coauthor: f64,
     non_mega_coauthor: f64,
     affiliation: f64,
+}
+
+impl ComponentOverlap {
+    /// No query term with positive weight hit the component.
+    pub(crate) fn has_zero_numerators(&self) -> bool {
+        self.coauthor == 0.0 && self.non_mega_coauthor == 0.0 && self.affiliation == 0.0
+    }
 }
 
 fn counter_hits_and_numerator(

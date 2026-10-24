@@ -1306,6 +1306,76 @@ def test_promoted_linker_reuses_one_plan_and_featurizer_for_four_scoring_batches
     assert "raw_arrow_batch_featurizer_reused_batch_count" not in telemetry
 
 
+def test_promoted_linker_views_one_background_block_featurizer_for_every_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Large requests build one block featurizer in the background; each window views it."""
+
+    query_ids = [f"q{index:02d}" for index in range(20)]
+    block = ["seed", *query_ids]
+    captured: dict[str, Any] = {"builds": [], "views": [], "released": 0, "scored_batches": []}
+
+    def build_seed_setup(*_args: object, **_kwargs: object):
+        return incremental_seed_setup({"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]})
+
+    def fake_limits(**kwargs: object):
+        query_count = int(cast(int, kwargs["query_count"]))
+        max_query_batch_size = int(cast(int, kwargs["max_query_batch_size"]))
+        return _mock_promoted_limits(
+            query_batch_size=min(query_count, max_query_batch_size),
+        )
+
+    class FakeBlockFeaturizer:
+        def view_with_cluster_seed_sidecars(self, signature_ids: list[str], *_paths: object) -> object:
+            captured["views"].append(tuple(signature_ids))
+            return object()
+
+        def release(self, **_kwargs: object) -> None:
+            captured["released"] += 1
+
+    def fake_featurizer(*_args: object, **kwargs: object) -> object:
+        captured["builds"].append(tuple(cast(Any, kwargs["signature_ids"])))
+        return FakeBlockFeaturizer()
+
+    def fake_linker(*_args: object, **kwargs: object) -> SimpleNamespace:
+        batch = tuple(cast(Any, kwargs["query_signature_ids"]))
+        captured["scored_batches"].append(batch)
+        return SimpleNamespace(
+            linked_signature_clusters={signature_id: "c_seed" for signature_id in batch},
+            telemetry={"query_count": len(batch), "candidate_row_count": 0, "pair_count": 0},
+        )
+
+    monkeypatch.setattr(production_module, "compute_promoted_incremental_limits", fake_limits)
+    monkeypatch.setattr(
+        production_module.runtime_module,
+        "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
+        fake_linker,
+    )
+    _patch_fake_raw_arrow_planner(monkeypatch, captured=captured)
+    monkeypatch.setattr(production_module.feature_port, "build_rust_featurizer_from_arrow_dataset", fake_featurizer)
+    monkeypatch.setattr(production_module, "_BACKGROUND_BLOCK_FEATURIZER_MIN_SIGNATURES", 1)
+
+    production_module.predict_incremental_promoted_linker_from_arrow(
+        _promoted_clusterer(build_seed_setup, suppress_orcid=True, featurizer_info=_PROMOTED_TEST_FEATURIZER_INFO),
+        block,
+        _direct_arrow_dataset(),
+        cluster_residuals=_unexpected_residual_clustering,
+        arrow_dataset=_minimal_arrow_dataset(tmp_path),
+        artifact=cast(Any, _promoted_artifact(tmp_path)),
+        prevent_new_incompatibilities=False,
+        partial_supervision={},
+        runtime_context=cast(Any, SimpleNamespace(run_id="test")),
+        total_ram_bytes=100_000,
+        batching_threshold=2,
+    )
+
+    assert captured["builds"] == [tuple(block)]
+    assert captured["views"] == [tuple(query_ids[:8]), tuple(query_ids[8:16]), tuple(query_ids[16:])]
+    assert captured["released"] == 1
+    assert captured["scored_batches"] == [tuple(query_ids[start : start + 2]) for start in range(0, 20, 2)]
+
+
 def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

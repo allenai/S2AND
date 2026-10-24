@@ -6,6 +6,7 @@ import logging
 import math
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from s2and.incremental_linking.seed_assignment import LinkPriority, apply_seed_l
 from s2and.prediction_state import PredictionState
 from s2and.runtime import RuntimeContext
 from s2and.text import CanonicalNameParts, canonical_names_conflict, canonicalize_name_parts, normalize_orcid
+from s2and.thread_config import resolve_n_jobs
 
 logger = logging.getLogger("s2and")
 
@@ -224,11 +226,11 @@ class _QueryDisallowFeaturizerCache:
                 return featurizer
         return None
 
-    def clear(self) -> None:
+    def clear(self, *, num_threads: int | None = None) -> None:
         """Release every retained native featurizer before residual Phase B."""
 
         for _covered, featurizer in self.entries:
-            feature_port.release_rust_handle(featurizer)
+            feature_port.release_rust_handle(featurizer, num_threads=num_threads)
         self.entries.clear()
 
 
@@ -743,7 +745,9 @@ def promoted_incremental_orcid_fanout_by_query(
     if resolved_component_sizes is None:
         resolved_component_sizes = promoted_incremental_component_sizes(cluster_seeds_require)
     # Inlined `_signature_orcid`: this loop visits every seed of the request.
+    # A person's signatures repeat one raw ORCID, so each value is normalized once.
     signatures = dataset.signatures
+    normalized_orcids: dict[Any, str | None] = {}
     for seed_signature_id, component in cluster_seeds_require.items():
         signature = signatures.get(str(seed_signature_id))
         if signature is None:
@@ -751,7 +755,10 @@ def promoted_incremental_orcid_fanout_by_query(
         value = getattr(signature, "author_info_orcid", None)
         if value is None:
             continue
-        seed_orcid = normalize_orcid(value)
+        if value in normalized_orcids:
+            seed_orcid = normalized_orcids[value]
+        else:
+            seed_orcid = normalized_orcids[value] = normalize_orcid(value)
         if seed_orcid in query_orcids:
             component_orcids.setdefault(str(component), set()).add(str(seed_orcid))
 
@@ -1027,6 +1034,58 @@ def finish_with_seed_links(
     )
 
 
+# Smaller blocks build their window featurizers in well under a second, less
+# than a background build's own thread and memory cost. On larger blocks the
+# build's Arrow rows overlap the planner's and raised the peak by gigabytes.
+_BACKGROUND_BLOCK_FEATURIZER_MIN_SIGNATURES = 20_000
+_BACKGROUND_BLOCK_FEATURIZER_MAX_SIGNATURES = 200_000
+
+
+class _BackgroundBlockFeaturizer:
+    """A featurizer over a request's block, built on a background thread.
+
+    The build joins the request's native pool, so the request keeps its thread
+    count; seed setup, planning and retrieval leave about half of the pool idle.
+    A view of it with a window's seed sidecars equals a fresh build over the
+    window, as for attachment passes.
+    """
+
+    def __init__(self, arrow_dataset: ArrowDataset, signature_ids: list[str], name_tuples: Any, num_threads: int):
+        self.signature_ids = frozenset(signature_ids)
+        self.name_tuples = name_tuples
+        self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="s2and-block-featurizer"
+        )
+        self._future = self._executor.submit(
+            feature_port.build_rust_featurizer_from_arrow_dataset,
+            arrow_dataset,
+            signature_ids=signature_ids,
+            name_tuples=name_tuples,
+            preprocess=True,
+            num_threads=num_threads,
+        )
+
+    def covers(self, name_tuples: Any, signature_ids: Iterable[str]) -> bool:
+        return (
+            self._executor is not None
+            and self.name_tuples == name_tuples
+            and self.signature_ids.issuperset(signature_ids)
+        )
+
+    def featurizer(self) -> Any:
+        return self._future.result()
+
+    def release(self, *, num_threads: int | None = None) -> None:
+        """Wait for the build, then free its featurizer; later calls do nothing."""
+
+        if self._executor is None:
+            return
+        self._executor.shutdown(wait=True)
+        self._executor = None
+        if self._future.exception() is None:
+            feature_port.release_rust_handle(self._future.result(), num_threads=num_threads)
+
+
 def predict_incremental_promoted_linker_from_arrow(
     clusterer: Any,
     block_signatures: list[str],
@@ -1048,7 +1107,67 @@ def predict_incremental_promoted_linker_from_arrow(
     one original block share: a lazily built featurizer (``signature_ids``,
     ``name_tuples``, ``featurizer()``) that query windows view instead of building
     their own, and a ``planner`` that the next pass reloads instead of rebuilding.
+    Without it, a mid-sized request whose queries retrieve about as many
+    components as its seeds form builds one block featurizer in the background
+    for its windows.
     """
+
+    block_featurizer: _BackgroundBlockFeaturizer | None = None
+    if (
+        attachment_state is None
+        and _BACKGROUND_BLOCK_FEATURIZER_MIN_SIGNATURES
+        <= len(block_signatures)
+        <= _BACKGROUND_BLOCK_FEATURIZER_MAX_SIGNATURES
+    ):
+        seeds = dataset.cluster_seeds_require
+        query_count = len(block_signatures) - len(seeds)
+        component_count = len(set(map(str, seeds.values())))
+        # Windows then cover most of the block, so the block build costs about
+        # what their builds would, and it overlaps work that idles half the pool.
+        if query_count > 0 and query_count * int(artifact.retrieval_top_k) >= component_count:
+            block_featurizer = _BackgroundBlockFeaturizer(
+                arrow_dataset,
+                [str(signature_id) for signature_id in block_signatures],
+                dataset.name_tuples,
+                resolve_n_jobs(clusterer.n_jobs),
+            )
+    try:
+        return _predict_incremental_promoted_linker_from_arrow(
+            clusterer,
+            block_signatures,
+            dataset,
+            cluster_residuals=cluster_residuals,
+            arrow_dataset=arrow_dataset,
+            artifact=artifact,
+            prevent_new_incompatibilities=prevent_new_incompatibilities,
+            partial_supervision=partial_supervision,
+            runtime_context=runtime_context,
+            total_ram_bytes=total_ram_bytes,
+            batching_threshold=batching_threshold,
+            attachment_state=attachment_state,
+            block_featurizer=block_featurizer,
+        )
+    finally:
+        if block_featurizer is not None:
+            block_featurizer.release()
+
+
+def _predict_incremental_promoted_linker_from_arrow(
+    clusterer: Any,
+    block_signatures: list[str],
+    dataset: _DirectArrowIncrementalDataset,
+    *,
+    cluster_residuals: ResidualClusterer,
+    arrow_dataset: ArrowDataset,
+    artifact: artifact_module.IncrementalLinkingArtifact,
+    prevent_new_incompatibilities: bool,
+    partial_supervision: dict[tuple[str, str], int | float],
+    runtime_context: RuntimeContext,
+    total_ram_bytes: int | None,
+    batching_threshold: int | None,
+    attachment_state: Any | None,
+    block_featurizer: _BackgroundBlockFeaturizer | None,
+) -> dict[str, Any]:
 
     resolved_total_ram_bytes, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
     prediction_state = PredictionState(
@@ -1075,7 +1194,7 @@ def predict_incremental_promoted_linker_from_arrow(
         raise ValueError("Promoted incremental linker mode requires at least one seed cluster")
 
     unassigned_signature_ids = [
-        str(signature_id) for signature_id in block_signatures if str(signature_id) not in cluster_seeds_require
+        signature_id for signature_id in map(str, block_signatures) if signature_id not in cluster_seeds_require
     ]
     component_members_for_sizes = (
         cluster_seeds_require_inverse
@@ -1211,7 +1330,12 @@ def predict_incremental_promoted_linker_from_arrow(
                     # and attachment passes reload from them.
                     retain_seed_rows=True,
                     # Later passes plan, then seed, the rest of the block; read its rows once.
-                    prefetch_signature_ids=None if attachment_state is None else list(attachment_state.signature_ids),
+                    # A single request's plans read its queries, which this scan reads with the seeds.
+                    prefetch_signature_ids=(
+                        list(unassigned_signature_ids)
+                        if attachment_state is None
+                        else list(attachment_state.signature_ids)
+                    ),
                 )
                 if attachment_state is not None:
                     attachment_state.planner = raw_request_planner
@@ -1274,6 +1398,12 @@ def predict_incremental_promoted_linker_from_arrow(
                 # Same features as a fresh build over signature_ids: the view reads the
                 # same seed sidecars and shares the block's per-signature preprocessing.
                 raw_batch_featurizer = attachment_state.featurizer().view_with_cluster_seed_sidecars(
+                    [str(signature_id) for signature_id in signature_ids],
+                    str(cluster_seeds_path),
+                    None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),
+                )
+            elif block_featurizer is not None and block_featurizer.covers(name_tuples, signature_ids):
+                raw_batch_featurizer = block_featurizer.featurizer().view_with_cluster_seed_sidecars(
                     [str(signature_id) for signature_id in signature_ids],
                     str(cluster_seeds_path),
                     None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),
@@ -1474,8 +1604,30 @@ def predict_incremental_promoted_linker_from_arrow(
         merged_telemetry["raw_arrow_seed_signature_count"] = int(len(cluster_seeds_require))
         merged_telemetry["raw_arrow_seed_component_count"] = int(len(cluster_seeds_require_inverse))
         raw_arrow_reusable_planner_enabled = int(raw_request_planner is not None)
-        rescore_featurizer_cache.clear()
+        rescore_featurizer_cache.clear(num_threads=resolve_n_jobs(clusterer.n_jobs))
         del rescore_featurizer_cache
+        if block_featurizer is not None:
+            # Residual scoring allocates its matrices next; free the block first.
+            block_featurizer.release(num_threads=resolve_n_jobs(clusterer.n_jobs))
+        held_residual_featurizer: feature_port.HeldRowFeaturizer | None = None
+        # Attachment passes view their block featurizer for residuals instead.
+        if attachment_state is None and raw_request_planner is not None and unassigned_signature_ids:
+            # Residuals are some of these queries. The planner holds the rows of
+            # its latest window's queries; it returns None when it lacks some.
+            residual_base = feature_port.build_rust_featurizer_from_planner(
+                raw_request_planner,
+                signature_ids=unassigned_signature_ids,
+                name_tuples=name_tuples,
+                preprocess=True,
+                num_threads=clusterer.n_jobs,
+            )
+            if residual_base is not None:
+                held_residual_featurizer = feature_port.HeldRowFeaturizer(
+                    arrow_dataset=arrow_dataset,
+                    name_tuples=name_tuples,
+                    signature_ids=frozenset(unassigned_signature_ids),
+                    featurizer=residual_base,
+                )
         if raw_request_planner is not None and (
             attachment_state is None or attachment_state.planner is not raw_request_planner
         ):
@@ -1498,22 +1650,28 @@ def predict_incremental_promoted_linker_from_arrow(
             )
             merged_telemetry["name_check_rejected_link_count"] = len(name_check_rejected)
             logger.info("Attach name check rejected %d new links that conflict in one pass", len(name_check_rejected))
-        predicted_clusters = finish_with_seed_links(
-            dataset,
-            unassigned_signature_ids=unassigned_signature_ids,
-            linked_signature_clusters=linked_signature_clusters,
-            recluster_map=recluster_map,
-            cluster_seeds_require_inverse=cluster_seeds_require_inverse,
-            split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
-            prevent_new_incompatibilities=prevent_new_incompatibilities,
-            partial_supervision=partial_supervision,
-            use_default_constraints_as_supervision=bool(
-                getattr(clusterer, "use_default_constraints_as_supervision", True)
-            ),
-            suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False)),
-            prediction_state=prediction_state,
-            cluster_residuals=cluster_residuals,
-        )
+        held_token = feature_port.RESIDUAL_FEATURIZER.set(held_residual_featurizer)
+        try:
+            predicted_clusters = finish_with_seed_links(
+                dataset,
+                unassigned_signature_ids=unassigned_signature_ids,
+                linked_signature_clusters=linked_signature_clusters,
+                recluster_map=recluster_map,
+                cluster_seeds_require_inverse=cluster_seeds_require_inverse,
+                split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
+                prevent_new_incompatibilities=prevent_new_incompatibilities,
+                partial_supervision=partial_supervision,
+                use_default_constraints_as_supervision=bool(
+                    getattr(clusterer, "use_default_constraints_as_supervision", True)
+                ),
+                suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False)),
+                prediction_state=prediction_state,
+                cluster_residuals=cluster_residuals,
+            )
+        finally:
+            feature_port.RESIDUAL_FEATURIZER.reset(held_token)
+            if held_residual_featurizer is not None:
+                feature_port.release_rust_handle(held_residual_featurizer.featurizer)
         finish_seconds = time.perf_counter() - finish_start
         residual_phase_b_telemetry = dict(prediction_state.telemetry.get("incremental_residual_phase_b", {}))
         residual_count = sum(

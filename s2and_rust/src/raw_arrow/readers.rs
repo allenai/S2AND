@@ -651,13 +651,92 @@ fn read_paper_author_batches(
     rows.finish()
 }
 
-pub(crate) fn read_raw_arrow_cluster_seeds(
+/// Seed components in first-appearance order, and each one's members in row order.
+pub(crate) type ClusterSeedComponents = (Vec<String>, HashMap<String, Vec<String>>);
+
+pub(crate) fn read_raw_arrow_cluster_seeds(path: &str) -> PyResult<ClusterSeedComponents> {
+    let batches = read_arrow_batches(path)?;
+    if let Some(seeds) = read_valid_cluster_seeds(path, &batches) {
+        return Ok(seeds);
+    }
+    // The row loop reports the first problem in row order.
+    read_cluster_seed_batches(path, batches)
+}
+
+/// Components in first-appearance order and their members in row order, as
+/// the row loop builds them, or None when the loop would fail.
+///
+/// The loop cloned each id into two maps per row; a request's sidecar holds
+/// every seed of its block, so this borrows the ids from the batches, checks
+/// for repeated signatures with a parallel sort, and copies each id once.
+fn read_valid_cluster_seeds(path: &str, batches: &[RecordBatch]) -> Option<ClusterSeedComponents> {
+    let mut rows: Vec<(&str, &str)> =
+        Vec::with_capacity(batches.iter().map(RecordBatch::num_rows).sum());
+    for batch in batches {
+        let column = |name: &str| -> Option<ArrowStringColumn<'_>> {
+            let index = arrow_column_index(batch, name, path).ok()?;
+            ArrowStringColumn::from_string_array(batch.column(index).as_ref(), name).ok()
+        };
+        let (signature_ids, cluster_ids) = (column("signature_id")?, column("cluster_id")?);
+        for row in 0..batch.num_rows() {
+            let signature_id = signature_ids.optional_value(row)?;
+            let cluster_id = cluster_ids.optional_value(row)?;
+            if signature_id.is_empty() || cluster_id.is_empty() {
+                return None;
+            }
+            rows.push((signature_id, cluster_id));
+        }
+    }
+    let mut sorted_ids: Vec<&str> = rows
+        .par_iter()
+        .map(|(signature_id, _)| *signature_id)
+        .collect();
+    sorted_ids.par_sort_unstable();
+    if sorted_ids.par_windows(2).any(|pair| pair[0] == pair[1]) {
+        return None;
+    }
+    drop(sorted_ids);
+    let mut component_index: HashMap<&str, usize> = HashMap::default();
+    let mut component_order: Vec<&str> = Vec::new();
+    let row_components: Vec<usize> = rows
+        .iter()
+        .map(|(_, cluster_id)| {
+            *component_index.entry(cluster_id).or_insert_with(|| {
+                component_order.push(cluster_id);
+                component_order.len() - 1
+            })
+        })
+        .collect();
+    let mut sizes = vec![0usize; component_order.len()];
+    for component in &row_components {
+        sizes[*component] += 1;
+    }
+    let mut members: Vec<Vec<String>> = sizes.into_iter().map(Vec::with_capacity).collect();
+    for ((signature_id, _), component) in rows.iter().zip(&row_components) {
+        members[*component].push((*signature_id).to_owned());
+    }
+    let mut members_by_component: HashMap<String, Vec<String>> =
+        HashMap::with_capacity_and_hasher(component_order.len(), Default::default());
+    members_by_component.extend(
+        component_order
+            .iter()
+            .map(|component_key| (*component_key).to_owned())
+            .zip(members),
+    );
+    Some((
+        component_order.into_iter().map(str::to_owned).collect(),
+        members_by_component,
+    ))
+}
+
+fn read_cluster_seed_batches(
     path: &str,
-) -> PyResult<(Vec<String>, HashMap<String, Vec<String>>)> {
+    batches: Vec<RecordBatch>,
+) -> PyResult<ClusterSeedComponents> {
     let mut component_order = Vec::new();
     let mut members_by_component: HashMap<String, Vec<String>> = HashMap::default();
     let mut component_by_signature_id = HashMap::<String, String>::default();
-    for batch in read_arrow_batches(path)? {
+    for batch in batches {
         let signature_id_col = batch.column(arrow_column_index(&batch, "signature_id", path)?);
         let signature_id_values =
             ArrowStringColumn::from_string_array(signature_id_col.as_ref(), "signature_id")?;

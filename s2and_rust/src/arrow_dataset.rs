@@ -337,12 +337,25 @@ impl ArrowDatasetResources {
         let Some(per_batch) = per_batch else {
             return Ok(None);
         };
-        let mut seen = HashSet::<&str>::default();
-        for (signature_id, _) in per_batch.iter().flatten() {
-            if !seen.insert(signature_id) {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "signatures Arrow contains duplicate signature_id: {signature_id:?}"
-                )));
+        // A sorted copy finds a repeated id on the pool; the first repeat in
+        // row order is then reported, as the row loop did.
+        let repeated = install_with_optional_rayon_pool(num_threads, || {
+            let mut sorted: Vec<&str> = per_batch
+                .iter()
+                .flatten()
+                .map(|(signature_id, _)| signature_id.as_str())
+                .collect();
+            sorted.par_sort_unstable();
+            sorted.par_windows(2).any(|pair| pair[0] == pair[1])
+        });
+        if repeated {
+            let mut seen = HashSet::<&str>::default();
+            for (signature_id, _) in per_batch.iter().flatten() {
+                if !seen.insert(signature_id) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "signatures Arrow contains duplicate signature_id: {signature_id:?}"
+                    )));
+                }
             }
         }
         Ok(Some(per_batch.into_iter().flatten().collect()))
@@ -492,18 +505,41 @@ impl ArrowDataset {
         self.resources.has_specter()
     }
 
-    /// Raw `author_orcid` values of the requested signatures as
-    /// `(signature_id, orcid)` pairs in Arrow row order, or None when the
-    /// table has no `author_orcid` column.
+    /// Raw `author_orcid` values of the requested signatures, or None when
+    /// the table has no `author_orcid` column: the ids found, in Arrow row
+    /// order, and the positions in that list and values of the non-null ORCIDs.
+    ///
+    /// A request asks for every seed, and few have an ORCID; one Python
+    /// tuple per seed took longer than the read.
     #[pyo3(signature = (signature_ids, num_threads = None))]
     fn signature_orcids(
         &self,
         py: Python<'_>,
         signature_ids: Vec<String>,
         num_threads: Option<usize>,
-    ) -> PyResult<Option<Vec<(String, Option<String>)>>> {
-        let keep_ids: HashSet<String> = signature_ids.into_iter().collect();
-        py.allow_threads(|| self.resources.read_signature_orcids(&keep_ids, num_threads))
+    ) -> PyResult<Option<(Vec<String>, Vec<usize>, Vec<String>)>> {
+        let rows = py.allow_threads(|| {
+            let mut keep_ids: HashSet<String> =
+                HashSet::with_capacity_and_hasher(signature_ids.len(), Default::default());
+            keep_ids.extend(signature_ids);
+            self.resources.read_signature_orcids(&keep_ids, num_threads)
+        })?;
+        Ok(rows.map(|rows| {
+            let mut positions = Vec::new();
+            let mut orcids = Vec::new();
+            let signature_ids = rows
+                .into_iter()
+                .enumerate()
+                .map(|(position, (signature_id, orcid))| {
+                    if let Some(orcid) = orcid {
+                        positions.push(position);
+                        orcids.push(orcid);
+                    }
+                    signature_id
+                })
+                .collect();
+            (signature_ids, positions, orcids)
+        }))
     }
 }
 

@@ -533,6 +533,63 @@ fn sparse_features_and_every_partial_group_match_baseline() {
 }
 
 #[test]
+fn pruned_trees_match_baseline_on_shared_patterns() {
+    let pool = |rng: &mut Rng| -> Vec<f64> {
+        let mut values = vec![f64::NEG_INFINITY, -K, -0.0, 0.0, K, 0.5, 1.0, f64::INFINITY];
+        values.extend((0..10).map(|_| (rng.unit() - 0.5) * 6.0));
+        values
+    };
+    for seed in 1..=5u64 {
+        let mut rng = Rng(0x5EED_0000_0000_0000 ^ seed);
+        let num_features = 5 + rng.below(4);
+        let pools: Vec<Vec<f64>> = (0..num_features).map(|_| pool(&mut rng)).collect();
+        // The last tree exceeds QuickScorer's leaf limit, so the plan is lockstep.
+        let trees: Vec<Node> = (0..=24)
+            .map(|index| {
+                let leaves = if index == 24 { 90 } else { 1 + rng.below(80) };
+                random_tree(&mut rng, leaves, &pools, &NAN_AND_NONE_DECISION_TYPES)
+            })
+            .collect();
+        let model = parse(num_features, &trees);
+        let plan = FastPlan::build(&model).expect("fast plan");
+        assert_eq!(plan.kernel_name(), "lockstep");
+        let templates = adversarial_rows(&model, 6, seed ^ 0xABCD);
+        for (value_features, nan_features) in [
+            (vec![0, 1], vec![2, 3]),
+            (vec![], vec![0, 1, 2, 3, 4]),
+            (vec![4], vec![]),
+            (vec![1, 3], vec![1, 2]),
+        ] {
+            let mut rows = adversarial_rows(&model, 777, seed);
+            for row in rows.chunks_exact_mut(num_features) {
+                // Value features repeat a template, so rows share patterns.
+                let template = &templates[rng.below(6) * num_features..][..num_features];
+                for &feature in &value_features {
+                    row[feature] = template[feature];
+                }
+                for &feature in &nan_features {
+                    if rng.below(10) < 4 {
+                        row[feature] = f64::NAN;
+                    }
+                }
+            }
+            let spec = RowSpecialization::new(0, num_features, value_features.clone(), nan_features.clone())
+                .expect("specialization fits");
+            for apply_sigmoid in [false, true] {
+                let expected = predict_rows(&model, &rows, num_features, 1, apply_sigmoid);
+                let actual = plan.predict_rows_specialized(&model, &rows, apply_sigmoid, &spec);
+                assert_same_bits(
+                    &actual,
+                    &expected,
+                    &rows,
+                    &format!("seed={seed} values={value_features:?} nans={nan_features:?} sigmoid={apply_sigmoid}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn leaf_limits_select_kernels() {
     // At most 128 distinct thresholds, so only the leaf count can fall back.
     let chain_thresholds = |leaves: usize| -> Vec<f64> {

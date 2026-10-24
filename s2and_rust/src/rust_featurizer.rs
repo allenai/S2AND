@@ -1,6 +1,6 @@
 use super::*;
 use crate::feature_schema as columns;
-use crate::lightgbm_booster::RustLightGBMBooster;
+use crate::lightgbm_booster::{RowSpecialization, RustLightGBMBooster};
 
 #[pyclass]
 #[derive(Clone)]
@@ -298,6 +298,93 @@ struct ConstraintKeys<'a> {
 /// to 256 pairs measured alike; 4,096 cost 15% and 16,384 cost 70% more, as
 /// the scorer's tables and the tile buffers left the caches.
 const FUSED_SCORING_TILE: usize = 256;
+thread_local! {
+    /// Each pool thread's one-pass buffers: unlabeled pairs, then main and
+    /// nameless feature rows. Reused across tiles and calls, so the fill does
+    /// not churn the allocator.
+    static ONE_PASS_BUFFERS: std::cell::RefCell<(Vec<(u32, u32, usize)>, Vec<f64>, Vec<f64>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new())) };
+}
+
+/// Most unlabeled pairs the one-pass fill featurizes and scores together;
+/// enough rows for pruned-tree groups, small enough to keep buffers in cache.
+const ONE_PASS_SCORING_BATCH: usize = 1024;
+
+/// Full feature columns that depend only on the two signatures' names. Pairs
+/// between the same two names share them, so the main model scores such
+/// pairs on trees pruned of these splits.
+const NAME_FEATURE_COLUMNS: [usize; 16] = [
+    columns::FIRST_NAMES_EQUAL,
+    columns::MIDDLE_INITIALS_OVERLAP,
+    columns::MIDDLE_NAMES_EQUAL,
+    columns::MIDDLE_ONE_MISSING,
+    columns::SINGLE_CHAR_FIRST,
+    columns::SINGLE_CHAR_MIDDLE,
+    columns::FIRST_NAME_COUNT_MIN,
+    columns::LAST_FIRST_NAME_COUNT_MIN,
+    columns::LAST_NAME_COUNT_MIN,
+    columns::LAST_FIRST_INITIAL_COUNT_MIN,
+    columns::FIRST_NAME_COUNT_MAX,
+    columns::LAST_FIRST_NAME_COUNT_MAX,
+    columns::LEVENSHTEIN,
+    columns::PREFIX,
+    columns::LCS,
+    columns::JARO,
+];
+
+/// Full feature columns that are often missing (NaN). Pairs missing the same
+/// ones share the nameless model's trees pruned of those splits.
+const OFTEN_MISSING_FEATURE_COLUMNS: [usize; 9] = [
+    columns::AFFILIATION_OVERLAP,
+    columns::EMAIL_PREFIX_EQUAL,
+    columns::EMAIL_SUFFIX_EQUAL,
+    columns::VENUE_OVERLAP,
+    columns::JOURNAL_OVERLAP,
+    columns::SPECTER_COSINE_SIM,
+    columns::COAUTHOR_OVERLAP,
+    columns::COAUTHOR_SIMILARITY,
+    columns::COAUTHOR_MATCH,
+];
+
+/// Pruned-tree roles for pair scoring: the main model fixes its name
+/// features, and the nameless model the NaN-ness of often-missing features.
+fn pair_scoring_specializations(
+    main_indices: &[usize],
+    main: &RustLightGBMBooster,
+    nameless: Option<(&[usize], &RustLightGBMBooster)>,
+) -> (Option<RowSpecialization>, Option<RowSpecialization>) {
+    let positions = |indices: &[usize], columns: &[usize]| -> Vec<usize> {
+        indices
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| columns.contains(column))
+            .map(|(position, _)| position)
+            .collect()
+    };
+    let main_spec = main.row_specialization(positions(main_indices, &NAME_FEATURE_COLUMNS), Vec::new());
+    let nameless_spec = nameless.and_then(|(indices, booster)| {
+        booster.row_specialization(Vec::new(), positions(indices, &OFTEN_MISSING_FEATURE_COLUMNS))
+    });
+    (main_spec, nameless_spec)
+}
+
+
+/// A raw output pointer shared by pool tasks that write disjoint offsets.
+struct SharedOutput(*mut f64);
+
+// SAFETY: tasks write disjoint offsets of one live buffer.
+unsafe impl Send for SharedOutput {}
+unsafe impl Sync for SharedOutput {}
+
+impl SharedOutput {
+    /// # Safety
+    /// `offset` is in bounds, and no other task writes it concurrently.
+    #[inline]
+    unsafe fn write(&self, offset: usize, value: f64) {
+        *self.0.add(offset) = value;
+    }
+}
+
 
 /// A feature value as the pairwise model reads it: `nan_value` for a missing
 /// value, unless `nan_value` is itself NaN.
@@ -1217,6 +1304,7 @@ impl RustFeaturizer {
         let tile = FUSED_SCORING_TILE;
         let main_cols = main_indices.len();
         let nameless_cols = nameless.map_or(0, |(indices, _)| indices.len());
+        let (main_spec, nameless_spec) = pair_scoring_specializations(main_indices, main, nameless);
         let aggregate_cols = aggregate_indices.len();
         let mut distances = vec![0.0f64; pair_count];
         let mut aggregate_values = vec![0.0f64; pair_count * aggregate_stride];
@@ -1268,13 +1356,17 @@ impl RustFeaturizer {
                     if scored == 0 {
                         return;
                     }
-                    let main_positive =
-                        main.probabilities_serial(&main_tile[..scored * main_cols], main_cols);
+                    let main_positive = main.probabilities_specialized(
+                        &main_tile[..scored * main_cols],
+                        main_cols,
+                        main_spec.as_ref(),
+                    );
                     match nameless {
                         Some((_, booster)) => {
-                            let nameless_positive = booster.probabilities_serial(
+                            let nameless_positive = booster.probabilities_specialized(
                                 &nameless_tile[..scored * nameless_cols],
                                 nameless_cols,
+                                nameless_spec.as_ref(),
                             );
                             for (position, row) in scored_rows.iter().enumerate() {
                                 distance_tile[*row] = ((1.0 - main_positive[position])
@@ -2698,6 +2790,289 @@ impl RustFeaturizer {
             })
         });
         Ok(out.into_pyarray(py))
+    }
+
+    /// Fill a block's condensed distance matrix `out` in one pass.
+    ///
+    /// Equals the chunked loop over `_constraint_labels_block_upper_triangle_indexed`
+    /// and `score_block_upper_triangle_rows_indexed`. A pair's label is its
+    /// override label if it has one, else its constraint value minus
+    /// `large_integer` (NaN without a constraint). A labeled pair stores
+    /// `label + large_integer`; an unlabeled pair stores the fused model
+    /// distance. Pairs are visited in tiles of `row_band` rows by
+    /// `column_block` columns, so one tile's records stay cached across its
+    /// rows; each pair is computed exactly as before and written to its own
+    /// offset. A tile's unlabeled pairs are scored together, so pairs that
+    /// share name values or missing features can share pruned trees. Returns
+    /// the labeled and scored pair counts.
+    #[pyo3(signature = (
+        block_signature_indices,
+        out,
+        large_integer,
+        override_offsets,
+        override_labels,
+        main_indices,
+        main_booster,
+        nameless_indices=None,
+        nameless_booster=None,
+        use_constraints=true,
+        low_value=0.0,
+        high_value=10000.0,
+        dont_merge_cluster_seeds=true,
+        incremental_dont_use_cluster_seeds=false,
+        suppress_orcid=false,
+        num_threads=None,
+        row_band=64,
+        column_block=128
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn fill_block_distances_indexed<'py>(
+        &self,
+        py: Python<'py>,
+        block_signature_indices: Vec<u32>,
+        mut out: numpy::PyReadwriteArray1<'py, f64>,
+        large_integer: f64,
+        override_offsets: PyReadonlyArray1<'py, i64>,
+        override_labels: PyReadonlyArray1<'py, f64>,
+        main_indices: Vec<usize>,
+        main_booster: PyRef<'py, RustLightGBMBooster>,
+        nameless_indices: Option<Vec<usize>>,
+        nameless_booster: Option<PyRef<'py, RustLightGBMBooster>>,
+        use_constraints: bool,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        suppress_orcid: bool,
+        num_threads: Option<usize>,
+        row_band: usize,
+        column_block: usize,
+    ) -> PyResult<(usize, usize)> {
+        let signature_ids = self.signature_id_order();
+        let signature_count = signature_ids.len();
+        let mut feature_lookup: Vec<(&SignatureData, &PaperData)> =
+            Vec::with_capacity(block_signature_indices.len());
+        let mut constraint_lookup: Vec<(&str, &SignatureData)> =
+            Vec::with_capacity(block_signature_indices.len());
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            if global_idx >= signature_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "block signature index out of range: index={} signature_count={}",
+                    global_idx, signature_count
+                )));
+            }
+            let signature_id = &signature_ids[global_idx];
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+            })?;
+            feature_lookup.push((signature, paper));
+            constraint_lookup.push((signature_id.as_str(), signature));
+        }
+        let block_size = feature_lookup.len();
+        let total_pairs = upper_triangle_total_pairs(block_size);
+        let out_slice = out.as_slice_mut()?;
+        if out_slice.len() != total_pairs {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "out holds {} values, the block has {} pairs",
+                out_slice.len(),
+                total_pairs
+            )));
+        }
+        let override_offsets = override_offsets.as_slice()?;
+        let override_labels = override_labels.as_slice()?;
+        if override_offsets.len() != override_labels.len()
+            || override_offsets.windows(2).any(|pair| pair[0] >= pair[1])
+            || override_offsets
+                .iter()
+                .any(|offset| *offset < 0 || *offset as usize >= total_pairs)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "override offsets must be strictly increasing pair offsets with one label each",
+            ));
+        }
+        if row_band == 0 || column_block == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "row_band and column_block must be positive",
+            ));
+        }
+        let full_cols = self.full_feature_count();
+        let main_indices = resolve_feature_indices("main_indices", Some(main_indices), full_cols)?;
+        let nameless_indices = match nameless_indices {
+            Some(indices) => Some(resolve_feature_indices(
+                "nameless_indices",
+                Some(indices),
+                full_cols,
+            )?),
+            None => None,
+        };
+        if nameless_indices.is_some() != nameless_booster.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "nameless_indices and nameless_booster must be given together",
+            ));
+        }
+        let main: &RustLightGBMBooster = &main_booster;
+        let nameless: Option<&RustLightGBMBooster> = nameless_booster.as_deref();
+        if main.feature_width() != main_indices.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "main booster expects {} features, got {} main_indices",
+                main.feature_width(),
+                main_indices.len()
+            )));
+        }
+        let main_cols = main_indices.len();
+        let nameless_cols = nameless_indices.as_ref().map_or(0, Vec::len);
+        if let Some(booster) = nameless {
+            if booster.feature_width() != nameless_cols {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "nameless booster expects {} features, got {} nameless_indices",
+                    booster.feature_width(),
+                    nameless_cols
+                )));
+            }
+        }
+        if block_size <= 1 {
+            return Ok((0, 0));
+        }
+        // Tiles of the upper triangle: row bands by aligned column blocks.
+        let mut tiles: Vec<(usize, usize, usize, usize)> = Vec::new();
+        for band_start in (0..block_size - 1).step_by(row_band) {
+            let band_end = (band_start + row_band).min(block_size - 1);
+            let first_block = (band_start + 1) / column_block;
+            let mut column_start = first_block * column_block;
+            while column_start < block_size {
+                let column_end = (column_start + column_block).min(block_size);
+                tiles.push((band_start, band_end, column_start, column_end));
+                column_start = column_end;
+            }
+        }
+        let (main_spec, nameless_spec) = pair_scoring_specializations(
+            &main_indices,
+            main,
+            nameless.zip(nameless_indices.as_deref()).map(|(booster, indices)| (indices, booster)),
+        );
+        let out_ptr = SharedOutput(out_slice.as_mut_ptr());
+        let labeled = std::sync::atomic::AtomicUsize::new(0);
+        let scored_total = std::sync::atomic::AtomicUsize::new(0);
+        py.allow_threads(|| {
+            install_with_optional_rayon_pool(num_threads, || {
+                let keys = use_constraints.then(|| self.constraint_keys(&constraint_lookup));
+                tiles.par_iter().for_each(|&(band_start, band_end, column_start, column_end)| {
+                    ONE_PASS_BUFFERS.with(|buffers| {
+                        let mut buffers = buffers.borrow_mut();
+                        let (scored, main_rows, nameless_rows) = &mut *buffers;
+                        let out_ptr = &out_ptr;
+                        scored.clear();
+                        let mut tile_labeled = 0usize;
+                        for left in band_start..band_end {
+                            let first_right = column_start.max(left + 1);
+                            if first_right >= column_end {
+                                continue;
+                            }
+                            // offset(left, right) = row_base + right.
+                            let row_base = left * block_size - left * (left + 1) / 2 - left - 1;
+                            let first_offset = (row_base + first_right) as i64;
+                            let mut next_override =
+                                override_offsets.partition_point(|offset| *offset < first_offset);
+                            for right in first_right..column_end {
+                                let offset = row_base + right;
+                                let override_label = if next_override < override_offsets.len()
+                                    && override_offsets[next_override] as usize == offset
+                                {
+                                    next_override += 1;
+                                    Some(override_labels[next_override - 1])
+                                } else {
+                                    None
+                                };
+                                let label = match override_label {
+                                    Some(label) => label,
+                                    None => keys
+                                        .as_ref()
+                                        .and_then(|keys| {
+                                            self.constraint_value_from_keys(
+                                                keys,
+                                                left,
+                                                right,
+                                                low_value,
+                                                high_value,
+                                                dont_merge_cluster_seeds,
+                                                incremental_dont_use_cluster_seeds,
+                                                suppress_orcid,
+                                            )
+                                        })
+                                        .map_or(f64::NAN, |value| value - large_integer),
+                                };
+                                if label.is_nan() {
+                                    scored.push((left as u32, right as u32, offset));
+                                } else {
+                                    // SAFETY: offsets are below total_pairs and each pair
+                                    // belongs to exactly one tile.
+                                    unsafe { out_ptr.write(offset, label + large_integer) };
+                                    tile_labeled += 1;
+                                }
+                            }
+                        }
+                        labeled.fetch_add(tile_labeled, std::sync::atomic::Ordering::Relaxed);
+                        scored_total.fetch_add(scored.len(), std::sync::atomic::Ordering::Relaxed);
+                        if scored.is_empty() {
+                            return;
+                        }
+                        // Bounded batches keep each thread's feature buffers small.
+                        for batch in scored.chunks(ONE_PASS_SCORING_BATCH) {
+                            let rows = batch.len();
+                            main_rows.resize(rows * main_cols, 0.0);
+                            nameless_rows.resize(rows * nameless_cols, 0.0);
+                            for (row, &(left, right, _)) in batch.iter().enumerate() {
+                                let (s1, p1) = feature_lookup[left as usize];
+                                let (s2, p2) = feature_lookup[right as usize];
+                                let features = self.featurize_pair_data(s1, s2, p1, p2);
+                                let main_row = &mut main_rows[row * main_cols..(row + 1) * main_cols];
+                                for (dest, index) in main_row.iter_mut().zip(main_indices.iter()) {
+                                    *dest = features[*index];
+                                }
+                                if let Some(indices) = nameless_indices.as_ref() {
+                                    let nameless_row =
+                                        &mut nameless_rows[row * nameless_cols..(row + 1) * nameless_cols];
+                                    for (dest, index) in nameless_row.iter_mut().zip(indices.iter()) {
+                                        *dest = features[*index];
+                                    }
+                                }
+                            }
+                            let main_positive = main.probabilities_specialized(
+                                &main_rows[..rows * main_cols],
+                                main_cols,
+                                main_spec.as_ref(),
+                            );
+                            let nameless_positive = nameless.map(|booster| {
+                                booster.probabilities_specialized(
+                                    &nameless_rows[..rows * nameless_cols],
+                                    nameless_cols,
+                                    nameless_spec.as_ref(),
+                                )
+                            });
+                            for (row, &(_, _, offset)) in batch.iter().enumerate() {
+                                let distance = match nameless_positive.as_ref() {
+                                    Some(nameless_positive) => {
+                                        ((1.0 - main_positive[row]) + (1.0 - nameless_positive[row])) / 2.0
+                                    }
+                                    None => 1.0 - main_positive[row],
+                                };
+                                // SAFETY: as above.
+                                unsafe { out_ptr.write(offset, distance) };
+                            }
+                        }
+                    })
+                });
+            })
+        });
+        Ok((
+            labeled.into_inner(),
+            scored_total.into_inner(),
+        ))
     }
 
     #[pyo3(

@@ -1323,6 +1323,10 @@ def _native_block_scorers(classifier: Any, nameless_classifier: Any | None) -> t
 
 # Tests compare the fused block scorer against the feature-matrix path.
 _FUSED_BLOCK_SCORING = True
+# Tests compare the one-pass block fill against the chunked fused loop.
+_ONE_PASS_BLOCK_FILL = True
+# Tests shrink the one-pass tiles to cross tile edges in small blocks.
+_one_pass_tile_overrides: dict[str, int] = {}
 
 
 def _use_rust_constraints(
@@ -2740,6 +2744,33 @@ class Clusterer:
                 signatures,
                 partial_supervision,
             )
+            if block_scorers is not None and uses_fastcluster and _ONE_PASS_BLOCK_FILL:
+                # One native pass labels, scores and writes every pair, with the
+                # chunked loop's values; it holds no chunk-sized buffers.
+                stage_start = time.perf_counter()
+                main_booster, nameless_booster = block_scorers
+                cast(Any, rust_featurizer).fill_block_distances_indexed(
+                    block_signature_indices,
+                    pairwise_proba,
+                    LARGE_INTEGER,
+                    override_offsets,
+                    override_labels,
+                    selected_indices,
+                    main_booster,
+                    nameless_selected_indices,
+                    nameless_booster,
+                    use_constraints=bool(self.use_default_constraints_as_supervision),
+                    low_value=0.0,
+                    high_value=LARGE_DISTANCE,
+                    dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                    suppress_orcid=bool(getattr(self, "suppress_orcid", False)),
+                    num_threads=resolve_n_jobs(self.n_jobs),
+                    **_one_pass_tile_overrides,
+                )
+                model_predict_seconds += time.perf_counter() - stage_start
+                chunk_count += 1
+                continue
             offset = 0
             while offset < block_pair_count:
                 chunk_pair_count = int(min(resolved_pair_chunk_size, block_pair_count - offset))

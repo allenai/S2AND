@@ -159,6 +159,31 @@ impl FastPlan {
         self.predict_rows_tiled(model, rows, num_threads, apply_sigmoid, tile_rows)
     }
 
+    /// Single-threaded probabilities (or raw margins) of `rows`, with rows
+    /// that share a pattern under `spec` scored on pruned trees. Equal to
+    /// `predict_rows_tiled` bit for bit; QuickScorer plans ignore `spec`.
+    pub(super) fn predict_rows_specialized<F: FeatureValue>(
+        &self,
+        model: &LgbModel,
+        rows: &[F],
+        apply_sigmoid: bool,
+        spec: &RowSpecialization,
+    ) -> Vec<f64> {
+        match self {
+            Self::QuickScorer(_) => self.predict_rows_tiled(model, rows, 1, apply_sigmoid, TILE_ROWS),
+            Self::Lockstep(kernel) => {
+                let mut margins = vec![0.0; rows.len() / model.num_features];
+                kernel.score_rows_specialized(rows, &mut margins, spec);
+                if apply_sigmoid {
+                    for raw in &mut margins {
+                        *raw = model.raw_to_probability(*raw);
+                    }
+                }
+                margins
+            }
+        }
+    }
+
     pub(super) fn predict_rows_tiled<F: FeatureValue>(
         &self,
         model: &LgbModel,
@@ -502,6 +527,105 @@ fn number_leaves_in_order(
     left | right
 }
 
+/// Feature roles that let groups of rows share pruned trees.
+///
+/// Rows that agree on every value feature's keys, and on which NaN features
+/// are NaN, take the same direction at every split on those features. Their
+/// trees can drop those splits: each row still reaches the same leaf and adds
+/// the same leaf values in tree order, so margins are bit-identical, while
+/// paths get shorter.
+///
+/// It holds the pruned trees it builds, so they are freed with it at the end
+/// of a scoring call rather than kept for the life of the model.
+#[derive(Debug)]
+pub(crate) struct RowSpecialization {
+    /// Per model feature: its position among the value features.
+    value_position: Vec<Option<u8>>,
+    /// Per model feature: its bit among the NaN features.
+    nan_bit: Vec<Option<u8>>,
+    value_features: Vec<usize>,
+    nan_features: Vec<usize>,
+    /// Address of the booster this specialization belongs to; its pruned
+    /// trees are only valid for that model.
+    pub(super) owner: usize,
+    /// Trees pruned for the patterns seen so far.
+    pruned: std::sync::RwLock<PrunedCache>,
+}
+
+/// Pruned trees by pattern, with their total node count.
+#[derive(Debug, Default)]
+struct PrunedCache {
+    by_pattern: std::collections::HashMap<PatternKey, std::sync::Arc<PrunedTrees>>,
+    nodes: usize,
+}
+
+/// Most value features one pattern fixes: two key bytes each fill 32 bytes.
+const MAX_VALUE_FEATURES: usize = 16;
+/// Most NaN features one pattern fixes: one bit each.
+const MAX_NAN_FEATURES: usize = 64;
+/// Smallest row group that gets pruned trees; smaller groups use the full
+/// trees together, so their lanes stay filled and few patterns are built.
+const MIN_PRUNED_GROUP: usize = 8;
+/// Most pruned-tree nodes one specialization keeps (8 bytes each, 8 MiB in
+/// all); it clears them when full, which bounds the memory pruning adds.
+const MAX_PRUNED_NODES: usize = 1 << 20;
+
+impl RowSpecialization {
+    /// `None` when the lists exceed the pattern capacity or name a feature
+    /// outside the model.
+    pub(crate) fn new(
+        owner: usize,
+        num_features: usize,
+        value_features: Vec<usize>,
+        nan_features: Vec<usize>,
+    ) -> Option<Self> {
+        if value_features.len() > MAX_VALUE_FEATURES
+            || nan_features.len() > MAX_NAN_FEATURES
+            || value_features
+                .iter()
+                .chain(&nan_features)
+                .any(|feature| *feature >= num_features)
+        {
+            return None;
+        }
+        let mut value_position = vec![None; num_features];
+        for (position, feature) in value_features.iter().enumerate() {
+            value_position[*feature] = Some(position as u8);
+        }
+        let mut nan_bit = vec![None; num_features];
+        for (bit, feature) in nan_features.iter().enumerate() {
+            // A value feature already fixes its splits.
+            if value_position[*feature].is_none() {
+                nan_bit[*feature] = Some(bit as u8);
+            }
+        }
+        Some(Self {
+            value_position,
+            nan_bit,
+            value_features,
+            nan_features,
+            owner,
+            pruned: std::sync::RwLock::new(PrunedCache::default()),
+        })
+    }
+}
+
+/// One row pattern: its value-feature keys and NaN bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct PatternKey {
+    values: [u8; 2 * MAX_VALUE_FEATURES],
+    nan: u64,
+}
+
+/// Lockstep trees with every split a pattern fixes replaced by its taken child.
+#[derive(Debug)]
+struct PrunedTrees {
+    nodes: Vec<u64>,
+    /// First node of each tree in `nodes`, in model order.
+    starts: Vec<usize>,
+}
+
+
 /// Lockstep traversal over `u8` keys for trees with at most 256 leaves.
 ///
 /// Trees are renumbered breadth first, so each internal node's children are
@@ -600,6 +724,193 @@ impl Lockstep {
             })
     }
 
+    /// The pattern of one row under `spec`.
+    fn pattern<F: FeatureValue>(&self, row: &[F], spec: &RowSpecialization) -> PatternKey {
+        let mut values = [0u8; 2 * MAX_VALUE_FEATURES];
+        for (position, &feature) in spec.value_features.iter().enumerate() {
+            let (nan_left, nan_right) = self.keys.keys(feature, row[feature].widen());
+            values[2 * position] = nan_left;
+            values[2 * position + 1] = nan_right;
+        }
+        let mut nan = 0u64;
+        for (bit, &feature) in spec.nan_features.iter().enumerate() {
+            if spec.nan_bit[feature].is_some()
+                && normalize_dense_zero(row[feature].widen()).is_nan()
+            {
+                nan |= 1u64 << bit;
+            }
+        }
+        PatternKey { values, nan }
+    }
+
+    /// Trees pruned for `pattern`, built on first use and shared by the
+    /// specialization's callers.
+    fn pruned_trees(&self, pattern: &PatternKey, spec: &RowSpecialization) -> std::sync::Arc<PrunedTrees> {
+        if let Ok(cache) = spec.pruned.read() {
+            if let Some(found) = cache.by_pattern.get(pattern) {
+                return found.clone();
+            }
+        }
+        let built = std::sync::Arc::new(self.prune(pattern, spec));
+        if let Ok(mut cache) = spec.pruned.write() {
+            if let Some(found) = cache.by_pattern.get(pattern) {
+                return found.clone();
+            }
+            if cache.nodes + built.nodes.len() > MAX_PRUNED_NODES {
+                cache.by_pattern.clear();
+                cache.nodes = 0;
+            }
+            cache.nodes += built.nodes.len();
+            cache.by_pattern.insert(*pattern, built.clone());
+        }
+        built
+    }
+
+    /// Rebuild every tree breadth first, following the fixed splits.
+    ///
+    /// A split reads the NaN-left key when its slot is below `num_features`,
+    /// else the NaN-right key, and goes right when that key exceeds `hi`; the
+    /// pattern fixes both keys of a value feature. A NaN key goes left on the
+    /// NaN-left slot (0 never exceeds `hi`) and right on the NaN-right slot
+    /// (255 always does).
+    fn prune(&self, pattern: &PatternKey, spec: &RowSpecialization) -> PrunedTrees {
+        let num_features = self.keys.num_features;
+        let resolve = |mut index: usize| -> usize {
+            loop {
+                let word = self.nodes[index];
+                if word as u8 == LEAF_HI {
+                    return index;
+                }
+                // Bits 16..32 hold the key offset, slot * LOCKSTEP_LANES.
+                let slot = usize::from((word >> 16) as u16) / LOCKSTEP_LANES;
+                let (feature, nan_right_slot) = if slot < num_features {
+                    (slot, false)
+                } else {
+                    (slot - num_features, true)
+                };
+                let go_right = if let Some(position) = spec.value_position[feature] {
+                    let key = pattern.values[2 * usize::from(position) + usize::from(nan_right_slot)];
+                    key > word as u8
+                } else if spec.nan_bit[feature]
+                    .is_some_and(|bit| pattern.nan & (1u64 << bit) != 0)
+                {
+                    nan_right_slot
+                } else {
+                    return index;
+                };
+                index = (word >> 32) as usize + usize::from(go_right);
+            }
+        };
+        // Pruned trees never exceed the full ones, so one allocation suffices.
+        let mut nodes: Vec<u64> = Vec::with_capacity(self.nodes.len());
+        let mut starts = Vec::with_capacity(self.trees.len());
+        let mut queue: Vec<usize> = Vec::new();
+        for &(first_node, _) in &self.trees {
+            let start = nodes.len();
+            starts.push(start);
+            queue.clear();
+            queue.push(resolve(first_node));
+            let mut position = 0;
+            while position < queue.len() {
+                let original = self.nodes[queue[position]];
+                let index = (start + position) as u64;
+                let word = if original as u8 == LEAF_HI {
+                    (original & 0xFFFF_FFFF) | (index << 32)
+                } else {
+                    let left = (start + queue.len()) as u64;
+                    let original_left = (original >> 32) as usize;
+                    queue.push(resolve(original_left));
+                    queue.push(resolve(original_left + 1));
+                    (original & 0xFFFF_FFFF) | (left << 32)
+                };
+                nodes.push(word);
+                position += 1;
+            }
+        }
+        nodes.shrink_to_fit();
+        PrunedTrees { nodes, starts }
+    }
+
+    /// Margins of `rows`, each group of rows sharing a pattern scored on its
+    /// pruned trees. Groups below `MIN_PRUNED_GROUP` rows share the full trees.
+    pub(super) fn score_rows_specialized<F: FeatureValue>(
+        &self,
+        rows: &[F],
+        margins: &mut [f64],
+        spec: &RowSpecialization,
+    ) {
+        let num_features = self.keys.num_features;
+        let row_count = margins.len();
+        debug_assert_eq!(rows.len(), row_count * num_features);
+        let mut ordered: Vec<(PatternKey, u32)> = rows
+            .chunks_exact(num_features)
+            .enumerate()
+            .map(|(row_index, row)| (self.pattern(row, spec), row_index as u32))
+            .collect();
+        ordered.sort_unstable();
+        let mut full_tree_rows: Vec<usize> = Vec::new();
+        let mut start = 0;
+        while start < ordered.len() {
+            let mut end = start + 1;
+            while end < ordered.len() && ordered[end].0 == ordered[start].0 {
+                end += 1;
+            }
+            let group: Vec<usize> = ordered[start..end].iter().map(|(_, row)| *row as usize).collect();
+            if group.len() >= MIN_PRUNED_GROUP {
+                let pruned = self.pruned_trees(&ordered[start].0, spec);
+                self.score_row_group(rows, margins, &group, &pruned.nodes, Some(&pruned.starts));
+            } else {
+                full_tree_rows.extend(group);
+            }
+            start = end;
+        }
+        if !full_tree_rows.is_empty() {
+            self.score_row_group(rows, margins, &full_tree_rows, &self.nodes, None);
+        }
+    }
+
+    /// Lockstep over the chosen rows on `nodes`; `starts` gives each tree's
+    /// root there, or `None` for the plan's own trees.
+    fn score_row_group<F: FeatureValue>(
+        &self,
+        rows: &[F],
+        margins: &mut [f64],
+        group: &[usize],
+        nodes: &[u64],
+        starts: Option<&[usize]>,
+    ) {
+        const LANES: usize = LOCKSTEP_LANES;
+        let num_features = self.keys.num_features;
+        let key_block = 2 * num_features * LANES;
+        let mut keys = vec![0u8; group.len().div_ceil(LANES) * key_block];
+        for (position, &row_index) in group.iter().enumerate() {
+            let block = &mut keys[(position / LANES) * key_block..][..key_block];
+            let lane = position % LANES;
+            let row = &rows[row_index * num_features..][..num_features];
+            for &feature in &self.keys.used_features {
+                let (nan_left, nan_right) = self.keys.keys(feature, row[feature].widen());
+                block[feature * LANES + lane] = nan_left;
+                block[(num_features + feature) * LANES + lane] = nan_right;
+            }
+        }
+        // Each row's margin starts from its incoming value and adds leaves in tree order.
+        let mut group_margins: Vec<f64> = group.iter().map(|&row| margins[row]).collect();
+        for (tree_index, &(first_node, first_leaf)) in self.trees.iter().enumerate() {
+            let root = starts.map_or(first_node, |starts| starts[tree_index]);
+            for (block_index, scores) in group_margins.chunks_mut(LANES).enumerate() {
+                let block = &keys[block_index * key_block..][..key_block];
+                if scores.len() == LANES {
+                    self.score_group_on::<true>(nodes, block, scores, root, first_leaf);
+                } else {
+                    self.score_group_on::<false>(nodes, block, scores, root, first_leaf);
+                }
+            }
+        }
+        for (position, &row_index) in group.iter().enumerate() {
+            margins[row_index] = group_margins[position];
+        }
+    }
+
     fn score_tile<F: FeatureValue>(&self, tile: &[F], margins: &mut [f64]) {
         let num_features = self.keys.num_features;
         let row_count = margins.len();
@@ -639,6 +950,20 @@ impl Lockstep {
         first_node: usize,
         first_leaf: usize,
     ) {
+        self.score_group_on::<FULL>(&self.nodes, group, margins, first_node, first_leaf);
+    }
+
+    /// `score_group` on `nodes`: the plan's trees or pruned copies of them,
+    /// whose words keep the plan's slots, thresholds and leaf indices.
+    #[inline(always)]
+    fn score_group_on<const FULL: bool>(
+        &self,
+        nodes: &[u64],
+        group: &[u8],
+        margins: &mut [f64],
+        first_node: usize,
+        first_leaf: usize,
+    ) {
         let lane_count = if FULL { LOCKSTEP_LANES } else { margins.len() };
         let mut lanes = [first_node; LOCKSTEP_LANES];
         loop {
@@ -650,7 +975,7 @@ impl Lockstep {
                 // one `key_block`-sized group. Partial groups use fewer lanes
                 // without changing that validated key stride.
                 let (word, key) = unsafe {
-                    let word = *self.nodes.get_unchecked(*index);
+                    let word = *nodes.get_unchecked(*index);
                     let key_offset = usize::from((word >> 16) as u16);
                     (word, *group.get_unchecked(key_offset + lane))
                 };
@@ -666,7 +991,7 @@ impl Lockstep {
             // SAFETY: no active lane moved, so each is on a leaf, whose
             // leaf index `invariants_hold` bounded by this tree's leaves.
             *margin += unsafe {
-                let leaf = usize::from((*self.nodes.get_unchecked(index) >> 8) as u8);
+                let leaf = usize::from((*nodes.get_unchecked(index) >> 8) as u8);
                 *self.leaves.get_unchecked(first_leaf + leaf)
             };
         }

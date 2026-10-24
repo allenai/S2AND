@@ -37,6 +37,7 @@ mod fast;
 mod fast_tests;
 
 use fast::FastPlan;
+pub(crate) use fast::RowSpecialization;
 
 pub(super) fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustLightGBMBooster>()?;
@@ -642,6 +643,40 @@ impl RustLightGBMBooster {
     /// Fused block scoring featurizes and scores one tile per pool task, so
     /// the batch scorer's parallelism and input copy are not needed. Each
     /// row's probability equals the batch scorer's.
+    /// The specialization of this model's lockstep plan for these feature
+    /// roles, or `None` when it has no lockstep plan or the roles do not fit.
+    pub(crate) fn row_specialization(
+        &self,
+        value_features: Vec<usize>,
+        nan_features: Vec<usize>,
+    ) -> Option<RowSpecialization> {
+        match self.fast_plan.as_ref() {
+            Some(FastPlan::Lockstep(_)) => RowSpecialization::new(
+                self as *const Self as usize,
+                self.model.num_features,
+                value_features,
+                nan_features,
+            ),
+            _ => None,
+        }
+    }
+
+    /// `probabilities_serial`, scoring row groups on pruned trees under `spec`.
+    pub(crate) fn probabilities_specialized(
+        &self,
+        rows: &[f64],
+        column_count: usize,
+        spec: Option<&RowSpecialization>,
+    ) -> Vec<f64> {
+        match (self.fast_plan.as_ref(), spec) {
+            // A specialization built for another booster holds that model's trees.
+            (Some(plan), Some(spec)) if spec.owner == self as *const Self as usize => {
+                plan.predict_rows_specialized(&self.model, rows, true, spec)
+            }
+            _ => self.probabilities_serial(rows, column_count),
+        }
+    }
+
     pub(crate) fn probabilities_serial(&self, rows: &[f64], column_count: usize) -> Vec<f64> {
         match self.fast_plan.as_ref() {
             Some(plan) => plan.predict_rows_tiled(&self.model, rows, 1, true, fast::TILE_ROWS),

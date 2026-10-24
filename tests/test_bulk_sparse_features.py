@@ -173,7 +173,7 @@ def test_fused_block_scoring_matches_feature_matrix_path(
     overrides: bool,
     with_nameless: bool,
 ) -> None:
-    """Fused tiles must give the distance matrix the batch path gives, bit for bit."""
+    """Fused tiles and the one-pass fill must give the batch path's distance matrix, bit for bit."""
     ids = [str(index) for index in range(7)]
     pairs = [(left, right) for index, left in enumerate(ids) for right in ids[index + 1 :]]
     supervision = (
@@ -195,11 +195,24 @@ def test_fused_block_scoring_matches_feature_matrix_path(
         signature_index_by_id={value: index for index, value in enumerate(ids)}, partial_supervision=supervision
     )
     assert model_module._native_block_scorers(main, nameless if with_nameless else None) is not None
+    # Small tiles cross tile edges inside the 7-signature block.
+    one_pass = []
+    for row_band, column_block in ((1, 1), (2, 3), (3, 2), (32, 64)):
+        monkeypatch.setattr(
+            model_module, "_one_pass_tile_overrides", {"row_band": row_band, "column_block": column_block}
+        )
+        one_pass.append(
+            clusterer._make_distance_matrices_from_verified_rust_featurizer({"block": ids}, native_features, **kwargs)
+        )
+    monkeypatch.setattr(model_module, "_ONE_PASS_BLOCK_FILL", False)
     fused = clusterer._make_distance_matrices_from_verified_rust_featurizer({"block": ids}, native_features, **kwargs)
     monkeypatch.setattr(model_module, "_FUSED_BLOCK_SCORING", False)
     batch = clusterer._make_distance_matrices_from_verified_rust_featurizer({"block": ids}, native_features, **kwargs)
     assert fused["block"].dtype == batch["block"].dtype == np.float64
     np.testing.assert_array_equal(fused["block"].view(np.uint64), batch["block"].view(np.uint64))
+    for filled in one_pass:
+        assert filled["block"].dtype == np.float64
+        np.testing.assert_array_equal(filled["block"].view(np.uint64), batch["block"].view(np.uint64))
     # With constraints and overrides every pair is labeled; otherwise the scores
     # vary across pairs, so the comparison is not of constants.
     if not (constraints and overrides):

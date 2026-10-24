@@ -65,6 +65,7 @@ use name_counts::{NameCountsData, NameCountsIndex, RawNameCountKind, RawNameCoun
 use orcid::normalize_orcid_compact_owned;
 use pair_indexing::{
     upper_triangle_pair_at, upper_triangle_pairs_for_range, upper_triangle_range_len,
+    upper_triangle_total_pairs,
 };
 use raw_arrow::readers::{
     read_raw_arrow_cluster_seed_disallows, read_raw_arrow_cluster_seeds,

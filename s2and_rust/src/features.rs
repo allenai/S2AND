@@ -266,8 +266,10 @@ pub(crate) fn word_ngrams_counter(text: &str) -> HashMap<String, usize> {
 #[cfg(test)]
 mod char_ngram_tests {
     use super::char_ngrams_counter_python_compat;
+    #[cfg(target_arch = "x86_64")]
     use super::intersection_min_sum_avx2;
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx2_intersection_matches_the_scalar_merge() {
         if !std::arch::is_x86_feature_detected!("avx2") {
@@ -533,16 +535,18 @@ pub(crate) fn counter_jaccard_data(
     } else {
         (c2, c1)
     };
+    let merge = large.len() < small.len().saturating_mul(4);
+    #[cfg(target_arch = "x86_64")]
+    let simd_sum = (merge && c1.simd && c2.simd && std::arch::is_x86_feature_detected!("avx2"))
+        // SAFETY: AVX2 was detected in the condition.
+        .then(|| unsafe { intersection_min_sum_avx2(c1, c2) });
+    #[cfg(not(target_arch = "x86_64"))]
+    let simd_sum: Option<u64> = None;
     let mut intersection = 0.0f64;
-    if c1.simd
-        && c2.simd
-        && large.len() < small.len().saturating_mul(4)
-        && std::arch::is_x86_feature_detected!("avx2")
-    {
+    if let Some(sum) = simd_sum {
         // Integer counts: the exact sum equals the merge's f64 sum.
-        // SAFETY: AVX2 was detected above.
-        intersection = unsafe { intersection_min_sum_avx2(c1, c2) } as f64;
-    } else if large.len() < small.len().saturating_mul(4) {
+        intersection = sum as f64;
+    } else if merge {
         let mut small_idx = 0usize;
         let mut large_idx = 0usize;
         while small_idx < small.len() && large_idx < large.len() {

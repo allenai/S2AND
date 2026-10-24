@@ -573,8 +573,13 @@ fn pruned_trees_match_baseline_on_shared_patterns() {
                     }
                 }
             }
-            let spec = RowSpecialization::new(0, num_features, value_features.clone(), nan_features.clone())
-                .expect("specialization fits");
+            let spec = RowSpecialization::new(
+                0,
+                num_features,
+                value_features.clone(),
+                nan_features.clone(),
+            )
+            .expect("specialization fits");
             for apply_sigmoid in [false, true] {
                 let expected = predict_rows(&model, &rows, num_features, 1, apply_sigmoid);
                 let actual = plan.predict_rows_specialized(&model, &rows, apply_sigmoid, &spec);

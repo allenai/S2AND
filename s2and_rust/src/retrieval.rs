@@ -796,9 +796,7 @@ pub(crate) fn counter_query_overlap_hashes(
     }
     let mut overlap = 0.0f64;
     for query_hash in query_hashes {
-        if let Ok(index) = counter_data
-            .keys.binary_search(query_hash)
-        {
+        if let Ok(index) = counter_data.keys.binary_search(query_hash) {
             overlap += (counter_data.values[index] as f64) / (size as f64);
         }
     }
@@ -848,9 +846,7 @@ pub(crate) fn middle_initial_score_hashes(
     let mut overlap = 0.0f64;
     let mut overlap_found = false;
     for query_hash in query_hashes {
-        if let Ok(index) = counter_data
-            .keys.binary_search(query_hash)
-        {
+        if let Ok(index) = counter_data.keys.binary_search(query_hash) {
             overlap += (counter_data.values[index] as f64) / (size as f64);
             overlap_found = true;
         }
@@ -933,11 +929,9 @@ pub(crate) fn has_middle_initial_conflict(
     if query_hashes.is_empty() || counter_data.is_empty() {
         return false;
     }
-    !query_hashes.iter().any(|query_hash| {
-        counter_data
-            .keys.binary_search(query_hash)
-            .is_ok()
-    })
+    !query_hashes
+        .iter()
+        .any(|query_hash| counter_data.keys.binary_search(query_hash).is_ok())
 }
 
 pub(crate) fn has_impossible_year_conflict(
@@ -1066,7 +1060,10 @@ fn vector_group_dot_products(query: &[f64], vectors: &[&[f64]]) -> [f64; 5] {
         0 => [0.0; 5],
         1 => pad(vector_group_dots::<1>(query, [vectors[0]])),
         2 => pad(vector_group_dots::<2>(query, [vectors[0], vectors[1]])),
-        3 => pad(vector_group_dots::<3>(query, [vectors[0], vectors[1], vectors[2]])),
+        3 => pad(vector_group_dots::<3>(
+            query,
+            [vectors[0], vectors[1], vectors[2]],
+        )),
         4 => pad(vector_group_dots::<4>(
             query,
             [vectors[0], vectors[1], vectors[2], vectors[3]],
@@ -1481,9 +1478,7 @@ mod overlap_index_tests {
                 continue;
             }
             denominator += query_weight;
-            if let Ok(index) = counter_data
-                .keys.binary_search(&term.hash)
-            {
+            if let Ok(index) = counter_data.keys.binary_search(&term.hash) {
                 let mut contribution = (counter_data.values[index] as f64) / (size as f64);
                 if let Some(cap) = config.per_term_cap {
                     contribution = contribution.min(cap);
@@ -1510,11 +1505,7 @@ mod overlap_index_tests {
         };
         query_terms
             .iter()
-            .filter(|term| {
-                counter_data
-                    .keys.binary_search(&term.hash)
-                    .is_ok()
-            })
+            .filter(|term| counter_data.keys.binary_search(&term.hash).is_ok())
             .count()
     }
 
@@ -2162,7 +2153,9 @@ mod overlap_index_tests {
         let mut rng = Lcg(77);
         for len in [0usize, 1, 7, 8, 9, 64, 767, 768, 769] {
             let make = |rng: &mut Lcg| -> Vec<f64> {
-                (0..len).map(|_| f64::from(rng.below(1000) as f32 / 500.0 - 1.0)).collect()
+                (0..len)
+                    .map(|_| f64::from(rng.below(1000) as f32 / 500.0 - 1.0))
+                    .collect()
             };
             let query = make(&mut rng);
             let vectors: Vec<Vec<f64>> = (0..5).map(|_| make(&mut rng)).collect();
@@ -2175,8 +2168,16 @@ mod overlap_index_tests {
                     let vector_f32: Vec<f32> = vector.iter().map(|value| *value as f32).collect();
                     let expected = fused_dot_products::<1>(&query_f32, [&vector_f32])[0];
                     let portable = grouped_dots_portable::<1>([&query], vector)[0];
-                    assert_eq!(observed[position].to_bits(), expected.to_bits(), "len={len} count={count}");
-                    assert_eq!(portable.to_bits(), expected.to_bits(), "len={len} count={count}");
+                    assert_eq!(
+                        observed[position].to_bits(),
+                        expected.to_bits(),
+                        "len={len} count={count}"
+                    );
+                    assert_eq!(
+                        portable.to_bits(),
+                        expected.to_bits(),
+                        "len={len} count={count}"
+                    );
                 }
             }
         }

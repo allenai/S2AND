@@ -511,7 +511,8 @@ unsafe fn for_each_common_gram_avx2(
                 _mm256_set1_epi32(7),
             );
             let rotated = _mm256_permutevar8x32_epi32(keys2, index);
-            *mask = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(keys1, rotated))) as u32;
+            *mask =
+                _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(keys1, rotated))) as u32;
             any |= *mask;
         }
         while any != 0 {
@@ -892,7 +893,9 @@ mod tests {
             let universe = 1 + rng.below(3_000) as u32;
             let mut make = |rng: &mut Lcg| {
                 let len = rng.below(700);
-                let mut keys: Vec<u32> = (0..len).map(|_| rng.below(universe as usize) as u32).collect();
+                let mut keys: Vec<u32> = (0..len)
+                    .map(|_| rng.below(universe as usize) as u32)
+                    .collect();
                 keys.sort_unstable();
                 keys.dedup();
                 keys.into_iter()
@@ -902,9 +905,14 @@ mod tests {
             let first = make(&mut rng);
             let second = make(&mut rng);
             let mut expected = Vec::new();
-            for_each_common(&first, &second, |(key, _)| *key, |(key, count1), (_, count2)| {
-                expected.push((*key, *count1, *count2));
-            });
+            for_each_common(
+                &first,
+                &second,
+                |(key, _)| *key,
+                |(key, count1), (_, count2)| {
+                    expected.push((*key, *count1, *count2));
+                },
+            );
             let mut observed = Vec::new();
             // SAFETY: AVX2 was detected above.
             unsafe {

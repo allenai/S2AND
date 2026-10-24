@@ -170,7 +170,9 @@ impl FastPlan {
         spec: &RowSpecialization,
     ) -> Vec<f64> {
         match self {
-            Self::QuickScorer(_) => self.predict_rows_tiled(model, rows, 1, apply_sigmoid, TILE_ROWS),
+            Self::QuickScorer(_) => {
+                self.predict_rows_tiled(model, rows, 1, apply_sigmoid, TILE_ROWS)
+            }
             Self::Lockstep(kernel) => {
                 let mut margins = vec![0.0; rows.len() / model.num_features];
                 kernel.score_rows_specialized(rows, &mut margins, spec);
@@ -625,7 +627,6 @@ struct PrunedTrees {
     starts: Vec<usize>,
 }
 
-
 /// Lockstep traversal over `u8` keys for trees with at most 256 leaves.
 ///
 /// Trees are renumbered breadth first, so each internal node's children are
@@ -745,7 +746,11 @@ impl Lockstep {
 
     /// Trees pruned for `pattern`, built on first use and shared by the
     /// specialization's callers.
-    fn pruned_trees(&self, pattern: &PatternKey, spec: &RowSpecialization) -> std::sync::Arc<PrunedTrees> {
+    fn pruned_trees(
+        &self,
+        pattern: &PatternKey,
+        spec: &RowSpecialization,
+    ) -> std::sync::Arc<PrunedTrees> {
         if let Ok(cache) = spec.pruned.read() {
             if let Some(found) = cache.by_pattern.get(pattern) {
                 return found.clone();
@@ -789,10 +794,10 @@ impl Lockstep {
                     (slot - num_features, true)
                 };
                 let go_right = if let Some(position) = spec.value_position[feature] {
-                    let key = pattern.values[2 * usize::from(position) + usize::from(nan_right_slot)];
+                    let key =
+                        pattern.values[2 * usize::from(position) + usize::from(nan_right_slot)];
                     key > word as u8
-                } else if spec.nan_bit[feature]
-                    .is_some_and(|bit| pattern.nan & (1u64 << bit) != 0)
+                } else if spec.nan_bit[feature].is_some_and(|bit| pattern.nan & (1u64 << bit) != 0)
                 {
                     nan_right_slot
                 } else {
@@ -855,7 +860,10 @@ impl Lockstep {
             while end < ordered.len() && ordered[end].0 == ordered[start].0 {
                 end += 1;
             }
-            let group: Vec<usize> = ordered[start..end].iter().map(|(_, row)| *row as usize).collect();
+            let group: Vec<usize> = ordered[start..end]
+                .iter()
+                .map(|(_, row)| *row as usize)
+                .collect();
             if group.len() >= MIN_PRUNED_GROUP {
                 let pruned = self.pruned_trees(&ordered[start].0, spec);
                 self.score_row_group(rows, margins, &group, &pruned.nodes, Some(&pruned.starts));

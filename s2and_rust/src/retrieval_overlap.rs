@@ -139,9 +139,7 @@ fn counter_hits_and_numerator(
     };
     let (mut hits, mut numerator) = (0u32, 0.0f64);
     for (term, weight) in terms.iter().zip(weights) {
-        if let Ok(index) = counter
-            .keys.binary_search(&term.hash)
-        {
+        if let Ok(index) = counter.keys.binary_search(&term.hash) {
             hits += 1;
             if *weight > 0.0 {
                 numerator += weight * term_share(counter.values[index], size, config);

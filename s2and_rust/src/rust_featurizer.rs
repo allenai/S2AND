@@ -361,13 +361,16 @@ fn pair_scoring_specializations(
             .map(|(position, _)| position)
             .collect()
     };
-    let main_spec = main.row_specialization(positions(main_indices, &NAME_FEATURE_COLUMNS), Vec::new());
+    let main_spec =
+        main.row_specialization(positions(main_indices, &NAME_FEATURE_COLUMNS), Vec::new());
     let nameless_spec = nameless.and_then(|(indices, booster)| {
-        booster.row_specialization(Vec::new(), positions(indices, &OFTEN_MISSING_FEATURE_COLUMNS))
+        booster.row_specialization(
+            Vec::new(),
+            positions(indices, &OFTEN_MISSING_FEATURE_COLUMNS),
+        )
     });
     (main_spec, nameless_spec)
 }
-
 
 /// A raw output pointer shared by pool tasks that write disjoint offsets.
 struct SharedOutput(*mut f64);
@@ -384,7 +387,6 @@ impl SharedOutput {
         *self.0.add(offset) = value;
     }
 }
-
 
 /// A feature value as the pairwise model reads it: `nan_value` for a missing
 /// value, unless `nan_value` is itself NaN.
@@ -2953,7 +2955,9 @@ impl RustFeaturizer {
         let (main_spec, nameless_spec) = pair_scoring_specializations(
             &main_indices,
             main,
-            nameless.zip(nameless_indices.as_deref()).map(|(booster, indices)| (indices, booster)),
+            nameless
+                .zip(nameless_indices.as_deref())
+                .map(|(booster, indices)| (indices, booster)),
         );
         let out_ptr = SharedOutput(out_slice.as_mut_ptr());
         let labeled = std::sync::atomic::AtomicUsize::new(0);
@@ -2961,118 +2965,125 @@ impl RustFeaturizer {
         py.allow_threads(|| {
             install_with_optional_rayon_pool(num_threads, || {
                 let keys = use_constraints.then(|| self.constraint_keys(&constraint_lookup));
-                tiles.par_iter().for_each(|&(band_start, band_end, column_start, column_end)| {
-                    ONE_PASS_BUFFERS.with(|buffers| {
-                        let mut buffers = buffers.borrow_mut();
-                        let (scored, main_rows, nameless_rows) = &mut *buffers;
-                        let out_ptr = &out_ptr;
-                        scored.clear();
-                        let mut tile_labeled = 0usize;
-                        for left in band_start..band_end {
-                            let first_right = column_start.max(left + 1);
-                            if first_right >= column_end {
-                                continue;
-                            }
-                            // offset(left, right) = row_base + right.
-                            let row_base = left * block_size - left * (left + 1) / 2 - left - 1;
-                            let first_offset = (row_base + first_right) as i64;
-                            let mut next_override =
-                                override_offsets.partition_point(|offset| *offset < first_offset);
-                            for right in first_right..column_end {
-                                let offset = row_base + right;
-                                let override_label = if next_override < override_offsets.len()
-                                    && override_offsets[next_override] as usize == offset
-                                {
-                                    next_override += 1;
-                                    Some(override_labels[next_override - 1])
-                                } else {
-                                    None
-                                };
-                                let label = match override_label {
-                                    Some(label) => label,
-                                    None => keys
-                                        .as_ref()
-                                        .and_then(|keys| {
-                                            self.constraint_value_from_keys(
-                                                keys,
-                                                left,
-                                                right,
-                                                low_value,
-                                                high_value,
-                                                dont_merge_cluster_seeds,
-                                                incremental_dont_use_cluster_seeds,
-                                                suppress_orcid,
-                                            )
-                                        })
-                                        .map_or(f64::NAN, |value| value - large_integer),
-                                };
-                                if label.is_nan() {
-                                    scored.push((left as u32, right as u32, offset));
-                                } else {
-                                    // SAFETY: offsets are below total_pairs and each pair
-                                    // belongs to exactly one tile.
-                                    unsafe { out_ptr.write(offset, label + large_integer) };
-                                    tile_labeled += 1;
+                tiles
+                    .par_iter()
+                    .for_each(|&(band_start, band_end, column_start, column_end)| {
+                        ONE_PASS_BUFFERS.with(|buffers| {
+                            let mut buffers = buffers.borrow_mut();
+                            let (scored, main_rows, nameless_rows) = &mut *buffers;
+                            let out_ptr = &out_ptr;
+                            scored.clear();
+                            let mut tile_labeled = 0usize;
+                            for left in band_start..band_end {
+                                let first_right = column_start.max(left + 1);
+                                if first_right >= column_end {
+                                    continue;
+                                }
+                                // offset(left, right) = row_base + right.
+                                let row_base = left * block_size - left * (left + 1) / 2 - left - 1;
+                                let first_offset = (row_base + first_right) as i64;
+                                let mut next_override = override_offsets
+                                    .partition_point(|offset| *offset < first_offset);
+                                for right in first_right..column_end {
+                                    let offset = row_base + right;
+                                    let override_label = if next_override < override_offsets.len()
+                                        && override_offsets[next_override] as usize == offset
+                                    {
+                                        next_override += 1;
+                                        Some(override_labels[next_override - 1])
+                                    } else {
+                                        None
+                                    };
+                                    let label = match override_label {
+                                        Some(label) => label,
+                                        None => keys
+                                            .as_ref()
+                                            .and_then(|keys| {
+                                                self.constraint_value_from_keys(
+                                                    keys,
+                                                    left,
+                                                    right,
+                                                    low_value,
+                                                    high_value,
+                                                    dont_merge_cluster_seeds,
+                                                    incremental_dont_use_cluster_seeds,
+                                                    suppress_orcid,
+                                                )
+                                            })
+                                            .map_or(f64::NAN, |value| value - large_integer),
+                                    };
+                                    if label.is_nan() {
+                                        scored.push((left as u32, right as u32, offset));
+                                    } else {
+                                        // SAFETY: offsets are below total_pairs and each pair
+                                        // belongs to exactly one tile.
+                                        unsafe { out_ptr.write(offset, label + large_integer) };
+                                        tile_labeled += 1;
+                                    }
                                 }
                             }
-                        }
-                        labeled.fetch_add(tile_labeled, std::sync::atomic::Ordering::Relaxed);
-                        scored_total.fetch_add(scored.len(), std::sync::atomic::Ordering::Relaxed);
-                        if scored.is_empty() {
-                            return;
-                        }
-                        // Bounded batches keep each thread's feature buffers small.
-                        for batch in scored.chunks(ONE_PASS_SCORING_BATCH) {
-                            let rows = batch.len();
-                            main_rows.resize(rows * main_cols, 0.0);
-                            nameless_rows.resize(rows * nameless_cols, 0.0);
-                            for (row, &(left, right, _)) in batch.iter().enumerate() {
-                                let (s1, p1) = feature_lookup[left as usize];
-                                let (s2, p2) = feature_lookup[right as usize];
-                                let features = self.featurize_pair_data(s1, s2, p1, p2);
-                                let main_row = &mut main_rows[row * main_cols..(row + 1) * main_cols];
-                                for (dest, index) in main_row.iter_mut().zip(main_indices.iter()) {
-                                    *dest = features[*index];
-                                }
-                                if let Some(indices) = nameless_indices.as_ref() {
-                                    let nameless_row =
-                                        &mut nameless_rows[row * nameless_cols..(row + 1) * nameless_cols];
-                                    for (dest, index) in nameless_row.iter_mut().zip(indices.iter()) {
+                            labeled.fetch_add(tile_labeled, std::sync::atomic::Ordering::Relaxed);
+                            scored_total
+                                .fetch_add(scored.len(), std::sync::atomic::Ordering::Relaxed);
+                            if scored.is_empty() {
+                                return;
+                            }
+                            // Bounded batches keep each thread's feature buffers small.
+                            for batch in scored.chunks(ONE_PASS_SCORING_BATCH) {
+                                let rows = batch.len();
+                                main_rows.resize(rows * main_cols, 0.0);
+                                nameless_rows.resize(rows * nameless_cols, 0.0);
+                                for (row, &(left, right, _)) in batch.iter().enumerate() {
+                                    let (s1, p1) = feature_lookup[left as usize];
+                                    let (s2, p2) = feature_lookup[right as usize];
+                                    let features = self.featurize_pair_data(s1, s2, p1, p2);
+                                    let main_row =
+                                        &mut main_rows[row * main_cols..(row + 1) * main_cols];
+                                    for (dest, index) in
+                                        main_row.iter_mut().zip(main_indices.iter())
+                                    {
                                         *dest = features[*index];
                                     }
+                                    if let Some(indices) = nameless_indices.as_ref() {
+                                        let nameless_row = &mut nameless_rows
+                                            [row * nameless_cols..(row + 1) * nameless_cols];
+                                        for (dest, index) in
+                                            nameless_row.iter_mut().zip(indices.iter())
+                                        {
+                                            *dest = features[*index];
+                                        }
+                                    }
+                                }
+                                let main_positive = main.probabilities_specialized(
+                                    &main_rows[..rows * main_cols],
+                                    main_cols,
+                                    main_spec.as_ref(),
+                                );
+                                let nameless_positive = nameless.map(|booster| {
+                                    booster.probabilities_specialized(
+                                        &nameless_rows[..rows * nameless_cols],
+                                        nameless_cols,
+                                        nameless_spec.as_ref(),
+                                    )
+                                });
+                                for (row, &(_, _, offset)) in batch.iter().enumerate() {
+                                    let distance = match nameless_positive.as_ref() {
+                                        Some(nameless_positive) => {
+                                            ((1.0 - main_positive[row])
+                                                + (1.0 - nameless_positive[row]))
+                                                / 2.0
+                                        }
+                                        None => 1.0 - main_positive[row],
+                                    };
+                                    // SAFETY: as above.
+                                    unsafe { out_ptr.write(offset, distance) };
                                 }
                             }
-                            let main_positive = main.probabilities_specialized(
-                                &main_rows[..rows * main_cols],
-                                main_cols,
-                                main_spec.as_ref(),
-                            );
-                            let nameless_positive = nameless.map(|booster| {
-                                booster.probabilities_specialized(
-                                    &nameless_rows[..rows * nameless_cols],
-                                    nameless_cols,
-                                    nameless_spec.as_ref(),
-                                )
-                            });
-                            for (row, &(_, _, offset)) in batch.iter().enumerate() {
-                                let distance = match nameless_positive.as_ref() {
-                                    Some(nameless_positive) => {
-                                        ((1.0 - main_positive[row]) + (1.0 - nameless_positive[row])) / 2.0
-                                    }
-                                    None => 1.0 - main_positive[row],
-                                };
-                                // SAFETY: as above.
-                                unsafe { out_ptr.write(offset, distance) };
-                            }
-                        }
-                    })
-                });
+                        })
+                    });
             })
         });
-        Ok((
-            labeled.into_inner(),
-            scored_total.into_inner(),
-        ))
+        Ok((labeled.into_inner(), scored_total.into_inner()))
     }
 
     #[pyo3(

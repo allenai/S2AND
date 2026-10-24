@@ -275,7 +275,9 @@ mod char_ngram_tests {
         }
         let mut state = 99u64;
         let mut next = move |bound: u64| {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             (state >> 11) % bound
         };
         let mut checked = 0usize;
@@ -284,10 +286,14 @@ mod char_ngram_tests {
             let len_b = 1 + next(600) as usize;
             let universe = 1 + next(4000);
             let mut make = |len: usize| {
-                let mut keys: Vec<u64> = (0..len).map(|_| next(universe).wrapping_mul(0x9E37_79B9_7F4A_7C15)).collect();
+                let mut keys: Vec<u64> = (0..len)
+                    .map(|_| next(universe).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                    .collect();
                 keys.sort_unstable();
                 keys.dedup();
-                keys.into_iter().map(|key| (key, (1 + next(6)) as f32)).collect::<Vec<_>>()
+                keys.into_iter()
+                    .map(|key| (key, (1 + next(6)) as f32))
+                    .collect::<Vec<_>>()
             };
             let a = make(len_a);
             let b = make(len_b);
@@ -307,7 +313,13 @@ mod char_ngram_tests {
             }
             // SAFETY: AVX2 was detected above.
             let observed = unsafe { intersection_min_sum_avx2(&counter_a, &counter_b) } as f64;
-            assert_eq!(observed.to_bits(), expected.to_bits(), "a={} b={}", a.len(), b.len());
+            assert_eq!(
+                observed.to_bits(),
+                expected.to_bits(),
+                "a={} b={}",
+                a.len(),
+                b.len()
+            );
             checked += usize::from(expected > 0.0);
         }
         assert!(checked > 10_000);
@@ -469,8 +481,7 @@ unsafe fn intersection_min_sum_avx2(a: &CounterData, b: &CounterData) -> u64 {
         macro_rules! rotation {
             ($keys:expr, $values:expr) => {{
                 let equal = _mm256_cmpeq_epi64(ak, $keys);
-                let equal32 =
-                    _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(equal, pack_lows));
+                let equal32 = _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(equal, pack_lows));
                 acc = _mm_add_epi32(acc, _mm_and_si128(_mm_min_epi32(av, $values), equal32));
             }};
         }

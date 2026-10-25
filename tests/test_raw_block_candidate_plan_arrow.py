@@ -926,6 +926,49 @@ def test_rust_featurizer_from_arrow_dataset_deduplicates_unsorted_requested_ids(
     assert tuple(featurizer.signature_ids()) == ("q1", "s1", "s2")
 
 
+def test_raw_arrow_candidate_plan_without_member_lists_reports_their_counts(tmp_path: Path) -> None:
+    paths = base_arrow_paths(tmp_path)
+    planner = native_auto_planner(paths, top_k=2, orcid_enabled=False, num_threads=1)
+    with_members = planner.plan(["q1"])
+    without_members = planner.plan(["q1"], include_component_members=False)
+
+    assert without_members["component_members"] is None
+    seed_map = _seed_map_from_component_members(with_members["component_members"])
+    expected_counts = (len(seed_map), len(set(seed_map.values())))
+    assert expected_counts[0] > 0
+    assert tuple(with_members["component_member_counts"]) == expected_counts
+    assert tuple(without_members["component_member_counts"]) == expected_counts
+    bundle = RawArrowPlanBundle.from_native_mapping(without_members)
+    assert bundle.component_members is None
+    assert bundle.component_member_counts == expected_counts
+    assert bundle.contiguous_query_slice(0, 1).component_member_counts == expected_counts
+    _assert_raw_candidate_plans_equal(
+        {**without_members, "component_members": with_members["component_members"]},
+        with_members,
+    )
+
+
+def test_raw_arrow_plan_bundle_needs_counts_without_member_lists(tmp_path: Path) -> None:
+    paths = base_arrow_paths(tmp_path)
+    planner = native_auto_planner(paths, top_k=2, orcid_enabled=False, num_threads=1)
+    plan = planner.plan(["q1"], include_component_members=False)
+    with pytest.raises(ValueError, match="needs component_member_counts"):
+        RawArrowPlanBundle.from_native_mapping({**plan, "component_member_counts": None})
+    with pytest.raises(ValueError, match="two nonnegative ints"):
+        RawArrowPlanBundle.from_native_mapping({**plan, "component_member_counts": (1, -2)})
+
+
+def test_rust_featurizer_recognizes_only_its_own_signature_order(tmp_path: Path) -> None:
+    paths = base_arrow_paths(tmp_path)
+    featurizer = _native_featurizer(paths, ["q1", "s1", "s2"], set())
+    order = tuple(featurizer.signature_ids())
+
+    assert featurizer.has_signature_order(order)
+    assert not featurizer.has_signature_order(tuple(reversed(order)))
+    assert not featurizer.has_signature_order(order[:-1])
+    assert not featurizer.has_signature_order((*order[:-1], 7))
+
+
 def test_rust_featurizer_from_arrow_dataset_reuses_cached_language(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path)
     with pa.memory_map(paths["papers"], "r") as source:
@@ -1257,6 +1300,7 @@ def test_raw_arrow_plan_bundle_derives_signature_order_from_rust_plan(tmp_path: 
         "query_authors",
         "seed_signature_ids",
         "component_members",
+        "component_member_counts",
         "pair_signature_ids",
         "left_pair_signature_indices",
         "right_pair_signature_indices",

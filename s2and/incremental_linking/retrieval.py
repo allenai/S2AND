@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -103,7 +103,8 @@ class RawArrowPlanBundle:
     query_views: tuple[QueryView, ...]
     query_authors: tuple[str, ...]
     seed_signature_ids: tuple[str, ...] | None
-    component_members: Mapping[str, tuple[str, ...]]
+    # None when the planner omitted the member lists (``include_component_members``).
+    component_members: Mapping[str, tuple[str, ...]] | None
     telemetry: Mapping[str, Any] | None
     row_count: int
     pair_count: int
@@ -116,6 +117,8 @@ class RawArrowPlanBundle:
     retrieval_scores: np.ndarray
     retrieval_ranks: np.ndarray
     row_signals: Mapping[str, np.ndarray]
+    # (signatures, nonempty components) in the plan's component members, from the planner.
+    component_member_counts: tuple[int, int] | None = None
 
     def contiguous_query_slice(self, start: int, stop: int) -> RawArrowPlanBundle:
         """Return the row and pair views for a contiguous query slice."""
@@ -150,6 +153,7 @@ class RawArrowPlanBundle:
             retrieval_scores=self.retrieval_scores[row_start:row_stop],
             retrieval_ranks=self.retrieval_ranks[row_start:row_stop],
             row_signals=MappingProxyType({key: values[row_start:row_stop] for key, values in self.row_signals.items()}),
+            component_member_counts=self.component_member_counts,
         )
 
     @classmethod
@@ -160,7 +164,7 @@ class RawArrowPlanBundle:
         query_views: Sequence[QueryView],
         query_authors: Sequence[Any],
         seed_signature_ids: Sequence[Any] | None,
-        component_members: Mapping[Any, Sequence[Any]],
+        component_members: Mapping[Any, Sequence[Any]] | None,
         telemetry: Mapping[Any, Any] | None,
         row_query_offsets: Any,
         pair_signature_ids: tuple[str, ...],
@@ -171,6 +175,7 @@ class RawArrowPlanBundle:
         retrieval_scores: Any,
         retrieval_ranks: Any,
         normalized_row_signals: Mapping[str, Any],
+        component_member_counts: tuple[int, int] | None = None,
     ) -> RawArrowPlanBundle:
         """Own normalized values and derive the runtime-only views once."""
 
@@ -216,11 +221,13 @@ class RawArrowPlanBundle:
             query_signature_ids=owned_query_signature_ids,
             query_views=owned_query_views,
             query_authors=owned_query_authors,
-            seed_signature_ids=(
-                None if seed_signature_ids is None else tuple(str(value) for value in seed_signature_ids)
-            ),
-            component_members=MappingProxyType(
-                {str(component_key): tuple(map(str, members)) for component_key, members in component_members.items()}
+            seed_signature_ids=None if seed_signature_ids is None else _string_tuple(seed_signature_ids),
+            component_members=(
+                None
+                if component_members is None
+                else MappingProxyType(
+                    {str(component_key): _string_tuple(members) for component_key, members in component_members.items()}
+                )
             ),
             telemetry=(
                 None
@@ -237,6 +244,7 @@ class RawArrowPlanBundle:
             retrieval_scores=owned_retrieval_scores,
             retrieval_ranks=owned_retrieval_ranks,
             row_signals=MappingProxyType(row_signals),
+            component_member_counts=component_member_counts,
         )
 
     @classmethod
@@ -265,7 +273,11 @@ class RawArrowPlanBundle:
         if missing:
             raise KeyError(f"raw candidate plan is missing required keys: {missing}")
         component_members = _required_raw_plan_value(plan, "component_members")
-        if not isinstance(component_members, Mapping):
+        component_member_counts = _raw_plan_component_member_counts(plan)
+        if component_members is None:
+            if component_member_counts is None:
+                raise ValueError("raw candidate plan without component_members needs component_member_counts")
+        elif not isinstance(component_members, Mapping):
             raise ValueError("raw candidate plan component_members must be a mapping")
         telemetry = plan.get("telemetry")
         if telemetry is not None and not isinstance(telemetry, Mapping):
@@ -365,7 +377,32 @@ class RawArrowPlanBundle:
             retrieval_scores=retrieval_scores,
             retrieval_ranks=retrieval_ranks,
             normalized_row_signals=normalized_row_signals,
+            component_member_counts=component_member_counts,
         )
+
+
+def _raw_plan_component_member_counts(plan: Mapping[str, Any]) -> tuple[int, int] | None:
+    """The plan's (signature, nonempty component) member counts, when present."""
+
+    counts = plan.get("component_member_counts")
+    if counts is None:
+        return None
+    if (
+        not isinstance(counts, Sequence)
+        or len(counts) != 2
+        or not all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts)
+    ):
+        raise ValueError(f"raw candidate plan component_member_counts must be two nonnegative ints, got {counts!r}")
+    return int(counts[0]), int(counts[1])
+
+
+def _string_tuple(values: Iterable[Any]) -> tuple[str, ...]:
+    """``values`` as a tuple of strings; native plans already hold strings."""
+
+    values = tuple(values)
+    if set(map(type, values)) <= {str}:
+        return values
+    return tuple(map(str, values))
 
 
 def _required_raw_plan_value(plan: Mapping[str, Any], key: str) -> Any:
@@ -521,6 +558,7 @@ def build_linker_retrieval_batch_from_raw_plan_bundle(
     *,
     signature_id_to_index: Mapping[str, int] | None = None,
     feature_block_signature_order: FeatureBlockSignatureOrder | Sequence[Any] | None = None,
+    signature_ids_by_index: Sequence[str] | None = None,
 ) -> LinkerRetrievalBatch:
     """Convert a validated raw plan into the numeric linker batch contract.
 
@@ -550,11 +588,15 @@ def build_linker_retrieval_batch_from_raw_plan_bundle(
     left_signature_indices = row_query_signature_indices[bundle.pair_row_indices]
     # Map each distinct pair signature once, then gather per pair.
     order_ids = bundle.signature_order.signature_ids
-    mapped_order = np.fromiter(
-        (signature_id_to_index.get(signature_id, -1) for signature_id in order_ids),
-        dtype=np.int64,
-        count=len(order_ids),
-    )
+    if signature_ids_by_index is not None and tuple(signature_ids_by_index) == order_ids:
+        # A featurizer built over the plan's own order maps each id to its position.
+        mapped_order = np.arange(len(order_ids), dtype=np.int64)
+    else:
+        mapped_order = np.fromiter(
+            (signature_id_to_index.get(signature_id, -1) for signature_id in order_ids),
+            dtype=np.int64,
+            count=len(order_ids),
+        )
     right_mapped = mapped_order[bundle.right_pair_signature_indices]
     missing = np.flatnonzero(right_mapped < 0)
     if len(missing):

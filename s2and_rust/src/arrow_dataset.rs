@@ -439,14 +439,34 @@ impl ArrowDatasetResources {
         keep_ids: Option<&HashSet<String>>,
         num_threads: Option<usize>,
     ) -> PyResult<(HashMap<String, RawArrowSignature>, IndexedArrowReadStats)> {
-        let table = &self.signatures;
         install_with_optional_rayon_pool(num_threads, || {
-            let (batches, stats) = table.read_batches(keep_ids)?;
-            let signatures =
-                read_raw_arrow_signatures_from_batches(table.label(), batches, keep_ids)?;
-            table.release_mapped_pages();
-            Ok((signatures, stats))
+            let (batches, stats) = self.read_signature_batches(keep_ids)?;
+            Ok((self.signatures_from_batches(batches, keep_ids)?, stats))
         })
+    }
+
+    /// The decoded signature batches that hold `keep_ids`, on the current pool.
+    pub(crate) fn read_signature_batches(
+        &self,
+        keep_ids: Option<&HashSet<String>>,
+    ) -> PyResult<(Vec<arrow::record_batch::RecordBatch>, IndexedArrowReadStats)> {
+        self.signatures.read_batches(keep_ids)
+    }
+
+    /// The rows `read_signatures` returns, from `read_signature_batches` batches.
+    pub(crate) fn signatures_from_batches(
+        &self,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        keep_ids: Option<&HashSet<String>>,
+    ) -> PyResult<HashMap<String, RawArrowSignature>> {
+        let table = &self.signatures;
+        let signatures = read_raw_arrow_signatures_from_batches(table.label(), batches, keep_ids)?;
+        table.release_mapped_pages();
+        Ok(signatures)
+    }
+
+    pub(crate) fn signatures_label(&self) -> &str {
+        self.signatures.label()
     }
 
     /// The raw `author_orcid` of each requested signature, in Arrow row order:

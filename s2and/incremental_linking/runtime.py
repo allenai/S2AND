@@ -1729,6 +1729,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     name_check_exempt_signature_ids: frozenset[str] | None = None,
     signature_ids_by_index: tuple[str, ...] | None = None,
     signature_id_to_index: Mapping[str, int] | None = None,
+    seed_counts: tuple[int, int] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Run production scoring/gating from an already retrieved candidate batch.
 
@@ -1739,6 +1740,8 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     constraint with a component member outside this set.
     ``signature_ids_by_index`` and ``signature_id_to_index`` are the featurizer's
     string ids and their index map; a caller that already built them passes them.
+    ``seed_counts`` are the plan's (seed signature, seed component) counts for
+    telemetry, when ``cluster_seeds_require`` is not the plan's own seed map.
     """
 
     if queries is not None and len(queries) != len(query_signature_ids):
@@ -1933,8 +1936,10 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         **_constraint_telemetry_dict(constraint_telemetry),
         **partial_telemetry,
         "query_count": int(len(query_signature_id_strings)),
-        "seed_signature_count": int(len(cluster_seeds_require)),
-        "seed_component_count": int(len({str(value) for value in cluster_seeds_require.values()})),
+        "seed_signature_count": int(len(cluster_seeds_require) if seed_counts is None else seed_counts[0]),
+        "seed_component_count": int(
+            len({str(value) for value in cluster_seeds_require.values()}) if seed_counts is None else seed_counts[1]
+        ),
         "retrieval_top_k": retrieval_top_k_resolved,
         "retrieved_component_count": int(len(retrieved_component_keys)),
         "orcid_force_link_enabled": orcid_force_link_enabled,
@@ -2038,8 +2043,15 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     signature_order = raw_plan_bundle.signature_order
     featurizer = rust_featurizer
     # A window holds most of the block's seeds; convert its ids and build the
-    # index map once for this function and the scoring it calls.
-    featurizer_signature_ids = tuple(map(str, featurizer.signature_ids()))
+    # index map once for this function and the scoring it calls. A featurizer
+    # built over the plan's order reuses the plan's ids instead of copying its own.
+    order_ids = raw_plan_bundle.signature_order.signature_ids
+    has_signature_order = getattr(featurizer, "has_signature_order", None)
+    featurizer_signature_ids = (
+        order_ids
+        if has_signature_order is not None and has_signature_order(order_ids)
+        else tuple(map(str, featurizer.signature_ids()))
+    )
     featurizer_signature_id_to_index = dict(
         zip(featurizer_signature_ids, range(len(featurizer_signature_ids)), strict=True)
     )
@@ -2049,6 +2061,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
         raw_plan_bundle,
         signature_id_to_index=featurizer_signature_id_to_index,
+        signature_ids_by_index=featurizer_signature_ids,
     )
     stage_start = time.perf_counter()
     if len(raw_plan_bundle.query_authors) != len(query_signature_id_strings):
@@ -2056,11 +2069,24 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
             "raw Arrow candidate plan query_authors length must match query_signature_ids: "
             f"{len(raw_plan_bundle.query_authors)} != {len(query_signature_id_strings)}"
         )
-    cluster_seeds_require = _seed_map_from_component_members(raw_plan_bundle.component_members)
-    seed_signature_count = len(cluster_seeds_require)
+    seed_counts: tuple[int, int] | None = None
+    if raw_plan_bundle.component_members is None:
+        # Plans without member lists serve callers with their own seed map; the
+        # members only gave these counts.
+        if partial_supervision_seed_signature_to_component is None or raw_plan_bundle.component_member_counts is None:
+            raise ValueError(
+                "raw Arrow candidate plans without component_members need "
+                "partial_supervision_seed_signature_to_component and component_member_counts"
+            )
+        cluster_seeds_require = partial_supervision_seed_signature_to_component
+        seed_signature_count, seed_component_count = raw_plan_bundle.component_member_counts
+        seed_counts = (seed_signature_count, seed_component_count)
+    else:
+        cluster_seeds_require = _seed_map_from_component_members(raw_plan_bundle.component_members)
+        seed_signature_count = len(cluster_seeds_require)
+        seed_component_count = len(set(cluster_seeds_require.values()))
     if seed_signature_count == 0 and raw_plan_bundle.telemetry is not None:
         seed_signature_count = int(raw_plan_bundle.telemetry.get("seed_signature_count", 0) or 0)
-    seed_component_count = len(set(cluster_seeds_require.values()))
     raw_arrow_signal_seconds = time.perf_counter() - stage_start
 
     result = _predict_incremental_link_or_abstain_production_from_retrieval_private(
@@ -2081,6 +2107,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         name_check_exempt_signature_ids=name_check_exempt_signature_ids,
         signature_ids_by_index=featurizer_signature_ids,
         signature_id_to_index=featurizer_signature_id_to_index,
+        seed_counts=seed_counts,
     )
     raw_plan_telemetry_fields = _raw_candidate_plan_telemetry_fields(raw_plan_bundle.telemetry)
     telemetry = {

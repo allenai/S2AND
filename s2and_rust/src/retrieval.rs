@@ -2,6 +2,10 @@ use super::*;
 use crate::retrieval_overlap::{
     component_overlap, overlap_scores, ComponentOverlap, OverlapIndex, PreparedQuery,
 };
+
+mod bounded;
+use bounded::SpecterBall;
+pub(crate) use bounded::{PendingPlanQuery, PlanFirstPass};
 #[derive(Clone)]
 pub(crate) struct RetrievalSummaryData {
     pub(crate) component_key: String,
@@ -137,6 +141,8 @@ pub(crate) struct RustHybridCentroidRetriever {
     /// Inverted coauthor and affiliation counters of `summaries`. Retrievers
     /// that only score given rows, such as the labeled-row plan, skip it.
     overlap_index: Option<OverlapIndex>,
+    /// Each summary's SPECTER ball for planning bounds; empty with the index.
+    specter_balls: Vec<Option<SpecterBall>>,
 }
 
 #[derive(Default)]
@@ -261,6 +267,7 @@ impl RustHybridCentroidRetriever {
                 non_mega_coauthor_cluster_df: HashMap::default(),
                 affiliation_cluster_df: HashMap::default(),
                 overlap_index: None,
+                specter_balls: Vec::new(),
             },
         )
     }
@@ -282,6 +289,11 @@ impl RustHybridCentroidRetriever {
         let overlap_index = with_overlap_index
             .then(|| OverlapIndex::build(&summaries))
             .transpose()?;
+        let specter_balls = if with_overlap_index {
+            Self::specter_balls_of(&summaries)
+        } else {
+            Vec::new()
+        };
         // The index's posting counts are the document frequencies, so a ranking
         // retriever reads them off instead of hashing every counter entry again.
         let (coauthor_cluster_df, non_mega_coauthor_cluster_df, affiliation_cluster_df) =
@@ -319,6 +331,7 @@ impl RustHybridCentroidRetriever {
             non_mega_coauthor_cluster_df,
             affiliation_cluster_df,
             overlap_index,
+            specter_balls,
         })
     }
 
@@ -388,6 +401,7 @@ impl RustHybridCentroidRetriever {
     /// comes from an f32 lane dot product plus `f32_dot_relative_error_bound`,
     /// so every bound is at or above the exact score. Summaries with more
     /// vectors than the fused kernel holds get an infinite bound.
+    #[cfg(test)]
     pub(crate) fn specter_score_upper_bounds(
         &self,
         queries: &[RetrievalQueryData],
@@ -582,6 +596,7 @@ impl RustHybridCentroidRetriever {
     /// score at or above `t`, so an exact score above `t` minus one f32 ulp,
     /// so a bound at least that high; every such candidate is scored exactly.
     /// The ranking then matches `score_top_k_candidate_indices_default_inner`.
+    #[cfg(test)]
     fn score_top_k_bounded(
         &self,
         query_data: &RetrievalQueryData,
@@ -962,6 +977,45 @@ impl RustHybridCentroidRetriever {
         self.hard_filtered_candidate_indices_for_query(query_data, candidate_indices)
     }
 
+    /// A plan query's candidates and how many it keeps, or None without candidates.
+    pub(crate) fn plan_query_candidates(
+        &self,
+        current_query: &RetrievalQueryData,
+        excluded_candidate_indices: Option<&HashSet<usize>>,
+        top_k: usize,
+    ) -> Option<(RetrievalCandidateSelection, usize)> {
+        let selection =
+            self.candidate_indices_for_pair_plan_query(current_query, excluded_candidate_indices);
+        if selection.indices.is_empty() {
+            return None;
+        }
+        let effective_top_k = if selection.return_all {
+            selection.indices.len()
+        } else {
+            top_k
+        };
+        Some((selection, effective_top_k))
+    }
+
+    /// Every candidate of `candidate_indices` scored exactly, best `top_k` first.
+    pub(crate) fn plan_score_all(
+        &self,
+        current_query: &RetrievalQueryData,
+        candidate_indices: &[usize],
+        top_k: usize,
+    ) -> Vec<(usize, f32)> {
+        self.score_top_k_candidate_indices_default_inner(
+            current_query,
+            candidate_indices,
+            top_k,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn build_pair_plan_query_result(
         &self,
         current_query: &RetrievalQueryData,
@@ -972,15 +1026,10 @@ impl RustHybridCentroidRetriever {
         top_k: usize,
         scoring: PlanScoring<'_>,
     ) -> Result<RetrievalPairPlanQueryResult, RetrievalError> {
-        let selection =
-            self.candidate_indices_for_pair_plan_query(current_query, excluded_candidate_indices);
-        if selection.indices.is_empty() {
+        let Some((selection, effective_top_k)) =
+            self.plan_query_candidates(current_query, excluded_candidate_indices, top_k)
+        else {
             return Ok(RetrievalPairPlanQueryResult::default());
-        }
-        let effective_top_k = if selection.return_all {
-            selection.indices.len()
-        } else {
-            top_k
         };
         let scored = match scoring {
             PlanScoring::Bounded {
@@ -1001,7 +1050,6 @@ impl RustHybridCentroidRetriever {
                 None,
                 None,
             ),
-            #[cfg(test)]
             PlanScoring::Exact(specter_scores) => self.score_top_k_candidate_indices_default_inner(
                 current_query,
                 &selection.indices,
@@ -1011,7 +1059,24 @@ impl RustHybridCentroidRetriever {
                 specter_scores,
             ),
         };
+        self.plan_query_rows(
+            current_query,
+            row_query_first_token,
+            query_signature_index,
+            component_member_indices,
+            &scored,
+        )
+    }
 
+    /// The plan rows of a query's ranked candidates `scored`.
+    pub(crate) fn plan_query_rows(
+        &self,
+        current_query: &RetrievalQueryData,
+        row_query_first_token: &str,
+        query_signature_index: u32,
+        component_member_indices: &HashMap<String, Vec<u32>>,
+        scored: &[(usize, f32)],
+    ) -> Result<RetrievalPairPlanQueryResult, RetrievalError> {
         let mut result = RetrievalPairPlanQueryResult::default();
         let (query_year, query_year_missing) = year_signal_value(current_query.year, "query year")?;
         let query_has_affiliations = u8::from(!current_query.affiliation_hashes.is_empty());
@@ -1104,6 +1169,7 @@ impl RustHybridCentroidRetriever {
 }
 
 /// Summaries per pool task when bounding a block of queries.
+#[cfg(test)]
 const SPECTER_BOUND_SUMMARIES_PER_TASK: usize = 64;
 
 /// `column[row]` is an upper bound of query `row`'s SPECTER score against `summary`.
@@ -1443,11 +1509,11 @@ pub(crate) struct MiddleTermCache {
 const MIDDLE_TERM_CACHE_ENTRIES: usize = 4;
 
 /// How a pair-plan query scores its candidates.
+#[cfg(test)]
 pub(crate) enum PlanScoring<'a> {
     /// Every candidate's exact score; `Some` holds the query's precomputed
     /// SPECTER scores of every summary (`specter_score_rows`). Tests compare
     /// the bounded scoring against it.
-    #[cfg(test)]
     Exact(Option<&'a [f64]>),
     /// Exact scores of the candidates whose upper bound can reach the top k:
     /// `specter_upper_bounds` from `specter_score_upper_bounds`, and
@@ -3041,6 +3107,303 @@ mod overlap_index_tests {
             let per_score =
                 start.elapsed().as_secs_f64() * 1e9 / ((repeats * summaries.len()) as f64);
             println!("{label}: {per_score:.0} ns per score (checksum {total:.6})");
+        }
+    }
+
+    /// The two-pass plan's top k of every query, as `plan()` computes it,
+    /// and how many candidates waited for a tight bound.
+    fn two_pass_rankings(
+        retriever: &RustHybridCentroidRetriever,
+        queries: &[RetrievalQueryData],
+        top_k: usize,
+    ) -> (Vec<Vec<(usize, f32)>>, usize) {
+        let centroid_bounds = retriever.specter_centroid_bounds(queries);
+        let first_names = retriever.first_name_index();
+        let first_passes: Vec<Option<PlanFirstPass>> = queries
+            .iter()
+            .zip(&centroid_bounds)
+            .map(|(query, bounds)| {
+                let (selection, top_k) = retriever.plan_query_candidates(query, None, top_k)?;
+                let terms = retriever.name_score_terms_indexed(query, &first_names);
+                Some(if selection.return_all {
+                    PlanFirstPass::Done(retriever.plan_score_all(query, &selection.indices, top_k))
+                } else {
+                    retriever.plan_first_pass(query, &selection.indices, top_k, bounds, &terms)
+                })
+            })
+            .collect();
+        let pending: Vec<Option<&PendingPlanQuery>> = first_passes
+            .iter()
+            .map(|pass| match pass {
+                Some(PlanFirstPass::Pending(pending)) => Some(pending),
+                _ => None,
+            })
+            .collect();
+        let waiting = pending
+            .iter()
+            .flatten()
+            .map(|pending| bounded::survivor_indices_for_tests(pending).len())
+            .sum();
+        let tight = retriever.specter_survivor_bounds(queries, &pending, &centroid_bounds);
+        drop(pending);
+        let rankings = first_passes
+            .into_iter()
+            .zip(queries)
+            .zip(&tight)
+            .map(|((pass, query), tight)| match pass {
+                None => Vec::new(),
+                Some(PlanFirstPass::Done(scored)) => scored,
+                Some(PlanFirstPass::Pending(pending)) => {
+                    retriever.plan_finish(query, pending, tight)
+                }
+            })
+            .collect();
+        (rankings, waiting)
+    }
+
+    fn exact_rankings(
+        retriever: &RustHybridCentroidRetriever,
+        queries: &[RetrievalQueryData],
+        top_k: usize,
+    ) -> Vec<Vec<(usize, f32)>> {
+        queries
+            .iter()
+            .map(
+                |query| match retriever.plan_query_candidates(query, None, top_k) {
+                    None => Vec::new(),
+                    Some((selection, top_k)) => {
+                        retriever.plan_score_all(query, &selection.indices, top_k)
+                    }
+                },
+            )
+            .collect()
+    }
+
+    fn ranking_bits(ranking: &[(usize, f32)]) -> Vec<(usize, u32)> {
+        ranking
+            .iter()
+            .map(|(index, score)| (*index, score.to_bits()))
+            .collect()
+    }
+
+    /// A unit-scale vector near `base`: `spread` sets how far it strays.
+    fn near(base: &[f32], spread: f32, rng: &mut Lcg) -> Vec<f32> {
+        base.iter()
+            .map(|value| value + spread * (rng.below(1000) as f32 / 500.0 - 1.0))
+            .collect()
+    }
+
+    /// Summaries whose exemplars sit near their centroid, as an author's papers
+    /// do, so loose bounds prune; then the cases a ball bound must not cover.
+    fn clustered_summaries(rng: &mut Lcg, bases: &[Vec<f32>]) -> Vec<RetrievalSummaryData> {
+        let mut summaries: Vec<RetrievalSummaryData> = bases
+            .iter()
+            .enumerate()
+            .map(|(index, base)| {
+                let mut summary = summary(rng, format!("k{index:03}"));
+                let exemplars: Vec<Vec<f32>> = (0..1 + rng.below(4))
+                    .map(|_| near(base, 0.15, rng))
+                    .collect();
+                let centroid: Vec<f32> = (0..base.len())
+                    .map(|dim| {
+                        exemplars.iter().map(|v| v[dim]).sum::<f32>() / exemplars.len() as f32
+                    })
+                    .collect();
+                summary.specter_centroid_norm = Some(vector_norm_f32(&centroid));
+                summary.specter_centroid = Some(centroid);
+                summary.exemplar_norms = exemplars.iter().map(|v| vector_norm_f32(v)).collect();
+                summary.exemplar_vectors = exemplars;
+                summary
+            })
+            .collect();
+        let base = &bases[0];
+        // Five exemplars plus a centroid: more vectors than the fused kernel holds.
+        let mut crowded = summaries[0].clone();
+        crowded.component_key = "edge_crowded".to_string();
+        crowded.exemplar_vectors = (0..5).map(|_| near(base, 0.1, rng)).collect();
+        crowded.exemplar_norms = crowded
+            .exemplar_vectors
+            .iter()
+            .map(|v| vector_norm_f32(v))
+            .collect();
+        // A zero exemplar, whose cosine is 0.0.
+        let mut zero = summaries[1].clone();
+        zero.component_key = "edge_zero".to_string();
+        zero.exemplar_vectors.push(vec![0.0; base.len()]);
+        zero.exemplar_norms.push(0.0);
+        // A stored norm far below its vector's: cosines above 1.0, no ball.
+        let mut short_norm = summaries[2].clone();
+        short_norm.component_key = "edge_short_norm".to_string();
+        short_norm.exemplar_norms[0] *= 0.25;
+        // A centroid of another length than the queries.
+        let mut other_length = summaries[3].clone();
+        other_length.component_key = "edge_other_length".to_string();
+        other_length.specter_centroid = Some(vec![0.5; 4]);
+        other_length.specter_centroid_norm = Some(1.0);
+        // No centroid, exemplars only.
+        let mut no_centroid = summaries[4].clone();
+        no_centroid.component_key = "edge_no_centroid".to_string();
+        no_centroid.specter_centroid = None;
+        no_centroid.specter_centroid_norm = None;
+        summaries.extend([crowded, zero, short_norm, other_length, no_centroid]);
+        summaries
+    }
+
+    #[test]
+    fn two_pass_plan_matches_exact_ranking_and_bounds_cover_exact_scores() {
+        let mut rng = Lcg(97);
+        let bases: Vec<Vec<f32>> = (0..120)
+            .map(|_| {
+                (0..24)
+                    .map(|_| rng.below(1000) as f32 / 500.0 - 1.0)
+                    .collect()
+            })
+            .collect();
+        let clustered = RustHybridCentroidRetriever::from_summaries(
+            clustered_summaries(&mut rng, &bases),
+            true,
+        )
+        .expect("clustered retriever");
+        let mut queries: Vec<RetrievalQueryData> = (0..60)
+            .map(|index| {
+                let mut query = query(&mut rng, Vec::new());
+                let values = near(&bases[index % bases.len()], 0.3, &mut rng);
+                query.specter_norm = Some(vector_norm_f32(&values));
+                query.specter = Some(Arc::new(values.into()));
+                query
+            })
+            .collect();
+        // A zero vector, no vector, a wrong stored norm, and another length.
+        let mut zero = queries[0].clone();
+        zero.specter = Some(Arc::new(vec![0.0f32; 24].into()));
+        zero.specter_norm = Some(0.0);
+        let mut missing = queries[1].clone();
+        missing.specter = None;
+        missing.specter_norm = None;
+        let mut short_norm = queries[2].clone();
+        short_norm.specter_norm = short_norm.specter_norm.map(|norm| norm * 0.5);
+        let mut other_length = queries[3].clone();
+        other_length.specter = Some(Arc::new(vec![0.5f32; 4].into()));
+        other_length.specter_norm = Some(1.0);
+        queries.extend([zero, missing, short_norm, other_length]);
+
+        let random = RustHybridCentroidRetriever::from_summaries(synthetic_summaries(), true)
+            .expect("random retriever");
+        let random_queries = synthetic_queries();
+        let mut clustered_waiting = 0;
+        let mut clustered_candidates = 0;
+        for (retriever, queries) in [(&clustered, &queries), (&random, &random_queries)] {
+            for top_k in [1usize, 5, 25] {
+                let (rankings, waiting) = two_pass_rankings(retriever, queries, top_k);
+                let expected = exact_rankings(retriever, queries, top_k);
+                for (query_index, (ranking, expected)) in rankings.iter().zip(&expected).enumerate()
+                {
+                    assert_eq!(
+                        ranking_bits(ranking),
+                        ranking_bits(expected),
+                        "query {query_index} top_k {top_k}"
+                    );
+                }
+                if std::ptr::eq(retriever, &clustered) {
+                    clustered_waiting += waiting;
+                    clustered_candidates += queries.len() * retriever.summaries.len();
+                }
+            }
+            // Every bound covers the exact SPECTER score.
+            let centroid_bounds = retriever.specter_centroid_bounds(queries);
+            for (query, bounds) in queries.iter().zip(&centroid_bounds) {
+                for (index, summary) in retriever.summaries.iter().enumerate() {
+                    let exact = fused_specter_score(query, summary);
+                    if bounds[index].is_finite() {
+                        let ball = retriever.specter_balls[index].expect("ball");
+                        assert!(
+                            bounded::ball_bound_for_tests(bounds[index], ball) >= exact,
+                            "ball bound below exact {exact} for {}",
+                            summary.component_key
+                        );
+                    }
+                }
+            }
+        }
+        // The clustered fixture prunes: far fewer candidates wait than exist.
+        assert!(
+            clustered_waiting * 4 < clustered_candidates,
+            "{clustered_waiting} of {clustered_candidates}"
+        );
+        // The edge summaries have no ball; the short stored norm query and the
+        // other-length query get no finite centroid bound.
+        let balls: Vec<bool> = clustered
+            .specter_balls
+            .iter()
+            .map(Option::is_some)
+            .collect();
+        assert!(balls[..120].iter().all(|has| *has));
+        assert_eq!(&balls[120..], &[false, true, false, false, false]);
+        let centroid_bounds = clustered.specter_centroid_bounds(&queries);
+        assert!(centroid_bounds[62].iter().all(|bound| bound.is_nan()));
+        assert!(centroid_bounds[63].iter().all(|bound| bound.is_nan()));
+        assert!(centroid_bounds[60][..120].iter().all(|bound| *bound == 0.0));
+    }
+
+    #[test]
+    fn survivor_bounds_cover_exact_scores() {
+        let mut rng = Lcg(101);
+        let bases: Vec<Vec<f32>> = (0..40)
+            .map(|_| {
+                (0..16)
+                    .map(|_| rng.below(1000) as f32 / 500.0 - 1.0)
+                    .collect()
+            })
+            .collect();
+        let retriever = RustHybridCentroidRetriever::from_summaries(
+            clustered_summaries(&mut rng, &bases),
+            true,
+        )
+        .expect("retriever");
+        let queries: Vec<RetrievalQueryData> = (0..9)
+            .map(|index| {
+                let mut query = query(&mut rng, Vec::new());
+                let values = near(&bases[index], 0.4, &mut rng);
+                query.specter_norm = Some(vector_norm_f32(&values));
+                query.specter = Some(Arc::new(values.into()));
+                query
+            })
+            .collect();
+        let centroid_bounds = retriever.specter_centroid_bounds(&queries);
+        // Every summary waits for every query, odd and even counts per summary.
+        let all: Vec<PendingPlanQuery> = queries
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                bounded::pending_for_tests(
+                    (0..retriever.summaries.len() as u32)
+                        .filter(|summary| !(*summary as usize + index).is_multiple_of(3))
+                        .collect(),
+                )
+            })
+            .collect();
+        let pending: Vec<Option<&PendingPlanQuery>> = all.iter().map(Some).collect();
+        let tight = retriever.specter_survivor_bounds(&queries, &pending, &centroid_bounds);
+        let reference = retriever.specter_score_upper_bounds(&queries);
+        for (query_index, (query, waiting)) in queries.iter().zip(&all).enumerate() {
+            for (position, summary_index) in bounded::survivor_indices_for_tests(waiting)
+                .iter()
+                .enumerate()
+            {
+                let summary = &retriever.summaries[*summary_index];
+                let bound = tight[query_index][position];
+                let exact = fused_specter_score(query, summary);
+                assert!(
+                    f64::from(bound) >= exact,
+                    "tight {bound} below exact {exact}"
+                );
+                // Where the full bound is finite, the tight bound is no looser.
+                let full = reference[query_index][*summary_index];
+                assert!(
+                    bound <= full || !full.is_finite(),
+                    "tight {bound} above full {full}"
+                );
+            }
         }
     }
 }

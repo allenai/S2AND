@@ -529,7 +529,10 @@ def _plan_query_with_excluded_components(
     """Build a singleton plan whose exclusions are applied before retrieval top-k."""
 
     additional_disallows = sorted(_query_seed_disallows_for_rescore(context, signature_id, excluded_components))
-    return RawArrowPlanBundle.from_native_mapping(context.planner.plan([str(signature_id)], additional_disallows))
+    # Scoring reads the context's seed map, so the plan omits its member lists.
+    return RawArrowPlanBundle.from_native_mapping(
+        context.planner.plan([str(signature_id)], additional_disallows, include_component_members=False)
+    )
 
 
 def _rescore_query_disallow_endpoint(
@@ -1193,6 +1196,51 @@ class _BackgroundSeedPlanner:
             feature_port.release_rust_handle(self._future.result())
 
 
+def start_background_seed_planner(
+    clusterer: Any,
+    block_signatures: Sequence[str],
+    *,
+    arrow_dataset: ArrowDataset,
+    artifact: artifact_module.IncrementalLinkingArtifact,
+    cluster_seeds_require: Mapping[str, int | str],
+    altered_cluster_signatures: Sequence[str] | None,
+    query_signature_ids: list[str] | None,
+    attachment_state: Any | None,
+) -> _BackgroundSeedPlanner | None:
+    """Start the planner over the original seeds when seed setup will split altered profiles.
+
+    Splitting altered profiles takes seconds on large blocks and leaves the pool
+    half idle; the planner builds meanwhile. Returns None when the request does
+    not qualify. ``query_signature_ids`` are the block signatures outside the
+    seeds, computed here when None.
+    """
+
+    if (
+        attachment_state is not None
+        or not altered_cluster_signatures
+        or len(block_signatures) < _BACKGROUND_SEED_PLANNER_MIN_SIGNATURES
+        or not cluster_seeds_require
+    ):
+        return None
+    original_queries = (
+        query_signature_ids
+        if query_signature_ids is not None
+        else [signature_id for signature_id in map(str, block_signatures) if signature_id not in cluster_seeds_require]
+    )
+    if not original_queries:
+        return None
+    return _BackgroundSeedPlanner(
+        arrow_dataset,
+        cluster_seeds_require,
+        original_queries,
+        top_k=int(artifact.retrieval_top_k),
+        orcid_enabled=promoted_linker_orcid_force_link_enabled(
+            suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False))
+        ),
+        num_threads=clusterer.n_jobs,
+    )
+
+
 def predict_incremental_promoted_linker_from_arrow(
     clusterer: Any,
     block_signatures: list[str],
@@ -1208,11 +1256,14 @@ def predict_incremental_promoted_linker_from_arrow(
     batching_threshold: int | None,
     attachment_state: Any | None = None,
     query_signature_ids: list[str] | None = None,
+    seed_planner: _BackgroundSeedPlanner | None = None,
 ) -> dict[str, Any]:
     """Run the promoted linker from one open Arrow dataset.
 
     ``query_signature_ids`` lists the block signatures outside the seeds, in
-    block order, when the caller has already computed them.
+    block order, when the caller has already computed them. ``seed_planner``
+    is a planner build the caller started with ``start_background_seed_planner``;
+    this function then owns and releases it.
 
     ``attachment_state`` is the native state that subblocked attachment passes of
     one original block share: a lazily built featurizer (``signature_ids``,
@@ -1242,31 +1293,17 @@ def predict_incremental_promoted_linker_from_arrow(
                 dataset.name_tuples,
                 resolve_n_jobs(clusterer.n_jobs),
             )
-    seed_planner: _BackgroundSeedPlanner | None = None
-    if (
-        attachment_state is None
-        and dataset.altered_cluster_signatures
-        and len(block_signatures) >= _BACKGROUND_SEED_PLANNER_MIN_SIGNATURES
-    ):
-        # Splitting altered profiles takes seconds on large blocks and leaves the
-        # pool half idle; the planner over the original seeds builds meanwhile.
-        original_seeds = dataset.cluster_seeds_require
-        original_queries = (
-            query_signature_ids
-            if query_signature_ids is not None
-            else [signature_id for signature_id in map(str, block_signatures) if signature_id not in original_seeds]
+    if seed_planner is None:
+        seed_planner = start_background_seed_planner(
+            clusterer,
+            block_signatures,
+            arrow_dataset=arrow_dataset,
+            artifact=artifact,
+            cluster_seeds_require=dataset.cluster_seeds_require,
+            altered_cluster_signatures=dataset.altered_cluster_signatures,
+            query_signature_ids=query_signature_ids,
+            attachment_state=attachment_state,
         )
-        if original_seeds and original_queries:
-            seed_planner = _BackgroundSeedPlanner(
-                arrow_dataset,
-                original_seeds,
-                original_queries,
-                top_k=int(artifact.retrieval_top_k),
-                orcid_enabled=promoted_linker_orcid_force_link_enabled(
-                    suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False))
-                ),
-                num_threads=clusterer.n_jobs,
-            )
     try:
         return _predict_incremental_promoted_linker_from_arrow(
             clusterer,
@@ -1283,6 +1320,7 @@ def predict_incremental_promoted_linker_from_arrow(
             attachment_state=attachment_state,
             block_featurizer=block_featurizer,
             seed_planner=seed_planner,
+            query_signature_ids=query_signature_ids,
         )
     finally:
         if seed_planner is not None:
@@ -1307,6 +1345,7 @@ def _predict_incremental_promoted_linker_from_arrow(
     attachment_state: Any | None,
     block_featurizer: _BackgroundBlockFeaturizer | None,
     seed_planner: _BackgroundSeedPlanner | None = None,
+    query_signature_ids: list[str] | None = None,
 ) -> dict[str, Any]:
 
     resolved_total_ram_bytes, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
@@ -1333,9 +1372,13 @@ def _predict_incremental_promoted_linker_from_arrow(
     if len(cluster_seeds_require) == 0:
         raise ValueError("Promoted incremental linker mode requires at least one seed cluster")
 
-    unassigned_signature_ids = [
-        signature_id for signature_id in map(str, block_signatures) if signature_id not in cluster_seeds_require
-    ]
+    # Seed setup only relabels altered profiles' own members, so the signatures
+    # outside the seeds are those the caller listed before it.
+    unassigned_signature_ids = (
+        query_signature_ids
+        if query_signature_ids is not None
+        else [signature_id for signature_id in map(str, block_signatures) if signature_id not in cluster_seeds_require]
+    )
     component_members_for_sizes = (
         cluster_seeds_require_inverse
         if split_cluster_seeds_require_inverse is None
@@ -1521,7 +1564,8 @@ def _predict_incremental_promoted_linker_from_arrow(
             if raw_request_planner is None:
                 raise RuntimeError("reusable raw Arrow planner was not initialized")
             planner_start = time.perf_counter()
-            raw_candidate_plan = raw_request_planner.plan(query_window)
+            # Scoring reads cluster_seeds_require, so the plan omits its member lists.
+            raw_candidate_plan = raw_request_planner.plan(query_window, include_component_members=False)
             raw_batch_plan_seconds += time.perf_counter() - planner_start
             raw_batch_plan_count += 1
             raw_batch_plan_query_count += len(query_window)

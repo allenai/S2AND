@@ -69,10 +69,11 @@ use pair_indexing::{
 };
 use raw_arrow::readers::{
     read_raw_arrow_cluster_seed_disallows, read_raw_arrow_cluster_seeds,
-    read_raw_arrow_query_signatures, RawArrowAuthorSignalData, RawArrowFeature, RawArrowPaper,
-    RawArrowQuerySignatureRequest, RawArrowSignature, RawArrowSummarySignalData,
+    read_raw_arrow_query_signatures, signature_batch_paper_ids, RawArrowAuthorSignalData,
+    RawArrowFeature, RawArrowPaper, RawArrowQuerySignatureRequest, RawArrowSignature,
+    RawArrowSummarySignalData,
 };
-use raw_arrow_authors::{paper_coauthor_blocks, PaperAuthorIndex};
+use raw_arrow_authors::{paper_coauthor_blocks, PaperAuthorIndex, PaperCoauthorBlockIndex};
 use raw_arrow_features::{
     build_raw_arrow_feature, build_raw_arrow_summary, build_raw_arrow_summary_signals,
     mask_raw_arrow_query, raw_arrow_name_count_rarity_row, raw_arrow_paper_evidence_row, round_six,
@@ -841,7 +842,7 @@ mod tests {
     fn raw_arrow_summary_rejects_out_of_range_year_before_mean_sum() {
         let features = HashMap::from_iter([(
             "s1".to_string(),
-            raw_arrow_feature_for_test("alice", Some(i64::MAX)),
+            Box::new(raw_arrow_feature_for_test("alice", Some(i64::MAX))),
         )]);
 
         let err = match build_raw_arrow_summary("c1", &["s1".to_string()], &features, 0) {
@@ -879,11 +880,11 @@ mod tests {
         let features = HashMap::from_iter([
             (
                 "m1".to_string(),
-                raw_arrow_feature_for_test("alice", Some(2020)),
+                Box::new(raw_arrow_feature_for_test("alice", Some(2020))),
             ),
             (
                 "m2".to_string(),
-                raw_arrow_feature_for_test("bob", Some(2021)),
+                Box::new(raw_arrow_feature_for_test("bob", Some(2021))),
             ),
         ]);
         let signatures = HashMap::from_iter([

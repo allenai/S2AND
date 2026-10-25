@@ -220,6 +220,75 @@ pub(crate) fn read_raw_arrow_signatures_from_batches(
     }
 }
 
+/// Paper ids of the rows in `batches` whose signature id is in `keep`, as
+/// (rows whose id is outside `prefetch`, rows whose id is in it): the papers a
+/// read keeping `keep` gives those signatures. Rows such a read rejects are
+/// skipped here; the read reports them.
+pub(crate) fn signature_batch_paper_ids(
+    path: &str,
+    batches: &[RecordBatch],
+    keep: &HashSet<String>,
+    prefetch: &HashSet<String>,
+) -> (HashSet<String>, HashSet<String>) {
+    let per_batch: Vec<(Vec<&str>, Vec<&str>)> = batches
+        .par_iter()
+        .map(|batch| {
+            let mut kept = Vec::new();
+            let mut prefetched = Vec::new();
+            let columns = arrow_column_index(batch, "signature_id", path)
+                .and_then(|index| {
+                    ArrowStringColumn::from_string_array(
+                        batch.column(index).as_ref(),
+                        "signature_id",
+                    )
+                })
+                .and_then(|ids| {
+                    let index = arrow_column_index(batch, "paper_id", path)?;
+                    let papers = ArrowStringColumn::from_string_array(
+                        batch.column(index).as_ref(),
+                        "paper_id",
+                    )?;
+                    Ok((ids, papers))
+                });
+            let Ok((ids, papers)) = columns else {
+                return (kept, prefetched);
+            };
+            for row in 0..batch.num_rows() {
+                let (Some(id), Some(paper)) = (ids.optional_value(row), papers.optional_value(row))
+                else {
+                    continue;
+                };
+                if !keep.contains(id) {
+                    continue;
+                }
+                if prefetch.contains(id) {
+                    prefetched.push(paper);
+                } else {
+                    kept.push(paper);
+                }
+            }
+            (kept, prefetched)
+        })
+        .collect();
+    let distinct = |lists: Vec<&str>| -> HashSet<String> {
+        let mut lists = lists;
+        lists.par_sort_unstable();
+        lists.dedup();
+        let mut set = HashSet::with_capacity_and_hasher(lists.len(), Default::default());
+        set.extend(lists.into_iter().map(str::to_owned));
+        set
+    };
+    let kept: Vec<&str> = per_batch
+        .iter()
+        .flat_map(|(kept, _)| kept.iter().copied())
+        .collect();
+    let prefetched: Vec<&str> = per_batch
+        .iter()
+        .flat_map(|(_, prefetched)| prefetched.iter().copied())
+        .collect();
+    (distinct(kept), distinct(prefetched))
+}
+
 fn read_signature_batches(
     path: &str,
     batches: &[RecordBatch],
@@ -1181,6 +1250,103 @@ mod optional_orcid_tests {
             .expect("author_orcid is optional");
 
         assert_eq!(signatures.get("s1").expect("s1 present").orcid, None);
+    }
+}
+
+#[cfg(test)]
+mod signature_batch_paper_id_tests {
+    use super::{read_raw_arrow_signatures_from_batches, signature_batch_paper_ids};
+    use crate::HashSet;
+    use arrow::array::{ArrayRef, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    fn batch(rows: &[(Option<&str>, Option<&str>)]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("signature_id", DataType::Utf8, true),
+            Field::new("paper_id", DataType::Utf8, true),
+            Field::new("author_first", DataType::Utf8, true),
+            Field::new("author_middle", DataType::Utf8, true),
+            Field::new("author_last", DataType::Utf8, true),
+            Field::new("author_suffix", DataType::Utf8, true),
+            Field::new(
+                "author_affiliations",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Field::new("author_position", DataType::Int64, true),
+        ]));
+        let count = rows.len();
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(vec![Some("a"); count])),
+            Arc::new(StringArray::from(vec![None::<&str>; count])),
+            Arc::new(StringArray::from(vec![Some("lee"); count])),
+            Arc::new(StringArray::from(vec![None::<&str>; count])),
+            arrow::array::new_null_array(
+                &DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                count,
+            ),
+            Arc::new(Int64Array::from(vec![0; count])),
+        ];
+        RecordBatch::try_new(schema, columns).expect("valid batch")
+    }
+
+    fn set(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn paper_ids_match_the_rows_a_read_keeps() {
+        let batches = vec![
+            batch(&[
+                (Some("s1"), Some("p1")),
+                (Some("x1"), Some("p9")),
+                (Some("s2"), Some("p2")),
+            ]),
+            batch(&[
+                (Some("q1"), Some("p4")),
+                (Some("s3"), Some("p2")),
+                (None, Some("p8")),
+                (Some("x2"), None),
+                (Some("q2"), Some("p1")),
+                (Some("s4"), Some("")),
+            ]),
+        ];
+        let prefetch = set(&["q1", "q2"]);
+        let keep = set(&["s1", "s2", "s3", "s4", "q1", "q2"]);
+        let (seed_papers, prefetch_papers) =
+            signature_batch_paper_ids("<test>", &batches, &keep, &prefetch);
+        assert_eq!(seed_papers, set(&["p1", "p2", ""]));
+        assert_eq!(prefetch_papers, set(&["p4", "p1"]));
+        // Without the rows a read rejects, the converted rows of the kept
+        // signatures name the same papers.
+        let valid = vec![
+            batches[0].clone(),
+            batch(&[
+                (Some("q1"), Some("p4")),
+                (Some("s3"), Some("p2")),
+                (Some("q2"), Some("p1")),
+                (Some("s4"), Some("")),
+            ]),
+        ];
+        assert_eq!(
+            signature_batch_paper_ids("<test>", &valid, &keep, &prefetch),
+            (seed_papers.clone(), prefetch_papers.clone())
+        );
+        let rows = read_raw_arrow_signatures_from_batches("<test>", valid, Some(&keep))
+            .expect("valid rows");
+        let from_rows = |ids: &[&str]| -> HashSet<String> {
+            ids.iter().map(|id| rows[*id].paper_id.clone()).collect()
+        };
+        assert_eq!(seed_papers, from_rows(&["s1", "s2", "s3", "s4"]));
+        assert_eq!(prefetch_papers, from_rows(&["q1", "q2"]));
     }
 }
 

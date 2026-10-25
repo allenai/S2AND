@@ -316,7 +316,7 @@ pub(crate) fn select_raw_arrow_exemplars(
 pub(crate) fn build_raw_arrow_summary<S: AsRef<str>>(
     component_key: &str,
     signature_ids: &[S],
-    features_by_signature_id: &HashMap<String, RawArrowFeature>,
+    features_by_signature_id: &HashMap<String, Box<RawArrowFeature>>,
     max_exemplars: usize,
 ) -> Result<RetrievalSummaryData, RetrievalError> {
     let mut first_name_counts: HashMap<String, usize> = HashMap::default();
@@ -439,7 +439,7 @@ pub(crate) fn build_raw_arrow_summary<S: AsRef<str>>(
 /// Summary signals of a component's members; their papers must be in `author_index`.
 pub(crate) fn build_raw_arrow_summary_signals<S: AsRef<str>>(
     signature_ids: &[S],
-    features_by_signature_id: &HashMap<String, RawArrowFeature>,
+    features_by_signature_id: &HashMap<String, Box<RawArrowFeature>>,
     signatures: &HashMap<String, RawArrowSignature>,
     author_index: &PaperAuthorIndex,
 ) -> Result<RawArrowSummarySignalData, String> {
@@ -813,7 +813,7 @@ mod tests {
             );
 
             assert_eq!(feature.query.year, None, "raw year={year:?}");
-            let features = HashMap::from_iter([("s1".to_string(), feature)]);
+            let features = HashMap::from_iter([("s1".to_string(), Box::new(feature))]);
             let summary = build_raw_arrow_summary("cluster", &["s1".to_string()], &features, 1)
                 .expect("missing years must produce a valid retrieval summary");
             assert_eq!(summary.year_min, None, "raw year={year:?}");

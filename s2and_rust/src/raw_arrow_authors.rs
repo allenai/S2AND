@@ -140,6 +140,44 @@ pub(crate) fn paper_coauthor_blocks<'a>(
         .collect()
 }
 
+/// Coauthor blocks of distinct papers, found by binary search on paper id.
+///
+/// Built on the current pool: the papers sort and deduplicate in parallel, so
+/// a planner over half a million seeds no longer collects them into a set and
+/// a map one at a time.
+pub(crate) struct PaperCoauthorBlockIndex<'a> {
+    paper_ids: Vec<&'a str>,
+    blocks: Vec<Option<PaperCoauthorBlocks>>,
+}
+
+impl<'a> PaperCoauthorBlockIndex<'a> {
+    /// Blocks of every paper in `paper_ids` that has author rows; ids may repeat.
+    pub(crate) fn build(
+        mut paper_ids: Vec<&'a str>,
+        paper_authors: &HashMap<String, Vec<(i64, String)>>,
+        unidecode_char_map: &HashMap<char, String>,
+    ) -> Result<Self, String> {
+        paper_ids.par_sort_unstable();
+        paper_ids.dedup();
+        let blocks = paper_ids
+            .par_iter()
+            .map(|paper_id| {
+                paper_authors
+                    .get(*paper_id)
+                    .map(|authors| PaperCoauthorBlocks::new(paper_id, authors, unidecode_char_map))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Self { paper_ids, blocks })
+    }
+
+    /// The paper's blocks, or None when it has no author rows.
+    pub(crate) fn get(&self, paper_id: &str) -> Option<&PaperCoauthorBlocks> {
+        let index = self.paper_ids.binary_search(&paper_id).ok()?;
+        self.blocks[index].as_ref()
+    }
+}
+
 /// One paper's normalized author names as interned ids.
 struct PaperAuthorNames {
     /// `(position, name id)` of each author with a nonempty name, sorted by position.

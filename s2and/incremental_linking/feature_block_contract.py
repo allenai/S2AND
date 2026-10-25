@@ -53,6 +53,15 @@ def filter_cluster_seed_disallows_for_signature_subset(
     return normalize_cluster_seed_disallow_pairs(filtered)
 
 
+def _string_ids(values: Iterable[Any]) -> tuple[str, ...]:
+    """``values`` as a tuple of strings, without a call per value when they already are."""
+
+    values = tuple(values)
+    if set(map(type, values)) <= {str}:
+        return values
+    return tuple(str(value) for value in values)
+
+
 @dataclass(frozen=True)
 class FeatureBlockSignatureOrder:
     """Deterministic mini-block signature order for numeric linker arrays."""
@@ -61,11 +70,12 @@ class FeatureBlockSignatureOrder:
     query_signature_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        signature_ids = tuple(str(value) for value in self.signature_ids)
-        query_signature_ids = tuple(str(value) for value in self.query_signature_ids)
-        if len(set(signature_ids)) != len(signature_ids):
+        signature_ids = _string_ids(self.signature_ids)
+        query_signature_ids = _string_ids(self.query_signature_ids)
+        signature_id_set = set(signature_ids)
+        if len(signature_id_set) != len(signature_ids):
             raise ValueError("FeatureBlockSignatureOrder.signature_ids must be unique")
-        missing_queries = sorted(set(query_signature_ids) - set(signature_ids))
+        missing_queries = sorted(set(query_signature_ids) - signature_id_set)
         if missing_queries:
             raise ValueError(f"query_signature_ids are missing from signature_ids: {missing_queries}")
         object.__setattr__(self, "signature_ids", signature_ids)

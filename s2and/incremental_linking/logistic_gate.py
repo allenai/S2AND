@@ -363,6 +363,49 @@ def _sort_group(
     return np.asarray(sorted((int(row_index) for row_index in group), key=sort_key), dtype=np.int64)
 
 
+def _array_ranked_groups(
+    query_array: np.ndarray,
+    probability_array: np.ndarray,
+    rank_array: np.ndarray | None,
+    component_keys: Sequence[object] | None,
+) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]] | None:
+    """The groups and ranked groups the loops below build, from array sorts.
+
+    Groups follow the first appearance of each query, and a group's rows sort
+    by probability (descending), retrieval rank and component key; every key
+    ties only for equal values, as the tuple comparison does. Returns None for
+    inputs the loops must handle: non-integer query ids, or probabilities or
+    ranks that are not finite, whose comparisons a sort key cannot reproduce.
+    A gate ranks one row per candidate, so the loops took a second on large
+    requests.
+    """
+
+    row_count = len(query_array)
+    if row_count == 0 or query_array.dtype.kind not in "iu" or not np.isfinite(probability_array).all():
+        return None
+    if rank_array is None:
+        ranks = np.zeros(row_count, dtype=np.int64)
+    elif rank_array.dtype.kind in "iu" or (rank_array.dtype.kind == "f" and np.isfinite(rank_array).all()):
+        # int() truncates toward zero, as the cast does.
+        ranks = rank_array.astype(np.int64)
+    else:
+        return None
+    if component_keys is None:
+        key_ranks = np.zeros(row_count, dtype=np.int64)
+    else:
+        keys = [str(key) for key in component_keys]
+        key_rank = {key: position for position, key in enumerate(sorted(set(keys)))}
+        key_ranks = np.fromiter((key_rank[key] for key in keys), dtype=np.int64, count=row_count)
+    _, first_rows, inverse = np.unique(query_array, return_index=True, return_inverse=True)
+    group_of_query = np.empty(len(first_rows), dtype=np.int64)
+    group_of_query[np.argsort(first_rows, kind="stable")] = np.arange(len(first_rows))
+    group_of_row = group_of_query[inverse.reshape(-1)]
+    boundaries = np.cumsum(np.bincount(group_of_row, minlength=len(first_rows)))[:-1]
+    grouped_rows = np.argsort(group_of_row, kind="stable").astype(np.int64)
+    ranked_rows = np.lexsort((key_ranks, ranks, -probability_array, group_of_row)).astype(np.int64)
+    return tuple(np.split(grouped_rows, boundaries)), tuple(np.split(ranked_rows, boundaries))
+
+
 def ranked_query_rows(
     query_indices: Sequence[Any] | np.ndarray,
     probabilities: Sequence[float] | np.ndarray,
@@ -385,16 +428,20 @@ def ranked_query_rows(
     if component_keys is not None and len(component_keys) != len(probability_array):
         raise ValueError(f"component_keys must have row_count={len(probability_array)}, got {len(component_keys)}")
 
-    groups = _ordered_group_indices(query_array)
-    ranked_groups = tuple(
-        _sort_group(
-            group,
-            probabilities=probability_array,
-            retrieval_ranks=rank_array,
-            component_keys=component_keys,
+    array_groups = _array_ranked_groups(query_array, probability_array, rank_array, component_keys)
+    if array_groups is not None:
+        groups, ranked_groups = array_groups
+    else:
+        groups = _ordered_group_indices(query_array)
+        ranked_groups = tuple(
+            _sort_group(
+                group,
+                probabilities=probability_array,
+                retrieval_ranks=rank_array,
+                component_keys=component_keys,
+            )
+            for group in groups
         )
-        for group in groups
-    )
     best_rows = np.asarray([group[0] for group in ranked_groups], dtype=np.int64)
     runner_up_scores = np.full(len(ranked_groups), np.nan, dtype=np.float64)
     for query_pos, group in enumerate(ranked_groups):

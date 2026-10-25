@@ -61,6 +61,7 @@ from s2and.incremental_linking.policy import (
 from s2and.incremental_linking.production import (
     _DirectArrowIncrementalDataset,
     predict_incremental_promoted_linker_from_arrow,
+    start_background_seed_planner,
 )
 from s2and.metrics import b3_precision_recall_fscore
 from s2and.model_pairwise import (
@@ -5274,73 +5275,90 @@ class Clusterer:
             unassigned_signature_ids = [
                 signature_id for signature_id in block_signature_ids if signature_id not in seed_signature_to_cluster
             ]
-            altered_signature_ids = _altered_cluster_signatures_from_values(altered_cluster_signatures)
-            altered_cluster_ids = {
-                str(seed_signature_to_cluster[signature_id])
-                for signature_id in altered_signature_ids
-                if signature_id in seed_signature_to_cluster
-            }
-            altered_seed_signature_ids = (
-                [
-                    signature_id
-                    for signature_id, cluster_id in seed_signature_to_cluster.items()
-                    if str(cluster_id) in altered_cluster_ids
-                ]
-                if altered_cluster_ids
-                else []
-            )
-            metadata_signature_ids = (*unassigned_signature_ids, *altered_seed_signature_ids)
-            signatures = _load_arrow_incremental_signature_info(arrow_lease, metadata_signature_ids)
-            if not bool(getattr(self, "suppress_orcid", False)) and any(
-                (signature_info := signatures.get(signature_id)) is not None
-                and signature_info.author_info_orcid is not None
-                and signature_info.author_info_orcid.strip()
-                for signature_id in unassigned_signature_ids
-            ):
-                seed_orcid_signature_ids = [
-                    signature_id for signature_id in seed_signature_to_cluster if signature_id not in signatures
-                ]
-                attachment_state = _ARROW_ATTACH_BLOCK_STATE.get()
-                signatures.update(
-                    attachment_state.orcid_signature_info(
-                        arrow_lease, seed_orcid_signature_ids, num_threads=self.n_jobs
-                    )
-                    if attachment_state is not None
-                    else _load_arrow_incremental_orcid_signature_info(
-                        arrow_lease,
-                        seed_orcid_signature_ids,
-                        num_threads=self.n_jobs,
-                    )
-                )
-            request_dataset = _DirectArrowIncrementalDataset(
-                name_tuples=resolved_name_tuples,
-                cluster_seeds_require=seed_signature_to_cluster,
-                cluster_seeds_disallow=resolved_cluster_seed_disallows,
-                altered_cluster_signatures=resolved_altered_cluster_signatures,
-                max_seed_cluster_id=_seed_cluster_count_from_seed_map(seed_signature_to_cluster),
-                signatures=signatures,
-                partial_supervision_is_distance_override=partial_supervision_is_distance_override,
-                name_check_exempt_signature_ids=name_check_exempt_signature_ids,
-            )
-            logger.info("Running direct Arrow promoted incremental prediction")
-            return predict_incremental_promoted_linker_from_arrow(
+            # The planner over the original seeds builds while the rest of the
+            # setup runs; the call below owns it, and a failure before then frees it.
+            seed_planner = start_background_seed_planner(
                 self,
                 block_signature_ids,
-                request_dataset,
                 arrow_dataset=arrow_dataset,
                 artifact=_required_incremental_linker_artifact(self),
-                cluster_residuals=self._make_residual_clusterer(
-                    cast(ANDData, request_dataset),
-                    partial_supervision=partial_supervision or {},
-                    runtime_context=runtime_context,
-                    total_ram_bytes=memory_budget.resolve_total_ram_bytes(total_ram_bytes)[0],
-                    arrow_dataset=arrow_dataset,
-                ),
-                prevent_new_incompatibilities=prevent_new_incompatibilities,
-                partial_supervision=partial_supervision,
-                runtime_context=runtime_context,
-                total_ram_bytes=total_ram_bytes,
-                batching_threshold=batching_threshold,
-                attachment_state=_ARROW_ATTACH_BLOCK_STATE.get(),
+                cluster_seeds_require=seed_signature_to_cluster,
+                altered_cluster_signatures=resolved_altered_cluster_signatures,
                 query_signature_ids=unassigned_signature_ids,
+                attachment_state=_ARROW_ATTACH_BLOCK_STATE.get(),
             )
+            try:
+                altered_signature_ids = _altered_cluster_signatures_from_values(altered_cluster_signatures)
+                altered_cluster_ids = {
+                    str(seed_signature_to_cluster[signature_id])
+                    for signature_id in altered_signature_ids
+                    if signature_id in seed_signature_to_cluster
+                }
+                altered_seed_signature_ids = (
+                    [
+                        signature_id
+                        for signature_id, cluster_id in seed_signature_to_cluster.items()
+                        if str(cluster_id) in altered_cluster_ids
+                    ]
+                    if altered_cluster_ids
+                    else []
+                )
+                metadata_signature_ids = (*unassigned_signature_ids, *altered_seed_signature_ids)
+                signatures = _load_arrow_incremental_signature_info(arrow_lease, metadata_signature_ids)
+                if not bool(getattr(self, "suppress_orcid", False)) and any(
+                    (signature_info := signatures.get(signature_id)) is not None
+                    and signature_info.author_info_orcid is not None
+                    and signature_info.author_info_orcid.strip()
+                    for signature_id in unassigned_signature_ids
+                ):
+                    seed_orcid_signature_ids = [
+                        signature_id for signature_id in seed_signature_to_cluster if signature_id not in signatures
+                    ]
+                    attachment_state = _ARROW_ATTACH_BLOCK_STATE.get()
+                    signatures.update(
+                        attachment_state.orcid_signature_info(
+                            arrow_lease, seed_orcid_signature_ids, num_threads=self.n_jobs
+                        )
+                        if attachment_state is not None
+                        else _load_arrow_incremental_orcid_signature_info(
+                            arrow_lease,
+                            seed_orcid_signature_ids,
+                            num_threads=self.n_jobs,
+                        )
+                    )
+                request_dataset = _DirectArrowIncrementalDataset(
+                    name_tuples=resolved_name_tuples,
+                    cluster_seeds_require=seed_signature_to_cluster,
+                    cluster_seeds_disallow=resolved_cluster_seed_disallows,
+                    altered_cluster_signatures=resolved_altered_cluster_signatures,
+                    max_seed_cluster_id=_seed_cluster_count_from_seed_map(seed_signature_to_cluster),
+                    signatures=signatures,
+                    partial_supervision_is_distance_override=partial_supervision_is_distance_override,
+                    name_check_exempt_signature_ids=name_check_exempt_signature_ids,
+                )
+                logger.info("Running direct Arrow promoted incremental prediction")
+                return predict_incremental_promoted_linker_from_arrow(
+                    self,
+                    block_signature_ids,
+                    request_dataset,
+                    arrow_dataset=arrow_dataset,
+                    artifact=_required_incremental_linker_artifact(self),
+                    cluster_residuals=self._make_residual_clusterer(
+                        cast(ANDData, request_dataset),
+                        partial_supervision=partial_supervision or {},
+                        runtime_context=runtime_context,
+                        total_ram_bytes=memory_budget.resolve_total_ram_bytes(total_ram_bytes)[0],
+                        arrow_dataset=arrow_dataset,
+                    ),
+                    prevent_new_incompatibilities=prevent_new_incompatibilities,
+                    partial_supervision=partial_supervision,
+                    runtime_context=runtime_context,
+                    total_ram_bytes=total_ram_bytes,
+                    batching_threshold=batching_threshold,
+                    attachment_state=_ARROW_ATTACH_BLOCK_STATE.get(),
+                    query_signature_ids=unassigned_signature_ids,
+                    seed_planner=seed_planner,
+                )
+            finally:
+                if seed_planner is not None:
+                    seed_planner.release()

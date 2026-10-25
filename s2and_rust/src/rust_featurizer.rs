@@ -2562,6 +2562,29 @@ impl RustFeaturizer {
         self.signature_id_order().to_vec()
     }
 
+    /// Whether this featurizer holds exactly `signature_ids`, in that order.
+    ///
+    /// A caller that built it over ids it holds reuses them instead of copying
+    /// every id out through `signature_ids`, a new Python string per id.
+    fn has_signature_order(
+        &self,
+        signature_ids: &Bound<'_, pyo3::types::PyTuple>,
+    ) -> PyResult<bool> {
+        let order = self.signature_id_order();
+        if signature_ids.len() != order.len() {
+            return Ok(false);
+        }
+        for (item, expected) in signature_ids.iter().zip(order) {
+            let Ok(text) = item.downcast::<pyo3::types::PyString>() else {
+                return Ok(false);
+            };
+            if text.to_str()? != expected.as_str() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn signature_name_counts_present(&self) -> Vec<(String, bool)> {
         self.signature_id_order()
             .iter()

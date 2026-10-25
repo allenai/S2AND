@@ -118,6 +118,7 @@ def test_altered_profile_disallows_survive_native_planning_and_restoration(
         return planner
 
     monkeypatch.setattr(production_module._BackgroundSeedPlanner, "take", recording_take)
+    monkeypatch.setattr(production_module, "_BACKGROUND_SEED_PLANNER_MIN_SIGNATURES", 1)
     with ArrowDataset.open(tmp_path) as arrow_dataset:
         result = production_module.predict_incremental_promoted_linker_from_arrow(
             SplitClusterer(),

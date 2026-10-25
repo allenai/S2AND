@@ -1103,6 +1103,10 @@ class _BackgroundBlockFeaturizer:
             feature_port.release_rust_handle(self._future.result(), num_threads=num_threads)
 
 
+# Smaller blocks build their planner in moments; a background build costs them more.
+_BACKGROUND_SEED_PLANNER_MIN_SIGNATURES = 20_000
+
+
 class _BackgroundSeedPlanner:
     """The request's planner over its original seeds, built while seed setup runs.
 
@@ -1235,7 +1239,11 @@ def predict_incremental_promoted_linker_from_arrow(
                 resolve_n_jobs(clusterer.n_jobs),
             )
     seed_planner: _BackgroundSeedPlanner | None = None
-    if attachment_state is None and dataset.altered_cluster_signatures:
+    if (
+        attachment_state is None
+        and dataset.altered_cluster_signatures
+        and len(block_signatures) >= _BACKGROUND_SEED_PLANNER_MIN_SIGNATURES
+    ):
         # Splitting altered profiles takes seconds on large blocks and leaves the
         # pool half idle; the planner over the original seeds builds meanwhile.
         original_seeds = dataset.cluster_seeds_require

@@ -1207,8 +1207,12 @@ def predict_incremental_promoted_linker_from_arrow(
     total_ram_bytes: int | None,
     batching_threshold: int | None,
     attachment_state: Any | None = None,
+    query_signature_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run the promoted linker from one open Arrow dataset.
+
+    ``query_signature_ids`` lists the block signatures outside the seeds, in
+    block order, when the caller has already computed them.
 
     ``attachment_state`` is the native state that subblocked attachment passes of
     one original block share: a lazily built featurizer (``signature_ids``,
@@ -1247,9 +1251,11 @@ def predict_incremental_promoted_linker_from_arrow(
         # Splitting altered profiles takes seconds on large blocks and leaves the
         # pool half idle; the planner over the original seeds builds meanwhile.
         original_seeds = dataset.cluster_seeds_require
-        original_queries = [
-            signature_id for signature_id in map(str, block_signatures) if signature_id not in original_seeds
-        ]
+        original_queries = (
+            query_signature_ids
+            if query_signature_ids is not None
+            else [signature_id for signature_id in map(str, block_signatures) if signature_id not in original_seeds]
+        )
         if original_seeds and original_queries:
             seed_planner = _BackgroundSeedPlanner(
                 arrow_dataset,

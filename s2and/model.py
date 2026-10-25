@@ -5342,4 +5342,5 @@ class Clusterer:
                 total_ram_bytes=total_ram_bytes,
                 batching_threshold=batching_threshold,
                 attachment_state=_ARROW_ATTACH_BLOCK_STATE.get(),
+                query_signature_ids=unassigned_signature_ids,
             )

@@ -54,6 +54,8 @@ const NAME_COUNTS_INDEX_MAGIC: &[u8; 8] = b"S2NCI001";
 const NAME_COUNTS_INDEX_HASH_DOMAIN: &[u8] = b"s2and-name-counts-index-v1\0";
 const NAME_COUNTS_INDEX_HEADER_LEN: usize = 32;
 const NAME_COUNTS_INDEX_RECORD_LEN: usize = 40;
+/// Ranges of at most this many records bisect: their records share a few cache lines.
+const NAME_COUNTS_BISECT_WIDTH: usize = 8;
 const NAME_COUNTS_SHA256_RECORD_CHUNK_BYTES: usize = 1024 * 1024;
 
 pub(crate) struct RawNameCountIndex {
@@ -707,21 +709,48 @@ impl RawNameCountIndexFile {
         )
     }
 
+    /// The first record whose hash pair is not below `target`.
+    ///
+    /// Record hashes are FNV values, close to uniform, so the search guesses
+    /// a position from the first hash. A miss of the guess narrows the range as
+    /// a bisection step would; any probe inside the range keeps the result
+    /// exact. A guess that fails to halve the range is followed by a bisection
+    /// step, which bounds the probes at twice a binary search. Bisection alone
+    /// took about 25 cache misses per lookup on the largest files.
+    fn lower_bound(&self, target: (u64, u64)) -> usize {
+        let mut lower = 0usize;
+        let mut upper = self.record_count;
+        // Bounds on the first hash of every record in lower..upper.
+        let mut lower_hash = 0u64;
+        let mut upper_hash = u64::MAX;
+        let mut bisect = false;
+        while lower < upper {
+            let width = upper - lower;
+            let middle = if bisect || width <= NAME_COUNTS_BISECT_WIDTH {
+                lower + width / 2
+            } else {
+                let span = u128::from(upper_hash - lower_hash) + 1;
+                let offset = u128::from(target.0.saturating_sub(lower_hash)) * width as u128 / span;
+                lower + (offset as usize).min(width - 1)
+            };
+            let record = self.record_hash_pair(middle);
+            if record < target {
+                lower = middle + 1;
+                lower_hash = record.0;
+            } else {
+                upper = middle;
+                upper_hash = record.0;
+            }
+            bisect = !bisect && upper - lower > width / 2;
+        }
+        lower
+    }
+
     fn get(&self, kind: RawNameCountKind, name: &str) -> Option<f64> {
         let name_bytes = name.as_bytes();
         let (hash_1, hash_2) = name_counts_index_hashes(kind, name_bytes);
         let target_pair = (hash_1, hash_2);
-        let mut lower = 0usize;
-        let mut upper = self.record_count;
-        while lower < upper {
-            let middle = lower + (upper - lower) / 2;
-            if self.record_hash_pair(middle) < target_pair {
-                lower = middle + 1;
-            } else {
-                upper = middle;
-            }
-        }
-        let mut index = lower;
+        let mut index = self.lower_bound(target_pair);
         while index < self.record_count {
             let (record_hash_1, record_hash_2) = self.record_hash_pair(index);
             let record_pair = (record_hash_1, record_hash_2);
@@ -1112,6 +1141,11 @@ mod name_counts_tests {
             })
             .collect::<Vec<_>>();
         records.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        write_index_records(path, &records);
+    }
+
+    /// Writes `records` of ((hash_1, hash_2), name, count), already in index order.
+    fn write_index_records(path: &std::path::Path, records: &[((u64, u64), Vec<u8>, f64)]) {
         let blob_offset = 32 + records.len() * 40;
         let blob_len = records.iter().map(|record| record.1.len()).sum::<usize>();
         let mut output = Vec::with_capacity(blob_offset + blob_len);
@@ -1120,7 +1154,7 @@ mod name_counts_tests {
         output.extend_from_slice(&(blob_offset as u64).to_le_bytes());
         output.extend_from_slice(&(blob_len as u64).to_le_bytes());
         let mut name_offset = 0usize;
-        for ((hash_1, hash_2), name, count) in &records {
+        for ((hash_1, hash_2), name, count) in records {
             output.extend_from_slice(&hash_1.to_le_bytes());
             output.extend_from_slice(&hash_2.to_le_bytes());
             output.extend_from_slice(&(name_offset as u64).to_le_bytes());
@@ -1130,9 +1164,70 @@ mod name_counts_tests {
             name_offset += name.len();
         }
         for (_hashes, name, _count) in records {
-            output.extend_from_slice(&name);
+            output.extend_from_slice(name);
         }
         std::fs::write(path, output).expect("write lookup index");
+    }
+
+    #[test]
+    fn lower_bound_matches_bisection_on_uniform_skewed_and_repeated_hashes() {
+        // A small deterministic generator keeps the fixture reproducible.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let uniform: Vec<(u64, u64)> = (0..5000).map(|_| (next(), next())).collect();
+        // Most hashes crowd near zero, as a poor hash would place them.
+        let skewed: Vec<(u64, u64)> = (0..5000)
+            .map(|i| (if i % 50 == 0 { next() } else { next() >> 40 }, next()))
+            .collect();
+        // Runs share a first hash and differ in the second.
+        let repeated: Vec<(u64, u64)> = (0..5000)
+            .map(|i| ((i / 100) as u64 * 7_919, next()))
+            .collect();
+        let dir = unique_temp_dir("s2and_nc_lower_bound");
+        for (label, mut pairs) in [
+            ("uniform", uniform),
+            ("skewed", skewed),
+            ("repeated", repeated),
+        ] {
+            pairs.sort_unstable();
+            let records: Vec<((u64, u64), Vec<u8>, f64)> = pairs
+                .iter()
+                .enumerate()
+                .map(|(i, &pair)| (pair, format!("n{i}").into_bytes(), 1.0))
+                .collect();
+            let path = dir.join(format!("{label}.bin"));
+            write_index_records(&path, &records);
+            let index = RawNameCountIndexFile::open(&path, RawNameCountKind::First)
+                .expect("open fixture index");
+            let mut targets = vec![(0, 0), (u64::MAX, u64::MAX), (0, u64::MAX), (u64::MAX, 0)];
+            for &(hash_1, hash_2) in &pairs {
+                targets.extend([
+                    (hash_1, hash_2),
+                    (hash_1, hash_2.wrapping_add(1)),
+                    (hash_1, hash_2.wrapping_sub(1)),
+                    (hash_1.wrapping_add(1), 0),
+                    (hash_1.wrapping_sub(1), u64::MAX),
+                ]);
+            }
+            targets.extend((0..2000).map(|_| (next(), next())));
+            for target in targets {
+                assert_eq!(
+                    index.lower_bound(target),
+                    pairs.partition_point(|&pair| pair < target),
+                    "{label} target {target:?}"
+                );
+            }
+        }
+        let empty = dir.join("empty.bin");
+        write_index_records(&empty, &[]);
+        let index =
+            RawNameCountIndexFile::open(&empty, RawNameCountKind::First).expect("open empty index");
+        assert_eq!(index.lower_bound((5, 5)), 0);
     }
 
     fn write_lookup_artifact() -> std::path::PathBuf {

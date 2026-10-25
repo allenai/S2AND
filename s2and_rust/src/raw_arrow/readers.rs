@@ -486,6 +486,9 @@ fn read_paper_batches(
     Ok(out)
 }
 
+/// Papers per task when finishing `paper_authors` rows; fewer stay on one thread.
+const FINISH_PAPERS_PER_TASK: usize = 4096;
+
 /// Where a paper's rows go while reading `paper_authors`.
 #[derive(Clone, Copy)]
 enum PaperSlot {
@@ -513,6 +516,15 @@ impl<'a> PaperAuthorRows<'a> {
             papers: Vec::new(),
             skipped_papers: Vec::new(),
             paper_slots: ahash::AHashMap::default(),
+        }
+    }
+
+    /// Rows with room for `papers` distinct papers, kept or skipped.
+    fn with_capacity(papers: usize) -> Self {
+        Self {
+            papers: Vec::with_capacity(papers),
+            skipped_papers: Vec::new(),
+            paper_slots: ahash::AHashMap::with_capacity(papers),
         }
     }
 
@@ -572,41 +584,85 @@ impl<'a> PaperAuthorRows<'a> {
 
     /// Appends the rows of a later batch range, as if read after this one. Both
     /// sides classify a paper by the same keep set, so their slots agree.
-    fn merge(&mut self, later: PaperAuthorRows<'a>, keep_paper_ids: Option<&HashSet<String>>) {
+    ///
+    /// A paper new to this side takes the later side's rows without copying:
+    /// most papers sit in one batch, and copying every row cost 0.5 s serially.
+    fn merge(&mut self, later: PaperAuthorRows<'a>) {
         for (paper_id, rows) in later.papers {
-            if let PaperSlot::Kept(index) = self.slot(paper_id, keep_paper_ids) {
-                self.papers[index].1.extend(rows);
+            match self.paper_slots.entry(paper_id) {
+                Entry::Occupied(entry) => {
+                    if let PaperSlot::Kept(index) = *entry.get() {
+                        self.papers[index].1.extend(rows);
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(PaperSlot::Kept(self.papers.len()));
+                    self.papers.push((paper_id, rows));
+                }
             }
         }
         for (paper_id, positions) in later.skipped_papers {
-            if let PaperSlot::Skipped(index) = self.slot(paper_id, keep_paper_ids) {
-                self.skipped_papers[index].1.extend(positions);
+            match self.paper_slots.entry(paper_id) {
+                Entry::Occupied(entry) => {
+                    if let PaperSlot::Skipped(index) = *entry.get() {
+                        self.skipped_papers[index].1.extend(positions);
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(PaperSlot::Skipped(self.skipped_papers.len()));
+                    self.skipped_papers.push((paper_id, positions));
+                }
             }
         }
     }
 
-    fn finish(self) -> PyResult<HashMap<String, Vec<(i64, String)>>> {
-        for (paper_id, mut positions) in self.skipped_papers {
-            positions.sort_unstable();
-            if let Some(pair) = positions.windows(2).find(|pair| pair[0] == pair[1]) {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "paper_authors Arrow contains duplicate (paper_id, position): ({:?}, {})",
-                    paper_id, pair[0]
-                )));
-            }
+    /// Sorts each paper's rows by position and checks positions are distinct.
+    ///
+    /// Papers sort on the current pool. The first duplicate in paper order is
+    /// reported, skipped papers first, as a serial pass would report it.
+    fn finish(mut self) -> PyResult<HashMap<String, Vec<(i64, String)>>> {
+        let duplicate_message = |paper_id: &str, position: i64| {
+            format!(
+                "paper_authors Arrow contains duplicate (paper_id, position): ({paper_id:?}, {position})"
+            )
+        };
+        let skipped_duplicate = self
+            .skipped_papers
+            .par_iter_mut()
+            .with_min_len(FINISH_PAPERS_PER_TASK)
+            .find_map_first(|(paper_id, positions)| {
+                positions.sort_unstable();
+                positions
+                    .windows(2)
+                    .find(|pair| pair[0] == pair[1])
+                    .map(|pair| duplicate_message(paper_id, pair[0]))
+            });
+        if let Some(message) = skipped_duplicate {
+            return Err(pyo3::exceptions::PyValueError::new_err(message));
         }
+        let kept_duplicate = self
+            .papers
+            .par_iter_mut()
+            .with_min_len(FINISH_PAPERS_PER_TASK)
+            .find_map_first(|(paper_id, authors)| {
+                authors.sort_by_key(|(position, _name)| *position);
+                authors
+                    .windows(2)
+                    .find(|pair| pair[0].0 == pair[1].0)
+                    .map(|pair| duplicate_message(paper_id, pair[0].0))
+            });
+        if let Some(message) = kept_duplicate {
+            return Err(pyo3::exceptions::PyValueError::new_err(message));
+        }
+        let entries: Vec<(String, Vec<(i64, String)>)> = self
+            .papers
+            .into_par_iter()
+            .with_min_len(FINISH_PAPERS_PER_TASK)
+            .map(|(paper_id, authors)| (paper_id.to_owned(), authors))
+            .collect();
         let mut out: HashMap<String, Vec<(i64, String)>> =
-            HashMap::with_capacity_and_hasher(self.papers.len(), Default::default());
-        for (paper_id, mut authors) in self.papers {
-            authors.sort_by_key(|(position, _name)| *position);
-            if let Some(pair) = authors.windows(2).find(|pair| pair[0].0 == pair[1].0) {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "paper_authors Arrow contains duplicate (paper_id, position): ({:?}, {})",
-                    paper_id, pair[0].0
-                )));
-            }
-            out.insert(paper_id.to_owned(), authors);
-        }
+            HashMap::with_capacity_and_hasher(entries.len(), Default::default());
+        out.extend(entries);
         Ok(out)
     }
 }
@@ -627,9 +683,11 @@ pub(crate) fn read_raw_arrow_paper_authors_from_batches(
             })
             .collect::<Option<Vec<_>>>();
         if let Some(parts) = parts {
-            let mut merged = PaperAuthorRows::new();
+            let mut merged = PaperAuthorRows::with_capacity(
+                parts.iter().map(|part| part.paper_slots.len()).sum(),
+            );
             for part in parts {
-                merged.merge(part, keep_paper_ids);
+                merged.merge(part);
             }
             if let Ok(out) = merged.finish() {
                 return Ok(out);

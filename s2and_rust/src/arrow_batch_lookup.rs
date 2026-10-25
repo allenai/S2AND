@@ -5,7 +5,7 @@ use memmap2::Mmap;
 use pyo3::PyResult;
 use rayon::prelude::*;
 
-use crate::arrow_dataset::RetainedFile;
+use crate::arrow_dataset::{MappedArrowFile, RetainedFile};
 use crate::fnv64;
 use crate::raw_arrow::arrow_io::{arrow_error_to_py, io_error_to_py};
 
@@ -171,9 +171,24 @@ impl ArrowBatchLookupIndex {
         )
     }
 
-    fn lower_bound(&self, hash: u64) -> usize {
-        let mut low = 0usize;
-        let mut high = self.record_count;
+    /// The first record at or after `start` whose hash is not below `hash`.
+    ///
+    /// Every record before `start` must hash below `hash`. The search gallops
+    /// forward from `start`, so a nearby target costs a few probes.
+    fn lower_bound_from(&self, start: usize, hash: u64) -> usize {
+        let mut low = start;
+        let mut step = 1usize;
+        let mut high = loop {
+            let probe = low.saturating_add(step);
+            if probe >= self.record_count {
+                break self.record_count;
+            }
+            if self.record_hash(probe) >= hash {
+                break probe;
+            }
+            low = probe + 1;
+            step = step.saturating_mul(2);
+        };
         while low < high {
             let middle = low + (high - low) / 2;
             if self.record_hash(middle) < hash {
@@ -188,18 +203,28 @@ impl ArrowBatchLookupIndex {
     /// Return a superset of needed batches. Consumers must still exact-filter
     /// ids because the compact index stores only 64-bit hashes.
     pub(crate) fn sorted_batch_indices(&self, keys: &HashSet<String>) -> Vec<usize> {
-        let mut out = HashSet::default();
-        for key in keys {
-            let hash = fnv64(key.as_bytes());
-            let mut index = self.lower_bound(hash);
+        let Some(max_batch_index) = self.max_batch_index else {
+            return Vec::new();
+        };
+        // Sorted hashes walk the sorted records forward. A binary search per
+        // key missed cache at every step: 0.6 s for a half-million paper ids.
+        let mut hashes: Vec<u64> = keys.iter().map(|key| fnv64(key.as_bytes())).collect();
+        hashes.sort_unstable();
+        hashes.dedup();
+        let mut found = vec![false; max_batch_index as usize + 1];
+        let mut index = 0usize;
+        for hash in hashes {
+            index = self.lower_bound_from(index, hash);
             while index < self.record_count && self.record_hash(index) == hash {
-                out.insert(self.record_batch_index(index) as usize);
+                found[self.record_batch_index(index) as usize] = true;
                 index += 1;
             }
         }
-        let mut out = out.into_iter().collect::<Vec<_>>();
-        out.sort_unstable();
-        out
+        found
+            .iter()
+            .enumerate()
+            .filter_map(|(batch_index, &found)| found.then_some(batch_index))
+            .collect()
     }
 
     fn validate_batch_indices(
@@ -222,13 +247,14 @@ impl ArrowBatchLookupIndex {
     pub(crate) fn read_retained_batches(
         &self,
         source: &RetainedFile,
+        mapped: Option<&MappedArrowFile>,
         keep_ids: &HashSet<String>,
     ) -> PyResult<(Vec<RecordBatch>, IndexedArrowReadStats)> {
         if keep_ids.is_empty() {
             return Ok((Vec::new(), IndexedArrowReadStats::default()));
         }
         let batch_indices = self.sorted_batch_indices(keep_ids);
-        let batches = decode_record_batches(source, &batch_indices)?;
+        let batches = decode_record_batches(source, mapped, &batch_indices)?;
         let rows_scanned = batches.iter().map(RecordBatch::num_rows).sum();
         Ok((
             batches,
@@ -242,13 +268,37 @@ impl ArrowBatchLookupIndex {
 
 /// Decodes record batches `batch_indices` of `source`, in that order.
 ///
-/// Tasks decode contiguous runs in parallel, each with its own positional
-/// reader. An error reports the first failing batch in order, as a serial
-/// decode would.
+/// Tasks decode in parallel, from `mapped` when given and otherwise from runs
+/// of positional reads. An error reports the first failing batch in order,
+/// as a serial decode would.
 pub(crate) fn decode_record_batches(
     source: &RetainedFile,
+    mapped: Option<&MappedArrowFile>,
     batch_indices: &[usize],
 ) -> PyResult<Vec<RecordBatch>> {
+    if let Some(mapped) = mapped {
+        let decoded: Vec<PyResult<RecordBatch>> = batch_indices
+            .par_iter()
+            .map(|&batch_index| {
+                mapped
+                    .decode(batch_index)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Arrow IPC file '{}' is missing indexed record batch {batch_index}",
+                            source.label()
+                        ))
+                    })?
+                    .map_err(|err| {
+                        arrow_error_to_py(
+                            "failed to read Arrow IPC record batch from",
+                            source.label(),
+                            err,
+                        )
+                    })
+            })
+            .collect();
+        return decoded.into_iter().collect();
+    }
     let run_len = batch_indices
         .len()
         .div_ceil(rayon::current_num_threads() * 4)
@@ -298,4 +348,79 @@ pub(crate) fn decode_record_batches(
 pub(crate) struct IndexedArrowReadStats {
     pub(crate) batches_read: usize,
     pub(crate) rows_scanned: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArrowBatchLookupIndex, HEADER_LEN, MAGIC, RECORD_LEN};
+    use crate::{fnv64, HashSet};
+
+    /// An index over `records` of (hash, batch), sorted by hash as written.
+    fn index_over(records: &mut [(u64, u32)]) -> ArrowBatchLookupIndex {
+        records.sort_unstable();
+        let mut bytes = Vec::with_capacity(HEADER_LEN + records.len() * RECORD_LEN);
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&(records.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 16]);
+        for &(hash, batch) in records.iter() {
+            bytes.extend_from_slice(&hash.to_le_bytes());
+            bytes.extend_from_slice(&batch.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 4]);
+        }
+        let mut map = memmap2::MmapMut::map_anon(bytes.len()).expect("anonymous map");
+        map.copy_from_slice(&bytes);
+        ArrowBatchLookupIndex {
+            bytes: map.make_read_only().expect("read-only map"),
+            record_count: records.len(),
+            max_batch_index: records.iter().map(|&(_, batch)| batch).max(),
+            label: "<test>".to_string(),
+        }
+    }
+
+    /// The batches holding each key's hash, one binary search per key.
+    fn expected_batches(records: &[(u64, u32)], keys: &HashSet<String>) -> Vec<usize> {
+        let mut out: Vec<usize> = keys
+            .iter()
+            .flat_map(|key| {
+                let hash = fnv64(key.as_bytes());
+                let start = records.partition_point(|&(record_hash, _)| record_hash < hash);
+                records[start..]
+                    .iter()
+                    .take_while(move |&&(record_hash, _)| record_hash == hash)
+                    .map(|&(_, batch)| batch as usize)
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn walk_matches_per_key_binary_search() {
+        // Keys k0..k3999 sit in batch i % 37; k5 also has rows in batches 3
+        // and 40, as a repeated key does; filler hashes pad the gaps.
+        let mut records: Vec<(u64, u32)> = (0..4000u32)
+            .map(|i| (fnv64(format!("k{i}").as_bytes()), i % 37))
+            .collect();
+        let repeated = fnv64(b"k5");
+        records.extend([(repeated, 3), (repeated, 40)]);
+        records.extend((0..20_000u64).map(|i| (i.wrapping_mul(0x9E37_79B9_7F4A_7C15), 41)));
+        let index = index_over(&mut records);
+        let key_sets: Vec<HashSet<String>> = vec![
+            HashSet::default(),
+            ["k5".to_string()].into_iter().collect(),
+            ["absent".to_string()].into_iter().collect(),
+            (0..4000).step_by(397).map(|i| format!("k{i}")).collect(),
+            (0..4000).map(|i| format!("k{i}")).collect(),
+            (0..6000).map(|i| format!("k{i}")).collect(),
+        ];
+        for keys in &key_sets {
+            assert_eq!(
+                index.sorted_batch_indices(keys),
+                expected_batches(&records, keys),
+                "{} keys",
+                keys.len()
+            );
+        }
+    }
 }

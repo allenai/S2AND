@@ -1294,7 +1294,7 @@ impl RawBlockQueryCandidatePlanner {
         validate_raw_arrow_query_signature_ids_allow_empty(&query_signature_ids)?;
         let raw_name_counts = dataset.name_counts();
 
-        let layout =
+        let mut layout =
             RawArrowSeedLayout::read(cluster_seeds_path, cluster_seed_disallows_path, num_threads)?;
         let prefetch_ids: HashSet<String> = prefetch_signature_ids
             .into_iter()
@@ -1305,17 +1305,20 @@ impl RawBlockQueryCandidatePlanner {
         let (mut signatures, signature_index_stats) =
             if layout.seed_signature_id_set.is_empty() && prefetch_ids.is_empty() {
                 (HashMap::default(), IndexedArrowReadStats::default())
-            } else if prefetch_ids.is_empty() {
-                py.allow_threads(|| {
-                    dataset.read_signatures(Some(&layout.seed_signature_id_set), num_threads)
-                })?
             } else {
-                let wanted: HashSet<String> = layout
+                // Prefetch ids join the seed set for this read only. They are not
+                // seeds, so removing them restores the set; copying half a million
+                // seed ids into a union took longer than the read's index lookup.
+                layout
                     .seed_signature_id_set
-                    .union(&prefetch_ids)
-                    .cloned()
-                    .collect();
-                py.allow_threads(|| dataset.read_signatures(Some(&wanted), num_threads))?
+                    .extend(prefetch_ids.iter().cloned());
+                let read = py.allow_threads(|| {
+                    dataset.read_signatures(Some(&layout.seed_signature_id_set), num_threads)
+                });
+                for signature_id in &prefetch_ids {
+                    layout.seed_signature_id_set.remove(signature_id);
+                }
+                read?
             };
         let prefetched_signatures: HashMap<String, RawArrowSignature> = prefetch_ids
             .iter()
@@ -1328,27 +1331,31 @@ impl RawBlockQueryCandidatePlanner {
         let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
         layout.require_signature_rows(&signatures, num_threads)?;
 
-        let needed_paper_ids = layout.needed_paper_ids(&signatures, num_threads);
+        let mut needed_paper_ids = layout.needed_paper_ids(&signatures, num_threads);
         let prefetch_paper_ids: HashSet<String> = prefetched_signatures
             .values()
             .map(|signature| signature.paper_id.clone())
             .collect();
         let metadata_reads_parallel_start = Instant::now();
-        let mut rows = if prefetch_paper_ids.is_empty() {
-            read_raw_arrow_paper_rows(
-                py,
-                &dataset,
-                &raw_name_counts,
-                &needed_paper_ids,
-                num_threads,
-            )?
-        } else {
-            let wanted: HashSet<String> = needed_paper_ids
-                .union(&prefetch_paper_ids)
-                .cloned()
-                .collect();
-            read_raw_arrow_paper_rows(py, &dataset, &raw_name_counts, &wanted, num_threads)?
-        };
+        // Prefetch-only papers join the seed papers for this read only, as the
+        // prefetch ids joined the seed set above.
+        let added_paper_ids: Vec<String> = prefetch_paper_ids
+            .iter()
+            .filter(|paper_id| !needed_paper_ids.contains(*paper_id))
+            .cloned()
+            .collect();
+        needed_paper_ids.extend(added_paper_ids.iter().cloned());
+        let read = read_raw_arrow_paper_rows(
+            py,
+            &dataset,
+            &raw_name_counts,
+            &needed_paper_ids,
+            num_threads,
+        );
+        for paper_id in &added_paper_ids {
+            needed_paper_ids.remove(paper_id);
+        }
+        let mut rows = read?;
         let prefetched_rows = (!prefetched_signatures.is_empty()).then(|| PrefetchedRawArrowRows {
             signatures: prefetched_signatures,
             papers: split_prefetched_rows(&mut rows.papers, &prefetch_paper_ids, &needed_paper_ids),

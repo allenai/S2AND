@@ -151,6 +151,148 @@ impl Read for RetainedFileReader {
     }
 }
 
+/// An Arrow IPC file mapped into memory, whose batches decode without copying.
+///
+/// Decoded arrays point into the shared mapping. Readers of one file then share
+/// its pages: positional reads copied each batch into private memory, and a
+/// kept SPECTER vector held its whole batch. Concurrent positional reads also
+/// contended on the kernel's page-cache lock.
+pub(crate) struct MappedArrowFile {
+    mmap: Arc<memmap2::Mmap>,
+    buffer: arrow::buffer::Buffer,
+    blocks: Vec<arrow::ipc::Block>,
+    decoder: arrow::ipc::reader::FileDecoder,
+}
+
+impl MappedArrowFile {
+    /// Map `source` and read its footer as `FileReader` does.
+    ///
+    /// Returns None when the file system cannot map the file; its reads then
+    /// stay positional, as before mapping existed.
+    pub(crate) fn open(source: &RetainedFile) -> Result<Option<Self>, arrow::error::ArrowError> {
+        use arrow::error::ArrowError;
+
+        // SAFETY: the retained handle pins this exact file. Dataset files stay
+        // unchanged while open, as the memory-mapped batch indexes require.
+        let Ok(mmap) = (unsafe { memmap2::Mmap::map(source.file()) }) else {
+            return Ok(None);
+        };
+        let mmap = Arc::new(mmap);
+        let len = mmap.len();
+        let ptr = std::ptr::NonNull::new(mmap.as_ptr().cast_mut())
+            .ok_or_else(|| ArrowError::IpcError("memory map returned a null pointer".into()))?;
+        // SAFETY: the mapping owns `len` readable bytes and lives as long as the buffer.
+        let buffer = unsafe {
+            arrow::buffer::Buffer::from_custom_allocation(ptr, len, Arc::clone(&mmap) as _)
+        };
+        let trailer_start = len.checked_sub(10).ok_or_else(|| {
+            ArrowError::ParseError("Arrow file is shorter than its trailer".into())
+        })?;
+        let trailer: [u8; 10] = buffer.as_slice()[trailer_start..]
+            .try_into()
+            .expect("ten trailer bytes");
+        let footer_len = arrow::ipc::reader::read_footer_length(trailer)?;
+        let footer_start = trailer_start.checked_sub(footer_len).ok_or_else(|| {
+            ArrowError::ParseError(format!("Invalid footer length: {footer_len}"))
+        })?;
+        let footer = arrow::ipc::root_as_footer(&buffer.as_slice()[footer_start..trailer_start])
+            .map_err(|err| {
+                ArrowError::ParseError(format!("Unable to get root as footer: {err:?}"))
+            })?;
+        let ipc_schema = footer
+            .schema()
+            .ok_or_else(|| ArrowError::ParseError("Arrow file footer has no schema".into()))?;
+        if !ipc_schema.endianness().equals_to_target_endianness() {
+            return Err(ArrowError::IpcError(
+                "the endianness of the source system does not match the endianness of the target system.".to_owned(),
+            ));
+        }
+        let schema = arrow::ipc::convert::fb_to_schema(ipc_schema);
+        let mut decoder = arrow::ipc::reader::FileDecoder::new(Arc::new(schema), footer.version());
+        if let Some(dictionaries) = footer.dictionaries() {
+            for block in dictionaries {
+                decoder.read_dictionary(block, &block_buffer(&buffer, block)?)?;
+            }
+        }
+        let blocks = footer
+            .recordBatches()
+            .ok_or_else(|| {
+                ArrowError::ParseError("Unable to get record batches from IPC Footer".to_string())
+            })?
+            .iter()
+            .copied()
+            .collect();
+        Ok(Some(Self {
+            mmap,
+            buffer,
+            blocks,
+            decoder,
+        }))
+    }
+
+    /// Drop this process's page mappings; the file's pages stay in the page cache.
+    ///
+    /// Readers that copy rows out call this, so mapped pages count in the
+    /// process's memory no longer than the private copies they replaced. A
+    /// later access, also one by a concurrent reader, maps the same file
+    /// pages again.
+    pub(crate) fn release_pages(&self) {
+        #[cfg(unix)]
+        {
+            // SAFETY: the mapping is shared and read-only, so the kernel refills
+            // released pages from the unchanged file. A failed release only
+            // leaves the pages mapped.
+            let _ = unsafe {
+                self.mmap
+                    .unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
+            };
+        }
+        // Windows keeps positional reads and never maps a table.
+        #[cfg(not(unix))]
+        let _ = &self.mmap;
+    }
+
+    /// Record batch `batch_index`, or None past the last batch.
+    pub(crate) fn decode(
+        &self,
+        batch_index: usize,
+    ) -> Option<Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>> {
+        let block = self.blocks.get(batch_index)?;
+        let batch = block_buffer(&self.buffer, block).and_then(|data| {
+            self.decoder
+                .read_record_batch(block, &data)?
+                .ok_or_else(|| {
+                    arrow::error::ArrowError::IpcError("record batch block holds no message".into())
+                })
+        });
+        Some(batch)
+    }
+}
+
+/// The bytes of one footer block, checked against the file length.
+fn block_buffer(
+    buffer: &arrow::buffer::Buffer,
+    block: &arrow::ipc::Block,
+) -> Result<arrow::buffer::Buffer, arrow::error::ArrowError> {
+    let invalid = || {
+        arrow::error::ArrowError::IpcError(format!(
+            "Arrow IPC block at offset {} with lengths {} and {} lies outside the file",
+            block.offset(),
+            block.metaDataLength(),
+            block.bodyLength()
+        ))
+    };
+    let offset = usize::try_from(block.offset()).map_err(|_| invalid())?;
+    let metadata_len = usize::try_from(block.metaDataLength()).map_err(|_| invalid())?;
+    let body_len = usize::try_from(block.bodyLength()).map_err(|_| invalid())?;
+    let len = metadata_len.checked_add(body_len).ok_or_else(invalid)?;
+    let end = offset.checked_add(len).ok_or_else(invalid)?;
+    if end > buffer.len() {
+        return Err(invalid());
+    }
+    Ok(buffer.slice_with_length(offset, len))
+}
+
 impl Seek for RetainedFileReader {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
         let next = match position {
@@ -173,6 +315,9 @@ impl Seek for RetainedFileReader {
 pub(crate) struct RetainedArrowTable {
     source: RetainedFile,
     index: Arc<ArrowBatchLookupIndex>,
+    /// The mapped source on Unix. Windows keeps positional reads, because a
+    /// mapped view kept by a decoded array would hold the file past close.
+    mapped: Option<Arc<MappedArrowFile>>,
 }
 
 impl RetainedArrowTable {
@@ -186,9 +331,19 @@ impl RetainedArrowTable {
             key_column,
             reader.num_batches(),
         )?;
+        let mapped = if cfg!(unix) {
+            MappedArrowFile::open(&source)
+                .map_err(|err| {
+                    arrow_error_to_py("failed to read mapped Arrow IPC file", source.label(), err)
+                })?
+                .map(Arc::new)
+        } else {
+            None
+        };
         Ok(Self {
             source,
             index: Arc::new(index),
+            mapped,
         })
     }
 
@@ -201,7 +356,10 @@ impl RetainedArrowTable {
         keep_ids: Option<&HashSet<String>>,
     ) -> PyResult<(Vec<arrow::record_batch::RecordBatch>, IndexedArrowReadStats)> {
         match keep_ids {
-            Some(ids) => self.index.read_retained_batches(&self.source, ids),
+            Some(ids) => {
+                self.index
+                    .read_retained_batches(&self.source, self.mapped.as_deref(), ids)
+            }
             None => {
                 let reader =
                     ArrowFileReader::try_new(self.source.reader(), None).map_err(|err| {
@@ -212,7 +370,8 @@ impl RetainedArrowTable {
                         )
                     })?;
                 let all_batches: Vec<usize> = (0..reader.num_batches()).collect();
-                let batches = decode_record_batches(&self.source, &all_batches)?;
+                let batches =
+                    decode_record_batches(&self.source, self.mapped.as_deref(), &all_batches)?;
                 let batches_read = batches.len();
                 let rows_scanned = batches.iter().map(|batch| batch.num_rows()).sum();
                 Ok((
@@ -228,6 +387,13 @@ impl RetainedArrowTable {
 
     pub(crate) fn batch_indices(&self, values: &HashSet<String>) -> Vec<usize> {
         self.index.sorted_batch_indices(values)
+    }
+
+    /// Releases the mapped pages of a read whose rows were copied out.
+    fn release_mapped_pages(&self) {
+        if let Some(mapped) = &self.mapped {
+            mapped.release_pages();
+        }
     }
 }
 
@@ -276,10 +442,10 @@ impl ArrowDatasetResources {
         let table = &self.signatures;
         install_with_optional_rayon_pool(num_threads, || {
             let (batches, stats) = table.read_batches(keep_ids)?;
-            Ok((
-                read_raw_arrow_signatures_from_batches(table.label(), batches, keep_ids)?,
-                stats,
-            ))
+            let signatures =
+                read_raw_arrow_signatures_from_batches(table.label(), batches, keep_ids)?;
+            table.release_mapped_pages();
+            Ok((signatures, stats))
         })
     }
 
@@ -334,6 +500,7 @@ impl ArrowDatasetResources {
                     .collect::<PyResult<_>>()
                     .map(Some)
             })?;
+        table.release_mapped_pages();
         let Some(per_batch) = per_batch else {
             return Ok(None);
         };
@@ -369,10 +536,10 @@ impl ArrowDatasetResources {
         let table = &self.papers;
         install_with_optional_rayon_pool(num_threads, || {
             let (batches, stats) = table.read_batches(Some(keep_ids))?;
-            Ok((
-                read_raw_arrow_papers_from_batches(table.label(), batches, Some(keep_ids))?,
-                stats,
-            ))
+            let papers =
+                read_raw_arrow_papers_from_batches(table.label(), batches, Some(keep_ids))?;
+            table.release_mapped_pages();
+            Ok((papers, stats))
         })
     }
 
@@ -384,10 +551,10 @@ impl ArrowDatasetResources {
         let table = &self.paper_authors;
         install_with_optional_rayon_pool(num_threads, || {
             let (batches, stats) = table.read_batches(Some(keep_ids))?;
-            Ok((
-                read_raw_arrow_paper_authors_from_batches(table.label(), batches, Some(keep_ids))?,
-                stats,
-            ))
+            let paper_authors =
+                read_raw_arrow_paper_authors_from_batches(table.label(), batches, Some(keep_ids))?;
+            table.release_mapped_pages();
+            Ok((paper_authors, stats))
         })
     }
 
@@ -600,6 +767,78 @@ mod tests {
     fn raw_handle(file: &File) -> isize {
         use std::os::windows::io::AsRawHandle;
         file.as_raw_handle() as isize
+    }
+
+    #[test]
+    fn mapped_decoding_matches_positional_reads() {
+        use arrow::array::{FixedSizeListArray, Float32Array, Int64Array, ListArray};
+        use arrow::datatypes::Int32Type;
+
+        let directory = unique_temp_dir();
+        let path = directory.join("mixed.arrow");
+        let item = Arc::new(Field::new("item", DataType::Float32, true));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("year", DataType::Int64, true),
+            Field::new(
+                "affiliations",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(Arc::clone(&item), 3),
+                true,
+            ),
+        ]));
+        let file = File::create(&path).expect("create Arrow file");
+        let mut writer = FileWriter::try_new(file, schema.as_ref()).expect("create Arrow writer");
+        for batch_number in 0..4i64 {
+            let rows = 1 + batch_number as usize * 3;
+            let ids: StringArray = (0..rows)
+                .map(|row| (row % 4 != 1).then(|| format!("p{batch_number}-{row}-é")))
+                .collect();
+            let years: Int64Array = (0..rows)
+                .map(|row| (row % 3 != 0).then_some(1990 + row as i64))
+                .collect();
+            let affiliations = ListArray::from_iter_primitive::<Int32Type, _, _>(
+                (0..rows).map(|row| (row % 2 == 0).then(|| vec![Some(row as i32)])),
+            );
+            let affiliations = arrow::compute::cast(
+                &affiliations,
+                &DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            )
+            .expect("cast list items to strings");
+            let values =
+                Float32Array::from_iter_values((0..rows * 3).map(|value| value as f32 / 7.0));
+            let embeddings = FixedSizeListArray::new(Arc::clone(&item), 3, Arc::new(values), None);
+            let columns: Vec<ArrayRef> = vec![
+                Arc::new(ids),
+                Arc::new(years),
+                affiliations,
+                Arc::new(embeddings),
+            ];
+            let batch = RecordBatch::try_new(Arc::clone(&schema), columns).expect("valid batch");
+            writer.write(&batch).expect("write Arrow batch");
+        }
+        writer.finish().expect("finish Arrow file");
+
+        let opened = File::open(&path).expect("open Arrow file");
+        let retained =
+            RetainedFile::from_raw_handle(raw_handle(&opened), path.display().to_string())
+                .expect("retain Arrow file");
+        let mapped = MappedArrowFile::open(&retained)
+            .expect("read mapped Arrow file")
+            .expect("map Arrow file");
+        let order = [3usize, 0, 2, 1];
+        let positional = decode_record_batches(&retained, None, &order).expect("read batches");
+        let decoded = decode_record_batches(&retained, Some(&mapped), &order).expect("map batches");
+        assert_eq!(decoded, positional);
+        assert_eq!(decoded.len(), 4);
+        assert!(mapped.decode(4).is_none());
+
+        drop((opened, retained, mapped, positional, decoded));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]

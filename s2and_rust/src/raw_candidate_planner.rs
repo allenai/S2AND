@@ -381,18 +381,28 @@ fn build_retriever_reusing_summaries(
     let mut previous_summaries: Vec<Option<RetrievalSummaryData>> =
         previous_summaries.into_iter().map(Some).collect();
     // A component's first member names the previous component it could match.
+    // Comparing every component's members touches every seed, so it runs on the
+    // pool; taking the matched summaries afterwards keeps the serial order.
+    let reuse_indices: Vec<Option<usize>> = install_with_optional_rayon_pool(num_threads, || {
+        component_order
+            .par_iter()
+            .map(|component_key| {
+                let members = members_by_component.get(component_key)?;
+                let previous_key = previous_component_keys_by_member
+                    .get(members.first()?)?
+                    .first()?;
+                if previous_members_by_component.get(previous_key)? != members {
+                    return None;
+                }
+                previous_component_index_by_key.get(previous_key).copied()
+            })
+            .collect()
+    });
     let mut slots: Vec<Option<RetrievalSummaryData>> = component_order
         .iter()
-        .map(|component_key| {
-            let members = members_by_component.get(component_key)?;
-            let previous_key = previous_component_keys_by_member
-                .get(members.first()?)?
-                .first()?;
-            if previous_members_by_component.get(previous_key)? != members {
-                return None;
-            }
-            let index = *previous_component_index_by_key.get(previous_key)?;
-            let mut summary = previous_summaries.get_mut(index)?.take()?;
+        .zip(reuse_indices)
+        .map(|(component_key, index)| {
+            let mut summary = previous_summaries.get_mut(index?)?.take()?;
             summary.component_key = component_key.clone();
             Some(summary)
         })
@@ -441,6 +451,33 @@ fn build_retriever_reusing_summaries(
         })
         .map_err(retrieval_error_to_py)?;
     Ok((retriever, reused_count))
+}
+
+/// Every component's members, in component order: the seed order that plans
+/// index into.
+fn flat_component_members(
+    component_order: &[String],
+    members_by_component: &HashMap<String, Vec<String>>,
+    num_threads: Option<usize>,
+) -> PyResult<Vec<String>> {
+    let members: Vec<String> = install_with_optional_rayon_pool(num_threads, || {
+        component_order
+            .par_iter()
+            .flat_map_iter(|component_key| {
+                members_by_component
+                    .get(component_key)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+            })
+            .collect()
+    });
+    if u32::try_from(members.len()).is_err() {
+        return Err(pyo3::exceptions::PyOverflowError::new_err(
+            "seed signature count exceeds u32",
+        ));
+    }
+    Ok(members)
 }
 
 fn raw_arrow_component_member_indices_for_batch(
@@ -1016,6 +1053,9 @@ struct ReloadParts {
     papers: HashMap<String, RawArrowPaper>,
     specter_by_paper_id: Option<HashMap<String, Arc<arrow::buffer::ScalarBuffer<f32>>>>,
     prefetched: Option<PrefetchedRawArrowRows>,
+    /// Rows this reload added, which a failed reload removes again.
+    added_signature_ids: Vec<String>,
+    added_paper_ids: Vec<String>,
 }
 
 /// Rows of block signatures that are not seeds yet, read with the seeds at build.
@@ -1423,13 +1463,23 @@ impl RawBlockQueryCandidatePlanner {
         let text_context_secs = text_context_start.elapsed().as_secs_f64();
 
         let feature_start = Instant::now();
-        features_by_signature_id
-            .retain(|signature_id, _| seed_signature_id_set.contains(signature_id));
+        let stale_features = install_with_optional_rayon_pool(num_threads, || {
+            features_by_signature_id
+                .par_iter()
+                .any(|(signature_id, _)| !seed_signature_id_set.contains(signature_id))
+        });
+        if stale_features {
+            features_by_signature_id
+                .retain(|signature_id, _| seed_signature_id_set.contains(signature_id));
+        }
         let reused_feature_count = features_by_signature_id.len();
-        let pending_signature_ids: Vec<&String> = seed_signature_ids
-            .iter()
-            .filter(|signature_id| !features_by_signature_id.contains_key(*signature_id))
-            .collect();
+        let pending_signature_ids: Vec<&String> =
+            install_with_optional_rayon_pool(num_threads, || {
+                seed_signature_ids
+                    .par_iter()
+                    .filter(|signature_id| !features_by_signature_id.contains_key(*signature_id))
+                    .collect()
+            });
         let raw_feature_results: Result<Vec<(String, RawArrowFeature)>, String> =
             py.allow_threads(|| {
                 let compute = || {
@@ -1509,12 +1559,8 @@ impl RawBlockQueryCandidatePlanner {
         let summary_secs = summary_start.elapsed().as_secs_f64();
 
         let component_members_start = Instant::now();
-        let (_component_member_indices, flat_seed_signature_ids, _seed_component_keys) =
-            raw_arrow_component_member_indices_for_batch(
-                &component_order,
-                &members_by_component,
-                0,
-            )?;
+        let flat_seed_signature_ids =
+            flat_component_members(&component_order, &members_by_component, num_threads)?;
         let component_members_secs = component_members_start.elapsed().as_secs_f64();
 
         let seed_specter_count = specter_by_paper_id.as_ref().map_or(0usize, HashMap::len);
@@ -1606,10 +1652,15 @@ impl RawBlockQueryCandidatePlanner {
             cluster_seed_disallows_path,
             self.num_threads,
         )?;
-        if !layout
-            .seed_signature_id_set
-            .is_superset(&self.state.seed_signature_id_set)
-        {
+        let seeds_grew = layout.seed_signature_id_set.len()
+            >= self.state.seed_signature_id_set.len()
+            && install_with_optional_rayon_pool(self.num_threads, || {
+                self.state
+                    .seed_signature_id_set
+                    .par_iter()
+                    .all(|signature_id| layout.seed_signature_id_set.contains(signature_id))
+            });
+        if !seeds_grew {
             return Ok(false);
         }
         let retained = self
@@ -1623,6 +1674,8 @@ impl RawBlockQueryCandidatePlanner {
             papers: retained.papers,
             specter_by_paper_id: retained.specter_by_paper_id,
             prefetched: self.state.prefetched_rows.take(),
+            added_signature_ids: Vec::new(),
+            added_paper_ids: Vec::new(),
         };
         match self.reload_seed_rows_from_parts(py, layout, &mut parts) {
             Ok(planner) => {
@@ -1630,7 +1683,18 @@ impl RawBlockQueryCandidatePlanner {
                 Ok(true)
             }
             Err(error) => {
-                // The rows go back, so a later reload or plan still has them.
+                // The rows go back as they were, so a later reload or plan still
+                // has exactly the current seeds' rows.
+                for signature_id in &parts.added_signature_ids {
+                    parts.signatures.remove(signature_id);
+                }
+                for paper_id in &parts.added_paper_ids {
+                    parts.papers.remove(paper_id);
+                    parts.paper_authors.remove(paper_id);
+                    if let Some(specter) = parts.specter_by_paper_id.as_mut() {
+                        specter.remove(paper_id);
+                    }
+                }
                 self.state.signatures = parts.signatures;
                 self.state.paper_authors = parts.paper_authors;
                 self.state.retained_seed_rows = Some(RetainedRawArrowSeedRows {
@@ -1658,14 +1722,24 @@ impl RawBlockQueryCandidatePlanner {
         let papers = &mut parts.papers;
         let specter_by_paper_id = &mut parts.specter_by_paper_id;
         let prefetched = &mut parts.prefetched;
+        let num_threads = self.num_threads;
 
+        // The planner holds exactly its seeds' rows: signatures for every seed,
+        // papers for every seed's paper, and authors and SPECTER rows only for
+        // those papers. Seeds only grow between passes, so adding the new seeds'
+        // rows gives what a fresh read of every seed would, without rescanning
+        // the half million seeds a large block carries.
         let read_signatures_start = Instant::now();
-        let mut missing_signature_ids: HashSet<String> = layout
-            .seed_signature_id_set
-            .iter()
-            .filter(|signature_id| !signatures.contains_key(*signature_id))
-            .cloned()
-            .collect();
+        let new_signature_ids: Vec<String> = install_with_optional_rayon_pool(num_threads, || {
+            layout
+                .seed_signature_ids
+                .par_iter()
+                .filter(|signature_id| !signatures.contains_key(*signature_id))
+                .cloned()
+                .collect()
+        });
+        let mut missing_signature_ids: HashSet<String> =
+            new_signature_ids.iter().cloned().collect();
         if let Some(cache) = prefetched.as_mut() {
             missing_signature_ids.retain(|signature_id| {
                 match cache.signatures.remove(signature_id) {
@@ -1677,11 +1751,11 @@ impl RawBlockQueryCandidatePlanner {
                 }
             });
         }
+        parts.added_signature_ids = new_signature_ids;
         let signature_index_stats = if missing_signature_ids.is_empty() {
             IndexedArrowReadStats::default()
         } else {
             let dataset = &self.dataset;
-            let num_threads = self.num_threads;
             let (loaded, stats) = py.allow_threads(|| {
                 dataset.read_signatures(Some(&missing_signature_ids), num_threads)
             })?;
@@ -1689,19 +1763,18 @@ impl RawBlockQueryCandidatePlanner {
             stats
         };
         let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
-        layout.require_signature_rows(&signatures, self.num_threads)?;
-        // Seeds only grow between passes, so the rows are usually exactly the seeds.
-        if signatures.len() != layout.seed_signature_id_set.len() {
-            signatures
-                .retain(|signature_id, _| layout.seed_signature_id_set.contains(signature_id));
-        }
+        layout.require_signature_rows(signatures, num_threads)?;
 
-        let needed_paper_ids = layout.needed_paper_ids(&signatures, self.num_threads);
-        let mut missing_paper_ids: HashSet<String> = needed_paper_ids
+        let new_paper_ids: HashSet<String> = parts
+            .added_signature_ids
             .iter()
+            .filter_map(|signature_id| signatures.get(signature_id))
+            .map(|signature| &signature.paper_id)
             .filter(|paper_id| !papers.contains_key(*paper_id))
             .cloned()
             .collect();
+        parts.added_paper_ids = new_paper_ids.iter().cloned().collect();
+        let mut missing_paper_ids = new_paper_ids.clone();
         if let Some(cache) = prefetched.as_ref() {
             // Copy, not move: another cached signature may share the paper.
             missing_paper_ids.retain(|paper_id| {
@@ -1730,7 +1803,7 @@ impl RawBlockQueryCandidatePlanner {
             &self.dataset,
             &raw_name_counts,
             &missing_paper_ids,
-            self.num_threads,
+            num_threads,
         )?;
         papers.extend(rows.papers);
         paper_authors.extend(rows.paper_authors);
@@ -1743,14 +1816,7 @@ impl RawBlockQueryCandidatePlanner {
                 ))
             }
         }
-        validate_required_raw_arrow_paper_metadata(&needed_paper_ids, &papers, self.num_threads)?;
-        if papers.len() != needed_paper_ids.len() {
-            papers.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
-        }
-        paper_authors.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
-        if let Some(specter) = specter_by_paper_id.as_mut() {
-            specter.retain(|paper_id, _| needed_paper_ids.contains(paper_id));
-        }
+        validate_required_raw_arrow_paper_metadata(&new_paper_ids, papers, num_threads)?;
         let read_telemetry = RawArrowSeedReadTelemetry {
             read_cluster_seeds_secs: layout.read_cluster_seeds_secs,
             read_signatures_secs,
@@ -1763,6 +1829,7 @@ impl RawBlockQueryCandidatePlanner {
             paper_author_index_stats: rows.paper_author_index_stats,
             specter_index_stats: rows.specter_index_stats,
         };
+        let seed_paper_count = papers.len();
         let previous = ReusableSeedState {
             features_by_signature_id: std::mem::take(&mut self.state.features_by_signature_id),
             members_by_component: std::mem::take(&mut self.state.members_by_component),
@@ -1784,7 +1851,7 @@ impl RawBlockQueryCandidatePlanner {
             std::mem::take(paper_authors),
             specter_by_paper_id.take(),
             raw_name_counts,
-            needed_paper_ids.len(),
+            seed_paper_count,
             read_telemetry,
             metadata_reads_parallel_start,
             query_signature_ids,
@@ -2379,51 +2446,63 @@ impl RawBlockQueryCandidatePlanner {
                                 .collect();
                             // Each block's SPECTER bounds read every summary once.
                             let specter_bounds = retriever.specter_score_upper_bounds(&block);
-                            let mut name_terms: Vec<(QueryNameKey, Vec<f64>)> = Vec::new();
+                            // Name terms once per run of equal keys, in block order, so
+                            // the middle-term cache sees the queries as before; the
+                            // queries then score on the pool.
+                            let mut name_terms: Vec<Vec<f64>> = Vec::new();
+                            let mut name_term_of_query: Vec<usize> =
+                                Vec::with_capacity(block.len());
                             let mut middle_terms = MiddleTermCache::default();
+                            let mut last_key: Option<&QueryNameKey> = None;
+                            for (&query_offset, current_query) in block_offsets.iter().zip(&block) {
+                                let key = &keys[query_offset];
+                                if last_key != Some(key) {
+                                    name_terms.push(retriever.name_score_terms_cached(
+                                        current_query,
+                                        &first_names,
+                                        &mut middle_terms,
+                                    ));
+                                    last_key = Some(key);
+                                }
+                                name_term_of_query.push(name_terms.len() - 1);
+                            }
                             block_offsets
-                                .iter()
-                                .zip(&block)
-                                .zip(&specter_bounds)
-                                .map(|((&query_offset, current_query), bound_row)| {
-                                    let key = &keys[query_offset];
-                                    if name_terms.last().is_none_or(|(last, _)| last != key) {
-                                        name_terms.push((
-                                            key.clone(),
-                                            retriever.name_score_terms_cached(
+                                .par_iter()
+                                .zip(block.par_iter())
+                                .zip(specter_bounds.par_iter())
+                                .zip(name_term_of_query.par_iter())
+                                .map(
+                                    |(((&query_offset, current_query), bound_row), &term_index)| {
+                                        let terms = &name_terms[term_index];
+                                        let result = (|| {
+                                            let query_index =
+                                                u32::try_from(query_offset).map_err(|_| {
+                                                    RetrievalError::Overflow(
+                                                        "query index exceeds u32".to_string(),
+                                                    )
+                                                })?;
+                                            let excluded_candidate_indices =
+                                                excluded_candidate_indices_by_query
+                                                    .as_ref()
+                                                    .and_then(|values| {
+                                                        values[query_offset].as_ref()
+                                                    });
+                                            retriever.build_pair_plan_query_result(
                                                 current_query,
-                                                &first_names,
-                                                &mut middle_terms,
-                                            ),
-                                        ));
-                                    }
-                                    let terms = &name_terms.last().expect("pushed above").1;
-                                    let result = (|| {
-                                        let query_index =
-                                            u32::try_from(query_offset).map_err(|_| {
-                                                RetrievalError::Overflow(
-                                                    "query index exceeds u32".to_string(),
-                                                )
-                                            })?;
-                                        let excluded_candidate_indices =
-                                            excluded_candidate_indices_by_query
-                                                .as_ref()
-                                                .and_then(|values| values[query_offset].as_ref());
-                                        retriever.build_pair_plan_query_result(
-                                            current_query,
-                                            query_first_tokens[query_offset].as_str(),
-                                            query_index,
-                                            excluded_candidate_indices,
-                                            &component_member_indices,
-                                            self.top_k,
-                                            PlanScoring::Bounded {
-                                                specter_upper_bounds: bound_row,
-                                                name_terms: terms,
-                                            },
-                                        )
-                                    })();
-                                    (query_offset, result)
-                                })
+                                                query_first_tokens[query_offset].as_str(),
+                                                query_index,
+                                                excluded_candidate_indices,
+                                                &component_member_indices,
+                                                self.top_k,
+                                                PlanScoring::Bounded {
+                                                    specter_upper_bounds: bound_row,
+                                                    name_terms: terms,
+                                                },
+                                            )
+                                        })();
+                                        (query_offset, result)
+                                    },
+                                )
                                 .collect::<Vec<_>>()
                         })
                         .flatten()

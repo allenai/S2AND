@@ -308,19 +308,22 @@ fn validate_overlap_counters(summaries: &[RetrievalSummaryData]) -> Result<(), R
         ));
     }
     for counter_of in COUNTER_FAMILIES {
-        let mut postings = 0usize;
-        for summary in summaries {
-            let Some(counter) = counter_of(summary).as_ref() else {
-                continue;
-            };
-            if let Some(pair) = counter.keys.windows(2).find(|pair| pair[0] >= pair[1]) {
-                return Err(RetrievalError::InvalidValue(format!(
-                    "component_key {:?} counter hashes must be strictly increasing, got {} then {}; duplicate FNV hashes may indicate a collision",
-                    summary.component_key, pair[0], pair[1]
-                )));
-            }
-            postings += counter.len();
+        // The first bad summary in order, as a serial scan reports it.
+        let unordered = summaries.par_iter().find_map_first(|summary| {
+            let counter = counter_of(summary).as_ref()?;
+            let pair = counter.keys.windows(2).find(|pair| pair[0] >= pair[1])?;
+            Some((summary, pair[0], pair[1]))
+        });
+        if let Some((summary, first, second)) = unordered {
+            return Err(RetrievalError::InvalidValue(format!(
+                "component_key {:?} counter hashes must be strictly increasing, got {} then {}; duplicate FNV hashes may indicate a collision",
+                summary.component_key, first, second
+            )));
         }
+        let postings: usize = summaries
+            .par_iter()
+            .filter_map(|summary| counter_of(summary).as_ref().map(CounterData::len))
+            .sum();
         if u32::try_from(postings).is_err() {
             return Err(RetrievalError::Overflow(
                 "retriever overlap postings exceed u32".to_string(),
@@ -337,19 +340,26 @@ impl CounterPostings {
         counter_of: fn(&RetrievalSummaryData) -> &Option<CounterData>,
         config: RetrievalOverlapConfig,
     ) -> Self {
-        let mut postings: Vec<(u64, u32, f64)> = Vec::new();
-        for (component, summary) in summaries.iter().enumerate() {
-            let Some(counter) = counter_of(summary).as_ref() else {
-                continue;
-            };
-            postings.extend(counter.iter().map(|(hash, count)| {
-                (
-                    *hash,
-                    component as u32,
-                    term_share(*count, summary.size, config),
-                )
-            }));
-        }
+        // Collection order does not matter: the sort orders postings by term,
+        // then component, and each component holds a term once.
+        let mut postings: Vec<(u64, u32, f64)> = summaries
+            .par_iter()
+            .enumerate()
+            .flat_map_iter(|(component, summary)| {
+                counter_of(summary)
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(move |counter| {
+                        counter.iter().map(move |(hash, count)| {
+                            (
+                                *hash,
+                                component as u32,
+                                term_share(*count, summary.size, config),
+                            )
+                        })
+                    })
+            })
+            .collect();
         postings.par_sort_unstable_by_key(|(hash, component, _)| (*hash, *component));
         let posting_count = postings.len() as u32;
         let mut index = Self {
@@ -367,6 +377,20 @@ impl CounterPostings {
         }
         index.offsets.push(posting_count);
         index
+    }
+
+    /// Each term's number of components: its posting count, because a
+    /// component's counter holds a term at most once.
+    fn document_frequencies(&self) -> HashMap<u64, usize> {
+        let mut frequencies =
+            HashMap::with_capacity_and_hasher(self.hashes.len(), Default::default());
+        frequencies.extend(
+            self.hashes
+                .iter()
+                .zip(self.offsets.windows(2))
+                .map(|(hash, bounds)| (*hash, (bounds[1] - bounds[0]) as usize)),
+        );
+        frequencies
     }
 
     /// Add each term's postings to `overlaps`, in `terms` order.
@@ -424,6 +448,27 @@ impl OverlapIndex {
             non_mega_coauthor,
             affiliation,
         })
+    }
+
+    /// Coauthor, non-mega coauthor and affiliation document frequencies: the
+    /// number of components whose counter holds each term.
+    pub(crate) fn document_frequencies(
+        &self,
+    ) -> (
+        HashMap<u64, usize>,
+        HashMap<u64, usize>,
+        HashMap<u64, usize>,
+    ) {
+        let ((coauthor, non_mega_coauthor), affiliation) = rayon::join(
+            || {
+                rayon::join(
+                    || self.coauthor.document_frequencies(),
+                    || self.non_mega_coauthor.document_frequencies(),
+                )
+            },
+            || self.affiliation.document_frequencies(),
+        );
+        (coauthor, non_mega_coauthor, affiliation)
     }
 
     /// A query's lookups in every indexed component, one entry per summary.

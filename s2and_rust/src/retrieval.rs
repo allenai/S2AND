@@ -273,21 +273,45 @@ impl RustHybridCentroidRetriever {
     ) -> Result<Self, RetrievalError> {
         let mut component_index_by_key =
             HashMap::with_capacity_and_hasher(summaries.len(), Default::default());
-        let mut coauthor_cluster_df = HashMap::default();
-        let mut non_mega_coauthor_cluster_df = HashMap::default();
-        let mut affiliation_cluster_df = HashMap::default();
-        for (index, summary) in summaries.iter().enumerate() {
-            component_index_by_key.insert(summary.component_key.clone(), index);
-            increment_df_from_counter(&summary.coauthor_counts, &mut coauthor_cluster_df);
-            increment_df_from_counter(
-                &summary.non_mega_coauthor_counts,
-                &mut non_mega_coauthor_cluster_df,
-            );
-            increment_df_from_counter(&summary.affiliation_counts, &mut affiliation_cluster_df);
-        }
+        component_index_by_key.extend(
+            summaries
+                .iter()
+                .enumerate()
+                .map(|(index, summary)| (summary.component_key.clone(), index)),
+        );
         let overlap_index = with_overlap_index
             .then(|| OverlapIndex::build(&summaries))
             .transpose()?;
+        // The index's posting counts are the document frequencies, so a ranking
+        // retriever reads them off instead of hashing every counter entry again.
+        let (coauthor_cluster_df, non_mega_coauthor_cluster_df, affiliation_cluster_df) =
+            match overlap_index.as_ref() {
+                Some(index) => index.document_frequencies(),
+                None => {
+                    let mut coauthor_cluster_df = HashMap::default();
+                    let mut non_mega_coauthor_cluster_df = HashMap::default();
+                    let mut affiliation_cluster_df = HashMap::default();
+                    for summary in &summaries {
+                        increment_df_from_counter(
+                            &summary.coauthor_counts,
+                            &mut coauthor_cluster_df,
+                        );
+                        increment_df_from_counter(
+                            &summary.non_mega_coauthor_counts,
+                            &mut non_mega_coauthor_cluster_df,
+                        );
+                        increment_df_from_counter(
+                            &summary.affiliation_counts,
+                            &mut affiliation_cluster_df,
+                        );
+                    }
+                    (
+                        coauthor_cluster_df,
+                        non_mega_coauthor_cluster_df,
+                        affiliation_cluster_df,
+                    )
+                }
+            };
         Ok(Self {
             summaries,
             component_index_by_key,
@@ -368,106 +392,22 @@ impl RustHybridCentroidRetriever {
         &self,
         queries: &[RetrievalQueryData],
     ) -> Vec<Vec<f32>> {
-        let mut rows = vec![vec![0.0f32; self.summaries.len()]; queries.len()];
-        for (index, summary) in self.summaries.iter().enumerate() {
-            let centroid = match (
-                summary.specter_centroid.as_ref(),
-                summary.specter_centroid_norm,
-            ) {
-                (Some(vector), Some(norm)) => Some((&vector[..], norm)),
-                _ => None,
-            };
-            if summary.exemplar_vectors.len() + usize::from(centroid.is_some()) > 5 {
-                for row in rows.iter_mut() {
-                    row[index] = f32::INFINITY;
-                }
-                continue;
-            }
-            let mut vectors: [&[f32]; 5] = [&[]; 5];
-            let mut norms = [0.0f64; 5];
-            let mut count = 0;
-            if let Some((vector, norm)) = centroid {
-                vectors[0] = vector;
-                norms[0] = norm;
-                count = 1;
-            }
-            for (vector, norm) in summary
-                .exemplar_vectors
-                .iter()
-                .zip(summary.exemplar_norms.iter())
-            {
-                vectors[count] = &vector[..];
-                norms[count] = *norm;
-                count += 1;
-            }
-            // Queries with a vector of the summary vectors' common length go two
-            // at a time; any other query takes its own pass.
-            let common_length = (count > 0
-                && vectors[..count].iter().all(|v| v.len() == vectors[0].len()))
-            .then(|| vectors[0].len());
-            let bound_of = |dots: &[f32; 5], slots: &[usize], query_norm: f64, len: usize| -> f32 {
-                let error = f32_dot_relative_error_bound(len);
-                let mut bound = 0.0f64;
-                for (position, slot) in slots.iter().enumerate() {
-                    let norm = norms[*slot];
-                    let cosine = if query_norm == 0.0 || norm == 0.0 {
-                        0.0
-                    } else {
-                        f64::from(dots[position]) / (query_norm * norm) + error
-                    };
-                    bound = bound.max(cosine);
-                }
-                f32_at_or_above(bound)
-            };
-            let all_slots = [0usize, 1, 2, 3, 4];
-            let mut pending: Option<(usize, &[f32], f64)> = None;
-            for (row_index, query) in queries.iter().enumerate() {
-                let (Some(values), Some(query_norm)) = (query.specter.as_ref(), query.specter_norm)
-                else {
-                    // The exact score is 0.0 without a query vector.
-                    continue;
-                };
-                let values: &[f32] = values;
-                if common_length == Some(values.len()) {
-                    match pending.take() {
-                        Some((first_row, first_values, first_norm)) => {
-                            let (first_dots, second_dots) =
-                                f32_lane_dots_pair(first_values, values, &vectors[..count]);
-                            rows[first_row][index] = bound_of(
-                                &first_dots,
-                                &all_slots[..count],
-                                first_norm,
-                                values.len(),
-                            );
-                            rows[row_index][index] = bound_of(
-                                &second_dots,
-                                &all_slots[..count],
-                                query_norm,
-                                values.len(),
-                            );
-                        }
-                        None => pending = Some((row_index, values, query_norm)),
-                    }
-                    continue;
-                }
-                let len = values.len();
-                let mut same_length: [&[f32]; 5] = [&[]; 5];
-                let mut slots = [0usize; 5];
-                let mut matched = 0;
-                for slot in 0..count {
-                    if vectors[slot].len() == len {
-                        same_length[matched] = vectors[slot];
-                        slots[matched] = slot;
-                        matched += 1;
-                    }
-                }
-                let dots = f32_lane_dots(values, &same_length[..matched]);
-                rows[row_index][index] = bound_of(&dots, &slots[..matched], query_norm, len);
-            }
-            if let Some((row_index, values, query_norm)) = pending {
-                let dots = f32_lane_dots(values, &vectors[..count]);
-                rows[row_index][index] =
-                    bound_of(&dots, &all_slots[..count], query_norm, values.len());
+        let query_count = queries.len();
+        if query_count == 0 {
+            return Vec::new();
+        }
+        // Each summary's bounds for the whole block, summaries on the pool: a
+        // pass plans few blocks, so threads would otherwise wait on the last ones.
+        let mut columns = vec![0.0f32; self.summaries.len() * query_count];
+        columns
+            .par_chunks_mut(query_count)
+            .zip(self.summaries.par_iter())
+            .with_min_len(SPECTER_BOUND_SUMMARIES_PER_TASK)
+            .for_each(|(column, summary)| specter_bound_column(summary, queries, column));
+        let mut rows = vec![vec![0.0f32; self.summaries.len()]; query_count];
+        for (index, column) in columns.chunks_exact(query_count).enumerate() {
+            for (row, bound) in rows.iter_mut().zip(column) {
+                row[index] = *bound;
             }
         }
         rows
@@ -1160,6 +1100,109 @@ impl RustHybridCentroidRetriever {
                 .push(member_indices.clone());
         }
         Ok(result)
+    }
+}
+
+/// Summaries per pool task when bounding a block of queries.
+const SPECTER_BOUND_SUMMARIES_PER_TASK: usize = 64;
+
+/// `column[row]` is an upper bound of query `row`'s SPECTER score against `summary`.
+///
+/// The exact score is the largest of 0.0 and the cosines of the summary's
+/// vectors, NaN cosines ignored. Each cosine here comes from an f32 lane dot
+/// product plus `f32_dot_relative_error_bound`, so every bound is at or above
+/// the exact score. Summaries with more vectors than the fused kernel holds
+/// get an infinite bound. Queries without a vector keep the 0.0 in `column`.
+fn specter_bound_column(
+    summary: &RetrievalSummaryData,
+    queries: &[RetrievalQueryData],
+    column: &mut [f32],
+) {
+    let centroid = match (
+        summary.specter_centroid.as_ref(),
+        summary.specter_centroid_norm,
+    ) {
+        (Some(vector), Some(norm)) => Some((&vector[..], norm)),
+        _ => None,
+    };
+    if summary.exemplar_vectors.len() + usize::from(centroid.is_some()) > 5 {
+        column.fill(f32::INFINITY);
+        return;
+    }
+    let mut vectors: [&[f32]; 5] = [&[]; 5];
+    let mut norms = [0.0f64; 5];
+    let mut count = 0;
+    if let Some((vector, norm)) = centroid {
+        vectors[0] = vector;
+        norms[0] = norm;
+        count = 1;
+    }
+    for (vector, norm) in summary
+        .exemplar_vectors
+        .iter()
+        .zip(summary.exemplar_norms.iter())
+    {
+        vectors[count] = &vector[..];
+        norms[count] = *norm;
+        count += 1;
+    }
+    // Queries with a vector of the summary vectors' common length go two
+    // at a time; any other query takes its own pass.
+    let common_length = (count > 0 && vectors[..count].iter().all(|v| v.len() == vectors[0].len()))
+        .then(|| vectors[0].len());
+    let bound_of = |dots: &[f32; 5], slots: &[usize], query_norm: f64, len: usize| -> f32 {
+        let error = f32_dot_relative_error_bound(len);
+        let mut bound = 0.0f64;
+        for (position, slot) in slots.iter().enumerate() {
+            let norm = norms[*slot];
+            let cosine = if query_norm == 0.0 || norm == 0.0 {
+                0.0
+            } else {
+                f64::from(dots[position]) / (query_norm * norm) + error
+            };
+            bound = bound.max(cosine);
+        }
+        f32_at_or_above(bound)
+    };
+    let all_slots = [0usize, 1, 2, 3, 4];
+    let mut pending: Option<(usize, &[f32], f64)> = None;
+    for (row_index, query) in queries.iter().enumerate() {
+        let (Some(values), Some(query_norm)) = (query.specter.as_ref(), query.specter_norm) else {
+            // The exact score is 0.0 without a query vector.
+            continue;
+        };
+        let values: &[f32] = values;
+        if common_length == Some(values.len()) {
+            match pending.take() {
+                Some((first_row, first_values, first_norm)) => {
+                    let (first_dots, second_dots) =
+                        f32_lane_dots_pair(first_values, values, &vectors[..count]);
+                    column[first_row] =
+                        bound_of(&first_dots, &all_slots[..count], first_norm, values.len());
+                    column[row_index] =
+                        bound_of(&second_dots, &all_slots[..count], query_norm, values.len());
+                }
+                None => pending = Some((row_index, values, query_norm)),
+            }
+            continue;
+        }
+        let len = values.len();
+        let mut same_length: [&[f32]; 5] = [&[]; 5];
+        let mut slots = [0usize; 5];
+        let mut matched = 0;
+        for slot in 0..count {
+            if vectors[slot].len() == len {
+                same_length[matched] = vectors[slot];
+                slots[matched] = slot;
+                matched += 1;
+            }
+        }
+        let dots = f32_lane_dots(values, &same_length[..matched]);
+        column[row_index] = bound_of(&dots, &slots[..matched], query_norm, len);
+    }
+    if let Some((row_index, values, query_norm)) = pending {
+        let dots = f32_lane_dots(values, &vectors[..count]);
+        column[row_index] = bound_of(&dots, &all_slots[..count], query_norm, values.len());
     }
 }
 

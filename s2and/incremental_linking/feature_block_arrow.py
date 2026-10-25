@@ -196,8 +196,14 @@ def write_cluster_seeds_arrow(path: Path, cluster_seeds_require: Mapping[Any, An
     signature_keys = list(map(str, cluster_seeds_require))
     cluster_keys = list(map(str, cluster_seeds_require.values()))
     # Requests carry half a million seeds; check them as sets, and walk them
-    # in order only to report the first problem.
-    if "" in signature_keys or "" in cluster_keys or len(set(signature_keys)) != len(signature_keys):
+    # in order only to report the first problem. Mapping keys are distinct, so
+    # only the conversion of non-string keys can repeat an id.
+    keys_are_strings = set(map(type, cluster_seeds_require)) <= {str}
+    if (
+        "" in signature_keys
+        or "" in cluster_keys
+        or (not keys_are_strings and len(set(signature_keys)) != len(signature_keys))
+    ):
         seen_signature_ids: set[str] = set()
         for signature_key, cluster_key in zip(signature_keys, cluster_keys, strict=True):
             if not signature_key:

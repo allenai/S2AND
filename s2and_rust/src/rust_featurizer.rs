@@ -216,9 +216,11 @@ mod constraint_key_tests {
     fn views_keep_a_subset_of_the_shared_signature_map() {
         let mut rng = XorShift(0x5eed_0000_0000_0007);
         let full = featurizer(&mut rng, 2);
-        let view = full
-            .view_with_cluster_seed_sidecars(vec!["s1".to_string()], None, None)
-            .expect("view over one signature");
+        pyo3::prepare_freethreaded_python();
+        let view = Python::with_gil(|py| {
+            full.view_with_cluster_seed_sidecars(py, vec!["s1".to_string()], None, None, Some(1))
+        })
+        .expect("view over one signature");
         assert_eq!(view.signature_id_order(), ["s1".to_string()]);
         assert_eq!(view.signatures.len(), 2);
     }
@@ -2069,12 +2071,14 @@ impl RustFeaturizer {
     /// Signature and paper preprocessing does not depend on which other signatures are
     /// loaded, so the view featurizes like a fresh build over `signature_ids`. Subblocked
     /// attachment passes use it instead of rebuilding the block's featurizer every pass.
-    #[pyo3(signature = (signature_ids, cluster_seeds_path=None, cluster_seed_disallows_path=None))]
+    #[pyo3(signature = (signature_ids, cluster_seeds_path=None, cluster_seed_disallows_path=None, num_threads=None))]
     fn view_with_cluster_seed_sidecars(
         &self,
+        py: Python<'_>,
         signature_ids: Vec<String>,
         cluster_seeds_path: Option<String>,
         cluster_seed_disallows_path: Option<String>,
+        num_threads: Option<usize>,
     ) -> PyResult<Self> {
         let mut selected_signature_id_set =
             HashSet::<String>::with_capacity_and_hasher(signature_ids.len(), Default::default());
@@ -2092,28 +2096,16 @@ impl RustFeaturizer {
                 "featurizer view is missing requested signature ids: {missing_signature_ids:?}"
             )));
         }
-        let mut cluster_seeds_require = HashMap::<String, ClusterId>::default();
-        if let Some(path) = cluster_seeds_path.as_ref() {
-            let (_component_order, members_by_component) = read_raw_arrow_cluster_seeds(path)?;
-            for (component_key, members) in members_by_component {
-                for signature_id in members {
-                    if selected_signature_id_set.contains(&signature_id) {
-                        cluster_seeds_require
-                            .insert(signature_id, ClusterId::Str(component_key.clone()));
-                    }
-                }
-            }
-        }
-        let mut cluster_seeds_disallow = HashSet::<(String, String)>::default();
-        if let Some(path) = cluster_seed_disallows_path.as_ref() {
-            for (left, right) in read_raw_arrow_cluster_seed_disallows(path)? {
-                if selected_signature_id_set.contains(&left)
-                    && selected_signature_id_set.contains(&right)
-                {
-                    cluster_seeds_disallow.insert((left, right));
-                }
-            }
-        }
+        // The same selection as a fresh build: an attachment pass's sidecar lists
+        // every seed of the block, so it runs on the request's pool.
+        let (cluster_seeds_require, cluster_seeds_disallow) = py.allow_threads(|| {
+            Self::read_seed_constraints(
+                cluster_seeds_path.as_deref(),
+                cluster_seed_disallows_path.as_deref(),
+                &selected_signature_id_set,
+                num_threads,
+            )
+        })?;
         Ok(Self {
             signatures: Arc::clone(&self.signatures),
             signature_ids: Arc::new(ordered_signature_ids),

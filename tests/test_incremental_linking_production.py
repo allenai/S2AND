@@ -107,6 +107,17 @@ def test_altered_profile_disallows_survive_native_planning_and_restoration(
         "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
         score_available_candidate,
     )
+    # The planner over the original seeds builds during seed setup; the request
+    # must reload and use it rather than build its own.
+    planners_taken: list[bool] = []
+    original_take = production_module._BackgroundSeedPlanner.take
+
+    def recording_take(self, *args, **kwargs):
+        planner = original_take(self, *args, **kwargs)
+        planners_taken.append(planner is not None)
+        return planner
+
+    monkeypatch.setattr(production_module._BackgroundSeedPlanner, "take", recording_take)
     with ArrowDataset.open(tmp_path) as arrow_dataset:
         result = production_module.predict_incremental_promoted_linker_from_arrow(
             SplitClusterer(),
@@ -121,6 +132,7 @@ def test_altered_profile_disallows_survive_native_planning_and_restoration(
             total_ram_bytes=32 * 1024**3,
             batching_threshold=batch_size,
         )
+    assert planners_taken == [True]
     assert not any(set(disallow) <= set(members) for members in result["clusters"].values())
     assert set(result["clusters"]["claimed"]) == ({"0", "1", "q1"} if query_disallow else {"0", "1"})
     if query_disallow:

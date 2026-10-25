@@ -201,7 +201,7 @@ class _AttachmentBlockState:
         read once, through the calling pass's lease, instead of once per pass.
         Entries keep the loader's Arrow row order.
         """
-        if any(signature_id not in self.signature_ids for signature_id in signature_ids):
+        if not self.signature_ids.issuperset(signature_ids):
             # Rows outside the block can sit anywhere in the table, so read all
             # requested ids together to keep the loader's order.
             return _load_arrow_incremental_orcid_signature_info(arrow_lease, signature_ids, num_threads=num_threads)
@@ -3706,6 +3706,7 @@ class Clusterer:
                 [str(signature_id) for signature_id in featurizer_signature_ids],
                 None if cluster_seeds_path is None else str(cluster_seeds_path),
                 None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),
+                num_threads=resolve_n_jobs(self.n_jobs),
             )
         elif (
             (held := RESIDUAL_FEATURIZER.get()) is not None
@@ -3719,6 +3720,7 @@ class Clusterer:
                 [str(signature_id) for signature_id in featurizer_signature_ids],
                 None if cluster_seeds_path is None else str(cluster_seeds_path),
                 None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),
+                num_threads=resolve_n_jobs(self.n_jobs),
             )
         else:
             rust_featurizer = build_rust_featurizer_from_arrow_dataset(

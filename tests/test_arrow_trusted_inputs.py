@@ -259,6 +259,32 @@ def test_planner_reload_matches_a_fresh_build_for_a_seed_superset(tmp_path: Path
         assert fresh.reload_seed_sidecars(str(sidecars["later"]), str(disallows)) is False
 
 
+def test_planner_reload_matches_a_fresh_build_after_seeds_change_components(tmp_path: Path) -> None:
+    # Seed setup splits altered profiles while the planner over the original seeds
+    # builds, so a reload that moves seeds between components must plan exactly
+    # like a fresh build over the split seeds.
+    from s2and.feature_port import _require_rust_runtime
+    from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
+
+    paths = write_minimal_arrow_prediction_bundle(tmp_path / "data", include_specter=True)
+    original_seeds = {"0": "a", "1": "a", "2": "a", "3": "b"}
+    split_seeds = {"0": "a_0", "1": "a_1", "2": "a_0", "3": "b"}
+    sidecars = {}
+    for name, seeds in (("original", original_seeds), ("split", split_seeds)):
+        sidecars[name] = tmp_path / f"{name}_seeds.arrow"
+        write_cluster_seeds_arrow(sidecars[name], seeds)
+    planner_class = _require_rust_runtime().RawBlockQueryCandidatePlanner
+    options = {"top_k": 3, "orcid_enabled": True, "num_threads": 1, "max_exemplars": 4}
+    queries = ["q1", "q2", "4"]
+    with ArrowDataset.open_trusted(paths, require_specter=True) as dataset:
+        expected = planner_class.from_auto_queries(dataset.native, str(sidecars["split"]), **options).plan(queries)
+        reused = planner_class.from_auto_queries(
+            dataset.native, str(sidecars["original"]), retain_seed_rows=True, prefetch_signature_ids=queries, **options
+        )
+        assert reused.reload_seed_sidecars(str(sidecars["split"])) is True
+        assert _same_plan(reused.plan(queries), expected)
+
+
 def test_planner_reload_that_fails_keeps_the_rows_for_a_retry(tmp_path: Path) -> None:
     # A seed without a signature row fails the reload. The planner must keep its
     # rows, so the next reload and plan work as before.

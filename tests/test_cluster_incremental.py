@@ -1327,7 +1327,9 @@ def test_promoted_linker_views_one_background_block_featurizer_for_every_window(
         )
 
     class FakeBlockFeaturizer:
-        def view_with_cluster_seed_sidecars(self, signature_ids: list[str], *_paths: object) -> object:
+        def view_with_cluster_seed_sidecars(
+            self, signature_ids: list[str], *_paths: object, **_options: object
+        ) -> object:
             captured["views"].append(tuple(signature_ids))
             return object()
 

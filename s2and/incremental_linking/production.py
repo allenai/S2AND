@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Container, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -643,7 +643,13 @@ def _partial_supervision_plan_disallows(
     """Return explicit query-to-active-seed disallows for candidate planning."""
 
     query_ids = {str(signature_id) for signature_id in query_signature_ids}
-    seed_ids = {str(signature_id) for signature_id in seed_signature_ids}
+    # A request's seed map holds half a million string ids; test membership in
+    # it directly instead of copying them into a set.
+    seed_ids: Container[Any] = (
+        seed_signature_ids
+        if isinstance(seed_signature_ids, Mapping) and set(map(type, seed_signature_ids)) <= {str}
+        else {str(signature_id) for signature_id in seed_signature_ids}
+    )
     pairs = []
     for (left, right), value in partial_supervision.items():
         if value != LARGE_DISTANCE:
@@ -744,11 +750,22 @@ def promoted_incremental_orcid_fanout_by_query(
     resolved_component_sizes = component_sizes
     if resolved_component_sizes is None:
         resolved_component_sizes = promoted_incremental_component_sizes(cluster_seeds_require)
-    # Inlined `_signature_orcid`: this loop visits every seed of the request.
-    # A person's signatures repeat one raw ORCID, so each value is normalized once.
+    # Inlined `_signature_orcid`. A person's signatures repeat one raw ORCID, so
+    # each value is normalized once.
     signatures = dataset.signatures
+    if set(map(type, cluster_seeds_require)) <= {str}:
+        # Few seeds carry an ORCID; visit the signatures that do and keep the
+        # seeds among them, instead of looking up every seed of the request.
+        # The floors below are sums, so the visiting order does not matter.
+        seed_items: Iterable[tuple[Any, Any]] = (
+            (signature_id, cluster_seeds_require[signature_id])
+            for signature_id, signature in signatures.items()
+            if getattr(signature, "author_info_orcid", None) is not None and signature_id in cluster_seeds_require
+        )
+    else:
+        seed_items = cluster_seeds_require.items()
     normalized_orcids: dict[Any, str | None] = {}
-    for seed_signature_id, component in cluster_seeds_require.items():
+    for seed_signature_id, component in seed_items:
         signature = signatures.get(str(seed_signature_id))
         if signature is None:
             continue
@@ -1086,6 +1103,92 @@ class _BackgroundBlockFeaturizer:
             feature_port.release_rust_handle(self._future.result(), num_threads=num_threads)
 
 
+class _BackgroundSeedPlanner:
+    """The request's planner over its original seeds, built while seed setup runs.
+
+    Seed setup splits altered profiles into new components but keeps every seed,
+    so reloading this planner with the final seed sidecars gives what a fresh
+    build over them would. The build and the setup share the request's native pool.
+    """
+
+    def __init__(
+        self,
+        arrow_dataset: ArrowDataset,
+        cluster_seeds_require: Mapping[str, int | str],
+        query_signature_ids: list[str],
+        *,
+        top_k: int,
+        orcid_enabled: bool,
+        num_threads: int,
+    ) -> None:
+        self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="s2and-seed-planner"
+        )
+        self._future = self._executor.submit(
+            self._build,
+            arrow_dataset,
+            dict(cluster_seeds_require),
+            query_signature_ids,
+            top_k,
+            orcid_enabled,
+            num_threads,
+        )
+
+    @staticmethod
+    def _build(
+        arrow_dataset: ArrowDataset,
+        cluster_seeds_require: dict[str, int | str],
+        query_signature_ids: list[str],
+        top_k: int,
+        orcid_enabled: bool,
+        num_threads: int,
+    ) -> Any:
+        planner_class = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner  # noqa: SLF001
+        with temporary_cluster_seed_sidecars(
+            cluster_seeds_require, prefix="s2and_arrow_incremental_original_seeds_"
+        ) as sidecars:
+            return planner_class.from_auto_queries(
+                arrow_dataset.native,
+                sidecars["cluster_seeds"],
+                top_k=top_k,
+                orcid_enabled=orcid_enabled,
+                num_threads=num_threads,
+                max_exemplars=4,
+                retain_seed_rows=True,
+                prefetch_signature_ids=query_signature_ids,
+            )
+
+    def take(self, cluster_seeds_path: Path, cluster_seed_disallows_path: str | None) -> Any | None:
+        """Return the planner reloaded for the final sidecars, or None.
+
+        None means the caller builds its planner as usual: the background build
+        failed, or the final seeds lack an original one.
+        """
+
+        if self._executor is None:
+            return None
+        self._executor.shutdown(wait=True)
+        self._executor = None
+        if self._future.exception() is not None:
+            # The usual build reports the same problem with its own context.
+            return None
+        planner = self._future.result()
+        if planner.reload_seed_sidecars(str(cluster_seeds_path), cluster_seed_disallows_path):
+            return planner
+        feature_port.release_rust_handle(planner)
+        return None
+
+    def release(self) -> None:
+        """Wait for an untaken build, then free its planner; later calls do nothing."""
+
+        if self._executor is None:
+            return
+        self._executor.shutdown(wait=True)
+        self._executor = None
+        if self._future.exception() is None:
+            feature_port.release_rust_handle(self._future.result())
+
+
 def predict_incremental_promoted_linker_from_arrow(
     clusterer: Any,
     block_signatures: list[str],
@@ -1131,6 +1234,25 @@ def predict_incremental_promoted_linker_from_arrow(
                 dataset.name_tuples,
                 resolve_n_jobs(clusterer.n_jobs),
             )
+    seed_planner: _BackgroundSeedPlanner | None = None
+    if attachment_state is None and dataset.altered_cluster_signatures:
+        # Splitting altered profiles takes seconds on large blocks and leaves the
+        # pool half idle; the planner over the original seeds builds meanwhile.
+        original_seeds = dataset.cluster_seeds_require
+        original_queries = [
+            signature_id for signature_id in map(str, block_signatures) if signature_id not in original_seeds
+        ]
+        if original_seeds and original_queries:
+            seed_planner = _BackgroundSeedPlanner(
+                arrow_dataset,
+                original_seeds,
+                original_queries,
+                top_k=int(artifact.retrieval_top_k),
+                orcid_enabled=promoted_linker_orcid_force_link_enabled(
+                    suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False))
+                ),
+                num_threads=clusterer.n_jobs,
+            )
     try:
         return _predict_incremental_promoted_linker_from_arrow(
             clusterer,
@@ -1146,8 +1268,11 @@ def predict_incremental_promoted_linker_from_arrow(
             batching_threshold=batching_threshold,
             attachment_state=attachment_state,
             block_featurizer=block_featurizer,
+            seed_planner=seed_planner,
         )
     finally:
+        if seed_planner is not None:
+            seed_planner.release()
         if block_featurizer is not None:
             block_featurizer.release()
 
@@ -1167,6 +1292,7 @@ def _predict_incremental_promoted_linker_from_arrow(
     batching_threshold: int | None,
     attachment_state: Any | None,
     block_featurizer: _BackgroundBlockFeaturizer | None,
+    seed_planner: _BackgroundSeedPlanner | None = None,
 ) -> dict[str, Any]:
 
     resolved_total_ram_bytes, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
@@ -1316,6 +1442,10 @@ def _predict_incremental_promoted_linker_from_arrow(
                 # The previous pass's planner, rebuilt for this pass's seeds from its
                 # retained rows: same state as a fresh build, without re-reading the block.
                 raw_request_planner = attachment_state.planner
+            elif seed_planner is not None and (
+                (early_planner := seed_planner.take(cluster_seeds_path, disallows_path_text)) is not None
+            ):
+                raw_request_planner = early_planner
             else:
                 planner_class = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner  # noqa: SLF001
                 raw_request_planner = planner_class.from_auto_queries(
@@ -1401,12 +1531,14 @@ def _predict_incremental_promoted_linker_from_arrow(
                     [str(signature_id) for signature_id in signature_ids],
                     str(cluster_seeds_path),
                     None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),
+                    num_threads=resolve_n_jobs(clusterer.n_jobs),
                 )
             elif block_featurizer is not None and block_featurizer.covers(name_tuples, signature_ids):
                 raw_batch_featurizer = block_featurizer.featurizer().view_with_cluster_seed_sidecars(
                     [str(signature_id) for signature_id in signature_ids],
                     str(cluster_seeds_path),
                     None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path),
+                    num_threads=resolve_n_jobs(clusterer.n_jobs),
                 )
             else:
                 # The planner holds the rows of this plan's queries and seeds, so the

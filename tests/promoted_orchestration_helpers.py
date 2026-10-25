@@ -57,12 +57,30 @@ def _patch_fake_raw_arrow_planner(
             _cluster_seeds_path: str,
             **kwargs: object,
         ) -> "FakePlanner":
+            planner = cls(resource, [], **kwargs)
+            planner._record_disallows(kwargs.get("cluster_seed_disallows_path"))
+            return planner
+
+        def _record_disallows(self, disallow_path: object) -> None:
+            if captured is None:
+                return
+            disallows = (
+                set() if disallow_path is None else set(read_cluster_seed_disallows_arrow(Path(str(disallow_path))))
+            )
+            recorded = captured.setdefault("planner_disallows", [])
+            self._disallows_index = len(recorded)
+            recorded.append(disallows)
+
+        def reload_seed_sidecars(self, _cluster_seeds_path: str, disallow_path: str | None = None) -> bool:
+            # A reloaded planner plans as one built for these sidecars, so it
+            # records their disallows in place of the ones it was built with.
             if captured is not None:
-                disallow_path = kwargs.get("cluster_seed_disallows_path")
-                captured.setdefault("planner_disallows", []).append(
-                    set() if disallow_path is None else set(read_cluster_seed_disallows_arrow(Path(str(disallow_path))))
-                )
-            return cls(resource, [], **kwargs)
+                recorded = captured["planner_disallows"]
+                index = self._disallows_index
+                self._record_disallows(disallow_path)
+                recorded[index] = recorded.pop()
+                self._disallows_index = index
+            return True
 
         def build_telemetry(self):
             return {

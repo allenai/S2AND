@@ -703,6 +703,10 @@ def _has_incremental_seed_source(dataset: Any) -> bool:
 def _normalize_cluster_seeds_require(cluster_seeds_require: Mapping[Any, Any]) -> dict[str, int | str]:
     """Return the seed map with the same string policy used by Arrow sidecars."""
 
+    # Attachment passes hand over half a million string ids; when every key and
+    # value already is a str, a copy equals the conversion.
+    if set(map(type, cluster_seeds_require)) <= {str} and set(map(type, cluster_seeds_require.values())) <= {str}:
+        return dict(cluster_seeds_require)
     return {str(signature_id): str(cluster_id) for signature_id, cluster_id in cluster_seeds_require.items()}
 
 
@@ -3506,14 +3510,20 @@ class Clusterer:
             # Future initial-only groups are not known to this request's planner.
             # Retain the full disallows above and expose only currently addressable
             # endpoints here; later passes will see those queries as seeds.
-            known_ids = set(synthetic_seed_map).union(group_signature_ids)
+            # Known ids are the seeds and this group. Test membership in both
+            # rather than copy every seed into a set on each pass.
+            group_ids = set(group_signature_ids)
             current_disallows = {
-                (left, right) for left, right in cluster_seeds_disallow if left in known_ids and right in known_ids
+                (left, right)
+                for left, right in cluster_seeds_disallow
+                if (left in synthetic_seed_map or left in group_ids)
+                and (right in synthetic_seed_map or right in group_ids)
             }
             current_supervision = {
                 (left, right): distance
                 for (left, right), distance in partial_supervision.items()
-                if left in known_ids and right in known_ids
+                if (left in synthetic_seed_map or left in group_ids)
+                and (right in synthetic_seed_map or right in group_ids)
             }
             current_disallows, current_supervision = filter_generated_seed_negatives(
                 synthetic_seed_map, current_disallows, current_supervision
@@ -5268,11 +5278,15 @@ class Clusterer:
                 for signature_id in altered_signature_ids
                 if signature_id in seed_signature_to_cluster
             }
-            altered_seed_signature_ids = [
-                signature_id
-                for signature_id, cluster_id in seed_signature_to_cluster.items()
-                if str(cluster_id) in altered_cluster_ids
-            ]
+            altered_seed_signature_ids = (
+                [
+                    signature_id
+                    for signature_id, cluster_id in seed_signature_to_cluster.items()
+                    if str(cluster_id) in altered_cluster_ids
+                ]
+                if altered_cluster_ids
+                else []
+            )
             metadata_signature_ids = (*unassigned_signature_ids, *altered_seed_signature_ids)
             signatures = _load_arrow_incremental_signature_info(arrow_lease, metadata_signature_ids)
             if not bool(getattr(self, "suppress_orcid", False)) and any(

@@ -1325,7 +1325,7 @@ def _string_keyed_supervision(
 
 def _string_keyed_seed_map(seed_signature_to_component: Mapping[Any, Any]) -> Mapping[str, Any]:
     """Seed map keyed by string ids; an already string-keyed map is used as is."""
-    if all(type(signature_id) is str for signature_id in seed_signature_to_component):
+    if set(map(type, seed_signature_to_component)) <= {str}:
         return seed_signature_to_component
     return {str(signature_id): component for signature_id, component in seed_signature_to_component.items()}
 
@@ -1727,6 +1727,8 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
     partial_supervision_is_distance_override: bool = False,
     name_check_exempt_signature_ids: frozenset[str] | None = None,
+    signature_ids_by_index: tuple[str, ...] | None = None,
+    signature_id_to_index: Mapping[str, int] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Run production scoring/gating from an already retrieved candidate batch.
 
@@ -1735,6 +1737,8 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     A non-None ``name_check_exempt_signature_ids`` turns on the attach name
     check: a link becomes an abstain when the query violates the hard name
     constraint with a component member outside this set.
+    ``signature_ids_by_index`` and ``signature_id_to_index`` are the featurizer's
+    string ids and their index map; a caller that already built them passes them.
     """
 
     if queries is not None and len(queries) != len(query_signature_ids):
@@ -1748,8 +1752,10 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     partial_supervision_dict = _string_keyed_supervision(partial_supervision)
     n_jobs_resolved = resolve_n_jobs(getattr(clusterer, "n_jobs", 1) if n_jobs is None else n_jobs)
     retrieval_top_k_resolved = int(artifact.retrieval_top_k if retrieval_top_k is None else retrieval_top_k)
-    signature_id_to_index = signature_id_to_index_map(featurizer)
-    signature_ids_by_index = tuple(str(signature_id) for signature_id in featurizer.signature_ids())
+    if signature_id_to_index is None:
+        signature_id_to_index = signature_id_to_index_map(featurizer)
+    if signature_ids_by_index is None:
+        signature_ids_by_index = tuple(str(signature_id) for signature_id in featurizer.signature_ids())
     query_signature_id_strings = tuple(str(signature_id) for signature_id in query_signature_ids)
     query_signature_indices = np.asarray(
         [_signature_id_to_index(signature_id_to_index, signature_id) for signature_id in query_signature_id_strings],
@@ -2031,7 +2037,12 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         raise ValueError("preplanned raw Arrow scoring requires rust_featurizer built for the same raw_candidate_plan")
     signature_order = raw_plan_bundle.signature_order
     featurizer = rust_featurizer
-    featurizer_signature_id_to_index = signature_id_to_index_map(featurizer)
+    # A window holds most of the block's seeds; convert its ids and build the
+    # index map once for this function and the scoring it calls.
+    featurizer_signature_ids = tuple(map(str, featurizer.signature_ids()))
+    featurizer_signature_id_to_index = dict(
+        zip(featurizer_signature_ids, range(len(featurizer_signature_ids)), strict=True)
+    )
     raw_arrow_signature_count = len(featurizer_signature_id_to_index)
     raw_arrow_plan_signature_count = len(signature_order.signature_ids)
 
@@ -2068,6 +2079,8 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         cluster_seed_disallow_excluded_components=cluster_seed_disallow_excluded_components,
         partial_supervision_is_distance_override=partial_supervision_is_distance_override,
         name_check_exempt_signature_ids=name_check_exempt_signature_ids,
+        signature_ids_by_index=featurizer_signature_ids,
+        signature_id_to_index=featurizer_signature_id_to_index,
     )
     raw_plan_telemetry_fields = _raw_candidate_plan_telemetry_fields(raw_plan_bundle.telemetry)
     telemetry = {

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "s2and"
-version = "1.0.0b7"
+version = "1.0.0b8"
 description = "S2AND"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

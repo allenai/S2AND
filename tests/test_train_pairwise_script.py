@@ -357,9 +357,10 @@ class _StubSearch:
         self.init = kwargs
         self.classifier = "search-classifier"
         self.best_params = {"num_leaves": 7}
+        self.fit_kwargs: dict[str, Any] = {}
 
-    def fit(self, *_args: Any) -> None:
-        pass
+    def fit(self, *_args: Any, **kwargs: Any) -> None:
+        self.fit_kwargs = kwargs
 
     def predict_proba(self, X: Any) -> np.ndarray:
         return np.full((len(X), 2), 0.5)
@@ -368,12 +369,14 @@ class _StubSearch:
 class _StubLightGBM:
     def __init__(self) -> None:
         self.params: dict[str, Any] = {}
+        self.fit_kwargs: dict[str, Any] = {}
 
     def set_params(self, **params: Any) -> _StubLightGBM:
         self.params = params
         return self
 
-    def fit(self, *_args: Any) -> _StubLightGBM:
+    def fit(self, *_args: Any, **kwargs: Any) -> _StubLightGBM:
+        self.fit_kwargs = kwargs
         return self
 
     def predict_proba(self, X: Any) -> np.ndarray:
@@ -403,7 +406,10 @@ def test_incumbent_parameters_compete_with_the_search_winner(
         np.save(arrays[role], values)
     scores = iter([search_auc, incumbent_auc])
     built: list[_StubLightGBM] = []
-    monkeypatch.setattr(train_pairwise, "PairwiseModeler", _StubSearch)
+    searches: list[_StubSearch] = []
+    monkeypatch.setattr(
+        train_pairwise, "PairwiseModeler", lambda **kwargs: searches.append(_StubSearch(**kwargs)) or searches[-1]
+    )
     monkeypatch.setattr(train_pairwise, "roc_auc_score", lambda *_args: next(scores))
     monkeypatch.setattr(train_pairwise, "LGBMClassifier", lambda: built.append(_StubLightGBM()) or built[-1])
     args = _args(tmp_path, n_iter=3, n_jobs=5)
@@ -413,11 +419,16 @@ def test_incumbent_parameters_compete_with_the_search_winner(
         arrays,
         feature_prefix="",
         monotone_constraints="1,0",
+        feature_names=["left", "right"],
         incumbent={"num_leaves": 99, "n_jobs": 20, "random_state": 7},
     )
 
     [incumbent] = built
+    [search] = searches
     assert incumbent.params == {"num_leaves": 99, "n_jobs": 5, "random_state": 42, "monotone_constraints": "1,0"}
+    # Both candidates name their features, so the saved booster matches the released 1.3 files.
+    assert search.fit_kwargs == {"feature_names": ["left", "right"]}
+    assert incumbent.fit_kwargs == {"feature_name": ["left", "right"]}
     assert selection == {
         "selected_source": selected,
         "search_validation_roc_auc": search_auc,

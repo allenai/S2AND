@@ -42,6 +42,7 @@ from s2and.featurizer import (  # noqa: E402
     resolve_selection_pairs,
 )
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
+from s2and.model_pairwise import _validated_classifier_features  # noqa: E402
 from s2and.production_bundle import write_pairwise_production_bundle  # noqa: E402
 from s2and.production_bundle_contract import PENDING_EPS_CALIBRATION, PENDING_PAIRWISE_EPS  # noqa: E402
 from s2and.production_training_contract import (  # noqa: E402
@@ -372,6 +373,7 @@ def _fit_pairwise_model(
     *,
     feature_prefix: str,
     monotone_constraints: Any,
+    feature_names: list[str],
     incumbent: Mapping[str, Any] | None = None,
 ) -> tuple[PairwiseModeler, float, dict[str, Any]]:
     model = PairwiseModeler(
@@ -383,7 +385,8 @@ def _fit_pairwise_model(
     y_train = _load_staged_array(arrays["y_train"])
     X_val = _load_staged_array(arrays[f"{feature_prefix}X_val"])
     y_val = _load_staged_array(arrays["y_val"])
-    model.fit(X_train, y_train, X_val, y_val)
+    # Named fits write feature names into the saved boosters, as in the released 1.3 model.
+    model.fit(X_train, y_train, X_val, y_val, feature_names=feature_names)
     validation_roc_auc = _finite_validation_roc_auc(roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))
     selection: dict[str, Any] = {"selected_source": "search", "search_validation_roc_auc": validation_roc_auc}
     if incumbent is not None:
@@ -395,8 +398,11 @@ def _fit_pairwise_model(
             "random_state": 42,
             "monotone_constraints": monotone_constraints,
         }
-        classifier = LGBMClassifier().set_params(**parameters).fit(X_train, y_train)
-        probabilities = np.asarray(classifier.predict_proba(X_val), dtype=np.float64)[:, 1]
+        classifier = LGBMClassifier().set_params(**parameters).fit(X_train, y_train, feature_name=feature_names)
+        # A named classifier warns on bare arrays; the checked path names the columns.
+        probabilities = np.asarray(
+            classifier.predict_proba(_validated_classifier_features(classifier, X_val)), dtype=np.float64
+        )[:, 1]
         incumbent_roc_auc = _finite_validation_roc_auc(roc_auc_score(y_val, probabilities))
         selection["incumbent_validation_roc_auc"] = incumbent_roc_auc
         if incumbent_roc_auc >= validation_roc_auc:
@@ -589,6 +595,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             union_arrays,
             feature_prefix="",
             monotone_constraints=monotone_constraints,
+            feature_names=featurizer_info.get_feature_names(),
             incumbent=incumbents.get("main"),
         )
 
@@ -598,6 +605,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             union_arrays,
             feature_prefix="nameless_",
             monotone_constraints=nameless_monotone_constraints,
+            feature_names=nameless_featurizer_info.get_feature_names(),
             incumbent=incumbents.get("nameless"),
         )
 

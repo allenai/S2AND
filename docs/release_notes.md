@@ -21,6 +21,9 @@
 - The prediction tutorial rejects `--batching-threshold` with `--json-dir`, because that route clusters full blocks.
 - The release workflow stops when PyPI already has the version and imports each Linux wheel on its own platform.
   The distribution verifier now requires an exact `s2and` package inventory in every wheel and sdist.
+- `train_pairwise.py` boosters now name their features, as the released `1.3` boosters do, instead of
+  LightGBM's `Column_N` defaults. Trees and predictions are unchanged. `PairwiseModeler.fit` takes an optional
+  `feature_names` for the final LightGBM fit.
 
 
 ## Unreleased 1.0.0 simplification

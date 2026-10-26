@@ -68,3 +68,32 @@ def test_pairwise_modeler_resets_trials_when_search_space_empty():
     assert modeler.best_params == {}
     assert second_trials == {}
     assert modeler.hyperopt_trials_store == {}
+
+
+def test_pairwise_modeler_feature_names_change_only_the_saved_names():
+    """Named final fits write names into the booster and keep every tree and prediction."""
+    from lightgbm import LGBMClassifier
+
+    rng = np.random.RandomState(3)
+    X_train = rng.normal(size=(400, 3))
+    X_train[rng.rand(*X_train.shape) < 0.1] = np.nan
+    y_train = (np.nan_to_num(X_train[:, 0]) + rng.normal(size=400) > 0).astype(int)
+    X_val = rng.normal(size=(50, 3))
+    names = ["first_names_equal", "year_diff", "specter_cosine_sim"]
+    fitted = []
+    for feature_names in (None, names):
+        modeler = PairwiseModeler(
+            estimator=LGBMClassifier(n_estimators=20, num_leaves=7, n_jobs=1, verbose=-1, random_state=0),
+            search_space={},
+            n_jobs=1,
+        )
+        modeler.fit(X_train, y_train, X_val, y_train[:50], feature_names=feature_names)
+        fitted.append(modeler)
+    unnamed, named = fitted
+
+    assert named.classifier.booster_.feature_name() == names
+    unnamed_text = unnamed.classifier.booster_.model_to_string()
+    for index, name in enumerate(names):
+        unnamed_text = unnamed_text.replace(f"Column_{index}", name)
+    assert named.classifier.booster_.model_to_string() == unnamed_text
+    np.testing.assert_array_equal(named.predict_proba(X_val), unnamed.predict_proba(X_val))

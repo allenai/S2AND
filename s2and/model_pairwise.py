@@ -241,6 +241,8 @@ class PairwiseModeler:
         y_train: np.ndarray,
         X_val: np.ndarray,
         y_val: np.ndarray,
+        *,
+        feature_names: Sequence[str] | None = None,
     ) -> Trials | dict[Any, Any]:
         """
         Fits the classifier
@@ -255,6 +257,10 @@ class PairwiseModeler:
             feature matrix for the validation set
         y_val: np.ndarray
             labels for the validation set
+        feature_names: optional sequence of str
+            column names for the final fit of a LightGBM estimator. Its saved
+            booster then names features instead of using Column_N; the trees
+            are unchanged.
 
         Returns
         -------
@@ -289,7 +295,9 @@ class PairwiseModeler:
             self.hyperopt_trials_store = {}
 
         # refitting but only on training data so as not to leak anything
-        self.classifier = self.estimator.fit(X_train, y_train)
+        # Only this fit is kept, so only it needs names; the trials score unnamed arrays.
+        fit_kwargs = {} if feature_names is None else {"feature_name": [str(name) for name in feature_names]}
+        self.classifier = self.estimator.fit(X_train, y_train, **fit_kwargs)
 
         assert self.hyperopt_trials_store is not None
         return self.hyperopt_trials_store

@@ -281,6 +281,12 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     assert result["eps_calibration"] == "pending"
     manifest = json.loads((args.output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["eps_calibration"] == "pending"
+    from lightgbm import Booster
+
+    # Saved boosters name their features, as the released 1.3 boosters do, not Column_N.
+    for head in ("main", "nameless"):
+        booster = Booster(model_file=str(args.output_dir / "pairwise" / f"{head}.lgb"))
+        assert booster.feature_name() == manifest["feature_names"][head]
     training_config = json.loads(
         (args.output_dir / "reproducibility" / "pairwise_training_config.json").read_text(encoding="utf-8")
     )

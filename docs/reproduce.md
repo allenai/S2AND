@@ -6,7 +6,12 @@ Three steps stay outside public reproduction:
 
 - **Name counts.** Only AI2 staff can rebuild the name-count index from internal data. Use the released index.
 - **Final EPS review.** The release owner reviews giant-block EPS curves on internal production exports. Public calibration reproduces the validation EPS choice, `0.57`. The released model uses the owner's choice, `0.53`; see [giant-block EPS review](eps_calibration.md).
-- **LightGBM fits.** Multithreaded LightGBM fits can differ slightly across machines and thread counts. Use 12 threads for the closest match.
+- **LightGBM fits.** Multithreaded LightGBM sums leaf statistics in an order that depends on thread scheduling.
+  A rebuilt pairwise booster can differ from the released file in the last digits of some leaf values, even
+  between two runs on one machine with the same thread count. Splits, the selected hyperparameters, and every
+  metric in the reference table stayed the same in five reruns at 12 and 20 threads.
+  Compare a rebuilt model by those metrics, not by file hashes.
+  Files written on Windows also end in CRLF line breaks, so their bytes differ from files written elsewhere.
 
 The published data reproduces the `1.3` training and validation matrices exactly.
 It also reproduces the `1.3` EPS calibration report and outer-test report exactly with the released model.
@@ -150,5 +155,6 @@ uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py   --source-model
 The command changes only `clusterer.json` and the manifest; the boosters stay the same.
 Score the result with steps 4 and 5.
 
-On 12 threads, step 1 takes about one hour and step 3 about 75 minutes.
-Steps 2, 4, and 5 take a few minutes each.
+On 12 threads of a 12-core workstation, step 1 takes about 70 minutes and step 3 about 9 minutes.
+Steps 2, 4, and 5 take about a minute each or less.
+Step 1 is LightGBM's hyperparameter search; 20 threads did not finish it sooner than 12.

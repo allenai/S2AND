@@ -29,6 +29,9 @@
   and one featurizer serves the dataset's shards. Labeled plans describe their rows in parallel. Shard
   features go to a few partial files instead of one per shard. The materialized tables and the trained
   linker are unchanged; linker training ran 3.6x faster on the 1.3 data, with a 2.6 GB higher peak.
+- EPS calibration links each validation block once and cuts it at every EPS
+  (`Clusterer.predict_eps_grid`, `FastCluster.linkage_matrix`), and scores B3 for each EPS in one pass.
+  The calibration report is unchanged.
 - `apply_reviewed_eps.py` runs after a plain `uv sync` again. It imported `orjson`, from the optional
   `orcid-counts` extra, through the ORCID count producer; the producer now imports it only to publish counts.
 

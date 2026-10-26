@@ -424,6 +424,21 @@ class FastCluster:
         -------
         self
         """
+        self.labels_ = fcluster(self.linkage_matrix(X), t=self.eps, criterion="distance")
+        return self
+
+    def linkage_matrix(self, X: np.ndarray) -> np.ndarray:
+        """Return the linkage of `X` that `fit` cuts at `eps`.
+
+        Parameters
+        ----------
+        X: np.array
+            The input that `fit` takes.
+
+        Returns
+        -------
+        np.ndarray: the SciPy linkage matrix
+        """
         X = np.asarray(X)
         if len(X.shape) == 1 and self.input_as_observation_matrix:
             raise ValueError(
@@ -438,11 +453,8 @@ class FastCluster:
         elif len(X.shape) > 2:
             raise ValueError("The input to fit can only be one-dimensional or two-dimensional.")
         if self.input_as_observation_matrix:
-            Z = linkage(X, self.linkage, preserve_input=self.preserve_input)
-        else:
-            Z = constrained_linkage(X, self.linkage, preserve_input=self.preserve_input)
-        self.labels_ = fcluster(Z, t=self.eps, criterion="distance")
-        return self
+            return linkage(X, self.linkage, preserve_input=self.preserve_input)
+        return constrained_linkage(X, self.linkage, preserve_input=self.preserve_input)
 
     def fit_transform(
         self,

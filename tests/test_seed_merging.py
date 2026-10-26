@@ -1,6 +1,7 @@
 """Focused normal-case reproduction for the clustering bug scan."""
 
 import json
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -283,3 +284,39 @@ def test_missing_seed_restoration_checks_unseeded_cluster_occupants(disallowed: 
     assert restored["c"] == restored["d"] != restored["other"]
     assert list(restored) == ["a", "occupant", "other", "b", "c", "d"]
     assert clusters == {"existing": ["a", "occupant"], "collision": ["other"]}
+
+
+@pytest.mark.parametrize("draw", range(8))
+def test_predict_eps_grid_matches_predict_at_each_eps(draw: int) -> None:
+    """One linkage per block, cut at each EPS, gives predict's clusters, seed joins included."""
+
+    raw = json.loads(Path("tests/dummy/signatures.json").read_text())
+    dataset = ANDData(
+        raw,
+        "tests/dummy/papers.json",
+        name="eps_grid",
+        mode="inference",
+        cluster_seeds={"3": {"4": "require", "5": "disallow"}, "6": {"7": "require"}, "1": {"2": "require"}},
+        name_counts_index=tiny_name_counts_index(),
+    )
+    blocks = {"single": ["0"], "pair": ["1", "2"], "six": ["3", "4", "5", "6", "7", "8"]}
+    rng = np.random.default_rng(draw)
+    dists = {key: rng.uniform(0.0, 1.0, len(members) * (len(members) - 1) // 2) for key, members in blocks.items()}
+    clusterer = Clusterer(
+        FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
+        ConstantDistanceClassifier(0.9),
+        cluster_model=FastCluster(linkage="average"),
+        n_jobs=1,
+    )
+    grid = [0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 1.0]
+
+    signatures, ids_by_eps = clusterer.predict_eps_grid(blocks, dataset, dists, grid)
+
+    assert signatures == [signature for members in blocks.values() for signature in members]
+    for eps in grid:
+        clusterer.cluster_model.eps = eps
+        expected, _ = clusterer.predict(blocks, dataset, dists=dists)
+        observed: dict[int, list[str]] = defaultdict(list)
+        for signature, cluster in zip(signatures, ids_by_eps[eps].tolist(), strict=True):
+            observed[cluster].append(signature)
+        assert sorted(map(sorted, observed.values())) == sorted(map(sorted, expected.values()))

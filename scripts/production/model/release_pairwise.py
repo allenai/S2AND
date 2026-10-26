@@ -294,6 +294,67 @@ def _b3_report(
     return report
 
 
+class _B3Scorer:
+    """`_b3_report` of many predicted partitions of the same signatures.
+
+    The true partition and unknown-signature mask are prepared once. Each
+    report sums per-signature ratios with ``math.fsum``; `_b3_report` sums them
+    in set order, and both round to three decimals.
+    """
+
+    def __init__(
+        self,
+        true_clusters: Mapping[str, Sequence[str]],
+        signatures: Sequence[str],
+        unknown_signature_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        true_members = _validated_cluster_partition_coverage(dict(true_clusters), dict(true_clusters))[0]
+        if true_members != set(signatures) or len(signatures) != len(true_members):
+            raise ValueError("Predictions do not cover all the signatures!")
+        true_index = {
+            signature: cluster_index
+            for cluster_index, members in enumerate(true_clusters.values())
+            for signature in members
+        }
+        self.known = np.fromiter(
+            (signature not in unknown_signature_ids for signature in signatures), dtype=bool, count=len(signatures)
+        )
+        self.require_known = bool(unknown_signature_ids)
+        self.true_ids = np.fromiter(
+            (true_index[signature] for signature in signatures), dtype=np.int64, count=len(signatures)
+        )[self.known]
+        self.true_cluster_count = len(true_clusters)
+        self.true_sizes = np.bincount(self.true_ids, minlength=self.true_cluster_count)[self.true_ids]
+
+    def report(self, predicted_ids: np.ndarray) -> dict[str, Any]:
+        predicted = np.asarray(predicted_ids, dtype=np.int64)[self.known]
+        count = len(predicted)
+        if count == 0:
+            if self.require_known:
+                raise ValueError("B3 requires at least one known signature")
+            precision = recall = f1 = 0.0
+        else:
+            _, predicted_index = np.unique(predicted, return_inverse=True)
+            predicted_sizes = np.bincount(predicted_index)[predicted_index]
+            _, pair_index, pair_counts = np.unique(
+                predicted_index.astype(np.int64) * self.true_cluster_count + self.true_ids,
+                return_inverse=True,
+                return_counts=True,
+            )
+            intersections = pair_counts[pair_index]
+            precision = math.fsum((intersections / predicted_sizes).tolist()) / count
+            recall = math.fsum((intersections / self.true_sizes).tolist()) / count
+            f1 = 0.0 if precision == 0 or recall == 0 else 2 * precision * recall / (precision + recall)
+        report = {
+            "precision": float(np.round(precision, 3)),
+            "recall": float(np.round(recall, 3)),
+            "f1": float(np.round(f1, 3)),
+            "signature_count": count,
+        }
+        _validated_unit_interval_metrics(report, label="B3 metric")
+        return report
+
+
 def _aggregate_b3(dataset_metrics: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     names = sorted(dataset_metrics)
     weights = np.asarray([dataset_metrics[name]["signature_count"] for name in names], dtype=np.float64)
@@ -647,15 +708,11 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
                     "signature_count": sum(len(signatures) for signatures in val_blocks.values()),
                 }
                 # Prediction can read the Arrow-backed dataset, so it stays inside the open handle.
+                # Each block is linked once and cut at every EPS, as predict would cut it.
+                signatures, ids_by_eps = clusterer.predict_eps_grid(val_blocks, dataset, distances, plan.eps.grid)
+                scorer = _B3Scorer(true_clusters, signatures, unknown_source.ids)
                 for eps in plan.eps.grid:
-                    clusterer.cluster_model.eps = eps
-                    predicted, _ = clusterer.predict(
-                        val_blocks,
-                        dataset,
-                        dists=distances,
-                        total_ram_bytes=args.total_ram_bytes,
-                    )
-                    metrics_by_eps[eps][name] = _b3_report(true_clusters, predicted, unknown_source.ids)
+                    metrics_by_eps[eps][name] = scorer.report(ids_by_eps[float(eps)])
                 del distances, dataset, val_blocks, true_clusters
             gc.collect()
     finally:

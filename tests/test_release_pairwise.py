@@ -54,16 +54,17 @@ class _StubCalibrationClusterer:
         self.distance_ram.append(total_ram_bytes)
         return {key: object() for key in blocks}
 
-    def predict(
+    def predict_eps_grid(
         self,
         blocks: dict[str, list[str]],
         dataset: Any,
-        dists: dict[str, object] | None = None,
-        total_ram_bytes: int | None = None,
-    ) -> tuple[dict[str, list[str]], None]:
+        dists: dict[str, object],
+        eps_grid: list[float],
+    ) -> tuple[list[str], dict[float, np.ndarray]]:
         assert dists is not None
-        self.events.append(("predict", dataset.name, float(self.cluster_model.eps), total_ram_bytes))
-        return {"cluster": ["s1", "s2"]}, None
+        self.events.append(("predict_eps_grid", dataset.name, tuple(float(eps) for eps in eps_grid)))
+        # One cluster holds both signatures; its id encodes the EPS for the stub scorer.
+        return ["s1", "s2"], {float(eps): np.full(2, round(eps * 1000), dtype=np.int64) for eps in eps_grid}
 
 
 class _FakeRustFeaturizer:
@@ -173,16 +174,16 @@ def _patch_calibration(
         ),
     )
     monkeypatch.setattr(release_pairwise, "build_verified_rust_featurizer", build_featurizer)
-    monkeypatch.setattr(
-        release_pairwise,
-        "_b3_report",
-        lambda *_args: {
-            "precision": 1.0,
-            "recall": 1.0,
-            "f1": scores[float(clusterer.cluster_model.eps)],
-            "signature_count": 2,
-        },
-    )
+
+    class StubScorer:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        @staticmethod
+        def report(ids: np.ndarray) -> dict[str, Any]:
+            return {"precision": 1.0, "recall": 1.0, "f1": scores[int(ids[0]) / 1000], "signature_count": 2}
+
+    monkeypatch.setattr(release_pairwise, "_B3Scorer", StubScorer)
 
     def finalize(**kwargs: Any) -> None:
         finalizations.append(kwargs)
@@ -229,9 +230,11 @@ def test_calibrate_eps_binds_plan_reuses_matrices_applies_floors_and_smallest_ti
     # "b2" has one signature and is dropped.
     assert featurizer_calls[0]["signature_ids"] == {"s1", "s2"}
     assert [event for event in clusterer.events if event[0] == "build"] == [("build", "random")]
-    assert [event[2] for event in clusterer.events if event[0] == "predict"] == [0.2, 0.4, 0.6]
+    # One call cuts the shared matrices at every EPS.
+    assert [event for event in clusterer.events if event[0] == "predict_eps_grid"] == [
+        ("predict_eps_grid", "random", (0.2, 0.4, 0.6))
+    ]
     assert clusterer.distance_ram == [2048]
-    assert {event[3] for event in clusterer.events if event[0] == "predict"} == {2048}
     assert clusterer.cluster_model.eps == pytest.approx(0.5)
     assert clusterer.n_jobs == 5
     assert report["selected_eps"] == pytest.approx(0.2)
@@ -248,7 +251,7 @@ def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
 ) -> None:
     from scripts.production.model.plan_datasets import plan_unknown_signatures
 
-    actual_b3_report = release_pairwise._b3_report
+    actual_scorer = release_pairwise._B3Scorer
     model_plan = _arrow_model_plan(tmp_path, unknown=["s2"])
     bundle = _calibration_bundle(tmp_path)
     dataset = load_model_plan(model_plan).datasets["random"]
@@ -272,7 +275,7 @@ def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
     _write_json(model_plan, plan_payload)
     clusterer = _StubCalibrationClusterer()
     finalizations, featurizer_calls = _patch_calibration(monkeypatch, clusterer, {0.3: 1.0, 0.6: 1.0})
-    monkeypatch.setattr(release_pairwise, "_b3_report", actual_b3_report)
+    monkeypatch.setattr(release_pairwise, "_B3Scorer", actual_scorer)
     args = _calibration_args(tmp_path, bundle, model_plan)
     if sidecar_change not in {None, "relocated"}:
         message = "trained with unknown-signature" if sidecar_change == "unbound" else "sidecar changed"
@@ -289,7 +292,31 @@ def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
         assert trial["datasets"]["random"]["signature_count"] == 1
         assert trial["signature_count"] == 1
         assert trial["signature_weighted"]["f1"] == 1.0
-    assert len([event for event in clusterer.events if event[0] == "predict"]) == 2
+    assert [event[2] for event in clusterer.events if event[0] == "predict_eps_grid"] == [(0.3, 0.6)]
+
+
+@pytest.mark.parametrize("unknown", [frozenset(), frozenset({"s3", "s7", "s20"})], ids=["all-known", "unknowns"])
+def test_b3_scorer_matches_b3_report(unknown: frozenset[str]) -> None:
+    """Calibration scores each EPS with the scorer; it must report what _b3_report reports."""
+
+    rng = np.random.default_rng(11)
+    signatures = [f"s{index}" for index in range(40)]
+
+    def partition(ids: np.ndarray, prefix: str) -> dict[str, list[str]]:
+        clusters: dict[str, list[str]] = {}
+        for signature, cluster in zip(signatures, ids.tolist(), strict=True):
+            clusters.setdefault(f"{prefix}{cluster}", []).append(signature)
+        return clusters
+
+    true_clusters = partition(rng.integers(0, 9, len(signatures)), "t")
+    scorer = release_pairwise._B3Scorer(true_clusters, signatures, unknown)
+    for cluster_count in (1, 2, 5, 9, 15, 40):
+        predicted_ids = rng.integers(0, cluster_count, len(signatures))
+        expected = release_pairwise._b3_report(true_clusters, partition(predicted_ids, "p"), unknown)
+        assert scorer.report(predicted_ids) == expected
+    everyone = frozenset(signatures)
+    with pytest.raises(ValueError, match="at least one known signature"):
+        release_pairwise._B3Scorer(true_clusters, signatures, everyone).report(np.zeros(len(signatures)))
 
 
 def test_calibrate_eps_rejects_a_model_trained_on_other_blocks(

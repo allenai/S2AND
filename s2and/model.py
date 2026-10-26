@@ -4521,7 +4521,26 @@ class Clusterer:
         params = {k: intify(v) for k, v in (cluster_model_params or {}).items()}
         cluster_model.set_params(**params)
         cluster_model.fit(dist_matrix)
-        labels = cluster_model.labels_
+        return self._finish_block_labels(
+            block_signatures,
+            cluster_model.labels_,
+            dataset,
+            disallow_adjacency,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            prediction_state=prediction_state,
+        )
+
+    def _finish_block_labels(
+        self,
+        block_signatures: list[str],
+        labels: np.ndarray,
+        dataset: ANDData,
+        disallow_adjacency: Mapping[str, set[str]],
+        *,
+        incremental_dont_use_cluster_seeds: bool = False,
+        prediction_state: PredictionState | None = None,
+    ) -> list:
+        """Relabel outliers and join seed groups after a block's cluster-model fit."""
         max_label = labels.max()
         # In HDBSCAN, label -1 denotes outliers.
         # Give each outlier its own unique label starting at max_label + 1.
@@ -4534,6 +4553,87 @@ class Clusterer:
             )
             labels = merge_seed_labels(block_signatures, labels, cluster_seeds_require, disallow_adjacency)
         return labels
+
+    def predict_eps_grid(
+        self,
+        block_dict: dict[str, list[str]],
+        dataset: ANDData,
+        dists: dict[str, np.ndarray],
+        eps_grid: Sequence[float],
+    ) -> tuple[list[str], dict[float, np.ndarray]]:
+        """Cluster every block at each EPS from one linkage per block.
+
+        Only the FastCluster cut depends on EPS, so each block is linked once and
+        cut at every EPS. The clusters at an EPS equal those of
+        ``predict(block_dict, dataset, dists=dists)`` with ``cluster_model.eps``
+        set to it.
+
+        Args:
+            block_dict: Blocks to cluster.
+            dataset: Dataset whose cluster seeds constrain the clusters.
+            dists: Condensed distance matrix of every block with two or more signatures.
+            eps_grid: EPS values to cut at.
+
+        Returns:
+            The signatures in block order, and per EPS one cluster id per
+            signature. Ids are unique across blocks.
+        """
+        if (
+            not isinstance(self.cluster_model, FastCluster)
+            or self.cluster_model.input_as_observation_matrix
+            or _prediction_cluster_model_params(self, None) is not None
+        ):
+            raise ValueError("predict_eps_grid needs a FastCluster over condensed distances and no prediction params")
+        from scipy.cluster.hierarchy import fcluster
+
+        try:
+            # fcluster validates the linkage on every call, about 0.15 ms; the
+            # cut itself is this C routine, so later EPS call it directly.
+            from scipy.cluster._hierarchy import cluster_dist
+        except ImportError:
+            cluster_dist = None
+
+        prediction_state = _prediction_state_from_dataset(dataset)
+        disallow_adjacency = seed_disallow_adjacency(
+            prediction_state.cluster_seeds_disallow, normalize_partial_supervision(None)
+        )
+        signatures: list[str] = []
+        ids_by_eps: dict[float, list[np.ndarray]] = {float(eps): [] for eps in eps_grid}
+        next_id = 0
+        for block_key, block_signatures in block_dict.items():
+            # predict requires a matrix for every block, even a single signature's.
+            if block_key not in dists:
+                raise KeyError(f"Missing precomputed distance matrix for block '{block_key}'")
+            signatures.extend(block_signatures)
+            if len(block_signatures) < 2:
+                for ids in ids_by_eps.values():
+                    ids.append(np.arange(next_id, next_id + len(block_signatures), dtype=np.int64))
+                next_id += len(block_signatures)
+                continue
+            cluster_model = clone_cluster_model(self.cluster_model)
+            # predict clusters reused matrices with preserve_input=True; so does this.
+            cluster_model.set_params(preserve_input=True)
+            linkage_matrix = np.ascontiguousarray(cluster_model.linkage_matrix(dists[block_key]), dtype=np.float64)
+            block_width = len(block_signatures)
+            for eps_index, (eps, ids) in enumerate(ids_by_eps.items()):
+                if eps_index == 0 or cluster_dist is None:
+                    cut = fcluster(linkage_matrix, t=eps, criterion="distance")
+                else:
+                    cut = np.zeros(block_width, dtype="i")
+                    cluster_dist(linkage_matrix, cut, float(eps), block_width)
+                labels = self._finish_block_labels(
+                    block_signatures,
+                    cut,
+                    dataset,
+                    disallow_adjacency,
+                    prediction_state=prediction_state,
+                )
+                _, block_ids = np.unique(np.asarray(labels), return_inverse=True)
+                ids.append(next_id + block_ids.astype(np.int64))
+            next_id += block_width
+        return signatures, {
+            eps: np.concatenate(ids) if ids else np.zeros(0, dtype=np.int64) for eps, ids in ids_by_eps.items()
+        }
 
     def _cluster_one_block_with_logging(
         self,

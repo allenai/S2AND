@@ -273,13 +273,18 @@ def test_arrow_rust_materialization_passes_dataset_handle_to_native_planner(
     real_rust_module = promoted_train.feature_port._require_rust_runtime()  # noqa: SLF001
     captured: dict[str, Any] = {}
 
-    class CapturingRustModule:
-        @staticmethod
-        def raw_arrow_labeled_candidate_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    class CapturingPlanner:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
             captured["native_dataset"] = args[0]
-            plan = real_rust_module.raw_arrow_labeled_candidate_plan(*args, **kwargs)
+            self.planner = real_rust_module.RawArrowLabeledCandidatePlanner(*args, **kwargs)
+
+        def plan(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            plan = self.planner.plan(*args, **kwargs)
             captured["reused_name_counts_index"] = plan["telemetry"]["reused_name_counts_index"]
             return plan
+
+    class CapturingRustModule:
+        RawArrowLabeledCandidatePlanner = CapturingPlanner
 
     monkeypatch.setattr(promoted_train.feature_port, "_require_rust_runtime", lambda: CapturingRustModule)
 

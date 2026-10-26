@@ -21,7 +21,6 @@ from scripts.production.model.train_linker_and_finalize import (
     _clean_arrow_rust_structural_rows,
     _load_target,
     _resolve_arrow_rust_pair_labels,
-    _write_arrow_rust_partial_frame,
 )
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, write_minimal_arrow_prediction_bundle
 
@@ -74,32 +73,45 @@ def test_load_target_rejects_invalid_contract(tmp_path: Path, target_payload, ov
         _load_target(target_path)
 
 
-def test_arrow_rust_partial_writer_replaces_label_columns_with_materialized_features(tmp_path) -> None:
+def test_arrow_rust_partial_batches_replace_label_columns_and_keep_every_shard_row(tmp_path) -> None:
     rows = pd.DataFrame(
         {
-            "retrieval_rank": [2.0, 1.0],
-            "query_group_id": ["q1", "q1"],
-            "label": [1, 0],
+            "retrieval_rank": [2.0, 1.0, 3.0],
+            "query_group_id": ["q1", "q1", "q2"],
+            "label": [1, 0, 1],
         }
     )
-    partial_path = tmp_path / "partial.parquet"
+    plan = SimpleNamespace(partial_paths=[])
+    batches = promoted_train._PartialBatches({"table": plan})  # noqa: SLF001
+    features = {
+        "retrieval_rank": np.asarray([1.0, 2.0, 5.0], dtype=np.float32),
+        "title_overlap": np.asarray([0.4, 0.1, 0.7], dtype=np.float32),
+    }
+    for name, positions in (("first", [0, 1]), ("second", [2])):
+        shard = promoted_train.ArrowRustPendingShard(
+            table_key="table",
+            dataset_name="toy",
+            rows=rows.iloc[positions].reset_index(drop=True),
+            row_positions=np.asarray(positions, dtype=np.int64) + 7,
+            partial_path=tmp_path / f"{name}.parquet",
+        )
+        written_to = batches.add(
+            shard=shard,
+            dataset_features={key: values[positions] for key, values in features.items()},
+            target_features=("retrieval_rank", "title_overlap"),
+            selected_row_positions=np.arange(len(positions)),
+        )
+        # Both shards share the first shard's partial file.
+        assert written_to == tmp_path / "first.parquet"
+    assert plan.partial_paths == []
+    batches.flush()
 
-    _write_arrow_rust_partial_frame(
-        rows=rows,
-        row_positions=np.asarray([7, 8], dtype=np.int64),
-        partial_path=partial_path,
-        dataset_features={
-            "retrieval_rank": np.asarray([1.0, 2.0], dtype=np.float32),
-            "title_overlap": np.asarray([0.4, 0.1], dtype=np.float32),
-        },
-        target_features=("retrieval_rank", "title_overlap"),
-    )
-
-    out = pd.read_parquet(partial_path)
-
+    assert plan.partial_paths == [tmp_path / "first.parquet"]
+    out = pd.read_parquet(plan.partial_paths[0])
     assert out.columns.tolist() == ["_row_position", "retrieval_rank", "query_group_id", "label", "title_overlap"]
-    assert out["retrieval_rank"].tolist() == [1.0, 2.0]
-    assert out["title_overlap"].tolist() == pytest.approx([0.4, 0.1])
+    assert out["_row_position"].tolist() == [7, 8, 9]
+    assert out["retrieval_rank"].tolist() == [1.0, 2.0, 5.0]
+    assert out["title_overlap"].tolist() == pytest.approx([0.4, 0.1, 0.7])
 
 
 def test_current_retrieval_window_uses_native_ranks_instead_of_source_ranks() -> None:

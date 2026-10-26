@@ -24,6 +24,11 @@
 - `train_pairwise.py` boosters now name their features, as the released `1.3` boosters do, instead of
   LightGBM's `Column_N` defaults. Trees and predictions are unchanged. `PairwiseModeler.fit` takes an optional
   `feature_names` for the final LightGBM fit.
+- Linker training reads and featurizes each dataset's candidate members once. The native
+  `RawArrowLabeledCandidatePlanner` plans every shard of a dataset against one prepared component table,
+  and one featurizer serves the dataset's shards. Labeled plans describe their rows in parallel. Shard
+  features go to a few partial files instead of one per shard. The materialized tables and the trained
+  linker are unchanged; linker training ran 3.6x faster on the 1.3 data, with a 2.6 GB higher peak.
 - `apply_reviewed_eps.py` runs after a plain `uv sync` again. It imported `orjson`, from the optional
   `orcid-counts` extra, through the ORCID count producer; the producer now imports it only to publish counts.
 

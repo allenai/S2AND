@@ -78,9 +78,10 @@ use raw_arrow_features::{
     build_raw_arrow_feature, build_raw_arrow_summary, build_raw_arrow_summary_signals,
     mask_raw_arrow_query, raw_arrow_name_count_rarity_row, raw_arrow_paper_evidence_row, round_six,
 };
-#[cfg(test)]
-use raw_candidate_planner::raw_arrow_summary_signals_for_members_cached;
-use raw_candidate_planner::{raw_arrow_labeled_candidate_plan, RawBlockQueryCandidatePlanner};
+use raw_candidate_planner::{
+    raw_arrow_labeled_candidate_plan, RawArrowLabeledCandidatePlanner,
+    RawBlockQueryCandidatePlanner,
+};
 use rayon_pool::install_with_optional_rayon_pool;
 pub(crate) use retrieval::*;
 pub(crate) use rust_featurizer::{RawFeaturizerRows, RustFeaturizer};
@@ -359,21 +360,6 @@ mod tests {
             name_counts: None,
             paper_author_count: 0,
             query_author: first.to_string(),
-        }
-    }
-
-    fn raw_arrow_signature_for_test(paper_id: &str) -> RawArrowSignature {
-        RawArrowSignature {
-            paper_id: paper_id.to_string(),
-            author_first: String::new(),
-            author_middle: String::new(),
-            author_last: String::new(),
-            author_suffix: String::new(),
-            author_block: None,
-            affiliations: Vec::new(),
-            email: None,
-            orcid: None,
-            position: None,
         }
     }
 
@@ -873,60 +859,6 @@ mod tests {
             16_777_218
         );
     }
-
-    #[test]
-    fn residual_summary_signal_cache_uses_tuple_key_for_nul_collisions() {
-        let mut cache = HashMap::<(String, String), RawArrowSummarySignalData>::default();
-        let features = HashMap::from_iter([
-            (
-                "m1".to_string(),
-                Box::new(raw_arrow_feature_for_test("alice", Some(2020))),
-            ),
-            (
-                "m2".to_string(),
-                Box::new(raw_arrow_feature_for_test("bob", Some(2021))),
-            ),
-        ]);
-        let signatures = HashMap::from_iter([
-            ("m1".to_string(), raw_arrow_signature_for_test("p1")),
-            ("m2".to_string(), raw_arrow_signature_for_test("p2")),
-        ]);
-        let mut author_index = PaperAuthorIndex::default();
-        author_index
-            .extend(["p1", "p2"], &HashMap::default(), &HashMap::default())
-            .expect("papers without author rows index empty");
-
-        let first_member_ids = {
-            let signals = raw_arrow_summary_signals_for_members_cached(
-                &mut cache,
-                "a\0b",
-                "c",
-                &["m1".to_string()],
-                &features,
-                &signatures,
-                &author_index,
-            )
-            .expect("first cache lookup");
-            signals.member_signature_ids.clone()
-        };
-        let second_member_ids = {
-            let signals = raw_arrow_summary_signals_for_members_cached(
-                &mut cache,
-                "a",
-                "b\0c",
-                &["m2".to_string()],
-                &features,
-                &signatures,
-                &author_index,
-            )
-            .expect("second cache lookup");
-            signals.member_signature_ids.clone()
-        };
-
-        assert_eq!(cache.len(), 2);
-        assert_eq!(first_member_ids, vec!["m1".to_string()]);
-        assert_eq!(second_member_ids, vec!["m2".to_string()]);
-    }
 }
 
 #[pymodule]
@@ -965,6 +897,7 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     artifact_hash::add_to_module(m)?;
     name_normalization::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(raw_arrow_labeled_candidate_plan, m)?)?;
+    m.add_class::<RawArrowLabeledCandidatePlanner>()?;
     promoted_linker::add_to_module(m)?;
     lightgbm_booster::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(

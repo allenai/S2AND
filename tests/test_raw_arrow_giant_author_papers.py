@@ -328,3 +328,71 @@ def test_heavy_queries_score_many_components_quickly_and_match_direct_scores(gia
     )
     assert len(row_keys) == 5 * len(queries)
     assert elapsed < 3.0, f"{len(queries)} heavy queries over {len(components)} components used {elapsed:.2f} CPU s"
+
+
+def _labeled_rows(giant_dataset: dict[str, Any], queries: list[str]) -> tuple[list[Any], ...]:
+    """Rows of `queries` against their own and the next person's components."""
+
+    signatures = giant_dataset["signatures"]
+    components = giant_dataset["components"]
+    rows: tuple[list[Any], ...] = ([], [], [], [], [])
+    for query in queries:
+        person = signatures[query][2]
+        for rank, key in enumerate((f"person-{person}", f"person-{person + 1}"), start=1):
+            if key in components:
+                for column, value in zip(rows, (query, "full", f"{query}|full", key, rank), strict=True):
+                    column.append(value)
+    return rows
+
+
+def _assert_same_plan(observed: dict[str, Any], expected: dict[str, Any]) -> None:
+    assert observed.keys() == expected.keys()
+    for key, value in expected.items():
+        if key == "telemetry":
+            continue
+        if isinstance(value, np.ndarray):
+            assert (observed[key].dtype, observed[key].shape) == (value.dtype, value.shape), key
+            assert observed[key].tobytes() == value.tobytes(), key
+        else:
+            assert observed[key] == value, key
+
+
+def test_labeled_planner_matches_planning_each_shard_alone(giant_dataset: dict[str, Any]) -> None:
+    """One planner across shards equals the one-shot plan, with and without an excluded origin.
+
+    Training plans every shard of a dataset against one component table. The
+    planner featurizes its members once; an excluded origin leaves every
+    component for one plan, and later plans see the full table again.
+    """
+
+    components = giant_dataset["components"]
+    signatures = giant_dataset["signatures"]
+    queries = giant_dataset["queries"][::4]
+    shards = [queries[0::3], queries[1::3], queries[2::3]]
+    excluded_query, origin = next(
+        (query, member)
+        for query in shards[1]
+        for member in components[f"person-{signatures[query][2]}"]
+        if member != query
+    )
+    rest = [query for query in shards[1] if query != excluded_query]
+    plans = [(shards[0], []), ([excluded_query], [origin]), (rest, []), (shards[2], [])]
+    rust = _require_rust_runtime()
+    with ArrowDataset.open(giant_dataset["root"]) as arrow:
+        planner = rust.RawArrowLabeledCandidatePlanner(
+            arrow.native, components, orcid_enabled=True, num_threads=2, max_exemplars=4
+        )
+        for shard_queries, excluded in plans:
+            rows = _labeled_rows(giant_dataset, shard_queries)
+            table = (
+                {key: [member for member in members if member not in excluded] for key, members in components.items()}
+                if excluded
+                else components
+            )
+            expected = dict(
+                rust.raw_arrow_labeled_candidate_plan(
+                    arrow.native, *rows, table, orcid_enabled=True, num_threads=2, max_exemplars=4
+                )
+            )
+            observed = dict(planner.plan(*rows, excluded_signature_ids=excluded, num_threads=2))
+            _assert_same_plan(observed, expected)

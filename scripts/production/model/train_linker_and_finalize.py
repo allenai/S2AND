@@ -115,6 +115,13 @@ class ArrowRustDatasetContext:
     cluster_seeds_disallow: frozenset[tuple[str, str]]
     max_block_component_size: int
     initial_query_sources: dict[str, str] = field(default_factory=dict)
+    # Every shard of the dataset plans against the same components; these are
+    # built at the first shard and reused, instead of rereading and refeaturizing
+    # every member per shard.
+    shard_query_signature_ids: frozenset[str] = frozenset()
+    labeled_planner: Any = None
+    featurizer: Any = None
+    featurizer_signature_index: dict[str, int] | None = None
 
 
 @dataclass
@@ -548,7 +555,62 @@ def _build_arrow_rust_dataset_context(
 
 def _release_arrow_rust_dataset_context(context: ArrowRustDatasetContext) -> None:
     context.component_members.clear()
+    context.labeled_planner = None
+    context.featurizer = None
+    context.featurizer_signature_index = None
     gc.collect()
+
+
+def _dataset_labeled_planner(context: ArrowRustDatasetContext, *, n_jobs: int, max_exemplars: int) -> Any:
+    """The dataset's labeled planner, which reads and featurizes its component members once."""
+
+    if context.labeled_planner is None:
+        context.labeled_planner = feature_port._require_rust_runtime().RawArrowLabeledCandidatePlanner(  # noqa: SLF001
+            context.arrow_dataset.native,
+            context.component_members,
+            orcid_enabled=not PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
+            num_threads=max(1, int(n_jobs)),
+            max_exemplars=int(max_exemplars),
+        )
+    return context.labeled_planner
+
+
+def _dataset_featurizer(
+    context: ArrowRustDatasetContext,
+    signature_ids: Sequence[str],
+    *,
+    name_tuples: frozenset[tuple[str, str]],
+    n_jobs: int,
+) -> tuple[Any, dict[str, int]]:
+    """A featurizer covering `signature_ids`, shared by the shards of one dataset.
+
+    A plan's signatures are its queries and members of its candidate components.
+    The training loop records every shard query, so one featurizer over all
+    members and queries covers every shard. Prepared features depend only on
+    each signature's own rows.
+    """
+
+    def build(ids: Sequence[str]) -> Any:
+        return feature_port.build_rust_featurizer_from_arrow_dataset(
+            context.arrow_dataset,
+            signature_ids=tuple(ids),
+            name_tuples=name_tuples,
+            preprocess=True,
+            num_threads=max(1, int(n_jobs)),
+        )
+
+    if context.featurizer is None:
+        members = (member for members in context.component_members.values() for member in members)
+        covered = dict.fromkeys([*members, *sorted(context.shard_query_signature_ids), *signature_ids])
+        context.featurizer = build(list(covered))
+        context.featurizer_signature_index = _signature_id_to_index(context.featurizer)
+    index = context.featurizer_signature_index
+    assert index is not None
+    if all(signature_id in index for signature_id in signature_ids):
+        return context.featurizer, index
+    # Direct callers outside the training loop may plan queries it never recorded.
+    featurizer = build(signature_ids)
+    return featurizer, _signature_id_to_index(featurizer)
 
 
 def _signature_indices_from_plan_ids(
@@ -878,38 +940,33 @@ def _materialize_arrow_rust_dataset_rows(
     dataset_name = context.dataset_name
     source_rows = rows.reset_index(drop=True).copy()
     source_row_count = len(source_rows)
-    component_members = context.component_members
     query_ids = set(source_rows["query_signature_id"].astype(str))
     query_origins = {
         query: context.initial_query_sources[query] for query in query_ids if query in context.initial_query_sources
     }
     removed_queries = set(query_origins.values())
-    if any(removed_queries.intersection(members) for members in component_members.values()):
+    excluded_signature_ids: list[str] = []
+    if any(removed_queries.intersection(members) for members in context.component_members.values()):
         if source_rows["query_group_id"].nunique() != 1:
             raise ValueError("Origin-query exclusion requires one query group")
-        component_members = {
-            key: tuple(member for member in members if member not in removed_queries)
-            for key, members in component_members.items()
-        }
+        # The planner leaves the origins out of every component for this shard only.
+        excluded_signature_ids = sorted(removed_queries)
     rust_module = feature_port._require_rust_runtime()  # noqa: SLF001
-    plan_fn = rust_module.raw_arrow_labeled_candidate_plan
+    planner = _dataset_labeled_planner(context, n_jobs=n_jobs, max_exemplars=max_exemplars)
 
     def build_raw_plan(candidate_rows: pd.DataFrame) -> Mapping[str, Any]:
         stored_ranks = as_retrieval_rank_uint16_1d(
             "retrieval_rank",
             pd.to_numeric(candidate_rows["retrieval_rank"], errors="raise").to_numpy(),
         )
-        return plan_fn(
-            context.arrow_dataset.native,
+        return planner.plan(
             candidate_rows["query_signature_id"].astype(str).tolist(),
             candidate_rows["query_view"].astype(str).tolist(),
             candidate_rows["query_group_id"].astype(str).tolist(),
             candidate_rows["candidate_component_key"].astype(str).tolist(),
             stored_ranks.tolist(),
-            component_members,
-            orcid_enabled=not PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
+            excluded_signature_ids=excluded_signature_ids,
             num_threads=max(1, int(n_jobs)),
-            max_exemplars=int(max_exemplars),
         )
 
     plan_started = time.perf_counter()
@@ -928,15 +985,11 @@ def _materialize_arrow_rust_dataset_rows(
         int(value) for value in pd.factorize(dataset_rows["query_group_id"].astype(str), sort=False)[0].tolist()
     )
     signature_ids = tuple(str(signature_id) for signature_id in raw_plan["signature_ids"])
+    plan_signature_ids = frozenset(signature_ids)
     featurizer_started = time.perf_counter()
-    featurizer = feature_port.build_rust_featurizer_from_arrow_dataset(
-        context.arrow_dataset,
-        signature_ids=signature_ids,
-        name_tuples=name_tuples,
-        preprocess=True,
-        num_threads=max(1, int(n_jobs)),
+    dataset_featurizer, signature_id_to_index = _dataset_featurizer(
+        context, signature_ids, name_tuples=name_tuples, n_jobs=n_jobs
     )
-    signature_id_to_index = _signature_id_to_index(featurizer)
     request_seeds = dict(context.cluster_seeds_require)
     request_seeds.update(
         {query: request_seeds[origin] for query, origin in query_origins.items() if origin in request_seeds}
@@ -947,16 +1000,12 @@ def _materialize_arrow_rust_dataset_rows(
         for left, right in context.cluster_seeds_disallow
     }
     # Share prepared native features and restrict request seeds to this shard.
-    featurizer = featurizer.with_cluster_seeds(
-        {
-            signature_id: request_seeds[signature_id]
-            for signature_id in signature_id_to_index
-            if signature_id in request_seeds
-        },
+    featurizer = dataset_featurizer.with_cluster_seeds(
+        {signature_id: request_seeds[signature_id] for signature_id in signature_ids if signature_id in request_seeds},
         {
             (left, right)
             for left, right in request_disallows
-            if left in signature_id_to_index and right in signature_id_to_index
+            if left in plan_signature_ids and right in plan_signature_ids
         },
     )
     featurizer_seconds = float(time.perf_counter() - featurizer_started)
@@ -1052,7 +1101,6 @@ def _materialize_arrow_rust_dataset_rows(
         "seconds": round(float(time.perf_counter() - started), 3),
     }
     del pair_labels, fused_pairwise, featurizer
-    gc.collect()
     return feature_values, summary, selected_row_positions
 
 
@@ -1060,35 +1108,74 @@ def _safe_dataset_filename(dataset_name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(dataset_name))
 
 
-def _write_arrow_rust_partial(
-    *,
-    shard: ArrowRustPendingShard,
-    dataset_features: Mapping[str, np.ndarray],
-    target_features: Sequence[str],
-    selected_row_positions: np.ndarray,
-) -> None:
-    _write_arrow_rust_partial_frame(
-        rows=shard.rows.iloc[selected_row_positions].reset_index(drop=True),
-        row_positions=shard.row_positions[selected_row_positions],
-        partial_path=shard.partial_path,
-        dataset_features=dataset_features,
-        target_features=target_features,
-    )
-
-
-def _write_arrow_rust_partial_frame(
-    *,
+def _partial_frame(
     rows: pd.DataFrame,
     row_positions: np.ndarray,
-    partial_path: Path,
     dataset_features: Mapping[str, np.ndarray],
     target_features: Sequence[str],
-) -> None:
-    partial_output = _rows_with_materialized_target_features(rows, dataset_features, target_features)
-    partial_output.insert(0, "_row_position", row_positions)
-    partial_path.parent.mkdir(parents=True, exist_ok=True)
-    partial_output.to_parquet(partial_path, index=False)
-    del partial_output
+) -> pd.DataFrame:
+    """Rows with materialized features and their source positions, as a partial file holds them."""
+
+    frame = _rows_with_materialized_target_features(rows, dataset_features, target_features)
+    frame.insert(0, "_row_position", row_positions)
+    return frame
+
+
+# Rows per partial file. Most shards hold a few hundred rows, and one Parquet
+# write per shard cost more than featurizing many of them.
+PARTIAL_BATCH_ROWS = 250_000
+
+
+class _PartialBatches:
+    """Buffer shard feature frames per table and write them as few partial files.
+
+    The table assembly sorts every partial row by its source position, so the
+    grouping of rows into files cannot change the assembled table.
+    """
+
+    def __init__(self, table_plans: Mapping[str, ArrowRustTablePlan]) -> None:
+        self.table_plans = table_plans
+        self.frames: dict[str, list[pd.DataFrame]] = {}
+        self.rows: dict[str, int] = {}
+        self.paths: dict[str, Path] = {}
+
+    def add(
+        self,
+        *,
+        shard: ArrowRustPendingShard,
+        dataset_features: Mapping[str, np.ndarray],
+        target_features: Sequence[str],
+        selected_row_positions: np.ndarray,
+    ) -> Path:
+        """Buffer one shard's rows; return the partial file that will hold them."""
+
+        frame = _partial_frame(
+            shard.rows.iloc[selected_row_positions].reset_index(drop=True),
+            shard.row_positions[selected_row_positions],
+            dataset_features,
+            target_features,
+        )
+        key = shard.table_key
+        if key not in self.frames:
+            # The batch takes its first shard's partial name, which is unique.
+            self.frames[key], self.rows[key], self.paths[key] = [], 0, shard.partial_path
+        self.frames[key].append(frame)
+        self.rows[key] += len(frame)
+        path = self.paths[key]
+        if self.rows[key] >= PARTIAL_BATCH_ROWS:
+            self.flush(key)
+        return path
+
+    def flush(self, key: str | None = None) -> None:
+        """Write the buffered rows of `key`, or of every table."""
+
+        for table_key in [key] if key is not None else list(self.frames):
+            frames = self.frames.pop(table_key)
+            del self.rows[table_key]
+            path = self.paths.pop(table_key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pd.concat(frames, axis=0, ignore_index=True).to_parquet(path, index=False)
+            self.table_plans[table_key].partial_paths.append(path)
 
 
 def _finalize_arrow_rust_table_plan(
@@ -1429,6 +1516,10 @@ def _materialize_arrow_rust_feature_bundle(
             arrow_dataset=arrow_datasets[dataset_name],
             query_sources=query_sources,
         )
+        context.shard_query_signature_ids = frozenset(
+            str(signature_id) for shard in shards for signature_id in shard.rows["query_signature_id"]
+        )
+        partials = _PartialBatches(table_plans)
         try:
             for shard in shards:
                 print(
@@ -1456,29 +1547,27 @@ def _materialize_arrow_rust_feature_bundle(
                     pairwise_aggregate_nan_value=float(pairwise_aggregate_nan_value),
                     retrieval_top_k=retrieval_top_k,
                 )
-                _write_arrow_rust_partial(
+                partial_path = partials.add(
                     shard=shard,
                     dataset_features=dataset_features,
                     target_features=target_features,
                     selected_row_positions=selected_row_positions,
                 )
-                table_plan = table_plans[shard.table_key]
-                table_plan.partial_paths.append(shard.partial_path)
-                table_plan.dataset_summaries.append(dataset_summary)
+                table_plans[shard.table_key].dataset_summaries.append(dataset_summary)
                 print(
                     json.dumps(
                         {
                             "event": "arrow_rust_dataset_featureization_done",
                             "mode": "arrow-rust",
                             "table_key": shard.table_key,
-                            "partial_path": str(shard.partial_path),
+                            "partial_path": str(partial_path),
                             **dataset_summary,
                         }
                     ),
                     flush=True,
                 )
                 del dataset_features
-                gc.collect()
+            partials.flush()
         finally:
             _release_arrow_rust_dataset_context(context)
             del context

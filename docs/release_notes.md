@@ -31,7 +31,7 @@
   linker are unchanged; linker training ran 3.6x faster on the 1.3 data, with a 2.6 GB higher peak.
 - EPS calibration links each validation block once and cuts it at every EPS
   (`Clusterer.predict_eps_grid`, `FastCluster.linkage_matrix`), and scores B3 for each EPS in one pass.
-  The calibration report is unchanged.
+  The calibration report is unchanged; calibration on the 1.3 data took 47 s instead of 131 s.
 - `apply_reviewed_eps.py` runs after a plain `uv sync` again. It imported `orjson`, from the optional
   `orcid-counts` extra, through the ORCID count producer; the producer now imports it only to publish counts.
 
@@ -44,8 +44,8 @@ production model and public-data version is `1.3`, on a separate version axis.
 ### Status
 
 - **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles are on S3 (see [data](data.md)).
-  PyPI has the `1.0.0b7` beta for integration testing; the final `1.0.0` release is pending.
-  Pin `s2and==1.0.0b7`; its wheel bundles the native extension, so no `s2and-rust` pin is needed.
+  PyPI has the `1.0.0b8` beta for integration testing; the final `1.0.0` release is pending.
+  Pin `s2and==1.0.0b8`; its wheel bundles the native extension, so no `s2and-rust` pin is needed.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.
@@ -713,6 +713,31 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   and of the s_lee incremental request 10.3 GB instead of 12.6 GB. Smaller full-block
   requests peak higher: a_silva 3.9 GB instead of 3.6 GB, and s_feldman 0.82 GB
   instead of 0.68 GB.
+- Subblocked attachment passes reload the planner from the new seeds' rows instead of
+  rescanning every seed, and copy fewer seed maps per pass. Postings, their checks, and
+  each block's SPECTER bounds run on the pool. Full s_lee attachment passes take 222 s
+  instead of 263 s.
+- Incremental requests of 20,000 signatures or more start their planner on a background
+  thread in `predict`, while seed setup splits altered profiles, and reuse its query
+  list afterwards.
+- Planner and featurizer reads match batch-index keys in one walk over sorted hashes and
+  find name-count records by interpolation search. On Unix they decode retained Arrow
+  batches from a shared memory map and release its pages once rows are copied out.
+  Windows, and file systems that cannot map, keep positional reads.
+- Retrieval bounds each SPECTER score with one dot product against the component centroid,
+  and computes exemplar dot products only for pairs whose bound reaches the query's
+  cutoff. The top k is unchanged. Gate rows rank with array sorts, and production plans
+  report seed member counts instead of member lists.
+- Together, on the same 13 requests with identical clusters, run right after a rerun
+  of the published `1.0.0b7`, `1.0.0b8` incremental prediction takes 18.1 s instead
+  of 23.1 s on s_lee, 5.3 s instead of 6.4 s on j_smith, 3.6 s instead of 4.1 s on
+  a_khan, and 3.3 s instead of 3.7 s on s_gupta. Full-block prediction takes 732 s
+  instead of 837 s on s_lee, 130 s instead of 136 s on j_smith, and 52 s instead of
+  58 s on a_khan; s_gupta and a_silva stay within 2%. Peak RSS of the s_lee full block
+  is 12.1 GB instead of 13.6 GB, and no sweep request peaks more than 0.03 GB higher. One
+  new signature into s_lee's seeds takes 5.8 s instead of 8.7 s (median of 3), with a
+  peak of 7.0 GB instead of 6.8 GB. That `1.0.0b7` rerun took up to 19% longer than the
+  10-24 `1.0.0b7` sweep on the same requests, so compare the pairs above.
 - On the s_feldman block (Windows, 8 threads, median of 3), `1.0.0b6` full-block
   prediction takes 11.2 s instead of `1.0.0b1`'s 18.0 s, the as-exported incremental
   request 11.7 s instead of 18.6 s, and the 200-signature steady-state request 0.82 s
